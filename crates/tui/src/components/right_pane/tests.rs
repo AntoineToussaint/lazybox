@@ -470,28 +470,85 @@ mod scroll_does_not_rebuild_tests {
         let mut feed = crate::components::activity_feed::ActivityFeed::new();
         let logins = std::collections::HashMap::new();
 
-        let base = RightPane::activity_buffer_key(&ws, &feed, &logins, "Dark", 60, true);
+        let base = RightPane::activity_buffer_key(0, &ws, &feed, &logins, "Dark", 60, true);
         // Same inputs → same key (deterministic).
         assert_eq!(
             base,
-            RightPane::activity_buffer_key(&ws, &feed, &logins, "Dark", 60, true)
+            RightPane::activity_buffer_key(0, &ws, &feed, &logins, "Dark", 60, true)
         );
         // Expansion is part of the buffer → key changes.
         feed.toggle_expand(0);
         assert_ne!(
             base,
-            RightPane::activity_buffer_key(&ws, &feed, &logins, "Dark", 60, true),
+            RightPane::activity_buffer_key(0, &ws, &feed, &logins, "Dark", 60, true),
             "expanded set must be part of the key"
         );
         // Width + theme are part of the buffer → key changes.
         feed.toggle_expand(0);
         assert_ne!(
             base,
-            RightPane::activity_buffer_key(&ws, &feed, &logins, "Dark", 40, true)
+            RightPane::activity_buffer_key(0, &ws, &feed, &logins, "Dark", 40, true)
         );
         assert_ne!(
             base,
-            RightPane::activity_buffer_key(&ws, &feed, &logins, "Light", 60, true)
+            RightPane::activity_buffer_key(0, &ws, &feed, &logins, "Light", 60, true)
+        );
+        // The content revision is part of the key — bumping it (what a
+        // mutated activity set does) invalidates the cache without the
+        // key ever hashing body bytes.
+        assert_ne!(
+            base,
+            RightPane::activity_buffer_key(1, &ws, &feed, &logins, "Dark", 60, true),
+            "activity_rev must be part of the key"
+        );
+    }
+
+    /// The revision counter is the content-change detector: re-setting
+    /// a byte-identical workspace clone (what every pane sync does)
+    /// must NOT bump it, while a genuine activity mutation must — and
+    /// must therefore rebuild the memoized buffer through `render`.
+    #[test]
+    fn activity_rev_tracks_content_not_clones() {
+        let mut pane = RightPane::new(PaneId::new(0));
+        let ws = ws_with_n_activities(5);
+        pane.set_workspace(Some(ws.clone()));
+        let rev = pane.activity_rev();
+
+        // Identical clone (routine pane sync) → no bump.
+        pane.set_workspace(Some(ws.clone()));
+        assert_eq!(
+            pane.activity_rev(),
+            rev,
+            "an identical workspace clone must not invalidate the buffer"
+        );
+
+        // A new comment arrives via WorkspaceUpserted → bump + rebuild.
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        draw(&mut pane, &mut term);
+        let rebuilds = pane.activity_rebuilds();
+        let mut grown = ws.clone();
+        grown.activity.push(lazybox_core::Activity {
+            author: "late-commenter".into(),
+            body: "a fresh comment".into(),
+            created_at: Utc::now(),
+            kind: ActivityKind::Comment,
+            node_id: Some("n-new".into()),
+            path: None,
+            line: None,
+            diff_hunk: None,
+            thread_id: None,
+        });
+        pane.on_event(&lazybox_ipc::Event::WorkspaceUpserted(Box::new(grown)));
+        assert_ne!(
+            pane.activity_rev(),
+            rev,
+            "a mutated activity set must bump the revision"
+        );
+        draw(&mut pane, &mut term);
+        assert_eq!(
+            pane.activity_rebuilds(),
+            rebuilds + 1,
+            "the mutated set must rebuild the memoized buffer"
         );
     }
 }

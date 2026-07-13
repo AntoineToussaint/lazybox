@@ -18,6 +18,7 @@ pub mod loading;
 pub mod messages;
 pub mod polling;
 pub mod right;
+pub mod settings;
 pub mod sidebar;
 pub mod snippet_browser;
 pub mod snippet_picker;

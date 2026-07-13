@@ -1,5 +1,9 @@
 # Deep critical review (issue #180)
 
+> **Historical** — point-in-time review as of issue #180. Superseded;
+> crate counts, file paths, and findings may no longer match the code.
+> Do not act on this document.
+
 A full pass over the brittle subsystems — the ones behind repeated
 regressions and "still happening" reports — along four axes:
 **correctness, modularity, debuggability, testability**. Each subsystem

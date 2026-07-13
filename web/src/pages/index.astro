@@ -35,8 +35,8 @@ const features = [
   },
   {
     icon: '∑',
-    title: 'Keep spend observable',
-    body: 'A local pass-through proxy records model traffic by session so token and cost reporting can settle behind the same inbox. Your API key goes straight to the model; the daemon never sees it.',
+    title: 'Route agents through your gateway',
+    body: 'Set one llm_gateway_url and every spawned agent points at your own LLM gateway — lazybox injects the right base-URL env var per provider (Anthropic or OpenAI). Your API key goes straight to the gateway; the daemon never sees it.',
     wide: true,
   },
   {
@@ -55,8 +55,8 @@ const steps = [
   },
   {
     title: 'Spawn agents in parallel',
-    body: 'Press c, x, or u for Claude Code, Codex, or Cursor — or w to let lazybox pick the brief. Each gets its own isolated checkout. Run as many as you like.',
-    code: 'c · x · u · w',
+    body: 'Press a c, a x, or a u for Claude Code, Codex, or Cursor — or w to let lazybox pick the brief. Each gets its own isolated checkout. Run as many as you like.',
+    code: 'a c · a x · a u · w',
   },
   {
     title: 'Step in only when needed',
@@ -245,7 +245,7 @@ const steps = [
             </p>
             <div class="keys-list">
               <div class="k"><kbd>j</kbd><kbd>k</kbd> navigate the inbox</div>
-              <div class="k"><kbd>c</kbd>&nbsp;·&nbsp;<kbd>x</kbd>&nbsp;·&nbsp;<kbd>u</kbd> spawn Claude / Codex / Cursor</div>
+              <div class="k"><kbd>a c</kbd>&nbsp;·&nbsp;<kbd>a x</kbd>&nbsp;·&nbsp;<kbd>a u</kbd> spawn Claude / Codex / Cursor</div>
               <div class="k"><kbd>w</kbd> auto-prompt for the row's state</div>
               <div class="k"><kbd>!</kbd> jump to the next agent that needs you</div>
             </div>
@@ -261,7 +261,7 @@ const steps = [
 <span class="unread">● #197  Drop bot-authored Slack msgs</span>    <span class="c-red">✗ ci failed</span>
 <span class="c-dim">○ #195  Collapse out-of-scope issue</span>      <span class="c-green">merged</span>
 <span class="c-dim">└──────────────────────────────────────┘</span>
-  <span class="c-accent">c</span> claude  <span class="c-accent">x</span> codex  <span class="c-accent">w</span> work  <span class="c-accent">!</span> waiting</pre>
+  <span class="c-accent">a</span> agent  <span class="c-accent">w</span> work  <span class="c-accent">s</span> shell  <span class="c-accent">!</span> waiting</pre>
           </div>
         </div>
       </div>

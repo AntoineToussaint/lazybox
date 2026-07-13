@@ -23,8 +23,9 @@ of reading the README?* Concretely:
   `TaskProvider`, `Store` — each is a 5-method contract at most. No
   god-interfaces.
 - **Config is discoverable.** Every option has a default, a type, and
-  a one-line description. A `lazybox config dump` command prints the
-  effective config (defaults + user overrides + `$LAZYBOX_*` env).
+  a one-line description. Planned (not yet built): a `lazybox config
+  dump` command that prints the effective config (defaults + user
+  overrides + `$LAZYBOX_*` env).
 - **Errors tell you what to do next.** No "Error: GraphQL: A query
   attribute must be specified" with zero context. Messages link to
   docs or suggest a remediation.
@@ -447,8 +448,8 @@ Built-ins (shipped in `crates/agents/`):
 
 ## Open questions
 
-- **Config format.** YAML today; no plans to move. `lazybox config dump`
-  prints the effective merged config.
+- **Config format.** YAML today; no plans to move. A `lazybox config dump`
+  command printing the effective merged config is planned, not yet built.
 - **Dashboard tile layout.** Fixed grid (2×2) or stacked (1×N with user
   reorder)? Leaning stacked, user can drag/reorder later.
 - **Streaming responses in `llm-proxy`.** Hyper's streaming body types

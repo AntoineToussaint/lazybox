@@ -34,6 +34,14 @@ impl SqliteStore {
         // daemon) wait briefly instead of failing with SQLITE_BUSY.
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(|e| StoreError::Backend(e.to_string()))?;
+        // Standard WAL pairing: NORMAL only risks durability of the
+        // very last transactions on an OS crash / power loss (the WAL
+        // itself stays consistent — no corruption), and drops an
+        // fsync per write. The default FULL was inherited, not chosen;
+        // nothing in this DB (session metadata, read state) justifies
+        // paying FULL's per-commit fsync.
+        conn.pragma_update(None, "synchronous", "NORMAL")
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
         conn.pragma_update(None, "busy_timeout", 5000)
             .map_err(|e| StoreError::Backend(e.to_string()))?;
         let store = Self {
@@ -214,6 +222,12 @@ mod tests {
             .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
             .unwrap();
         assert_eq!(busy, 5000);
+        // WAL pairs with synchronous=NORMAL (1) — FULL's per-commit
+        // fsync buys nothing for this DB's contents.
+        let sync: i64 = conn
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(sync, 1, "synchronous must be NORMAL alongside WAL");
     }
 
     /// The on-disk DB carries credential rows — `open` must leave it

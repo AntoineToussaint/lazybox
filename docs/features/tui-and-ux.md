@@ -52,8 +52,8 @@ reads the focused pane's keymap.
 
 **Status:** stable
 **Crate(s):** `tui-core` (`src/action.rs`), `tui` (`realm/model/keys.rs`, `dispatch.rs`)
-**Config / flags:** `ui.action_keys` (per-action key overrides), `agent_shortcuts`, `ui.quit_double_tap_window` (800ms), `ui.terminal_escape_char`
-**Key bindings:** `q q` quit, `g …` GitHub leader group, `]<key>` snippet trigger
+**Config / flags:** `ui.action_keys` (per-action key overrides, incl. `spawn_agent.<id>` for agent chords), `ui.keymap_preset` (`default` / `vim`), `ui.quit_double_tap_window` (800ms), `ui.terminal_escape_char`
+**Key bindings:** `q q` quit, `g …` GitHub leader group, `]]s` snippet picker (terminal)
 
 ### What it does
 A central **Action catalog** maps every command to keys, with support for
@@ -63,12 +63,14 @@ and user overrides.
 ### How to use it
 Most keys are single presses (see each feature page). Chords: `q q` to quit
 (double-tap within 800ms), `g` then `m`/`v`/`a`/`l`/`o` for GitHub actions.
-Override any binding via `ui.action_keys` in config; add single-char agent keys
-via `agent_shortcuts`.
+Override any binding via `ui.action_keys` in config; agent spawn chords are
+remapped there too, keyed `spawn_agent.<id>` (e.g. `spawn_agent.claude: "c"`
+restores a top-level key).
 
 ### How it works (brief)
 `Action` + `ActionDef::for_kind` (`crates/tui-core/src/action.rs`) is the
-catalog; `ActionGroup::Github` defines the leader group. Key routing is
+catalog; leader groups are multi-stroke `Chord::Seq` rows in it (the which-key
+popup is a pure function of the armed prefix). Key routing is
 `handle_pane_key` (`crates/tui/src/realm/model/keys.rs`); dispatch is
 `dispatch_action_unchecked` (`dispatch.rs`). Effective keys honor `ui.action_keys`
 overrides. Some sidebar/activity keys (`j/k`, `f`, `o`, `/`) are handled inline

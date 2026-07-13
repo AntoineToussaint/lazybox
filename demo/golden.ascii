@@ -3,12 +3,12 @@
   ?               help              Shift+T         tour               Shift+D         sync status
   Shift+M         messages          Esc             dismiss            `               jump to workspace
   !               next asking       Shift+F         next failing       .               focus mode
-  Shift+W         start agent       Shift+P         activity pane      Shift+Arrows    resize splitters
-  q q             quit
+  Shift+W         start agent       Shift+P         activity pane      F8 | Alt-s | Ctrl-Alt-s  mouse ca
+  Shift+Arrows    resize splitters  q q             quit
   Workspace
   Enter           open              w               work on this       s               shell
   e               editor            m               mark read          z               snooze
-  Shift+Z         long snooze       Shift+N         new workspace      n               new workspace
+  Shift+Z         long snooze       Shift+N         new project        n               new workspace
   r               reply             Shift+A         adopt sessions     Shift+J         join into PR
   Shift+X         archive           Shift+C         close issue
   Sidebar

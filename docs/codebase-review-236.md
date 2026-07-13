@@ -1,5 +1,9 @@
 # Full codebase review (issue #236)
 
+> **Historical** — point-in-time review as of issue #236. Superseded;
+> crate counts, file paths, and findings may no longer match the code.
+> Do not act on this document.
+
 A systematic pass over all 17 crates against the invariants in
 `CLAUDE.md`, grouped into the five crate families from the issue.
 Every finding cites a `file:line` that was **read**, not inferred.

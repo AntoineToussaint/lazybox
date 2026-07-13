@@ -495,7 +495,7 @@ async fn mark_workspace_read_persists_seen_count() {
     assert_eq!(before.activity.len(), 3);
     assert_eq!(before.unread_count(), 3, "everything unread initially");
 
-    polling::mark_workspace_read(&config, &key);
+    polling::mark_workspace_read(&config, &key).await;
 
     let after: lazybox_core::Workspace = serde_json::from_str(
         &config
@@ -533,7 +533,7 @@ async fn mark_workspace_read_broadcasts_upsert() {
 
     let key =
         lazybox_core::WorkspaceKey::new(lazybox_core::workspace_key_for(&make_task("o/r#22")));
-    polling::mark_workspace_read(&config, &key);
+    polling::mark_workspace_read(&config, &key).await;
 
     let evt = recv_workspace_upsert(&mut client).await;
     match evt {
@@ -555,7 +555,7 @@ async fn mark_workspace_read_is_independent_of_provider_state() {
 
     let key =
         lazybox_core::WorkspaceKey::new(lazybox_core::workspace_key_for(&make_task("o/r#33")));
-    polling::mark_workspace_read(&config, &key);
+    polling::mark_workspace_read(&config, &key).await;
 
     // Re-poll the same task — seen state survives.
     polling::upsert(&config, task).await;
@@ -578,7 +578,7 @@ async fn mark_workspace_read_no_op_when_workspace_missing() {
     // (race: TUI saw a stale snapshot) must not panic.
     let config = ServerConfig::in_memory();
     let key = lazybox_core::WorkspaceKey::new("github:o/r#nope");
-    polling::mark_workspace_read(&config, &key);
+    polling::mark_workspace_read(&config, &key).await;
     assert!(config.store.get_workspace(&key).unwrap().is_none());
 }
 // ── PR-attach migration ──────────────────────────────────────────────
@@ -1025,7 +1025,7 @@ async fn set_session_layout_persists_and_broadcasts() {
         },
         focused: vec![0],
     };
-    polling::set_session_layout(&config, &ws_key, session_id, layout.clone());
+    polling::set_session_layout(&config, &ws_key, session_id, layout.clone()).await;
 
     // Reload + verify.
     let stored: lazybox_core::Workspace = serde_json::from_str(
@@ -1055,7 +1055,8 @@ async fn set_session_layout_no_op_for_missing_session() {
         &key,
         lazybox_core::SessionId::new(),
         SessionLayout::default(),
-    );
+    )
+    .await;
 }
 // ── Bus → Server::serve integration ──────────────────────────────────
 

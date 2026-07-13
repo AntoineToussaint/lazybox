@@ -525,6 +525,19 @@ pub struct Model<T: TerminalAdapter> {
     /// `None`, so we only clear the notice when it's still the
     /// sync-error we set.
     sync_error_source: Option<String>,
+    /// Set by [`Self::send_cmd`] when a command failed to reach the
+    /// daemon (dead channel — the daemon exited or the socket closed).
+    /// A `Cell` because `send_cmd` is `&self` (it's called from deep
+    /// inside borrow-heavy paths); the run loop's per-iteration
+    /// `tick_daemon_health` drains it into the one-shot disconnect
+    /// notice. Without this, a dead daemon meant every keypress
+    /// "succeeded" silently while nothing happened (#zombie-UI).
+    cmd_send_failed: std::cell::Cell<bool>,
+    /// One-shot latch for the "daemon disconnected" Permanent notice —
+    /// the disconnect is detected repeatedly (every failed send, every
+    /// wake on the closed event channel), but the banner should be
+    /// raised once, not re-flashed per keypress.
+    daemon_disconnect_notified: bool,
     /// Whether lazybox is capturing mouse events. Toggled by F8 /
     /// Alt-s. When `false`, lazybox has issued `DisableMouseCapture`
     /// so the host terminal regains native text selection (which
@@ -577,6 +590,13 @@ pub struct Model<T: TerminalAdapter> {
     /// Set by `mount_reply`; consumed by `Msg::TextareaSubmitted` to
     /// build the `Command::PostReply` payload.
     pending_reply: Option<lazybox_core::SessionKey>,
+    /// Body of the most recently submitted reply, kept until the next
+    /// reply is composed. If the daemon later reports the post failed
+    /// (`ProviderError { source: "reply" }`), the composed text would
+    /// otherwise be gone — the textarea was consumed on submit — so
+    /// the failure handler records it into the messages log (Shift-M)
+    /// where the user can recover it.
+    last_reply_body: Option<String>,
     /// Set by `mount_request_reviewers`; consumed by
     /// `handle_input_submitted` when `Id::RequestReviewers` is the
     /// top modal. Holds the workspace whose PR we'll request
@@ -636,6 +656,15 @@ pub struct Model<T: TerminalAdapter> {
     /// while the checklist is up — created on the first
     /// `WorktreeProgress` event, cleared when the modal dismisses.
     worktree_progress: Option<crate::realm::components::worktree_progress::WorktreeProgressState>,
+    /// Session whose worktree-provisioning checklist the user dismissed
+    /// with Esc while the operation was still running. Later
+    /// `WorktreeProgress` events for THIS session are absorbed silently
+    /// instead of resurrecting the modal on top of whatever the user is
+    /// typing; the marker clears when the op completes
+    /// (`TerminalSpawned` / spawn failure) or a different session
+    /// starts provisioning. A failed step still surfaces as a footer
+    /// error so a dismissed checklist can't hide a broken provision.
+    worktree_progress_dismissed: Option<lazybox_core::SessionKey>,
     /// Workspace key whose PR is being confirmed for merge by the
     /// `g m` Confirm modal. Set when the modal mounts, taken on
     /// `Msg::Confirmed` / `Msg::ModalDismissed`.
@@ -1049,11 +1078,14 @@ impl<T: TerminalAdapter> Model<T> {
             terminal_user_typed_since_focus: false,
             pending_refresh_ack: false,
             sync_error_source: None,
+            cmd_send_failed: std::cell::Cell::new(false),
+            daemon_disconnect_notified: false,
             mouse_capture_on: true,
             terminal_selection: None,
             preselect: None,
             layout: LayoutCtx::new(),
             pending_reply: None,
+            last_reply_body: None,
             pending_review_request: None,
             review_choices: Vec::new(),
             pending_assignees_request: None,
@@ -1067,6 +1099,7 @@ impl<T: TerminalAdapter> Model<T> {
             pending_merge_prompts: std::collections::VecDeque::new(),
             active_merge_prompt: None,
             worktree_progress: None,
+            worktree_progress_dismissed: None,
             pending_adopt_source: None,
             adopt_choices: Vec::new(),
             start_agent_project_choices: Vec::new(),
@@ -1992,6 +2025,38 @@ impl<T: TerminalAdapter> Model<T> {
     fn send_cmd(&self, cmd: IpcCommand) {
         if let Err(e) = self.client.send(cmd) {
             tracing::warn!("ipc send failed: {e}");
+            // Don't pretend the keypress worked: flag the failure so
+            // the next `tick_daemon_health` raises the disconnect
+            // banner. A `Cell` because this method is `&self` and is
+            // called from borrow-heavy paths that can't take `&mut`.
+            self.cmd_send_failed.set(true);
+        }
+    }
+
+    /// Raise the one-shot "daemon disconnected" banner. Permanent
+    /// severity: it never auto-fades, and the severity-aware `flash`
+    /// keeps routine Info/Hint flashes from displacing it — the UI is
+    /// a zombie until the user restarts/reconnects, so the banner must
+    /// outlive everything else. Esc still dismisses it (severity only
+    /// drives auto-fade + displacement, never dismissability).
+    pub(crate) fn note_daemon_disconnected(&mut self) {
+        if self.daemon_disconnect_notified {
+            return;
+        }
+        self.daemon_disconnect_notified = true;
+        self.flash_error(
+            "✗ daemon disconnected — commands are no longer delivered; \
+             restart lazybox (or reconnect with `lazybox --connect …`) to resume",
+        );
+    }
+
+    /// Per-iteration daemon-health check: drain the `send_cmd` failure
+    /// flag into the disconnect banner. Called from the run loop's
+    /// tick section (and unit tests) so a dead channel surfaces within
+    /// one frame of the first failed send instead of never.
+    pub(crate) fn tick_daemon_health(&mut self) {
+        if self.cmd_send_failed.take() {
+            self.note_daemon_disconnected();
         }
     }
 
@@ -2078,6 +2143,39 @@ impl<T: TerminalAdapter> Model<T> {
         self.flash_error(crate::build_guard::outdated_message(behind));
     }
 
+    /// Validate the applied keymap config at startup and surface any
+    /// problems (issue: silent keymap misconfiguration). `extra`
+    /// carries warnings the caller computed before the catalog existed
+    /// (today: an unknown `ui.keymap_preset` name). The per-issue
+    /// details land in the durable messages log (Shift-M) and the
+    /// footer gets one summarizing notice — mirroring how the
+    /// build-freshness guard surfaces its banner. Never rejects the
+    /// config: the catalog already fell back to parseable defaults.
+    pub fn surface_keymap_warnings(&mut self, mut warnings: Vec<String>) {
+        warnings.extend(helpers::keymap_config_warnings(
+            &self.action_key_overrides,
+            &self.catalog,
+        ));
+        if warnings.is_empty() {
+            return;
+        }
+        for w in &warnings {
+            tracing::warn!("keymap config: {w}");
+            self.status.messages.record(
+                &format!("keymap config: {w}"),
+                crate::realm::components::footer::NoticeSeverity::Retryable,
+            );
+        }
+        let n = warnings.len();
+        self.flash(
+            format!(
+                "⚠ keymap config: {n} issue{} — Shift-M for details",
+                if n == 1 { "" } else { "s" }
+            ),
+            crate::realm::components::footer::NoticeSeverity::Retryable,
+        );
+    }
+
     /// Like `flash_error`, but tags the notice as a provider "sync
     /// failed" banner owned by `source`, so the next successful
     /// `PollCompleted` from that same provider can clear it once sync
@@ -2119,10 +2217,33 @@ impl<T: TerminalAdapter> Model<T> {
         severity: crate::realm::components::footer::NoticeSeverity,
     ) {
         use crate::realm::components::footer::{Notice, NoticeSeverity};
+        // Sticky severities own the footer slot: they never auto-fade
+        // and demand an acknowledgment (Esc), so they must not be
+        // displaced by a routine flash.
+        let sticky =
+            |s: NoticeSeverity| matches!(s, NoticeSeverity::Permanent | NoticeSeverity::Auth);
         let msg = msg.into();
+        // Severity-aware replacement: a lower-severity flash must not
+        // displace a live sticky error — pre-fix, a Permanent
+        // "✗ merge failed" could be wiped within a second by an Info
+        // "✓ sync ok" or a Hint, leaving no trace of the failure. The
+        // suppressed notice is routed to the durable messages log
+        // (Shift-M) instead — Hints included here, precisely because
+        // suppression is the one case where a hint would otherwise
+        // vanish without ever being visible.
+        if let Some(existing) = &self.status.notice
+            && sticky(existing.severity)
+            && !sticky(severity)
+        {
+            self.status.messages.record(&msg, severity);
+            self.redraw = true;
+            return;
+        }
         // Any fresh notice supersedes a sync-error banner, so the
         // "clear on recovery" tag only stays armed while the
-        // sync-error notice is the one actually on screen.
+        // sync-error notice is the one actually on screen. (Reset only
+        // when actually replacing — a suppressed flash above must
+        // leave the banner attribution intact.)
         self.sync_error_source = None;
         // Every notice flashes in the footer AND accumulates in the
         // durable messages log (#309) — except one-shot Hints, which
@@ -2334,8 +2455,9 @@ impl<T: TerminalAdapter> Model<T> {
     fn open_external_url(&mut self, url: &str) {
         match crate::editors::open_url(url, self.ui_defaults.browser.as_deref()) {
             Ok(()) => {
-                tracing::info!(%url, "opened url from terminal");
-                self.flash_hint(format!("opened {url}"));
+                // open_url is fire-and-forget — phrase as in-progress.
+                tracing::info!(%url, "opening url from terminal");
+                self.flash_hint(format!("opening {url}…"));
             }
             Err(e) => {
                 tracing::warn!(%url, "open_url failed: {e}");
@@ -2512,13 +2634,20 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
-    /// Open the in-session Settings palette. Builds a small picker
-    /// with actions like "Add a repo (github)" / "Edit agents" /
-    /// etc., scoped to the user's current providers. Falls back to
-    /// the full wizard when there's no cached persisted setup yet
-    /// (first-run path or `--test` mode).
+    /// Open the in-session Settings window: actions grouped under
+    /// Providers / Agents / Appearance / Maintenance tabs (see
+    /// `SettingsSection`), scoped to the user's current providers.
+    /// Falls back to the full wizard when there's no cached persisted
+    /// setup yet (first-run path or `--test` mode).
+    ///
+    /// The rows are stashed FLAT (in tab order) in
+    /// `setup.settings_actions`; the tabbed component carries each
+    /// row's flat index and emits `Msg::ChoicePicked([flat_idx])` on
+    /// Enter, so the pick routing in `handle_choice_picked` is the
+    /// same as the old flat palette's.
     pub fn open_settings(&mut self) {
-        use crate::realm::components::choice::Choice;
+        use crate::realm::components::settings::{Settings, SettingsTab};
+        use crate::realm::setup_ctx::SettingsSection;
 
         if self.setup.runner.is_some() || matches!(self.modal_stack.last(), Some(Id::Setup)) {
             return;
@@ -2530,12 +2659,21 @@ impl<T: TerminalAdapter> Model<T> {
             self.reopen_setup();
             return;
         }
-        let labels: Vec<String> = actions.iter().map(|a| a.label()).collect();
-        self.setup.settings_actions = actions;
-        let modal = Choice::single("What do you want to configure?", labels)
-            .title("Settings")
-            .label(|s: &String| s.clone());
-        self.mount_modal(Id::Setup, modal);
+        // Group into tabs, rebuilding the flat list in tab order so
+        // the component's flat indices resolve against exactly what
+        // `handle_choice_picked` will read back.
+        let mut flat: Vec<SettingsAction> = Vec::with_capacity(actions.len());
+        let mut tabs: Vec<SettingsTab> = Vec::with_capacity(SettingsSection::ALL.len());
+        for section in SettingsSection::ALL {
+            let mut rows = Vec::new();
+            for action in actions.iter().filter(|a| a.section() == section) {
+                rows.push((action.label(), flat.len()));
+                flat.push(action.clone());
+            }
+            tabs.push(SettingsTab { section, rows });
+        }
+        self.setup.settings_actions = flat;
+        self.mount_modal(Id::Setup, Settings::new(tabs));
     }
 
     /// Build the visible actions from the user's cached persisted
@@ -2573,7 +2711,9 @@ impl<T: TerminalAdapter> Model<T> {
             enabled: skip_permissions,
         });
         actions.push(SettingsAction::EditSnippets);
-        actions.push(SettingsAction::EditTheme);
+        actions.push(SettingsAction::EditTheme {
+            current: crate::theme::current().name.to_string(),
+        });
         let gateway_set = lazybox_config::Config::load()
             .map(|c| c.agent.gateway_url().is_some())
             .unwrap_or(false);
@@ -2611,7 +2751,7 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         }
         // Theme picker is its own live-preview modal — not a wizard step.
-        if matches!(action, SettingsAction::EditTheme) {
+        if matches!(action, SettingsAction::EditTheme { .. }) {
             self.mount_theme_picker();
             return;
         }
@@ -2653,7 +2793,7 @@ impl<T: TerminalAdapter> Model<T> {
             SettingsAction::ToggleSkipPermissions { .. } => return,
             // Handled by the early returns above; listed for exhaustiveness.
             SettingsAction::EditSnippets => return,
-            SettingsAction::EditTheme => return,
+            SettingsAction::EditTheme { .. } => return,
             SettingsAction::EditLlmGateway { .. } => return,
             SettingsAction::EditDefaultAgent { .. } => return,
         };

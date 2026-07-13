@@ -46,8 +46,10 @@ built-in; you never have to start from an empty library.
    ```
 
 2. (Re)start lazybox — snippet files are read once at launch.
-3. Open a session, focus its terminal, and type `]]rev`. The body is
-   sent to the agent and submitted immediately.
+3. Open a session, focus its terminal, and type `]]s` to open the
+   snippet picker, then `rev`. As soon as the typed text uniquely
+   matches the key, the body is sent to the agent and submitted
+   immediately — the whole chord reads `]]srev`.
 
 ## The lifecycle
 
@@ -133,8 +135,8 @@ cursor in view as you move.
 
 Filtering is case-insensitive and matches the snippet **key**, its
 **description**, and its **category** — so you can find a snippet by
-what it *does*, not only by a key you already know. The `]]rev`
-exact-key fast path is preserved: when what you type after the leader
+what it *does*, not only by a key you already know. The `]]srev`
+exact-key fast path is preserved: when what you type in the picker
 is the *only* snippet key that starts with it and equals it exactly,
 the body auto-submits immediately, regardless of any description-only
 matches.
@@ -172,7 +174,7 @@ library, and either file can override a built-in.
 
 ## House style for bodies
 
-The point of a snippet is that `]]rev` should produce a *noticeably
+The point of a snippet is that `]]srev` should produce a *noticeably
 better* agent run than typing "please review the diff." A body is a
 carefully-tuned instruction, not a label. The shipped built-in library
 follows one deliberate style, and your own snippets will be sharper if
@@ -234,7 +236,7 @@ snippets:
 
 | Field         | Required | Notes                                                          |
 | ------------- | -------- | -------------------------------------------------------------- |
-| `<key>`       | yes      | The shortcut typed after the `]]` leader. Case-sensitive.      |
+| `<key>`       | yes      | The shortcut typed in the picker after `]]s`. Matching (filter + auto-submit) is case-insensitive. |
 | `description` | no       | One-line label shown in the picker. Defaults to empty.         |
 | `category`    | no       | Group header + colored tag in the picker (e.g. `Review`, `Git & PR`). Free-form; defaults to empty, which files under a trailing **Other** group. |
 | `body`        | yes      | Sent verbatim to the agent. May span multiple lines.           |
@@ -263,10 +265,11 @@ snippets:
   leader if a second `]` immediately follows. `]` + any other key is
   sent to the agent verbatim, so brackets in code and markdown reach
   the agent unharmed. The doubled `]]` is the only intercepted form.
-- **The built-in library is always present**, so the `]]` leader
+- **The built-in library is always present**, so the `]]s` picker
   always has a broad, categorized set to offer even before you write
-  your own. (If you somehow have no snippets at all, `]]` simply
-  leaves the pane immediately, with no idle wait.)
+  your own. (If you somehow have no snippets at all, `]]s` flashes
+  "no snippets configured" and points you at
+  `~/.lazybox/snippets.yaml`.)
 - **Reload.** Files are read once at startup. Restart lazybox after
   creating, editing, or deleting a snippet.
 - **Malformed YAML.** A file that fails to parse is skipped with a

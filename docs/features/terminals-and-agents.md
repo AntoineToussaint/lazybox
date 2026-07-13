@@ -56,8 +56,8 @@ streams live `TerminalOutput` bytes. The default session backend is tmux
 
 **Status:** stable
 **Crate(s):** `agents` (`src/agent.rs`), `server` (`spawn_handler.rs`)
-**Config / flags:** `setup.agents` (enabled), `setup.default_agent`, `agent_shortcuts` (custom single-char keys)
-**Key bindings:** `s` shell, `c` Claude, `x` Codex, `u` Cursor (generic agents get registry-driven keys)
+**Config / flags:** `setup.agents` (enabled), `setup.default_agent`, `ui.action_keys` `spawn_agent.<id>` entries (remap agent chords)
+**Key bindings:** `s` shell; `a` agent leader — `a c` Claude, `a x` Codex, `a u` Cursor (agents without a built-in key convention are remappable via `spawn_agent.<id>`)
 
 ### What it does
 Launches a shell or a coding agent in the focused workspace's worktree. Built-in
@@ -65,8 +65,9 @@ agents: Claude Code, Codex, Cursor Agent, and a YAML-configured GenericCli for
 anything else.
 
 ### How to use it
-On a workspace: `s` opens a shell, `c` Claude, `x` Codex, `u` Cursor. The agent
-list and their keys come from your enabled agents; `setup.default_agent` is what
+On a workspace: `s` opens a shell; `a` opens the agent which-key group —
+`a c` Claude, `a x` Codex, `a u` Cursor. The agent list and their chords come
+from your enabled agents; `setup.default_agent` is what
 [`w`](#work-command) uses.
 
 ### How it works (brief)

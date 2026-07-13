@@ -415,6 +415,15 @@ pub struct ServerConfig {
     /// (forwarder output drops + bus lag). Surfaced at `/v1/metrics` and
     /// stamped into the drop/lag warn lines (issue #91).
     pub event_metrics: Arc<metrics::EventMetrics>,
+    /// Per-workspace-key write serialization for the store's
+    /// load-modify-save cycles (see [`ServerConfig::lock_workspace`]).
+    /// Outer `std::sync::Mutex` guards only the map lookup/insert and
+    /// is never held across an await; the inner `tokio::sync::Mutex`
+    /// is what mutation paths hold for the duration of a
+    /// load→modify→commit. Entries are never removed — the map is
+    /// bounded by the number of distinct workspace keys seen in this
+    /// process (inbox-sized), and a `Mutex<()>` is a few dozen bytes.
+    pub workspace_locks: Arc<std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 impl ServerConfig {
@@ -501,7 +510,35 @@ impl ServerConfig {
             deleted_workspaces: Arc::new(std::sync::Mutex::new(HashSet::new())),
             input_needed_shapes: Arc::new(Mutex::new(HashMap::new())),
             event_metrics: Arc::new(metrics::EventMetrics::default()),
+            workspace_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Serialize a workspace's load-modify-save cycle. Every mutation
+    /// of a stored workspace row is an unserialized read-modify-write
+    /// on the same kv record; without a lock, a poll tick's
+    /// prepare→commit (which spans awaits) could interleave with a
+    /// detached handler's mark-read on the serve loop's mutations
+    /// JoinSet — the tick then saved its pre-mark copy and silently
+    /// reverted the user's action. Hold the returned guard from
+    /// BEFORE the workspace load until AFTER the commit.
+    ///
+    /// Per-key (not one global lock) because a tick's
+    /// prepare→commit for one workspace can await the network of
+    /// store scans; a global lock would queue the user's mark-read on
+    /// an unrelated workspace behind it. Deadlock-safe by convention:
+    /// callers hold at most ONE workspace guard at a time (multi-key
+    /// surgery like adopt/confirm-merge stays unlocked — see the
+    /// comments at those sites).
+    pub async fn lock_workspace(&self, key: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let entry = {
+            let mut map = self
+                .workspace_locks
+                .lock()
+                .expect("workspace_locks poisoned");
+            map.entry(key.to_string()).or_default().clone()
+        };
+        entry.lock_owned().await
     }
 
     /// Convenience: in-memory store + `MockBackend`. Never touches
@@ -767,8 +804,9 @@ impl Server {
                             .await
                             {
                                 Ok((workspaces, projects)) => {
-                                    let terminals =
+                                    let mut terminals =
                                         spawn_handler::snapshot_terminals(&self.config).await;
+                                    budget_snapshot_replay(&mut terminals);
                                     let _ = conn.tx.send(Event::Snapshot {
                                         workspaces,
                                         terminals,
@@ -878,7 +916,8 @@ async fn dispatch_command(
                     (Vec::new(), Vec::new())
                 }
             };
-            let terminals = spawn_handler::snapshot_terminals(config).await;
+            let mut terminals = spawn_handler::snapshot_terminals(config).await;
+            budget_snapshot_replay(&mut terminals);
             let _ = tx.send(Event::Snapshot {
                 workspaces,
                 terminals,
@@ -1033,7 +1072,7 @@ async fn dispatch_command(
             // bumps even when the TUI doesn't fire a separate
             // `FocusWorkspace`.
             polling::set_focused_workspace(config, &key).await;
-            polling::mark_workspace_read(config, &key);
+            polling::mark_workspace_read(config, &key).await;
         }
         lazybox_ipc::Command::FocusWorkspace { session_key } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
@@ -1041,11 +1080,11 @@ async fn dispatch_command(
         }
         lazybox_ipc::Command::MarkActivityRead { session_key, index } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
-            polling::mark_activity_read(config, &key, index);
+            polling::mark_activity_read(config, &key, index).await;
         }
         lazybox_ipc::Command::UnmarkActivityRead { session_key, index } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
-            polling::unmark_activity_read(config, &key, index);
+            polling::unmark_activity_read(config, &key, index).await;
         }
         lazybox_ipc::Command::CreateWorkspace {
             name,
@@ -1079,18 +1118,18 @@ async fn dispatch_command(
         }
         lazybox_ipc::Command::Snooze { session_key, until } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
-            polling::set_snooze(config, &key, Some(until));
+            polling::set_snooze(config, &key, Some(until)).await;
         }
         lazybox_ipc::Command::Unsnooze { session_key } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
-            polling::set_snooze(config, &key, None);
+            polling::set_snooze(config, &key, None).await;
         }
         lazybox_ipc::Command::SetAutoMergeOnGreen {
             session_key,
             enabled,
         } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
-            polling::set_auto_merge_on_green(config, &key, enabled);
+            polling::set_auto_merge_on_green(config, &key, enabled).await;
         }
         lazybox_ipc::Command::Kill { session_key } => {
             // Serialized against any in-flight Spawn on the same workspace:
@@ -1160,7 +1199,7 @@ async fn dispatch_command(
             let layout: Option<lazybox_core::SessionLayout> =
                 serde_json::from_str(&layout_json).ok();
             if let (Some(sid), Some(lay)) = (session_id, layout) {
-                polling::set_session_layout(config, &key, sid, lay);
+                polling::set_session_layout(config, &key, sid, lay).await;
             } else {
                 tracing::warn!("SetSessionLayout: bad payload (id={:?})", session_id_raw);
             }
@@ -1281,6 +1320,55 @@ fn load_workspaces(store: &dyn Store) -> Vec<lazybox_core::Workspace> {
         .collect()
 }
 
+/// Cap on the TOTAL terminal-replay bytes embedded in one `Snapshot`.
+///
+/// A snapshot carries each terminal's full replay ring (up to
+/// [`pty::REPLAY_RING_BYTES`] = 2 MiB each); with enough busy
+/// terminals the serialized frame crossed the socket transport's
+/// `MAX_FRAME_BYTES` (64 MiB), `write_frame` returned `TooLarge`, the
+/// writer loop died, and the reconnecting `--connect` client looped
+/// re-requesting the same unsendable snapshot forever. Half the frame
+/// cap leaves ample headroom for the workspaces/projects JSON and
+/// bincode overhead riding in the same frame.
+const SNAPSHOT_REPLAY_BUDGET: usize = (lazybox_ipc::MAX_FRAME_BYTES as usize) / 2;
+
+/// Trim per-terminal replay buffers so their total stays within
+/// [`SNAPSHOT_REPLAY_BUDGET`]. Water-fill allocation: terminals under
+/// their fair share keep everything; oversized ones split the
+/// leftover budget evenly. Trimming drops the OLDEST bytes and keeps
+/// the tail — the tail is what the client's VT reset needs to
+/// reconstruct the current screen (the ring buffer already starts at
+/// an arbitrary byte offset once it has wrapped, so a mid-sequence
+/// cut is nothing new for the parser).
+fn budget_snapshot_replay(terminals: &mut [lazybox_ipc::TerminalSnapshot]) {
+    let total: usize = terminals.iter().map(|t| t.replay.len()).sum();
+    if total <= SNAPSHOT_REPLAY_BUDGET {
+        return;
+    }
+    tracing::warn!(
+        terminals = terminals.len(),
+        total_replay_bytes = total,
+        budget = SNAPSHOT_REPLAY_BUDGET,
+        "snapshot replay exceeds budget — trimming oldest bytes per terminal"
+    );
+    // Smallest-first so under-share terminals release their unused
+    // share to the bigger ones before those are cut.
+    let mut order: Vec<usize> = (0..terminals.len()).collect();
+    order.sort_by_key(|&i| terminals[i].replay.len());
+    let mut remaining = SNAPSHOT_REPLAY_BUDGET;
+    let mut left = order.len();
+    for idx in order {
+        let share = remaining / left;
+        let replay = &mut terminals[idx].replay;
+        if replay.len() > share {
+            let cut = replay.len() - share;
+            replay.drain(..cut); // keep the tail
+        }
+        remaining -= replay.len();
+        left -= 1;
+    }
+}
+
 /// Same shape as `load_workspaces` for the project table. Used by
 /// `Snapshot` to seed the sidebar's project headers on reconnect.
 fn load_projects(store: &dyn Store) -> Vec<lazybox_core::Project> {
@@ -1304,4 +1392,92 @@ fn load_projects(store: &dyn Store) -> Vec<lazybox_core::Project> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod snapshot_budget_tests {
+    use super::*;
+
+    fn full_ring_snapshot(i: u64) -> lazybox_ipc::TerminalSnapshot {
+        lazybox_ipc::TerminalSnapshot {
+            terminal_id: lazybox_ipc::TerminalId(i),
+            session_key: lazybox_core::SessionKey::from("ws"),
+            kind: lazybox_ipc::TerminalKind::Shell,
+            // Full replay ring with a recognizable tail so tests can
+            // verify trimming kept the NEWEST bytes.
+            replay: (0..pty::REPLAY_RING_BYTES)
+                .map(|b| (b % 251) as u8)
+                .collect(),
+            last_seq: 42,
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+            last_user_message: None,
+        }
+    }
+
+    /// Regression: ~40 busy terminals × 2 MiB replay rings used to
+    /// assemble an 80 MiB Snapshot — over the 64 MiB socket frame cap,
+    /// which killed the writer loop and left a `--connect` client
+    /// permanently re-requesting the same unsendable snapshot. The
+    /// budgeted snapshot must bincode-encode under the cap.
+    #[test]
+    fn budgeted_snapshot_stays_under_the_frame_cap_with_many_full_rings() {
+        let mut terminals: Vec<lazybox_ipc::TerminalSnapshot> =
+            (0..40).map(full_ring_snapshot).collect();
+        let raw_total: usize = terminals.iter().map(|t| t.replay.len()).sum();
+        assert!(
+            raw_total as u32 > lazybox_ipc::MAX_FRAME_BYTES,
+            "fixture must reproduce the oversized-snapshot condition"
+        );
+
+        budget_snapshot_replay(&mut terminals);
+
+        let total: usize = terminals.iter().map(|t| t.replay.len()).sum();
+        assert!(
+            total <= SNAPSHOT_REPLAY_BUDGET,
+            "total replay {total} must fit the {SNAPSHOT_REPLAY_BUDGET} budget"
+        );
+        let encoded = bincode::serialize(&Event::Snapshot {
+            workspaces: Vec::new(),
+            terminals,
+            projects: Vec::new(),
+        })
+        .expect("snapshot serializes");
+        assert!(
+            (encoded.len() as u64) < u64::from(lazybox_ipc::MAX_FRAME_BYTES),
+            "encoded snapshot ({} bytes) must stay under MAX_FRAME_BYTES",
+            encoded.len()
+        );
+    }
+
+    /// Trimming must drop the OLDEST bytes: the tail is what the
+    /// client's VT reset needs to redraw the current screen.
+    #[test]
+    fn budget_trims_from_the_front_and_keeps_the_tail() {
+        let mut terminals: Vec<lazybox_ipc::TerminalSnapshot> =
+            (0..40).map(full_ring_snapshot).collect();
+        let tail: Vec<u8> = terminals[0].replay[terminals[0].replay.len() - 64..].to_vec();
+
+        budget_snapshot_replay(&mut terminals);
+
+        for t in &terminals {
+            assert!(!t.replay.is_empty(), "every terminal keeps some replay");
+            assert!(
+                t.replay.ends_with(&tail),
+                "replay must end with the original tail bytes"
+            );
+        }
+    }
+
+    /// Under-budget snapshots pass through untouched — the common
+    /// case must not pay for the pathological one.
+    #[test]
+    fn budget_leaves_small_snapshots_alone() {
+        let mut terminals = vec![full_ring_snapshot(1), full_ring_snapshot(2)];
+        let before: Vec<usize> = terminals.iter().map(|t| t.replay.len()).collect();
+        budget_snapshot_replay(&mut terminals);
+        let after: Vec<usize> = terminals.iter().map(|t| t.replay.len()).collect();
+        assert_eq!(before, after);
+    }
 }

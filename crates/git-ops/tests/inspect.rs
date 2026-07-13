@@ -83,13 +83,28 @@ async fn setup_fixture() -> Fixture {
     }
 }
 
+/// Fixture git must not inherit the developer's signing setup: with
+/// global `commit.gpgsign` + an agent-backed signer (1Password, gpg
+/// pinentry), fixture commits hang or fail whenever the agent is
+/// locked. `GIT_CONFIG_*` pairs override the global values without
+/// discarding the rest of the config (identity, defaults).
+fn no_signing(cmd: &mut tokio::process::Command) -> &mut tokio::process::Command {
+    cmd.env("GIT_CONFIG_COUNT", "2")
+        .env("GIT_CONFIG_KEY_0", "commit.gpgsign")
+        .env("GIT_CONFIG_VALUE_0", "false")
+        .env("GIT_CONFIG_KEY_1", "tag.gpgsign")
+        .env("GIT_CONFIG_VALUE_1", "false")
+}
+
 async fn run(cwd: &Path, args: &[&str]) {
-    let out = tokio::process::Command::new("git")
-        .current_dir(cwd)
-        .args(args)
-        .output()
-        .await
-        .unwrap();
+    let out = no_signing(
+        tokio::process::Command::new("git")
+            .current_dir(cwd)
+            .args(args),
+    )
+    .output()
+    .await
+    .unwrap();
     assert!(
         out.status.success(),
         "git {args:?} failed in {}: {}",
@@ -99,12 +114,14 @@ async fn run(cwd: &Path, args: &[&str]) {
 }
 
 async fn run_capture(cwd: &Path, args: &[&str]) -> String {
-    let out = tokio::process::Command::new("git")
-        .current_dir(cwd)
-        .args(args)
-        .output()
-        .await
-        .unwrap();
+    let out = no_signing(
+        tokio::process::Command::new("git")
+            .current_dir(cwd)
+            .args(args),
+    )
+    .output()
+    .await
+    .unwrap();
     assert!(out.status.success(), "git {args:?} failed");
     String::from_utf8(out.stdout).unwrap()
 }
@@ -132,11 +149,21 @@ async fn add_wt(fx: &Fixture, name: &str, branch: &str, upstream_branch: &str) -
     }
     // Populate `refs/remotes/origin/<branch>` in the bare. Mirrors
     // the production fetch in `WorktreeManager::checkout_at`.
+    // `--refmap=` restricts the update to exactly this explicit
+    // refspec: without it, git ≥2.55 also applies the fixture's
+    // configured `+refs/heads/*:refs/remotes/origin/*` opportunistically
+    // (mirroring `main` into `refs/remotes/origin/main` as a side
+    // effect), and that stale side-effect ref later collides with the
+    // explicit `origin/main` fetch ("cannot lock ref … unable to
+    // resolve reference"). Production bare clones keep the default
+    // heads:heads refmap, so they never hit this — the fixture must
+    // opt out explicitly.
     run(
         &fx.bare,
         &[
             "fetch",
             "-q",
+            "--refmap=",
             "origin",
             &format!("+{upstream_branch}:refs/remotes/origin/{branch}"),
         ],
@@ -553,9 +580,20 @@ async fn merged_and_deleted_upstream_branch_is_still_safe() {
     run(&fx.upstream_path, &["merge", "-q", "feature"]).await;
     run(&fx.upstream_path, &["branch", "-D", "feature"]).await;
     // The bare clone's next prune-style fetch reflects both.
+    // `--refmap=` keeps the update to exactly the explicit refspec:
+    // git ≥2.55 otherwise also applies the fixture's configured
+    // `+refs/heads/*:refs/remotes/origin/*` opportunistically and
+    // rejects the duplicate `refs/remotes/origin/main` update in one
+    // transaction ("cannot lock ref … unable to resolve reference").
     run(
         &fx.bare,
-        &["fetch", "-q", "origin", "+main:refs/remotes/origin/main"],
+        &[
+            "fetch",
+            "-q",
+            "--refmap=",
+            "origin",
+            "+main:refs/remotes/origin/main",
+        ],
     )
     .await;
     run(

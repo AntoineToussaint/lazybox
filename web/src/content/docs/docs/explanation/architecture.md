@@ -24,19 +24,18 @@ socket, SSH local forwarding (`ssh -L`) carries it across machines — that's ho
 
 ## The crates
 
-lazybox is built from 16 lazybox crates (plus two vendored libghostty crates),
-split across shared libraries, providers, the daemon, and the client binary. The
-four **core** libraries — core, auth, events, and store — are deliberately
-isolated: they never depend on each other. That keeps the foundation acyclic and
-each concern independently testable.
+lazybox is built from 16 crates (including two vendored libghostty crates),
+split across shared libraries, providers, the daemon, and the client binary.
+The **core** libraries are deliberately layered: core and auth depend on no
+internal crate, and store may depend on core only. That keeps the foundation
+acyclic and each concern independently testable.
 
 - **core** — the source-agnostic domain types (Task, Session, Activity, time
   helpers).
 - **auth** — the credential provider trait and chain.
-- **events** — the in-process event bus.
 - **store** — the persistence trait and its SQLite backend.
 
-Providers (GitHub, Linear) depend only on core, events, and auth. The daemon
+Providers (GitHub, Linear, Slack) depend only on core and auth. The daemon
 side wires everything together; the client renders it.
 
 ## The event bus
@@ -50,9 +49,9 @@ adding a new source (or a new consumer) doesn't require touching the others.
 ## The credential chain
 
 Authentication is a chain of credential providers tried in order, so the common
-case needs zero configuration. For GitHub the chain resolves the token from
-`gh auth token` by default, falling back to the `GH_TOKEN` / `GITHUB_TOKEN`
-environment variables. The chain is trait-based and extensible (env, command,
+case needs zero configuration. For GitHub the chain tries the `GH_TOKEN` and
+`GITHUB_TOKEN` environment variables first, then falls back to running
+`gh auth token`. The chain is trait-based and extensible (env, command,
 and static providers exist today).
 
 ## The embedded terminal

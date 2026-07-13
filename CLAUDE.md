@@ -53,9 +53,10 @@ nudge is currently dormant.
 
 ## Architecture
 
-16 crates organized as a client/daemon split with shared library crates. The
-core library crates (core, auth, store) must NEVER depend on each
-other.
+16 crates organized as a client/daemon split with shared library crates.
+Core-library layering: `core` depends on no internal crate; `auth` depends on
+no internal crate; `store` may depend on `core` only. Enforced by the
+workspace dep-rules test (`crates/core/tests/dep_rules.rs`).
 
 ```
 crates/
@@ -194,6 +195,9 @@ a leader group into one cell (`g ▸ github`, `a ▸ agent`) — the
 which-key popup and `?` help reuse the same group labels.
 
 **Global**: `Tab` cycle panes, `?` help, `q q` quit, `,` settings,
+`t` theme picker (live-preview palette list; the choice persists to
+`ui.theme`), `Shift-W` start agent from anywhere (pick a project,
+name a workspace, spawn the default agent — one flow, any pane),
 `]` browse snippets (read-only catalog; `e` there opens the YAML),
 `Shift-R` refresh, `Ctrl-L` force a full repaint (recovery for a
 stale/garbled screen; resize and focus-regain also repaint
@@ -222,7 +226,10 @@ resize.
 filter, `o` cycle sort, `Space` collapse/expand repo group, `Shift-S`
 cycle mailbox (Inbox → Inactive → Snoozed), `/` search, `n` new
 workspace, `Shift-N` new project, `Shift-A` adopt sessions, `Shift-J`
-join issue into PR, `Shift-X` archive. `v` multi-selects workspace
+join issue into PR, `Shift-X` archive, `Shift-C` close issue
+(as not-planned, upstream; issue workspaces only, confirmed first),
+`r` reply (works from the sidebar as well as the activity pane —
+it's a Workspace-section action). `v` multi-selects workspace
 rows (marks survive j/k; `Esc` clears) and `Shift-B` broadcasts one
 instruction to every selected workspace: a snippet picker (`Ctrl-F`
 skips it for free text) feeds a compose textarea pre-filled with the
@@ -241,10 +248,12 @@ Claude ships a built-in Haiku/Sonnet/Opus menu, other agents define
 their own. The alias is agent-agnostic at the chord — the daemon maps
 it to whatever agent the spawn targets — and the picked tier's label
 rides a `◆ Opus` tab badge. `g` is a leader that
-opens the **github** group the same way: `g m` merge, `g v`
-reviewers, `g a` assignees, `g l` labels, `g o` open in browser —
-leader chords only, the legacy `Shift-{M,V,G,L,O}` direct aliases are
-gone (#304). `b` is a leader
+opens the **github** group the same way: `g m` merge, `g g` toggle
+auto-merge on green (lazybox merges automatically once CI passes —
+own PR, no conflicts, no changes requested; only while lazybox runs),
+`g v` reviewers, `g a` assignees, `g l` labels, `g o` open in
+browser — leader chords only, the legacy `Shift-{M,V,G,L,O}` direct
+aliases are gone (#304). `b` is a leader
 for the **on-main** group (which-key popup): `b c` / `b x` / `b u`
 start an agent, `b s` a shell, on the repo's shared **main checkout**
 (default branch) instead of an isolated worktree — confirmed first
@@ -285,7 +294,9 @@ scrollback, `Shift-Home/End` jump top/bottom (mouse wheel works too).
 
 - `thiserror` for errors in library crates, `anyhow` in the binary (`tui`)
 - No `unwrap()` in library crates
-- Core libraries (core, auth, store) must not depend on each other
+- Core-library layering: core and auth depend on no internal crate; store may
+  depend on core only (enforced by the workspace dep-rules test)
 - Provider crates depend on core + auth only
-- Every public function has a test; every TUI component has a render snapshot
-  (insta + ratatui `TestBackend`); every bug fix lands with a regression test
+- Every public function has a test; visually complex TUI components carry
+  insta render snapshots (sidebar, themes) and the rest get ratatui
+  `TestBackend` render tests; every bug fix lands with a regression test

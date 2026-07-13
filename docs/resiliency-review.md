@@ -1,5 +1,9 @@
 # Resiliency review (issue #74)
 
+> **Historical** — point-in-time review as of issue #74. Superseded;
+> crate counts, file paths, and findings may no longer match the code.
+> Do not act on this document.
+
 A pass over the 18 crates aimed at state-management fragility — the
 class of bug behind the #64 sync regression. Findings are ranked by
 severity × confidence. "Verified" means I read the code path and

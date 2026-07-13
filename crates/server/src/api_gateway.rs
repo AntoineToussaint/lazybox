@@ -133,8 +133,20 @@ pub fn metrics_response(config: &ServerConfig) -> EventMetricsSnapshot {
     config.event_metrics.snapshot()
 }
 
-pub fn workspaces_response(config: &ServerConfig) -> Result<WorkspacesResponse, GatewayError> {
-    let records = config.store.list_workspaces()?;
+/// Full workspace scan + deserialize on `spawn_blocking` (issue #34's
+/// convention): the synchronous rusqlite scan can pin a runtime
+/// worker for up to the 5s busy_timeout when another process
+/// contends on the DB, which on the gateway's runtime would stall
+/// unrelated requests.
+pub async fn workspaces_response(
+    config: &ServerConfig,
+) -> Result<WorkspacesResponse, GatewayError> {
+    let store = config.store.clone();
+    let records = tokio::task::spawn_blocking(move || store.list_workspaces())
+        .await
+        .map_err(|error| {
+            lazybox_store::StoreError::Backend(format!("workspace scan task failed: {error}"))
+        })??;
     let workspaces = records
         .into_iter()
         .filter_map(|record| {
@@ -254,7 +266,7 @@ where
     match (request.method(), request.uri().path()) {
         (&Method::GET, "/v1/health") => json_response(StatusCode::OK, &health_response()),
         (&Method::GET, "/v1/metrics") => json_response(StatusCode::OK, &metrics_response(&config)),
-        (&Method::GET, "/v1/workspaces") => match workspaces_response(&config) {
+        (&Method::GET, "/v1/workspaces") => match workspaces_response(&config).await {
             Ok(payload) => json_response(StatusCode::OK, &payload),
             Err(error) => json_response(
                 StatusCode::INTERNAL_SERVER_ERROR,

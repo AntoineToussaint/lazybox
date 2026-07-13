@@ -290,21 +290,35 @@ impl SnippetPicker {
     /// matches alone, so the broader description-inclusive display
     /// filter can't suppress the `]rev` fast path (nor make an
     /// ambiguous prefix auto-fire).
+    ///
+    /// Case-tie break: matching is ASCII case-insensitive, so a library
+    /// defining both `rev` and `Rev` used to make the fast path
+    /// permanently ambiguous — typing either full key never
+    /// auto-submitted. When several case-insensitive prefix matches
+    /// exist but exactly one is a case-EXACT full-key match of the
+    /// typed text, that one wins.
     fn auto_submit_index(&self) -> Option<usize> {
         let q = self.filter.trim();
         if q.is_empty() {
             return None;
         }
-        let mut key_prefix = self
+        let prefix_matches: Vec<(usize, &PickerRow)> = self
             .rows
             .iter()
             .enumerate()
-            .filter(|(_, r)| starts_with_icase(&r.key, q));
-        let (idx, row) = key_prefix.next()?;
-        if key_prefix.next().is_some() {
-            return None;
+            .filter(|(_, r)| starts_with_icase(&r.key, q))
+            .collect();
+        match prefix_matches.as_slice() {
+            [] => None,
+            [(idx, row)] => row.key.eq_ignore_ascii_case(q).then_some(*idx),
+            many => {
+                let mut exact = many.iter().filter(|(_, r)| r.key == q);
+                let &(idx, _) = exact.next()?;
+                // Keys are unique (BTreeMap-backed), so a second exact
+                // match can't happen — the guard is belt-and-braces.
+                exact.next().is_none().then_some(idx)
+            }
         }
-        row.key.eq_ignore_ascii_case(q).then_some(idx)
     }
 
     /// Build the list layout (headers + rows) from `visible_indices`.
@@ -1036,6 +1050,47 @@ mod tests {
         assert!(picker.visible_indices.is_empty());
         assert!(picker.cursor.is_none());
         assert!(picker.on_key(&key(Key::Enter)).is_none());
+    }
+
+    /// Case-tie break: with both `rev` and `Rev` defined, matching is
+    /// case-insensitive so BOTH prefix-match either typed form — which
+    /// used to permanently disable auto-submit. Now the case-exact
+    /// full-key match wins the tie; a genuinely ambiguous prefix
+    /// (`re`) still never auto-fires.
+    #[test]
+    fn case_tied_keys_auto_submit_on_the_exact_match() {
+        let rows = vec![
+            PickerRow::new(
+                "Rev",
+                &snip("Review", "Big review", "big body", SnippetOrigin::Global),
+            ),
+            PickerRow::new(
+                "rev",
+                &snip(
+                    "Review",
+                    "Small review",
+                    "small body",
+                    SnippetOrigin::Global,
+                ),
+            ),
+        ];
+        // Lowercase `rev` typed → the lowercase key submits.
+        let mut picker = SnippetPicker::new(rows.clone(), String::new());
+        assert!(picker.on_key(&ke('r')).is_none());
+        assert!(picker.on_key(&ke('e')).is_none());
+        match picker.on_key(&ke('v')) {
+            Some(Msg::ChoicePicked(v)) => assert_eq!(picker.rows[v[0]].key, "rev"),
+            other => panic!("expected exact-case auto-submit of `rev`, got {other:?}"),
+        }
+        // Uppercase `Rev` typed → the uppercase key submits.
+        let mut picker = SnippetPicker::new(rows, String::new());
+        for c in ['R', 'e'] {
+            assert!(picker.on_key(&ke(c)).is_none());
+        }
+        match picker.on_key(&ke('v')) {
+            Some(Msg::ChoicePicked(v)) => assert_eq!(picker.rows[v[0]].key, "Rev"),
+            other => panic!("expected exact-case auto-submit of `Rev`, got {other:?}"),
+        }
     }
 
     #[test]

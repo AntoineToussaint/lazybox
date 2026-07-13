@@ -177,52 +177,71 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         }
         match key.code {
-            // Tab cycles panes — but ONLY when the active pane has
-            // no PTY swallowing keys. Inside a terminal with a live
-            // PTY, Tab belongs to the shell / agent; the `]]`
-            // escape sequence is the only way out (tmux-style
-            // prefix model). With no terminals running, Tab cycles
-            // normally — there's no inner program to forward it to.
-            Key::Tab
-                if !key.modifiers.contains(KeyModifiers::SHIFT)
-                    && !self.focus_mode
-                    && (self.focus != PaneFocus::Terminals
-                        || self.terminals.is_empty()
-                        || !self.terminal_user_typed_since_focus) =>
+            // Cycle panes — the catalog's `CyclePane` chord (Tab by
+            // default, `Ctrl-w` under the vim preset, remappable via
+            // `ui.action_keys.cycle_pane`) — but ONLY when the active
+            // pane has no PTY swallowing keys. Inside a terminal with a
+            // live PTY the chord belongs to the shell / agent (Tab
+            // autocomplete, readline `Ctrl-w`); the `]]` escape
+            // sequence is the only way out (tmux-style prefix model).
+            // With no terminals running (or fresh entry, no typing
+            // yet) it cycles normally — there's no inner program to
+            // forward it to. Kept as a guard arm rather than plain
+            // catalog dispatch because the terminal gating below needs
+            // to apply even where the catalog can't resolve (a live
+            // but untyped terminal pane).
+            _ if self.matches_cycle_pane(&key)
+                && !self.focus_mode
+                && (self.focus != PaneFocus::Terminals
+                    || self.terminals.is_empty()
+                    || !self.terminal_user_typed_since_focus) =>
             {
-                // Empty terminal pane OR fresh-entry-no-typing-yet →
-                // cycle focus instead of forwarding Tab to the PTY.
-                // After the user has typed even one character in this
-                // focus session the flag flips and Tab goes to the
-                // shell for autocomplete.
                 self.q_latch.disarm();
-                self.focus = self.focus.next();
-                // Skip the Activity pane when it's hidden — Tab should
-                // never land focus on a pane the user can't see.
-                if self.focus == PaneFocus::Right && !self.activity_pane_visible() {
-                    self.focus = self.focus.next();
-                }
-                self.set_focus_attr();
-                self.redraw = true;
+                self.cycle_pane_focus();
+                return;
+            }
+            // Completion of a two-DISTINCT-stroke quit override
+            // (`quit: "q x"`): the head press armed the latch below;
+            // this press is the declared second stroke. Checked before
+            // the head arm so the second stroke can't be re-read as a
+            // fresh head press, and before catalog / pane dispatch so
+            // it never leaks as its own action.
+            _ if self.focus != PaneFocus::Terminals && self.quit_seq_completes(&key) => {
+                self.q_latch.disarm();
+                self.quit = true;
                 return;
             }
             _ if self.focus != PaneFocus::Terminals && self.matches_quit_chord(&key) => {
                 // Quit chord (catalog `ActionKind::Quit`, default `q q`,
-                // overridable via `ui.action_keys.quit`). A `Seq` is the
-                // two-press latch; a single-keystroke `Key` remap fires
-                // on first press.
-                let chord = self.resolve_quit_chord();
+                // overridable via `ui.action_keys.quit`). A `Seq` of the
+                // same stroke twice is the two-press latch; a
+                // single-keystroke `Key` remap fires on first press; a
+                // `Seq` of two distinct strokes arms here and completes
+                // in the branch above (`quit: "q x"` must quit on
+                // `q x`, not on `q q`).
                 use lazybox_tui_core::action::Chord;
-                if matches!(chord, Some(Chord::Key(_))) {
-                    self.quit = true;
-                    return;
+                match self.resolve_quit_chord() {
+                    Some(Chord::Key(_)) => {
+                        self.quit = true;
+                        return;
+                    }
+                    Some(Chord::Seq(ref s)) if s.len() >= 2 && s[0] != s[1] => {
+                        // Head of a distinct-stroke sequence: (re)arm
+                        // only — a repeat of the head must never fire.
+                        self.q_latch.disarm();
+                        let _ = self.q_latch.tap(self.ui_defaults.quit_double_tap_window);
+                        self.redraw = true;
+                        return;
+                    }
+                    _ => {
+                        if self.q_latch.tap(self.ui_defaults.quit_double_tap_window) {
+                            self.quit = true;
+                            return;
+                        }
+                        self.redraw = true;
+                        return;
+                    }
                 }
-                if self.q_latch.tap(self.ui_defaults.quit_double_tap_window) {
-                    self.quit = true;
-                    return;
-                }
-                self.redraw = true;
-                return;
             }
             // `?` Help, `!` JumpToAsking — both go through the
             // catalog dispatch below (Section::Global).
@@ -271,40 +290,19 @@ impl<T: TerminalAdapter> Model<T> {
             // (Ghostty / iTerm2) regains native text selection. When
             // OFF the user can trackpad-select inside claude / shell
             // scrollback and Cmd-C normally; toggle back on for
-            // splitter drag etc. Bound to multiple chords because
-            // terminals report Ctrl-Shift-S inconsistently and
-            // Ctrl-S itself is XOFF flow control:
+            // splitter drag etc. The catalog row
+            // (`ActionKind::ToggleMouseCapture`) ships three default
+            // chords because terminals report Ctrl-Shift-S
+            // inconsistently and Ctrl-S itself is XOFF flow control:
             //   - F8         — function key, never conflicts with TTY
             //   - Alt-s      — Option-s on Mac (Alt-s elsewhere)
             //   - Ctrl-Alt-s — extra fallback for non-mac users
-            // Available from any pane (including Terminals) so users
-            // in claude can escape to a copy gesture without breaking
-            // flow.
-            Key::Function(8) => {
-                self.q_latch.disarm();
-                self.toggle_mouse_capture();
-                return;
-            }
-            // Focus mode (#156). From the sidebar / activity panes it
-            // rides the catalog dispatch below (the `.` binding). From
-            // inside a terminal the PTY eats every key, so the entry
-            // point there is the `]]` leader: `]]f` toggles focus mode
-            // and `]]<digit>` jumps to a specific agent — both handled
-            // in the leader block above. F-keys were dropped (#156
-            // follow-up): macOS steals them for brightness / Mission
-            // Control, so they never reliably reached lazybox.
-            Key::Char('s')
-                if key.modifiers.contains(KeyModifiers::ALT)
-                    && !key.modifiers.contains(KeyModifiers::SHIFT) =>
-            {
-                self.q_latch.disarm();
-                self.toggle_mouse_capture();
-                return;
-            }
-            Key::Char('s' | 'S')
-                if key.modifiers.contains(KeyModifiers::ALT)
-                    && key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
+            // Handled as a guard arm (not plain catalog dispatch) so it
+            // stays reachable from a LIVE terminal — users in claude
+            // escape to a copy gesture without `]]` first — while the
+            // catalog row keeps it visible in `?` help and remappable
+            // via `ui.action_keys.toggle_mouse_capture`.
+            _ if self.matches_mouse_capture(&key) => {
                 self.q_latch.disarm();
                 self.toggle_mouse_capture();
                 return;
@@ -755,6 +753,84 @@ impl<T: TerminalAdapter> Model<T> {
             return false;
         };
         &input == chord.head()
+    }
+
+    /// Whether `key` completes an armed two-DISTINCT-stroke quit
+    /// sequence (`quit: "q x"`): the latch was armed by the head
+    /// within the double-tap window and this stroke equals the
+    /// declared second stroke. Always false for the default `q q`
+    /// (same-stroke sequences stay on the tap latch) and for a
+    /// single-`Key` remap.
+    fn quit_seq_completes(&self, key: &RealmKey) -> bool {
+        use lazybox_tui_core::action::Chord;
+        if !self.q_latch.is_armed()
+            || self
+                .q_latch
+                .armed_past(self.ui_defaults.quit_double_tap_window)
+        {
+            return false;
+        }
+        let Some(Chord::Seq(strokes)) = self.resolve_quit_chord() else {
+            return false;
+        };
+        if strokes.len() < 2 || strokes[0] == strokes[1] {
+            return false;
+        }
+        let Some(input) = key_event_to_stroke(realm_key_to_crossterm(key)) else {
+            return false;
+        };
+        input == strokes[1]
+    }
+
+    /// Whether `key` is the effective `CyclePane` binding (default
+    /// `Tab`, `Ctrl-w` under the vim preset, remappable via
+    /// `ui.action_keys.cycle_pane`). Every ` | ` alternative is
+    /// honored; `Seq` alternatives are ignored (pane cycling is a
+    /// single-stroke action).
+    fn matches_cycle_pane(&self, key: &RealmKey) -> bool {
+        self.matches_single_key_binding(lazybox_tui_core::action::ActionKind::CyclePane, key)
+    }
+
+    /// Whether `key` is one of the effective `ToggleMouseCapture`
+    /// chords (defaults F8 / Alt-s / Ctrl-Alt-s, remappable via
+    /// `ui.action_keys.toggle_mouse_capture`).
+    fn matches_mouse_capture(&self, key: &RealmKey) -> bool {
+        self.matches_single_key_binding(
+            lazybox_tui_core::action::ActionKind::ToggleMouseCapture,
+            key,
+        )
+    }
+
+    /// Shared matcher for the explicit-branch actions that read their
+    /// chord from the catalog: true when `key` equals any single-`Key`
+    /// alternative of `kind`'s effective binding.
+    fn matches_single_key_binding(
+        &self,
+        kind: lazybox_tui_core::action::ActionKind,
+        key: &RealmKey,
+    ) -> bool {
+        use lazybox_tui_core::action::{ActionDef, Chord};
+        let Some(input) = key_event_to_stroke(realm_key_to_crossterm(key)) else {
+            return false;
+        };
+        ActionDef::for_kind(kind)
+            .effective_chords(&self.action_key_overrides)
+            .iter()
+            .any(|c| matches!(c, Chord::Key(k) if k == &input))
+    }
+
+    /// Move focus to the next visible pane — the `CyclePane` effect,
+    /// shared by the guard arm in `handle_pane_key` and the catalog
+    /// dispatch (`dispatch_action`).
+    pub(super) fn cycle_pane_focus(&mut self) {
+        self.focus = self.focus.next();
+        // Skip the Activity pane when it's hidden — cycling should
+        // never land focus on a pane the user can't see.
+        if self.focus == PaneFocus::Right && !self.activity_pane_visible() {
+            self.focus = self.focus.next();
+        }
+        self.set_focus_attr();
+        self.redraw = true;
     }
 
     /// Handle a bracketed-paste event from the host terminal. The
@@ -1308,7 +1384,7 @@ impl<T: TerminalAdapter> Model<T> {
 /// is the bridge from the data-model catalog back to the dispatchable
 /// `Action` enum — both single-key and leader-sequence resolution go
 /// through it.
-fn action_from_entry(
+pub(super) fn action_from_entry(
     entry: &lazybox_tui_core::action::CatalogEntry,
 ) -> Option<lazybox_tui_core::action::Action> {
     use lazybox_tui_core::action::{Action, ActionKind, Param};
@@ -1342,7 +1418,7 @@ fn action_from_entry(
 ///
 /// `SpawnAgent` carries the agent id as a `Param`, handled by
 /// [`action_from_entry`]; reached here it has no payload, so `None`.
-fn action_from_kind(
+pub(super) fn action_from_kind(
     kind: lazybox_tui_core::action::ActionKind,
 ) -> Option<lazybox_tui_core::action::Action> {
     use lazybox_tui_core::action::{Action, ActionKind};
@@ -1369,6 +1445,20 @@ fn action_from_kind(
         ActionKind::AddAssignees => Action::AddAssignees,
         ActionKind::ManageLabels => Action::ManageLabels,
         ActionKind::OpenInBrowser => Action::OpenInBrowser,
+        // Activity-pane cursor jumps (`g` / `Shift-G` under Right
+        // focus). Dispatching these through the catalog is what keeps
+        // a reflexive `g` in the activity pane from arming the
+        // Workspace `g *` github leader (where `g g` toggled
+        // auto-merge on the PR).
+        ActionKind::ActivityTop => Action::ActivityTop,
+        ActionKind::ActivityBottom => Action::ActivityBottom,
+        // Pane cycling + mouse capture dispatch through their
+        // chord-reading guard arms in `handle_pane_key` first; these
+        // mappings serve the non-keyboard surfaces (context menu,
+        // invariant tests) and keep the kinds out of the silent
+        // fallback set.
+        ActionKind::CyclePane => Action::CyclePane,
+        ActionKind::ToggleMouseCapture => Action::ToggleMouseCapture,
         ActionKind::CycleRoleFilter => Action::CycleRoleFilter,
         ActionKind::CycleSort => Action::CycleSort,
         ActionKind::CycleMailbox => Action::CycleMailbox,
@@ -1395,4 +1485,94 @@ fn action_from_kind(
         ActionKind::ToggleFocusMode => Action::ToggleFocusMode,
         _ => return None,
     })
+}
+
+/// The reviewed allowlist of catalog kinds that deliberately do NOT
+/// dispatch through `dispatch_action` — each is consumed by a named
+/// pane match arm or an explicit `handle_pane_key` branch instead.
+/// Every other kind in the runtime catalog MUST resolve through
+/// [`action_from_entry`]; the `dispatch_coverage` invariant test fails
+/// the build when a new catalog row lands in neither camp (it would
+/// render in `?` help and the footer while silently no-oping on the
+/// keyboard).
+///
+/// Second tuple field: where the kind is actually handled. Third:
+/// whether a `ui.action_keys` override on it takes effect — `false`
+/// entries are hardcoded pane arms, and the startup keymap validation
+/// warns when a user tries to remap one.
+pub(super) const PANE_NATIVE_KINDS: &[(lazybox_tui_core::action::ActionKind, &str, bool)] = {
+    use lazybox_tui_core::action::ActionKind as K;
+    &[
+        (
+            K::OpenWorkspace,
+            "handle_pane_key's sidebar Enter arm (keys.rs)",
+            false,
+        ),
+        (
+            K::ToggleActivity,
+            "RightPane::handle_key's Enter arm (components/right_pane/mod.rs)",
+            false,
+        ),
+        (
+            K::ToggleRow,
+            "RightPane::handle_key's Right/Left/l/h arms (components/right_pane/mod.rs)",
+            false,
+        ),
+        (
+            K::SelectRow,
+            "RightPane::handle_key's Space/v arm (components/right_pane/mod.rs)",
+            false,
+        ),
+        (
+            K::ToggleDescription,
+            "RightPane::handle_key's 'd' arm (components/right_pane/mod.rs)",
+            false,
+        ),
+        (
+            K::UndoMarkRead,
+            "RightPane::handle_key's 'z' arm (components/right_pane/mod.rs)",
+            false,
+        ),
+        (
+            K::Quit,
+            "handle_pane_key's quit-chord latch branches (keys.rs) — override honored",
+            true,
+        ),
+        (
+            K::DismissNotice,
+            "handle_pane_key's dismiss-notice branch (keys.rs) — override honored",
+            true,
+        ),
+        (
+            K::ResizeSplitter,
+            "handle_pane_key's Shift-arrow arm (keys.rs)",
+            false,
+        ),
+        (
+            K::TerminalScroll,
+            "TerminalStack::handle_key's Shift-PgUp/PgDn/Home/End arms (components/terminal_stack.rs)",
+            false,
+        ),
+        (
+            K::LeaveTerminal,
+            "the terminal `]]` escape latch (keys.rs; chord comes from ui.terminal_escape_char)",
+            false,
+        ),
+    ]
+};
+
+/// Whether a `ui.action_keys` override targeting `config_key`'s
+/// catalog row can actually change what fires. Catalog-dispatched rows
+/// and the chord-reading explicit branches (quit, dismiss-notice,
+/// cycle-pane, mouse-capture) honor overrides; the hardcoded
+/// pane-native arms in [`PANE_NATIVE_KINDS`] don't.
+pub(super) fn override_takes_effect(entry: &lazybox_tui_core::action::CatalogEntry) -> bool {
+    if action_from_entry(entry).is_some() {
+        return true;
+    }
+    PANE_NATIVE_KINDS
+        .iter()
+        .find(|(k, _, _)| *k == entry.kind)
+        .map(|(_, _, effective)| *effective)
+        .unwrap_or(false)
 }

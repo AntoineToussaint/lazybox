@@ -26,15 +26,16 @@ lazybox server start
 lazybox server status     # confirm it is up
 ```
 
-The daemon listens on a Unix socket. Note its path (it lives under the remote
-host's lazybox home; `LAZYBOX_HOME` overrides where lazybox writes everything).
+The daemon listens on a Unix socket at `~/.lazybox/run/daemon.sock`
+(`LAZYBOX_HOME` moves the whole `~/.lazybox` tree, socket included;
+`lazybox server status` confirms the daemon is up).
 
 ## 2. Forward the socket over SSH
 
 From your laptop, forward a local socket path to the remote socket path:
 
 ```sh
-ssh -L /tmp/lazybox-remote.sock:/path/to/remote/lazybox.sock user@remote-host
+ssh -L /tmp/lazybox-remote.sock:/home/you/.lazybox/run/daemon.sock user@remote-host
 ```
 
 Keep this SSH session open; it carries the connection.

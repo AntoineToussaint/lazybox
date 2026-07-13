@@ -55,6 +55,17 @@ pub const WRITE_QUEUE_CAPACITY: usize = 256;
 /// daemon serve path and must never wedge on a dead child.
 const WRITE_ENQUEUE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// Signal numbers, spelled as plain i32s so the non-unix stub build
+/// (where the `libc` constants aren't referenced) still compiles.
+#[cfg(unix)]
+const SIGTERM_CODE: i32 = libc::SIGTERM;
+#[cfg(not(unix))]
+const SIGTERM_CODE: i32 = 15;
+#[cfg(unix)]
+const SIGKILL_CODE: i32 = libc::SIGKILL;
+#[cfg(not(unix))]
+const SIGKILL_CODE: i32 = 9;
+
 #[derive(Debug, thiserror::Error)]
 pub enum PtyError {
     #[error("PTY open: {0}")]
@@ -124,11 +135,23 @@ pub struct DaemonPty {
 
 /// Fixed-capacity byte ring. Writes overwrite the oldest bytes; reads
 /// return a logical linear slice of everything currently stored.
+///
+/// A true circular buffer: once storage reaches `cap`, `push` writes
+/// over the oldest region in place and advances `head`. The previous
+/// implementation kept the buffer linear with a `copy_within` over the
+/// whole (2 MiB) buffer per ≤8 KiB chunk — ~256× write amplification
+/// under the same lock `snapshot`/`subscribe` contend on.
 #[derive(Debug)]
 pub struct ReplayRing {
+    /// Storage. Grows with content up to `cap` (an idle terminal never
+    /// holds the full multi-MiB budget), then stays at `cap` and is
+    /// treated circularly with `head` marking the oldest byte.
     buf: Vec<u8>,
     /// Capacity the ring enforces on the buffer's length.
     cap: usize,
+    /// Index in `buf` of the oldest stored byte. Invariant: `head == 0`
+    /// until the ring first fills (`buf.len() < cap` ⇒ `head == 0`).
+    head: usize,
     /// Total bytes ever written. The ring contains bytes
     /// `[total - buf.len(), total)`. Monotonic — useful for
     /// cross-checking seq numbers in tests.
@@ -149,6 +172,7 @@ impl ReplayRing {
             // (now multi-MiB) budget before it has emitted anything.
             buf: Vec::new(),
             cap,
+            head: 0,
             total_written: 0,
         }
     }
@@ -160,18 +184,42 @@ impl ReplayRing {
             let tail_start = bytes.len() - self.cap;
             self.buf.clear();
             self.buf.extend_from_slice(&bytes[tail_start..]);
+            self.head = 0;
             return;
         }
-        self.buf.extend_from_slice(bytes);
-        if self.buf.len() > self.cap {
-            let excess = self.buf.len() - self.cap;
-            self.buf.copy_within(excess.., 0);
-            self.buf.truncate(self.cap);
+        let mut bytes = bytes;
+        if self.buf.len() < self.cap {
+            // Fill phase: storage still growing toward cap; head is 0.
+            let room = self.cap - self.buf.len();
+            let take = room.min(bytes.len());
+            self.buf.extend_from_slice(&bytes[..take]);
+            bytes = &bytes[take..];
+            if bytes.is_empty() {
+                return;
+            }
+            // Storage just reached cap; the remainder overwrites from
+            // head == 0 below.
         }
+        // Overwrite phase: `buf.len() == cap`. Write over the oldest
+        // region starting at `head`, wrapping at most once (the
+        // burst-exceeds-cap case was handled above, so `bytes.len() <
+        // cap`).
+        let n = bytes.len();
+        let first = (self.cap - self.head).min(n);
+        self.buf[self.head..self.head + first].copy_from_slice(&bytes[..first]);
+        if first < n {
+            self.buf[..n - first].copy_from_slice(&bytes[first..]);
+        }
+        self.head = (self.head + n) % self.cap;
     }
 
+    /// Everything currently stored, oldest byte first, assembled into
+    /// one contiguous allocation on demand.
     pub fn snapshot(&self) -> Vec<u8> {
-        self.buf.clone()
+        let mut out = Vec::with_capacity(self.buf.len());
+        out.extend_from_slice(&self.buf[self.head..]);
+        out.extend_from_slice(&self.buf[..self.head]);
+        out
     }
 
     pub fn len(&self) -> usize {
@@ -403,18 +451,38 @@ impl DaemonPty {
     /// once the child has actually exited, which the reader thread
     /// observes and uses to trip `finished` + close the broadcast
     /// channel — that's what causes the `TerminalExited` event to
-    /// fire downstream. No-op if the pid wasn't captured at spawn.
+    /// fire downstream. No-op (logged) if the pid wasn't captured at
+    /// spawn — the terminal cannot be signalled at all in that case,
+    /// and a silent return here left such sessions wedged with no
+    /// breadcrumb.
     pub fn kill(&self) {
-        let Some(pid) = self.child_pid else { return };
+        // SIGTERM rather than SIGKILL so the agent gets a chance
+        // to clean up its session file / save state.
+        self.signal_child(SIGTERM_CODE);
+    }
+
+    /// SIGKILL the child — the escalation rung for a child that
+    /// ignored `kill()`'s SIGTERM past the backend's grace period.
+    pub fn force_kill(&self) {
+        self.signal_child(SIGKILL_CODE);
+    }
+
+    fn signal_child(&self, sig: i32) {
+        let Some(pid) = self.child_pid else {
+            tracing::warn!(
+                sig,
+                "PTY kill: portable-pty reported no child pid at spawn — cannot signal; \
+                 the child will only exit on its own"
+            );
+            return;
+        };
         #[cfg(unix)]
         unsafe {
-            // SIGTERM rather than SIGKILL so the agent gets a chance
-            // to clean up its session file / save state.
-            libc::kill(pid as i32, libc::SIGTERM);
+            libc::kill(pid as i32, sig);
         }
         #[cfg(not(unix))]
         {
-            let _ = pid;
+            let _ = (pid, sig);
         }
     }
 
@@ -672,6 +740,78 @@ mod ring_tests {
         assert_eq!(r.total_written, 3);
         r.push(b"defghijk");
         assert_eq!(r.total_written, 11); // wraps; total still tracks real count
+    }
+
+    /// The circular rewrite must survive many full revolutions: after
+    /// every push the snapshot is exactly the last `cap` bytes of the
+    /// concatenated input, regardless of where `head` currently sits.
+    #[test]
+    fn many_wraps_snapshot_matches_reference_tail() {
+        let cap = 16;
+        let mut r = ReplayRing::with_capacity(cap);
+        let mut reference: Vec<u8> = Vec::new();
+        // Chunk sizes chosen to hit every alignment: 1, 3, 7, 13 cycle
+        // over a 16-byte ring so the wrap point lands everywhere.
+        let sizes = [1usize, 3, 7, 13];
+        let mut next: u8 = 0;
+        for i in 0..50 {
+            let n = sizes[i % sizes.len()];
+            let chunk: Vec<u8> = (0..n)
+                .map(|_| {
+                    next = next.wrapping_add(1);
+                    next
+                })
+                .collect();
+            r.push(&chunk);
+            reference.extend_from_slice(&chunk);
+            let tail_start = reference.len().saturating_sub(cap);
+            assert_eq!(
+                r.snapshot(),
+                &reference[tail_start..],
+                "snapshot diverged after push #{i} (len {n})"
+            );
+            assert_eq!(r.total_written, reference.len() as u64);
+            assert!(r.len() <= cap);
+        }
+    }
+
+    /// A push that lands exactly on the wrap boundary (fills the ring to
+    /// the byte) keeps head/state consistent for the next push.
+    #[test]
+    fn push_exactly_to_boundary_then_continue() {
+        let mut r = ReplayRing::with_capacity(6);
+        r.push(b"abcd");
+        r.push(b"ef"); // exactly full, no overwrite yet
+        assert_eq!(r.snapshot(), b"abcdef");
+        r.push(b"gh"); // overwrites 'a','b'
+        assert_eq!(r.snapshot(), b"cdefgh");
+        assert_eq!(r.total_written, 8);
+    }
+
+    /// A burst exactly equal to capacity replaces the entire contents,
+    /// even when the ring was mid-wrap (head != 0).
+    #[test]
+    fn cap_sized_burst_replaces_everything_when_wrapped() {
+        let mut r = ReplayRing::with_capacity(4);
+        r.push(b"abc");
+        r.push(b"de"); // wrapped: holds "bcde", head != 0
+        assert_eq!(r.snapshot(), b"bcde");
+        r.push(b"WXYZ");
+        assert_eq!(r.snapshot(), b"WXYZ");
+        assert_eq!(r.total_written, 9);
+    }
+
+    /// One push that both finishes the fill phase and wraps: part of it
+    /// tops the storage up to cap, the remainder overwrites the oldest
+    /// bytes.
+    #[test]
+    fn single_push_spanning_fill_and_overwrite_phases() {
+        let mut r = ReplayRing::with_capacity(5);
+        r.push(b"abc");
+        r.push(b"defg"); // "de" fills, "fg" overwrites "ab"
+        assert_eq!(r.snapshot(), b"cdefg");
+        assert_eq!(r.total_written, 7);
+        assert_eq!(r.len(), 5);
     }
 }
 

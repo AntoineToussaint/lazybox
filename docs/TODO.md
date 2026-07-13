@@ -21,11 +21,16 @@ surface — daemon already broadcasts the data the chip needs (PR's
 
 ## macOS desktop notifications: ship a .app bundle
 
-**Status.** The Script-Editor-on-click surprise is fixed: the
-`osascript` fallback was dropped (newer macOS attributes the click
-action back to Script Editor, which is awful UX). On macOS lazybox
-now only fires desktop notifications when `terminal-notifier` is on
-PATH; otherwise it silently no-ops with a one-time log line.
+**Status.** On macOS lazybox prefers `terminal-notifier` when it's
+on PATH (real icon, verifiable exit status, sane click target).
+When it's missing, `osascript -e 'display notification …'` is still
+the last-resort fallback — it ships with every macOS install, so a
+stock Mac gets a banner rather than silence. The tradeoff stands:
+newer macOS attributes the osascript banner's click action to
+Script Editor, and `display notification` exits 0 even when the
+banner is suppressed, so lazybox logs a one-time hint pointing at
+`terminal-notifier` (see `notify_user` in
+`crates/tui-core/src/platform.rs`).
 
 **Still missing.** A real solution: bundle lazybox as a `.app` with
 its own Info.plist + LSUIElement + bundle id so we can call

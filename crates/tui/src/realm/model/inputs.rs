@@ -47,6 +47,12 @@ impl<T: TerminalAdapter> Model<T> {
         if let Some(session_key) = target
             && !body.trim().is_empty()
         {
+            // Keep the composed text until the next reply: if the
+            // daemon later reports the post failed (`ProviderError`
+            // with source "reply"), the textarea is long gone — the
+            // failure handler parks this in the messages log so the
+            // user's words aren't lost.
+            self.last_reply_body = Some(body.clone());
             cmds.push(IpcCommand::PostReply { session_key, body });
             self.flash_info("Reply submitted — fetching…");
             cmds.push(IpcCommand::Refresh);
@@ -852,9 +858,18 @@ showing keybinding search only"
                 self.snooze_choices.clear();
             }
             Some(Id::WorktreeProgress) => {
-                // Esc on the checklist — drop the accumulated state so a
-                // later spawn starts a fresh one. Provisioning keeps
-                // running on the daemon; this only closes the view.
+                // Esc on the checklist — remember WHICH provisioning op
+                // was dismissed so its later `WorktreeProgress` events
+                // don't resurrect the modal on top of whatever the user
+                // is typing (they update silently instead; see
+                // `apply_worktree_progress`). Then drop the accumulated
+                // state so a later spawn starts a fresh one.
+                // Provisioning keeps running on the daemon; this only
+                // closes the view.
+                self.worktree_progress_dismissed = self
+                    .worktree_progress
+                    .as_ref()
+                    .map(|s| s.session_key.clone());
                 self.worktree_progress = None;
             }
             Some(Id::JumpPicker) => {
@@ -882,6 +897,14 @@ showing keybinding search only"
             }
             Some(Id::DefaultAgentPicker) => {
                 self.default_agent_choices.clear();
+            }
+            Some(Id::Setup) => {
+                // Esc on the (non-runner) Settings window — drop the
+                // stashed rows so a stale flat index can never be
+                // resolved by a later Setup-id mount. The runner-owned
+                // wizard path never reaches this match (it early-
+                // returns through `step_dismissed` above).
+                self.setup.settings_actions.clear();
             }
             _ => {}
         }

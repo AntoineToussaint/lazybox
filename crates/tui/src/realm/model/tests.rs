@@ -231,19 +231,33 @@ mod effects_tests {
         assert!(m.status.notice.is_none());
     }
 
-    /// Any unrelated notice supersedes the sync-error banner and
-    /// disarms the "clear on recovery" tag — otherwise a later poll
-    /// would wrongly clear whatever notice is now on screen.
+    /// The sync-error banner is sticky (Permanent), so a routine
+    /// lower-severity flash no longer displaces it — the banner (and
+    /// its "clear on recovery" tag) stays armed, and the routine
+    /// notice lands in the messages log instead. Only an unrelated
+    /// notice that actually REPLACES the banner (another sticky)
+    /// disarms the tag — otherwise a later poll would wrongly clear
+    /// whatever notice is now on screen.
     #[test]
     fn unrelated_notice_disarms_sync_error_tag() {
         use lazybox_ipc::Event as IpcEvent;
 
         let mut m = model_with_sync_error("github");
 
+        // A routine Info flash is suppressed by the sticky banner:
+        // the tag stays armed and recovery still clears the banner.
         m.flash_info("something else happened");
+        assert_eq!(
+            m.sync_error_source.as_deref(),
+            Some("github"),
+            "a suppressed flash must leave the banner attribution intact"
+        );
+
+        // An unrelated STICKY notice replaces the banner → tag disarms.
+        m.flash_error("something sticky happened");
         assert!(
             m.sync_error_source.is_none(),
-            "a fresh notice must disarm the sync-error tag"
+            "a notice that actually replaces the banner must disarm the tag"
         );
 
         // A subsequent GitHub poll must leave the new notice intact.
@@ -7797,17 +7811,21 @@ mod dismiss_and_messages_tests {
     }
 
     /// Every notice flashed accumulates in the messages log — except
-    /// one-shot Hints, which are ephemeral UI nudges that would only
-    /// clutter the readable history.
+    /// one-shot Hints that actually display: those are ephemeral UI
+    /// nudges that would only clutter the readable history. (A hint
+    /// SUPPRESSED by a sticky error is the one exception — it never
+    /// displayed, so it's logged instead of vanishing; see
+    /// `notice_severity_slot_tests`.)
     #[test]
     fn flash_records_notices_in_the_log_except_hints() {
         let mut m = build_model();
         m.flash_info("saved");
-        m.flash_error("boom");
+        // Hint while a non-sticky notice is up: displays, not logged.
         m.flash_hint("scroll: alt-screen");
+        m.flash_error("boom");
 
         let logged: Vec<_> = m.status.messages.recent().collect();
-        // Most-recent-first, hint excluded.
+        // Most-recent-first, displayed hint excluded.
         assert_eq!(logged.len(), 2, "hint must not be logged: {logged:?}");
         assert_eq!(logged[0].message, "boom");
         assert_eq!(logged[0].severity, NoticeSeverity::Permanent);
@@ -8099,5 +8117,1559 @@ mod recent_snippets_tests {
         // The live key survives (catalog was applied first); the stale
         // one is pruned.
         assert_eq!(m.recent_snippets, vec!["rev".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod mutation_failure_notice_tests {
+    //! GitHub mutation rejections must surface as Permanent footer
+    //! errors, not vanish into the Shift-D sync log behind the
+    //! optimistic "requested N reviewer(s)" / "set labels" flashes
+    //! the client shows at command-send time.
+    use super::super::*;
+    use crate::realm::components::footer::NoticeSeverity;
+    use lazybox_core::SessionKey;
+    use lazybox_ipc::{Event as IpcEvent, channel};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn provider_error(source: &str, message: &str) -> IpcEvent {
+        IpcEvent::ProviderError {
+            source: source.into(),
+            message: message.into(),
+            detail: String::new(),
+            kind: "retryable".into(),
+        }
+    }
+
+    #[test]
+    fn mutation_failures_raise_persistent_named_errors() {
+        for (source, verb) in [
+            ("reviewers", "request reviewers"),
+            ("assignees", "update assignees"),
+            ("labels", "update labels"),
+            ("merge", "merge"),
+            ("close-issue", "close issue"),
+        ] {
+            let mut m = build_model();
+            m.status.polling = None;
+            m.handle_daemon_event(provider_error(source, "GraphQL said no"));
+            let n = m
+                .status
+                .notice
+                .as_ref()
+                .unwrap_or_else(|| panic!("{source}: failure must raise a notice"));
+            assert_eq!(
+                n.severity,
+                NoticeSeverity::Permanent,
+                "{source}: a rejected mutation must not auto-fade",
+            );
+            assert!(
+                n.message.contains(&format!("{verb} failed")),
+                "{source}: message must name the action, got {:?}",
+                n.message,
+            );
+            assert!(
+                n.message.contains("GraphQL said no"),
+                "{source}: message must quote the reason, got {:?}",
+                n.message,
+            );
+        }
+    }
+
+    /// Non-mutation provider sources (poll cycles) keep their existing
+    /// quiet handling — no footer notice on an auto-cycle failure.
+    #[test]
+    fn poll_cycle_failures_stay_out_of_the_footer() {
+        let mut m = build_model();
+        m.status.polling = None;
+        m.handle_daemon_event(provider_error("github", "rate limited"));
+        assert!(
+            m.status.notice.is_none(),
+            "an auto-cycle poll failure must not flash (sync log only)"
+        );
+    }
+
+    /// A failed reply names the action AND parks the (otherwise lost)
+    /// composed text in the messages log so it's recoverable.
+    #[test]
+    fn reply_failure_names_action_and_preserves_text() {
+        let mut m = build_model();
+        m.status.polling = None;
+        m.pending_reply = Some(SessionKey::from("github:o/r#1"));
+        let cmds = m.handle_textarea_submitted("my carefully composed reply".into());
+        assert!(!cmds.is_empty(), "reply submit dispatches PostReply");
+
+        m.handle_daemon_event(provider_error("reply", "comment create failed"));
+        let n = m.status.notice.as_ref().expect("reply failure notice");
+        assert_eq!(n.severity, NoticeSeverity::Permanent);
+        assert!(n.message.contains("reply failed"), "got {:?}", n.message);
+        assert!(
+            n.message.contains("Shift-M"),
+            "must point at the recovered text, got {:?}",
+            n.message,
+        );
+        assert!(
+            m.status
+                .messages
+                .recent()
+                .any(|e| e.message.contains("my carefully composed reply")),
+            "the composed text must be recoverable from the messages log",
+        );
+    }
+}
+
+#[cfg(test)]
+mod daemon_disconnect_tests {
+    //! A dead daemon channel must surface, not leave a zombie UI that
+    //! renders forever while every keypress silently goes nowhere.
+    use super::super::*;
+    use crate::realm::components::footer::NoticeSeverity;
+    use lazybox_ipc::channel;
+    use tuirealm::ratatui::layout::Size;
+
+    #[test]
+    fn failed_send_raises_disconnect_banner_on_next_tick() {
+        let (client, server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        drop(server);
+
+        m.status.notice = None;
+        m.send_cmd(IpcCommand::Refresh);
+        m.tick_daemon_health();
+
+        let n = m.status.notice.as_ref().expect("disconnect banner set");
+        assert_eq!(
+            n.severity,
+            NoticeSeverity::Permanent,
+            "a dead daemon must not auto-fade"
+        );
+        assert!(
+            n.message.contains("daemon disconnected"),
+            "got {:?}",
+            n.message
+        );
+    }
+
+    /// The banner is one-shot: repeated failed sends (every keypress
+    /// on a dead channel) must not re-record it per keystroke.
+    #[test]
+    fn disconnect_banner_is_raised_once() {
+        let (client, server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        drop(server);
+
+        for _ in 0..5 {
+            m.send_cmd(IpcCommand::Refresh);
+            m.tick_daemon_health();
+        }
+        m.note_daemon_disconnected();
+
+        let count = m
+            .status
+            .messages
+            .recent()
+            .filter(|e| e.message.contains("daemon disconnected"))
+            .count();
+        assert_eq!(count, 1, "the disconnect notice must be latched one-shot");
+    }
+
+    /// The event-channel-closed path (`wait_for_wake` flipping
+    /// `daemon_open` off) reports through the same one-shot notice.
+    #[test]
+    fn note_daemon_disconnected_sets_sticky_notice() {
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        m.note_daemon_disconnected();
+        let n = m.status.notice.as_ref().expect("banner");
+        assert_eq!(n.severity, NoticeSeverity::Permanent);
+    }
+}
+
+#[cfg(test)]
+mod notice_severity_slot_tests {
+    //! The single footer-notice slot is severity-aware: a routine
+    //! Info/Hint flash must not displace a live sticky (Permanent /
+    //! Auth) error — it lands in the messages log instead.
+    use super::super::*;
+    use crate::realm::components::footer::NoticeSeverity;
+    use lazybox_ipc::channel;
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    #[test]
+    fn info_does_not_displace_a_sticky_error() {
+        let mut m = build_model();
+        m.flash_error("✗ merge failed — o/r#1: checks pending");
+        m.flash_info("requested 2 reviewer(s)");
+
+        let n = m.status.notice.as_ref().expect("notice present");
+        assert!(
+            n.message.contains("merge failed"),
+            "the sticky error must survive a routine Info flash, got {:?}",
+            n.message,
+        );
+        assert!(
+            m.status
+                .messages
+                .recent()
+                .any(|e| e.message.contains("requested 2 reviewer(s)")),
+            "the suppressed flash must land in the messages log",
+        );
+    }
+
+    #[test]
+    fn suppressed_hint_lands_in_messages_log() {
+        let mut m = build_model();
+        m.flash_error("✗ spawn failed — boom");
+        m.flash_hint("loading repo labels…");
+
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|n| n.message.contains("spawn failed")),
+            "the sticky error must survive a Hint",
+        );
+        assert!(
+            m.status
+                .messages
+                .recent()
+                .any(|e| e.message.contains("loading repo labels")),
+            "a suppressed hint would otherwise vanish unseen — log it",
+        );
+    }
+
+    /// Ordinary (non-sticky) notices keep last-wins semantics, and
+    /// hints stay out of the log when they actually display.
+    #[test]
+    fn non_sticky_notices_keep_last_wins() {
+        let mut m = build_model();
+        m.flash_info("first");
+        m.flash_hint("second");
+        assert_eq!(m.status.notice.as_ref().unwrap().message, "second");
+        assert!(
+            !m.status.messages.recent().any(|e| e.message == "second"),
+            "a DISPLAYED hint stays out of the durable log (#309)",
+        );
+    }
+
+    /// A sticky error may replace another sticky error — the newest
+    /// failure is the actionable one.
+    #[test]
+    fn sticky_replaces_sticky() {
+        let mut m = build_model();
+        m.flash_error("first failure");
+        m.flash_error("second failure");
+        assert_eq!(m.status.notice.as_ref().unwrap().message, "second failure");
+    }
+
+    /// Esc-dismissing the sticky error re-opens the slot.
+    #[test]
+    fn dismissed_sticky_frees_the_slot() {
+        let mut m = build_model();
+        m.flash_error("boom");
+        m.status.notice = None; // what the Esc handler does
+        m.flash_info("all good");
+        assert_eq!(m.status.notice.as_ref().unwrap().message, "all good");
+    }
+
+    /// The manual-refresh recovery path must still show "✓ sync ok"
+    /// even though a Permanent "✗ sync failed" banner is up — the
+    /// recovered provider's banner is cleared before the Info flash.
+    #[test]
+    fn sync_recovery_ack_replaces_its_own_sticky_banner() {
+        use lazybox_ipc::Event as IpcEvent;
+        let mut m = build_model();
+        m.status.polling = None;
+
+        m.pending_refresh_ack = true;
+        m.handle_daemon_event(IpcEvent::ProviderError {
+            source: "github".into(),
+            message: "boom".into(),
+            detail: String::new(),
+            kind: "retryable".into(),
+        });
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|n| n.message.contains("sync failed")),
+        );
+
+        m.pending_refresh_ack = true;
+        m.handle_daemon_event(IpcEvent::PollCompleted {
+            source: "github".into(),
+            count: 4,
+        });
+        let n = m.status.notice.as_ref().expect("ack notice");
+        assert!(
+            n.message.contains("✓ sync ok"),
+            "recovery ack must replace the failed-sync banner it owns, got {:?}",
+            n.message,
+        );
+        assert_eq!(n.severity, NoticeSeverity::Info);
+    }
+}
+
+#[cfg(test)]
+mod worktree_progress_dismiss_tests {
+    //! Esc on the provisioning checklist must stick: later progress
+    //! events for the SAME operation update silently instead of
+    //! re-mounting the modal on top of whatever the user is typing.
+    use super::super::*;
+    use lazybox_core::SessionKey;
+    use lazybox_ipc::{Event as IpcEvent, WorktreeStep, WorktreeStepStatus, channel};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn progress(key: &SessionKey, step: WorktreeStep, status: WorktreeStepStatus) -> IpcEvent {
+        IpcEvent::WorktreeProgress {
+            session_key: key.clone(),
+            step,
+            status,
+        }
+    }
+
+    #[test]
+    fn dismissed_checklist_does_not_resurrect_on_next_progress_event() {
+        let mut m = build_model();
+        let key = SessionKey::from("github:o/r#1");
+
+        m.handle_daemon_event(progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        assert!(
+            m.modal_stack.contains(&Id::WorktreeProgress),
+            "first progress event mounts the checklist"
+        );
+
+        // Esc — the user dismissed it mid-provision.
+        assert_eq!(m.modal_stack.last(), Some(&Id::WorktreeProgress));
+        let _ = m.handle_modal_dismissed();
+        assert!(!m.modal_stack.contains(&Id::WorktreeProgress));
+
+        // The next progress event for the SAME op must NOT remount.
+        m.handle_daemon_event(progress(
+            &key,
+            WorktreeStep::Fetch,
+            WorktreeStepStatus::Started,
+        ));
+        assert!(
+            !m.modal_stack.contains(&Id::WorktreeProgress),
+            "a dismissed checklist must stay dismissed for this operation"
+        );
+        assert!(m.worktree_progress.is_none());
+    }
+
+    /// A failed step still surfaces even while dismissed — Esc must
+    /// not hide a broken provision.
+    #[test]
+    fn dismissed_checklist_still_surfaces_step_failures() {
+        use crate::realm::components::footer::NoticeSeverity;
+        let mut m = build_model();
+        let key = SessionKey::from("github:o/r#1");
+
+        m.handle_daemon_event(progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        let _ = m.handle_modal_dismissed();
+
+        m.handle_daemon_event(progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Failed("clone exploded".into()),
+        ));
+        let n = m.status.notice.as_ref().expect("failure notice");
+        assert_eq!(n.severity, NoticeSeverity::Permanent);
+        assert!(n.message.contains("clone exploded"), "got {:?}", n.message);
+        assert!(
+            !m.modal_stack.contains(&Id::WorktreeProgress),
+            "the failure surfaces in the footer, not by resurrecting the modal"
+        );
+    }
+
+    /// A different workspace starting to provision is a NEW operation
+    /// — its checklist shows normally.
+    #[test]
+    fn new_operation_after_dismissal_shows_its_checklist() {
+        let mut m = build_model();
+        let a = SessionKey::from("github:o/r#1");
+        let b = SessionKey::from("github:o/r#2");
+
+        m.handle_daemon_event(progress(
+            &a,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        let _ = m.handle_modal_dismissed();
+
+        m.handle_daemon_event(progress(
+            &b,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        assert!(
+            m.modal_stack.contains(&Id::WorktreeProgress),
+            "a different session's provision is a fresh op — checklist shows"
+        );
+    }
+
+    /// Once the dismissed op completes (its terminal spawns), the
+    /// marker releases so the workspace's NEXT provision gets its
+    /// checklist again.
+    #[test]
+    fn completion_releases_the_dismissal_marker() {
+        let mut m = build_model();
+        let key = SessionKey::from("github:o/r#1");
+
+        m.handle_daemon_event(progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        let _ = m.handle_modal_dismissed();
+        assert_eq!(m.worktree_progress_dismissed.as_ref(), Some(&key));
+
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            terminal_id: lazybox_ipc::TerminalId(9),
+            session_key: key.clone(),
+            kind: lazybox_ipc::TerminalKind::Shell,
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+        });
+        assert!(
+            m.worktree_progress_dismissed.is_none(),
+            "op completed — the dismissal must not outlive it"
+        );
+
+        m.handle_daemon_event(progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        assert!(
+            m.modal_stack.contains(&Id::WorktreeProgress),
+            "the next provision on this workspace gets its checklist again"
+        );
+    }
+}
+
+#[cfg(test)]
+mod spawn_focus_steal_tests {
+    //! `TerminalSpawned` must only yank pane focus when THIS client
+    //! asked for the spawn — in multi-client mode every client hears
+    //! every spawn, and focus must never move mid-search or under a
+    //! mounted modal.
+    use super::super::*;
+    use lazybox_core::SessionKey;
+    use lazybox_ipc::{Event as IpcEvent, TerminalId, TerminalKind, channel};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn spawned(key: &SessionKey, id: u64) -> IpcEvent {
+        IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(id),
+            session_key: key.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+        }
+    }
+
+    #[test]
+    fn unsolicited_spawn_does_not_steal_focus() {
+        let mut m = build_model();
+        let key = SessionKey::from("github:o/r#1");
+        assert_eq!(m.focus, PaneFocus::Sidebar);
+
+        // No spawn spinner, no follow pin, no deferred editor — this
+        // client never asked. (Another client pressed `w`.)
+        m.handle_daemon_event(spawned(&key, 1));
+        assert_eq!(
+            m.focus,
+            PaneFocus::Sidebar,
+            "an unsolicited spawn must not move focus to the terminal pane"
+        );
+    }
+
+    #[test]
+    fn requested_spawn_moves_focus_to_terminals() {
+        let mut m = build_model();
+        let key = SessionKey::from("github:o/r#1");
+        m.status.note_spawning(
+            "claude",
+            key.clone(),
+            TerminalKind::Agent("claude".into()),
+            0,
+        );
+        m.handle_daemon_event(spawned(&key, 1));
+        assert_eq!(
+            m.focus,
+            PaneFocus::Terminals,
+            "our own spawn still lands us in the terminal"
+        );
+    }
+
+    /// Minimal PR workspace so the sidebar has a repo group header —
+    /// `open_search` is scoped to the project under the cursor and
+    /// no-ops on an empty sidebar.
+    fn pr_workspace(key: &str) -> lazybox_core::Workspace {
+        use chrono::Utc;
+        let (path, num) = key.rsplit_once('#').unwrap_or((key, "1"));
+        let task = lazybox_core::Task {
+            id: lazybox_core::TaskId {
+                source: "github".into(),
+                key: key.into(),
+            },
+            title: format!("task: {key}"),
+            body: None,
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: format!("https://github.com/{path}/pull/{num}"),
+            repo: Some("owner/repo".into()),
+            branch: Some("main".into()),
+            base_branch: None,
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        };
+        lazybox_core::Workspace::from_task(task, Utc::now())
+    }
+
+    #[test]
+    fn spawn_never_steals_focus_while_search_is_being_typed() {
+        let mut m = build_model();
+        let ws = pr_workspace("owner/repo#1");
+        let key: SessionKey = SessionKey::from(&ws.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&key));
+        m.status.note_spawning(
+            "claude",
+            key.clone(),
+            TerminalKind::Agent("claude".into()),
+            0,
+        );
+        m.sidebar.open_search();
+        assert!(m.sidebar.search_editing());
+
+        m.handle_daemon_event(spawned(&key, 1));
+        assert_eq!(
+            m.focus,
+            PaneFocus::Sidebar,
+            "keystrokes mid-search must not suddenly land in a shell"
+        );
+    }
+
+    #[test]
+    fn spawn_never_steals_focus_under_an_interactive_modal() {
+        let mut m = build_model();
+        let key = SessionKey::from("github:o/r#1");
+        m.status.note_spawning(
+            "claude",
+            key.clone(),
+            TerminalKind::Agent("claude".into()),
+            0,
+        );
+        m.mount_reply(SessionKey::from("github:o/r#2"));
+        assert_eq!(m.modal_stack.last(), Some(&Id::Reply));
+
+        m.handle_daemon_event(spawned(&key, 1));
+        assert_eq!(
+            m.focus,
+            PaneFocus::Sidebar,
+            "a mounted modal owns input — the spawn must not refocus behind it"
+        );
+    }
+}
+
+#[cfg(test)]
+mod repo_labels_failure_tests {
+    //! `g l` label-fetch failure: the daemon now broadcasts a
+    //! `ProviderError { source: "repo-labels" }`, and the client
+    //! consumes it — degraded picker from the task's own labels when
+    //! there are any, a clear error otherwise. The stale request
+    //! stash never stays armed.
+    use super::super::*;
+    use chrono::Utc;
+    use lazybox_core::{Task, TaskId, Workspace};
+    use lazybox_ipc::{Event as IpcEvent, channel};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn pr_task_with_labels(key: &str, labels: &[&str]) -> Task {
+        let (path, num) = key.rsplit_once('#').unwrap_or((key, "1"));
+        Task {
+            id: TaskId {
+                source: "github".into(),
+                key: key.into(),
+            },
+            title: format!("task: {key}"),
+            body: None,
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: format!("https://github.com/{path}/pull/{num}"),
+            repo: Some("owner/repo".into()),
+            branch: Some("main".into()),
+            base_branch: None,
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: labels
+                .iter()
+                .map(|l| lazybox_core::Label::new(*l))
+                .collect(),
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: Some("N1".into()),
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        }
+    }
+
+    fn repo_labels_error(msg: &str) -> IpcEvent {
+        IpcEvent::ProviderError {
+            source: "repo-labels".into(),
+            message: msg.into(),
+            detail: String::new(),
+            kind: "retryable".into(),
+        }
+    }
+
+    #[test]
+    fn fetch_failure_with_task_labels_opens_degraded_picker() {
+        let mut m = build_model();
+        m.status.polling = None;
+        let ws = Workspace::from_task(
+            pr_task_with_labels("owner/repo#1", &["bug", "p1"]),
+            Utc::now(),
+        );
+        let wk = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+
+        m.pending_labels_request = Some(wk);
+        m.handle_daemon_event(repo_labels_error("network down"));
+
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::ManageLabels),
+            "the documented fallback: picker over the task's own labels"
+        );
+        assert_eq!(m.labels_choices, vec!["bug".to_string(), "p1".to_string()]);
+    }
+
+    #[test]
+    fn fetch_failure_without_task_labels_raises_clear_error() {
+        use crate::realm::components::footer::NoticeSeverity;
+        let mut m = build_model();
+        m.status.polling = None;
+        m.pending_labels_request = Some(lazybox_core::WorkspaceKey::new("github:owner/repo#7"));
+
+        m.handle_daemon_event(repo_labels_error("network down"));
+
+        assert!(
+            m.pending_labels_request.is_none(),
+            "the stale stash must not stay armed after a failed fetch"
+        );
+        assert!(m.modal_stack.is_empty(), "nothing to pick from — no modal");
+        let n = m.status.notice.as_ref().expect("failure notice");
+        assert_eq!(n.severity, NoticeSeverity::Permanent);
+        assert!(
+            n.message.contains("couldn't load repo labels"),
+            "got {:?}",
+            n.message
+        );
+        assert!(n.message.contains("network down"), "got {:?}", n.message);
+    }
+
+    /// Someone else's `g l` (no local stash) must not flash anything.
+    #[test]
+    fn fetch_failure_without_pending_request_is_ignored() {
+        let mut m = build_model();
+        m.status.polling = None;
+        m.handle_daemon_event(repo_labels_error("network down"));
+        assert!(m.status.notice.is_none());
+        assert!(m.modal_stack.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod async_modal_preempt_tests {
+    //! Async mounts (a slow `RepoLabels` reply) must not preempt a
+    //! modal the user opened meanwhile — the daemon prompts already
+    //! wait for an empty stack; the label picker now does too.
+    use super::super::*;
+    use lazybox_core::SessionKey;
+    use lazybox_ipc::{Event as IpcEvent, channel};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    #[test]
+    fn slow_repo_labels_reply_does_not_preempt_reply_textarea() {
+        let mut m = build_model();
+        let wk = lazybox_core::WorkspaceKey::new("github:owner/repo#1");
+        m.pending_labels_request = Some(wk.clone());
+
+        // User opened the reply composer while the fetch was in flight.
+        m.mount_reply(SessionKey::from("github:owner/repo#1"));
+        assert_eq!(m.modal_stack.last(), Some(&Id::Reply));
+
+        m.handle_daemon_event(IpcEvent::RepoLabels {
+            workspace_key: wk,
+            labels: vec![lazybox_core::Label::new("bug")],
+        });
+
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::Reply),
+            "the label picker must not steal keyboard focus from the composer"
+        );
+        assert!(
+            !m.modal_stack.contains(&Id::ManageLabels),
+            "picker deferred (dropped), not stacked underneath"
+        );
+        assert!(
+            m.pending_labels_request.is_none(),
+            "the stash is disarmed so a stray later reply can't mount unprompted"
+        );
+    }
+
+    /// The normal path — empty stack — still mounts the picker.
+    #[test]
+    fn repo_labels_reply_mounts_on_an_empty_stack() {
+        let mut m = build_model();
+        let wk = lazybox_core::WorkspaceKey::new("github:owner/repo#1");
+        m.pending_labels_request = Some(wk.clone());
+        m.handle_daemon_event(IpcEvent::RepoLabels {
+            workspace_key: wk,
+            labels: vec![lazybox_core::Label::new("bug")],
+        });
+        assert_eq!(m.modal_stack.last(), Some(&Id::ManageLabels));
+    }
+}
+
+#[cfg(test)]
+mod focus_mode_terminal_exit_tests {
+    //! Focus mode must not survive its terminal's death — the user
+    //! would be stranded on a near-fullscreen empty pane.
+    use super::super::*;
+    use chrono::Utc;
+    use lazybox_core::SessionKey;
+    use lazybox_ipc::{Event as IpcEvent, TerminalId, TerminalKind, channel};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn workspace(key: &str) -> lazybox_core::Workspace {
+        lazybox_core::Workspace::empty(lazybox_core::WorkspaceKey::new(key), "sandbox", Utc::now())
+    }
+
+    #[test]
+    fn focus_mode_exits_when_last_terminal_dies() {
+        let mut m = build_model();
+        let ws = workspace("github:owner/repo#1");
+        let key: SessionKey = SessionKey::from(&ws.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&key));
+        m.sync_panes();
+
+        m.status.note_spawning(
+            "claude",
+            key.clone(),
+            TerminalKind::Agent("claude".into()),
+            0,
+        );
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(7),
+            session_key: key.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+        });
+        assert!(m.terminals.active_terminal_id().is_some());
+        m.focus_mode = true;
+        m.focus = PaneFocus::Terminals;
+
+        m.handle_daemon_event(IpcEvent::TerminalExited {
+            terminal_id: TerminalId(7),
+            exit_code: Some(0),
+        });
+
+        assert!(
+            !m.focus_mode,
+            "focus mode over an empty stack is a blank screen — must exit"
+        );
+        assert_eq!(m.focus, PaneFocus::Sidebar);
+    }
+
+    /// A terminal dying in ANOTHER workspace leaves focus mode alone.
+    #[test]
+    fn focus_mode_survives_other_workspaces_terminal_exit() {
+        let mut m = build_model();
+        let ws = workspace("github:owner/repo#1");
+        let key: SessionKey = SessionKey::from(&ws.key);
+        let other = SessionKey::from("github:owner/repo#2");
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&key));
+        m.sync_panes();
+
+        for (id, sk) in [(7u64, &key), (8u64, &other)] {
+            m.handle_daemon_event(IpcEvent::TerminalSpawned {
+                terminal_id: TerminalId(id),
+                session_key: sk.clone(),
+                kind: TerminalKind::Agent("claude".into()),
+                no_permission: false,
+                on_main: false,
+                model_label: None,
+            });
+        }
+        m.focus_mode = true;
+        m.focus = PaneFocus::Terminals;
+
+        m.handle_daemon_event(IpcEvent::TerminalExited {
+            terminal_id: TerminalId(8),
+            exit_code: Some(0),
+        });
+        assert!(
+            m.focus_mode,
+            "an unrelated workspace's terminal exit must not drop focus mode"
+        );
+    }
+}
+
+#[cfg(test)]
+mod spinner_redraw_gate_tests {
+    //! An active spinner must only request a redraw when its glyph
+    //! actually advances (80ms cadence), not on every ~16ms run-loop
+    //! heartbeat for the whole poll/provision duration.
+    use super::super::*;
+    use lazybox_ipc::channel;
+    use std::time::{Duration, Instant};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    #[test]
+    fn spinner_presence_alone_does_not_redraw_every_heartbeat() {
+        let mut m = build_model();
+        m.status.note_poll_progress("github", "Querying…");
+
+        // Cadence gate closed (fresh heartbeat): no redraw request.
+        m.status.polling_last_tick = Instant::now();
+        m.redraw = false;
+        let _ = m.polling_tick();
+        assert!(
+            !m.redraw,
+            "an idle heartbeat between spinner frames must not repaint"
+        );
+
+        // Cadence gate open: the glyph advances → redraw.
+        m.status.polling_last_tick = Instant::now() - Duration::from_millis(200);
+        let _ = m.polling_tick();
+        assert!(m.redraw, "an advanced glyph must repaint");
+    }
+}
+
+#[cfg(test)]
+mod keybinding_audit_tests {
+    //! Regression tests for the keybinding/catalog audit batch:
+    //!
+    //! 1. `g` in the activity pane jumps to the top (catalog
+    //!    `ActivityTop`) instead of arming the Workspace `g *` github
+    //!    leader — the vim scrolling reflex `g g` must never toggle
+    //!    auto-merge on the PR again.
+    //! 2. `CyclePane` dispatches through the catalog, so the vim
+    //!    preset's `Ctrl-w` remap actually cycles (and Tab stops).
+    //! 7. Merge / close-issue emit a pending footer notice at command
+    //!    send.
+    //! 10. A `quit: "q x"` override quits on `q x`, not on `q q`.
+    //! 11c. The mouse-capture toggle is catalog-backed: default chords
+    //!    fire and a remap moves them.
+    use super::super::*;
+    use chrono::Utc;
+    use lazybox_core::{SessionKey, Task, TaskId, Workspace};
+    use lazybox_ipc::{Command as IpcCommand, Event as IpcEvent, channel};
+    use lazybox_tui_core::action::Action;
+    use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        lazybox_ipc::Connection,
+    ) {
+        let (client, server) = channel::pair();
+        let m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        (m, server)
+    }
+
+    fn press(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>, code: Key) {
+        m.dispatch_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    /// A merge-ready PR workspace (CI green, mergeable, own PR) with
+    /// `activity_rows` comments — the state where both the activity
+    /// cursor keys and the github leader are live.
+    fn pr_workspace(key: &str, activity_rows: usize) -> Workspace {
+        let num = key.rsplit_once('#').map(|(_, n)| n).unwrap_or("1");
+        let task = Task {
+            id: TaskId {
+                source: "github".into(),
+                key: key.into(),
+            },
+            title: format!("PR {key}"),
+            body: None,
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::Success,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: format!("https://github.com/o/r/pull/{num}"),
+            repo: Some("o/r".into()),
+            branch: Some("main".into()),
+            base_branch: None,
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        };
+        let mut ws = Workspace::from_task(task, Utc::now());
+        for i in 0..activity_rows {
+            ws.activity.push(lazybox_core::Activity {
+                author: format!("user{i}"),
+                body: format!("comment {i}"),
+                created_at: Utc::now(),
+                kind: lazybox_core::ActivityKind::Comment,
+                node_id: None,
+                path: None,
+                line: None,
+                diff_hunk: None,
+                thread_id: None,
+            });
+        }
+        ws
+    }
+
+    /// Seed a model focused on a PR workspace with activity, with the
+    /// Right (activity) pane holding key focus.
+    fn model_on_activity_pane() -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        lazybox_ipc::Connection,
+    ) {
+        let (mut m, server) = build_model();
+        let ws = pr_workspace("github:o/r#1", 3);
+        let sk = SessionKey::from(&ws.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&sk), "PR row focusable");
+        m.sync_panes();
+        m.focus = PaneFocus::Right;
+        m.set_focus_attr();
+        (m, server)
+    }
+
+    // ── 1: `g` in the activity pane ────────────────────────────────
+
+    #[test]
+    fn activity_g_jumps_to_top_without_arming_the_github_leader() {
+        let (mut m, _server) = model_on_activity_pane();
+        // Move the row cursor off the top first.
+        press(&mut m, Key::Char('j'));
+        press(&mut m, Key::Char('j'));
+        assert_eq!(m.right.comment_cursor(), 2, "j/j moved the cursor");
+
+        press(&mut m, Key::Char('g'));
+        assert_eq!(
+            m.right.comment_cursor(),
+            0,
+            "`g` jumps the cursor to the top"
+        );
+        assert!(
+            m.leader_pending().is_none(),
+            "`g` under Right focus must NOT arm the github leader",
+        );
+    }
+
+    #[test]
+    fn activity_gg_scroll_reflex_does_not_toggle_auto_merge() {
+        let (mut m, mut server) = model_on_activity_pane();
+        while server.rx.try_recv().is_ok() {}
+
+        press(&mut m, Key::Char('g'));
+        press(&mut m, Key::Char('g'));
+        while let Ok(cmd) = server.rx.try_recv() {
+            assert!(
+                !matches!(cmd, IpcCommand::SetAutoMergeOnGreen { .. }),
+                "`g g` in the activity pane must never arm auto-merge",
+            );
+        }
+        let notice = m.status.notice.as_ref().map(|n| n.message.clone());
+        assert!(
+            !notice.unwrap_or_default().contains("auto-merge"),
+            "no auto-merge notice may flash on the g g scroll reflex",
+        );
+    }
+
+    #[test]
+    fn activity_shift_g_jumps_to_bottom() {
+        let (mut m, _server) = model_on_activity_pane();
+        m.dispatch_key(KeyEvent::new(Key::Char('G'), KeyModifiers::SHIFT));
+        assert_eq!(
+            m.right.comment_cursor(),
+            2,
+            "`Shift-G` jumps the cursor to the last activity row",
+        );
+    }
+
+    #[test]
+    fn sidebar_g_still_arms_the_github_leader_and_g_m_reaches_merge() {
+        let (mut m, _server) = model_on_activity_pane();
+        // Back to the sidebar — the github leader lives there.
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+
+        press(&mut m, Key::Char('g'));
+        assert!(
+            m.leader_pending().is_some(),
+            "`g` under Sidebar focus arms the github leader",
+        );
+        press(&mut m, Key::Char('m'));
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::ActionConfirm),
+            "`g m` completes to the merge confirm",
+        );
+        assert!(matches!(
+            m.pending_action_confirm,
+            Some((Action::MergePr, _)),
+        ));
+    }
+
+    // ── 2: CyclePane through the catalog (vim preset) ──────────────
+
+    #[test]
+    fn default_preset_tab_cycles_panes() {
+        let (mut m, _server) = build_model();
+        assert_eq!(m.focus(), PaneFocus::Sidebar);
+        press(&mut m, Key::Tab);
+        assert_ne!(m.focus(), PaneFocus::Sidebar, "Tab cycles off the sidebar");
+    }
+
+    #[test]
+    fn vim_preset_ctrl_w_cycles_panes_and_tab_stops() {
+        let (mut m, _server) = build_model();
+        m.apply_action_key_overrides(
+            lazybox_tui_core::action::keymap_preset("vim").expect("vim preset"),
+        );
+        // The remapped chord fires…
+        m.dispatch_key(KeyEvent::new(Key::Char('w'), KeyModifiers::CONTROL));
+        assert_ne!(
+            m.focus(),
+            PaneFocus::Sidebar,
+            "vim preset: Ctrl-w cycles panes",
+        );
+        // …and the displaced default no longer does.
+        let (mut m2, _server2) = build_model();
+        m2.apply_action_key_overrides(
+            lazybox_tui_core::action::keymap_preset("vim").expect("vim preset"),
+        );
+        press(&mut m2, Key::Tab);
+        assert_eq!(
+            m2.focus(),
+            PaneFocus::Sidebar,
+            "vim preset: Tab no longer cycles (the override moved the chord)",
+        );
+    }
+
+    // ── 7: pending feedback on merge / close ───────────────────────
+
+    #[test]
+    fn confirmed_merge_flashes_a_pending_notice() {
+        let (mut m, _server) = build_model();
+        let ws = pr_workspace("github:o/r#42", 0);
+        let sk = SessionKey::from(&ws.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&sk));
+
+        let cmds = m.dispatch_action(&Action::MergePr);
+        assert!(cmds.is_empty(), "merge gates on confirm");
+        let cmds = m.handle_confirmed(true);
+        assert!(matches!(cmds.as_slice(), [IpcCommand::MergePr { .. }]));
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .map(|n| n.message.clone())
+            .unwrap_or_default();
+        assert!(
+            notice.contains("merging PR #42"),
+            "pending merge feedback missing: {notice:?}",
+        );
+    }
+
+    #[test]
+    fn confirmed_close_issue_flashes_a_pending_notice() {
+        let (mut m, _server) = build_model();
+        // Reshape the PR fixture into an open issue workspace — the
+        // only shape CloseIssue is offered on.
+        let mut ws = pr_workspace("github:o/r#7", 0);
+        let mut issue = ws.pr.take().expect("fixture has a PR to reshape");
+        issue.url = "https://github.com/o/r/issues/7".into();
+        ws.attach_task(issue);
+        let sk = SessionKey::from(&ws.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&sk));
+
+        let cmds = m.dispatch_action(&Action::CloseIssue);
+        assert!(cmds.is_empty(), "close gates on confirm");
+        let cmds = m.handle_confirmed(true);
+        assert!(matches!(cmds.as_slice(), [IpcCommand::CloseIssue { .. }]));
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .map(|n| n.message.clone())
+            .unwrap_or_default();
+        assert!(
+            notice.contains("closing issue #7"),
+            "pending close feedback missing: {notice:?}",
+        );
+    }
+
+    // ── 10: quit-chord grammar ──────────────────────────────────────
+
+    #[test]
+    fn quit_override_with_distinct_strokes_quits_on_the_sequence() {
+        let (mut m, _server) = build_model();
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert("quit".to_string(), "q x".to_string());
+        m.apply_action_key_overrides(overrides);
+
+        press(&mut m, Key::Char('q'));
+        assert!(!m.quit, "head press only arms");
+        press(&mut m, Key::Char('x'));
+        assert!(m.quit, "`q x` completes the override chord");
+    }
+
+    #[test]
+    fn quit_override_with_distinct_strokes_does_not_quit_on_double_head() {
+        let (mut m, _server) = build_model();
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert("quit".to_string(), "q x".to_string());
+        m.apply_action_key_overrides(overrides);
+
+        press(&mut m, Key::Char('q'));
+        press(&mut m, Key::Char('q'));
+        assert!(
+            !m.quit,
+            "`quit: \"q x\"` must not fire on `q q` — that was the head-only bug",
+        );
+    }
+
+    #[test]
+    fn default_double_press_quit_still_fires() {
+        let (mut m, _server) = build_model();
+        press(&mut m, Key::Char('q'));
+        assert!(!m.quit);
+        press(&mut m, Key::Char('q'));
+        assert!(m.quit, "default `q q` still quits");
+    }
+
+    // ── 11c: mouse-capture toggle is catalog-backed ─────────────────
+
+    #[test]
+    fn mouse_capture_default_chords_toggle_and_remap_moves_them() {
+        let (mut m, _server) = build_model();
+        let initial = m.mouse_capture_on;
+        press(&mut m, Key::Function(8));
+        assert_eq!(m.mouse_capture_on, !initial, "F8 toggles capture");
+        m.dispatch_key(KeyEvent::new(Key::Char('s'), KeyModifiers::ALT));
+        assert_eq!(m.mouse_capture_on, initial, "Alt-s toggles it back");
+
+        // A remap moves the binding: the old default goes dead, the
+        // new chord fires.
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert("toggle_mouse_capture".to_string(), "F6".to_string());
+        m.apply_action_key_overrides(overrides);
+        press(&mut m, Key::Function(8));
+        assert_eq!(
+            m.mouse_capture_on, initial,
+            "remapped: F8 no longer toggles"
+        );
+        press(&mut m, Key::Function(6));
+        assert_eq!(m.mouse_capture_on, !initial, "remapped: F6 toggles");
+    }
+}
+
+#[cfg(test)]
+mod dispatch_coverage_tests {
+    //! House-pattern invariant (#5 of the keybinding audit): every
+    //! `ActionKind` in the generated runtime catalog must either
+    //! resolve to a dispatchable `Action` via `action_from_entry`, or
+    //! sit on the explicit, commented allowlist of pane-native kinds
+    //! (`keys::PANE_NATIVE_KINDS`, each entry naming the match arm
+    //! that consumes it). A new catalog row wired to neither fails the
+    //! build here instead of rendering everywhere and no-oping.
+    use super::super::keys::{PANE_NATIVE_KINDS, action_from_entry};
+    use lazybox_tui_core::action::ActionDef;
+
+    #[test]
+    fn every_catalog_row_dispatches_or_is_allowlisted() {
+        let agents: Vec<String> = ["claude", "codex", "cursor"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let tiers = lazybox_core::AgentModels::builtin("claude")
+            .expect("claude builtin tiers")
+            .tiers;
+        let catalog =
+            ActionDef::catalog_with_tiers(&agents, &std::collections::BTreeMap::new(), &tiers);
+        for entry in &catalog {
+            let dispatchable = action_from_entry(entry).is_some();
+            let allowlisted = PANE_NATIVE_KINDS.iter().any(|(k, _, _)| *k == entry.kind);
+            assert!(
+                dispatchable || allowlisted,
+                "catalog row {:?} (param {:?}, keys {:?}) neither dispatches through \
+                 `dispatch_action` nor sits on keys::PANE_NATIVE_KINDS — it would render \
+                 in ? help and the footer while silently no-oping on the keyboard. Wire a \
+                 dispatch arm (action_from_kind + dispatch_action) or allowlist it with \
+                 the pane match arm that handles it.",
+                entry.kind,
+                entry.param,
+                entry.keys_display,
+            );
+            assert!(
+                !(dispatchable && allowlisted),
+                "catalog row {:?} is BOTH dispatchable and allowlisted — remove the stale \
+                 PANE_NATIVE_KINDS entry so the allowlist stays the exact silent-fallback set",
+                entry.kind,
+            );
+        }
+        // Allowlist hygiene in the other direction: every allowlisted
+        // kind must still exist in the catalog (a removed action must
+        // take its allowlist row with it).
+        for (kind, site, _) in PANE_NATIVE_KINDS {
+            assert!(
+                catalog.iter().any(|e| e.kind == *kind),
+                "stale PANE_NATIVE_KINDS entry {kind:?} ({site}) — not in the catalog",
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod keymap_validation_tests {
+    //! Startup `ui.action_keys` / `ui.keymap_preset` validation (#4 of
+    //! the keybinding audit): each misconfiguration class produces a
+    //! warning, and the model surfaces them (footer notice + messages
+    //! log) without rejecting the config.
+    use super::super::helpers::keymap_config_warnings;
+    use super::super::*;
+    use lazybox_ipc::channel;
+    use lazybox_tui_core::action::ActionDef;
+    use std::collections::BTreeMap;
+    use tuirealm::ratatui::layout::Size;
+
+    fn agents() -> Vec<String> {
+        ["claude", "codex", "cursor"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    fn warnings_for(overrides: BTreeMap<String, String>) -> Vec<String> {
+        let catalog = ActionDef::catalog(&agents(), &overrides);
+        keymap_config_warnings(&overrides, &catalog)
+    }
+
+    #[test]
+    fn clean_config_produces_no_warnings() {
+        assert_eq!(warnings_for(BTreeMap::new()), Vec::<String>::new());
+        // The shipped vim preset is clean too.
+        let vim = lazybox_tui_core::action::keymap_preset("vim").unwrap();
+        assert_eq!(warnings_for(vim), Vec::<String>::new());
+    }
+
+    #[test]
+    fn unknown_config_key_warns() {
+        let mut o = BTreeMap::new();
+        o.insert("mrege_pr".to_string(), "Ctrl-m".to_string());
+        let w = warnings_for(o);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("mrege_pr"), "{w:?}");
+        assert!(w[0].contains("unknown"), "{w:?}");
+    }
+
+    #[test]
+    fn pane_native_override_warns_as_ineffective() {
+        let mut o = BTreeMap::new();
+        o.insert("toggle_row".to_string(), "Ctrl-e".to_string());
+        let w = warnings_for(o);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("toggle_row"), "{w:?}");
+        assert!(w[0].contains("no effect"), "{w:?}");
+    }
+
+    #[test]
+    fn override_shadowing_a_leader_family_warns() {
+        // The motivating case: `refresh: "w"` silently killed every
+        // `w <key>` chord (work-in-agent, tiers).
+        let mut o = BTreeMap::new();
+        o.insert("refresh".to_string(), "w".to_string());
+        let w = warnings_for(o);
+        assert!(
+            w.iter()
+                .any(|w| w.contains("refresh") && w.contains("leader")),
+            "leader-shadow warning missing: {w:?}",
+        );
+    }
+
+    #[test]
+    fn override_induced_same_rank_collision_warns() {
+        let mut o = BTreeMap::new();
+        // Two Global actions on the same key — same (focus, rank).
+        o.insert("refresh".to_string(), "F5".to_string());
+        o.insert("open_tour".to_string(), "F5".to_string());
+        let w = warnings_for(o);
+        assert!(
+            w.iter().any(|w| w.contains("unreachable")),
+            "same-rank collision warning missing: {w:?}",
+        );
+    }
+
+    #[test]
+    fn model_surfaces_warnings_in_footer_and_messages_log() {
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let mut o = BTreeMap::new();
+        o.insert("not_a_real_action".to_string(), "F5".to_string());
+        m.apply_action_key_overrides(o);
+        m.surface_keymap_warnings(Vec::new());
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .map(|n| n.message.clone())
+            .unwrap_or_default();
+        assert!(
+            notice.contains("keymap config"),
+            "footer summary missing: {notice:?}",
+        );
+        // The unknown-preset warning path rides the same surface.
+        let (client2, _server2) = channel::pair();
+        let mut m2 = Model::new_for_test(client2, Size::new(120, 40)).expect("model init");
+        m2.surface_keymap_warnings(
+            lazybox_tui_core::action::unknown_preset_warning("emacs")
+                .into_iter()
+                .collect(),
+        );
+        let notice2 = m2
+            .status
+            .notice
+            .as_ref()
+            .map(|n| n.message.clone())
+            .unwrap_or_default();
+        assert!(notice2.contains("keymap config"), "{notice2:?}");
+    }
+
+    #[test]
+    fn clean_model_stays_quiet() {
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        m.surface_keymap_warnings(Vec::new());
+        assert!(
+            m.status.notice.is_none(),
+            "no warning notice on a clean keymap",
+        );
+    }
+}
+
+#[cfg(test)]
+mod settings_window_tests {
+    //! The `,` Settings window: tabbed (Providers / Agents /
+    //! Appearance / Maintenance) instead of the old flat 11+ row
+    //! palette. These tests pin the model-side contract — grouped
+    //! flat ordering, the flat-index pick round-trip through the
+    //! unchanged `ChoicePicked` envelope, and stash hygiene on Esc.
+    use super::super::*;
+    use crate::realm::setup_ctx::{SettingsAction, SettingsSection};
+    use lazybox_ipc::channel;
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model_with_setup() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let mut persisted = lazybox_core::PersistedSetup::default();
+        persisted.enabled_providers.insert("github".into());
+        m.cache_persisted_setup(persisted);
+        m
+    }
+
+    #[test]
+    fn open_settings_mounts_the_tabbed_window_with_grouped_actions() {
+        let mut m = build_model_with_setup();
+        m.open_settings();
+        assert_eq!(m.modal_stack.last(), Some(&Id::Setup));
+        assert!(!m.setup.settings_actions.is_empty());
+
+        // The flat stash is in tab order: section indices must be
+        // non-decreasing, with Providers first and Maintenance last.
+        let order = |s: SettingsSection| {
+            SettingsSection::ALL
+                .iter()
+                .position(|x| *x == s)
+                .expect("section in ALL")
+        };
+        let sections: Vec<usize> = m
+            .setup
+            .settings_actions
+            .iter()
+            .map(|a| order(a.section()))
+            .collect();
+        assert!(
+            sections.windows(2).all(|w| w[0] <= w[1]),
+            "flat stash must be grouped in tab order, got {sections:?}"
+        );
+        assert_eq!(*sections.first().unwrap(), 0, "Providers first");
+        assert_eq!(
+            *sections.last().unwrap(),
+            SettingsSection::ALL.len() - 1,
+            "Maintenance last"
+        );
+        // Every section has at least one row with one provider enabled.
+        for (i, _) in SettingsSection::ALL.iter().enumerate() {
+            assert!(sections.contains(&i), "section {i} must have rows");
+        }
+    }
+
+    /// The component emits `ChoicePicked([flat_idx])`; the existing
+    /// handler must resolve it against the grouped stash — picking
+    /// the theme row mounts the theme picker.
+    #[test]
+    fn picking_a_flat_index_dispatches_that_action() {
+        let mut m = build_model_with_setup();
+        m.open_settings();
+        let theme_idx = m
+            .setup
+            .settings_actions
+            .iter()
+            .position(|a| matches!(a, SettingsAction::EditTheme { .. }))
+            .expect("theme row present");
+        let _ = m.handle_choice_picked(vec![theme_idx]);
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::ThemePicker),
+            "the flat-index pick must route to the right action"
+        );
+    }
+
+    /// Esc on the Settings window drops the stashed rows so a stale
+    /// flat index can never resolve against a later Setup-id mount.
+    #[test]
+    fn dismissing_settings_clears_the_stash() {
+        let mut m = build_model_with_setup();
+        m.open_settings();
+        assert!(!m.setup.settings_actions.is_empty());
+        let _ = m.handle_modal_dismissed();
+        assert!(m.modal_stack.is_empty());
+        assert!(
+            m.setup.settings_actions.is_empty(),
+            "Esc must drop the stashed settings rows"
+        );
+    }
+
+    /// The theme row surfaces the CURRENT theme name, matching the
+    /// state-bearing labels of its siblings.
+    #[test]
+    fn theme_row_names_the_active_theme() {
+        let mut m = build_model_with_setup();
+        m.open_settings();
+        let current = crate::theme::current().name;
+        assert!(
+            m.setup
+                .settings_actions
+                .iter()
+                .any(|a| a.label() == format!("Change theme (live preview) · {current}")),
+            "theme row must show the active theme"
+        );
     }
 }

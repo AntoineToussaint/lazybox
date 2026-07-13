@@ -762,6 +762,16 @@ async fn run_embedded_realm(
             .as_deref()
             .and_then(lazybox_tui_core::action::keymap_preset)
             .unwrap_or_default();
+        // An unknown preset name silently fell back to the default
+        // keymap; collect the warning now (the model surfaces it with
+        // the rest of the keymap validation once the catalog is built).
+        let keymap_warnings: Vec<String> = user_config
+            .ui
+            .keymap_preset
+            .as_deref()
+            .and_then(lazybox_tui_core::action::unknown_preset_warning)
+            .into_iter()
+            .collect();
         overrides.extend(user_config.ui.action_keys.clone());
         model.apply_action_key_overrides(overrides);
         // Per-agent model tiers (`agents.<id>.models`, with built-in
@@ -771,6 +781,11 @@ async fn run_embedded_realm(
             .map(|id| (id.clone(), user_config.agent_models(id)))
             .collect();
         model.set_agent_models(agent_models);
+        // Startup keymap validation (#4 of the keybinding audit):
+        // unknown action_keys names, overrides that can't take effect,
+        // and override-induced chord collisions surface as a footer
+        // warning + messages-log details instead of failing silently.
+        model.surface_keymap_warnings(keymap_warnings);
         // Arm the feature tour for anyone who hasn't seen it. It
         // launches on wizard Finish for first-run users, or at startup
         // (just below) for returning ones.

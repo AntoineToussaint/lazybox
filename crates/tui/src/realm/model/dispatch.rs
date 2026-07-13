@@ -9,6 +9,17 @@ use super::{ActionConfirmTarget, Model, PaneFocus};
 use lazybox_ipc::Command as IpcCommand;
 use tuirealm::terminal::TerminalAdapter;
 
+/// The ` #N` suffix parsed from a task id key
+/// (`"github:o/r#42"` → `" #42"`), or empty when the key carries no
+/// number. Feeds the pending merge / close footer notices. (The
+/// *workspace* key won't do — `sanitize_key` strips the `#`.)
+fn task_number_suffix(task_key: &str) -> String {
+    task_key
+        .rsplit_once('#')
+        .map(|(_, n)| format!(" #{n}"))
+        .unwrap_or_default()
+}
+
 impl<T: TerminalAdapter> Model<T> {
     /// Single fan-out from a catalog `Action` to its effect (IPC
     /// command, modal mount, focus shift, …). Surfaces (keyboard,
@@ -112,6 +123,20 @@ impl<T: TerminalAdapter> Model<T> {
                                 Some(ws),
                             ) =>
                         {
+                            // Pending feedback at command send — the
+                            // provider round trip takes seconds, and a
+                            // silent gap after "Yes" reads as a dropped
+                            // keypress (same convention as CollapseIntoPr's
+                            // "joining into PR…").
+                            self.flash_info(format!(
+                                "closing issue{}…",
+                                task_number_suffix(
+                                    ws.gh_issues
+                                        .first()
+                                        .map(|i| i.id.key.as_str())
+                                        .unwrap_or("")
+                                )
+                            ));
                             vec![IpcCommand::CloseIssue {
                                 workspace_key: ws.key.clone(),
                             }]
@@ -148,6 +173,20 @@ impl<T: TerminalAdapter> Model<T> {
                         if let crate::intent::Intent::MergePr { workspace_key } =
                             crate::intent::resolve_merge(workspace.as_ref())
                         {
+                            // Pending feedback: the merge result arrives
+                            // seconds later via PrMerged / an error event,
+                            // and a silent footer in between reads as a
+                            // dropped confirm.
+                            self.flash_info(format!(
+                                "merging PR{}…",
+                                task_number_suffix(
+                                    workspace
+                                        .as_ref()
+                                        .and_then(|w| w.pr.as_ref())
+                                        .map(|t| t.id.key.as_str())
+                                        .unwrap_or("")
+                                )
+                            ));
                             vec![IpcCommand::MergePr { workspace_key }]
                         } else {
                             let reason = workspace
@@ -379,14 +418,32 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Action::NewWorkspace => {
                 let focused = self.sidebar.focused_project_key();
+                // Explicit variant list (no `_` catch-all) so a new
+                // Intent variant is a compile error here — this
+                // consumer must decide what it means instead of
+                // silently swallowing it.
+                use crate::intent::Intent;
                 match crate::intent::resolve_new_workspace(focused) {
-                    crate::intent::Intent::MountNewWorkspaceInput { project_key } => {
+                    Intent::MountNewWorkspaceInput { project_key } => {
                         self.mount_new_workspace_input(project_key);
                     }
-                    crate::intent::Intent::Notice(msg) => {
+                    Intent::Notice(msg) => {
                         self.flash_info(msg);
                     }
-                    _ => {}
+                    // The resolver only produces the two arms above;
+                    // the rest are unreachable from this call.
+                    Intent::NoOp
+                    | Intent::SpawnAgent { .. }
+                    | Intent::SpawnShell { .. }
+                    | Intent::MountReply { .. }
+                    | Intent::MountAdoptPicker { .. }
+                    | Intent::OpenEditor
+                    | Intent::MergePr { .. }
+                    | Intent::SetAutoMergeOnGreen { .. }
+                    | Intent::KillWorkspace { .. }
+                    | Intent::Snooze { .. }
+                    | Intent::Unsnooze { .. }
+                    | Intent::MarkAllRead { .. } => {}
                 }
             }
             Action::NewProject => {
@@ -447,14 +504,28 @@ impl<T: TerminalAdapter> Model<T> {
                 // → mount the target picker; no → footer notice.
                 // Same shape as the inline handler had.
                 let workspace = self.sidebar.selected_workspace().cloned();
+                // Explicit variant list — a new Intent variant must be
+                // triaged here at compile time, not silently dropped.
+                use crate::intent::Intent;
                 match crate::intent::resolve_adopt(workspace.as_ref()) {
-                    crate::intent::Intent::MountAdoptPicker { source_key } => {
+                    Intent::MountAdoptPicker { source_key } => {
                         self.mount_adopt_picker(source_key);
                     }
-                    crate::intent::Intent::Notice(msg) => {
+                    Intent::Notice(msg) => {
                         self.flash_info(msg);
                     }
-                    _ => {}
+                    Intent::NoOp
+                    | Intent::SpawnAgent { .. }
+                    | Intent::SpawnShell { .. }
+                    | Intent::MountReply { .. }
+                    | Intent::MountNewWorkspaceInput { .. }
+                    | Intent::OpenEditor
+                    | Intent::MergePr { .. }
+                    | Intent::SetAutoMergeOnGreen { .. }
+                    | Intent::KillWorkspace { .. }
+                    | Intent::Snooze { .. }
+                    | Intent::Unsnooze { .. }
+                    | Intent::MarkAllRead { .. } => {}
                 }
             }
             Action::CollapseIntoPr => {
@@ -522,13 +593,28 @@ impl<T: TerminalAdapter> Model<T> {
                 if let crate::intent::Intent::MergePr { workspace_key } =
                     crate::intent::resolve_merge(workspace.as_ref())
                 {
+                    // Same pending feedback as the confirmed path — the
+                    // result lands seconds later.
+                    self.flash_info(format!(
+                        "merging PR{}…",
+                        task_number_suffix(
+                            workspace
+                                .as_ref()
+                                .and_then(|w| w.pr.as_ref())
+                                .map(|t| t.id.key.as_str())
+                                .unwrap_or("")
+                        )
+                    ));
                     cmds.push(IpcCommand::MergePr { workspace_key });
                 }
             }
             Action::ToggleAutoMerge => {
                 let workspace = self.sidebar.selected_workspace().cloned();
+                // Explicit variant list — a new Intent variant must be
+                // triaged here at compile time, not silently dropped.
+                use crate::intent::Intent;
                 match crate::intent::resolve_toggle_auto_merge(workspace.as_ref()) {
-                    crate::intent::Intent::SetAutoMergeOnGreen {
+                    Intent::SetAutoMergeOnGreen {
                         workspace_key,
                         enabled,
                     } => {
@@ -546,8 +632,19 @@ impl<T: TerminalAdapter> Model<T> {
                             enabled,
                         });
                     }
-                    crate::intent::Intent::Notice(msg) => self.flash_info(msg),
-                    _ => {}
+                    Intent::Notice(msg) => self.flash_info(msg),
+                    Intent::NoOp
+                    | Intent::SpawnAgent { .. }
+                    | Intent::SpawnShell { .. }
+                    | Intent::MountReply { .. }
+                    | Intent::MountNewWorkspaceInput { .. }
+                    | Intent::MountAdoptPicker { .. }
+                    | Intent::OpenEditor
+                    | Intent::MergePr { .. }
+                    | Intent::KillWorkspace { .. }
+                    | Intent::Snooze { .. }
+                    | Intent::Unsnooze { .. }
+                    | Intent::MarkAllRead { .. } => {}
                 }
             }
             Action::Refresh => {
@@ -715,8 +812,10 @@ impl<T: TerminalAdapter> Model<T> {
                 let browser = self.ui_defaults.browser.clone();
                 match lazybox_tui_core::editors::open_url(&url, browser.as_deref()) {
                     Ok(()) => {
-                        tracing::info!(%url, "opened workspace URL in browser");
-                        self.flash_info(format!("opened {url}"));
+                        // open_url is fire-and-forget (the launcher is
+                        // spawned, not waited on) — phrase as in-progress.
+                        tracing::info!(%url, "opening workspace URL in browser");
+                        self.flash_info(format!("opening {url}…"));
                     }
                     Err(e) => {
                         tracing::warn!(%url, "open_url failed: {e}");
@@ -726,6 +825,29 @@ impl<T: TerminalAdapter> Model<T> {
                         );
                     }
                 }
+            }
+            Action::CyclePane => {
+                // The keyboard path normally consumes the chord in
+                // `handle_pane_key`'s guard arm (which owns the
+                // live-terminal gating); this arm serves the other
+                // surfaces (context menu, tests) with the same effect.
+                self.cycle_pane_focus();
+            }
+            Action::ToggleMouseCapture => {
+                self.toggle_mouse_capture();
+            }
+            Action::ActivityTop => {
+                // `g` under Right focus: jump the activity cursor to
+                // the first row. Catalog-dispatched so the vim
+                // go-to-top reflex can never arm the Workspace `g *`
+                // github leader from the activity pane (where a
+                // reflexive `g g` used to silently toggle auto-merge).
+                self.right.activity_cursor_top();
+                self.redraw = true;
+            }
+            Action::ActivityBottom => {
+                self.right.activity_cursor_bottom();
+                self.redraw = true;
             }
             Action::CycleRoleFilter => {
                 self.sidebar.cycle_role_filter();

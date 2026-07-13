@@ -172,6 +172,13 @@ pub enum Action {
     ToggleActivity,
     /// Toggle a single activity row's expanded view.
     ToggleRow,
+    /// Jump the activity row cursor to the first row (`g` under Right
+    /// focus — the vim go-to-top reflex). Catalog-dispatched so the
+    /// keystroke can't fall through to arming the Workspace `g *`
+    /// github leader (where a reflexive `g g` toggled auto-merge).
+    ActivityTop,
+    /// Jump the activity row cursor to the last row (`Shift-G`).
+    ActivityBottom,
     /// Mount the reply textarea targeted at the focused workspace.
     Reply,
     /// Toggle the multi-select state on the focused activity row.
@@ -247,6 +254,12 @@ pub enum Action {
     /// re-hides it). The override is remembered per workspace for
     /// the session.
     ToggleActivityPane,
+    /// Toggle lazybox's mouse capture so the host terminal regains
+    /// native text selection (F8 / Alt-s / Ctrl-Alt-s). Reachable from
+    /// every pane INCLUDING a live terminal — the whole point is
+    /// escaping to a host copy gesture mid-agent-session — so the
+    /// keyboard path matches it before PTY forwarding.
+    ToggleMouseCapture,
     /// Begin the two-press quit chord. Single-press from a remap
     /// just fires.
     Quit,
@@ -344,6 +357,7 @@ pub enum ActionKind {
     UndoMarkRead,
     // Global
     CyclePane,
+    ToggleMouseCapture,
     Refresh,
     ForceRedraw,
     OpenHelp,
@@ -447,11 +461,14 @@ impl Action {
             Action::BroadcastToSelected => ActionKind::BroadcastToSelected,
             Action::ToggleActivity => ActionKind::ToggleActivity,
             Action::ToggleRow => ActionKind::ToggleRow,
+            Action::ActivityTop => ActionKind::ActivityTop,
+            Action::ActivityBottom => ActionKind::ActivityBottom,
             Action::Reply => ActionKind::Reply,
             Action::SelectRow => ActionKind::SelectRow,
             Action::ToggleDescription => ActionKind::ToggleDescription,
             Action::UndoMarkRead => ActionKind::UndoMarkRead,
             Action::CyclePane => ActionKind::CyclePane,
+            Action::ToggleMouseCapture => ActionKind::ToggleMouseCapture,
             Action::Refresh => ActionKind::Refresh,
             Action::ForceRedraw => ActionKind::ForceRedraw,
             Action::OpenHelp => ActionKind::OpenHelp,
@@ -501,6 +518,13 @@ impl ActionDef {
                 default_keys: "Tab",
                 label: "cycle panes",
                 describe: "Move focus to the next pane.",
+                section: Section::Global,
+            },
+            ActionKind::ToggleMouseCapture => &Self {
+                kind: ActionKind::ToggleMouseCapture,
+                default_keys: "F8 | Alt-s | Ctrl-Alt-s",
+                label: "mouse capture",
+                describe: "Toggle lazybox's mouse capture so the host terminal regains native text selection (trackpad-select + Cmd-C in agent scrollback). Works from any pane, including inside a live terminal; toggle back on for splitter drags and click-to-focus.",
                 section: Section::Global,
             },
             ActionKind::Refresh => &Self {
@@ -707,7 +731,10 @@ impl ActionDef {
             ActionKind::NewProject => &Self {
                 kind: ActionKind::NewProject,
                 default_keys: "Shift-N",
-                label: "new workspace",
+                // Distinct from NewWorkspace's "new workspace" — the two
+                // used to share a label, rendering two identical footer
+                // cells for different actions.
+                label: "new project",
                 describe: "Pick a tracked repo to start a workspace on, or create a new local project.",
                 section: Section::Workspace,
             },
@@ -914,7 +941,7 @@ impl ActionDef {
                 kind: ActionKind::TerminalScroll,
                 default_keys: "Shift-PgUp/Dn",
                 label: "scroll",
-                describe: "Scroll the terminal's scrollback buffer.",
+                describe: "Scroll the terminal's scrollback buffer. Shift-Home / Shift-End jump to the top / bottom; the mouse wheel scrolls too.",
                 section: Section::Terminal,
             },
             ActionKind::LeaveTerminal => &Self {
@@ -962,6 +989,7 @@ impl ActionDef {
             ActionKind::ToggleFocusMode,
             ActionKind::StartAgent,
             ActionKind::ToggleActivityPane,
+            ActionKind::ToggleMouseCapture,
             ActionKind::ResizeSplitter,
             ActionKind::Quit,
             // Workspace
@@ -1502,6 +1530,7 @@ impl ActionKind {
             ActionKind::ToggleDescription => "toggle_description",
             ActionKind::UndoMarkRead => "undo_mark_read",
             ActionKind::CyclePane => "cycle_pane",
+            ActionKind::ToggleMouseCapture => "toggle_mouse_capture",
             ActionKind::Refresh => "refresh",
             ActionKind::ForceRedraw => "force_redraw",
             ActionKind::OpenHelp => "open_help",
@@ -1612,6 +1641,20 @@ pub fn keymap_preset(name: &str) -> Option<std::collections::BTreeMap<String, St
         _ => return None,
     }
     Some(m)
+}
+
+/// Startup-validation helper: a warning line for an unknown
+/// `ui.keymap_preset` name, or `None` when the name resolves. The
+/// config is never rejected — the caller surfaces the warning (footer
+/// notice + messages log) and continues on the default keymap.
+pub fn unknown_preset_warning(name: &str) -> Option<String> {
+    if keymap_preset(name).is_some() {
+        return None;
+    }
+    Some(format!(
+        "ui.keymap_preset: unknown preset {name:?} — known presets: {} (using default)",
+        KEYMAP_PRESETS.join(", ")
+    ))
 }
 
 /// The in-group key a known agent binds to under the `a` agent leader
@@ -1794,15 +1837,18 @@ impl ActionDef {
                 let seq = Chord::Seq(vec![leader, second]);
                 let keys_display =
                     std::borrow::Cow::Owned(format!("{} {}", leader.display(), second.display()));
+                let config_key = format!("work_with.{id}");
+                let (chords, keys_display) =
+                    generated_row_chords(overrides, &config_key, (vec![seq], keys_display));
                 out.push(CatalogEntry {
                     kind: ActionKind::WorkWith,
                     param: Some(Param::Agent(id.clone())),
                     section: work.section,
                     label: std::borrow::Cow::Owned(format!("work in {id}")),
                     describe: work.describe,
-                    chords: vec![seq],
+                    chords,
                     keys_display,
-                    config_key: format!("work_with.{id}"),
+                    config_key,
                 });
             }
         }
@@ -1830,15 +1876,18 @@ impl ActionDef {
                 let seq = Chord::Seq(vec![leader, second]);
                 let keys_display =
                     std::borrow::Cow::Owned(format!("{} {}", leader.display(), second.display()));
+                let config_key = format!("spawn_agent_on_main.{id}");
+                let (chords, keys_display) =
+                    generated_row_chords(overrides, &config_key, (vec![seq], keys_display));
                 out.push(CatalogEntry {
                     kind: ActionKind::SpawnAgentOnMain,
                     param: Some(Param::Agent(id.clone())),
                     section: on_main.section,
                     label: std::borrow::Cow::Owned(format!("{id} on main")),
                     describe: on_main.describe,
-                    chords: vec![seq],
+                    chords,
                     keys_display,
-                    config_key: format!("spawn_agent_on_main.{id}"),
+                    config_key,
                 });
             }
         }
@@ -1855,38 +1904,67 @@ impl ActionDef {
             };
             if let Some(leader) = work_leader {
                 let seq = Chord::Seq(vec![leader, stroke]);
+                let config_key = format!("work_tier.{}", tier.alias);
+                let default_display =
+                    std::borrow::Cow::Owned(format!("{} {}", leader.display(), stroke.display()));
+                let (chords, keys_display) =
+                    generated_row_chords(overrides, &config_key, (vec![seq], default_display));
                 out.push(CatalogEntry {
                     kind: ActionKind::WorkWith,
                     param: Some(Param::Tier(tier.alias.clone())),
                     section: work.section,
                     label: std::borrow::Cow::Owned(tier.label.clone()),
                     describe: work.describe,
-                    chords: vec![seq],
-                    keys_display: std::borrow::Cow::Owned(format!(
-                        "{} {}",
-                        leader.display(),
-                        stroke.display()
-                    )),
-                    config_key: format!("work_tier.{}", tier.alias),
+                    chords,
+                    keys_display,
+                    config_key,
                 });
             }
             let seq = Chord::Seq(vec![spawn_leader, stroke]);
+            let config_key = format!("spawn_tier.{}", tier.alias);
+            let default_display =
+                std::borrow::Cow::Owned(format!("{} {}", spawn_leader.display(), stroke.display()));
+            let (chords, keys_display) =
+                generated_row_chords(overrides, &config_key, (vec![seq], default_display));
             out.push(CatalogEntry {
                 kind: ActionKind::SpawnAgent,
                 param: Some(Param::Tier(tier.alias.clone())),
                 section: spawn.section,
                 label: std::borrow::Cow::Owned(tier.label.clone()),
                 describe: spawn.describe,
-                chords: vec![seq],
-                keys_display: std::borrow::Cow::Owned(format!(
-                    "{} {}",
-                    spawn_leader.display(),
-                    stroke.display()
-                )),
-                config_key: format!("spawn_tier.{}", tier.alias),
+                chords,
+                keys_display,
+                config_key,
             });
         }
         out
+    }
+}
+
+/// Resolve a generated catalog row's effective chords: a parseable
+/// `ui.action_keys` override for `config_key` wins; otherwise the
+/// built-in `default` pair. Same fallback semantics as the static
+/// rows' [`ActionDef::effective_chords`] — an override whose
+/// alternatives all fail to parse falls back to the default rather
+/// than unbinding the row (a YAML typo shouldn't break the keyboard).
+/// Shared by the `work_with.<id>`, `spawn_agent_on_main.<id>`,
+/// `work_tier.<alias>` and `spawn_tier.<alias>` builders, which used
+/// to set `config_key` without ever consulting the override map.
+fn generated_row_chords(
+    overrides: &std::collections::BTreeMap<String, String>,
+    config_key: &str,
+    default: (Vec<Chord>, std::borrow::Cow<'static, str>),
+) -> (Vec<Chord>, std::borrow::Cow<'static, str>) {
+    match overrides.get(config_key) {
+        Some(raw) => {
+            let parsed: Vec<Chord> = raw.split('|').filter_map(Chord::parse).collect();
+            if parsed.is_empty() {
+                default
+            } else {
+                (parsed, std::borrow::Cow::Owned(raw.clone()))
+            }
+        }
+        None => default,
     }
 }
 
@@ -2060,6 +2138,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::NewProject
         | ActionKind::StartAgent
         | ActionKind::CyclePane
+        | ActionKind::ToggleMouseCapture
         | ActionKind::Refresh
         | ActionKind::ForceRedraw
         | ActionKind::OpenHelp
@@ -3089,6 +3168,162 @@ mod tests {
         );
         assert_eq!(leader_group_label(ActionKind::Work), None);
         assert_eq!(leader_group_label(ActionKind::Quit), None);
+    }
+
+    /// Regression (advertised-but-ignored namespaces): each generated
+    /// row family must consult `ui.action_keys` under its documented
+    /// config key. Pre-fix only `spawn_agent.<id>` did; the other four
+    /// set `config_key` but never read the map.
+    #[test]
+    fn work_with_override_is_honored() {
+        use std::collections::BTreeMap;
+        let mut overrides = BTreeMap::new();
+        overrides.insert("work_with.claude".to_string(), "Ctrl-k".to_string());
+        let catalog = ActionDef::catalog(&["claude".to_string()], &overrides);
+        let row = catalog
+            .iter()
+            .find(|e| {
+                e.kind == ActionKind::WorkWith && e.param == Some(Param::Agent("claude".into()))
+            })
+            .expect("work_with.claude row");
+        assert_eq!(
+            row.chords,
+            vec![Chord::Key(KeyStroke::new(
+                true,
+                false,
+                false,
+                ChordCode::Char('k')
+            ))],
+            "work_with.<id> override must replace the default `w c` chord",
+        );
+        assert_eq!(row.keys_display, "Ctrl-k");
+    }
+
+    #[test]
+    fn spawn_agent_on_main_override_is_honored() {
+        use std::collections::BTreeMap;
+        let mut overrides = BTreeMap::new();
+        overrides.insert(
+            "spawn_agent_on_main.codex".to_string(),
+            "Ctrl-b".to_string(),
+        );
+        let catalog = ActionDef::catalog(&["codex".to_string()], &overrides);
+        let row = catalog
+            .iter()
+            .find(|e| {
+                e.kind == ActionKind::SpawnAgentOnMain
+                    && e.param == Some(Param::Agent("codex".into()))
+            })
+            .expect("spawn_agent_on_main.codex row");
+        assert_eq!(
+            row.chords,
+            vec![Chord::Key(KeyStroke::new(
+                true,
+                false,
+                false,
+                ChordCode::Char('b')
+            ))],
+        );
+    }
+
+    #[test]
+    fn work_tier_and_spawn_tier_overrides_are_honored() {
+        use std::collections::BTreeMap;
+        let tiers = vec![lazybox_core::ModelTier {
+            alias: "S".to_string(),
+            label: "Haiku".to_string(),
+            args: vec![],
+        }];
+        let mut overrides = BTreeMap::new();
+        overrides.insert("work_tier.S".to_string(), "Ctrl-1".to_string());
+        overrides.insert("spawn_tier.S".to_string(), "Ctrl-2".to_string());
+        let catalog = ActionDef::catalog_with_tiers(&["claude".to_string()], &overrides, &tiers);
+        let work_tier = catalog
+            .iter()
+            .find(|e| e.kind == ActionKind::WorkWith && e.param == Some(Param::Tier("S".into())))
+            .expect("work_tier.S row");
+        assert_eq!(
+            work_tier.chords,
+            vec![Chord::Key(KeyStroke::new(
+                true,
+                false,
+                false,
+                ChordCode::Char('1')
+            ))],
+        );
+        let spawn_tier = catalog
+            .iter()
+            .find(|e| e.kind == ActionKind::SpawnAgent && e.param == Some(Param::Tier("S".into())))
+            .expect("spawn_tier.S row");
+        assert_eq!(
+            spawn_tier.chords,
+            vec![Chord::Key(KeyStroke::new(
+                true,
+                false,
+                false,
+                ChordCode::Char('2')
+            ))],
+        );
+    }
+
+    /// An unparseable override on a generated row falls back to the
+    /// built-in chord — same typo-guard semantics as the static rows.
+    #[test]
+    fn generated_row_override_falls_back_when_unparseable() {
+        use std::collections::BTreeMap;
+        let mut overrides = BTreeMap::new();
+        overrides.insert("work_with.claude".to_string(), "garbage-spec".to_string());
+        let catalog = ActionDef::catalog(&["claude".to_string()], &overrides);
+        let row = catalog
+            .iter()
+            .find(|e| {
+                e.kind == ActionKind::WorkWith && e.param == Some(Param::Agent("claude".into()))
+            })
+            .expect("work_with.claude row");
+        let w = KeyStroke::new(false, false, false, ChordCode::Char('w'));
+        let c = KeyStroke::new(false, false, false, ChordCode::Char('c'));
+        assert_eq!(row.chords, vec![Chord::Seq(vec![w, c])]);
+    }
+
+    /// NewProject and NewWorkspace must not share a footer label —
+    /// two identical "new workspace" cells rendered for different
+    /// actions (#8 of the keybinding audit).
+    #[test]
+    fn new_project_label_is_distinct_from_new_workspace() {
+        assert_eq!(
+            ActionDef::for_kind(ActionKind::NewProject).label,
+            "new project"
+        );
+        assert_eq!(
+            ActionDef::for_kind(ActionKind::NewWorkspace).label,
+            "new workspace"
+        );
+    }
+
+    /// The mouse-capture toggle is a catalog row (discoverable in `?`,
+    /// remappable) with all three chord alternatives parseable.
+    #[test]
+    fn mouse_capture_row_parses_all_alternatives() {
+        let def = ActionDef::for_kind(ActionKind::ToggleMouseCapture);
+        let chords = def.default_chords();
+        assert_eq!(
+            chords.len(),
+            3,
+            "F8 / Alt-s / Ctrl-Alt-s all parse: {chords:?}"
+        );
+        assert_eq!(def.section, Section::Global);
+    }
+
+    #[test]
+    fn unknown_preset_warning_fires_only_for_unknown_names() {
+        assert!(unknown_preset_warning("default").is_none());
+        assert!(unknown_preset_warning("vim").is_none());
+        let warning = unknown_preset_warning("emacs").expect("unknown preset warns");
+        assert!(warning.contains("emacs"), "{warning}");
+        assert!(
+            warning.contains("vim"),
+            "names the known presets: {warning}"
+        );
     }
 
     #[test]

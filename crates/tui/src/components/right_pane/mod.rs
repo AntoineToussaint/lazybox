@@ -134,6 +134,21 @@ pub struct RightPane {
     /// (which only moves `comment_scroll`) reuses it untouched. See
     /// [`ActivityBuffer`] for why this is what keeps scroll responsive.
     activity_buffer: Option<ActivityBuffer>,
+    /// Revision counter for the workspace's activity *content*. Bumped
+    /// by [`RightPane::refresh_activity_rev`] whenever the stored
+    /// workspace's activity set actually mutates (new / edited /
+    /// removed entries, or a different workspace entirely). The buffer
+    /// cache key hashes this single u64 instead of re-hashing every
+    /// activity body's bytes on every frame — with a long feed of
+    /// large comment bodies, the per-frame SipHash over all bodies was
+    /// itself a measurable render cost.
+    activity_rev: u64,
+    /// Cheap fingerprint backing `activity_rev`: workspace key +
+    /// per-activity (author, body *length*, timestamp, kind, node id).
+    /// Deliberately length-not-bytes for bodies — `set_workspace`
+    /// receives a fresh `Workspace` clone on every pane sync, so this
+    /// runs often and must stay O(n) over tiny fields.
+    activity_identity: u64,
     /// Count of activity-buffer rebuilds, for the encapsulation
     /// regression test that pins "scrolling never rebuilds the feed."
     #[cfg(test)]
@@ -334,6 +349,8 @@ impl RightPane {
             click_hits: ClickHits::default(),
             pending_selection_notice: None,
             activity_buffer: None,
+            activity_rev: 0,
+            activity_identity: 0,
             #[cfg(test)]
             activity_rebuilds: 0,
         }
@@ -711,6 +728,10 @@ impl RightPane {
             self.pending_selection_notice = None;
         }
         self.auto_collapse_for_workspace();
+        // Bump the activity revision iff the content actually changed —
+        // `set_workspace` runs on every pane sync with a fresh clone,
+        // and most of those carry byte-identical activity.
+        self.refresh_activity_rev();
         // Arm the auto-mark timer if the new workspace has an unread
         // row under the (fresh) cursor. Without this the badge count
         // stuck on the sidebar even as the user navigated past every
@@ -721,6 +742,44 @@ impl RightPane {
         // future use); arming is purely "is the cursor on an unread
         // row right now."
         self.rearm_mark_timer(true);
+    }
+
+    /// Cheap fingerprint of the current workspace's activity *set*
+    /// identity — everything that determines the rendered card content
+    /// except body bytes (length + timestamp + author + node id stand
+    /// in; a body edit that keeps all of those identical is not
+    /// detectable, an accepted trade for not re-hashing every body on
+    /// every pane sync). Read/unread bits are deliberately excluded:
+    /// the buffer key folds those per-entry itself (they mutate
+    /// in-place without going through `set_workspace`).
+    fn compute_activity_identity(workspace: Option<&Workspace>) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let Some(w) = workspace else {
+            return 0;
+        };
+        let mut h = DefaultHasher::new();
+        w.key.as_str().hash(&mut h);
+        w.activity.len().hash(&mut h);
+        for a in &w.activity {
+            a.author.hash(&mut h);
+            a.body.len().hash(&mut h);
+            a.created_at.timestamp_millis().hash(&mut h);
+            (a.kind as u8).hash(&mut h);
+            a.node_id.hash(&mut h);
+        }
+        h.finish()
+    }
+
+    /// Recompute the activity-identity fingerprint and bump
+    /// `activity_rev` when it moved. Called wherever `self.workspace`
+    /// is replaced (`set_workspace`, the `WorkspaceUpserted` handler).
+    fn refresh_activity_rev(&mut self) {
+        let identity = Self::compute_activity_identity(self.workspace.as_ref());
+        if identity != self.activity_identity {
+            self.activity_identity = identity;
+            self.activity_rev = self.activity_rev.wrapping_add(1);
+        }
     }
 
     /// Map a mouse click to a pane action. Returns `true` when the
@@ -871,6 +930,27 @@ impl RightPane {
 
     pub fn comment_cursor(&self) -> usize {
         self.feed.cursor
+    }
+
+    /// Jump the activity row cursor to the first row (`g` — the
+    /// catalog's `ActivityTop`). Safe no-op semantics on an empty /
+    /// absent feed: cursor and scroll both pin to 0.
+    pub fn activity_cursor_top(&mut self) {
+        self.feed.cursor = 0;
+        self.comment_scroll = 0;
+    }
+
+    /// Jump the activity row cursor to the last row (`Shift-G` — the
+    /// catalog's `ActivityBottom`). No-op when there's no activity.
+    pub fn activity_cursor_bottom(&mut self) {
+        let Some(ws) = &self.workspace else {
+            return;
+        };
+        if ws.activity.is_empty() {
+            return;
+        }
+        self.feed.cursor = ws.activity.len() - 1;
+        self.clamp_scroll_to_cursor();
     }
 
     /// Test accessor — top-of-viewport index into the activity
@@ -1087,6 +1167,14 @@ impl RightPane {
         self.activity_rebuilds
     }
 
+    /// Test accessor — the activity content revision. The memo-key
+    /// regression tests pin "identical content doesn't bump, mutated
+    /// content does."
+    #[cfg(test)]
+    pub(super) fn activity_rev(&self) -> u64 {
+        self.activity_rev
+    }
+
     /// Fingerprint every input that determines the activity virtual-line
     /// buffer, so [`render_activity`](Self::render_activity) can skip the
     /// rebuild when nothing relevant changed.
@@ -1103,6 +1191,7 @@ impl RightPane {
     /// buffer, and a poll lands at least once a minute, so staleness is
     /// bounded and invisible.
     fn activity_buffer_key(
+        activity_rev: u64,
         workspace: &Workspace,
         feed: &crate::components::activity_feed::ActivityFeed,
         viewer_logins: &std::collections::HashMap<String, String>,
@@ -1138,11 +1227,16 @@ impl RightPane {
             acc ^ e.finish()
         });
         viewer_fold.hash(&mut h);
-        for (i, a) in workspace.activity.iter().enumerate() {
-            a.author.hash(&mut h);
-            a.body.hash(&mut h);
-            a.created_at.timestamp_millis().hash(&mut h);
-            (a.kind as u8).hash(&mut h);
+        // Activity *content* rides the revision counter — bumped by
+        // `refresh_activity_rev` whenever the set actually mutates —
+        // instead of re-hashing every body's bytes on every frame
+        // (which made an idle repaint O(total comment bytes)). The
+        // per-entry read/unread bits are still folded directly: they
+        // mutate in-place (auto-mark, `m`, `z`) without a workspace
+        // swap, so the rev can't see them — and they're one bool each.
+        activity_rev.hash(&mut h);
+        workspace.activity.len().hash(&mut h);
+        for i in 0..workspace.activity.len() {
             workspace.is_activity_unread(i).hash(&mut h);
         }
         h.finish()
@@ -1307,6 +1401,7 @@ impl RightPane {
         // re-windows it below; that's what keeps the feed responsive at
         // any list size. See [`ActivityBuffer`].
         let key = Self::activity_buffer_key(
+            self.activity_rev,
             workspace,
             &self.feed,
             &self.viewer_logins,
@@ -1619,14 +1714,17 @@ impl RightPane {
                 self.feed.set_expanded(self.feed.cursor, false);
                 PaneOutcome::Consumed
             }
+            // `g` / `Shift-G` normally arrive through the catalog
+            // dispatch (`ActivityTop` / `ActivityBottom` →
+            // `activity_cursor_top` / `_bottom`), which resolves first
+            // under Right focus; these arms remain for direct
+            // pane-driving callers (tests, tuirealm event path).
             (KeyCode::Char('g'), KeyModifiers::NONE) => {
-                self.feed.cursor = 0;
-                self.comment_scroll = 0;
+                self.activity_cursor_top();
                 PaneOutcome::Consumed
             }
             (KeyCode::Char('G'), m) if m.contains(KeyModifiers::SHIFT) => {
-                self.feed.cursor = last;
-                self.clamp_scroll_to_cursor();
+                self.activity_cursor_bottom();
                 PaneOutcome::Consumed
             }
             // `Space` (and the vim-style `v`) toggle the focused
@@ -1716,6 +1814,9 @@ impl RightPane {
             let new_len = workspace.activity.len();
             let last = new_len.saturating_sub(1);
             self.workspace = Some((**workspace).clone());
+            // Content may have changed (new comment, edited body) —
+            // bump the buffer revision so the cache invalidates.
+            self.refresh_activity_rev();
             self.feed.cursor = self.feed.cursor.min(last);
             if self.comment_scroll > last {
                 self.comment_scroll = last;

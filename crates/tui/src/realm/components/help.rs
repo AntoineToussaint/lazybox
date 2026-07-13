@@ -223,14 +223,27 @@ impl Help {
         // it's a terminal-pane chord whose binding set is the user's
         // snippet library — so it's hand-added to the Terminal section
         // here, the same way the hint bar curates it (issue #205).
-        by_section
-            .entry(Section::Terminal.order())
-            .or_insert_with(|| (Section::Terminal.title(), Vec::new()))
-            .1
-            .push(Binding {
-                keys: std::borrow::Cow::Owned(format!("{leader}<key>")),
-                label: std::borrow::Cow::Borrowed("snippets"),
-            });
+        // The tile-management chords (#286) ride the same `]]` leader
+        // and are likewise dispatched by `terminal_leader::LeaderCmd`
+        // rather than the catalog — hand-added too, so the Keys screen
+        // matches what the `]]` which-key popup offers.
+        {
+            let terminal = by_section
+                .entry(Section::Terminal.order())
+                .or_insert_with(|| (Section::Terminal.title(), Vec::new()));
+            for (suffix, label) in [
+                ("<key>", "snippets"),
+                ("|", "split right"),
+                ("-", "split down"),
+                ("<arrow>", "move tile / switch tab"),
+                ("x", "close terminal"),
+            ] {
+                terminal.1.push(Binding {
+                    keys: std::borrow::Cow::Owned(format!("{leader}{suffix}")),
+                    label: std::borrow::Cow::Borrowed(label),
+                });
+            }
+        }
         let sections: Vec<HelpSection> = by_section
             .into_iter()
             .map(|(_, (title, bindings))| HelpSection { title, bindings })
@@ -773,6 +786,70 @@ mod tests {
             flat.iter()
                 .any(|(k, l)| k == "Space" && l == "collapse group"),
             "repo-group collapse missing from the Keys screen: {flat:?}",
+        );
+    }
+
+    /// The tile-management chords (#286) ride the `]]` leader and are
+    /// dispatched by `terminal_leader::LeaderCmd`, not the catalog —
+    /// they must still show in the `?` Terminal section (they used to
+    /// appear only in the `]]` which-key popup), rendered from the
+    /// live escape char.
+    #[test]
+    fn terminal_section_lists_the_tile_management_chords() {
+        use lazybox_tui_core::action::ActionDef;
+        let catalog = ActionDef::catalog(&[], &std::collections::BTreeMap::new());
+        let help = Help::from_catalog(&catalog, ']');
+        let terminal: Vec<(String, String)> = help
+            .sections
+            .iter()
+            .filter(|s| s.title == "Terminal")
+            .flat_map(|s| s.bindings.iter())
+            .map(|b| (b.keys.to_string(), b.label.to_string()))
+            .collect();
+        for (keys, label) in [
+            ("]]|", "split right"),
+            ("]]-", "split down"),
+            ("]]<arrow>", "move tile / switch tab"),
+            ("]]x", "close terminal"),
+        ] {
+            assert!(
+                terminal.iter().any(|(k, l)| k == keys && l == label),
+                "Terminal section missing {keys} → {label}: {terminal:?}",
+            );
+        }
+        // A remapped escape char re-renders the rows from the live char.
+        let remapped = Help::from_catalog(&catalog, '}');
+        assert!(
+            remapped
+                .sections
+                .iter()
+                .filter(|s| s.title == "Terminal")
+                .flat_map(|s| s.bindings.iter())
+                .any(|b| b.keys == "}}x"),
+            "tile rows must render from the configured escape char",
+        );
+    }
+
+    /// The mouse-capture toggle is a catalog row now (11c of the
+    /// keybinding audit) — the `?` Global grid lists it with all three
+    /// chord alternatives.
+    #[test]
+    fn global_section_lists_the_mouse_capture_toggle() {
+        use lazybox_tui_core::action::ActionDef;
+        let catalog = ActionDef::catalog(&[], &std::collections::BTreeMap::new());
+        let help = Help::from_catalog(&catalog, ']');
+        let global: Vec<(String, String)> = help
+            .sections
+            .iter()
+            .filter(|s| s.title == "Global")
+            .flat_map(|s| s.bindings.iter())
+            .map(|b| (b.keys.to_string(), b.label.to_string()))
+            .collect();
+        assert!(
+            global
+                .iter()
+                .any(|(k, l)| l == "mouse capture" && k.contains("F8") && k.contains("Alt-s")),
+            "mouse-capture row missing from the Global grid: {global:?}",
         );
     }
 

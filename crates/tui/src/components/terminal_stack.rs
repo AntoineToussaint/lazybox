@@ -60,8 +60,10 @@ pub const RECENT_OUTPUT_CAP: usize = 4 * 1024;
 /// backlog of a chatty hidden agent — when it overflows we keep the
 /// most-recent tail and reset+refeed the parser on display. It is
 /// deliberately independent of (and smaller than) the daemon's
-/// `REPLAY_RING_BYTES`: the full recovery replay arrives via `Snapshot`
-/// and is fed straight to the VT, never through this transient buffer.
+/// `REPLAY_RING_BYTES`: a `Snapshot`'s recovery replay is stashed into
+/// this buffer *uncapped* (it seeds a brand-new slot, is already
+/// bounded by the daemon ring, and trimming it would drop scrollback);
+/// the cap only trims *live* output appended while hidden.
 const PENDING_FEED_CAP: usize = 64 * 1024;
 
 /// Cap for the per-terminal composing buffer (the in-flight user
@@ -2082,14 +2084,42 @@ impl TerminalStack {
                         snap.model_label.clone(),
                         snap.last_user_message.clone(),
                     );
-                    // Replay the daemon-side ring through the VT so
-                    // the cell grid reflects what was on screen
-                    // before this client connected.
-                    slot.vt.feed(&snap.replay);
+                    // Defer the daemon-ring replay instead of parsing
+                    // it here: a reconnect / broadcast-lag snapshot
+                    // carries EVERY terminal's full ring (potentially
+                    // MiBs each), and feeding them all through
+                    // libghostty synchronously in one dispatch stalled
+                    // the single UI thread for the whole batch. The
+                    // slot is brand-new (empty grid), so the stash is
+                    // clean replace-not-append semantics: the replay
+                    // becomes the first bytes the fresh parser sees on
+                    // the terminal's first render (`flush_pending`) —
+                    // no reset needed, unlike the hidden-overflow path
+                    // — and live output arriving before then appends
+                    // behind it in stream order. `PENDING_FEED_CAP`
+                    // deliberately does not apply to this one-shot
+                    // stash (it bounds the *between-render* backlog of
+                    // a chatty hidden agent); the replay is already
+                    // bounded by the daemon's ring, and capping it here
+                    // would silently drop scrollback the old eager path
+                    // preserved. A later live overflow while hidden
+                    // still trims to the cap tail via `append_output`.
+                    slot.pending_feed = snap.replay.clone();
                     self.terminals.insert(snap.terminal_id, slot);
                 }
                 self.clamp_active_tab();
                 self.auto_collapse_on_emptiness();
+                // Eagerly parse only the terminal actually in the
+                // foreground: the `&self` readers (mouse-tracking
+                // probe, alt-screen check) consult its live parser
+                // state between now and the next render, and it's what
+                // the user is looking at. Everything else parses
+                // lazily on first display.
+                if let Some(id) = self.focused_terminal_id()
+                    && let Some(slot) = self.terminals.get_mut(&id)
+                {
+                    slot.flush_pending();
+                }
             }
             Event::TerminalSpawned {
                 terminal_id,
@@ -4306,6 +4336,73 @@ mod hidden_feed_tests {
             rows.iter().any(|r| r.contains("last line")),
             "expected the post-truncation tail on screen, got {rows:?}"
         );
+    }
+
+    /// A reconnect `Snapshot` must not pay the VT parse for every
+    /// terminal synchronously on the UI thread: only the foreground
+    /// terminal is fed eagerly; hidden terminals stash their replay in
+    /// `pending_feed` and reconstruct the exact grid on first display.
+    #[test]
+    fn snapshot_defers_hidden_terminal_replays() {
+        let sk_a = SessionKey::new("a");
+        let sk_b = SessionKey::new("b");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        stack.set_active_session(Some(sk_a.clone()));
+
+        let snap = |id: u64, sk: &SessionKey, replay: &[u8]| lazybox_ipc::TerminalSnapshot {
+            terminal_id: TerminalId(id),
+            session_key: sk.clone(),
+            kind: TerminalKind::Shell,
+            replay: replay.to_vec(),
+            last_seq: 1,
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+            last_user_message: None,
+        };
+        stack.on_event(&Event::Snapshot {
+            workspaces: vec![],
+            terminals: vec![
+                snap(1, &sk_a, b"visible\r\n"),
+                snap(2, &sk_b, b"hidden\r\n"),
+            ],
+            projects: vec![],
+        });
+
+        // Foreground terminal: parsed eagerly (the mouse/alt-screen
+        // readers consult its parser before any render).
+        assert!(
+            stack.terminals[&TerminalId(1)].pending_feed.is_empty(),
+            "the focused terminal's replay must be fed eagerly"
+        );
+        // Background terminal: replay stashed, parser untouched.
+        assert_eq!(
+            stack.terminals[&TerminalId(2)].pending_feed,
+            b"hidden\r\n",
+            "a hidden terminal's replay must be deferred, not parsed in the dispatch"
+        );
+
+        // Live output arriving before the first display appends behind
+        // the stashed replay in stream order.
+        feed(&mut stack, TerminalId(2), b"more\r\n", 2);
+        assert_eq!(
+            stack.terminals[&TerminalId(2)].pending_feed,
+            b"hidden\r\nmore\r\n"
+        );
+
+        // First display of the hidden terminal reconstructs the grid
+        // from replay + live tail.
+        stack.set_active_session(Some(sk_b));
+        let rows = screen_rows(&mut stack);
+        assert!(stack.terminals[&TerminalId(2)].pending_feed.is_empty());
+        assert!(
+            rows.iter().any(|r| r.contains("hidden")) && rows.iter().any(|r| r.contains("more")),
+            "deferred replay must render the full stream, got {rows:?}"
+        );
+
+        // And the eagerly-fed foreground grid was correct all along.
+        stack.set_active_session(Some(sk_a));
+        assert_eq!(row0(&mut stack), "visible");
     }
 
     /// A resync replaces any bytes buffered while hidden — the ring is

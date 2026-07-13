@@ -355,8 +355,22 @@ impl<T: TerminalAdapter> Model<T> {
     ) {
         use crate::realm::components::choice::Choice;
 
-        // Don't trample whatever's currently on top.
-        if matches!(self.modal_stack.last(), Some(Id::ManageLabels)) {
+        // Async mount — the `RepoLabels` reply can arrive seconds after
+        // the `g l` press, by which time the user may have opened
+        // something else (a Reply textarea, a confirm). Mounting on top
+        // would steal keyboard focus mid-typing, so this follows the
+        // queued daemon prompts' wait-for-empty-stack rule: any modal
+        // already up wins, and the fetch result is dropped (the user
+        // can press `g l` again — the hint says so). Also covers the
+        // old ManageLabels-only idempotence check.
+        if let Some(top) = self.modal_stack.last() {
+            tracing::info!(?top, "label picker skipped — another modal owns the stack");
+            // Disarm the request stash so a later stray `RepoLabels`
+            // broadcast can't mount the picker unprompted.
+            self.pending_labels_request = None;
+            if !matches!(top, Id::ManageLabels) {
+                self.flash_hint("labels loaded, but another dialog was open — press g l again");
+            }
             return;
         }
         if repo_labels.is_empty() {
@@ -773,6 +787,22 @@ impl<T: TerminalAdapter> Model<T> {
     ) {
         use crate::realm::components::choice::Choice;
 
+        // Async mount (the `WorktreesInspected` reply) — same
+        // don't-preempt rule as the label picker: only take the stack
+        // when it's empty or already owned by the inspector flow
+        // (loading placeholder, the list itself after a delete
+        // re-inspect, or its per-row confirm). In multi-client mode
+        // another client's `InspectWorktrees` broadcasts here too, and
+        // mounting on top of an unrelated modal would steal focus.
+        let inspector_owned = matches!(
+            self.modal_stack.last(),
+            None | Some(Id::InspectLoading | Id::InspectList | Id::InspectConfirm)
+        );
+        if !inspector_owned {
+            tracing::info!("worktree inspector list skipped — another modal owns the stack");
+            return;
+        }
+
         // Sort: orphans first (sorted by path), then healthy.
         let mut rows = inspections;
         rows.sort_by(|a, b| {
@@ -1056,6 +1086,23 @@ impl<T: TerminalAdapter> Model<T> {
         use crate::realm::components::worktree_progress::{
             WorktreeProgress, WorktreeProgressState,
         };
+        // Esc'd checklist: the user already dismissed this operation's
+        // modal, so its later progress events must NOT resurrect it on
+        // top of whatever they're typing (pre-fix every step re-mounted
+        // with `app.active`, yanking keyboard focus back). Absorb the
+        // update silently — except a *failed* step, which still
+        // surfaces as a footer error so a dismissed checklist can't
+        // hide a broken provision. A DIFFERENT session starting to
+        // provision is a new operation: release the marker and show
+        // its checklist normally.
+        if self.worktree_progress_dismissed.as_ref() == Some(&session_key) {
+            if let lazybox_ipc::WorktreeStepStatus::Failed(err) = &status {
+                self.worktree_progress_dismissed = None;
+                self.flash_error(format!("✗ worktree setup failed — {err}"));
+            }
+            return;
+        }
+        self.worktree_progress_dismissed = None;
         // A new spawn supersedes any stale checklist (e.g. the previous
         // one errored and the user re-pressed `w`).
         let state = match self.worktree_progress.as_mut() {
@@ -1083,6 +1130,12 @@ impl<T: TerminalAdapter> Model<T> {
         &mut self,
         session_key: &lazybox_core::SessionKey,
     ) {
+        // The operation completed — release any Esc-dismissal marker
+        // for it so the NEXT provision on this workspace gets its
+        // checklist again.
+        if self.worktree_progress_dismissed.as_ref() == Some(session_key) {
+            self.worktree_progress_dismissed = None;
+        }
         if let Some(state) = self.worktree_progress.as_mut()
             && &state.session_key == session_key
             && !state.failed()

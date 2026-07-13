@@ -472,14 +472,21 @@ impl StatusCtx {
     }
 
     /// Drive the polling spinner + termination check from the run
-    /// loop. Cheap; called every iteration. Returns Some(msg) when
-    /// the polling modal wants to be torn down. Caller redraws when
-    /// the inner state actually changed.
-    pub fn polling_tick(&mut self) -> Option<Msg> {
+    /// loop. Cheap; called every iteration. Returns `(msg, advanced)`:
+    /// `msg` is Some when the polling modal wants to be torn down;
+    /// `advanced` is true when a visible indicator actually changed
+    /// this tick (a spinner frame advanced, or a guard cleared one).
+    /// The caller uses `advanced` as its redraw gate — the old shape
+    /// redrew the whole UI on every ~16ms run-loop heartbeat for the
+    /// entire duration of a poll/provision just because an indicator
+    /// *existed*, even though the glyph only moves at the 80ms
+    /// cadence enforced here.
+    pub fn polling_tick(&mut self) -> (Option<Msg>, bool) {
         if self.polling_last_tick.elapsed() < POLLING_TICK_INTERVAL {
-            return None;
+            return (None, false);
         }
         self.polling_last_tick = Instant::now();
+        let mut advanced = false;
         // Background-spinner cadence too — PollProgress events are
         // bursty (zero between steps for several hundred ms), so a
         // pure event-driven advance freezes the glyph between
@@ -487,6 +494,7 @@ impl StatusCtx {
         // the initial-poll spinner already has.
         if let Some(bg) = self.bg_poll.as_mut() {
             bg.spinner_idx = bg.spinner_idx.wrapping_add(1);
+            advanced = true;
         }
         // Same cadence for the spawn spinner — there are no progress
         // events during worktree provisioning, so without advancing
@@ -494,13 +502,19 @@ impl StatusCtx {
         // wait, defeating the "something is happening" reassurance.
         if let Some(sp) = self.spawning.as_mut() {
             sp.spinner_idx = sp.spinner_idx.wrapping_add(1);
+            advanced = true;
         }
         // Also gc a stale bg_poll (dropped PollCompleted) + a stale
-        // spawn indicator (dropped TerminalSpawned).
-        let _ = self.tick_bg_poll();
-        let _ = self.tick_spawning();
-        let polling = self.polling.as_mut()?;
-        polling.tick_direct()
+        // spawn indicator (dropped TerminalSpawned). Clearing an
+        // indicator is itself a visible change.
+        if self.tick_bg_poll() {
+            advanced = true;
+        }
+        if self.tick_spawning() {
+            advanced = true;
+        }
+        let msg = self.polling.as_mut().and_then(|p| p.tick_direct());
+        (msg, advanced)
     }
 
     /// Tear down the polling modal. Returns true if there was one to
@@ -533,7 +547,9 @@ mod tests {
     fn empty_status_is_noop_on_tick() {
         let mut s = StatusCtx::new();
         assert!(!s.tick_notice());
-        assert!(s.polling_tick().is_none());
+        let (msg, advanced) = s.polling_tick();
+        assert!(msg.is_none());
+        assert!(!advanced, "nothing to animate — no redraw request");
         assert!(!s.dismiss_polling());
     }
 
@@ -736,9 +752,34 @@ mod tests {
         // Backdate the heartbeat so the cadence gate (80ms) opens.
         s.polling_last_tick = Instant::now() - Duration::from_millis(200);
         let before = s.spawning.as_ref().unwrap().spinner_idx;
-        let _ = s.polling_tick();
+        let (_, advanced) = s.polling_tick();
         let after = s.spawning.as_ref().unwrap().spinner_idx;
         assert_eq!(after, before + 1, "spinner glyph advances on heartbeat");
+        assert!(advanced, "a moved glyph must request a redraw");
+    }
+
+    /// Redraw gating for the run loop (spinner-driven re-render storm):
+    /// a live indicator whose 80ms cadence gate hasn't opened yet must
+    /// NOT report `advanced` — the glyph didn't move, so a ~16ms
+    /// heartbeat between frames has nothing to repaint.
+    #[test]
+    fn polling_tick_between_frames_does_not_request_redraw() {
+        let mut s = StatusCtx::new();
+        s.note_spawning(
+            "claude",
+            "test:ws".into(),
+            TerminalKind::Agent("claude".into()),
+            0,
+        );
+        s.note_poll_progress("github", "Querying…");
+        // Fresh heartbeat: the 80ms cadence gate is closed.
+        s.polling_last_tick = Instant::now();
+        let (msg, advanced) = s.polling_tick();
+        assert!(msg.is_none());
+        assert!(
+            !advanced,
+            "indicator exists but its glyph didn't move — no redraw"
+        );
     }
 
     #[test]

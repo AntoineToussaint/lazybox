@@ -249,7 +249,56 @@ impl<T: TerminalAdapter> Model<T> {
                         self.apply_merge_latch(ws);
                     }
                 }
-                _ => {}
+                // Deliberately ignored: the latch only patches
+                // workspace payloads, and no other variant carries
+                // one. Exhaustive on purpose — a new Event variant
+                // must be classified here (does it carry workspaces
+                // needing the merge latch?) before this compiles.
+                IpcEvent::ViewerIdentities { .. }
+                | IpcEvent::WorkspaceRemoved(_)
+                | IpcEvent::ProjectUpserted(_)
+                | IpcEvent::ProjectRemoved(_)
+                | IpcEvent::WorkspaceOutOfScope { .. }
+                | IpcEvent::WorkspaceMergePending { .. }
+                | IpcEvent::WorkspaceMerged { .. }
+                | IpcEvent::PrMerged { .. }
+                | IpcEvent::PrMergeFailed { .. }
+                | IpcEvent::IssueClosed { .. }
+                | IpcEvent::IssueCloseFailed { .. }
+                | IpcEvent::MergedPrRemovable { .. }
+                | IpcEvent::RepoLabels { .. }
+                | IpcEvent::SessionCreated(_)
+                | IpcEvent::WorktreeProgress { .. }
+                | IpcEvent::SessionEnded { .. }
+                | IpcEvent::TerminalSpawned { .. }
+                | IpcEvent::TerminalOutput { .. }
+                | IpcEvent::TerminalResync { .. }
+                | IpcEvent::TerminalExited { .. }
+                | IpcEvent::TerminalFocusRequested { .. }
+                | IpcEvent::TerminalsRebadged { .. }
+                | IpcEvent::AgentState { .. }
+                | IpcEvent::ProviderError { .. }
+                | IpcEvent::PollCompleted { .. }
+                | IpcEvent::PollProgress { .. }
+                | IpcEvent::Notification { .. }
+                | IpcEvent::CleanWorktreesCompleted { .. }
+                | IpcEvent::WorktreesInspected { .. }
+                | IpcEvent::OrphanedWorktreeDeleted { .. }
+                | IpcEvent::AgentRunStarted { .. }
+                | IpcEvent::AgentRawJson { .. }
+                | IpcEvent::AgentDebug { .. }
+                | IpcEvent::AgentAssistantTextDelta { .. }
+                | IpcEvent::AgentToolCallStarted { .. }
+                | IpcEvent::AgentToolCallDelta { .. }
+                | IpcEvent::AgentToolCallFinished { .. }
+                | IpcEvent::AgentPermissionRequest { .. }
+                | IpcEvent::AgentUserQuestion { .. }
+                | IpcEvent::AgentUsage { .. }
+                | IpcEvent::AgentTurnFinished { .. }
+                | IpcEvent::AgentRunFinished { .. }
+                | IpcEvent::ProviderCredentialUpdated { .. }
+                | IpcEvent::ProviderCredentialRemoved { .. }
+                | IpcEvent::ProviderCredentialsListed { .. } => {}
             }
         }
         // Agent-state pings repeat at the detector's cadence while an
@@ -647,7 +696,57 @@ impl<T: TerminalAdapter> Model<T> {
             } if !source.starts_with("spawn") => {
                 self.status.sync.note_error(source, kind, message, detail);
             }
-            _ => {}
+            // Spawn-sourced errors fall through the guard above —
+            // they're spawn failures, not sync attempts.
+            IpcEvent::ProviderError { .. } => {}
+            // Deliberately ignored: not sync-attempt outcomes.
+            // Exhaustive on purpose — a new Event variant must be
+            // classified here before this compiles.
+            IpcEvent::Snapshot { .. }
+            | IpcEvent::ViewerIdentities { .. }
+            | IpcEvent::WorkspaceUpserted(_)
+            | IpcEvent::WorkspaceRemoved(_)
+            | IpcEvent::ProjectUpserted(_)
+            | IpcEvent::ProjectRemoved(_)
+            | IpcEvent::WorkspaceOutOfScope { .. }
+            | IpcEvent::WorkspaceMergePending { .. }
+            | IpcEvent::WorkspaceMerged { .. }
+            | IpcEvent::PrMerged { .. }
+            | IpcEvent::PrMergeFailed { .. }
+            | IpcEvent::IssueClosed { .. }
+            | IpcEvent::IssueCloseFailed { .. }
+            | IpcEvent::MergedPrRemovable { .. }
+            | IpcEvent::RepoLabels { .. }
+            | IpcEvent::SessionCreated(_)
+            | IpcEvent::WorktreeProgress { .. }
+            | IpcEvent::SessionEnded { .. }
+            | IpcEvent::TerminalSpawned { .. }
+            | IpcEvent::TerminalOutput { .. }
+            | IpcEvent::TerminalResync { .. }
+            | IpcEvent::TerminalExited { .. }
+            | IpcEvent::TerminalFocusRequested { .. }
+            | IpcEvent::TerminalsRebadged { .. }
+            | IpcEvent::AgentState { .. }
+            | IpcEvent::PollProgress { .. }
+            | IpcEvent::Notification { .. }
+            | IpcEvent::CleanWorktreesCompleted { .. }
+            | IpcEvent::WorktreesInspected { .. }
+            | IpcEvent::OrphanedWorktreeDeleted { .. }
+            | IpcEvent::AgentRunStarted { .. }
+            | IpcEvent::AgentRawJson { .. }
+            | IpcEvent::AgentDebug { .. }
+            | IpcEvent::AgentAssistantTextDelta { .. }
+            | IpcEvent::AgentToolCallStarted { .. }
+            | IpcEvent::AgentToolCallDelta { .. }
+            | IpcEvent::AgentToolCallFinished { .. }
+            | IpcEvent::AgentPermissionRequest { .. }
+            | IpcEvent::AgentUserQuestion { .. }
+            | IpcEvent::AgentUsage { .. }
+            | IpcEvent::AgentTurnFinished { .. }
+            | IpcEvent::AgentRunFinished { .. }
+            | IpcEvent::ProviderCredentialUpdated { .. }
+            | IpcEvent::ProviderCredentialRemoved { .. }
+            | IpcEvent::ProviderCredentialsListed { .. } => {}
         }
         // Background-poll indicator. Lights up whenever the daemon
         // emits PollProgress (any cycle, initial or not); clears on
@@ -667,6 +766,13 @@ impl<T: TerminalAdapter> Model<T> {
                     // didn't ask for them) stay silent.
                     if self.pending_refresh_ack {
                         self.pending_refresh_ack = false;
+                        // Release the recovered provider's sticky
+                        // "✗ sync failed" banner FIRST — the
+                        // severity-aware `flash` refuses to let an
+                        // Info displace a live Permanent, so without
+                        // this the "✓ sync ok" would be routed to the
+                        // log and the stale red banner would stay up.
+                        self.clear_sync_error_if_recovered(source);
                         self.flash_info(format!("✓ sync ok — {count} tasks from {source}"));
                     } else {
                         // Sync recovered on an auto-cycle: if a sticky
@@ -701,9 +807,39 @@ impl<T: TerminalAdapter> Model<T> {
                         // hang — surface the error in the footer and
                         // tear it down. `ProviderError` carries no
                         // session, so this clears whichever checklist
-                        // is up (only ever one).
+                        // is up (only ever one). Also release any Esc-
+                        // dismissal marker — the op is dead.
+                        self.worktree_progress_dismissed = None;
                         self.force_dismiss_worktree_progress();
                         self.flash_error(format!("✗ spawn failed — {message}"));
+                    } else if source == "repo-labels" {
+                        self.handle_repo_labels_failed(message);
+                    } else if let Some(action) = mutation_failure_label(source) {
+                        // A user-initiated GitHub mutation was rejected
+                        // (or never reached the provider). Pre-fix the
+                        // client had already flashed optimistic success
+                        // ("requested N reviewer(s)", "set labels…") at
+                        // command-send time and the rejection went to
+                        // the Shift-D sync log only — the user believed
+                        // the mutation landed. Surface it like
+                        // `PrMergeFailed`: a Permanent, named error.
+                        if source == "reply"
+                            && let Some(body) = self.last_reply_body.take()
+                        {
+                            // The compose textarea was consumed on
+                            // submit — park the lost text in the
+                            // durable messages log so it's recoverable.
+                            self.status.messages.record(
+                                &format!("unsent reply text: {body}"),
+                                crate::realm::components::footer::NoticeSeverity::Info,
+                            );
+                            self.flash_error(format!(
+                                "✗ reply failed — {message} · your text is in the \
+                                 messages log (Shift-M)"
+                            ));
+                        } else {
+                            self.flash_error(format!("✗ {action} failed — {message}"));
+                        }
                     }
                     // Manual refresh failed — convert the ack flag
                     // into a "sync failed" notice so the user
@@ -717,7 +853,54 @@ impl<T: TerminalAdapter> Model<T> {
                         );
                     }
                 }
-                _ => {}
+                // Deliberately ignored: no poll-indicator / mutation-
+                // failure semantics. Exhaustive on purpose — a new
+                // Event variant must be classified here before this
+                // compiles.
+                IpcEvent::Snapshot { .. }
+                | IpcEvent::ViewerIdentities { .. }
+                | IpcEvent::WorkspaceUpserted(_)
+                | IpcEvent::WorkspaceRemoved(_)
+                | IpcEvent::ProjectUpserted(_)
+                | IpcEvent::ProjectRemoved(_)
+                | IpcEvent::WorkspaceOutOfScope { .. }
+                | IpcEvent::WorkspaceMergePending { .. }
+                | IpcEvent::WorkspaceMerged { .. }
+                | IpcEvent::PrMerged { .. }
+                | IpcEvent::PrMergeFailed { .. }
+                | IpcEvent::IssueClosed { .. }
+                | IpcEvent::IssueCloseFailed { .. }
+                | IpcEvent::MergedPrRemovable { .. }
+                | IpcEvent::RepoLabels { .. }
+                | IpcEvent::SessionCreated(_)
+                | IpcEvent::WorktreeProgress { .. }
+                | IpcEvent::SessionEnded { .. }
+                | IpcEvent::TerminalSpawned { .. }
+                | IpcEvent::TerminalOutput { .. }
+                | IpcEvent::TerminalResync { .. }
+                | IpcEvent::TerminalExited { .. }
+                | IpcEvent::TerminalFocusRequested { .. }
+                | IpcEvent::TerminalsRebadged { .. }
+                | IpcEvent::AgentState { .. }
+                | IpcEvent::Notification { .. }
+                | IpcEvent::CleanWorktreesCompleted { .. }
+                | IpcEvent::WorktreesInspected { .. }
+                | IpcEvent::OrphanedWorktreeDeleted { .. }
+                | IpcEvent::AgentRunStarted { .. }
+                | IpcEvent::AgentRawJson { .. }
+                | IpcEvent::AgentDebug { .. }
+                | IpcEvent::AgentAssistantTextDelta { .. }
+                | IpcEvent::AgentToolCallStarted { .. }
+                | IpcEvent::AgentToolCallDelta { .. }
+                | IpcEvent::AgentToolCallFinished { .. }
+                | IpcEvent::AgentPermissionRequest { .. }
+                | IpcEvent::AgentUserQuestion { .. }
+                | IpcEvent::AgentUsage { .. }
+                | IpcEvent::AgentTurnFinished { .. }
+                | IpcEvent::AgentRunFinished { .. }
+                | IpcEvent::ProviderCredentialUpdated { .. }
+                | IpcEvent::ProviderCredentialRemoved { .. }
+                | IpcEvent::ProviderCredentialsListed { .. } => {}
             }
         }
         // CleanWorktrees finished — replace the "cleaning…" notice
@@ -781,31 +964,10 @@ impl<T: TerminalAdapter> Model<T> {
             if let IpcEvent::TerminalSpawned { session_key, .. } = &event {
                 self.queue_worktree_progress_dismiss(session_key);
             }
-            // A terminal just appeared — auto-focus the Terminals
-            // pane so the user can start typing immediately, and
-            // clear any legacy "Spawning…" footer notice that was set
-            // when the matching Spawn command was sent. The animated
-            // spawn *spinner* is NOT cleared here: it's a projection of
-            // the live terminal set (recomputed at the tail of this
-            // function via `recompute_spawn_spinner`), so a spawn event
-            // for an unrelated workspace can't clear the wrong spinner
-            // and a missing one can't strand it (#206).
-            self.focus = PaneFocus::Terminals;
-            self.set_focus_attr();
-            self.status.clear_spawning_notice();
-            self.needs_pane_sync = true;
-            // Pinned spawn-follow: a `w` press recorded the workspace it
-            // targeted. When that workspace's terminal finally lands —
-            // possibly seconds later after a cold worktree provision, and
-            // possibly after the user navigated elsewhere — pull the
-            // cursor back to it and mark the new terminal as the tab to
-            // activate, so `w` reliably ends on the freshly-spawned agent
-            // rather than wherever the cursor drifted. `pending_focus_terminal`
-            // is applied by the upcoming `sync_panes`, after
-            // `set_active_session` has rebuilt the followed workspace's
-            // visible terminal set. `TerminalFocusRequested` (singleton
-            // guard: the agent already existed) carries no session key, so
-            // recover it from the terminal's own slot.
+            // Recover the spawned terminal's (session, id) pair.
+            // `TerminalFocusRequested` (singleton guard: the agent
+            // already existed) carries no session key, so recover it
+            // from the terminal's own slot.
             let spawned = match &event {
                 IpcEvent::TerminalSpawned {
                     session_key,
@@ -818,6 +980,58 @@ impl<T: TerminalAdapter> Model<T> {
                     .map(|sk| (sk.clone(), *terminal_id)),
                 _ => None,
             };
+            // A terminal appeared — auto-focus the Terminals pane so
+            // the user can start typing immediately, but ONLY when
+            // this client actually asked for the spawn (correlated via
+            // the spawn spinner / follow pin / deferred-editor stash;
+            // in multi-client mode every client receives every
+            // `TerminalSpawned`, and pre-fix another client's spawn
+            // yanked focus out from under whatever this one was
+            // doing). Never steal focus while an interactive modal is
+            // mounted or the sidebar `/` search is being typed — a
+            // keystroke mid-word must not land in a fresh shell. The
+            // provisioning checklist is exempt from the modal guard:
+            // it's a progress overlay for this very spawn, and the
+            // whole point of `w` is landing in the agent behind it.
+            let requested_here = spawned.as_ref().is_some_and(|(sk, _)| {
+                self.status
+                    .spawning
+                    .as_ref()
+                    .is_some_and(|sp| &sp.session_key == sk)
+                    || self.spawn_follow_to.as_ref() == Some(sk)
+                    || self
+                        .setup
+                        .pending_editor_launch
+                        .as_ref()
+                        .is_some_and(|(k, _)| k == sk)
+            });
+            let interactive_modal_up = self
+                .modal_stack
+                .iter()
+                .any(|id| *id != Id::WorktreeProgress);
+            if requested_here && !interactive_modal_up && !self.sidebar.search_editing() {
+                self.focus = PaneFocus::Terminals;
+                self.set_focus_attr();
+            }
+            // Clear any legacy "Spawning…" footer notice that was set
+            // when the matching Spawn command was sent. The animated
+            // spawn *spinner* is NOT cleared here: it's a projection of
+            // the live terminal set (recomputed at the tail of this
+            // function via `recompute_spawn_spinner`), so a spawn event
+            // for an unrelated workspace can't clear the wrong spinner
+            // and a missing one can't strand it (#206).
+            self.status.clear_spawning_notice();
+            self.needs_pane_sync = true;
+            // Pinned spawn-follow: a `w` press recorded the workspace it
+            // targeted. When that workspace's terminal finally lands —
+            // possibly seconds later after a cold worktree provision, and
+            // possibly after the user navigated elsewhere — pull the
+            // cursor back to it and mark the new terminal as the tab to
+            // activate, so `w` reliably ends on the freshly-spawned agent
+            // rather than wherever the cursor drifted. `pending_focus_terminal`
+            // is applied by the upcoming `sync_panes`, after
+            // `set_active_session` has rebuilt the followed workspace's
+            // visible terminal set.
             if let Some((spawned_key, terminal_id)) = spawned
                 && self.spawn_follow_to.as_ref() == Some(&spawned_key)
             {
@@ -844,6 +1058,22 @@ impl<T: TerminalAdapter> Model<T> {
         } else {
             self.needs_pane_sync = true;
         }
+        // Focus mode needs a live terminal to fill the screen. If the
+        // focused workspace's last terminal just exited, drop back to
+        // the three-pane view instead of stranding the user on a
+        // near-fullscreen empty pane with no hint (mirrors the
+        // no-terminal fallback in `jump_to_workspace_key`).
+        if self.focus_mode
+            && matches!(&event, IpcEvent::TerminalExited { .. })
+            && self.terminals.active_terminal_id().is_none()
+        {
+            self.focus_mode = false;
+            if self.focus == PaneFocus::Terminals {
+                self.focus = PaneFocus::Sidebar;
+                self.set_focus_attr();
+            }
+            self.flash_hint("terminal exited — left focus mode");
+        }
         // Same projection as the spawn spinner: if the terminal stack
         // already proves the worktree-backed session exists, queue the
         // checklist dismissal even when the specific TerminalSpawned
@@ -853,6 +1083,60 @@ impl<T: TerminalAdapter> Model<T> {
         // waiting for. Recompute the spinner from the now-current
         // terminal set rather than trusting a single clear event (#206).
         self.recompute_spawn_spinner();
+        self.redraw = true;
+    }
+
+    /// The daemon couldn't fetch the repo's label set for a pending
+    /// `g l` request (`ProviderError { source: "repo-labels" }`).
+    /// Pre-fix the server broadcast nothing on this failure and the
+    /// stash stayed armed forever — the picker just never appeared.
+    /// Now: consume the stash and fall back to the documented degraded
+    /// picker built from the labels already on the task, so the user
+    /// can still toggle/remove those; when the task carries no labels
+    /// at all there's nothing to pick from, so surface a clear error
+    /// instead.
+    fn handle_repo_labels_failed(&mut self, message: &str) {
+        let Some(workspace_key) = self.pending_labels_request.take() else {
+            // Not our request (another client's `g l`, or the user
+            // already dismissed) — nothing to do.
+            return;
+        };
+        // Union of the PR's + first issue's labels, deduped by name —
+        // the same sources `mount_manage_labels` pre-checks.
+        let mut labels: Vec<lazybox_core::Label> = Vec::new();
+        if let Some(ws) = self
+            .sidebar
+            .workspace_iter()
+            .find(|(k, _)| k.as_str() == workspace_key.as_str())
+            .map(|(_, w)| w)
+        {
+            let mut push = |l: &lazybox_core::Label| {
+                if !labels.iter().any(|e| e.name == l.name) {
+                    labels.push(l.clone());
+                }
+            };
+            if let Some(pr) = &ws.pr {
+                for l in &pr.labels {
+                    push(l);
+                }
+            }
+            if let Some(issue) = ws.gh_issues.first() {
+                for l in &issue.labels {
+                    push(l);
+                }
+            }
+        }
+        if labels.is_empty() {
+            self.flash_error(format!("✗ couldn't load repo labels — {message}"));
+        } else {
+            self.mount_manage_labels(workspace_key, labels);
+            // The mount can refuse (another modal owns the stack —
+            // see the don't-preempt guard); only advertise the
+            // degraded picker when it's actually up.
+            if matches!(self.modal_stack.last(), Some(Id::ManageLabels)) {
+                self.flash_hint("repo labels unavailable — showing this task's labels only");
+            }
+        }
         self.redraw = true;
     }
 
@@ -1061,22 +1345,20 @@ impl<T: TerminalAdapter> Model<T> {
     /// Flips `redraw` when:
     /// - the modal tick produced a termination message (caller will
     ///   apply it), OR
-    /// - a background-poll spinner is active (the spinner glyph +
-    ///   the `· Ns` elapsed counter both need a re-render every
-    ///   tick or the user sees `4s` frozen forever even though the
-    ///   poll is still in flight).
+    /// - an indicator's glyph / elapsed label actually advanced this
+    ///   tick (the `StatusCtx` heartbeat runs at an 80ms cadence). The
+    ///   old gate was "an indicator exists", which forced a full
+    ///   re-render on every ~16ms run-loop heartbeat for the entire
+    ///   duration of a poll or provision — 4 of every 5 of those
+    ///   frames repainted an unchanged screen.
     pub fn polling_tick(&mut self) -> Option<Msg> {
-        let msg = self.status.polling_tick();
+        let (msg, spinner_advanced) = self.status.polling_tick();
         // Backstop the projection: if the spawn's terminal slipped in
         // without a daemon event reaching `handle_daemon_event` (e.g. it
         // already existed when the spawn was sent), the idle tick still
         // clears the spinner.
         let cleared_spawn = self.recompute_spawn_spinner();
-        let needs_redraw = msg.is_some()
-            || cleared_spawn
-            || self.status.bg_poll.is_some()
-            || self.status.spawning.is_some();
-        if needs_redraw {
+        if msg.is_some() || cleared_spawn || spinner_advanced {
             self.redraw = true;
         }
         msg
@@ -1221,5 +1503,27 @@ impl<T: TerminalAdapter> Model<T> {
             self.focus = PaneFocus::Terminals;
             self.set_focus_attr();
         }
+    }
+}
+
+/// Map a `ProviderError` source string to the user-facing verb of the
+/// GitHub mutation that failed, for the "✗ <action> failed — <reason>"
+/// Permanent notice. `None` for sources that are NOT user-initiated
+/// mutations (poll cycles, spawn paths, worktree provisioning, agent
+/// runs …) — those keep their existing handling. The strings mirror
+/// the daemon's `emit_err` sources in
+/// `crates/server/src/polling/handlers.rs`.
+fn mutation_failure_label(source: &str) -> Option<&'static str> {
+    match source {
+        "reviewers" => Some("request reviewers"),
+        "assignees" => Some("update assignees"),
+        "labels" => Some("update labels"),
+        "reply" => Some("reply"),
+        // Pre-flight merge / close failures (workspace lookup, provider
+        // build). The GitHub-rejected cases arrive as the dedicated
+        // `PrMergeFailed` / `IssueCloseFailed` events instead.
+        "merge" => Some("merge"),
+        "close-issue" => Some("close issue"),
+        _ => None,
     }
 }

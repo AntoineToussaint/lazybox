@@ -186,13 +186,19 @@ fn browser_argv(url: &str, browser: Option<&str>) -> (String, Vec<String>) {
 /// workspaces and right-clicked links in the terminal grid.
 ///
 /// Unlike the editor launchers, this does **not** detach via
-/// `setsid()`. The launcher is a short-lived hand-off process — the
-/// real browser is re-parented by the OS (Launch Services on macOS,
-/// the desktop elsewhere) — so detaching buys nothing, and a fresh
-/// session severs the macOS GUI bootstrap the launcher needs to reach
-/// Launch Services. We wait for the launcher and surface a non-zero
-/// exit (with its stderr) instead of nulling it, so a failed open is a
-/// visible error rather than silence.
+/// `setsid()`. The launcher is usually a short-lived hand-off process —
+/// the real browser is re-parented by the OS (Launch Services on
+/// macOS, the desktop elsewhere) — and a fresh session severs the
+/// macOS GUI bootstrap the launcher needs to reach Launch Services.
+///
+/// It also does **not** wait for the child. This runs on the single
+/// UI thread, and with a configured `browser` binary on Linux the
+/// child IS the browser — the old `.output()` blocked the entire TUI
+/// until the browser exited. Instead the launcher is spawned like the
+/// editors (`spawn` + drop the handle) and a background thread reaps
+/// it, logging a non-zero exit to `/tmp/lazybox.log`. `Err` therefore
+/// only means "could not even start `program`"; a launcher that
+/// starts and then fails is log-only.
 pub fn open_url(url: &str, browser: Option<&str>) -> std::io::Result<()> {
     // Minimal allow-list: must be http(s) so a malformed task URL
     // can't be coerced into running an arbitrary shell command.
@@ -203,21 +209,28 @@ pub fn open_url(url: &str, browser: Option<&str>) -> std::io::Result<()> {
         ));
     }
     let (program, args) = browser_argv(url, browser);
-    let output = std::process::Command::new(&program)
+    let mut child = std::process::Command::new(&program)
         .args(&args)
         .stdin(std::process::Stdio::null())
-        .output()?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let detail = String::from_utf8_lossy(&output.stderr);
-    let detail = detail.trim();
-    let msg = if detail.is_empty() {
-        format!("`{program}` exited with {}", output.status)
-    } else {
-        format!("`{program}` failed: {detail}")
-    };
-    Err(std::io::Error::other(msg))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    // Reap off-thread so the child never zombifies and a failed
+    // launcher still leaves a breadcrumb — without ever blocking the
+    // caller. Detached thread: it exits with the child (or with the
+    // process, whichever comes first).
+    std::thread::Builder::new()
+        .name("lazybox-open-url".into())
+        .spawn(move || match child.wait() {
+            Ok(status) if !status.success() => {
+                tracing::warn!(%program, %status, "browser launcher exited non-zero");
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(%program, "browser launcher wait failed: {e}"),
+        })
+        .map(|_| ())
+        .unwrap_or_else(|e| tracing::warn!("open_url reaper thread spawn failed: {e}"));
+    Ok(())
 }
 
 /// Build the argv (everything after the command) for opening `file`
@@ -428,6 +441,23 @@ mod tests {
         // Returns before spawning anything, so this is safe to run in CI.
         let err = open_url("file:///etc/passwd", None).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    /// On Linux a configured browser is exec'd directly, so a missing
+    /// binary must surface as a spawn error — the ONLY error the
+    /// detached launch still reports (a launcher that starts and then
+    /// fails is log-only, and `open_url` never blocks on the child).
+    /// macOS routes through `open -a`, so the equivalent failure
+    /// happens post-spawn there and this test doesn't apply.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn open_url_reports_missing_browser_binary_at_spawn() {
+        let err = open_url(
+            "https://x.test/pr/1",
+            Some("/definitely/not/a/real/browser-binary"),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     }
 
     #[cfg(target_os = "macos")]

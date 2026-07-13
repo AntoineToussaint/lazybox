@@ -167,6 +167,18 @@ impl Right {
         self.inner.comment_cursor()
     }
 
+    /// Jump the activity cursor to the first row — the catalog's
+    /// `ActivityTop` dispatch (`g` under Right focus).
+    pub fn activity_cursor_top(&mut self) {
+        self.inner.activity_cursor_top();
+    }
+
+    /// Jump the activity cursor to the last row — the catalog's
+    /// `ActivityBottom` dispatch (`Shift-G` under Right focus).
+    pub fn activity_cursor_bottom(&mut self) {
+        self.inner.activity_cursor_bottom();
+    }
+
     /// Drop the multi-select set. Called by `w` dispatch once the
     /// selection has been consumed into an agent spawn.
     pub fn clear_activity_selection(&mut self) {

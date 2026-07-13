@@ -31,6 +31,44 @@ pub type SetupSaveResult = anyhow::Result<Option<std::path::PathBuf>>;
 /// caching state that never hit disk.
 pub type SetupCompleteHook = Arc<dyn Fn(SetupOutcome) -> SetupSaveResult + Send + Sync>;
 
+/// Tab a [`SettingsAction`] lives under in the Settings window (`,`).
+/// The old palette was one flat `Choice` list — 11+ rows, growing two
+/// per enabled provider, with "change theme" sitting next to "wipe
+/// worktrees". Grouping by concern is what makes the window
+/// scannable; the order of [`SettingsSection::ALL`] is the tab order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsSection {
+    /// Provider membership + per-provider scopes and filters.
+    Providers,
+    /// Agent roster, default agent, permission mode, LLM gateway.
+    Agents,
+    /// Theme + snippets — how lazybox looks and what it types for you.
+    Appearance,
+    /// Disk admin + the full-wizard escape hatch. Deliberately last:
+    /// destructive-adjacent actions shouldn't share a screen with
+    /// "change theme".
+    Maintenance,
+}
+
+impl SettingsSection {
+    /// Tab order in the Settings window.
+    pub const ALL: [SettingsSection; 4] = [
+        SettingsSection::Providers,
+        SettingsSection::Agents,
+        SettingsSection::Appearance,
+        SettingsSection::Maintenance,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Providers => "Providers",
+            Self::Agents => "Agents",
+            Self::Appearance => "Appearance",
+            Self::Maintenance => "Maintenance",
+        }
+    }
+}
+
 /// One row in the Settings palette (`,` opens this).
 #[derive(Debug, Clone)]
 pub enum SettingsAction {
@@ -57,8 +95,10 @@ pub enum SettingsAction {
     /// design).
     EditSnippets,
     /// Open the live-preview theme picker (same modal as the `t`
-    /// shortcut). Persists the choice to `ui.theme`.
-    EditTheme,
+    /// shortcut). Persists the choice to `ui.theme`. Carries the
+    /// active theme name so the row shows current state like its
+    /// siblings.
+    EditTheme { current: String },
     /// Configure the global LLM gateway base URL (`agent.llm_gateway_url`).
     /// Opens a single URL input; persists to `~/.lazybox/config.yaml`.
     /// `set` is whether a URL is currently configured, for the label.
@@ -91,7 +131,7 @@ impl SettingsAction {
                 if *enabled { "on" } else { "off" }
             ),
             Self::EditSnippets => "Browse snippets (]]<key> shortcuts)".into(),
-            Self::EditTheme => "Change theme (live preview)".into(),
+            Self::EditTheme { current } => format!("Change theme (live preview) · {current}"),
             Self::EditLlmGateway { set } => format!(
                 "Configure LLM gateway · {}",
                 if *set { "on" } else { "off" }
@@ -99,6 +139,25 @@ impl SettingsAction {
             Self::FullSetup => "Run the full setup wizard".into(),
             Self::CleanWorktrees => "Clean worktrees (free disk, keep inbox)".into(),
             Self::InspectWorktrees => "Inspect worktrees…".into(),
+        }
+    }
+
+    /// Which Settings tab this action lives under. Every action maps
+    /// to exactly one section — adding a `SettingsAction` variant is a
+    /// compile error here until it's filed somewhere.
+    pub fn section(&self) -> SettingsSection {
+        match self {
+            Self::EditScopes { .. } | Self::EditFilters { .. } | Self::EditProviders => {
+                SettingsSection::Providers
+            }
+            Self::EditAgents
+            | Self::EditDefaultAgent { .. }
+            | Self::ToggleSkipPermissions { .. }
+            | Self::EditLlmGateway { .. } => SettingsSection::Agents,
+            Self::EditTheme { .. } | Self::EditSnippets => SettingsSection::Appearance,
+            Self::FullSetup | Self::CleanWorktrees | Self::InspectWorktrees => {
+                SettingsSection::Maintenance
+            }
         }
     }
 }
@@ -193,6 +252,55 @@ mod tests {
             }
             .label(),
             "Change default agent · codex"
+        );
+    }
+
+    #[test]
+    fn theme_label_names_the_current_theme() {
+        assert_eq!(
+            SettingsAction::EditTheme {
+                current: "Dark".into()
+            }
+            .label(),
+            "Change theme (live preview) · Dark"
+        );
+    }
+
+    #[test]
+    fn sections_group_by_concern_with_maintenance_last() {
+        use super::SettingsSection;
+        assert_eq!(
+            SettingsAction::EditProviders.section(),
+            SettingsSection::Providers
+        );
+        assert_eq!(
+            SettingsAction::EditScopes {
+                provider_id: "github".into(),
+                label: "GitHub".into()
+            }
+            .section(),
+            SettingsSection::Providers
+        );
+        assert_eq!(
+            SettingsAction::EditLlmGateway { set: false }.section(),
+            SettingsSection::Agents
+        );
+        assert_eq!(
+            SettingsAction::EditTheme {
+                current: "Dark".into()
+            }
+            .section(),
+            SettingsSection::Appearance
+        );
+        // Destructive-adjacent admin actions live on the LAST tab so
+        // they never share a screen with appearance tweaks.
+        assert_eq!(
+            SettingsAction::CleanWorktrees.section(),
+            SettingsSection::Maintenance
+        );
+        assert_eq!(
+            SettingsSection::ALL.last().copied(),
+            Some(SettingsSection::Maintenance)
         );
     }
 

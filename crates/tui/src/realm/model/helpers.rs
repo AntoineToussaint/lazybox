@@ -108,9 +108,10 @@ pub(crate) fn paint_selection(
 /// Convert a crossterm `KeyEvent` to a typed `KeyStroke` for catalog
 /// lookup. Uppercase letters auto-shift so `KeyEvent { Char('M'),
 /// no_mods }` produces the same stroke as `KeyEvent { Char('m'),
-/// SHIFT }` — matches the catalog's parser convention. Returns
-/// `None` for codes the catalog doesn't model (function keys,
-/// release events).
+/// SHIFT }` — matches the catalog's parser convention. Function keys
+/// map to `NamedKey::Function(n)` (the catalog parses `F1`..`F12`).
+/// Returns `None` only for codes the catalog doesn't model (media
+/// keys, BackTab, Null, …).
 pub(crate) fn key_event_to_stroke(
     key: crossterm::event::KeyEvent,
 ) -> Option<lazybox_tui_core::action::KeyStroke> {
@@ -271,6 +272,144 @@ pub(crate) fn section_rank(
         (Section::Workspace, PaneFocus::Right) => Some(2),
         _ => None,
     }
+}
+
+/// Human-readable display of one chord (`"g m"`, `"Ctrl-w"`), for the
+/// keymap-validation warnings.
+fn chord_display(chord: &lazybox_tui_core::action::Chord) -> String {
+    use lazybox_tui_core::action::Chord;
+    match chord {
+        Chord::Key(k) => k.display(),
+        Chord::Seq(s) => s.iter().map(|k| k.display()).collect::<Vec<_>>().join(" "),
+    }
+}
+
+/// Startup validation of `ui.action_keys` against the built runtime
+/// catalog (issue: silent keymap misconfiguration). Returns
+/// human-readable warning lines; the caller surfaces them (footer
+/// notice + messages log) and continues — a bad override never
+/// rejects the config, it just stops being silent. Three classes:
+///
+/// 1. **Unknown config keys** — a key that names no catalog row
+///    (typo, or a bare `work_with` where only `work_with.<id>`
+///    exists).
+/// 2. **Ineffective overrides** — the row exists but its keystroke is
+///    consumed by a hardcoded pane arm
+///    (`keys::PANE_NATIVE_KINDS`), so remapping it changes the help
+///    text and nothing else.
+/// 3. **Override-induced collisions** — two rows resolving the same
+///    chord at the same (focus, rank), and the sneakier variant: an
+///    overridden single-key binding whose stroke is also a leader
+///    prefix, which silently makes the whole leader family
+///    unreachable (`refresh: "w"` killing `w c` / `w x` / …).
+pub(crate) fn keymap_config_warnings(
+    overrides: &std::collections::BTreeMap<String, String>,
+    catalog: &[lazybox_tui_core::action::CatalogEntry],
+) -> Vec<String> {
+    use lazybox_tui_core::action::{ActionKind, Chord};
+    use std::collections::{HashMap, HashSet};
+    let mut warnings: Vec<String> = Vec::new();
+    let mut seen_warnings: HashSet<String> = HashSet::new();
+    let mut push = |warnings: &mut Vec<String>, w: String| {
+        if seen_warnings.insert(w.clone()) {
+            warnings.push(w);
+        }
+    };
+
+    // 1 + 2: unknown / ineffective config keys.
+    for key in overrides.keys() {
+        match catalog.iter().find(|e| e.config_key == *key) {
+            None => push(
+                &mut warnings,
+                format!(
+                    "ui.action_keys.{key}: unknown action key — the valid names are the \
+                     `config_key`s the Keys screen (?) lists"
+                ),
+            ),
+            Some(entry) => {
+                if !super::keys::override_takes_effect(entry) {
+                    let site = super::keys::PANE_NATIVE_KINDS
+                        .iter()
+                        .find(|(k, _, _)| *k == entry.kind)
+                        .map(|(_, site, _)| *site)
+                        .unwrap_or("a pane-native handler");
+                    push(
+                        &mut warnings,
+                        format!(
+                            "ui.action_keys.{key}: has no effect — this binding is handled by {site}"
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    // 3a: same-(focus, rank) chord collisions after overrides. The
+    // default catalog is collision-free by test; anything here was
+    // introduced by an override.
+    for focus in [PaneFocus::Sidebar, PaneFocus::Right, PaneFocus::Terminals] {
+        let mut seen: HashMap<(u8, Chord), String> = HashMap::new();
+        for entry in catalog {
+            let Some(rank) = section_rank(entry.section, focus) else {
+                continue;
+            };
+            for chord in &entry.chords {
+                let id = entry.label.to_string();
+                if let Some(prev) = seen.insert((rank, chord.clone()), id.clone()) {
+                    push(
+                        &mut warnings,
+                        format!(
+                            "ui.action_keys: `{}` is bound to both \"{prev}\" and \"{id}\" \
+                             at the same priority under {focus:?} focus — one of them is \
+                             unreachable",
+                            chord_display(chord),
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    // 3b: an overridden single-key binding that shadows a leader
+    // family. Dispatch fires a resolved single-key action instead of
+    // arming a leader (Work being the one deliberate exception), so a
+    // remap like `refresh: "w"` silently kills every `w <key>` chord.
+    // Restricted to overridden entries: the in-tree catalog's own
+    // single-key/leader overlaps (e.g. activity-top `g` vs the
+    // workspace `g *` group under Right focus) are deliberate.
+    for entry in catalog {
+        if !overrides.contains_key(&entry.config_key) || entry.kind == ActionKind::Work {
+            continue;
+        }
+        for chord in &entry.chords {
+            let Chord::Key(stroke) = chord else { continue };
+            for focus in [PaneFocus::Sidebar, PaneFocus::Right] {
+                if section_rank(entry.section, focus).is_none() {
+                    continue;
+                }
+                let dead: Vec<String> = seq_continuations(stroke, focus, catalog)
+                    .iter()
+                    .filter(|(_, e)| e.config_key != entry.config_key)
+                    .map(|(_, e)| e.label.to_string())
+                    .collect();
+                if !dead.is_empty() {
+                    push(
+                        &mut warnings,
+                        format!(
+                            "ui.action_keys.{}: `{}` is also the leader for {} — the \
+                             single-key override fires first under {focus:?} focus, making \
+                             those chords unreachable",
+                            entry.config_key,
+                            stroke.display(),
+                            dead.join(", "),
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    warnings
 }
 
 /// Carve the bottom row off for the footer. Returns
@@ -1096,6 +1235,11 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
         model.tick_working();
         model.tick_terminal_leader();
         model.tick_work_leader();
+        // Surface a dead daemon channel within a frame of the first
+        // failed `send_cmd` — without this a `--connect` client whose
+        // daemon died keeps rendering as if everything works while
+        // every keypress silently goes nowhere.
+        model.tick_daemon_health();
         timings.ticks = ticks_start.elapsed();
 
         // 3. Process tuirealm-side messages (timer ticks for Loading,
@@ -1263,6 +1407,15 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
                 carried = Some(*event);
             }
             Wake::Tick => report_stale_drops(model, &mut stale_tally, &mut perf),
+        }
+        // The event channel closing means the daemon is gone (process
+        // exit, socket torn down). Pre-fix this only flipped the
+        // select branch off and the UI kept rendering as a silent
+        // zombie; raise the persistent disconnect banner instead. The
+        // notice is one-shot latched, so hitting this every iteration
+        // afterwards is free.
+        if !daemon_open {
+            model.note_daemon_disconnected();
         }
     }
     Ok(())

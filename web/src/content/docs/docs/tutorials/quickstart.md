@@ -83,16 +83,18 @@ In the sidebar:
 
 1. Press `j` / `k` to move the selection to a workspace.
 2. Press `Enter` to open it.
-3. Press `c` to spawn a **Claude Code** session — or `s` for a plain **shell**
-   if you'd rather not start an agent yet. `c` needs the `claude` CLI on your
-   `PATH`; `s` always works.
+3. Press `w` to put your **default agent** to work — or `s` for a plain
+   **shell** if you'd rather not start an agent yet. `w` needs the agent's CLI
+   (e.g. `claude`) on your `PATH`; `s` always works. To pick a specific agent,
+   press `a` for the agent menu: `a c` Claude Code, `a x` Codex, `a u` Cursor.
 
 A terminal pane opens, embedded right inside lazybox, running in that
 workspace's own git worktree. Type a command; it runs in the worktree. That's
 the win: lazybox gave the task an isolated worktree and a live terminal, and you
 never left the inbox.
 
-To get back to the sidebar from a terminal, press `]]` (two presses).
+To get back to the sidebar from a terminal, press `]]` (two presses) then `q`
+— `]]` opens a small command menu, and `]]q` exits to the sidebar.
 
 :::note[Don't see anything yet?]
 An empty sidebar right after setup is normal, not a bug:

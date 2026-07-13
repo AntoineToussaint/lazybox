@@ -19,9 +19,9 @@ Logs go to `/tmp/lazybox.log`. Persistent state lives in `~/.lazybox/v2/state.db
 These are enforced in code review:
 
 1. **Files over 1500 lines are unacceptable.** Split aggressively into sibling files. `model.rs` was 4626 lines, now lives in 8 focused files under `crates/tui/src/realm/model/`. Same shape applies elsewhere.
-2. **No `unwrap()` in library crates.** `thiserror` for error types in `crates/{core,auth,events,store,config,git-ops,gh-provider,linear-provider,tui-term,tui-core,ipc,agents,llm-proxy}`. `anyhow` is only allowed in the `lazybox-tui` binary crate.
-3. **Core 4 isolation.** `lazybox-core`, `lazybox-auth`, `lazybox-events`, `lazybox-store` must NOT depend on each other. Provider crates depend on core + auth only.
-4. **Tests with every change.** Every public function has a test; every TUI component has a render snapshot (insta + ratatui `TestBackend`); every bug fix lands with a regression test. See `crates/tui/tests/` for the realm-level effect-contract tests.
+2. **No `unwrap()` in library crates.** `thiserror` for error types in `crates/{core,auth,store,config,git-ops,gh-provider,linear-provider,slack-provider,tui-term,tui-core,ipc,agents,server}`. `anyhow` is only allowed in the `lazybox-tui` binary crate.
+3. **Core library layering.** `lazybox-core` and `lazybox-auth` depend on no internal crate; `lazybox-store` may depend on `lazybox-core` only. Provider crates depend on core + auth only. Guarded by the workspace dep-rules test (`crates/core/tests/dep_rules.rs`).
+4. **Tests with every change.** Every public function has a test; visually complex TUI components carry insta render snapshots (sidebar, themes) and the rest get ratatui `TestBackend` render tests; every bug fix lands with a regression test. See `crates/tui/tests/` for the realm-level effect-contract tests.
 5. **No real subprocesses in tests.** No real `claude` / `sh` / `curl` / `tmux` invocations. Mock at the trait boundary (`Agent`, `SessionBackend`, `CredentialProvider`) or `#[ignore]`-gate.
 6. **Every async test needs a timeout.** Wrap the body in `tokio::time::timeout` — no exceptions. `cargo-nextest` enforces a 10s slow-test budget; relying on it is fine for healthy tests but explicit `timeout` is the rule for ones that historically hung.
 7. **Don't add error handling / fallbacks for scenarios that can't happen.** Trust internal code + framework guarantees. Only validate at system boundaries (user input, external APIs).
@@ -36,7 +36,6 @@ crates/
   # ── shared libraries ────────────────────────────────────────────────
   core/           # Task, Workspace, Project, SessionKey. Source-agnostic.
   auth/           # CredentialProvider trait + chain.
-  events/         # In-process event bus.
   store/          # Store trait + SQLite backend.
   config/         # YAML loader for ~/.lazybox/config.yaml.
   git-ops/        # Worktree manager.
@@ -53,11 +52,10 @@ crates/
   # ── daemon-side ─────────────────────────────────────────────────────
   ipc/            # Command/Event wire types.
   agents/         # Agent trait + claude/codex/cursor/generic.
-  llm-proxy/      # 127.0.0.1 HTTP pass-through.
   server/         # Server library.
 
   # ── client / binary ─────────────────────────────────────────────────
-  tui/            # tuirealm-based TUI client + `lazybox` binary.
+  tui/            # tuirealm-based TUI client + `lazybox` and `lb` binaries.
 ```
 
 More detail in [`CLAUDE.md`](./CLAUDE.md) (architecture decisions, key patterns).
@@ -67,10 +65,11 @@ More detail in [`CLAUDE.md`](./CLAUDE.md) (architecture decisions, key patterns)
 `~/.lazybox/config.yaml`:
 
 ```yaml
-repos:
-  - org: acme
-    only:
-      - widget
+providers:
+  github:
+    filters:
+      - org: acme
+      - repo: acme/widget
 display:
   show_inactive_in_inbox: false
 ui:
@@ -78,8 +77,8 @@ ui:
   long_snooze: 365d
 attention:
   unread: true
-  ci_failure: true
-  changes_requested: true
+  ci_failing: true
+  review_pending: true
 ```
 
 ## Status / known gaps

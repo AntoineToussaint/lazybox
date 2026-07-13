@@ -15,6 +15,8 @@ completion. Pick the one that matches what you need to do.
 - **[Per-repo env and mounts](/docs/how-to/per-repo-env-and-mounts/)** — inject
   environment variables, symlink shared directories, and materialize scripts
   into worktrees.
+- **[Connect Linear](/docs/how-to/linear/)** — bring your Linear issues into
+  the inbox alongside GitHub.
 - **[Remote over SSH](/docs/how-to/remote-over-ssh/)** — run the daemon on one
   machine and the TUI on another over a forwarded Unix socket.
 - **[Mirror to Slack](/docs/how-to/mirror-to-slack/)** — reflect your inbox into

@@ -61,6 +61,7 @@ export default defineConfig({
               label: 'Per-repo env and mounts',
               slug: 'docs/how-to/per-repo-env-and-mounts',
             },
+            { label: 'Connect Linear', slug: 'docs/how-to/linear' },
             { label: 'Remote over SSH', slug: 'docs/how-to/remote-over-ssh' },
             { label: 'Mirror to Slack', slug: 'docs/how-to/mirror-to-slack' },
           ],

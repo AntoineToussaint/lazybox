@@ -19,22 +19,26 @@ any checkout; lazybox does not wrap those actions behind an approval layer.
 
 ## Spawn an agent
 
-With a workspace selected in the sidebar, press one of:
+With a workspace selected in the sidebar, press `a` to open the agent menu
+(a which-key popup), then the agent's key:
 
-| Key | Agent |
+| Chord | Agent |
 | --- | --- |
-| `c` | Claude Code |
-| `x` | Codex |
-| `u` | Cursor |
+| `a c` | Claude Code |
+| `a x` | Codex |
+| `a u` | Cursor |
 | `s` | Plain shell (no agent) |
 
 An embedded terminal opens, running the agent in that workspace's worktree.
-Press `]]` (twice) to return to the sidebar; the session keeps running.
+Press `]]` then `q` to return to the sidebar; the session keeps running.
+(Prefer the old top-level keys? Remap them via `ui.action_keys`, keyed
+`spawn_agent.<id>` — e.g. `spawn_agent.claude: "c"`.)
 
 ## Let lazybox choose the prompt: `w`
 
 Press `w` for **work** instead of picking an agent manually. lazybox spawns
-Claude Code with a prompt tailored to the selected row's current state:
+your **default agent** (`setup.default_agent`, falling back to Claude Code)
+with a prompt tailored to the selected row's current state:
 
 - failing CI → fix CI
 - merge conflict → fix the conflict
@@ -42,6 +46,16 @@ Claude Code with a prompt tailored to the selected row's current state:
 - an issue → implement the issue
 
 This is the fastest way to act on whatever the inbox is telling you about a row.
+
+## Pick a model tier
+
+Both leaders carry model-tier chords: `w S` / `w M` / `w L` run the work
+prompt at a small / medium / large model, and `a S` / `a M` / `a L` spawn the
+default agent at that tier. Claude ships a built-in Haiku / Sonnet / Opus
+menu; other agents define theirs under `agents.<id>.models` in
+`~/.lazybox/config.yaml` (see the
+[configuration reference](/docs/reference/configuration/#agentsid)). The
+picked tier's label rides a `◆ Opus`-style badge on the terminal tab.
 
 ## Autonomous runs and skip-permissions
 

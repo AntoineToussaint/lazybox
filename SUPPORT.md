@@ -13,8 +13,9 @@ For "how do I…", setup help, or sharing your configuration, start a
 Open an [issue](https://github.com/AntoineToussaint/lazybox/issues/new/choose):
 
 - **Bug report** — something is broken. Include a `/tmp/lazybox.log` excerpt
-  (re-run with `RUST_LOG=lazybox=debug` for more), your OS, and the commit you
-  built from.
+  (re-run with `RUST_LOG=lazybox=debug` for more), your OS, and the version
+  you're running (`lazybox --version`; for source builds, the commit you built
+  from).
 - **Feature request** — describe the problem you're hitting, not just the
   feature you have in mind.
 
@@ -25,6 +26,7 @@ architecture notes are in [`CLAUDE.md`](./CLAUDE.md) and `DESIGN.md`.
 
 ## A note on response times
 
-This is an early-adopter project with no release channels yet, so support is
-best-effort and replies may take a while. The more detail you include up front,
+This is an early-adopter, pre-1.0 project — releases ship via the Homebrew tap,
+the `curl | sh` installer, and GitHub Releases, but support is best-effort and
+replies may take a while. The more detail you include up front,
 the faster we can help.

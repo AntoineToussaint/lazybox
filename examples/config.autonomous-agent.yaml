@@ -18,7 +18,7 @@ agent:
   # you are comfortable with worktree-scoped autonomy.
   autonomous_skip_permissions: true
 
-  # Used for interactive agent sessions you start yourself (`c` for Claude).
+  # Used for interactive agent sessions you start yourself (`a c` for Claude).
   # When true, those sessions also skip permission prompts. Leave false if you
   # want to confirm actions while pairing with the agent directly.
   skip_permissions: false

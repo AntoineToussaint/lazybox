@@ -19,21 +19,27 @@ which is the canonical source of truth for defaults and field names.
 
 | Key | Purpose |
 | --- | --- |
+| [`setup`](#setup) | Wizard output: enabled providers / agents, filters, scopes, default agent |
 | [`editors`](#editors) | Override / extend the detected editors |
 | [`repos`](#repos) | Per-repo env, mounts, scripts, branch prefix |
-| [`agent_shortcuts`](#agent_shortcuts) | Single-char keys → agent ids |
-| [`agent`](#agent) | Agent command, args, permission prompts |
+| [`agent`](#agent) | Agent command, args, permission prompts, LLM gateway |
+| [`agents`](#agentsid) | Per-agent overrides — the model-tier menu |
 | [`worktree`](#worktree) | Global mounts, scripts, branch prefix, merged-cleanup |
 | [`terminal`](#terminal) | Terminal escape chord + scrollback behavior |
-| [`ui`](#ui) | View state, key remaps, timings, browser |
+| [`ui`](#ui) | View state, key remaps, keymap preset, theme, timings, browser |
 | [`display`](#display) | Sort, filtering, glyphs |
-| [`attention`](#attention) | Which signals raise the per-repo badge |
+| [`attention`](#attention) | Which signals raise the per-repo badge + notification delivery |
 | [`providers`](#providers) | GitHub polling + filters |
 | [`slack`](#slack) | Slack mirror tokens + channels |
 | [`hooks`](#hooks) | Periodic maintenance scripts |
 | [`mention`](#mention) | Auto-spawn on `@lazybox` mention |
 | [`auto_fix`](#auto_fix) | Auto-fix PRs on CI failure / conflict |
 | [`shell`](#shell) | Shell command for the `s` spawn |
+
+Snippets are **not** part of `config.yaml` — they live in their own files:
+`~/.lazybox/snippets.yaml` (global) and `<repo>/.lazybox/snippets.yaml`
+(repo-local, wins on key conflict). See the
+[snippets guide](https://github.com/AntoineToussaint/lazybox/blob/main/docs/snippets.md).
 
 ## Annotated example
 
@@ -70,10 +76,13 @@ repos:
     # Override the worktree.branch_prefix for this repo only.
     branch_prefix: at        # → at/issue-42
 
-# ── agent_shortcuts ──────────────────────────────────────────────────
-# Single-char keys → agent ids. Defaults: c→claude, x→codex, u→cursor.
-agent_shortcuts:
-  a: aider
+# ── setup ────────────────────────────────────────────────────────────
+# Written by the first-run wizard and the `,` Settings palette; editable
+# by hand.
+setup:
+  providers: [github, linear]
+  agents: [claude, codex]
+  default_agent: claude      # what the `w` (work) key spawns; unset → claude
 
 # ── agent ────────────────────────────────────────────────────────────
 agent:
@@ -81,6 +90,22 @@ agent:
   autonomous_skip_permissions: true
   # Skip permission prompts for interactively spawned agents too.
   skip_permissions: false
+  # Point every spawned agent at your own LLM gateway (injected as
+  # ANTHROPIC_BASE_URL / OPENAI_BASE_URL depending on the agent).
+  llm_gateway_url: "http://gateway.internal"
+
+# ── agents (per-agent overrides) ─────────────────────────────────────
+# Model-tier menu the `w S`/`w M`/`w L` and `a S`/`a M`/`a L` chords pick
+# from. Claude ships a built-in Haiku/Sonnet/Opus menu; other agents
+# define theirs here.
+agents:
+  codex:
+    models:
+      default: M             # tier a bare spawn uses; unset → agent default
+      tiers:
+        - alias: M
+          label: GPT-5
+          args: ["-m", "gpt-5"]
 
 # ── worktree ─────────────────────────────────────────────────────────
 worktree:
@@ -100,12 +125,14 @@ terminal:
 
 # ── ui ───────────────────────────────────────────────────────────────
 ui:
+  keymap_preset: default     # base keymap layer: default | vim
+  theme: Lazybox Dark        # written back by the `t` theme picker
   # Remap any catalog action. Keys are snake_case action ids; values are
   # key-spec strings. Unset actions keep their default binding.
   action_keys:
     merge_pr: Ctrl-m
     refresh: Ctrl-r
-    spawn_shell: t
+    spawn_agent.claude: c    # restore a top-level Claude spawn key
   terminal_escape_char: "]"
   short_snooze: 4h
   long_snooze: 365d
@@ -186,14 +213,19 @@ Provide either `content` or `source` per script, never both.
 See [Per-repo env & mounts](/docs/how-to/per-repo-env-and-mounts/) for a
 walkthrough.
 
-## `agent_shortcuts`
+## `setup`
 
-Single-character keys mapped to agent ids. Press the key in the sidebar to
-spawn that agent on the focused workspace.
+Written by the first-run wizard and the `,` Settings palette; safe to edit by
+hand.
 
-| Type | Default | Description |
-| --- | --- | --- |
-| map of char → string | `c → claude`, `x → codex`, `u → cursor` | Remap the built-ins or add custom CLIs (e.g. `a: aider`). |
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `providers` | list of string | `[]` | Provider ids currently enabled (`github`, `linear`) |
+| `agents` | list of string | `[]` | Agent ids currently enabled (`claude`, `codex`, …) |
+| `filters` | map | `{}` | Per-provider role/type filter keys (e.g. `github: [pr.author, pr.reviewer]`) |
+| `scopes` | map | `{}` | Per-provider scope ids (orgs / repos); empty = all |
+| `default_agent` | string | unset | Agent the `w` (work) shortcut spawns; unset falls back to `claude` |
+| `wizard_completed` | bool | `false` | Set once the wizard finishes, so an all-empty block doesn't re-trigger it |
 
 ## `agent`
 
@@ -206,6 +238,21 @@ spawn that agent on the focused workspace.
 | `asking_patterns` | list of string | `(y/n)`, `do you want`, … | Output substrings that mark the agent as waiting on input |
 | `autonomous_skip_permissions` | bool | `true` | Autonomous `@lazybox` work runs Claude with `--dangerously-skip-permissions` (blast radius bounded to the worktree) |
 | `skip_permissions` | bool | `false` | Skip permission prompts for interactively spawned agents too |
+| `llm_gateway_url` | string | unset | Global LLM-gateway base URL. When set, every spawned agent gets it injected as the base-URL env var its CLI reads (`ANTHROPIC_BASE_URL` for Claude, `OPENAI_BASE_URL` for Codex / Cursor). A per-repo `env` entry for the same var wins. Auth keys are deliberately not managed here. |
+
+## `agents.<id>`
+
+Per-agent overrides keyed by agent id (`claude`, `codex`, …). Today this
+carries the **model-tier menu** the `w S` / `w M` / `w L` and `a S` / `a M` /
+`a L` chords pick from. Agents without an entry fall back to the built-in
+preset — Claude ships Haiku (`S`) / Sonnet (`M`) / Opus (`L`); other agents
+have no built-in menu.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `models.default` | string | unset | Alias of the tier a bare spawn uses; unset → the agent's own default model |
+| `models.tiers` | list | `[]` | Ordered tier menu. Each entry: `alias` (the chord key — a single uppercase letter binds as `Shift`, e.g. `S` → `w S`), `label` (shown in the popup and the `◆` tab badge), `args` (appended to the spawn argv) |
+| `models.priority` | map | `{}` | `high` / `medium` / `low` → tier alias, used when a spawn declares no explicit tier but the task carries a priority |
 
 ## `worktree`
 
@@ -247,9 +294,13 @@ ui:
   action_keys:
     merge_pr: Ctrl-m       # was g m
     refresh: Ctrl-r        # was Shift-R
-    spawn_shell: t         # was s
     quit: Ctrl-q           # single press (default is the q q chord)
+    spawn_agent.claude: c  # restore a top-level Claude spawn key (default a c)
 ```
+
+Agent spawn chords are remapped with `spawn_agent.<agent-id>` keys (the
+defaults are the `a` leader chords: `a c` Claude, `a x` Codex, `a u` Cursor).
+Alternatives are separated by `|` (`"g v | Shift-V"`).
 
 **Key-spec format:**
 
@@ -260,8 +311,10 @@ ui:
 - Named keys: `Tab`, `Enter`, `Esc`, `Space`, `Backspace`, `Up`, `Down`,
   `Left`, `Right`, `Home`, `End`, `PageUp`/`PgUp`, `PageDown`/`PgDn`,
   `Delete`/`Del`, `Insert`.
-- A two-key chord repeats the same key separated by a space (`q q`). Function
-  keys (`F5`) are not supported yet.
+- Function keys `F1`–`F12` (`F5`; `F8` is a shipped default — it toggles mouse
+  capture).
+- Multi-key sequences separate the strokes with a space: a leader chord
+  (`g m`), a double press (`q q`).
 
 **Common action ids** (the full set is the snake_case names of every catalog
 action in
@@ -279,10 +332,10 @@ action in
 | `mark_all_read` | `m` | Mark the workspace read |
 | `toggle_snooze` | `z` | Snooze (~4h) |
 | `merge_pr` | `g m` | Merge the PR |
-| `request_reviewers` | `Shift-V` | Request reviewers |
-| `add_assignees` | `Shift-G` | Change assignees |
-| `manage_labels` | `Shift-L` | Edit labels |
-| `open_in_browser` | `Shift-O` | Open the PR / issue in the browser |
+| `request_reviewers` | `g v` | Request reviewers |
+| `add_assignees` | `g a` | Change assignees |
+| `manage_labels` | `g l` | Edit labels |
+| `open_in_browser` | `g o` | Open the PR / issue in the browser |
 | `archive` | `Shift-X` | Archive the workspace |
 | `new_workspace` | `n` | New pre-PR workspace |
 | `new_project` | `Shift-N` | New project / pick a repo |
@@ -306,12 +359,15 @@ default keymap.
 | `long_snooze` | duration | `365d` | `Shift-Z` long-snooze duration |
 | `log_path` | path | `/tmp/lazybox.log` | Where the client writes its log |
 | `browser` | string | OS default | Preferred browser for `o` / terminal links. macOS: the app name for `open -a` (`"Google Chrome"`); Linux: the executable. |
+| `keymap_preset` | `default` \| `vim` | unset | Base keymap layer shipped in-tree; your `action_keys` still layer on top (`vim` moves pane-cycling to `Ctrl-w`) |
+| `theme` | string | unset | Active UI theme by exact name (`"Lazybox Dark"`, `"Lazybox Light"`, `"High Contrast"`, …). Written back by the `t` theme picker (live preview; `Esc` restores); unknown / unset keeps the default theme. Full theme list: [docs/themes.md](https://github.com/AntoineToussaint/lazybox/blob/main/docs/themes.md). |
 | `show_tips` | bool | `true` | Show progressive feature-discovery tips (opt-out) |
 
 Duration values take a unit suffix (`30s`, `15m`, `4h`, `365d`).
 
-`tour_seen` and `tips_seen` also live here but are managed by lazybox; you
-rarely set them by hand.
+`tour_seen` and `tips_seen` (the list of tip ids already shown, so a tip never
+repeats) also live here but are managed by lazybox; you rarely set them by
+hand.
 
 ## `display`
 
@@ -327,8 +383,8 @@ rarely set them by hand.
 
 ## `attention`
 
-Which signals contribute to the "needs attention" badge on a repo header. All
-default to `true`.
+Which signals contribute to the "needs attention" badge on a repo header. The
+booleans all default to `true`.
 
 | Field | Type | Description |
 | --- | --- | --- |
@@ -338,6 +394,7 @@ default to `true`.
 | `agent_asking` | bool | An agent is waiting on input |
 | `mentioned` | bool | You were mentioned |
 | `desktop_notify` | bool | Fire an OS desktop notification when an agent needs input (independent of `agent_asking`) |
+| `notifier` | `auto` \| `osc` \| `subprocess` | How the desktop banner is delivered. `auto` (default) picks per environment — subprocess helpers (`terminal-notifier` / `osascript` on macOS, `notify-send` on Linux) locally, the terminal's OSC escape sequence over SSH; `osc` / `subprocess` force one path. |
 
 ## `providers`
 

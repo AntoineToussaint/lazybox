@@ -99,11 +99,14 @@ You land on the inbox. Then:
 ```
 ↑ / ↓     move between workspaces   (j / k also works)
 Enter     open the selected workspace
-c         spawn a Claude Code session in its worktree   (s for a plain shell)
-]]        back to the inbox
+w         put your default agent to work in its worktree   (s for a plain shell)
+]]q       leave the terminal, back to the inbox
 ```
 
-`c` needs the `claude` CLI on your `PATH`; `s` (a plain shell) always works.
+`w` picks the right prompt for the row's state and needs the agent's CLI
+(e.g. `claude`) on your `PATH`; `s` (a plain shell) always works. To pick an
+agent explicitly, `a` opens the agent menu (`a c` Claude · `a x` Codex ·
+`a u` Cursor).
 
 That's the whole model in one screen: the workspace got an **isolated git
 worktree** and a **live embedded terminal**, and you never left the inbox.
@@ -137,11 +140,21 @@ to focus it, drag the splitters to resize, wheel-scroll, and right-click links
 | `Tab` | Cycle Sidebar → Activity → Terminals |
 | `↑` / `↓` · `Enter` | Navigate the inbox (`j` / `k` also works) · open a workspace |
 | `a` · `s` | Agent menu (which-key popup): `a c` Claude · `a x` Codex · `a u` Cursor · `s` spawns a shell (`a c` needs the `claude` CLI on `PATH`; `s` always works) |
-| `w` | "Work" — spawn Claude with the right prompt for the row's state (fix CI / address comments / implement issue) |
+| `w` | "Work" — spawn your default agent with the right prompt for the row's state (fix CI / address comments / implement issue) |
 | `m` · `r` | Mark read · reply |
-| `g` | GitHub menu (which-key popup): `g m` merge · `g v` reviewers · `g a` assignees · `g l` labels · `g o` open in browser |
+| `g` | GitHub menu (which-key popup): `g m` merge · `g g` auto-merge on green · `g v` reviewers · `g a` assignees · `g l` labels · `g o` open in browser |
 | `,` · `?` · `q q` | Settings · help · quit |
-| `]]` | Leave a terminal, back to the sidebar |
+| `]]` | Terminal leader (which-key popup): `]]q` back to the sidebar · `]]s` snippets · `]]f` focus mode · `]]\|` / `]]-` split · `]]x` close |
+
+Power moves, once the basics feel natural:
+
+- **Model tiers** — `w S` / `w M` / `w L` (and `a S` / `a M` / `a L`) run the agent at a small / medium / large model; Claude ships a Haiku/Sonnet/Opus menu, others configure theirs under `agents.<id>.models`. The picked tier rides a `◆ Opus` tab badge.
+- **Multi-select + broadcast** — `v` marks sidebar rows, `Shift-B` sends one instruction (snippet or free text) to every selected workspace at once.
+- **Focus mode** — `.` (or `]]f` from a terminal) near-fullscreens the agent terminal; `]]<digit>` jumps straight to the Nth agent workspace.
+- **On main** — `b` leader (`b c` / `b s`, confirmed first) runs an agent or shell on the repo's shared main checkout instead of a worktree; the tab carries a `⎇ main` badge.
+- **Jump anywhere** — `` ` `` opens a fuzzy workspace picker across all repos (from a terminal: `]]` then `` ` ``); `!` jumps to an agent waiting on input, `Shift-F` to failing CI.
+- **Themes & messages** — `t` opens a live-preview theme picker; `Shift-M` shows the log of recent footer notices.
+- **Snippets** — reusable prompts in `~/.lazybox/snippets.yaml` (plus repo-local `.lazybox/snippets.yaml`), sent via `]]s`; see [`docs/snippets.md`](docs/snippets.md).
 
 The [full keybinding reference](https://lazybox.ai/docs/reference/keybindings/) covers every pane.
 
@@ -160,8 +173,8 @@ main inbox.
 ## Contributing & support
 
 Issues and PRs welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md) for the build
-loop and standing rules (tests with every change; the four core libraries stay
-dependency-free of each other). Questions, bugs, and feature ideas:
+loop and standing rules (tests with every change; the core library crates keep
+their strict dependency layering). Questions, bugs, and feature ideas:
 [`SUPPORT.md`](SUPPORT.md) points you at
 [Discussions](https://github.com/AntoineToussaint/lazybox/discussions) and the
 [issue templates](https://github.com/AntoineToussaint/lazybox/issues/new/choose).

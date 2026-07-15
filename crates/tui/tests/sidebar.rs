@@ -421,10 +421,9 @@ fn m_emits_mark_read() {
 // ── Snooze semantics ───────────────────────────────────────────────────
 // (lowercase `z` snooze/unsnooze migrated to `Action::ToggleSnooze`
 // in the catalog — exercised via `Model::dispatch_action` in
-// tests/model_orchestrator.rs. `Shift-Z` long-snooze is still inline
-// here pending its own catalog migration.)
+// tests/model_orchestrator.rs. `x z` long-snooze is catalog-driven.)
 
-// `Shift-Z` long-snooze is a `Confirm`-guarded catalog action now
+// `x z` long-snooze is a `Confirm`-guarded catalog action
 // (#102 P3) — covered at the model layer in `model_orchestrator.rs`.
 
 // ── Navigation bounds ─────────────────────────────────────────────────
@@ -1141,7 +1140,7 @@ fn s_on_workspace_emits_shell_spawn() {
     }
 }
 
-// `Shift-Z` long-snooze moved out of the sidebar into the catalog as
+// `x z` long-snooze moved out of the sidebar into the catalog as
 // a `Confirm`-guarded `LongSnooze` row (#102 P3): pressing it mounts
 // the unified Confirm modal instead of arming a sidebar two-press
 // latch, which let the per-pane `LatchSet` be deleted. The keyboard +

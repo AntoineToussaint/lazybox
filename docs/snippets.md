@@ -81,7 +81,7 @@ The **snippets browser** is the answer to "what's even available?" —
 a read-only modal listing every merged snippet with its key, origin
 tag, description, and full body. Open it with `]` from the sidebar or
 activity pane, or via **Settings → Browse snippets**; it's also in the
-`?` help under the global shortcuts. `↑`/`↓` scroll, `e` opens the
+`?` shortcut index under Ask Lazybox. `↑`/`↓` scroll, `e` opens the
 global YAML file in your editor, and any other key closes it. Unlike
 the terminal `]]` leader it needs no focused session and you don't
 have to know a key first.
@@ -120,7 +120,7 @@ lists it). The commands:
   the agent verbatim, so `]` is typeable in code, arrays, and
   markdown. Only the doubled `]]` is intercepted. To type a literal
   `]]` into an agent (nested arrays, some markdown), remap the prefix
-  with `ui.terminal_escape_char` to a character you don't type, e.g. `}`.
+  with `terminal.escape_char` to a character you don't type, e.g. `}`.
 
 The picker is a small overlay; the terminal stays focused underneath.
 Rows are **grouped under category headers** (Review, Git & PR,
@@ -247,7 +247,7 @@ snippets:
   and submitted in one action — no extra keystroke. How the submit is
   delivered depends on the terminal:
   - **Agent terminals** (Claude Code, Codex, Cursor) go through the same
-    settle-gated inject path `w` uses: the body is pasted, then Enter is
+    settle-gated inject path `w w` uses: the body is pasted, then Enter is
     sent as a **separate** keystroke once the paste's repaint quiesces.
     A single write with a trailing `\r` is unreliable here — an agent
     that debounces the pasted burst can swallow the `\r` as a soft

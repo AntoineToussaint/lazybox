@@ -575,11 +575,7 @@ pub async fn handle_fetch_pr_details(config: &ServerConfig, workspace_key: Works
     // cache must not hold a lock across the `from_credential` network
     // call (issue #92). The cache lives outside `poll_state` so this
     // never contends with a running poll tick.
-    let cached = config
-        .gh_client_cache
-        .lock()
-        .expect("gh_client_cache poisoned")
-        .clone();
+    let cached = config.gh_client_cache.lock().clone();
     let client = match cached {
         Some(c) => c,
         None => {
@@ -595,10 +591,7 @@ pub async fn handle_fetch_pr_details(config: &ServerConfig, workspace_key: Works
             };
             match GhClient::from_credential(cred).await {
                 Ok(c) => {
-                    *config
-                        .gh_client_cache
-                        .lock()
-                        .expect("gh_client_cache poisoned") = Some(c.clone());
+                    *config.gh_client_cache.lock() = Some(c.clone());
                     c
                 }
                 Err(e) => {
@@ -1025,7 +1018,7 @@ pub async fn on_terminal_transition(
 ///
 /// No-op for a session-less workspace: there's no worktree to delete
 /// and no terminal to kill, so the only thing removal would do is drop
-/// the tracking row — which the user can do with `Shift-X` without
+/// the tracking row — which the user can do with `x x` without
 /// being nagged.
 pub(crate) async fn prompt_merged_pr_removal_with(
     config: &ServerConfig,
@@ -1096,7 +1089,7 @@ pub(crate) async fn prompt_merged_pr_removal_with(
 /// merged-PR removal modal. Snapshot the worktree paths, kill the
 /// sessions + drop the row via [`super::delete_workspace`], then
 /// force-delete the now-idle worktree directories — the deletion
-/// `delete_workspace` (used by `Shift-X`) deliberately skips.
+/// `delete_workspace` (used by `x x`) deliberately skips.
 pub async fn remove_merged_workspace(config: &ServerConfig, key: &WorkspaceKey) {
     remove_merged_workspace_with(
         config,
@@ -1460,12 +1453,7 @@ pub async fn prefetch_top_pr_details(
 
     // Reuse the persistent GhClient cache. If absent (linear-only
     // setup, or auth failed earlier), prefetch is a no-op.
-    let Some(client) = config
-        .gh_client_cache
-        .lock()
-        .expect("gh_client_cache poisoned")
-        .clone()
-    else {
+    let Some(client) = config.gh_client_cache.lock().clone() else {
         return;
     };
 

@@ -2020,7 +2020,7 @@ mod done_alert_tests {
 
 #[cfg(test)]
 mod rebadge_attention_tests {
-    //! Issue #205: combining an issue into a PR (`Shift-J`) rebadges the
+    //! Issue #205: combining an issue into a PR (`x j`) rebadges the
     //! issue's live terminals onto the PR. The sidebar's transient
     //! agent-state sets are keyed by session, so a `TerminalsRebadged`
     //! must migrate them — otherwise an agent parked on a prompt (which
@@ -2214,7 +2214,7 @@ mod work_target_agent_tests {
 
     #[test]
     fn single_running_agent_wins_over_default() {
-        // The core bug fix: only Codex is running, so bare `w` targets
+        // The core bug fix: only Codex is running, so `w w` targets
         // Codex (which `rewrite_spawn_to_inject` then injects into)
         // instead of spawning the default Claude.
         let mut sb = Sidebar::new(PaneId::new(1));
@@ -2238,7 +2238,7 @@ mod work_target_agent_tests {
     #[test]
     fn multiple_non_default_agents_fall_back_to_default() {
         // Tie-break: several non-default agents and no default running →
-        // the bare `w` outcome stays predictable (the default, a fresh
+        // the `w w` outcome stays predictable (the default, a fresh
         // spawn). The scoped `w c` / `w x` chords pick a specific one.
         let mut sb = Sidebar::new(PaneId::new(1));
         let ws = ws_key("github:o/r#1");

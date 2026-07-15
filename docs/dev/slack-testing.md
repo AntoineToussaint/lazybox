@@ -66,7 +66,7 @@ ago). The label changes based on `last_output_at[terminal_id]`.
 
 ### 3a. `paused — input expected` (claude asks mid-task)
 
-1. In the TUI, open any workspace and press `c` to spawn claude.
+1. In the TUI, open any workspace and press `a c` to spawn Claude.
 2. Type something that triggers a yes/no prompt — e.g. give it an
    instruction that requires file deletion ("delete the `tmp/` directory"
    if you have one), so claude prints the confirmation prompt.

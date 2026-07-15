@@ -48,9 +48,9 @@ pub struct SlackProvider {
     bot_user_id: String,
     /// `channel_name → channel_id` cache. Populated at boot from
     /// `conversations.list`; updated when lazybox creates a new
-    /// channel. Plain `std::sync::Mutex` — guards never span an
+    /// channel. Plain `parking_lot::Mutex` — guards never span an
     /// `.await`, so the async-aware variant would be overkill.
-    name_to_id: std::sync::Mutex<HashMap<String, String>>,
+    name_to_id: parking_lot::Mutex<HashMap<String, String>>,
     /// Pre-resolved id of `cfg.anchor_channel`. Set when the channel
     /// is visible to the bot at boot. Required for thread-fallback
     /// mode (`per_workspace_channels: false`); when missing, the
@@ -76,7 +76,7 @@ impl SlackProvider {
                 allowed_users: cfg.allowed_users,
             },
             bot_user_id,
-            name_to_id: std::sync::Mutex::new(seed),
+            name_to_id: parking_lot::Mutex::new(seed),
             anchor_channel_id,
         }
     }
@@ -162,22 +162,13 @@ impl ChatProvider for SlackProvider {
         name: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ChatError>> + Send + 'a>> {
         Box::pin(async move {
-            if let Some(id) = self
-                .name_to_id
-                .lock()
-                .expect("slack name_to_id mutex poisoned")
-                .get(name)
-                .cloned()
-            {
+            if let Some(id) = self.name_to_id.lock().get(name).cloned() {
                 return Ok(id);
             }
             match self.api.conversations_create(name).await {
                 Ok(resp) => {
                     let id = resp.channel.id.clone();
-                    self.name_to_id
-                        .lock()
-                        .expect("slack name_to_id mutex poisoned")
-                        .insert(name.to_string(), id.clone());
+                    self.name_to_id.lock().insert(name.to_string(), id.clone());
                     tracing::info!(channel = %resp.channel.name, "slack: created channel");
                     Ok(id)
                 }
@@ -188,10 +179,7 @@ impl ChatProvider for SlackProvider {
                     tracing::debug!(name = %name, "slack: channel exists, looking up id");
                     match self.api.conversations_list_all().await {
                         Ok(channels) => {
-                            let mut s = self
-                                .name_to_id
-                                .lock()
-                                .expect("slack name_to_id mutex poisoned");
+                            let mut s = self.name_to_id.lock();
                             for c in &channels {
                                 s.insert(c.name.clone(), c.id.clone());
                             }
@@ -225,10 +213,10 @@ pub fn spawn(config: ServerConfig, slack: SlackConfig) -> Option<tokio::task::Jo
 
 /// Env wins over YAML so credentials don't have to live on disk.
 fn resolve_token(yaml: Option<&str>, env_key: &str) -> Option<String> {
-    if let Ok(v) = std::env::var(env_key) {
-        if !v.trim().is_empty() {
-            return Some(v);
-        }
+    if let Ok(v) = std::env::var(env_key)
+        && !v.trim().is_empty()
+    {
+        return Some(v);
     }
     yaml.filter(|s| !s.trim().is_empty()).map(str::to_string)
 }

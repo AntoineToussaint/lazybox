@@ -12,4 +12,4 @@ Closes #
 - [ ] Tests added or updated for this change
 - [ ] `cargo fmt --all` is clean
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` is clean
-- [ ] No new dependencies in the core-4 libs (`core`, `auth`, `events`, `store`)
+- [ ] No new dependencies in the core libraries (`core`, `auth`, `store`)

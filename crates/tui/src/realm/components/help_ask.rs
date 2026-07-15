@@ -1,7 +1,6 @@
 //! `HelpAsk` — ask lazybox how to use lazybox (#302).
 //!
-//! Opened by pressing `?` on the `?` help panel. One modal, two
-//! layers:
+//! Opened directly by pressing `?`. One modal, two layers:
 //!
 //! - **Typing** fuzzy-searches the runtime action catalog live
 //!   (`lazybox_tui_core::help::search`) — the offline layer that
@@ -23,7 +22,8 @@
 use crate::components::comment_render;
 use crate::realm::Msg;
 use crate::realm::UserEvent;
-use lazybox_tui_core::action::CatalogEntry;
+use lazybox_tui_core::action::{ActionKind, CatalogEntry, Section};
+use std::borrow::Cow;
 use std::sync::{Arc, Mutex, MutexGuard};
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
@@ -94,7 +94,21 @@ pub struct HelpAsk {
 }
 
 impl HelpAsk {
-    pub fn new(catalog: Vec<CatalogEntry>, convo: SharedHelpConvo) -> Self {
+    pub fn new(
+        mut catalog: Vec<CatalogEntry>,
+        convo: SharedHelpConvo,
+        terminal_escape_char: char,
+    ) -> Self {
+        let leader = format!("{0}{0}", terminal_escape_char);
+        // LeaveTerminal is dispatched by the configurable terminal latch, not
+        // by its catalog chord. Make fuzzy-search results reflect the live key.
+        if let Some(exit) = catalog
+            .iter_mut()
+            .find(|entry| entry.kind == ActionKind::LeaveTerminal)
+        {
+            exit.keys_display = Cow::Owned(format!("{leader}q"));
+        }
+        catalog.extend(terminal_search_entries(&leader));
         Self {
             catalog,
             convo,
@@ -119,6 +133,12 @@ impl HelpAsk {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if matches!(key.code, Key::Esc) || (ctrl && matches!(key.code, Key::Char('c'))) {
             return Some(Msg::ModalDismissed);
+        }
+        // The assistant is the primary `?` surface. Pressing `?` again
+        // from its empty prompt swaps to the compact all-shortcuts index;
+        // typing inside a non-empty question still accepts punctuation.
+        if self.query.is_empty() && matches!(key.code, Key::Char('?')) {
+            return Some(Msg::HelpIndexOpen);
         }
         match key.code {
             Key::Enter => {
@@ -218,15 +238,24 @@ impl HelpAsk {
         let mut out: Vec<Line<'static>> = Vec::new();
         if convo.turns.is_empty() && convo.notice.is_none() {
             out.push(Line::from(Span::styled(
-                "  Type to search every keybinding (your remaps included).",
-                Style::default().fg(theme.text_dim),
+                "  Ask about workflows, shortcuts, agents, providers—anything in lazybox.",
+                Style::default().fg(theme.text_strong).bold(),
             )));
             out.push(Line::from(Span::styled(
-                "  Press Enter to ask the help assistant in plain language,",
+                "  Typing searches your live keymap instantly; Enter asks in plain language.",
                 Style::default().fg(theme.text_dim),
             )));
+            out.push(Line::default());
             out.push(Line::from(Span::styled(
-                "  e.g. \"how do I multi-select activity rows?\"",
+                "  Try “how do I send one prompt to several workspaces?”",
+                Style::default().fg(theme.text_dim).italic(),
+            )));
+            out.push(Line::from(Span::styled(
+                "      “what can I do while a terminal is focused?”",
+                Style::default().fg(theme.text_dim).italic(),
+            )));
+            out.push(Line::from(Span::styled(
+                "      “how do I act on a failing PR?”",
                 Style::default().fg(theme.text_dim).italic(),
             )));
             return out;
@@ -271,6 +300,81 @@ impl HelpAsk {
     }
 }
 
+/// Search-only rows for commands owned by the terminal escape latch rather
+/// than the Action catalog. They make “split terminal”, “jump agent”, etc.
+/// resolve instantly in Ask Lazybox while the live `]]` popup remains the
+/// source of truth for dispatch.
+fn terminal_search_entries(leader: &str) -> Vec<CatalogEntry> {
+    let row = |kind, suffix: &str, label, describe, config_key: &str| CatalogEntry {
+        kind,
+        param: None,
+        section: Section::Terminal,
+        label: Cow::Borrowed(label),
+        describe,
+        chords: Vec::new(),
+        keys_display: Cow::Owned(format!("{leader}{suffix}")),
+        config_key: config_key.to_string(),
+    };
+    vec![
+        row(
+            ActionKind::OpenSnippets,
+            "s<key>",
+            "send snippet",
+            "Open the terminal snippet picker and send the chosen saved prompt.",
+            "terminal.snippets",
+        ),
+        row(
+            ActionKind::ToggleFocusMode,
+            "f",
+            "focus mode",
+            "Toggle the focused terminal between the tiled layout and near-fullscreen focus mode.",
+            "terminal.focus_mode",
+        ),
+        row(
+            ActionKind::JumpToWorkspace,
+            "`",
+            "jump to workspace",
+            "Open the fuzzy workspace picker without leaving the focused terminal.",
+            "terminal.jump_workspace",
+        ),
+        row(
+            ActionKind::JumpToWorkspace,
+            "1…9",
+            "jump to agent",
+            "Jump to an agent workspace by its position in the sidebar.",
+            "terminal.jump_agent",
+        ),
+        row(
+            ActionKind::ResizeSplitter,
+            "|",
+            "split right",
+            "Split the focused terminal tile side-by-side.",
+            "terminal.split_right",
+        ),
+        row(
+            ActionKind::ResizeSplitter,
+            "-",
+            "split down",
+            "Split the focused terminal tile vertically.",
+            "terminal.split_down",
+        ),
+        row(
+            ActionKind::CyclePane,
+            "<arrow>",
+            "move terminal tile",
+            "Move tile focus in a split layout or switch tabs in a tabbed layout.",
+            "terminal.move_tile",
+        ),
+        row(
+            ActionKind::LeaveTerminal,
+            "x",
+            "close terminal",
+            "Close the focused terminal tile or active tab.",
+            "terminal.close",
+        ),
+    ]
+}
+
 impl Component for HelpAsk {
     fn view(&mut self, frame: &mut Frame, area: Rect) {
         let theme = crate::theme::current();
@@ -284,7 +388,7 @@ impl Component for HelpAsk {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .title(Span::styled(" Ask lazybox ", theme.modal_title()))
+            .title(Span::styled(" Ask Lazybox ", theme.modal_title()))
             .border_style(theme.modal_border());
         let inner = block.inner(modal);
         frame.render_widget(block, modal);
@@ -346,7 +450,9 @@ impl Component for HelpAsk {
                 Span::styled("Type", Style::default().fg(theme.accent).bold()),
                 Span::raw(" filter keys  "),
                 Span::styled("Esc", Style::default().fg(theme.error).bold()),
-                Span::raw(" close"),
+                Span::raw(" close  "),
+                Span::styled("?", Style::default().fg(theme.accent).bold()),
+                Span::raw(" shortcuts (clear query first)"),
             ]
         } else {
             vec![
@@ -357,7 +463,9 @@ impl Component for HelpAsk {
                 Span::styled("↑↓", Style::default().fg(theme.accent).bold()),
                 Span::raw(" scroll  "),
                 Span::styled("Esc", Style::default().fg(theme.error).bold()),
-                Span::raw(" close"),
+                Span::raw(" close  "),
+                Span::styled("?", Style::default().fg(theme.accent).bold()),
+                Span::raw(" all shortcuts"),
             ]
         };
         frame.render_widget(Paragraph::new(Line::from(hint)), help_rect);
@@ -397,7 +505,7 @@ mod tests {
     fn component() -> HelpAsk {
         let catalog =
             ActionDef::catalog(&["claude".to_string()], &std::collections::BTreeMap::new());
-        HelpAsk::new(catalog, SharedHelpConvo::default())
+        HelpAsk::new(catalog, SharedHelpConvo::default(), ']')
     }
 
     fn ke(c: char) -> KeyEvent {
@@ -459,6 +567,46 @@ mod tests {
         ));
         let ev = KeyEvent::new(Key::Char('c'), KeyModifiers::CONTROL);
         assert!(matches!(c.on_key(&ev), Some(Msg::ModalDismissed)));
+    }
+
+    #[test]
+    fn question_mark_at_empty_prompt_opens_shortcut_index() {
+        let mut c = component();
+        assert!(matches!(c.on_key(&ke('?')), Some(Msg::HelpIndexOpen)));
+
+        // Once a question is in progress, punctuation remains ordinary input.
+        let _ = c.on_key(&ke('w'));
+        assert!(c.on_key(&ke('?')).is_none());
+        assert_eq!(c.query, "w?");
+    }
+
+    #[test]
+    fn terminal_commands_are_searchable_with_the_live_escape_char() {
+        let catalog =
+            ActionDef::catalog(&["claude".to_string()], &std::collections::BTreeMap::new());
+        let mut c = HelpAsk::new(catalog, SharedHelpConvo::default(), '}');
+
+        for ch in "split right".chars() {
+            let _ = c.on_key(&ke(ch));
+        }
+        let split = c
+            .match_lines()
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(split.contains("}}|"), "live split chord missing: {split}");
+        assert!(
+            split.contains("split right"),
+            "terminal action missing: {split}"
+        );
+
+        let exit = c
+            .catalog
+            .iter()
+            .find(|entry| entry.label == "exit to sidebar")
+            .expect("exit row");
+        assert_eq!(exit.keys_display, "}}q");
     }
 
     /// The transcript renders the shared conversation: question line,
@@ -523,7 +671,7 @@ mod tests {
         })
         .unwrap();
         let rendered = format!("{:?}", term.backend().buffer());
-        assert!(rendered.contains("Ask lazybox"));
+        assert!(rendered.contains("Ask Lazybox"));
         assert!(rendered.contains("merge"));
     }
 }

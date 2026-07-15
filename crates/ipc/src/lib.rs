@@ -616,7 +616,7 @@ pub enum Command {
     /// no upstream provider. Slugified to `local-<slug>`; idempotent
     /// on collision (re-opens the existing project, same shape as
     /// `polling::ensure_project_for_workspace` for provider
-    /// projects). Bound to `Shift-N` in the default keymap.
+    /// projects). Bound to `x p` in the default keymap.
     CreateProject {
         name: String,
     },
@@ -671,12 +671,12 @@ pub enum Command {
         accept: bool,
     },
     /// Manual "adopt": move all sessions from `source_workspace_key`
-    /// into `target_workspace_key`. Driven by the sidebar's `Shift-A`
+    /// into `target_workspace_key`. Driven by the sidebar's `x a`
     /// picker — useful when you started work on the wrong row and
     /// want to migrate the running agent without losing it. Unlike
     /// the issue→PR merge, the source workspace is NOT deleted; it
     /// just becomes a session-less tracking row the user can ignore
-    /// or remove via `Shift-X`.
+    /// or remove via `x x`.
     AdoptSessions {
         source_workspace_key: lazybox_core::WorkspaceKey,
         target_workspace_key: lazybox_core::WorkspaceKey,
@@ -690,7 +690,7 @@ pub enum Command {
         workspace_key: lazybox_core::WorkspaceKey,
     },
     /// Close the workspace's GitHub issue upstream. Fires from the
-    /// sidebar's `Shift-C` shortcut on an issue-only workspace, after
+    /// sidebar's `x c` shortcut on an issue-only workspace, after
     /// a confirm. GitHub has no non-admin "delete issue" via the API,
     /// so the daemon closes the issue (state `NOT_PLANNED`) via the
     /// GraphQL `closeIssue` mutation. The next poll picks up the
@@ -993,7 +993,7 @@ pub enum Event {
         issue_label: String,
     },
     /// `Command::CloseIssue` failed at the GitHub API — the user
-    /// pressed `Shift-C` and the close did NOT happen. Surfaced as a
+    /// pressed `x c` and the close did NOT happen. Surfaced as a
     /// prominent, persistent error naming the reason (e.g. missing
     /// permissions), mirroring `PrMergeFailed`. The issue stays
     /// Open/actionable.

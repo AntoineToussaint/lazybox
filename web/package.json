@@ -8,7 +8,8 @@
     "dev": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
-    "check": "astro check"
+    "check": "astro check",
+    "lighthouse": "node scripts/lighthouse.mjs"
   },
   "dependencies": {
     "@astrojs/check": "^0.9.9",
@@ -22,5 +23,8 @@
     "yaml-language-server": {
       "yaml": "^2.8.3"
     }
+  },
+  "devDependencies": {
+    "lighthouse": "12.6.1"
   }
 }

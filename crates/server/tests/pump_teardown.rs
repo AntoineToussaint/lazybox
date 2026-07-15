@@ -88,7 +88,9 @@ async fn spawn_shell(client: &mut lazybox_ipc::Client) -> lazybox_ipc::TerminalI
             session_key: "test:ws-teardown".into(),
             session_id: None,
             kind: TerminalKind::Shell,
-            cwd: None,
+            // These tests isolate pump teardown, not workspace lookup.
+            // Production workspace-less spawns are intentionally denied.
+            cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
             initial_prompt: None,
             on_main: false,
         })

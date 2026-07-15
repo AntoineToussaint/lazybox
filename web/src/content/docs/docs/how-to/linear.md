@@ -45,7 +45,7 @@ Restart lazybox (or press `Shift-R` to refresh) and the Linear poller starts.
   with `display.ascii_glyphs: true`), grouped by team, with the same
   read/unread tracking as GitHub rows.
 - Everything workspace-shaped works the same: `Enter` opens it, `s` opens a
-  shell, `w` puts your default agent on it — lazybox cuts a branch and an
+  shell, `w w` puts your default agent on it — lazybox cuts a branch and an
   isolated worktree for the ticket just as it does for a GitHub issue.
 
 ## Role filtering

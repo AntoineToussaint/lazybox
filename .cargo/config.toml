@@ -1,0 +1,5 @@
+[resolver]
+# Keep `cargo update` on the newest releases that honor the workspace's
+# declared Rust 1.88 floor instead of silently locking transitive crates
+# that only the current compiler can build.
+incompatible-rust-versions = "fallback"

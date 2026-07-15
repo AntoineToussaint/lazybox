@@ -2,7 +2,7 @@
 source: crates/tui/tests/snapshots.rs
 expression: rendered
 ---
- LAZYBOX v0.1.6 (dev)       0 items  7d
+ LAZYBOX v0.1.7 (dev)       0 items  7d
  f [all]  o [split]
 
  ──────────────────────────────────────
@@ -14,9 +14,9 @@ expression: rendered
   git worktrees — spin up an
   agent session per task:
 
-   ⇧W   start agent
-   n    new workspace
-   ⇧N   pick a repo
+   ⇧W   start work
+   x p  new project
+   x n  new workspace
 
   or open a tool yourself:
    a c  claude
@@ -24,6 +24,6 @@ expression: rendered
    e    editor
 
   new here?
-   ?    help
+   ?    Ask Lazybox
    ⇧T   tour
    ⇧R   refresh inbox

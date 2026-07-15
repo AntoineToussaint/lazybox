@@ -45,6 +45,8 @@ const ogImageAlt =
     <meta name="twitter:image:alt" content={ogImageAlt} />
 
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <!-- Reveal styles are applied only after JS proves it is available. -->
+    <script is:inline>document.documentElement.classList.add('js');</script>
   </head>
   <body>
     <slot />

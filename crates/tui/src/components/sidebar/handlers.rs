@@ -157,7 +157,7 @@ impl Sidebar {
             // help) and collided with the vim `g`/`G` "go to
             // top/bottom" convention the right pane already uses.
             // One refresh binding, accessible from every pane.
-            // `z` toggle-snooze and `Shift-Z` long-snooze are catalog
+            // `z` toggle-snooze and `x z` long-snooze are catalog
             // actions now (#102): `Model::dispatch_action(ToggleSnooze)`
             // and the `Confirm`-guarded `LongSnooze` row, which mounts
             // the unified Confirm modal instead of the old two-press

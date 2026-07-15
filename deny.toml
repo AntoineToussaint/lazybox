@@ -23,16 +23,12 @@ feature-depth = 1
 version = 2
 yanked = "deny"
 ignore = [
-    # bincode 1.x is unmaintained as of 2025. We use it via
-    # lazybox-ipc for length-prefixed framing on the Unix-socket
-    # transport. Moving to bincode 2.x or postcard is a non-trivial
-    # wire-format change tracked separately — ignore until that
-    # lands.
+    # bincode's maintainers ended development for every release line. We use
+    # 2.0.1 only for size-bounded, length-prefixed local IPC and preserve the
+    # existing wire format with `config::legacy()`. RUSTSEC-2025-0141 reports
+    # unmaintained status rather than an exploitable flaw, and no safe upgrade
+    # exists; replacing the codec requires an explicitly versioned migration.
     "RUSTSEC-2025-0141",
-    # `serial` 0.4 is unmaintained (last release 2017). Pulled in
-    # transitively by portable-pty 0.8; we don't use the serial
-    # functionality. Bound to portable-pty's upstream choices.
-    "RUSTSEC-2017-0008",
 ]
 
 # ── licenses ──────────────────────────────────────────────────────────

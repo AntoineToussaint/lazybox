@@ -223,10 +223,10 @@ fn parse_value(raw: Value) -> ParsedAgentEvent {
         };
     }
 
-    if type_name == Some("stream_event") {
-        if let Some(parsed) = parse_stream_event(raw.clone()) {
-            return parsed;
-        }
+    if type_name == Some("stream_event")
+        && let Some(parsed) = parse_stream_event(raw.clone())
+    {
+        return parsed;
     }
 
     if let Some(usage) = raw.get("usage") {
@@ -327,10 +327,10 @@ fn message_text(raw: &Value) -> Option<String> {
     let content = raw.get("message")?.get("content")?.as_array()?;
     let mut text = String::new();
     for block in content {
-        if string_at(block, &["type"]) == Some("text") {
-            if let Some(part) = string_at(block, &["text"]) {
-                text.push_str(part);
-            }
+        if string_at(block, &["type"]) == Some("text")
+            && let Some(part) = string_at(block, &["text"])
+        {
+            text.push_str(part);
         }
     }
     if text.is_empty() { None } else { Some(text) }

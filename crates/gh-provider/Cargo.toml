@@ -15,12 +15,13 @@ futures = { workspace = true }
 tracing = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
+parking_lot = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 # `http` is the type plumbing octocrab uses for its low-level
 # `_get_with_headers` API — we set the `If-Modified-Since` header
 # directly so the notifications heartbeat can answer 304. Pin matches
-# what octocrab 0.44 already depends on so there's no duplicate.
+# what octocrab 0.54 already depends on so there's no duplicate.
 http = "1.4"
 
 [dev-dependencies]

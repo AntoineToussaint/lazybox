@@ -115,7 +115,7 @@ fn render_to_string(rp: &mut RightPane, width: u16, height: u16, focused: bool) 
 // when nothing was selected, which surprised users on a CI-failing
 // PR: pressing `w` would fire an "address these comments" prompt
 // against a random activity row instead of the fix-CI prompt the
-// sidebar `w` produces. These tests pin the new dispatch:
+// sidebar `w w` produces. These tests pin the dispatch:
 //   - selected comments → address them
 //   - no selection → fall through to fix-CI / implement-issue / etc.
 

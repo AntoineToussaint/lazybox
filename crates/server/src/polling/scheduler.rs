@@ -211,10 +211,10 @@ pub fn pick_repos_for_tick(
     }
 
     let run_global = if known.len() <= n {
-        tick % 2 == 0
+        tick.is_multiple_of(2)
     } else {
         let k = known.len().div_ceil(n).max(2) as u64;
-        tick % k == 0
+        tick.is_multiple_of(k)
     };
 
     RoundRobinPick { repos, run_global }

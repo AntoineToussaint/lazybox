@@ -117,7 +117,9 @@ trust boundary — there's no TCP/TLS in v2.0.
 
 **Status:** experimental
 **Crate(s):** `server` (`api_gateway.rs`)
-**Config / flags:** `LAZYBOX_API_ADDR` (default `127.0.0.1:8787`), `LAZYBOX_API_TOKEN` (required bearer unless `--insecure-no-auth`)
+**Config / flags:** `LAZYBOX_API_ADDR` (default `127.0.0.1:8787`),
+`LAZYBOX_API_TOKEN` (required bearer unless `--insecure-no-auth`),
+`--allow-insecure-http` (required for a non-loopback plaintext bind)
 **Key bindings:** —
 
 ### What it does
@@ -128,12 +130,14 @@ without the terminal protocol.
 ### How to use it
 ```sh
 LAZYBOX_API_TOKEN=secret lazybox server api   # bind 127.0.0.1:8787
-LAZYBOX_API_TOKEN=secret lazybox server api 0.0.0.0:9000  # explicit addr
+LAZYBOX_API_TOKEN=secret lazybox server api 0.0.0.0:9000 --allow-insecure-http
 lazybox server api --insecure-no-auth         # explicitly unauthenticated
 ```
 
 Without `LAZYBOX_API_TOKEN` the gateway refuses to start unless
-`--insecure-no-auth` is passed.
+`--insecure-no-auth` is passed. Because bearer auth does not encrypt HTTP,
+non-loopback listeners are separately refused without `--allow-insecure-http`.
+Prefer a loopback listener reached through SSH or an authenticated TLS proxy.
 
 Endpoints: `GET /v1/health`, `GET /v1/metrics` (event-pipeline drop/lag
 counters), `GET /v1/workspaces`, `GET /v1/events` (NDJSON stream), `POST
@@ -145,7 +149,16 @@ counters), `GET /v1/workspaces`, `GET /v1/events` (NDJSON stream), `POST
 `--insecure-no-auth` is passed. The gateway (`api_gateway.rs`)
 serves the endpoints; streaming uses NDJSON frames (`JsonClientFrame::Command`
 / `JsonServerFrame::Event`). When a token is set, requests need
-`Authorization: Bearer <token>`.
+`Authorization: Bearer <token>`. One-shot commands execute their handler to
+completion before HTTP 200; control commands that require a stream are
+rejected. Connections, request bodies, command lines, and commands per stream
+all have hard bounds. `GET /v1/workspaces` includes a `warnings` array for
+persisted rows that were preserved but could not be decoded.
+
+Provider credentials mutated through the experimental API remain in memory for
+the daemon process lifetime. Restarting the daemon discards them; persistent
+provider configuration still belongs in the documented environment variables
+or `~/.lazybox/config.yaml` until an encrypted credential store is available.
 
 ### Test checklist
 - [ ] `GET /v1/health` returns OK.
@@ -157,9 +170,13 @@ serves the endpoints; streaming uses NDJSON frames (`JsonClientFrame::Command`
 - [ ] With `LAZYBOX_API_TOKEN` set, unauthenticated requests are rejected.
 - [ ] Without `LAZYBOX_API_TOKEN` and without `--insecure-no-auth`, the
       command refuses to start.
+- [ ] A non-loopback bind is refused without `--allow-insecure-http`.
+- [ ] `/v1/commands` does not respond until its handler side effect is visible.
+- [ ] Oversized bodies/lines and over-limit command streams are rejected.
 
 ### Known sharp edges
-- Localhost-only by default and no CORS (ROADMAP §5); bearer auth is required at the CLI unless `--insecure-no-auth` is passed.
+- Localhost-only by default and no CORS (ROADMAP §5); there is no built-in TLS.
+- API-managed provider credentials are deliberately session-only.
 - No OpenAPI schema yet; the wire shapes are defined in `crates/ipc`.
 
 ---
@@ -263,7 +280,7 @@ Top-level keys (`crates/config/src/lib.rs`):
 | `agent` | `autonomous_skip_permissions`, `skip_permissions`, `llm_gateway_url`, nested agent config |
 | `agents.<id>` | Per-agent overrides — today the model-tier menu `models` (`default` + ordered `tiers` of `alias`/`label`/`args`, plus `priority` aliases) |
 | `attention` | Which signals flag a row: `unread`, `ci_failing`, `review_pending`, `agent_asking`, `mentioned`, `desktop_notify`, `notifier` (`auto` \| `osc` \| `subprocess` banner delivery) |
-| `ui` | View/behavior: `auto_mark_delay`, `quit_double_tap_window`, `terminal_escape_char`, `split_step_percent`, `task_body_max_rows`, `short_snooze`, `long_snooze`, `action_keys` (incl. `spawn_agent.<id>` keys), `keymap_preset`, `theme`, `tour_seen`, `tips_seen` |
+| `ui` | View/behavior: `auto_mark_delay`, `quit_double_tap_window`, `split_step_percent`, `task_body_max_rows`, `short_snooze`, `long_snooze`, `action_keys` (incl. `spawn_agent.<id>` keys), `keymap_preset`, `theme`, `tour_seen`, `tips_seen` |
 | `display`, `shell`, `hooks`, `terminal`, `mention`, `auto_fix` | Display merging, shell, agent hooks, terminal, mention routing, auto-fix triggers |
 
 ### How it works (brief)
@@ -273,7 +290,7 @@ Top-level keys (`crates/config/src/lib.rs`):
 
 ### Test checklist
 - [ ] An empty `config.yaml` loads with all defaults (zero-config first run).
-- [ ] A `ui.terminal_escape_char` override changes the terminal escape key.
+- [ ] A `terminal.escape_char` override changes the terminal command-menu key.
 - [ ] `providers.github.poll_interval` changes poll cadence within one interval.
 - [ ] `attention.*` toggles change which rows get flagged.
 - [ ] Editing config via the `,` palette writes valid YAML that re-loads.
@@ -285,45 +302,51 @@ Top-level keys (`crates/config/src/lib.rs`):
 
 ## Build & install
 
-**Status:** stable (build) / scaffolded-not-active (release channels)
+**Status:** stable
 **Crate(s):** build scripts, `libghostty-vt*` (vendored), `.github/workflows/release.yml`
-**Config / flags:** `LAZYBOX_ZIG_CACHE`, `GHOSTTY_SOURCE_DIR`
+**Config / flags:** `LAZYBOX_ZIG_CACHE`, `LAZYBOX_GHOSTTY_CACHE`,
+`LAZYBOX_ZIG_GLOBAL_CACHE`, `GHOSTTY_SOURCE_DIR`
 **Key bindings:** —
 
 ### What it does
 Builds lazybox from source with a pinned Zig toolchain and vendored ghostty VT
-bindings. Release channels (Homebrew tap, curl installer, GitHub Releases via
-cargo-dist) are wired but not yet activated (no `v*.*.*` tag pushed pre-1.0).
+bindings. Version tags publish GitHub Release archives, a checksum manifest, a
+shell installer, and a Homebrew formula through cargo-dist.
 
 ### How to use it
 ```sh
-make setup   # download pinned zig 0.15.2 to ~/.cache/lazybox/zig/
+make setup   # one online preparation of Zig, Ghostty, and Cargo caches
 make run     # build + run
-cargo test --workspace
+make release # optimized Cargo build in strict offline mode
+cargo nextest run --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Prereqs: Rust 1.85+, a C compiler (bundled SQLite), `gh` for credentials, and
-network on first build (ghostty Zig sources fetched at a pinned commit). Linux
+Prereqs: Rust 1.88+, a C compiler (bundled SQLite), and `gh` for real GitHub
+credentials. Network is required by `make setup`, not subsequent release
+builds. Linux
 also needs libc++ / libc++abi. Direct `cargo build` needs **zig 0.15.2** on
 PATH.
 
 ### How it works (brief)
-`make setup` caches zig host-wide (`~/.cache/lazybox/zig/<host>/`, override
-`LAZYBOX_ZIG_CACHE`) so clones/worktrees share one download. The `libghostty-vt*`
-Rust bindings are vendored; the underlying ghostty Zig sources are fetched at
-build time (pinned commit, 3× retry; override with `GHOSTTY_SOURCE_DIR`). The
+`make setup` checksum-verifies and caches Zig host-wide
+(`~/.cache/lazybox/zig/<host>/`, override `LAZYBOX_ZIG_CACHE`), caches the
+pinned Ghostty source and Zig packages under `~/.cache/lazybox/ghostty/`, and
+fetches the locked Cargo graph. Clones, profiles, and worktrees reuse those
+caches instead of cloning Ghostty into each Cargo `OUT_DIR`. `GHOSTTY_SOURCE_DIR`
+still overrides the cached checkout. The
 cargo-dist pipeline (`.github/workflows/release.yml` + `[workspace.metadata.dist]`)
 builds macOS + Linux binaries on a version tag.
 
 ### Test checklist
 - [ ] `make setup` downloads/caches zig 0.15.2.
 - [ ] `make run` builds and launches from a clean checkout.
-- [ ] A second worktree reuses the cached zig (no re-download).
+- [ ] A second worktree and a post-`cargo clean` release reuse Zig and Ghostty.
+- [ ] With networking disabled, `make release` completes without a fetch.
 - [ ] `GHOSTTY_SOURCE_DIR` lets a hand-cloned ghostty bypass the network fetch.
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` is clean.
 
 ### Known sharp edges
-- First build needs network for the ghostty source clone (HTTP/2 cancels happen; the script retries 3×).
-- Release channels are scaffolded only — no tag pushed yet, so `brew`/curl installs aren't live.
+- A fresh machine must run `make setup` online once; a source checkout does not
+  vendor the Rust registry or the full Ghostty repository.
 - Windows is a non-goal; Linux gets less testing than macOS.

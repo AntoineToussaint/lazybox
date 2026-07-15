@@ -35,7 +35,7 @@ For day-to-day development, the `Makefile` wraps the common flows.
 | --- | --- |
 | `cargo build` | Build |
 | `cargo run -p lazybox-tui` | Build and run the TUI binary |
-| `cargo test --workspace` | Run all tests |
+| `cargo nextest run --workspace` | Run all tests with the repository's per-test timeout policy |
 | `cargo clippy --workspace --all-targets -- -D warnings` | Lint, warnings as errors |
 
 If you build with cargo directly (no `make`), put Zig 0.15.2 on your `PATH`
@@ -59,7 +59,7 @@ first.
 | `lazybox server start` | Start the daemon |
 | `lazybox server stop` | Stop the daemon |
 | `lazybox server status` | Report whether the daemon is running |
-| `lazybox server api [addr:port] [--insecure-no-auth]` | Start the JSON HTTP API gateway |
+| `lazybox server api [addr:port] [--insecure-no-auth] [--allow-insecure-http]` | Start the JSON HTTP API gateway |
 
 ### `lazybox server api` auth
 
@@ -70,6 +70,16 @@ printed).
 
 The listen address resolves in order: the `[addr:port]` argument, then the
 `LAZYBOX_API_ADDR` environment variable, then the default `127.0.0.1:8787`.
+The gateway has no built-in TLS. A non-loopback bind is refused unless
+`--allow-insecure-http` is also supplied; use that acknowledgement only behind
+an authenticated TLS proxy, SSH tunnel, or trusted private overlay network.
+
+`POST /v1/commands` waits for the command handler to finish before returning
+`{"ok":true,"completed":true}`. Provider/domain outcomes still arrive as
+normal events. Streaming requests are connection- and command-bounded, so a
+client must reconnect after the documented stream limit instead of growing an
+unbounded daemon queue. `GET /v1/workspaces` includes a `warnings` array when
+an unreadable row was preserved and omitted from the decoded workspace list.
 
 ## `lazybox slack`
 
@@ -100,3 +110,4 @@ The listen address resolves in order: the `[addr:port]` argument, then the
 | `~/.lazybox/snippets.yaml` | Global snippet library (repo-local: `<repo>/.lazybox/snippets.yaml`) |
 | `/tmp/lazybox.log` | Logs (override with `ui.log_path`) |
 | `~/.cache/lazybox/zig/` | Pinned Zig toolchain from `make setup` |
+| `~/.cache/lazybox/ghostty/` | Pinned Ghostty source and Zig package cache used by offline builds |

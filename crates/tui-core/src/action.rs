@@ -197,7 +197,7 @@ pub enum Action {
     /// (Ctrl-L). Recovery hatch for a screen left stale or garbled by
     /// something no event reports — e.g. display sleep/wake.
     ForceRedraw,
-    /// Open the `?` help modal.
+    /// Open Ask Lazybox (`?`): live keymap search plus conversational help.
     OpenHelp,
     /// Launch the in-app feature tour / guided walkthrough.
     OpenTour,
@@ -222,7 +222,7 @@ pub enum Action {
     OpenThemePicker,
     /// Open the snippets browser — a read-only modal listing every
     /// snippet (key, origin, description, body) so the library is
-    /// discoverable outside the `]]<key>` terminal leader.
+    /// discoverable outside the `]]s<key>` terminal leader.
     OpenSnippets,
     /// Open a fuzzy picker over every workspace (across repos) and
     /// jump the cursor to the one chosen (default `` ` ``). The
@@ -269,7 +269,7 @@ pub enum Action {
     // ── Terminal-pane scoped ───────────────────────────────────────
     /// Scroll the focused terminal's scrollback (Shift+PgUp/Dn).
     TerminalScroll(ScrollDirection),
-    /// Escape the terminal back to sidebar focus (`]]`).
+    /// Escape the terminal back to sidebar focus (`]]q`).
     LeaveTerminal,
 }
 
@@ -523,7 +523,7 @@ impl ActionDef {
             ActionKind::ToggleMouseCapture => &Self {
                 kind: ActionKind::ToggleMouseCapture,
                 default_keys: "F8 | Alt-s | Ctrl-Alt-s",
-                label: "mouse capture",
+                label: "text selection",
                 describe: "Toggle lazybox's mouse capture so the host terminal regains native text selection (trackpad-select + Cmd-C in agent scrollback). Works from any pane, including inside a live terminal; toggle back on for splitter drags and click-to-focus.",
                 section: Section::Global,
             },
@@ -544,8 +544,8 @@ impl ActionDef {
             ActionKind::OpenHelp => &Self {
                 kind: ActionKind::OpenHelp,
                 default_keys: "?",
-                label: "help",
-                describe: "Show this list of shortcuts. Press ? again to ask lazybox a question in plain language (fuzzy keybinding search + AI answers).",
+                label: "ask lazybox",
+                describe: "Search the live keymap or ask how to use lazybox in plain language. Press ? again at the empty prompt for the compact all-shortcuts index.",
                 section: Section::Global,
             },
             ActionKind::OpenTour => &Self {
@@ -558,7 +558,7 @@ impl ActionDef {
             ActionKind::OpenSyncStatus => &Self {
                 kind: ActionKind::OpenSyncStatus,
                 default_keys: "Shift-D",
-                label: "sync status",
+                label: "sync diagnostics",
                 describe: "Show recent provider-sync outcomes, last poll times, and errors.",
                 section: Section::Global,
             },
@@ -594,7 +594,7 @@ impl ActionDef {
                 kind: ActionKind::OpenSnippets,
                 default_keys: "]",
                 label: "snippets",
-                describe: "Browse the snippet library — every `]]<key>` shortcut with its description and body, so you can see what's available without already knowing the key. Press `e` to edit the YAML file; restart to reload.",
+                describe: "Browse the snippet library — every `]]s<key>` shortcut with its description and body, so you can see what's available without already knowing the key. Press `e` to edit the YAML file; restart to reload.",
                 section: Section::Global,
             },
             ActionKind::JumpToWorkspace => &Self {
@@ -628,7 +628,7 @@ impl ActionDef {
             ActionKind::StartAgent => &Self {
                 kind: ActionKind::StartAgent,
                 default_keys: "Shift-W",
-                label: "start agent",
+                label: "start work",
                 describe: "Pick a project, name a workspace, and start the default agent in it — all in one step, from any pane.",
                 section: Section::Global,
             },
@@ -663,9 +663,9 @@ impl ActionDef {
             },
             ActionKind::Work => &Self {
                 kind: ActionKind::Work,
-                default_keys: "w",
+                default_keys: "w w",
                 label: "work on this",
-                describe: "Spawn the default agent with a contextual work prompt (fix CI, address review, implement issue, …).",
+                describe: "Use the default or already-running agent with a contextual work prompt (fix CI, address review, implement issue, …). `w w` runs on the second key; `w c` / `w x` / `w u` choose an agent instead.",
                 section: Section::Workspace,
             },
             ActionKind::WorkWith => &Self {
@@ -675,7 +675,7 @@ impl ActionDef {
                 // help panel a row. No parseable chord of its own.
                 default_keys: "w c / w x / w u",
                 label: "work in agent",
-                describe: "Work on this with a specific agent (claude / codex / cursor / …): same contextual prompt as `w`, but forced to the chosen agent — injecting if it's already running, else spawning it.",
+                describe: "Work on this with a specific agent (claude / codex / cursor / …): same contextual prompt as `w w`, but forced to the chosen agent — injecting if it's already running, else spawning it.",
                 section: Section::Workspace,
             },
             ActionKind::SpawnAgent => &Self {
@@ -723,14 +723,14 @@ impl ActionDef {
             },
             ActionKind::NewWorkspace => &Self {
                 kind: ActionKind::NewWorkspace,
-                default_keys: "n",
+                default_keys: "x n",
                 label: "new workspace",
                 describe: "Create a pre-PR workspace (asks for a name).",
                 section: Section::Workspace,
             },
             ActionKind::NewProject => &Self {
                 kind: ActionKind::NewProject,
-                default_keys: "Shift-N",
+                default_keys: "x p",
                 // Distinct from NewWorkspace's "new workspace" — the two
                 // used to share a label, rendering two identical footer
                 // cells for different actions.
@@ -754,21 +754,21 @@ impl ActionDef {
             },
             ActionKind::LongSnooze => &Self {
                 kind: ActionKind::LongSnooze,
-                default_keys: "Shift-Z",
+                default_keys: "x z",
                 label: "long snooze",
                 describe: "Snooze the workspace for ~1 year (effectively hide). Confirmed first.",
                 section: Section::Workspace,
             },
             ActionKind::Archive => &Self {
                 kind: ActionKind::Archive,
-                default_keys: "Shift-X",
+                default_keys: "x x",
                 label: "archive",
                 describe: "Drop the workspace and kill any sessions. Destructive.",
                 section: Section::Workspace,
             },
             ActionKind::CloseIssue => &Self {
                 kind: ActionKind::CloseIssue,
-                default_keys: "Shift-C",
+                default_keys: "x c",
                 label: "close issue",
                 describe: "Close the focused GitHub issue upstream (as not-planned). Only on issue workspaces; a true delete needs elevated permissions, so this closes instead. Confirmed first.",
                 section: Section::Workspace,
@@ -783,27 +783,27 @@ impl ActionDef {
             ActionKind::ToggleAutoMerge => &Self {
                 kind: ActionKind::ToggleAutoMerge,
                 default_keys: "g g",
-                label: "auto-merge",
+                label: "auto-merge on green",
                 describe: "Toggle \"auto-merge on green\": arm the workspace so lazybox merges your PR automatically once CI goes green (own PR, no conflicts, no changes requested). Fires only while lazybox is running.",
                 section: Section::Workspace,
             },
             ActionKind::AdoptSessions => &Self {
                 kind: ActionKind::AdoptSessions,
-                default_keys: "Shift-A",
+                default_keys: "x a",
                 label: "adopt sessions",
                 describe: "Move every session from this workspace into another.",
                 section: Section::Workspace,
             },
             ActionKind::CollapseIntoPr => &Self {
                 kind: ActionKind::CollapseIntoPr,
-                default_keys: "Shift-J",
+                default_keys: "x j",
                 label: "join into PR",
                 describe: "Fold this issue into the PR that closes it (one row instead of two).",
                 section: Section::Workspace,
             },
             ActionKind::RequestReviewers => &Self {
                 kind: ActionKind::RequestReviewers,
-                default_keys: "g v",
+                default_keys: "g r",
                 label: "reviewers",
                 describe: "Request reviewer(s) on the workspace's PR.",
                 section: Section::Workspace,
@@ -840,14 +840,14 @@ impl ActionDef {
             ActionKind::CycleSort => &Self {
                 kind: ActionKind::CycleSort,
                 default_keys: "o",
-                label: "sort",
+                label: "order",
                 describe: "Cycle the sort order (recency → by-role → by-role with section headers).",
                 section: Section::Sidebar,
             },
             ActionKind::CycleMailbox => &Self {
                 kind: ActionKind::CycleMailbox,
                 default_keys: "Shift-S",
-                label: "mailbox",
+                label: "switch mailbox",
                 describe: "Cycle the mailbox view (Inbox → Inactive → Snoozed).",
                 section: Section::Sidebar,
             },
@@ -1003,13 +1003,16 @@ impl ActionDef {
             ActionKind::OpenEditor,
             ActionKind::MarkAllRead,
             ActionKind::ToggleSnooze,
-            ActionKind::LongSnooze,
-            // Project comes before Workspace — projects are
-            // containers; the user reads "create a project, then
-            // create workspaces inside it." Help modal + any other
-            // catalog-driven UI inherits this ordering.
-            ActionKind::NewProject,
+            // Workspace-management menu: creation and movement first,
+            // hiding/destructive actions last. The runtime which-key
+            // popup inherits this order directly.
             ActionKind::NewWorkspace,
+            ActionKind::NewProject,
+            ActionKind::AdoptSessions,
+            ActionKind::CollapseIntoPr,
+            ActionKind::LongSnooze,
+            ActionKind::Archive,
+            ActionKind::CloseIssue,
             ActionKind::MergePr,
             ActionKind::ToggleAutoMerge,
             ActionKind::RequestReviewers,
@@ -1017,10 +1020,6 @@ impl ActionDef {
             ActionKind::ManageLabels,
             ActionKind::OpenInBrowser,
             ActionKind::Reply,
-            ActionKind::AdoptSessions,
-            ActionKind::CollapseIntoPr,
-            ActionKind::Archive,
-            ActionKind::CloseIssue,
             // Sidebar list management
             ActionKind::CycleRoleFilter,
             ActionKind::CycleSort,
@@ -1065,15 +1064,14 @@ pub struct KeyStroke {
 /// keystrokes (a leader chord like `g m`, or the two-press `q q`).
 ///
 /// `Seq` subsumes every leader mechanism the catalog used to express
-/// out-of-band: the github `g`-group (`g m`, `g v`, …), the two-press
-/// quit (`q q`), and the terminal escape (`] ]`). The which-key popup
-/// is then a pure function of the armed prefix — "which catalog
+/// out-of-band: the github `g`-group (`g m`, `g r`, …) and the two-press
+/// quit (`q q`). The catalog which-key popup is then a pure function of the armed prefix — "which catalog
 /// entries have a `Seq` starting with this stroke?" — instead of a
 /// hardcoded `ActionGroup` table.
 ///
 /// Parsed from the catalog's `default_keys` string so the catalog
 /// stays human-readable: alternatives are separated by ` | `
-/// (`"g v | Shift-V"` in a user override), and the keystrokes WITHIN
+/// (`"g r | Shift-V"` in a user override), and the keystrokes WITHIN
 /// one alternative are space-separated (`"g m"`, `"q q"`).
 /// Presentation-only strings (`"g/G"`, `"↑/↓"`, `"all keys"`) still
 /// don't parse to a chord.
@@ -1345,7 +1343,7 @@ impl ActionDef {
     /// "always available" claims on this so the advertised set can't
     /// drift from what the terminal really dispatches (issue #114).
     pub fn available_in_terminal(&self) -> bool {
-        matches!(self.section, Section::Terminal)
+        matches!(self.section, Section::Terminal) || self.kind == ActionKind::ToggleMouseCapture
     }
 
     /// The guard standing between a keypress and this action firing —
@@ -1711,10 +1709,31 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::ManageLabels
         | ActionKind::OpenInBrowser => Some("github"),
         ActionKind::SpawnAgent => Some("agent"),
-        ActionKind::WorkWith => Some("work"),
-        ActionKind::SpawnAgentOnMain | ActionKind::SpawnShellOnMain => Some("on main"),
+        ActionKind::Work | ActionKind::WorkWith => Some("work"),
+        ActionKind::SpawnAgentOnMain | ActionKind::SpawnShellOnMain => Some("main branch"),
+        ActionKind::NewWorkspace
+        | ActionKind::NewProject
+        | ActionKind::LongSnooze
+        | ActionKind::Archive
+        | ActionKind::CloseIssue
+        | ActionKind::AdoptSessions
+        | ActionKind::CollapseIntoPr => Some("workspace"),
         _ => None,
     }
+}
+
+/// Deliberate reading order for the five non-terminal command families.
+/// Consumers use this instead of catalog insertion order, so the footer,
+/// compact index, generated docs, and help-agent context all teach the same
+/// mental model: do work, choose an agent, use main deliberately, operate on
+/// GitHub, then manage the workspace itself.
+pub const LEADER_GROUP_ORDER: &[&str] = &["work", "agent", "main branch", "github", "workspace"];
+
+pub fn leader_group_rank(label: &str) -> usize {
+    LEADER_GROUP_ORDER
+        .iter()
+        .position(|candidate| *candidate == label)
+        .unwrap_or(LEADER_GROUP_ORDER.len())
 }
 
 impl ActionDef {
@@ -1814,19 +1833,19 @@ impl ActionDef {
             });
         }
         // Scoped "work on this" rows: `<work-leader> <agent-key>` (e.g.
-        // `w c` / `w x` / `w u`). The leader is whatever `work` resolves
-        // to (honoring a remap), and the second key is the agent's own
-        // default shortcut — so the scoped chord tracks both the `work`
-        // and the agent bindings. Generated only for agents that have a
-        // default single-letter key; agents without a convention still
-        // get the bare `w` default-agent path.
+        // `w c` / `w x` / `w u`). The leader is the first stroke of
+        // Work's two-stroke binding (honoring a remap), and the second
+        // key is the agent's own shortcut. A single-stroke Work override
+        // intentionally has no scoped family: one stroke cannot both fire
+        // immediately and wait as a prefix without reintroducing the old
+        // ambiguity timer.
         let work = ActionDef::for_kind(ActionKind::WorkWith);
         let work_leader: Option<KeyStroke> = ActionDef::for_kind(ActionKind::Work)
             .effective_chords(overrides)
             .into_iter()
             .find_map(|c| match c {
-                Chord::Key(k) => Some(k),
-                Chord::Seq(_) => None,
+                Chord::Seq(keys) => keys.first().copied(),
+                Chord::Key(_) => None,
             });
         if let Some(leader) = work_leader {
             for id in agents {
@@ -2443,7 +2462,7 @@ mod tests {
         // back re-add them there.
         use std::collections::BTreeMap;
         let mut overrides = BTreeMap::new();
-        overrides.insert("request_reviewers".into(), "g v | Shift-V".into());
+        overrides.insert("request_reviewers".into(), "g r | Shift-V".into());
         let def = ActionDef::for_kind(ActionKind::RequestReviewers);
         let chords = def.effective_chords(&overrides);
         assert_eq!(chords.len(), 2, "override carries a leader + an alias");
@@ -2523,6 +2542,122 @@ mod tests {
     }
 
     #[test]
+    fn default_keymap_uses_only_named_nontrivial_leader_families() {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let agents = ["claude", "codex", "cursor"].map(str::to_string);
+        let catalog = ActionDef::catalog(&agents, &BTreeMap::new());
+        let mut groups: BTreeMap<String, (BTreeSet<&'static str>, BTreeSet<String>)> =
+            BTreeMap::new();
+        for entry in &catalog {
+            if matches!(ActionDef::for_kind(entry.kind).guard(), Guard::DoublePress) {
+                continue;
+            }
+            for chord in &entry.chords {
+                let Chord::Seq(strokes) = chord else { continue };
+                assert_eq!(strokes.len(), 2, "leaders are exactly two strokes");
+                let label = leader_group_label(entry.kind).unwrap_or_else(|| {
+                    panic!("leader action {:?} has no designed group label", entry.kind)
+                });
+                let group = groups.entry(strokes[0].display()).or_default();
+                group.0.insert(label);
+                group.1.insert(strokes[1].display());
+            }
+        }
+
+        assert_eq!(
+            groups.keys().cloned().collect::<Vec<_>>(),
+            ["a", "b", "g", "w", "x"],
+            "a new leader must be an intentional addition to the keymap grammar",
+        );
+        for (leader, (labels, continuations)) in groups {
+            assert_eq!(labels.len(), 1, "{leader} has conflicting group names");
+            assert!(
+                continuations.len() >= 2,
+                "{leader} should be a direct key, not a one-item menu",
+            );
+        }
+    }
+
+    #[test]
+    fn compatibility_aliases_are_exceptional_not_the_default_style() {
+        for def in ActionDef::all() {
+            let count = def.default_chords().len();
+            if count > 1 {
+                assert_eq!(
+                    def.kind,
+                    ActionKind::ToggleMouseCapture,
+                    "{:?} has {count} default aliases; grouped actions belong behind a leader",
+                    def.kind,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cross_scope_key_reuse_is_small_and_intentional() {
+        use std::collections::{BTreeSet, HashMap};
+        let mut by_chord: HashMap<Chord, Vec<&ActionDef>> = HashMap::new();
+        for def in ActionDef::all() {
+            for chord in def.default_chords() {
+                by_chord.entry(chord).or_default().push(def);
+            }
+        }
+        let reused: BTreeSet<String> = by_chord
+            .into_iter()
+            .filter(|(_, defs)| {
+                defs.iter()
+                    .map(|d| d.section)
+                    .collect::<std::collections::HashSet<_>>()
+                    .len()
+                    > 1
+            })
+            .map(|(chord, _)| chord_display_for_test(&chord))
+            .collect();
+        assert_eq!(
+            reused,
+            ["Enter", "Space", "z"].map(str::to_string).into(),
+            "cross-scope reuse needs an explicit design decision",
+        );
+    }
+
+    fn chord_display_for_test(chord: &Chord) -> String {
+        match chord {
+            Chord::Key(key) => key.display(),
+            Chord::Seq(strokes) => strokes
+                .iter()
+                .map(KeyStroke::display)
+                .collect::<Vec<_>>()
+                .join(" "),
+        }
+    }
+
+    #[test]
+    fn confirmed_actions_never_live_on_a_bare_key() {
+        for def in ActionDef::all().filter(|def| def.is_destructive()) {
+            let chords = def.default_chords();
+            if chords.is_empty() {
+                assert_eq!(
+                    def.kind,
+                    ActionKind::SpawnAgentOnMain,
+                    "only the generated per-agent main-branch rows use a placeholder",
+                );
+                continue;
+            }
+            for chord in chords {
+                let Chord::Seq(strokes) = chord else {
+                    panic!("confirmed action {:?} is bound to a bare key", def.kind)
+                };
+                assert!(
+                    matches!(strokes[0].display().as_str(), "b" | "g" | "x"),
+                    "confirmed action {:?} lives outside a risk-signaling leader",
+                    def.kind,
+                );
+            }
+        }
+    }
+
+    #[test]
     fn every_parseable_default_round_trips_to_chord() {
         // Smoke: every catalog entry whose default_keys carries at
         // least one parseable alternative must yield a chord. Catches
@@ -2541,7 +2676,7 @@ mod tests {
             "all keys",
             // The terminal `]]q` leave chord is dispatched by the
             // terminal-pane escape-char latch + leader (rendered from the
-            // configured `ui.terminal_escape_char`, #170/#252), never by
+            // configured `terminal.escape_char`, #170/#252), never by
             // the catalog matcher — so it carries no parseable catalog
             // chord.
             "]]q",
@@ -2608,13 +2743,11 @@ mod tests {
         assert!(def.confirm_prompt().is_some());
         assert_eq!(
             def.default_chord(),
-            Some(Chord::Key(KeyStroke::new(
-                false,
-                true,
-                false,
-                ChordCode::Char('c'),
-            ))),
-            "close-issue defaults to Shift-C",
+            Some(Chord::Seq(vec![
+                KeyStroke::new(false, false, false, ChordCode::Char('x')),
+                KeyStroke::new(false, false, false, ChordCode::Char('c')),
+            ])),
+            "close-issue lives in the workspace-management menu",
         );
     }
 
@@ -2735,16 +2868,16 @@ mod tests {
     }
 
     #[test]
-    fn available_in_terminal_tracks_section() {
-        // The terminal pane forwards every key to the PTY; only its
-        // own section's chords (`]]`, scrollback) survive that. The
-        // predicate must equal "is a Terminal-section action" for
-        // every catalog entry — that equivalence is the single source
-        // of truth every surface gates its terminal claims on (#114).
+    fn available_in_terminal_tracks_real_dispatch_exceptions() {
+        // Terminal-section actions survive PTY focus. Mouse capture is
+        // the one intentional global exception: it is matched before PTY
+        // forwarding specifically so users can regain native selection.
         for def in ActionDef::all() {
+            let expected =
+                def.section == Section::Terminal || def.kind == ActionKind::ToggleMouseCapture;
             assert_eq!(
                 def.available_in_terminal(),
-                def.section == Section::Terminal,
+                expected,
                 "{:?} availability disagrees with its section",
                 def.kind,
             );
@@ -2826,8 +2959,8 @@ mod tests {
             .filter(|e| e.kind == ActionKind::WorkWith)
             .collect();
         // One row per agent WITH a default key — `aider` has no
-        // convention, so it gets no scoped chord (bare `w` still
-        // reaches the default-agent path).
+        // convention, so it gets no scoped chord (`w w` still reaches
+        // the default-agent path).
         assert_eq!(work_rows.len(), 3, "one scoped row per known agent");
 
         let w = KeyStroke::new(false, false, false, ChordCode::Char('w'));
@@ -2989,10 +3122,10 @@ mod tests {
     #[test]
     fn scoped_work_leader_follows_a_work_remap() {
         // The scoped chords' leader tracks the `work` binding, so a
-        // remap of `w` moves `w c` → `g c` too.
+        // remap of `w w` moves `w c` → `g c` too.
         use std::collections::BTreeMap;
         let mut overrides = BTreeMap::new();
-        overrides.insert("work".to_string(), "g".to_string());
+        overrides.insert("work".to_string(), "g g".to_string());
         let catalog = ActionDef::catalog(&["claude".to_string()], &overrides);
         let claude = catalog
             .iter()
@@ -3004,6 +3137,31 @@ mod tests {
                 KeyStroke::new(false, false, false, ChordCode::Char('g')),
                 KeyStroke::new(false, false, false, ChordCode::Char('c')),
             ])],
+        );
+    }
+
+    #[test]
+    fn single_key_work_remap_does_not_create_an_ambiguous_leader() {
+        use std::collections::BTreeMap;
+        let mut overrides = BTreeMap::new();
+        overrides.insert("work".to_string(), "Ctrl-k".to_string());
+        let catalog = ActionDef::catalog(&["claude".to_string()], &overrides);
+        let work = catalog
+            .iter()
+            .find(|e| e.kind == ActionKind::Work)
+            .expect("work row");
+        assert_eq!(
+            work.chords,
+            vec![Chord::Key(KeyStroke::new(
+                true,
+                false,
+                false,
+                ChordCode::Char('k'),
+            ))],
+        );
+        assert!(
+            !catalog.iter().any(|e| e.kind == ActionKind::WorkWith),
+            "a direct Work key must not also become a delayed leader",
         );
     }
 
@@ -3160,14 +3318,44 @@ mod tests {
         assert_eq!(leader_group_label(ActionKind::WorkWith), Some("work"));
         assert_eq!(
             leader_group_label(ActionKind::SpawnAgentOnMain),
-            Some("on main"),
+            Some("main branch"),
         );
         assert_eq!(
             leader_group_label(ActionKind::SpawnShellOnMain),
-            Some("on main"),
+            Some("main branch"),
         );
-        assert_eq!(leader_group_label(ActionKind::Work), None);
+        assert_eq!(leader_group_label(ActionKind::Work), Some("work"));
+        assert_eq!(
+            leader_group_label(ActionKind::NewWorkspace),
+            Some("workspace"),
+        );
+        assert_eq!(leader_group_label(ActionKind::Archive), Some("workspace"),);
         assert_eq!(leader_group_label(ActionKind::Quit), None);
+    }
+
+    #[test]
+    fn workspace_management_actions_share_the_x_leader() {
+        let expected = [
+            (ActionKind::NewWorkspace, 'n'),
+            (ActionKind::NewProject, 'p'),
+            (ActionKind::AdoptSessions, 'a'),
+            (ActionKind::CollapseIntoPr, 'j'),
+            (ActionKind::LongSnooze, 'z'),
+            (ActionKind::Archive, 'x'),
+            (ActionKind::CloseIssue, 'c'),
+        ];
+        let leader = KeyStroke::new(false, false, false, ChordCode::Char('x'));
+        for (kind, key) in expected {
+            assert_eq!(
+                ActionDef::for_kind(kind).default_chord(),
+                Some(Chord::Seq(vec![
+                    leader,
+                    KeyStroke::new(false, false, false, ChordCode::Char(key)),
+                ])),
+                "{kind:?} must stay in the workspace menu",
+            );
+            assert_eq!(leader_group_label(kind), Some("workspace"));
+        }
     }
 
     /// Regression (advertised-but-ignored namespaces): each generated

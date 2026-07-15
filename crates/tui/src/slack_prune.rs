@@ -311,9 +311,12 @@ pub async fn run(args: &[String]) -> std::io::Result<PruneOutcome> {
         println!("  Run `lazybox slack init` to configure interactively.");
         return Ok(PruneOutcome::Failed);
     };
-    let Some(store) = lazybox_server::open_store() else {
-        println!("✗ open ~/.lazybox/v2/state.db — can't tell which sessions are live.");
-        return Ok(PruneOutcome::Failed);
+    let store = match lazybox_server::open_store() {
+        Ok(store) => store,
+        Err(error) => {
+            println!("✗ {error} — refusing to prune without reliable session state.");
+            return Ok(PruneOutcome::Failed);
+        }
     };
     let slack = LiveSlack::new(bot_token);
     let mut io = StdioPrompt;

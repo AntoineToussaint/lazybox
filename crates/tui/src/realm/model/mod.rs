@@ -70,7 +70,7 @@ const TERMINALS_PID: PaneId = PaneId::new(3);
 pub enum Id {
     Splash,
     Help,
-    /// "Ask lazybox" help modal (#302), opened by pressing `?` on the
+    /// "Ask Lazybox" help modal (#302), opened by pressing `?` on the
     /// `?` help panel. Typing fuzzy-searches the runtime catalog;
     /// Enter sends the text as a question to the headless help-agent
     /// run. Conversation state lives in `Model::help_convo` (shared
@@ -86,7 +86,7 @@ pub enum Id {
     /// Single-line input prompt for naming a brand-new local
     /// Project. Submit → `Command::CreateProject { name }`.
     NewProject,
-    /// Repo picker for the `Shift-N` new-workspace flow. Lists the
+    /// Repo picker for the `x p` new-workspace flow. Lists the
     /// already-tracked repos plus a "create a new local project"
     /// escape hatch. Choices live in `new_workspace_repo_choices`;
     /// `Msg::ChoicePicked` either funnels into the new-workspace name
@@ -111,7 +111,7 @@ pub enum Id {
     /// (issue, PR) keys live in `active_merge_prompt`; `Msg::Confirmed`
     /// dispatches `Command::ConfirmMerge` back to the daemon.
     MergeConfirm,
-    /// Picker for the `Shift-A` ("adopt") flow — pick the target
+    /// Picker for the `x a` ("adopt") flow — pick the target
     /// workspace the source's sessions should move into. Source is
     /// stashed in `pending_adopt_source`; `Msg::ChoicePicked` reads
     /// the picked index out of `adopt_choices` and dispatches
@@ -183,7 +183,7 @@ pub enum Id {
     /// modals (MergePrConfirm, the kill latch, …) — one modal id,
     /// one Yes-handler, one place to remember.
     ActionConfirm,
-    /// Snippet picker mounted from the terminal pane on `]<key>`.
+    /// Snippet picker mounted from the terminal pane on `]]s<key>`.
     /// Filter input + scrollable snippet list. `Msg::ChoicePicked`
     /// resolves the picked row to a snippet body, which the
     /// dispatcher writes to the active terminal followed by `\r`
@@ -225,7 +225,7 @@ pub enum Id {
     /// Read-only snippets browser (`]`, or the `,` Settings palette).
     /// Scrollable list of the merged snippet library — key, origin,
     /// description, body — so snippets are discoverable outside the
-    /// `]]<key>` terminal leader (#237). `e` opens the YAML for editing
+    /// `]]s<key>` terminal snippet leader (#237). `e` opens the YAML for editing
     /// (`Msg::OpenSnippetsFile`); any other non-scroll key dismisses.
     /// See `realm::components::snippet_browser`.
     SnippetBrowser,
@@ -347,9 +347,11 @@ pub enum Msg {
     ChoicePicked(Vec<usize>),
     ChoiceRefresh,
     ChoiceBack,
-    /// `?` pressed on the `?` help panel — swap it for the
-    /// "Ask lazybox" modal (#302).
+    /// `?` pressed on the Shortcuts panel — return to Ask Lazybox.
     HelpAskOpen,
+    /// `?` pressed at Ask Lazybox's empty prompt — swap to the compact
+    /// all-shortcuts index.
+    HelpIndexOpen,
     /// Question submitted from the `HelpAsk` modal. The modal stays
     /// mounted; the answer streams back into `Model::help_convo`.
     HelpAsked(String),
@@ -567,15 +569,6 @@ pub struct Model<T: TerminalAdapter> {
     /// Cleared by the completing key, or on an abandonment signal (a
     /// mouse click, via `cancel_leader_chords`).
     terminal_leader_armed: bool,
-    /// `w` leader armed-at instant (issue #224). Unlike the github `g`
-    /// group, `w` is BOTH a direct action (work on the running-or-default
-    /// agent) and a leader prefix for the scoped `w c` / `w x` chords —
-    /// so pressing `w` arms a *timed* leader: an agent key within
-    /// `ui_defaults.escape_window` picks that agent (via `self.leader`),
-    /// otherwise bare `Work` fires on the idle tick (`tick_work_leader`).
-    /// `None` when not armed. Kept in lockstep with `self.leader`: armed
-    /// together, cleared together.
-    work_leader_at: Option<std::time::Instant>,
     /// Pending `--workspace` / `--session` preselect from the CLI.
     /// Applied after the daemon's first Snapshot — by then the
     /// sidebar has the full workspace list and `focus_workspace_key`
@@ -668,7 +661,7 @@ pub struct Model<T: TerminalAdapter> {
     /// Workspace key whose PR is being confirmed for merge by the
     /// `g m` Confirm modal. Set when the modal mounts, taken on
     /// `Msg::Confirmed` / `Msg::ModalDismissed`.
-    /// Source workspace key the `Shift-A` adopt picker is gathering
+    /// Source workspace key the `x a` adopt picker is gathering
     /// a target for. Set when the picker mounts; consumed when the
     /// user picks (or dismisses).
     pending_adopt_source: Option<lazybox_core::WorkspaceKey>,
@@ -680,7 +673,7 @@ pub struct Model<T: TerminalAdapter> {
     /// picker, in row order. `Msg::ChoicePicked` indexes into this to
     /// recover the chosen `ProjectKey`, then mounts the name input.
     start_agent_project_choices: Vec<lazybox_core::ProjectKey>,
-    /// Candidate repos for the active `Shift-N` new-workspace picker,
+    /// Candidate repos for the active `x p` new-workspace picker,
     /// in row order. The picker shows one extra trailing row (the
     /// "create a new local project" escape hatch), so a pick index
     /// equal to this vec's length means "make a new project" rather
@@ -810,7 +803,7 @@ pub struct Model<T: TerminalAdapter> {
     /// from the focused-project resolver, consumed by
     /// `handle_input_submitted`'s `Id::NewWorkspace` arm.
     pending_new_workspace_project: Option<lazybox_core::ProjectKey>,
-    /// Name of a project the user just submitted via Shift-N. When
+    /// Name of a project the user just submitted via x p. When
     /// the daemon broadcasts `ProjectUpserted` for a matching name,
     /// we focus its header row + auto-mount the new-workspace input
     /// — without this hand-off, the new project is unreachable via
@@ -1027,7 +1020,7 @@ const TIP_IDLE_DELAY: Duration = Duration::from_secs(8);
 /// consecutive presses (with no intervening non-`]` key) returns
 /// focus to the sidebar instead of forwarding to the PTY.
 // `TERMINAL_ESCAPE_CHAR` retired — value lives on `ui_defaults`,
-// sourced from `~/.lazybox/config.yaml::ui.terminal_escape_char`
+// sourced from `~/.lazybox/config.yaml::terminal.escape_char`
 // (default `]`).
 
 impl<T: TerminalAdapter> Model<T> {
@@ -1073,7 +1066,6 @@ impl<T: TerminalAdapter> Model<T> {
             leader: crate::confirm_latch::LeaderLatch::new(),
             escape_latch: crate::confirm_latch::DoubleTapLatch::new(),
             terminal_leader_armed: false,
-            work_leader_at: None,
             last_click: None,
             terminal_user_typed_since_focus: false,
             pending_refresh_ack: false,
@@ -1328,7 +1320,7 @@ impl<T: TerminalAdapter> Model<T> {
 
     /// Install the loaded snippet collection. Called from the
     /// startup path in `main.rs` after `Snippets::load_merged`. The
-    /// terminal-pane `]<key>` latch reads from `self.snippets`
+    /// terminal-pane `]]s<key>` flow reads from `self.snippets`
     /// directly, so this is the only handoff needed.
     pub fn apply_snippets(&mut self, snippets: lazybox_config::Snippets) {
         self.snippets = snippets;
@@ -1442,7 +1434,7 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     /// Mount the snippet picker with an initial filter (typically
-    /// the single char the user typed after `]`). Picker rows are
+    /// the snippet key prefix typed after `]]s`). Picker rows are
     /// derived from the model's snippet collection; their keys are
     /// stashed in `self.snippet_choices` so `handle_choice_picked`
     /// can resolve a picked index back to a snippet via
@@ -1453,7 +1445,7 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         }
         if self.snippets.is_empty() {
-            // The user typed `]<key>` expecting a snippet and there
+            // The user typed `]]s<key>` expecting a snippet and there
             // are none. Flash a hint pointing at the snippets file
             // so they know how to configure one.
             self.flash_info("no snippets configured — add some to ~/.lazybox/snippets.yaml");
@@ -1639,7 +1631,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// Mount the read-only snippets browser (`]`, or the Settings
     /// palette). Lists the whole merged library — key, origin,
     /// description, body — so a user can discover what's available
-    /// without already knowing a `]]<key>` shortcut (#237). Built-ins
+    /// without already knowing a `]]s<key>` shortcut (#237). Built-ins
     /// are normally present so it's rarely empty; the browser renders a
     /// placeholder if it's opened before snippets finish loading.
     pub(crate) fn mount_snippet_browser(&mut self) {
@@ -1652,7 +1644,10 @@ impl<T: TerminalAdapter> Model<T> {
             .all()
             .map(|(k, v)| BrowserRow::new(k, v))
             .collect();
-        self.mount_modal(Id::SnippetBrowser, SnippetBrowser::new(rows));
+        self.mount_modal(
+            Id::SnippetBrowser,
+            SnippetBrowser::new(rows, self.ui_defaults.terminal_escape_char),
+        );
     }
 
     /// Mount the fuzzy workspace switcher (`JumpToWorkspace`). Rows are
@@ -2952,7 +2947,7 @@ impl<T: TerminalAdapter> Model<T> {
             {
                 let help = ActionDef::for_kind(ActionKind::OpenHelp);
                 let quit = ActionDef::for_kind(ActionKind::Quit);
-                // The way back out is `ui.terminal_escape_char` doubled,
+                // The way back out is `terminal.escape_char` doubled,
                 // owned by the escape-char latch — not a remappable
                 // catalog chord (#188). Render it from the configured
                 // char so the hint matches what the dispatcher matches.
@@ -3290,12 +3285,18 @@ impl<T: TerminalAdapter> Model<T> {
                 self.dispatch_cmds(cmds);
             }
             Msg::HelpAskOpen => {
-                // `?` on the help panel: swap the panel for the ask
-                // modal.
+                // `?` on Shortcuts: return to the primary Ask surface.
                 if matches!(self.modal_stack.last(), Some(Id::Help)) {
                     self.pop_modal();
                 }
                 self.mount_help_ask();
+            }
+            Msg::HelpIndexOpen => {
+                // `?` at Ask's empty prompt: swap to the compact index.
+                if matches!(self.modal_stack.last(), Some(Id::HelpAsk)) {
+                    self.pop_modal();
+                }
+                self.mount_help();
             }
             Msg::HelpAsked(question) => {
                 // The HelpAsk modal stays mounted — the answer streams

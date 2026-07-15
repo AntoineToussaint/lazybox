@@ -31,7 +31,7 @@ const features = [
   {
     icon: '⌁',
     title: 'The right prompt, one key',
-    body: 'Press w and lazybox reads the row — failing CI, a merge conflict, an open issue, review comments — and launches the agent with exactly the right brief.',
+    body: 'Press w w and lazybox reads the row — failing CI, a merge conflict, an open issue, review comments — and launches the agent with exactly the right brief.',
   },
   {
     icon: '∑',
@@ -55,8 +55,8 @@ const steps = [
   },
   {
     title: 'Spawn agents in parallel',
-    body: 'Press a c, a x, or a u for Claude Code, Codex, or Cursor — or w to let lazybox pick the brief. Each gets its own isolated checkout. Run as many as you like.',
-    code: 'a c · a x · a u · w',
+    body: 'Press a c, a x, or a u for Claude Code, Codex, or Cursor — or w w to let lazybox pick the brief. Each gets its own isolated checkout. Run as many as you like.',
+    code: 'a c · a x · a u · w w',
   },
   {
     title: 'Step in only when needed',
@@ -130,14 +130,15 @@ const steps = [
           <video
             src="/demo/lazybox.mp4"
             poster="/demo/lazybox.png"
+            aria-label="lazybox inbox with workspaces, CI status, and an embedded terminal"
+            data-demo
             autoplay
             loop
             muted
             playsinline
             preload="metadata"
-          >
-            <img src="/demo/lazybox.gif" alt="lazybox inbox with workspaces, CI status, and an embedded terminal" />
-          </video>
+            controls
+          ></video>
         </div>
       </div>
     </header>
@@ -321,6 +322,11 @@ const steps = [
 
     // Scroll reveal
     const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const demo = document.querySelector<HTMLVideoElement>('[data-demo]');
+    if (reduce && demo) {
+      demo.pause();
+      demo.removeAttribute('autoplay');
+    }
     const items = document.querySelectorAll('[data-reveal]');
     if (reduce || !('IntersectionObserver' in window)) {
       items.forEach((el) => el.classList.add('in'));

@@ -105,8 +105,9 @@ fn is_leader_entry(entry: &CatalogEntry) -> bool {
 fn section_intro(section: Section) -> &'static str {
     match section {
         Section::Global => {
-            "Work from any pane — **except** a focused terminal, which forwards every key \
-             to the PTY; press `]]` to return to the sidebar first."
+            "Work from any non-terminal pane. A focused terminal forwards keys to the PTY; \
+             press `]]q` to return first. **Text selection (`F8`) is the deliberate exception** \
+             and works inside a terminal too."
         }
         Section::Workspace => {
             "Act on the focused workspace. Available from the sidebar **and** the activity \
@@ -132,14 +133,30 @@ fn generate(frontmatter: &str) -> String {
     );
     out.push_str(
         "\nThe full default keymap, generated from the action catalog \
-         (`crates/tui-core/src/action.rs`) — the same source the in-app `?` help renders. \
-         If you've remapped keys via `ui.action_keys` or picked a `ui.keymap_preset`, `?` \
-         shows your live bindings; this page shows the defaults.\n",
+         (`crates/tui-core/src/action.rs`). Press `?` in the app to open **Ask Lazybox**: \
+         typing searches your live bindings immediately, and Enter asks in plain language. \
+         Press `?` again at its empty prompt for the compact shortcut index. If you've \
+         remapped keys via `ui.action_keys` or selected a preset, those in-app surfaces show \
+         your effective bindings; this page shows the defaults.\n",
     );
     out.push_str(
         "\nGrouped actions live behind **leader keys** (press the leader, a which-key menu \
          pops up, the next key picks the action). The default keymap is leaders-only: no \
          single-key aliases for grouped actions.\n",
+    );
+    out.push_str(
+        "\n## The design\n\n\
+         The keymap follows five rules:\n\n\
+         1. **Ask, don't memorize.** `?` searches the effective keymap and answers workflow \
+            questions; the static index is secondary.\n\
+         2. **Common verbs stay direct.** `Enter` opens, `s` starts a shell, `e` opens the \
+            editor, `r` replies, `z` snoozes, and `/` searches.\n\
+         3. **Families use mnemonic leaders.** `w` work, `a` agent, `b` main branch, `g` \
+            GitHub, and `x` workspace management. Every leader opens a visible menu.\n\
+         4. **Risk requires intent.** Destructive/provider mutations are behind a leader and \
+            confirmation; quit is `q q`.\n\
+         5. **Terminal mode has one escape namespace.** `]]` opens every lazybox command that \
+            must work while the embedded program owns the keyboard.\n",
     );
 
     // ── Flat per-section tables ─────────────────────────────────────
@@ -174,7 +191,7 @@ fn generate(frontmatter: &str) -> String {
         if section == Section::Activity {
             out.push_str(
                 "\n`j` / `k` (or arrows) move the row cursor; `→`/`l` expand and `←`/`h` \
-                 collapse the focused row; `w` works on the selection.\n",
+                 collapse the focused row; `w w` works on the selection.\n",
             );
         }
         if section == Section::Terminal {
@@ -203,6 +220,13 @@ fn generate(frontmatter: &str) -> String {
             }
         }
     }
+    leaders.sort_by_key(|(_, members)| {
+        members
+            .first()
+            .and_then(|entry| leader_group_label(entry.kind))
+            .map(lazybox_tui_core::action::leader_group_rank)
+            .unwrap_or(usize::MAX)
+    });
     for (leader, members) in &leaders {
         let label = members
             .iter()
@@ -215,9 +239,9 @@ fn generate(frontmatter: &str) -> String {
         ));
         if *leader == KeyStroke::parse("w").expect("w parses") {
             out.push_str(
-                "`w` alone (after a short pause) is \"work on this\": it spawns the default \
-                 agent with a contextual prompt. The scoped chords below pick the agent or \
-                 model tier explicitly.\n\n",
+                "`w` opens a deterministic work menu: press `w w` for the default or \
+                 already-running agent, or choose an agent / model tier below. Nothing waits \
+                 on a timeout, so the second key acts immediately.\n\n",
             );
         }
         out.push_str("| Chord | Action |\n| --- | --- |\n");
@@ -265,7 +289,7 @@ fn terminal_appendix() -> String {
          `]]` is a non-timed leader: after the two presses it waits for the command key. \
          `Esc` or any unbound key cancels back into the terminal; a lone `]` followed by \
          any other key is sent to the program verbatim. The escape char is configurable \
-         (`ui.terminal_escape_char`).\n\n\
+         (`terminal.escape_char`; the legacy `ui.terminal_escape_char` alias is still accepted).\n\n\
          | Chord | Action |\n| --- | --- |\n\
          | `]]s` | Open the snippet picker (typing a full key auto-submits — `]]srev`) |\n\
          | `]]f` | Toggle focus mode |\n\
@@ -318,7 +342,7 @@ fn generated_page_reflects_the_leaders_only_default_keymap() {
         "`a c`",
         "`w c`",
         "`b s`",
-        "mouse capture",
+        "text selection",
         "]]x",
         "Shift-Home",
         "new project",

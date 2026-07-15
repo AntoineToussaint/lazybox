@@ -211,7 +211,8 @@ Remote & services:
   lazybox server stop         stop a running standalone daemon
   lazybox server status       show daemon status
   lazybox server api [addr]   JSON HTTP API gateway (default 127.0.0.1:8787;
-                              needs LAZYBOX_API_TOKEN or --insecure-no-auth)
+                              needs LAZYBOX_API_TOKEN or --insecure-no-auth;
+                              non-loopback also needs --allow-insecure-http)
   lazybox --connect <socket>  attach a TUI to a running daemon
   lazybox slack init          set up the optional Slack mirror
   lazybox slack doctor        validate an existing Slack setup
@@ -234,15 +235,12 @@ fn wants_version(args: &[String]) -> bool {
     args.iter().any(|a| a == "-V" || a == "--version")
 }
 
-// `pub` so the `lb` alias bin (src/bin/lb.rs) can call this via a
-// `#[path]` include; harmless for the binary's own entrypoint.
-//
 // The disallowed-methods allow covers the `Runtime::block_on` that
 // `#[tokio::main]` expands to — the process entrypoint standing up
 // the runtime, not run-loop work (see clippy.toml).
 #[allow(clippy::disallowed_methods)]
 #[tokio::main]
-pub async fn main() -> anyhow::Result<()> {
+async fn main() -> anyhow::Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
 
     // Resolve --help / --version before init_tracing (which redirects stderr
@@ -530,7 +528,7 @@ async fn run_embedded_realm(
     preselect: Option<lazybox_tui::realm::model::Preselect>,
 ) -> anyhow::Result<()> {
     let (client, server) = channel::pair();
-    let config = ServerConfig::from_user_config();
+    let config = server_config_from_user()?;
 
     // Recovery probes the backend (`tmux list-sessions`) before the UI
     // paints — bound it so a wedged tmux server degrades to "no
@@ -934,7 +932,7 @@ async fn server_subcommand(args: &[String]) -> anyhow::Result<()> {
         Some("api") => server_api(&args[1..]).await,
         _ => {
             eprintln!(
-                "usage: lazybox server [start|stop|status|api [addr:port] [--insecure-no-auth]]"
+                "usage: lazybox server [start|stop|status|api [addr:port] [--insecure-no-auth] [--allow-insecure-http]]"
             );
             std::process::exit(2);
         }
@@ -949,7 +947,7 @@ async fn server_start() -> anyhow::Result<()> {
     let socket = lifecycle::socket_path();
     let pid_file = lifecycle::pid_path();
 
-    let config = ServerConfig::from_user_config();
+    let config = server_config_from_user()?;
     if tokio::time::timeout(
         Duration::from_secs(5),
         lazybox_server::spawn_handler::recover_sessions(&config),
@@ -1002,9 +1000,14 @@ fn server_status() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn api_bind_requires_insecure_http_ack(bind_addr: SocketAddr, allowed: bool) -> bool {
+    !bind_addr.ip().is_loopback() && !allowed
+}
+
 async fn server_api(args: &[String]) -> anyhow::Result<()> {
     let mut args = args.to_vec();
     let insecure_no_auth = take_flag(&mut args, "--insecure-no-auth");
+    let allow_insecure_http = take_flag(&mut args, "--allow-insecure-http");
     let bind_addr = match args.first() {
         Some(raw) => raw
             .parse::<SocketAddr>()
@@ -1032,7 +1035,19 @@ async fn server_api(args: &[String]) -> anyhow::Result<()> {
         std::process::exit(2);
     }
 
-    let config = ServerConfig::from_user_config();
+    // Bearer auth does not encrypt HTTP. Refuse a routable listener unless
+    // the operator separately acknowledges that a trusted tunnel, TLS proxy,
+    // or private overlay protects the network path.
+    if api_bind_requires_insecure_http_ack(bind_addr, allow_insecure_http) {
+        println!(
+            "refusing to expose the plaintext JSON API on {bind_addr}.\n\
+             Keep it on loopback and use an SSH tunnel or authenticated TLS proxy.\n\
+             Pass --allow-insecure-http only when a trusted private network already protects the connection."
+        );
+        std::process::exit(2);
+    }
+
+    let config = server_config_from_user()?;
     if tokio::time::timeout(
         Duration::from_secs(5),
         lazybox_server::spawn_handler::recover_sessions(&config),
@@ -1051,16 +1066,39 @@ async fn server_api(args: &[String]) -> anyhow::Result<()> {
              anything that can reach {bind_addr} can drive your agents"
         );
     }
+    if !bind_addr.ip().is_loopback() {
+        println!(
+            "WARNING: serving plaintext HTTP on non-loopback {bind_addr}; bearer tokens and commands are not encrypted"
+        );
+    }
 
     lazybox_server::api_gateway::serve(
         config,
         lazybox_server::api_gateway::GatewayOptions {
             bind_addr,
             bearer_token: token,
+            ..lazybox_server::api_gateway::GatewayOptions::default()
         },
     )
     .await?;
     Ok(())
+}
+
+/// Load the production database without ever degrading to ephemeral
+/// state. Tracing redirects stderr to the log file, so print the failure
+/// to stdout before returning it or a CLI user would see a silent exit.
+fn server_config_from_user() -> anyhow::Result<ServerConfig> {
+    match ServerConfig::from_user_config() {
+        Ok(config) => Ok(config),
+        Err(error) => {
+            println!(
+                "✗ lazybox cannot open its persistent state: {error}\n\
+                 Refusing to continue with an empty in-memory database.\n\
+                 Check the path and its permissions, then retry."
+            );
+            Err(error.into())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1121,5 +1159,17 @@ mod argv_tests {
         let destructive = HELP.find("--fresh").expect("--fresh mention");
         assert!(getting_started < destructive);
         assert!(HELP.contains("(destructive)"));
+    }
+
+    #[test]
+    fn api_plaintext_bind_policy_requires_separate_non_loopback_ack() {
+        let loopback: SocketAddr = "127.0.0.1:8787".parse().unwrap();
+        let wildcard: SocketAddr = "0.0.0.0:8787".parse().unwrap();
+        let private: SocketAddr = "192.168.1.10:8787".parse().unwrap();
+
+        assert!(!api_bind_requires_insecure_http_ack(loopback, false));
+        assert!(api_bind_requires_insecure_http_ack(wildcard, false));
+        assert!(api_bind_requires_insecure_http_ack(private, false));
+        assert!(!api_bind_requires_insecure_http_ack(private, true));
     }
 }

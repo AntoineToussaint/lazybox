@@ -74,9 +74,9 @@ pub fn worktrees_root() -> PathBuf {
 }
 
 /// Sandbox workspaces — repo-less scratch directories the user
-/// creates via `Shift-N`. Lives next to the worktree base under
+/// creates via `x p`. Lives next to the worktree base under
 /// `<home>/v2/sandboxes/<slug>/`. Survives across lazybox restarts
-/// and is preserved on `Shift-X` archive (the workspace record
+/// and is preserved on `x x` archive (the workspace record
 /// goes; the directory stays for the user to clean up manually if
 /// it contains real work).
 pub fn sandboxes_root() -> PathBuf {

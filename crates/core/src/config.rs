@@ -251,7 +251,7 @@ pub const KV_KEY_THEME: &str = "theme_v1";
 pub const KV_KEY_LAYOUT: &str = "layout_v2";
 
 /// Set of workspace keys the user has explicitly archived
-/// (`Shift-X`). Stored as a JSON-encoded `Vec<String>` so re-poll
+/// (`x x`). Stored as a JSON-encoded `Vec<String>` so re-poll
 /// upserts know to skip them — without this the next poll's
 /// `WorkspaceUpserted` would just re-create the row the user
 /// just dismissed. Persistence is per-machine, not synced.

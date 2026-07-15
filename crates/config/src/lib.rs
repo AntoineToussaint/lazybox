@@ -192,9 +192,10 @@ pub struct UiSection {
     /// tap. None = 800 ms.
     #[serde(with = "duration_human_opt", default)]
     pub quit_double_tap_window: Option<Duration>,
-    /// Two consecutive presses of this character return focus from
-    /// the terminal pane back to the sidebar (tmux-style prefix).
-    /// None = `]`.
+    /// Legacy location for the terminal command-menu character. New
+    /// configs should use `terminal.escape_char`; when this is set it
+    /// remains the compatibility override. None = use the terminal
+    /// section (default `]`).
     pub terminal_escape_char: Option<char>,
     /// Shift-arrow nudges the focused splitter by this many
     /// percent. None = 3.
@@ -205,7 +206,7 @@ pub struct UiSection {
     /// `z` snooze duration. None = 4 hours.
     #[serde(with = "duration_human_opt", default)]
     pub short_snooze: Option<Duration>,
-    /// `Shift-Z` long-snooze duration. None = ~1 year (365 days).
+    /// `x z` long-snooze duration. None = ~1 year (365 days).
     #[serde(with = "duration_human_opt", default)]
     pub long_snooze: Option<Duration>,
     /// Where the lazybox client writes its log file. None =
@@ -302,10 +303,9 @@ pub struct UiDefaults {
     pub auto_mark_delay: Duration,
     pub quit_double_tap_window: Duration,
     pub terminal_escape_char: char,
-    /// Window for the terminal escape / `]]` leader: a second
-    /// escape-char press within it arms the leader, and a leader key
-    /// must arrive within it before the pane leaves on idle. Sourced
-    /// from `terminal.escape_window_ms`.
+    /// Window in which a second terminal escape-char press completes
+    /// the doubled escape and opens the non-timed terminal leader.
+    /// Sourced from `terminal.escape_window_ms`.
     pub escape_window: Duration,
     pub split_step_percent: i16,
     pub task_body_max_rows: u16,
@@ -640,27 +640,24 @@ impl Default for ShellSection {
     }
 }
 
-/// How the user gets out of an embedded terminal when they want to go
-/// back to the inbox. The default is `]]` — two closing brackets typed
-/// in quick succession. Configurable because:
+/// How the user opens lazybox's command menu from an embedded terminal.
+/// The default is `]]` — two closing brackets typed in quick succession.
+/// The menu then waits without a timeout (`q` exits to the inbox).
+/// Configurable because:
 ///   - some users want a different char (`}`, `*`, etc.) that doesn't
 ///     collide with their normal typing,
-///   - some shells / agents print `]` heavily (BBcode, escape
-///     sequences shown literally) and want a longer run,
+///   - some users type `]` heavily (code, arrays, Markdown) and want
+///     a less collision-prone prefix,
 ///   - hardware keyboards differ, accessibility differs.
 ///
-/// The first `(count - 1)` chars are buffered and only flushed to the
-/// agent on a non-matching key, so an actual `]]` in code never ends
-/// up in the agent's input mid-typed if the user was escaping.
+/// The first char is buffered and flushed to the agent when the next key
+/// is different, so typing a literal `]x` still reaches the program.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TerminalSection {
-    /// Char that, when repeated `escape_count` times within
-    /// `escape_window_ms`, exits the terminal back to the sidebar.
+    /// Char that, when pressed twice within `escape_window_ms`, opens
+    /// the terminal command menu.
     pub escape_char: char,
-    /// How many of `escape_char` in a row trigger the escape.
-    /// Must be ≥ 2; `1` would steal the key entirely.
-    pub escape_count: u8,
     /// Time window between consecutive `escape_char` presses for them
     /// to count toward the same run. After this window the run
     /// resets and the buffered chars flush to the agent.
@@ -685,7 +682,6 @@ impl Default for TerminalSection {
     fn default() -> Self {
         Self {
             escape_char: ']',
-            escape_count: 2,
             escape_window_ms: 600,
             native_scrollback: true,
         }
@@ -698,6 +694,12 @@ impl Config {
     /// `]]` leader window, which lives under `terminal`.
     pub fn resolved_ui(&self) -> UiDefaults {
         let mut ui = self.ui.resolved();
+        // `ui.terminal_escape_char` predates the dedicated terminal
+        // section. Keep it as a compatibility override; new configs use
+        // `terminal.escape_char` as the single obvious home for this key.
+        if self.ui.terminal_escape_char.is_none() {
+            ui.terminal_escape_char = self.terminal.escape_char;
+        }
         ui.escape_window = Duration::from_millis(self.terminal.escape_window_ms);
         ui
     }
@@ -1588,6 +1590,22 @@ auto_fix:
         assert_eq!(r.short_snooze, Duration::from_secs(15 * 60));
         assert_eq!(r.long_snooze, Duration::from_secs(7 * 24 * 3600));
         assert_eq!(r.log_path, std::path::PathBuf::from("/var/log/lazybox.log"));
+    }
+
+    #[test]
+    fn resolved_ui_uses_terminal_escape_char_with_legacy_ui_precedence() {
+        let cfg: Config =
+            serde_yaml::from_str("terminal:\n  escape_char: '}'\n  escape_window_ms: 250\n")
+                .expect("terminal config parses");
+        let resolved = cfg.resolved_ui();
+        assert_eq!(resolved.terminal_escape_char, '}');
+        assert_eq!(resolved.escape_window, Duration::from_millis(250));
+
+        let legacy: Config = serde_yaml::from_str(
+            "terminal:\n  escape_char: '}'\nui:\n  terminal_escape_char: '*'\n",
+        )
+        .expect("legacy ui override parses");
+        assert_eq!(legacy.resolved_ui().terminal_escape_char, '*');
     }
 
     #[test]

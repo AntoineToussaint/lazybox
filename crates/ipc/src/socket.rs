@@ -23,8 +23,12 @@ pub enum FrameError {
     Io(#[from] std::io::Error),
     #[error("frame too large ({0} bytes); max is {MAX_FRAME_BYTES}")]
     TooLarge(u32),
-    #[error("encode/decode: {0}")]
-    Codec(#[from] bincode::Error),
+    #[error("encode: {0}")]
+    Encode(#[from] bincode::error::EncodeError),
+    #[error("decode: {0}")]
+    Decode(#[from] bincode::error::DecodeError),
+    #[error("decode left {0} trailing bytes in the frame")]
+    TrailingBytes(usize),
 }
 
 /// A protocol handshake failed before any frames were exchanged.
@@ -197,7 +201,12 @@ fn encode_frame<T>(msg: &T) -> Result<Vec<u8>, FrameError>
 where
     T: Serialize,
 {
-    let bytes = bincode::serialize(msg)?;
+    // `legacy()` preserves bincode 1's wire representation while using
+    // bincode 2's maintained API. The explicit limit also constrains
+    // allocations requested by a malicious payload, independently of
+    // the outer frame-length check.
+    let config = bincode::config::legacy().with_limit::<{ MAX_FRAME_BYTES as usize }>();
+    let bytes = bincode::serde::encode_to_vec(msg, config)?;
     let len = u32::try_from(bytes.len()).map_err(|_| FrameError::TooLarge(u32::MAX))?;
     if len > MAX_FRAME_BYTES {
         return Err(FrameError::TooLarge(len));
@@ -236,7 +245,12 @@ where
     }
     let mut buf = vec![0u8; len as usize];
     r.read_exact(&mut buf).await?;
-    Ok(Some(bincode::deserialize(&buf)?))
+    let config = bincode::config::legacy().with_limit::<{ MAX_FRAME_BYTES as usize }>();
+    let (message, consumed) = bincode::serde::decode_from_slice(&buf, config)?;
+    if consumed != buf.len() {
+        return Err(FrameError::TrailingBytes(buf.len() - consumed));
+    }
+    Ok(Some(message))
 }
 
 /// Connect to a daemon listening at `path` (possibly tunneled by SSH

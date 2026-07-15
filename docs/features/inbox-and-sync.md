@@ -282,16 +282,16 @@ focused; `z` disarms the timer and reverts the last auto-mark.
 **Status:** stable
 **Crate(s):** `tui`, `store` (persisted)
 **Config / flags:** `ui.short_snooze` (default 4h), `ui.long_snooze` (default 365d)
-**Key bindings:** `z` (sidebar) short snooze toggle, `Shift-Z` long snooze (two-press confirm)
+**Key bindings:** `z` (sidebar) short snooze toggle, `x z` long snooze (confirmed)
 
 ### What it does
 Hides a workspace from the Inbox until its snooze expires, moving it to the
 Snoozed mailbox. `z` on a sidebar row applies a short snooze (~4h, toggleable);
-`Shift-Z` applies a long snooze (~1 year) behind a two-press confirm.
+`x z` applies a long snooze (~1 year) behind a confirmation modal.
 
 ### How to use it
 - Sidebar: `z` snoozes the focused workspace for the short window; press `z` again to un-snooze.
-- `Shift-Z` twice applies the long snooze.
+- `x z`, then confirm, applies the long snooze.
 - View snoozed items via the Snoozed mailbox (`Shift-S`).
 
 ### How it works (brief)
@@ -302,7 +302,7 @@ timestamp passes.
 ### Test checklist
 - [ ] `z` snoozes a workspace and removes it from the Inbox.
 - [ ] `z` again un-snoozes it.
-- [ ] `Shift-Z` twice applies the long snooze.
+- [ ] `x z`, then confirm, applies the long snooze.
 - [ ] A snoozed workspace reappears in the Inbox after its window elapses.
 - [ ] Snooze persists across restart.
 

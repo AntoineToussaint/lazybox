@@ -72,6 +72,12 @@ async fn wait_for<F: FnMut(&Event) -> bool>(
     None
 }
 
+/// Explicit cwd for tests that exercise terminal behavior rather than
+/// persisted workspace resolution.
+fn test_cwd() -> Option<String> {
+    Some(std::env::temp_dir().to_string_lossy().into_owned())
+}
+
 async fn run_daemon(config: ServerConfig) -> lazybox_ipc::Client {
     let (client, server) = channel::pair();
     tokio::spawn(async move {
@@ -97,7 +103,10 @@ async fn spawn_and_wait(
             session_key: "test:ws-1".into(),
             session_id: None,
             kind,
-            cwd: None,
+            // This helper tests the terminal pipeline, not workspace
+            // resolution. An explicit cwd keeps that boundary honest:
+            // production spawns without one require a persisted row.
+            cwd: test_cwd(),
             initial_prompt: None,
             on_main: false,
         })
@@ -655,7 +664,7 @@ async fn interactive_claude_spawn_keeps_permission_prompts() {
                 session_key: "test:ws-1".into(),
                 session_id: None,
                 kind: TerminalKind::Agent("claude".into()),
-                cwd: None,
+                cwd: test_cwd(),
                 initial_prompt: None,
                 on_main: false,
             })
@@ -764,7 +773,7 @@ async fn unknown_agent_id_emits_provider_error() {
                 session_key: "test:ws-1".into(),
                 session_id: None,
                 kind: TerminalKind::Agent("does-not-exist".into()),
-                cwd: None,
+                cwd: test_cwd(),
                 initial_prompt: None,
                 on_main: false,
             })
@@ -994,7 +1003,7 @@ async fn spawn_with_initial_prompt_delivers_work_to_agent() {
                 session_key: "test:ws-ingest".into(),
                 session_id: None,
                 kind: TerminalKind::Agent("claude".into()),
-                cwd: None,
+                cwd: test_cwd(),
                 initial_prompt: Some(WORK.into()),
                 on_main: false,
             })
@@ -1147,7 +1156,7 @@ async fn inject_prompt_falls_back_to_spawn_when_terminal_dead() {
                     session_key: "test:ws-fallback".into(),
                     session_id: None,
                     kind: TerminalKind::Shell,
-                    cwd: None,
+                    cwd: test_cwd(),
                 }),
             })
             .unwrap();
@@ -1379,7 +1388,7 @@ async fn wedged_session_does_not_block_subscribe_or_subsequent_spawn() {
                 session_key: "test:wedge-followup".into(),
                 session_id: None,
                 kind: TerminalKind::Shell,
-                cwd: None,
+                cwd: test_cwd(),
                 initial_prompt: None,
                 on_main: false,
             })
@@ -1626,9 +1635,7 @@ async fn concurrent_spawns_collapse_onto_one_backend_session() {
 /// A spawn whose workspace row vanished because the workspace was
 /// DELETED while the spawn was in flight (Kill racing a slow provision)
 /// must abort — the old fallback silently launched the agent in the
-/// daemon's own cwd. A key that never existed keeps the fallback
-/// (pinned by `spawn_shell_emits_terminal_spawned_event`, which spawns
-/// against an unpersisted workspace).
+/// daemon's own cwd.
 #[tokio::test]
 async fn spawn_aborts_when_workspace_was_deleted_mid_flight() {
     timeout(TEST_DEADLINE, async {
@@ -1636,7 +1643,6 @@ async fn spawn_aborts_when_workspace_was_deleted_mid_flight() {
         config
             .deleted_workspaces
             .lock()
-            .unwrap()
             .insert("test:ws-deleted".to_string());
         let mut bus = config.bus.subscribe();
 
@@ -1668,6 +1674,49 @@ async fn spawn_aborts_when_workspace_was_deleted_mid_flight() {
         }
         assert!(saw_error, "aborted spawn must surface a provider error");
         assert!(!saw_spawned, "no terminal may be announced");
+    })
+    .await
+    .expect("deadline");
+}
+
+/// A stale or forged workspace key must never turn into a terminal in
+/// the daemon's cwd. This is the non-racy form of the same safety rule:
+/// without an explicit cwd, workspace resolution is mandatory.
+#[tokio::test]
+async fn spawn_aborts_when_workspace_does_not_exist() {
+    timeout(TEST_DEADLINE, async {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut bus = config.bus.subscribe();
+
+        lazybox_server::spawn_handler::handle_spawn(
+            &config,
+            "test:missing-workspace".into(),
+            None,
+            TerminalKind::Agent("claude".into()),
+            None,
+            None,
+            false,
+            false,
+            None,
+        )
+        .await;
+
+        assert!(
+            mock.list().await.unwrap().is_empty(),
+            "unknown workspace must not spawn a process"
+        );
+        let errors: Vec<String> = std::iter::from_fn(|| bus.try_recv().ok())
+            .filter_map(|event| match event {
+                Event::ProviderError { message, .. } => Some(message),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            errors.iter().any(|message| {
+                message.contains("unknown workspace") && message.contains("test:missing-workspace")
+            }),
+            "missing workspace should emit an actionable error: {errors:?}"
+        );
     })
     .await
     .expect("deadline");
@@ -1987,7 +2036,7 @@ fn collapse_task(key: &str, url: &str, closes: Vec<lazybox_core::TaskId>) -> laz
     }
 }
 
-/// Issue #78 regression: the manual `Shift-J` collapse (`Command::
+/// Issue #78 regression: the manual `x j` collapse (`Command::
 /// CollapseIntoPr`) must carry a live Claude terminal across to the PR
 /// workspace, not tear it down. Drives the FULL serve loop: seed an
 /// issue + claiming PR, spawn a real (mock-backed) agent on the issue,

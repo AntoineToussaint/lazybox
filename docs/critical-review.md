@@ -98,14 +98,11 @@ miss-handling. This is the #167 stale-key bug class, and the EPIC's
 `#170` is fixed (the `]]` hint is the first footer entry, with regression
 tests). The real residual:
 
-- **[high / correctness — the one live bug]** A `leave_terminal` rebind
-  makes the footer **lie**: dispatch (`keys.rs:280`) keys off
-  `terminal_escape_char`, but the footer (`terminal_stack.rs:1735`)
-  renders the overridable `leave_terminal` catalog chord. Remap it and
-  the footer shows "Esc exit to sidebar" while Esc does nothing.
-- **[medium]** No test asserts every footer hint is catalog-backed;
-  the Tour hardcodes ~20 key hints as prose (only a subset is checked);
-  the help panel hardcodes `]]<key>` ignoring the escape char.
+- **[high / correctness, resolved]** Terminal exit hints and help now render
+  the configured escape character plus `q`, matching the non-remappable
+  terminal latch instead of accepting a misleading `leave_terminal` override.
+- **[medium, resolved]** Footer/catalog coverage and tour-key checks now guard
+  against drift; terminal help renders from the configured escape character.
 
 The dispatch core *is* genuinely catalog-driven and guarded by build-time
 collision detectors — the drift is confined to the hand-curated footer /

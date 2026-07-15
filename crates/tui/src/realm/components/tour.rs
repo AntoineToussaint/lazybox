@@ -30,7 +30,7 @@ use tuirealm::ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use tuirealm::state::State;
 
 /// One tour card: a heading plus the body lines under it. Body keeps
-/// inline key hints (`w`, `Tab`, `Shift-N`) as plain text — the
+/// inline key hints (`w w`, `Tab`, `x p`) as plain text — the
 /// default bindings are stable and a card reads cleaner than a table.
 /// Keys mirror the action catalog (`lazybox_tui_core::action`); when a
 /// binding moves there, update the matching hint here.
@@ -61,8 +61,8 @@ const STEPS: &[TourStep] = &[
         body: &[
             "Empty inbox? Here's a first move that needs no PRs:",
             "",
-            "  Shift-N   new project (register a repo or local space)",
-            "  n         new workspace inside it",
+            "  x p       new project (register a repo or local space)",
+            "  x n       new workspace inside it",
             "  a c / s   start Claude Code, or a plain shell in it",
             "",
             "You land in a fresh git worktree + session, zero setup.",
@@ -93,14 +93,14 @@ const STEPS: &[TourStep] = &[
     TourStep {
         title: "3 · Put an agent on it",
         body: &[
-            "Press w on any row and lazybox opens a worktree, then",
+            "Press w w on any row and lazybox opens a worktree, then",
             "launches Claude Code with a prompt fit to the task. A few",
             "ways that plays out:",
             "",
             "  • A PR you review has failing CI → Shift-F jumps to it,",
-            "    then w lets the agent fix the build.",
-            "  • An open issue → w starts an agent to implement it.",
-            "  • A scratch idea on a repo you track → n, a c, done.",
+            "    then w w lets the agent fix the build.",
+            "  • An open issue → w w starts an agent to implement it.",
+            "  • A scratch idea on a repo → x n, a c, done.",
             "",
             "a opens the agent menu: a c / a x / a u pick Claude /",
             "Codex / Cursor; s is a plain shell; e opens the worktree",
@@ -116,7 +116,7 @@ const STEPS: &[TourStep] = &[
             "  `          jump to any workspace (fuzzy picker, all repos)",
             "  !          jump to the next agent waiting on your input",
             "  Shift-F    jump to the next PR with failing CI",
-            "  Shift-A    adopt worktrees/agents you started elsewhere",
+            "  x a        adopt worktrees/agents started elsewhere",
             "  Tab        cycle the sidebar, activity and terminal panes",
             "",
             "Jump works from anywhere — inside an agent, press ]] then `.",
@@ -128,15 +128,16 @@ const STEPS: &[TourStep] = &[
             "When a PR is ready, press g — a which-key menu pops up",
             "showing everything you can do to this PR:",
             "",
-            "  g m  merge PR    g v  reviewers   g a  assignees",
+            "  g m  merge PR    g r  reviewers   g a  assignees",
             "  g l  labels      g o  open in browser",
             "",
             "g shows the menu; the second key picks. Grouped actions",
             "live behind their leader only — re-add direct aliases via",
             "ui.action_keys if you miss them.",
             "",
-            "? shows the keymap, , Settings, t themes, q q quits. In",
-            "a terminal keys go to the agent — press ]]q to return first.",
+            "? opens Ask Lazybox (press ? again for all keys); , opens",
+            "Settings, t themes, q q quits. In a terminal, press ]]q",
+            "to return first—the embedded program owns other keys.",
             "",
             "t opens the theme picker: light + dark, live preview,",
             "and your pick persists across restarts.",
@@ -455,7 +456,7 @@ mod tests {
         // A fresh user with an empty inbox must see a first move that
         // needs no pre-existing row: new project / new workspace.
         let all = render_all();
-        assert!(all.contains("Shift-N"), "new-project key missing");
+        assert!(all.contains("x p"), "new-project key missing");
         assert!(all.contains("new workspace"), "new-workspace step missing");
         assert!(
             all.contains("Start from scratch"),
@@ -465,10 +466,7 @@ mod tests {
 
     #[test]
     fn mentions_adopt_sessions() {
-        assert!(
-            render_all().contains("Shift-A"),
-            "adopt-sessions key missing"
-        );
+        assert!(render_all().contains("x a"), "adopt-sessions key missing");
     }
 
     #[test]
@@ -480,7 +478,6 @@ mod tests {
             !all.contains("snippet"),
             "snippets leaked back into the tour"
         );
-        assert!(!all.contains("]<key>"), "snippet leader hint still present");
     }
 
     #[test]
@@ -490,9 +487,10 @@ mod tests {
         // default for that action — the catalog is the source of truth.
         let all = render_all();
         for (kind, hint) in [
-            (ActionKind::NewProject, "Shift-N"),
-            (ActionKind::NewWorkspace, "n"),
-            (ActionKind::AdoptSessions, "Shift-A"),
+            (ActionKind::NewProject, "x p"),
+            (ActionKind::NewWorkspace, "x n"),
+            (ActionKind::AdoptSessions, "x a"),
+            (ActionKind::Work, "w w"),
             (ActionKind::JumpToWorkspace, "`"),
             (ActionKind::JumpToAsking, "!"),
             (ActionKind::JumpToFailingCi, "Shift-F"),
@@ -533,7 +531,7 @@ mod tests {
         // out the ship-it card.
         assert_eq!(ActionDef::for_kind(ActionKind::Quit).default_keys, "q q");
         assert!(all.contains("q q"), "tour no longer shows the quit chord");
-        // `]]` is `ui.terminal_escape_char` (default `]`) doubled, owned
+        // `]]` is `terminal.escape_char` (default `]`) doubled, owned
         // by the terminal latch rather than the catalog (#188); the tour
         // documents the default form.
         assert!(

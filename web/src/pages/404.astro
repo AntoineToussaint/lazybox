@@ -1,0 +1,78 @@
+---
+import Layout from '../layouts/Layout.astro';
+---
+
+<Layout
+  title="Page not found — lazybox"
+  description="The requested lazybox page does not exist."
+>
+  <a href="#main" class="skip-link">Skip to content</a>
+  <main id="main" class="not-found">
+    <a href="/" class="brand" aria-label="lazybox home">
+      <svg viewBox="0 0 32 32" aria-hidden="true">
+        <rect width="32" height="32" rx="7" fill="#0b0e14"></rect>
+        <rect x="3.5" y="3.5" width="25" height="25" rx="5.5" fill="none" stroke="#232a38"></rect>
+        <path d="M8 11l4 4-4 4" fill="none" stroke="#6ee7a8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"></path>
+        <line x1="15" y1="20" x2="22" y2="20" stroke="#7cc4ff" stroke-width="2.2" stroke-linecap="round"></line>
+      </svg>
+      lazybox
+    </a>
+
+    <section aria-labelledby="not-found-title">
+      <p class="code">404</p>
+      <h1 id="not-found-title">That page is not in this workspace.</h1>
+      <p class="message">
+        The URL may have moved, or the workspace may no longer exist.
+      </p>
+      <div class="actions">
+        <a class="btn btn-primary" href="/">Back to lazybox</a>
+        <a class="btn btn-ghost" href="/docs/">Read the docs</a>
+      </div>
+    </section>
+  </main>
+</Layout>
+
+<style>
+  .not-found {
+    width: min(42rem, calc(100% - 3rem));
+    min-height: 100vh;
+    margin: 0 auto;
+    padding: 2rem 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+
+  .not-found section {
+    margin: auto 0;
+    padding: 5rem 0;
+  }
+
+  .code {
+    margin: 0 0 1rem;
+    color: var(--accent-2);
+    font: 600 0.9rem/1 var(--mono);
+    letter-spacing: 0.16em;
+  }
+
+  h1 {
+    max-width: 11ch;
+    margin: 0;
+    font-size: clamp(2.6rem, 8vw, 5rem);
+    line-height: 1.02;
+    letter-spacing: -0.055em;
+  }
+
+  .message {
+    max-width: 34rem;
+    margin: 1.5rem 0 2rem;
+    color: var(--fg-dim);
+    font-size: 1.1rem;
+  }
+
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+  }
+</style>

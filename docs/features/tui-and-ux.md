@@ -7,8 +7,9 @@ notifications.
 
 See [`CLAUDE.md` § TUI tiers](../../CLAUDE.md) and
 [`DESIGN.md` § Component tree](../../DESIGN.md) for the architecture. The full
-key reference also lives in [`README.md`](../../README.md#key-bindings); the
-help overlay (`?`) is the always-current source.
+key reference also lives in [`README.md`](../../README.md#key-bindings). Ask
+Lazybox (`?`) is the always-current source: type to search the live keymap, or
+press Enter to ask a workflow question.
 
 ---
 
@@ -52,17 +53,17 @@ reads the focused pane's keymap.
 
 **Status:** stable
 **Crate(s):** `tui-core` (`src/action.rs`), `tui` (`realm/model/keys.rs`, `dispatch.rs`)
-**Config / flags:** `ui.action_keys` (per-action key overrides, incl. `spawn_agent.<id>` for agent chords), `ui.keymap_preset` (`default` / `vim`), `ui.quit_double_tap_window` (800ms), `ui.terminal_escape_char`
-**Key bindings:** `q q` quit, `g …` GitHub leader group, `]]s` snippet picker (terminal)
+**Config / flags:** `ui.action_keys` (per-action key overrides, incl. `spawn_agent.<id>` for agent chords), `ui.keymap_preset` (`default` / `vim`), `ui.quit_double_tap_window` (800ms), `terminal.escape_char`
+**Key bindings:** `q q` quit; `w` work, `a` agent, `b` main branch, `g` GitHub, `x` workspace leaders; `]]` terminal leader
 
 ### What it does
 A central **Action catalog** maps every command to keys, with support for
-two-press chords (`q q`), leader-key groups (`g` opens a which-key GitHub group),
-and user overrides.
+two-press chords (`q q`), five named leader groups, and user overrides.
 
 ### How to use it
-Most keys are single presses (see each feature page). Chords: `q q` to quit
-(double-tap within 800ms), `g` then `m`/`v`/`a`/`l`/`o` for GitHub actions.
+Most common verbs are single presses (see each feature page). Chords: `q q` to
+quit (double-tap within 800ms), or press a named leader and choose from its
+visible menu—`g` then `m`/`g`/`r`/`a`/`l`/`o` for GitHub actions, for example.
 Override any binding via `ui.action_keys` in config; agent spawn chords are
 remapped there too, keyed `spawn_agent.<id>` (e.g. `spawn_agent.claude: "c"`
 restores a top-level key).
@@ -81,39 +82,44 @@ in their pane handlers rather than as catalog actions.
 - [ ] `g` opens the GitHub which-key group; `g m` merges.
 - [ ] `Shift-M` no longer merges — `g m` is the only default merge chord.
 - [ ] A `ui.action_keys` override remaps the bound action.
-- [ ] The help overlay reflects effective (overridden) keys.
+- [ ] Ask Lazybox search and the shortcut index reflect effective keys.
 
 ### Known sharp edges
 - Catalog actions and inline pane handlers coexist; not every key is in the `Action` enum.
-- Some `Shift-*` bindings (`Shift-T`, `Shift-N`, `Shift-A`, `Shift-J`, `Shift-F`, `Shift-Z`, `Shift-S`) aren't in the README tables — see help (`?`).
+- Less-frequent workspace actions live behind the `x` which-key menu; use Ask Lazybox (`?`) for the complete live keymap.
 
 ---
 
-## Help overlay
+## Ask Lazybox & shortcut index
 
 **Status:** stable
-**Crate(s):** `tui` (`realm/components/help.rs`)
+**Crate(s):** `tui` (`realm/components/help_ask.rs`, `help.rs`)
 **Config / flags:** reflects `ui.action_keys` overrides
 **Key bindings:** `?`
 
 ### What it does
-A which-key-style overlay listing the active bindings, grouped Global /
-Workspace / Activity / Terminal — the always-current key reference.
+The primary help surface combines instant fuzzy search over the effective
+keymap with conversational workflow answers. A secondary compact index groups
+direct bindings by scope and advertises the five leader menus without repeating
+every continuation.
 
 ### How to use it
-Press `?`; dismiss with any key.
+Press `?` to open Ask Lazybox. Type to search immediately or press Enter to ask.
+At an empty prompt, press `?` again to switch to the shortcut index; `?` there
+returns to Ask. `Esc` closes either surface.
 
 ### How it works (brief)
-`Help` (`crates/tui/src/realm/components/help.rs`) builds sections from
-`ActionDef::all()` and renders effective keys (honoring overrides).
+Both surfaces build from the runtime catalog and render effective keys
+(honoring overrides). Conversational answers receive that same catalog plus the
+embedded feature docs as context.
 
 ### Test checklist
-- [ ] `?` opens the overlay with all four sections populated.
+- [ ] `?` opens Ask Lazybox directly; another `?` toggles the compact index.
 - [ ] Overridden keys show their effective binding.
-- [ ] Any keystroke dismisses it.
+- [ ] `Esc` dismisses either surface; the index also closes on non-navigation keys.
 
 ### Known sharp edges
-- Inline-handled keys (e.g. `/` search) may not all appear if they aren't catalog actions.
+- A focused embedded terminal owns ordinary keys; use `]]q` to return before opening Ask.
 
 ---
 
@@ -189,7 +195,7 @@ gates the auto-launch).
 ### What it does
 The right pane: the focused workspace's merged feed of comments, reviews, status
 changes, and CI updates, with a collapsible Description section and per-card
-expand/collapse. Multi-select drives bulk mark-read and the `w`/reply targeting.
+expand/collapse. Multi-select drives bulk mark-read and the `w w`/reply targeting.
 
 ### How to use it
 Navigate with `j/k`; `g/G` jump top/bottom; `h/l` collapse/expand the focused
@@ -208,7 +214,7 @@ the merged `Workspace.activity`.
 - [ ] `g/G` jump to top/bottom; `PageUp/PageDown` move a screenful.
 - [ ] `h/l` collapse/expand the focused card; double-click does the same.
 - [ ] `d` toggles the description section.
-- [ ] `v` multi-selects rows; the footer shows the count; `w`/reply target the set.
+- [ ] `v` multi-selects rows; the footer shows the count; `w w`/reply target the set.
 - [ ] `m` marks the focused (or selected) rows read; `z` undoes the last auto-mark.
 
 ### Known sharp edges

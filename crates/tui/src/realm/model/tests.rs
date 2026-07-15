@@ -356,7 +356,7 @@ mod effects_tests {
         );
     }
 
-    /// `Shift-N` with no tracked repos has nothing to pick, so it
+    /// `x p` with no tracked repos has nothing to pick, so it
     /// skips the picker and drops straight into the new-project input
     /// — the only way to bootstrap a brand-new, empty inbox.
     #[test]
@@ -367,7 +367,7 @@ mod effects_tests {
         assert_eq!(m.modal_stack.last(), Some(&Id::NewProject));
     }
 
-    /// `Shift-N` with tracked repos mounts the repo picker, listing
+    /// `x p` with tracked repos mounts the repo picker, listing
     /// each repo plus the trailing "create a new local project" row.
     #[test]
     fn new_workspace_picker_with_projects_mounts_repo_picker() {
@@ -1129,7 +1129,7 @@ snippets:
     /// single live terminal of `kind` on screen, its snippet library
     /// loaded, and the picker primed to resolve row 0 → `snippet_key`.
     /// This is the exact pre-submit state BOTH snippet trigger paths
-    /// (the `]]<key>` auto-submit and the picker's Enter) funnel into
+    /// (the `]]s<key>` auto-submit and the picker's Enter) funnel into
     /// `handle_choice_picked`.
     fn model_with_active_terminal_and_snippet(
         label: &str,
@@ -1712,7 +1712,7 @@ snippets:
 
     /// mount_snippet_picker with an empty collection flashes a hint
     /// and refuses to mount — no Id::SnippetPicker on the stack.
-    /// This is the "user typed `]<key>` but never configured any
+    /// This is the "user typed `]]s<key>` but never configured any
     /// snippets" UX.
     #[test]
     fn mount_snippet_picker_with_empty_collection_skips_mount() {
@@ -3429,7 +3429,7 @@ mod merge_focus_follow_tests {
         m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(issue)));
         m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(decoy)));
 
-        // Press `w` on the issue → arms the follow target + emits Spawn.
+        // Dispatch Work (`w w`) on the issue → arms the follow target + emits Spawn.
         assert!(m.sidebar.focus_workspace_key(&issue_sk));
         let cmds = m.dispatch_action(&Action::Work);
         assert!(
@@ -3547,7 +3547,7 @@ mod merge_focus_follow_tests {
         );
     }
 
-    /// Issue #224: bare `w` on a workspace whose only running agent is
+    /// Issue #224: default work (`w w`) whose only running agent is
     /// Codex must target Codex — not always spawn the default Claude.
     #[test]
     fn bare_w_targets_the_running_agent_over_default() {
@@ -3581,7 +3581,7 @@ mod merge_focus_follow_tests {
         assert_eq!(
             agent.as_deref(),
             Some("codex"),
-            "bare `w` targets the running Codex, not the default Claude",
+            "`w w` targets the running Codex, not the default Claude",
         );
     }
 
@@ -3621,11 +3621,15 @@ mod merge_focus_follow_tests {
         assert!(m.sidebar.focus_workspace_key(&sk));
         while cmd_rx.try_recv().is_ok() {} // drop setup traffic
 
-        // `w` arms the timed leader; `x` completes `w x` → work in Codex.
+        // `w` opens the deterministic work menu; `x` completes `w x`.
         m.dispatch_key(KeyEvent::new(Key::Char('w'), KeyModifiers::NONE));
-        assert!(m.work_leader_pending(), "`w` arms the scoped-work leader");
+        assert_eq!(
+            m.leader_pending(),
+            lazybox_tui_core::action::KeyStroke::parse("w"),
+            "`w` opens the work menu",
+        );
         m.dispatch_key(KeyEvent::new(Key::Char('x'), KeyModifiers::NONE));
-        assert!(!m.work_leader_pending(), "`x` resolves the leader");
+        assert!(m.leader_pending().is_none(), "`x` resolves the leader");
 
         let inject = std::iter::from_fn(|| cmd_rx.try_recv().ok())
             .find(|c| matches!(c, Command::InjectPrompt { .. }));
@@ -3635,11 +3639,11 @@ mod merge_focus_follow_tests {
         );
     }
 
-    /// Issue #224: with no follow-up key, the `w` leader times out on the
-    /// idle tick and fires bare `Work` against the running-or-default
-    /// agent — so bare `w` still works without pressing a scoped key.
+    /// `w w` deterministically fires Work against the running-or-default
+    /// agent. There is no idle timeout, so the command lands on the
+    /// second keystroke without 600ms of artificial latency.
     #[test]
-    fn w_leader_times_out_to_bare_work() {
+    fn w_w_fires_default_work_immediately() {
         use lazybox_ipc::{Client, Command, EVENT_CHANNEL_CAPACITY, TerminalId, TerminalKind};
         use tokio::sync::mpsc;
         use tuirealm::event::{Key, KeyEvent, KeyModifiers};
@@ -3652,8 +3656,6 @@ mod merge_focus_follow_tests {
             Size::new(120, 40),
         )
         .expect("model init");
-        m.ui_defaults.escape_window = std::time::Duration::from_millis(1);
-
         let pr = workspace("owner/repo#1", true, Duration::hours(1));
         let sk: SessionKey = (&pr.key).into();
         m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
@@ -3671,28 +3673,30 @@ mod merge_focus_follow_tests {
         while cmd_rx.try_recv().is_ok() {} // drop setup traffic
 
         m.dispatch_key(KeyEvent::new(Key::Char('w'), KeyModifiers::NONE));
-        assert!(m.work_leader_pending(), "`w` arms the leader");
-
-        // Window elapsed (1ms) → the idle tick fires bare Work, which
-        // injects into the running Codex.
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        m.tick_work_leader();
-        assert!(!m.work_leader_pending(), "idle tick resolves the leader");
+        assert_eq!(
+            m.leader_pending(),
+            lazybox_tui_core::action::KeyStroke::parse("w"),
+        );
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "the menu key alone does not act"
+        );
+        m.dispatch_key(KeyEvent::new(Key::Char('w'), KeyModifiers::NONE));
+        assert!(m.leader_pending().is_none(), "second `w` resolves the menu");
 
         let inject = std::iter::from_fn(|| cmd_rx.try_recv().ok())
             .find(|c| matches!(c, Command::InjectPrompt { .. }));
         assert!(
             inject.is_some(),
-            "bare `w` (leader timeout) injects work into the running Codex",
+            "`w w` injects work into the running Codex",
         );
     }
 
-    /// Issue #304: an *empty* terminal pane resolves keys with sidebar
-    /// scope, so `w` there arms the timed leader and the idle-tick
-    /// timeout must still fire bare `Work` — the pane's focus guard
-    /// only blocks a *live* terminal (where the leader can't arm).
+    /// An *empty* terminal pane resolves keys with sidebar scope, so the
+    /// complete `w w` menu chord must work there too. A live terminal
+    /// still owns its keys and uses the `]]` command menu.
     #[test]
-    fn w_from_empty_terminal_pane_times_out_to_bare_work() {
+    fn w_w_from_empty_terminal_pane_fires_work() {
         use lazybox_ipc::{Client, Command, EVENT_CHANNEL_CAPACITY};
         use tokio::sync::mpsc;
         use tuirealm::event::{Key, KeyEvent, KeyModifiers};
@@ -3705,8 +3709,6 @@ mod merge_focus_follow_tests {
             Size::new(120, 40),
         )
         .expect("model init");
-        m.ui_defaults.escape_window = std::time::Duration::from_millis(1);
-
         let pr = workspace("owner/repo#1", true, Duration::hours(1));
         let sk: SessionKey = (&pr.key).into();
         m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
@@ -3718,20 +3720,15 @@ mod merge_focus_follow_tests {
         while cmd_rx.try_recv().is_ok() {} // drop setup traffic
 
         m.dispatch_key(KeyEvent::new(Key::Char('w'), KeyModifiers::NONE));
-        assert!(
-            m.work_leader_pending(),
-            "`w` arms the leader from an empty terminal pane",
-        );
-
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        m.tick_work_leader();
-        assert!(!m.work_leader_pending(), "idle tick resolves the leader");
+        assert!(m.leader_pending().is_some(), "`w` opens the work menu");
+        m.dispatch_key(KeyEvent::new(Key::Char('w'), KeyModifiers::NONE));
+        assert!(m.leader_pending().is_none(), "second `w` resolves it");
 
         let spawned = std::iter::from_fn(|| cmd_rx.try_recv().ok())
             .any(|c| matches!(c, Command::Spawn { .. } | Command::InjectPrompt { .. }));
         assert!(
             spawned,
-            "bare `w` (leader timeout) from an empty terminal pane must still fire Work",
+            "`w w` from an empty terminal pane must still fire Work",
         );
     }
 
@@ -3760,9 +3757,8 @@ mod merge_focus_follow_tests {
         assert!(!m.quit, "a lone `q` never quits");
     }
 
-    /// Issue #224 hardening: a mouse click cancels the armed `w` leader,
-    /// so its idle-tick timeout can't fire a stray `Work` after the user
-    /// clicked away.
+    /// A mouse click cancels an armed catalog leader so the next key is
+    /// interpreted in the newly-clicked context, not as an old menu choice.
     #[test]
     fn mouse_click_cancels_the_work_leader() {
         use crossterm::event::{KeyModifiers as CtMods, MouseButton, MouseEvent, MouseEventKind};
@@ -3776,7 +3772,7 @@ mod merge_focus_follow_tests {
         assert!(m.sidebar.focus_workspace_key(&sk));
 
         m.dispatch_key(KeyEvent::new(Key::Char('w'), KeyModifiers::NONE));
-        assert!(m.work_leader_pending(), "`w` arms the leader");
+        assert!(m.leader_pending().is_some(), "`w` arms the leader");
 
         m.dispatch_mouse_in(
             MouseEvent {
@@ -3788,57 +3784,9 @@ mod merge_focus_follow_tests {
             Rect::new(0, 0, 120, 40),
         );
         assert!(
-            !m.work_leader_pending(),
+            m.leader_pending().is_none(),
             "a mouse click must cancel the armed work leader",
         );
-    }
-
-    /// Issue #224 hardening: if a modal mounts (via a daemon event)
-    /// while the `w` leader is armed, the idle-tick timeout cancels the
-    /// leader instead of firing `Work` behind the modal.
-    #[test]
-    fn work_leader_timeout_does_not_fire_behind_a_modal() {
-        use lazybox_core::WorkspaceKey;
-        use lazybox_ipc::{Client, Command, EVENT_CHANNEL_CAPACITY};
-        use tokio::sync::mpsc;
-        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
-
-        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
-        let (_evt_tx, evt_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
-        let client = Client::from_channels(cmd_tx, evt_rx);
-        let mut m = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
-            client,
-            Size::new(120, 40),
-        )
-        .expect("model init");
-        m.ui_defaults.escape_window = std::time::Duration::from_millis(1);
-
-        let pr = workspace("owner/repo#1", true, Duration::hours(1));
-        let sk: SessionKey = (&pr.key).into();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
-        assert!(m.sidebar.focus_workspace_key(&sk));
-        while cmd_rx.try_recv().is_ok() {}
-
-        m.dispatch_key(KeyEvent::new(Key::Char('w'), KeyModifiers::NONE));
-        assert!(m.work_leader_pending(), "`w` arms the leader");
-
-        // A modal mounts from a daemon event — no keystroke clears the
-        // leader, so the idle tick must.
-        m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
-            workspace_key: WorkspaceKey::new("github:owner/repo#9"),
-            label: "owner/repo#9".into(),
-            title: None,
-            active_terminal_count: 1,
-        });
-        assert!(!m.modal_stack.is_empty(), "a modal is up");
-
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        m.tick_work_leader();
-
-        assert!(!m.work_leader_pending(), "the timeout clears the leader");
-        let spawned = std::iter::from_fn(|| cmd_rx.try_recv().ok())
-            .any(|c| matches!(c, Command::Spawn { .. } | Command::InjectPrompt { .. }));
-        assert!(!spawned, "bare `Work` must not fire behind a modal",);
     }
 }
 
@@ -4793,7 +4741,7 @@ mod destructive_confirm_tests {
 
     #[test]
     fn close_issue_gates_on_confirm_then_fires_close_command() {
-        // Issue #270: `Shift-C` must route through the confirm modal
+        // Issue #270: `x c` must route through the confirm modal
         // (nothing closed without a yes), and Yes emits a single
         // `CloseIssue` aimed at the focused workspace.
         let mut m = build_model();
@@ -5131,7 +5079,7 @@ mod setup_finish_tests {
 
 #[cfg(test)]
 mod collapse_into_pr_tests {
-    //! Issue #78: joining an Issue into a PR (`Shift-J`) must not drop
+    //! Issue #78: joining an Issue into a PR (`x j`) must not drop
     //! the running Claude terminal. The daemon rebadges the live
     //! terminal onto the PR and emits, in order:
     //!   `TerminalsRebadged` → `WorkspaceUpserted(pr)` →
@@ -6263,7 +6211,7 @@ mod terminal_section_dispatch_tests {
     //! proxy, so these round-trip each `Section::Terminal` action through
     //! `handle_pane_key` under `PaneFocus::Terminals` to prove the
     //! proxy's premise. They also pin the central #188 finding: the leave
-    //! chord is owned by `ui.terminal_escape_char`, NOT a remappable
+    //! chord is owned by `terminal.escape_char`, NOT a remappable
     //! `leave_terminal` catalog chord the footer must never advertise.
     use super::super::*;
     use lazybox_core::SessionKey;
@@ -6321,7 +6269,7 @@ mod terminal_section_dispatch_tests {
     }
 
     /// `]]q` leaves even with the `leave_terminal` override present —
-    /// proving `ui.terminal_escape_char` (not the action_keys slot) owns
+    /// proving `terminal.escape_char` (not the action_keys slot) owns
     /// the chord. `]]` arms the non-timed leader and `q` is its exit
     /// command (#252).
     #[test]
@@ -7767,13 +7715,17 @@ mod help_ask_tests {
         );
     }
 
-    /// `?` on the help panel swaps it for the ask modal; asking a
-    /// question keeps the modal mounted so the answer can stream in.
+    /// Ask and the compact shortcut index swap in both directions;
+    /// asking a question keeps Ask mounted so the answer can stream in.
     #[test]
     fn help_ask_open_swaps_the_help_panel() {
         let mut m = build_model();
         m.mount_help();
         assert_eq!(m.modal_stack.last(), Some(&Id::Help));
+        m.update(Msg::HelpAskOpen);
+        assert_eq!(m.modal_stack.as_slice(), &[Id::HelpAsk]);
+        m.update(Msg::HelpIndexOpen);
+        assert_eq!(m.modal_stack.as_slice(), &[Id::Help]);
         m.update(Msg::HelpAskOpen);
         assert_eq!(m.modal_stack.as_slice(), &[Id::HelpAsk]);
         m.update(Msg::HelpAsked("how do I merge?".into()));
@@ -9410,7 +9362,7 @@ mod dispatch_coverage_tests {
                 dispatchable || allowlisted,
                 "catalog row {:?} (param {:?}, keys {:?}) neither dispatches through \
                  `dispatch_action` nor sits on keys::PANE_NATIVE_KINDS — it would render \
-                 in ? help and the footer while silently no-oping on the keyboard. Wire a \
+                 in Ask Lazybox and the footer while silently no-oping on the keyboard. Wire a \
                  dispatch arm (action_from_kind + dispatch_action) or allowlist it with \
                  the pane match arm that handles it.",
                 entry.kind,

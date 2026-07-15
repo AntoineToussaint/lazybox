@@ -196,7 +196,8 @@ async fn hook_ingest_over_socket_reaches_shared_embedded_config() {
         session_key: "test:ws-hooks".into(),
         session_id: None,
         kind: lazybox_ipc::TerminalKind::Agent("claude".into()),
-        cwd: None,
+        // The test covers socket/bus sharing, not workspace lookup.
+        cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
         initial_prompt: None,
         on_main: false,
     })

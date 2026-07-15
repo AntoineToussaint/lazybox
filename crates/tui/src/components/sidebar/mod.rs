@@ -51,7 +51,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 /// - **Inactive** — historical workspaces: primary task is Merged
 ///   or Closed. Useful for "where did I work on that PR last
 ///   week" — the data is already persisted, this just surfaces it.
-/// - **Snoozed** — explicitly snoozed (Z / Shift-Z).
+/// - **Snoozed** — explicitly snoozed (`z` / `x z`).
 ///
 /// Future expansion: a fourth "All repo activity" view that surfaces
 /// PRs the user isn't involved in. That requires a separate GH fetch
@@ -1924,16 +1924,16 @@ impl Sidebar {
         }
 
         // Session lifecycle. Spawn shortcuts + editor + archive
-        // surface whenever a workspace is selected. `Shift-X`
+        // surface whenever a workspace is selected. `x x`
         // archive's "(kills sessions)" suffix flips automatically
         // via `contextual_label`.
         //
-        // NOTE: `Shift-X` ALSO deletes the project when the cursor
+        // NOTE: `x x` ALSO deletes the project when the cursor
         // sits on a project header — wired in
         // `Model::dispatch_action(Archive)` via the polymorphic
         // session_key / focused_project_key fallback. We
         // deliberately don't add a second footer entry for the
-        // header case: Shift-X is the universal destroy key,
+        // header case: `x x` is the universal archive key,
         // visible muscle-memory is enough.
         if workspace.is_some() {
             // Any bound agent row stands in for the whole `a ▸ agent`
@@ -2000,9 +2000,17 @@ impl Sidebar {
                         continue;
                     }
                     seen_leaders.push(head);
-                    let label = leader_group_label(entry.kind)
-                        .map(std::borrow::Cow::Borrowed)
-                        .unwrap_or_else(|| entry.label.clone());
+                    // Work is both a named leader menu and the primary
+                    // contextual action. Keep the footer's useful verb
+                    // (`fix CI`, `implement issue`, …); the popup itself
+                    // still carries the stable `work` group title.
+                    let label = if matches!(a, Action::Work) {
+                        std::borrow::Cow::Borrowed(contextual_label(&a, workspace))
+                    } else {
+                        leader_group_label(entry.kind)
+                            .map(std::borrow::Cow::Borrowed)
+                            .unwrap_or_else(|| entry.label.clone())
+                    };
                     out.push(Binding {
                         keys: std::borrow::Cow::Owned(format!("{} ▸", head.display())),
                         label,

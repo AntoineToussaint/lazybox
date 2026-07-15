@@ -55,7 +55,7 @@ model (`crates/core/src/task.rs`): `TaskState`, `TaskRole`, `CiStatus`,
 **Status:** stable
 **Crate(s):** `gh-provider`
 **Config / flags:** `setup.scopes` (orgs/repos), `providers.github.poll_interval`; auth via `GH_TOKEN` / `GITHUB_TOKEN` / `gh auth token`; `ui.browser` picks the browser for `g o` / right-clicked links (`"Google Chrome"` → `open -a` on macOS, an executable on Linux; default = OS default browser)
-**Key bindings:** GitHub action group — `g m` merge, `g v` reviewers, `g a` assignees, `g l` labels, `g o` open in browser (and `Shift-{M,V,G,L,O}` aliases)
+**Key bindings:** GitHub action group — `g m` merge, `g g` auto-merge on green, `g r` reviewers, `g a` assignees, `g l` labels, `g o` open in browser
 
 ### What it does
 The primary source: GitHub **PRs and Issues** in one query, with labels, CI
@@ -67,7 +67,7 @@ issue and the PR that closes it can collapse into one row).
 Configure scopes in the setup wizard (`,`). Credentials resolve automatically
 from `gh auth token` if you've run `gh auth login`. PRs and issues you author,
 review, are assigned, or are mentioned on appear in the inbox. Act on them with
-the GitHub action group (`g` leader) or the `Shift-*` aliases.
+the GitHub action group (`g` leader); its which-key popup shows every continuation.
 
 ### How it works (brief)
 `GhPoller` (`crates/gh-provider/src/poller.rs`) runs one GraphQL query per
@@ -82,7 +82,7 @@ implements `ScopeSource` for the setup flow. Credential chain:
 - [ ] CI status reflects the rolled-up check state (success/failure/mixed/pending).
 - [ ] An issue and a PR that closes it (`Closes #N`) collapse appropriately.
 - [ ] `g m` merges a green, approved, conflict-free PR.
-- [ ] `g v` / `g a` / `g l` mutate reviewers / assignees / labels and the change reflects on next poll.
+- [ ] `g r` / `g a` / `g l` mutate reviewers / assignees / labels and the change reflects on next poll.
 - [ ] `g o` opens the PR/issue in the browser.
 - [ ] With no `GH_TOKEN`, creds fall back to `gh auth token`.
 

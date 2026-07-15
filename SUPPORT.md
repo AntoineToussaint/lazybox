@@ -24,6 +24,9 @@ Open an [issue](https://github.com/AntoineToussaint/lazybox/issues/new/choose):
 The docs site lives at <https://lazybox.ai/docs/>, and the
 architecture notes are in [`CLAUDE.md`](./CLAUDE.md) and `DESIGN.md`.
 
+Potential vulnerabilities should not be posted as public issues. Follow
+[`SECURITY.md`](SECURITY.md) to open a private GitHub security advisory.
+
 ## A note on response times
 
 This is an early-adopter, pre-1.0 project — releases ship via the Homebrew tap,

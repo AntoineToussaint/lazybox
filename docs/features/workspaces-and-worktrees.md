@@ -16,7 +16,7 @@ workspace's worktree.
 **Status:** stable
 **Crate(s):** `core` (`src/workspace.rs`), `server`
 **Config / flags:** —
-**Key bindings:** `Enter` open, `Shift-X` archive
+**Key bindings:** `Enter` open, `x` workspace menu (`x x` archive)
 
 ### What it does
 Groups a task with everything you do about it. A `Workspace` holds at most one
@@ -25,7 +25,7 @@ zero-or-more `Session`s (each an embedded terminal in a worktree).
 
 ### How to use it
 Workspaces appear in the sidebar. `Enter` opens one; spawning a shell or agent
-(`s`, `a c`/`a x`/`a u`, or `w`) attaches a session; `Shift-X` archives it.
+(`s`, `a c`/`a x`/`a u`, or `w w`) attaches a session; `x x` archives it.
 
 ### How it works (brief)
 `Workspace` (`crates/core/src/workspace.rs`) carries `key`, optional
@@ -100,14 +100,14 @@ source). Cleanup (`remove_by_path`) removes the worktree and falls back to
 **Status:** stable
 **Crate(s):** `tui`, `git-ops`
 **Config / flags:** —
-**Key bindings:** `n`
+**Key bindings:** `x n`
 
 ### What it does
 Creates a fresh workspace with a new branch off the latest `main`, before any
 PR exists — for starting work from scratch.
 
 ### How to use it
-Press `n`, enter a name; lazybox creates the branch + worktree and opens the
+Press `x n`, enter a name; lazybox creates the branch + worktree and opens the
 workspace ready for an agent or shell.
 
 ### How it works (brief)
@@ -115,7 +115,7 @@ workspace ready for an agent or shell.
 `WorktreeManager::checkout_new_branch()` off the repo's base branch.
 
 ### Test checklist
-- [ ] `n` prompts for a name and creates a worktree on a new branch.
+- [ ] `x n` prompts for a name and creates a worktree on a new branch.
 - [ ] The new branch is based on the latest `main`.
 - [ ] You can immediately spawn an agent in the new workspace.
 
@@ -129,21 +129,21 @@ workspace ready for an agent or shell.
 **Status:** beta
 **Crate(s):** `tui`, `core`
 **Config / flags:** —
-**Key bindings:** `Shift-N`
+**Key bindings:** `x p`
 
 ### What it does
 Creates a local **project** container — a grouping for workspaces that isn't
 tied to a single upstream PR/issue.
 
 ### How to use it
-Press `Shift-N` and enter a name.
+Press `x p` and enter a name.
 
 ### How it works (brief)
 `NewProject` (`crates/tui-core/src/action.rs`) creates a `ProjectRecord`
 persisted via the store; workspaces can reference it via `project_key`.
 
 ### Test checklist
-- [ ] `Shift-N` creates a named project visible in the sidebar grouping.
+- [ ] `x p` creates a named project visible in the sidebar grouping.
 - [ ] Projects persist across restart.
 
 ### Known sharp edges
@@ -276,14 +276,14 @@ Yes/No, `Enter` confirms.
 **Status:** stable
 **Crate(s):** `tui`, `git-ops`
 **Config / flags:** `worktree.auto_cleanup_merged`
-**Key bindings:** `Shift-X`
+**Key bindings:** `x x`
 
 ### What it does
 Archives a workspace and cleans up its worktree, killing any running sessions
 first.
 
 ### How to use it
-Press `Shift-X`; confirm in the modal. Running sessions are terminated and the
+Press `x x`; confirm in the modal. Running sessions are terminated and the
 worktree is removed.
 
 ### How it works (brief)
@@ -292,7 +292,7 @@ the worktree manager's removal path. With `worktree.auto_cleanup_merged: true`,
 merged PRs' worktrees are reaped automatically.
 
 ### Test checklist
-- [ ] `Shift-X` opens a Confirm modal.
+- [ ] `x x` opens a Confirm modal.
 - [ ] Confirming kills running sessions and removes the worktree from disk.
 - [ ] Cancelling leaves sessions and worktree intact.
 - [ ] With `auto_cleanup_merged: true`, a merged PR's worktree is reaped without manual archive.
@@ -307,21 +307,21 @@ merged PRs' worktrees are reaped automatically.
 **Status:** beta
 **Crate(s):** `tui`
 **Config / flags:** —
-**Key bindings:** `Shift-A`
+**Key bindings:** `x a`
 
 ### What it does
 Moves every session from one workspace into another — useful when work started
 on a pre-PR workspace and you want it under the real PR's workspace.
 
 ### How to use it
-Press `Shift-A` on the source workspace; pick the target in the picker.
+Press `x a` on the source workspace; pick the target in the picker.
 
 ### How it works (brief)
 `AdoptSessions` (`crates/tui-core/src/action.rs`) reparents the source's
 `Session`s onto the chosen target workspace.
 
 ### Test checklist
-- [ ] `Shift-A` opens a target picker.
+- [ ] `x a` opens a target picker.
 - [ ] Sessions move to the chosen workspace and keep running.
 - [ ] The source workspace is left without those sessions.
 
@@ -335,14 +335,14 @@ Press `Shift-A` on the source workspace; pick the target in the picker.
 **Status:** beta
 **Crate(s):** `tui`
 **Config / flags:** —
-**Key bindings:** `Shift-J`
+**Key bindings:** `x j`
 
 ### What it does
 Folds an issue workspace into the PR that closes it, so the two collapse to a
 single row.
 
 ### How to use it
-Press `Shift-J` on the issue workspace; if multiple candidate PRs exist, a
+Press `x j` on the issue workspace; if multiple candidate PRs exist, a
 picker appears.
 
 ### How it works (brief)
@@ -350,7 +350,7 @@ picker appears.
 to the closing PR using the `closes_issues` relationship on the `Task`.
 
 ### Test checklist
-- [ ] `Shift-J` collapses an issue into its closing PR's row.
+- [ ] `x j` collapses an issue into its closing PR's row.
 - [ ] With multiple closing PRs, a picker disambiguates.
 - [ ] The collapsed row shows both issue and PR activity.
 

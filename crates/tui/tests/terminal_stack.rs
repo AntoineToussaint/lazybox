@@ -1688,7 +1688,7 @@ fn footer_surfaces_leader_focus_and_tile_escape_hatches() {
 
 #[test]
 fn footer_leader_hints_honor_the_configured_escape_char() {
-    // Issue #170: a user who remapped `ui.terminal_escape_char` must
+    // Issue #170: a user who remapped `terminal.escape_char` must
     // see the chord they actually type — `}}q` / `}}s`, not the
     // hardcoded `]]` default.
     let bindings = TerminalStack::contextual_bindings('}');
@@ -1757,7 +1757,7 @@ fn every_footer_hint_is_catalog_backed_or_allowlisted() {
 
 #[test]
 fn footer_leave_hint_tracks_the_escape_char_not_an_action_override() {
-    // #188: the leave chord is owned by `ui.terminal_escape_char`, not
+    // #188: the leave chord is owned by `terminal.escape_char`, not
     // the `leave_terminal` action_keys slot. Terminal-pane dispatch
     // matches only the escape char and never the catalog chord, so the
     // footer must always render the escape char doubled + the `q` exit

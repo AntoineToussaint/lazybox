@@ -27,7 +27,7 @@
 //! adapters; the tests at the bottom drive `run_init_with` with
 //! scripted answers.
 
-use std::io::{BufRead, Write};
+use std::io::Write;
 
 use lazybox_config::{Config, ConfigError};
 use lazybox_slack::SlackError;
@@ -59,39 +59,28 @@ pub enum DoctorOutcome {
     Failed,
 }
 
-/// Stdin / stdout abstraction. The wizard prompts twice (bot +
-/// app token) and prints status lines as it goes. Replacing both
-/// in tests means no real terminal interaction is required.
+/// Secret-input / stdout abstraction. The wizard prompts twice (bot +
+/// app token) with terminal echo disabled and prints status lines as it
+/// goes. Replacing both in tests means no real terminal interaction is
+/// required.
 pub trait PromptIo {
-    /// Ask the user for input. Implementations print `label` (no
-    /// trailing newline) and read one line from stdin, returning
-    /// it with the trailing `\n` stripped.
-    fn prompt(&mut self, label: &str) -> std::io::Result<String>;
+    /// Ask the user for a secret. Production implementations must
+    /// disable terminal echo for the duration of the read.
+    fn prompt_secret(&mut self, label: &str) -> std::io::Result<String>;
     /// Print a line of status output. Used for both success ticks
     /// and failure explanations so tests can assert on the message
     /// stream.
     fn print(&mut self, line: &str) -> std::io::Result<()>;
 }
 
-/// Real stdin/stdout adapter. Flushes the prompt so the cursor
-/// lands at end-of-line before the user types.
+/// Real terminal/stdout adapter. `rpassword` reads and writes via the
+/// controlling TTY, so prompts remain visible even though the binary
+/// redirects stderr to its log file, while pasted tokens never echo.
 pub struct StdioPrompt;
 
 impl PromptIo for StdioPrompt {
-    fn prompt(&mut self, label: &str) -> std::io::Result<String> {
-        let mut out = std::io::stdout().lock();
-        out.write_all(label.as_bytes())?;
-        out.flush()?;
-        drop(out);
-        let mut line = String::new();
-        std::io::stdin().lock().read_line(&mut line)?;
-        if line.ends_with('\n') {
-            line.pop();
-            if line.ends_with('\r') {
-                line.pop();
-            }
-        }
-        Ok(line)
+    fn prompt_secret(&mut self, label: &str) -> std::io::Result<String> {
+        rpassword::prompt_password(label)
     }
     fn print(&mut self, line: &str) -> std::io::Result<()> {
         let mut out = std::io::stdout().lock();
@@ -262,7 +251,7 @@ pub async fn run_init_with<P: SlackProbe + ?Sized, I: PromptIo + ?Sized>(
     io.print("")?;
 
     // ── Bot token ────────────────────────────────────────────────
-    let bot_token = io.prompt("Bot User OAuth Token (xoxb-...): ")?;
+    let bot_token = io.prompt_secret("Bot User OAuth Token (xoxb-..., input hidden): ")?;
     let bot_token = bot_token.trim().to_string();
     if let Err(msg) = validate_bot_shape(&bot_token) {
         io.print(&format!("✗ {msg}"))?;
@@ -281,7 +270,7 @@ pub async fn run_init_with<P: SlackProbe + ?Sized, I: PromptIo + ?Sized>(
     ))?;
 
     // ── App token ────────────────────────────────────────────────
-    let app_token = io.prompt("App-Level Token (xapp-...): ")?;
+    let app_token = io.prompt_secret("App-Level Token (xapp-..., input hidden): ")?;
     let app_token = app_token.trim().to_string();
     if let Err(msg) = validate_app_shape(&app_token) {
         io.print(&format!("✗ {msg}"))?;
@@ -526,6 +515,7 @@ mod tests {
     struct ScriptedIo {
         answers: VecDeque<String>,
         out: Vec<String>,
+        secret_prompts: Vec<String>,
     }
 
     impl ScriptedIo {
@@ -533,6 +523,7 @@ mod tests {
             Self {
                 answers: answers.iter().map(|s| s.to_string()).collect(),
                 out: Vec::new(),
+                secret_prompts: Vec::new(),
             }
         }
         fn joined(&self) -> String {
@@ -541,7 +532,8 @@ mod tests {
     }
 
     impl PromptIo for ScriptedIo {
-        fn prompt(&mut self, label: &str) -> std::io::Result<String> {
+        fn prompt_secret(&mut self, label: &str) -> std::io::Result<String> {
+            self.secret_prompts.push(label.to_string());
             self.out.push(label.trim_end().to_string());
             Ok(self
                 .answers
@@ -676,6 +668,12 @@ mod tests {
         let saved = slot.lock().unwrap().clone().unwrap();
         assert_eq!(saved.0, "xoxb-good");
         assert_eq!(saved.1, "xapp-good");
+        assert_eq!(io.secret_prompts.len(), 2);
+        assert!(
+            io.secret_prompts
+                .iter()
+                .all(|prompt| prompt.contains("input hidden"))
+        );
         let log = io.joined();
         // Success ticks land in order: bot, app, write, channel.
         assert!(log.contains("✓ bot token OK"));

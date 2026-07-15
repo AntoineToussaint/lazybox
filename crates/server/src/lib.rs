@@ -46,7 +46,7 @@ use lazybox_agents::Registry;
 use lazybox_ipc::{AgentRunId, Connection, Event, TerminalId};
 use lazybox_store::{MemoryStore, SqliteStore, Store};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use tokio::sync::{Mutex, broadcast};
@@ -59,21 +59,29 @@ pub fn state_db_path() -> PathBuf {
     lazybox_core::paths::state_db()
 }
 
-/// Open the persistent store at the canonical path. Returns `None` on
-/// open failure (corrupt DB, permissions); callers fall back to skipping
-/// persistence rather than aborting startup.
-pub fn open_store() -> Option<Arc<dyn Store>> {
-    let path = state_db_path();
+/// Open the persistent store at the canonical path.
+///
+/// Failure is explicit: continuing with an empty in-memory database
+/// would make existing workspaces appear deleted and allow new state to
+/// vanish on exit.
+pub fn open_store() -> Result<Arc<dyn Store>, ServerError> {
+    open_store_at(&state_db_path())
+}
+
+fn open_store_at(path: &Path) -> Result<Arc<dyn Store>, ServerError> {
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent).map_err(|error| {
+            ServerError::Store(format!(
+                "create state directory {}: {error}",
+                parent.display()
+            ))
+        })?;
     }
-    match SqliteStore::open(&path) {
-        Ok(s) => Some(Arc::new(s)),
-        Err(e) => {
-            tracing::warn!("store open failed at {}: {e}", path.display());
-            None
-        }
-    }
+    SqliteStore::open(path)
+        .map(|store| Arc::new(store) as Arc<dyn Store>)
+        .map_err(|error| {
+            ServerError::Store(format!("open persistent state {}: {error}", path.display()))
+        })
 }
 
 // REMOVED: wipe_legacy_worktrees. We never delete from `~/.lazybox/`.
@@ -335,17 +343,17 @@ pub struct ServerConfig {
     /// client (and its budget `Arc`) and only rebuild when the credential
     /// SOURCE changes.
     ///
-    /// Why its own `std::sync::Mutex` rather than living in `poll_state`:
+    /// Why its own `parking_lot::Mutex` rather than living in `poll_state`:
     /// `handle_fetch_pr_details` and the poll tick both need this client,
     /// and the cold-cache path builds it with a network `.await`. Holding
     /// `poll_state` across that build re-creates the exact serve-loop
     /// stall #91/#92 fight — and #133's `checkout_poll_state` made it
     /// worse by emptying `poll_state`'s copy for the whole tick, so every
     /// concurrent fetch hit the rebuild path. Keeping the client here
-    /// means reaching it is a brief `std::sync::Mutex` clone-out that
+    /// means reaching it is a brief `parking_lot::Mutex` clone-out that
     /// never blocks on `poll_state` and never spans the `from_credential`
     /// await.
-    pub gh_client_cache: Arc<std::sync::Mutex<Option<lazybox_gh::GhClient>>>,
+    pub gh_client_cache: Arc<parking_lot::Mutex<Option<lazybox_gh::GhClient>>>,
     /// Issue→PR merge-prompt dedupe memory. Deliberately separate from
     /// `poll_state`: the collapse path that touches it runs inside an
     /// `upsert`, and sharing `poll_state`'s non-reentrant
@@ -366,9 +374,9 @@ pub struct ServerConfig {
     /// each provider client initializes; consumed by the Subscribe
     /// handler so reconnecting TUIs immediately know which authors
     /// in activity bylines are the local user (→ render as `@me`).
-    /// `std::sync::Mutex` (not tokio's) because the data is tiny
+    /// `parking_lot::Mutex` (not tokio's) because the data is tiny
     /// and read/written from sync contexts only — no await needed.
-    pub viewer_identities: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    pub viewer_identities: Arc<parking_lot::Mutex<Vec<(String, String)>>>,
     /// Wake handle for the long-lived poll loop. Pinging this
     /// `Notify` makes the next poll tick fire immediately instead of
     /// waiting out the remainder of its current sleep. Used by:
@@ -387,10 +395,10 @@ pub struct ServerConfig {
     /// and launched two skip-permissions agents into one worktree.
     /// Claimed synchronously at the top of `handle_spawn`, released by
     /// a drop guard on EVERY exit path; `Kill` also serializes against
-    /// it. `std::sync::Mutex` — the data is tiny and no await ever
+    /// it. `parking_lot::Mutex` — the data is tiny and no await ever
     /// happens under the guard, which lets the drop guard release
     /// synchronously.
-    pub inflight_spawns: Arc<std::sync::Mutex<HashSet<(String, String)>>>,
+    pub inflight_spawns: Arc<parking_lot::Mutex<HashSet<(String, String)>>>,
     /// Pinged whenever an in-flight spawn claim is released, so
     /// waiters (duplicate spawns collapsing onto the winner, `Kill`
     /// waiting out a mid-flight provision) re-check promptly instead
@@ -398,10 +406,10 @@ pub struct ServerConfig {
     pub inflight_spawn_changed: Arc<tokio::sync::Notify>,
     /// Workspace keys deleted in this process (`Kill` /
     /// `RemoveMergedWorkspace`). Consulted by the spawn path when a
-    /// workspace row is missing: deleted-mid-spawn ABORTS the spawn,
-    /// while a key that never existed keeps the test/--test-mode
-    /// fallback of rooting the spawn in the daemon's cwd.
-    pub deleted_workspaces: Arc<std::sync::Mutex<HashSet<String>>>,
+    /// workspace row is missing so a deleted-mid-spawn error can tell
+    /// the user what happened. Unknown workspaces also abort: a spawn
+    /// must never silently inherit the daemon's cwd.
+    pub deleted_workspaces: Arc<parking_lot::Mutex<HashSet<String>>>,
     /// Shape of the last `InputNeeded` decision per terminal — whether
     /// a bare chooser keystroke (`1`-`9`, y/n, Esc) is a complete
     /// answer. Written by the PTY detector (its structural triggers
@@ -417,36 +425,23 @@ pub struct ServerConfig {
     pub event_metrics: Arc<metrics::EventMetrics>,
     /// Per-workspace-key write serialization for the store's
     /// load-modify-save cycles (see [`ServerConfig::lock_workspace`]).
-    /// Outer `std::sync::Mutex` guards only the map lookup/insert and
+    /// Outer `parking_lot::Mutex` guards only the map lookup/insert and
     /// is never held across an await; the inner `tokio::sync::Mutex`
     /// is what mutation paths hold for the duration of a
     /// load→modify→commit. Entries are never removed — the map is
     /// bounded by the number of distinct workspace keys seen in this
     /// process (inbox-sized), and a `Mutex<()>` is a few dozen bytes.
-    pub workspace_locks: Arc<std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    pub workspace_locks: Arc<parking_lot::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 impl ServerConfig {
     /// Open the store at `~/.lazybox/v2/state.db`.
     ///
-    /// Open failures (permissions, disk corruption) fall back to an
-    /// in-memory store so the daemon still starts — better empty than
-    /// dead.
-    pub fn from_user_config() -> Self {
-        let path = state_db_path();
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let store = match SqliteStore::open(&path) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(
-                    "falling back to in-memory store: couldn't open {}: {e}",
-                    path.display()
-                );
-                return Self::with_store(Arc::new(MemoryStore::new()));
-            }
-        };
+    /// Open failures (permissions, disk corruption) abort startup. A
+    /// production process must never impersonate an empty installation
+    /// when the user's persisted state is temporarily unavailable.
+    pub fn from_user_config() -> Result<Self, ServerError> {
+        let store = open_store()?;
 
         // Pick the strongest available backend. tmux means sessions
         // survive lazybox-server restart and can be attached externally
@@ -462,7 +457,7 @@ impl ServerConfig {
                 Arc::new(RawPtyBackend::new())
             }
         };
-        Self::with_store_and_backend(Arc::new(store), backend)
+        Ok(Self::with_store_and_backend(store, backend))
     }
 
     /// Build a config with an explicit store and the deterministic
@@ -500,17 +495,17 @@ impl ServerConfig {
             credential_store: Arc::new(auth::MemoryCredentialStore::new()),
             default_principal_id: lazybox_ipc::PrincipalId::local(),
             poll_state: Arc::new(Mutex::new(polling::TickState::default())),
-            gh_client_cache: Arc::new(std::sync::Mutex::new(None)),
+            gh_client_cache: Arc::new(parking_lot::Mutex::new(None)),
             merge_prompts: Arc::new(Mutex::new(polling::MergePromptMemory::default())),
             removal_prompts: Arc::new(Mutex::new(polling::RemovalPromptMemory::default())),
-            viewer_identities: Arc::new(std::sync::Mutex::new(Vec::new())),
+            viewer_identities: Arc::new(parking_lot::Mutex::new(Vec::new())),
             poll_wake: Arc::new(tokio::sync::Notify::new()),
-            inflight_spawns: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            inflight_spawns: Arc::new(parking_lot::Mutex::new(HashSet::new())),
             inflight_spawn_changed: Arc::new(tokio::sync::Notify::new()),
-            deleted_workspaces: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            deleted_workspaces: Arc::new(parking_lot::Mutex::new(HashSet::new())),
             input_needed_shapes: Arc::new(Mutex::new(HashMap::new())),
             event_metrics: Arc::new(metrics::EventMetrics::default()),
-            workspace_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            workspace_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         }
     }
 
@@ -532,10 +527,7 @@ impl ServerConfig {
     /// comments at those sites).
     pub async fn lock_workspace(&self, key: &str) -> tokio::sync::OwnedMutexGuard<()> {
         let entry = {
-            let mut map = self
-                .workspace_locks
-                .lock()
-                .expect("workspace_locks poisoned");
+            let mut map = self.workspace_locks.lock();
             map.entry(key.to_string()).or_default().clone()
         };
         entry.lock_owned().await
@@ -804,14 +796,19 @@ impl Server {
                             .await
                             {
                                 Ok((workspaces, projects)) => {
+                                    let load_errors =
+                                        workspaces.errors.len() + projects.errors.len();
                                     let mut terminals =
                                         spawn_handler::snapshot_terminals(&self.config).await;
                                     budget_snapshot_replay(&mut terminals);
                                     let _ = conn.tx.send(Event::Snapshot {
-                                        workspaces,
+                                        workspaces: workspaces.values,
                                         terminals,
-                                        projects,
+                                        projects: projects.values,
                                     });
+                                    if load_errors > 0 {
+                                        let _ = conn.tx.send(storage_recovery_event(load_errors));
+                                    }
                                     self.config.event_metrics.record_bus_lag_recovery();
                                 }
                                 Err(e) => {
@@ -888,7 +885,12 @@ fn command_lane(cmd: &lazybox_ipc::Command) -> CommandLane {
 /// inline-vs-detached decision lives in exactly one place
 /// (`command_lane`) instead of being re-litigated per arm. `Shutdown` is
 /// loop control and never reaches here.
-async fn dispatch_command(
+/// Execute one IPC command handler to completion.
+///
+/// Public for the JSON gateway's synchronous one-shot endpoint and its
+/// integration harness. Normal clients should continue using an IPC transport.
+#[doc(hidden)]
+pub async fn dispatch_command(
     config: &ServerConfig,
     tx: &tokio::sync::mpsc::UnboundedSender<Event>,
     cmd: lazybox_ipc::Command,
@@ -898,8 +900,8 @@ async fn dispatch_command(
             // Offload the SQLite scans (issue #34) onto `spawn_blocking`
             // so the inline handler doesn't pin the runtime worker on the
             // parking_lot mutex + row iteration. Both scans share one
-            // task to pay the spawn/handoff once. A panic inside (poisoned
-            // mutex, corrupt JSON) is logged loudly — silently sending an
+            // task to pay the spawn/handoff once. A panic inside (for example,
+            // corrupt JSON) is logged loudly — silently sending an
             // empty Snapshot would render a blank sidebar with no
             // breadcrumb.
             let store = config.store.clone();
@@ -913,16 +915,20 @@ async fn dispatch_command(
                     tracing::error!(
                         "Subscribe snapshot load task failed: {e} — sending empty snapshot",
                     );
-                    (Vec::new(), Vec::new())
+                    (LoadOutcome::default(), LoadOutcome::default())
                 }
             };
+            let load_errors = workspaces.errors.len() + projects.errors.len();
             let mut terminals = spawn_handler::snapshot_terminals(config).await;
             budget_snapshot_replay(&mut terminals);
             let _ = tx.send(Event::Snapshot {
-                workspaces,
+                workspaces: workspaces.values,
                 terminals,
-                projects,
+                projects: projects.values,
             });
+            if load_errors > 0 {
+                let _ = tx.send(storage_recovery_event(load_errors));
+            }
             // A fresh subscriber may have missed removal prompts emitted
             // before it connected (broadcast is fire-and-forget) — reset
             // the reprompt throttle so the tick kicked below re-offers
@@ -933,11 +939,7 @@ async fn dispatch_command(
             config.poll_wake.notify_one();
             // Replay cached viewer identities so a reconnecting TUI can
             // render `@me` without waiting for the next poll cycle.
-            let logins = config
-                .viewer_identities
-                .lock()
-                .expect("viewer_identities poisoned")
-                .clone();
+            let logins = config.viewer_identities.lock().clone();
             if !logins.is_empty() {
                 let _ = tx.send(Event::ViewerIdentities { logins });
             }
@@ -1140,7 +1142,6 @@ async fn dispatch_command(
             config
                 .deleted_workspaces
                 .lock()
-                .expect("deleted_workspaces poisoned")
                 .insert(key.as_str().to_string());
             spawn_handler::await_inflight_spawns(config, key.as_str()).await;
             polling::delete_workspace(config, &key).await;
@@ -1155,7 +1156,6 @@ async fn dispatch_command(
             config
                 .deleted_workspaces
                 .lock()
-                .expect("deleted_workspaces poisoned")
                 .insert(key.as_str().to_string());
             spawn_handler::await_inflight_spawns(config, key.as_str()).await;
             polling::remove_merged_workspace(config, &key).await;
@@ -1174,12 +1174,7 @@ async fn dispatch_command(
             // issue appears now instead of next scheduled sweep (issue
             // #180), then wake the long-lived poll loop — the single
             // source of truth for ticks.
-            if let Some(client) = config
-                .gh_client_cache
-                .lock()
-                .expect("gh_client_cache poisoned")
-                .as_ref()
-            {
+            if let Some(client) = config.gh_client_cache.lock().as_ref() {
                 client.force_full_sweep();
             }
             config.poll_wake.notify_one();
@@ -1295,29 +1290,64 @@ pub fn persisted_from_config(c: &lazybox_config::Config) -> lazybox_core::Persis
     }
 }
 
-/// Deserialize every persisted `Workspace`. Bad JSON is logged and
-/// skipped so a single corrupted row doesn't break startup.
-fn load_workspaces(store: &dyn Store) -> Vec<lazybox_core::Workspace> {
+struct LoadOutcome<T> {
+    values: Vec<T>,
+    errors: Vec<String>,
+}
+
+impl<T> Default for LoadOutcome<T> {
+    fn default() -> Self {
+        Self {
+            values: Vec::new(),
+            errors: Vec::new(),
+        }
+    }
+}
+
+fn storage_recovery_event(skipped: usize) -> Event {
+    Event::provider_error_permanent(
+        "storage",
+        format!(
+            "{skipped} persisted record(s) could not be loaded. They were preserved, not deleted. \
+             Back up the state directory and follow the recovery guide."
+        ),
+    )
+}
+
+/// Deserialize every persisted `Workspace`. Bad JSON is preserved in the
+/// store and reported to the client instead of silently disappearing.
+fn load_workspaces(store: &dyn Store) -> LoadOutcome<lazybox_core::Workspace> {
     let records = match store.list_workspaces() {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("list_workspaces failed: {e}");
-            return vec![];
+            return LoadOutcome {
+                values: Vec::new(),
+                errors: vec![format!("list workspaces: {e}")],
+            };
         }
     };
-    records
-        .into_iter()
-        .filter_map(|r| {
-            let json = r.workspace_json?;
-            match serde_json::from_str::<lazybox_core::Workspace>(&json) {
-                Ok(w) => Some(w),
-                Err(e) => {
-                    tracing::warn!("skipping unreadable workspace {}: {e}", r.key);
-                    None
+    let mut outcome = LoadOutcome::default();
+    for record in records {
+        match record.workspace_json {
+            Some(json) => match serde_json::from_str::<lazybox_core::Workspace>(&json) {
+                Ok(workspace) => outcome.values.push(workspace),
+                Err(error) => {
+                    tracing::warn!("preserving unreadable workspace {}: {error}", record.key);
+                    outcome
+                        .errors
+                        .push(format!("workspace {}: {error}", record.key));
                 }
+            },
+            None => {
+                tracing::warn!("preserving workspace {} with no JSON payload", record.key);
+                outcome
+                    .errors
+                    .push(format!("workspace {}: missing JSON payload", record.key));
             }
-        })
-        .collect()
+        }
+    }
+    outcome
 }
 
 /// Cap on the TOTAL terminal-replay bytes embedded in one `Snapshot`.
@@ -1369,29 +1399,79 @@ fn budget_snapshot_replay(terminals: &mut [lazybox_ipc::TerminalSnapshot]) {
     }
 }
 
-/// Same shape as `load_workspaces` for the project table. Used by
-/// `Snapshot` to seed the sidebar's project headers on reconnect.
-fn load_projects(store: &dyn Store) -> Vec<lazybox_core::Project> {
+/// Same shape as `load_workspaces` for the project table.
+fn load_projects(store: &dyn Store) -> LoadOutcome<lazybox_core::Project> {
     let records = match store.list_projects() {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("list_projects failed: {e}");
-            return vec![];
+            return LoadOutcome {
+                values: Vec::new(),
+                errors: vec![format!("list projects: {e}")],
+            };
         }
     };
-    records
-        .into_iter()
-        .filter_map(|r| {
-            let json = r.project_json?;
-            match serde_json::from_str::<lazybox_core::Project>(&json) {
-                Ok(p) => Some(p),
-                Err(e) => {
-                    tracing::warn!("skipping unreadable project {}: {e}", r.key);
-                    None
+    let mut outcome = LoadOutcome::default();
+    for record in records {
+        match record.project_json {
+            Some(json) => match serde_json::from_str::<lazybox_core::Project>(&json) {
+                Ok(project) => outcome.values.push(project),
+                Err(error) => {
+                    tracing::warn!("preserving unreadable project {}: {error}", record.key);
+                    outcome
+                        .errors
+                        .push(format!("project {}: {error}", record.key));
                 }
+            },
+            None => {
+                tracing::warn!("preserving project {} with no JSON payload", record.key);
+                outcome
+                    .errors
+                    .push(format!("project {}: missing JSON payload", record.key));
             }
-        })
-        .collect()
+        }
+    }
+    outcome
+}
+
+#[cfg(test)]
+mod store_open_tests {
+    use super::*;
+
+    #[test]
+    fn persistent_store_open_failure_is_returned() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let database = temp.path().join("state.db");
+        std::fs::create_dir(&database).expect("directory at database path");
+
+        let error = match open_store_at(&database) {
+            Ok(_) => panic!("a directory cannot be opened as a SQLite database"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, ServerError::Store(_)));
+        assert!(error.to_string().contains("open persistent state"));
+        assert!(error.to_string().contains(&database.display().to_string()));
+    }
+
+    #[test]
+    fn persistent_store_parent_creation_failure_is_returned() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let blocked_parent = temp.path().join("not-a-directory");
+        std::fs::write(&blocked_parent, b"file").expect("blocking file");
+        let database = blocked_parent.join("state.db");
+
+        let error = match open_store_at(&database) {
+            Ok(_) => panic!("database parent cannot be a regular file"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, ServerError::Store(_)));
+        assert!(error.to_string().contains("create state directory"));
+        assert!(
+            error
+                .to_string()
+                .contains(&blocked_parent.display().to_string())
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1438,11 +1518,14 @@ mod snapshot_budget_tests {
             total <= SNAPSHOT_REPLAY_BUDGET,
             "total replay {total} must fit the {SNAPSHOT_REPLAY_BUDGET} budget"
         );
-        let encoded = bincode::serialize(&Event::Snapshot {
-            workspaces: Vec::new(),
-            terminals,
-            projects: Vec::new(),
-        })
+        let encoded = bincode::serde::encode_to_vec(
+            Event::Snapshot {
+                workspaces: Vec::new(),
+                terminals,
+                projects: Vec::new(),
+            },
+            bincode::config::legacy(),
+        )
         .expect("snapshot serializes");
         assert!(
             (encoded.len() as u64) < u64::from(lazybox_ipc::MAX_FRAME_BYTES),

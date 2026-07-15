@@ -1363,27 +1363,27 @@ mod tests {
     /// Minimal in-memory provider that records calls and serves
     /// rigged responses. Lets us drive `on_terminal_spawned` without
     /// HTTP and assert on state-map population. Recorders are
-    /// `std::sync::Mutex` — guards never span an `.await` so the
+    /// `parking_lot::Mutex` — guards never span an `.await` so the
     /// async-aware tokio variant would be overkill.
     struct MockProvider {
         target: TerminalTarget,
         /// Posts go here as `(channel, body)`. `post()` returns the
         /// next ts from `anchor_ts` (popped in order) so a test can
         /// preset a known thread anchor.
-        posts: std::sync::Mutex<Vec<(String, String)>>,
-        thread_posts: std::sync::Mutex<Vec<(String, String, String)>>,
-        anchor_ts: std::sync::Mutex<Vec<String>>,
-        ensured: std::sync::Mutex<Vec<String>>,
+        posts: parking_lot::Mutex<Vec<(String, String)>>,
+        thread_posts: parking_lot::Mutex<Vec<(String, String, String)>>,
+        anchor_ts: parking_lot::Mutex<Vec<String>>,
+        ensured: parking_lot::Mutex<Vec<String>>,
     }
 
     impl MockProvider {
         fn new(target: TerminalTarget, anchor_ts: Vec<String>) -> Self {
             Self {
                 target,
-                posts: std::sync::Mutex::new(vec![]),
-                thread_posts: std::sync::Mutex::new(vec![]),
-                anchor_ts: std::sync::Mutex::new(anchor_ts),
-                ensured: std::sync::Mutex::new(vec![]),
+                posts: parking_lot::Mutex::new(vec![]),
+                thread_posts: parking_lot::Mutex::new(vec![]),
+                anchor_ts: parking_lot::Mutex::new(anchor_ts),
+                ensured: parking_lot::Mutex::new(vec![]),
             }
         }
     }
@@ -1406,12 +1406,10 @@ mod tests {
             Box::pin(async move {
                 self.posts
                     .lock()
-                    .unwrap()
                     .push((channel.to_string(), body.to_string()));
                 Ok(self
                     .anchor_ts
                     .lock()
-                    .unwrap()
                     .pop()
                     .unwrap_or_else(|| "ts-default".to_string()))
             })
@@ -1423,7 +1421,7 @@ mod tests {
             body: &'a str,
         ) -> Pin<Box<dyn Future<Output = Result<(), ChatError>> + Send + 'a>> {
             Box::pin(async move {
-                self.thread_posts.lock().unwrap().push((
+                self.thread_posts.lock().push((
                     channel.to_string(),
                     thread_ts.to_string(),
                     body.to_string(),
@@ -1436,7 +1434,7 @@ mod tests {
             name: &'a str,
         ) -> Pin<Box<dyn Future<Output = Result<String, ChatError>> + Send + 'a>> {
             Box::pin(async move {
-                self.ensured.lock().unwrap().push(name.to_string());
+                self.ensured.lock().push(name.to_string());
                 Ok(format!("C-{name}"))
             })
         }
@@ -1617,7 +1615,7 @@ mod tests {
         handle_inbound(&provider, &server, &state, msg.clone()).await;
         handle_inbound(&provider, &server, &state, msg).await;
         assert_eq!(
-            provider.posts.lock().unwrap().len(),
+            provider.posts.lock().len(),
             1,
             "the duplicate delivery must not produce a second reply"
         );
@@ -1725,7 +1723,7 @@ mod tests {
             "already-known terminal untouched"
         );
         assert_eq!(
-            provider.ensured.lock().unwrap().len(),
+            provider.ensured.lock().len(),
             1,
             "only the missed terminal triggered a channel ensure"
         );
@@ -1750,7 +1748,7 @@ mod tests {
         assert!(s.terminal_to_channel.is_empty());
         assert!(s.terminal_to_thread.is_empty());
         // and no post was attempted
-        assert!(provider.posts.lock().unwrap().is_empty());
-        assert!(provider.ensured.lock().unwrap().is_empty());
+        assert!(provider.posts.lock().is_empty());
+        assert!(provider.ensured.lock().is_empty());
     }
 }

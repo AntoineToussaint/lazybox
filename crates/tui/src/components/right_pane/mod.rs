@@ -1111,7 +1111,7 @@ impl RightPane {
                         .fg(theme.text_dim)
                         .add_modifier(Modifier::ITALIC),
                 ),
-                Span::styled("— g v to request", Style::default().fg(theme.text_dim)),
+                Span::styled("— g r to request", Style::default().fg(theme.text_dim)),
             ]));
         }
         if !task.assignees.is_empty() {

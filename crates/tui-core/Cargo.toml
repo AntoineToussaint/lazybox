@@ -34,7 +34,7 @@ serde     = { workspace = true }
 tracing   = { workspace = true }
 thiserror = { workspace = true }
 libc      = "0.2"
-which     = "6"
+which     = "8"
 unicode-width = "0.2"
 
 [dev-dependencies]

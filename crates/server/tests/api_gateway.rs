@@ -1,5 +1,5 @@
 pub use lazybox_server::metrics;
-pub use lazybox_server::{Server, ServerConfig};
+pub use lazybox_server::{Server, ServerConfig, dispatch_command};
 
 #[allow(dead_code)]
 #[path = "../src/api_gateway.rs"]
@@ -242,7 +242,40 @@ async fn workspaces_route_returns_current_store_snapshot() {
     assert_eq!(response.status(), StatusCode::OK);
     let payload: WorkspacesResponse = read_json(response).await;
     assert_eq!(payload.workspaces.len(), 1);
+    assert!(payload.warnings.is_empty());
     assert_eq!(payload.workspaces[0].pr.as_ref().unwrap().id.key, "o/r#42");
+}
+
+#[tokio::test]
+async fn workspaces_route_reports_and_preserves_unreadable_records() {
+    let config = ServerConfig::in_memory();
+    config
+        .store
+        .save_workspace(&WorkspaceRecord {
+            key: "broken-workspace".into(),
+            created_at: Utc::now(),
+            workspace_json: Some("not valid workspace JSON".into()),
+        })
+        .unwrap();
+    let observed = config.clone();
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/v1/workspaces")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+
+    let response = api_gateway::handle_request(config, GatewayOptions::default(), request).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: WorkspacesResponse = read_json(response).await;
+    assert!(payload.workspaces.is_empty());
+    assert_eq!(payload.warnings.len(), 1);
+    assert!(payload.warnings[0].contains("broken-workspace"));
+    assert_eq!(
+        observed.store.list_workspaces().unwrap().len(),
+        1,
+        "recovery diagnostics must not delete the unreadable record"
+    );
 }
 #[tokio::test]
 async fn command_route_accepts_json_client_frame() {
@@ -263,6 +296,71 @@ async fn command_route_accepts_json_client_frame() {
     assert_eq!(response.status(), StatusCode::OK);
     let payload: CommandResponse = read_json(response).await;
     assert!(payload.ok);
+    assert!(payload.completed);
+}
+
+#[tokio::test]
+async fn command_route_returns_only_after_handler_side_effect() {
+    let config = ServerConfig::in_memory();
+    let observed = config.clone();
+    let frame = JsonClientFrame::Command(Command::CreateProject {
+        name: "API project".into(),
+    });
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/commands")
+        .body(Full::new(Bytes::from(serde_json::to_vec(&frame).unwrap())))
+        .unwrap();
+
+    let response = api_gateway::handle_request(config, GatewayOptions::default(), request).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        observed
+            .store
+            .get_project(&lazybox_core::ProjectKey::local("api-project"))
+            .unwrap()
+            .is_some(),
+        "HTTP completion must mean the command handler's store write is visible"
+    );
+}
+
+#[tokio::test]
+async fn command_route_rejects_connection_control_commands() {
+    for command in [Command::Subscribe, Command::Shutdown] {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/commands")
+            .body(Full::new(Bytes::from(
+                serde_json::to_vec(&JsonClientFrame::Command(command)).unwrap(),
+            )))
+            .unwrap();
+        let response = api_gateway::handle_request(
+            ServerConfig::in_memory(),
+            GatewayOptions::default(),
+            request,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+#[tokio::test]
+async fn command_route_rejects_oversized_body() {
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/commands")
+        .body(Full::new(Bytes::from(vec![b'x'; 1024 * 1024 + 1])))
+        .unwrap();
+
+    let response = api_gateway::handle_request(
+        ServerConfig::in_memory(),
+        GatewayOptions::default(),
+        request,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }
 #[tokio::test]
 async fn command_route_rejects_malformed_json() {
@@ -317,6 +415,34 @@ async fn events_route_streams_initial_snapshot_as_ndjson() {
         other => panic!("expected Snapshot frame, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn subscribe_surfaces_unreadable_records_after_the_snapshot() {
+    let config = ServerConfig::in_memory();
+    config
+        .store
+        .save_workspace(&WorkspaceRecord {
+            key: "broken-workspace".into(),
+            created_at: Utc::now(),
+            workspace_json: Some("not valid workspace JSON".into()),
+        })
+        .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+    dispatch_command(&config, &tx, Command::Subscribe).await;
+
+    assert!(matches!(rx.recv().await, Some(Event::Snapshot { .. })));
+    match rx.recv().await {
+        Some(Event::ProviderError {
+            source, message, ..
+        }) => {
+            assert_eq!(source, "storage");
+            assert!(message.contains("preserved, not deleted"));
+        }
+        other => panic!("expected storage recovery warning, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn stream_route_accepts_ndjson_commands_and_streams_events() {
     let mut line = serde_json::to_vec(&JsonClientFrame::Command(Command::Subscribe)).unwrap();
@@ -348,6 +474,32 @@ async fn stream_route_accepts_ndjson_commands_and_streams_events() {
         JsonServerFrame::Event(Event::Snapshot { .. })
     ));
 }
+
+#[tokio::test]
+async fn stream_route_caps_malformed_nonempty_command_lines() {
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/stream")
+        .body(Full::new(Bytes::from("{}\n".repeat(256))))
+        .unwrap();
+
+    let response = api_gateway::handle_request(
+        ServerConfig::in_memory(),
+        GatewayOptions::default(),
+        request,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        response.into_body().collect(),
+    )
+    .await
+    .expect("over-limit command stream closes promptly")
+    .expect("stream body remains valid");
+}
+
 #[tokio::test]
 async fn stream_route_can_start_structured_agent_run() {
     let mut config = ServerConfig::in_memory();

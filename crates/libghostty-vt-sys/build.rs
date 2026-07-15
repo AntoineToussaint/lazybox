@@ -4,7 +4,16 @@ use std::process::Command;
 
 /// Pinned ghostty commit. Update this to pull a newer version.
 const GHOSTTY_REPO: &str = "https://github.com/ghostty-org/ghostty.git";
-const GHOSTTY_COMMIT: &str = "a1e75daef8b64426dbca551c6e41b1fbc2b7ae24";
+const GHOSTTY_COMMIT_RAW: &str = include_str!("../../.ghostty-version");
+const ZIG_VERSION_RAW: &str = include_str!("../../.zig-version");
+
+fn ghostty_commit() -> &'static str {
+    GHOSTTY_COMMIT_RAW.trim()
+}
+
+fn zig_version() -> &'static str {
+    ZIG_VERSION_RAW.trim()
+}
 
 fn main() {
     // docs.rs has no Zig toolchain. The checked-in bindings in src/bindings.rs
@@ -16,6 +25,10 @@ fn main() {
 
     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_SYS_NO_VENDOR");
     println!("cargo:rerun-if-env-changed=GHOSTTY_SOURCE_DIR");
+    println!("cargo:rerun-if-env-changed=LAZYBOX_GHOSTTY_CACHE");
+    println!("cargo:rerun-if-env-changed=LAZYBOX_ZIG_CACHE");
+    println!("cargo:rerun-if-env-changed=LAZYBOX_ZIG_GLOBAL_CACHE");
+    println!("cargo:rerun-if-env-changed=LAZYBOX_OFFLINE");
     println!("cargo:rerun-if-env-changed=TARGET");
     println!("cargo:rerun-if-env-changed=HOST");
     // rerun-if-changed paths are resolved relative to this package's root
@@ -24,10 +37,12 @@ fn main() {
     // points at a nonexistent file, which cargo treats as perpetually stale
     // and reruns the script (and the whole downstream chain) every build.
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=../../.ghostty-version");
+    println!("cargo:rerun-if-changed=../../.zig-version");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR must be set"));
     let target = env::var("TARGET").expect("TARGET must be set");
-    let _host = env::var("HOST").expect("HOST must be set");
+    let host = env::var("HOST").expect("HOST must be set");
 
     // Locate ghostty source: env override > fetch into OUT_DIR.
     let ghostty_dir = match env::var("GHOSTTY_SOURCE_DIR") {
@@ -50,15 +65,16 @@ fn main() {
     // requires the same minor — newer zig (e.g. brew's default 0.16.x)
     // fails at comptime. Resolve the right zig binary in order:
     //
-    //   1. `LAZYBOX_ZIG_BIN`     — explicit override, takes precedence.
-    //   2. `zig` on PATH       — usually correct; fails fast if too new.
-    //   3. Homebrew's `zig@0.15` keg path — best-effort fallback so a
+    //   1. `LAZYBOX_ZIG_BIN` — explicit override, takes precedence.
+    //   2. The worktree/shared cache populated by `make setup`.
+    //   3. A compatible `zig` on PATH.
+    //   4. Homebrew's `zig@0.15` keg path — best-effort fallback so a
     //      `brew install zig@0.15` (it's keg-only, doesn't link to
     //      /usr/local/bin) "just works" without the user editing PATH.
     //
     // The fallback only kicks in when the path exists, so non-mac CI
     // and users with a system zig 0.15 stay on the PATH binary.
-    let zig_bin = resolve_zig_binary();
+    let zig_bin = resolve_zig_binary(&host);
     println!("cargo:rerun-if-env-changed=LAZYBOX_ZIG_BIN");
     let mut build = Command::new(&zig_bin);
     build
@@ -75,6 +91,16 @@ fn main() {
         .arg("-Doptimize=ReleaseSafe")
         .arg("--prefix")
         .arg(&install_prefix)
+        // The source checkout is shared between profiles and worktrees.
+        // Keep Zig's mutable local cache profile-specific so concurrent
+        // builds never write into or lock the shared source tree.
+        .arg("--cache-dir")
+        .arg(out_dir.join("ghostty-zig-cache"))
+        // Keep Ghostty's downloaded Zig packages in the same persistent
+        // cache family as its source. `make setup` warms this directory,
+        // after which `make release` can run without network access.
+        .arg("--global-cache-dir")
+        .arg(zig_global_cache_dir(&out_dir))
         .current_dir(&ghostty_dir);
 
     // Always pass -Dtarget explicitly to avoid xcframework generation
@@ -177,12 +203,48 @@ fn link_libcpp_verbose_abort_shim() {
 }
 
 /// Pick the right `zig` binary to invoke. See the call site for the
-/// resolution order. Returns either a LAZYBOX_ZIG_BIN override, the
-/// system `zig` from PATH, or Homebrew's `zig@0.15` keg path on
-/// macOS when system zig is missing or too new.
-fn resolve_zig_binary() -> PathBuf {
+/// resolution order. Returns either a LAZYBOX_ZIG_BIN override, the exact
+/// project-pinned binary prepared by `make setup`, a compatible system Zig,
+/// or Homebrew's `zig@0.15` keg path on macOS.
+fn resolve_zig_binary(host: &str) -> PathBuf {
     if let Ok(explicit) = env::var("LAZYBOX_ZIG_BIN") {
         return PathBuf::from(explicit);
+    }
+
+    let host_slug = match host {
+        "aarch64-apple-darwin" => Some("aarch64-macos"),
+        "x86_64-apple-darwin" => Some("x86_64-macos"),
+        "aarch64-unknown-linux-gnu" | "aarch64-unknown-linux-musl" => Some("aarch64-linux"),
+        "x86_64-unknown-linux-gnu" | "x86_64-unknown-linux-musl" => Some("x86_64-linux"),
+        _ => None,
+    };
+    if let Some(host_slug) = host_slug {
+        let manifest = PathBuf::from(
+            env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set"),
+        );
+        let workspace = manifest
+            .parent()
+            .and_then(Path::parent)
+            .expect("libghostty-vt-sys must live under the workspace crates directory");
+        let relative = format!("{host_slug}-{}/zig", zig_version());
+        let local = workspace.join("vendor/zig").join(&relative);
+        if local.is_file() {
+            return local;
+        }
+
+        let cache_root = env::var_os("LAZYBOX_ZIG_CACHE")
+            .map(PathBuf::from)
+            .or_else(|| {
+                env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .map(|home| home.join(".cache/lazybox/zig"))
+            });
+        if let Some(cache_root) = cache_root {
+            let cached = cache_root.join(relative);
+            if cached.is_file() {
+                return cached;
+            }
+        }
     }
 
     // Probe the PATH zig's version. On any failure (missing,
@@ -225,26 +287,77 @@ fn resolve_zig_binary() -> PathBuf {
         }
     }
 
-    // Nothing compatible found. Fall back to the PATH binary so
-    // the user gets the ghostty `requireZig` error with the
-    // actionable "install zig 0.15.x" hint, rather than our
-    // version-shim error.
-    PathBuf::from("zig")
+    panic!(
+        "Zig {} is required but was not found. Run `make setup` once while online, then retry.",
+        zig_version()
+    )
 }
 
-/// Clone ghostty at the pinned commit into OUT_DIR/ghostty-src.
-/// Reuses an existing clone if the commit matches.
-fn fetch_ghostty(out_dir: &Path) -> PathBuf {
-    let src_dir = out_dir.join("ghostty-src");
-    let stamp = src_dir.join(".ghostty-commit");
+/// Return the persistent Zig package cache used by Ghostty builds.
+fn zig_global_cache_dir(out_dir: &Path) -> PathBuf {
+    let path = env::var_os("LAZYBOX_ZIG_GLOBAL_CACHE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| ghostty_cache_root(out_dir).join("zig-global-cache"));
+    std::fs::create_dir_all(&path)
+        .unwrap_or_else(|error| panic!("failed to create {}: {error}", path.display()));
+    path
+}
 
-    // Skip fetch if we already have the right commit.
-    if stamp.exists()
-        && let Ok(existing) = std::fs::read_to_string(&stamp)
-        && existing.trim() == GHOSTTY_COMMIT
-    {
+/// Resolve the host-level Ghostty cache. Keeping it outside `target/` means
+/// `cargo clean`, profile switches, and separate worktrees all reuse one
+/// pinned checkout instead of cloning hundreds of megabytes each time.
+fn ghostty_cache_root(out_dir: &Path) -> PathBuf {
+    if let Some(path) = env::var_os("LAZYBOX_GHOSTTY_CACHE") {
+        return PathBuf::from(path);
+    }
+    if let Some(home) = env::var_os("HOME") {
+        return PathBuf::from(home).join(".cache/lazybox/ghostty");
+    }
+    println!("cargo:warning=HOME is not set; Ghostty source cache will live under Cargo OUT_DIR");
+    out_dir.join("ghostty-cache")
+}
+
+fn cached_source_is_valid(src_dir: &Path) -> bool {
+    let stamp = src_dir.join(".ghostty-commit");
+    src_dir.join("build.zig").is_file()
+        && std::fs::read_to_string(stamp)
+            .map(|value| value.trim() == ghostty_commit())
+            .unwrap_or(false)
+}
+
+fn offline_requested() -> bool {
+    env::var("LAZYBOX_OFFLINE")
+        .map(|value| !matches!(value.as_str(), "" | "0" | "false" | "no"))
+        .unwrap_or(false)
+}
+
+/// Clone Ghostty once into a persistent, commit-addressed cache. A temporary
+/// checkout plus atomic rename makes concurrent first builds safe: the first
+/// completed clone wins and the others discard their temporary copies.
+fn fetch_ghostty(out_dir: &Path) -> PathBuf {
+    let cache_root = ghostty_cache_root(out_dir);
+    std::fs::create_dir_all(&cache_root)
+        .unwrap_or_else(|error| panic!("failed to create {}: {error}", cache_root.display()));
+    let src_dir = cache_root.join(format!("src-{}", ghostty_commit()));
+
+    if cached_source_is_valid(&src_dir) {
         return src_dir;
     }
+
+    if offline_requested() {
+        panic!(
+            "Ghostty source {} is not available in the offline cache at {}.\n\
+             Run `make setup` once while online, then retry `make release`.",
+            ghostty_commit(),
+            cache_root.display()
+        );
+    }
+
+    let temp_dir = cache_root.join(format!(
+        ".src-{}.tmp-{}",
+        ghostty_commit(),
+        std::process::id()
+    ));
 
     // Up to 3 attempts. Transient HTTP/2 stream cancellations from
     // GitHub mid-clone are surprisingly common on flaky networks
@@ -254,14 +367,17 @@ fn fetch_ghostty(out_dir: &Path) -> PathBuf {
     const MAX_ATTEMPTS: u32 = 3;
     let mut last_error: Option<String> = None;
     for attempt in 1..=MAX_ATTEMPTS {
-        if src_dir.exists() {
-            std::fs::remove_dir_all(&src_dir)
-                .unwrap_or_else(|e| panic!("failed to remove {}: {e}", src_dir.display()));
+        if temp_dir.exists() {
+            std::fs::remove_dir_all(&temp_dir)
+                .unwrap_or_else(|e| panic!("failed to remove {}: {e}", temp_dir.display()));
         }
         if attempt > 1 {
-            eprintln!("Fetching ghostty {GHOSTTY_COMMIT} (attempt {attempt}/{MAX_ATTEMPTS}) ...");
+            eprintln!(
+                "Fetching ghostty {} (attempt {attempt}/{MAX_ATTEMPTS}) ...",
+                ghostty_commit()
+            );
         } else {
-            eprintln!("Fetching ghostty {GHOSTTY_COMMIT} ...");
+            eprintln!("Fetching ghostty {} ...", ghostty_commit());
         }
         let mut clone = Command::new("git");
         clone
@@ -269,7 +385,7 @@ fn fetch_ghostty(out_dir: &Path) -> PathBuf {
             .arg("--filter=blob:none")
             .arg("--no-checkout")
             .arg(GHOSTTY_REPO)
-            .arg(&src_dir);
+            .arg(&temp_dir);
         if let Err(e) = try_run(clone, "git clone ghostty") {
             last_error = Some(e);
             continue;
@@ -277,14 +393,33 @@ fn fetch_ghostty(out_dir: &Path) -> PathBuf {
         let mut checkout = Command::new("git");
         checkout
             .arg("checkout")
-            .arg(GHOSTTY_COMMIT)
-            .current_dir(&src_dir);
+            .arg(ghostty_commit())
+            .current_dir(&temp_dir);
         if let Err(e) = try_run(checkout, "git checkout ghostty commit") {
             last_error = Some(e);
             continue;
         }
-        std::fs::write(&stamp, GHOSTTY_COMMIT)
+        std::fs::write(temp_dir.join(".ghostty-commit"), ghostty_commit())
             .unwrap_or_else(|e| panic!("failed to write stamp: {e}"));
+
+        if cached_source_is_valid(&src_dir) {
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            return src_dir;
+        }
+        if src_dir.exists() {
+            std::fs::remove_dir_all(&src_dir)
+                .unwrap_or_else(|e| panic!("failed to remove {}: {e}", src_dir.display()));
+        }
+        std::fs::rename(&temp_dir, &src_dir).unwrap_or_else(|error| {
+            if cached_source_is_valid(&src_dir) {
+                let _ = std::fs::remove_dir_all(&temp_dir);
+            } else {
+                panic!(
+                    "failed to install Ghostty cache {}: {error}",
+                    src_dir.display()
+                );
+            }
+        });
         return src_dir;
     }
     let last = last_error.unwrap_or_else(|| "unknown error".to_string());
@@ -295,9 +430,10 @@ fn fetch_ghostty(out_dir: &Path) -> PathBuf {
          - Re-run the build; the next attempt usually succeeds.\n\
          - Clone ghostty manually then set GHOSTTY_SOURCE_DIR:\n\
              git clone --filter=blob:none {GHOSTTY_REPO} /tmp/ghostty-src\n\
-             cd /tmp/ghostty-src && git checkout {GHOSTTY_COMMIT}\n\
+             cd /tmp/ghostty-src && git checkout {}\n\
              GHOSTTY_SOURCE_DIR=/tmp/ghostty-src cargo build\n\
          - Check network connectivity to github.com.",
+        ghostty_commit(),
     );
 }
 

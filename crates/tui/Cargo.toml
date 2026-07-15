@@ -28,16 +28,17 @@ path = "src/lib.rs"
 name = "lazybox"
 path = "src/main.rs"
 
-# The short `lb` alias is the auto-discovered bin at `src/bin/lb.rs`, a thin
-# shim that re-runs `main.rs`. (Note: `lb` collides with Debian live-build on
-# Linux hosts that have it; harmless on macOS / most dev setups.)
+# The short `lb` alias is the auto-discovered bin at `src/bin/lb.rs`, a tiny
+# exec shim for the sibling `lazybox` binary. This keeps release archives from
+# containing two copies of the full TUI. (`lb` can collide with Debian's
+# live-build command on Linux hosts that have it.)
 
 [dev-dependencies]
 # Golden-snapshot testing. Use `cargo insta review` to accept
 # intentional render changes; otherwise CI catches regressions.
 insta = { version = "1", features = ["yaml"] }
 tempfile = "3"
-criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
 [[bench]]
 name = "terminal_feed"
@@ -72,9 +73,10 @@ serde_json       = { workspace = true }
 serde_yaml       = { workspace = true }
 futures-util     = "0.3"
 tempfile         = "3"
-which            = "6"
+which            = "8"
 uuid             = { version = "1", features = ["v4"] }
 libc             = "0.2"
+rpassword        = "7.5.4"
 
 [lints]
 workspace = true

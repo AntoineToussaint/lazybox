@@ -25,7 +25,7 @@ use crate::ServerConfig;
 /// Outcome of a workspace mutation. `Applied` means the workspace
 /// was found, the closure ran, and the store + bus saw the result.
 /// `Missing` means the workspace vanished mid-mutation — typically
-/// because the user pressed `Shift-X` while we were in the
+/// because the user pressed `x x` while we were in the
 /// middle of an IO call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MutationOutcome {
@@ -184,7 +184,7 @@ mod tests {
     }
 
     /// Workspace deleted during the fetch — transform must NOT run
-    /// (otherwise an `Shift-X` during a slow fetch would re-create
+    /// (otherwise an `x x` during a slow fetch would re-create
     /// the row from a stale snapshot).
     #[tokio::test(flavor = "current_thread")]
     async fn fetch_and_apply_skips_transform_when_workspace_deleted_during_fetch() {

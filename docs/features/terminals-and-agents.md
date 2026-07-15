@@ -16,7 +16,7 @@ session runs in.
 
 **Status:** stable
 **Crate(s):** `tui-term`, `libghostty-vt` / `libghostty-vt-sys` (vendored), `agents` (tmux wrapper)
-**Config / flags:** `ui.terminal_escape_char` (default `]`)
+**Config / flags:** `terminal.escape_char` (default `]`)
 **Key bindings:** see [Terminal interaction model](#terminal-interaction-model)
 
 ### What it does
@@ -25,7 +25,7 @@ and drawn into ratatui. The daemon owns the PTY; the client replays bytes, so a
 reconnecting client reconstructs the screen.
 
 ### How to use it
-Spawn a shell or agent on a workspace (`s`, `a c`/`a x`/`a u`, or `w`); the terminal
+Spawn a shell or agent on a workspace (`s`, `a c`/`a x`/`a u`, or `w w`); the terminal
 appears in the right-hand stack. Multiple terminals coexist per workspace.
 
 ### How it works (brief)
@@ -44,7 +44,8 @@ streams live `TerminalOutput` bytes. The default session backend is tmux
 - [ ] Output beyond 64 KB scrolls without corrupting the live screen.
 
 ### Known sharp edges
-- libghostty's Zig sources are fetched at build time (pinned commit) — first build needs network.
+- `make setup` fetches the pinned Ghostty source and Zig packages once into a
+  shared host cache; subsequent `make release` builds run offline.
 - tmux ≥ 3.3 is required for persistent sessions (`allow-passthrough`
   and friends in the transparent conf; older tmux turns an unknown conf
   option into a config-error view that blocks every headless attach).
@@ -68,7 +69,7 @@ anything else.
 On a workspace: `s` opens a shell; `a` opens the agent which-key group —
 `a c` Claude, `a x` Codex, `a u` Cursor. The agent list and their chords come
 from your enabled agents; `setup.default_agent` is what
-[`w`](#work-command) uses.
+[`w w`](#work-command) uses.
 
 ### How it works (brief)
 The `Agent` trait (`crates/agents/src/agent.rs`) defines `spawn`/`resume` argv,
@@ -95,7 +96,7 @@ builtins; the server's `spawn_handler` builds the worktree, env, and
 **Status:** stable
 **Crate(s):** `tui-core` (`src/prompts.rs`, `src/intent.rs`), `core` (`src/prompts.rs`, `prompts/agent-work.md`)
 **Config / flags:** uses `setup.default_agent`
-**Key bindings:** `w`
+**Key bindings:** `w` menu (`w w` default, `w c`/`w x`/`w u` explicit)
 
 ### What it does
 Spawns the default agent with a **state-aware prompt** chosen from the
@@ -103,7 +104,7 @@ workspace's situation: fix a merge conflict, fix failing CI, address selected
 review comments, or implement an issue.
 
 ### How to use it
-Press `w` on a workspace. With Activity rows multi-selected (`v`), `w` targets
+Press `w w` on a workspace. With Activity rows multi-selected (`v`), `w w` targets
 those comments ("address these comments"). Otherwise it picks the prompt by
 priority: conflict → CI failure → issue-implementation / review.
 
@@ -116,10 +117,10 @@ Priority chain in `crates/tui-core/src/prompts.rs`: `build_fix_conflict_prompt`
 root-cause-over-masking principles).
 
 ### Test checklist
-- [ ] On a PR with a conflict, `w` produces the rebase/resolve/force-push prompt.
-- [ ] On a PR with failing CI (no conflict), `w` produces the fix-CI prompt.
-- [ ] On an issue workspace with no PR, `w` produces the implement-issue prompt.
-- [ ] With comments selected (`v`), `w` produces the address-comments prompt scoped to the selection.
+- [ ] On a PR with a conflict, `w w` produces the rebase/resolve/force-push prompt.
+- [ ] On a PR with failing CI (no conflict), `w w` produces the fix-CI prompt.
+- [ ] On an issue workspace with no PR, `w w` produces the implement-issue prompt.
+- [ ] With comments selected (`v`), `w w` produces the address-comments prompt scoped to the selection.
 - [ ] Every prompt carries the work preamble.
 
 ### Known sharp edges
@@ -306,7 +307,7 @@ with no inferable provider (`GenericCli`), or when no gateway URL is set.
 **Status:** stable
 **Crate(s):** `config` (`src/snippets.rs`), `tui` (picker)
 **Config / flags:** `~/.lazybox/snippets.yaml` (global) + `<repo>/.lazybox/snippets.yaml` (repo-local)
-**Key bindings:** `]<key>` in a terminal (configurable escape char)
+**Key bindings:** `]]s`, then the snippet key (configurable escape char)
 
 ### What it does
 Configurable text shortcuts that expand and auto-send to the focused terminal /
@@ -322,24 +323,24 @@ snippets:
     body: "Please review the current diff and flag bugs."
 ```
 
-In a terminal, press `]` then start typing the snippet key; the picker
+In a terminal, press `]]s` then start typing the snippet key; the picker
 fuzzy-filters and auto-submits the body (with a trailing carriage return) when
 the filter uniquely matches. See [`docs/snippets.md`](../snippets.md).
 
 ### How it works (brief)
 `Snippets::load_merged` (`crates/config/src/snippets.rs`) merges global +
-repo-local files (repo wins on key collision). The terminal's escape char (`]`)
-followed by a printable char mounts the snippet picker
+repo-local files (repo wins on key collision). The terminal's doubled escape
+leader (`]]`) followed by `s` mounts the snippet picker
 (`crates/tui/.../keys.rs`).
 
 ### Test checklist
-- [ ] A global snippet expands and submits in a terminal via `]<key>`.
+- [ ] A global snippet expands and submits in a terminal via `]]s<key>`.
 - [ ] A repo-local snippet overrides a global one with the same key.
 - [ ] The picker fuzzy-filters as you type and auto-submits on a unique match.
 - [ ] `Esc` dismisses the picker without sending.
 
 ### Known sharp edges
-- The trigger reuses the terminal escape char; if you remap `ui.terminal_escape_char`, the snippet trigger moves with it.
+- The trigger reuses the terminal escape char; if you remap `terminal.escape_char`, the snippet trigger moves with it.
 
 ---
 
@@ -347,7 +348,7 @@ followed by a printable char mounts the snippet picker
 
 **Status:** stable
 **Crate(s):** `tui` (`realm/model/keys.rs`, `components/terminal_stack.rs`)
-**Config / flags:** `ui.terminal_escape_char` (default `]`)
+**Config / flags:** `terminal.escape_char` (default `]`)
 **Key bindings:** `]]` exit to sidebar, `Tab` focus (pre-input), `Ctrl-c` SIGINT, `]]…` tile management, mouse wheel scrollback, drag-select → OSC 52 copy
 
 ### What it does
@@ -367,7 +368,7 @@ leaving, splitting, scrolling, and copying.
 ### How it works (brief)
 Terminal key routing lives in `crates/tui/src/realm/model/keys.rs`; tile
 management and scrollback in `components/terminal_stack.rs`. The escape char is
-`ui.terminal_escape_char`. OSC 52 emission is `emit_clipboard_copy`.
+`terminal.escape_char`. OSC 52 emission is `emit_clipboard_copy`.
 
 ### Test checklist
 - [ ] `]]` returns to the sidebar from a terminal.

@@ -1,0 +1,65 @@
+name: Performance benchmarks
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**"
+      - ".github/actions/rust-build-env/**"
+      - ".github/workflows/benchmarks.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  criterion:
+    name: Track Criterion regressions
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/rust-build-env
+
+      # A unique save key plus a broad restore prefix makes each run compare
+      # with the newest retained main-branch result while still allowing the
+      # cache action to persist the updated history at job teardown.
+      - name: Restore benchmark history
+        uses: actions/cache@v4
+        with:
+          path: .benchmark-cache
+          key: criterion-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            criterion-${{ runner.os }}-
+
+      - name: Run deterministic local benchmarks
+        shell: bash
+        run: |
+          rm -rf target/criterion
+          cargo bench -p lazybox-server --bench sync -- \
+            --quick --noplot
+          # libghostty-vt currently emits an info line for every parser
+          # allocation. Keep thousands of native lines out of the CI log, but
+          # print the captured stderr if compilation or the benchmark fails.
+          if ! cargo bench -p lazybox-tui --bench terminal_feed -- \
+            --quick --noplot 2>terminal-benchmark.stderr; then
+            cat terminal-benchmark.stderr
+            exit 1
+          fi
+          rm terminal-benchmark.stderr
+          python3 scripts/criterion-to-benchmark-json.py \
+            target/criterion benchmark-output.json
+
+      - name: Compare with prior main-branch results
+        uses: benchmark-action/github-action-benchmark@v1.22.1
+        with:
+          name: lazybox Criterion benchmarks
+          tool: customSmallerIsBetter
+          output-file-path: benchmark-output.json
+          external-data-json-path: .benchmark-cache/benchmark-data.json
+          alert-threshold: "150%"
+          fail-threshold: "200%"
+          fail-on-alert: true
+          summary-always: true
+          max-items-in-chart: 100

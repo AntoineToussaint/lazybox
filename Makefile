@@ -6,7 +6,9 @@
 # clone and every git worktree shares one download instead of each
 # re-fetching ~45MB into its own `vendor/zig/`. libghostty-rs is
 # vendored under crates/libghostty-vt*. Build rules below prepend the
-# pinned zig to PATH so any system zig is ignored. Cross-platform:
+# pinned zig to PATH so any system zig is ignored. The pinned Ghostty source is
+# prepared in the same shared cache instead of cloned under each Cargo OUT_DIR.
+# Cross-platform:
 # detects host (macos/linux × arm64/x86_64) in scripts/bootstrap.sh.
 
 # Detect host so PATH override picks the right vendored zig.
@@ -35,6 +37,7 @@ ZIG_SLUG := $(HOST_ARCH)-$(HOST_OS)-$(ZIG_VERSION)
 # every clone and worktree shares one download. Override the cache
 # root with `LAZYBOX_ZIG_CACHE` (forwarded to bootstrap.sh by `setup`).
 ZIG_CACHE ?= $(HOME)/.cache/lazybox/zig
+GHOSTTY_CACHE ?= $(HOME)/.cache/lazybox/ghostty
 CACHE_ZIG_DIR := $(ZIG_CACHE)/$(ZIG_SLUG)
 # Resolve zig from either a per-worktree local install or the shared
 # cache. A local vendor/zig wins when present (lets a worktree pin its
@@ -58,16 +61,16 @@ help: ## Show this help
 
 all: setup build ## Setup dependencies and build
 
-setup: ## Bootstrap: download pinned zig 0.15.2 to the shared cache (~/.cache/lazybox/zig).
-	@LAZYBOX_ZIG_CACHE="$(ZIG_CACHE)" ./scripts/bootstrap.sh
+setup: ## Prepare pinned Zig, Ghostty, and Cargo caches for offline builds (network used once).
 	@command -v cargo >/dev/null || { echo "Error: cargo not found. Install Rust: https://rustup.rs"; exit 1; }
-	@command -v gh    >/dev/null || { echo "Error: gh not found. Install: brew install gh (macOS) or https://cli.github.com"; exit 1; }
+	@LAZYBOX_ZIG_CACHE="$(ZIG_CACHE)" LAZYBOX_GHOSTTY_CACHE="$(GHOSTTY_CACHE)" LAZYBOX_PREFETCH_BUILD=1 ./scripts/bootstrap.sh
+	@command -v gh >/dev/null || echo "warning: gh not found — --test works, but GitHub-backed runs need the GitHub CLI or GH_TOKEN"
 
 build: ## Build lazybox (debug). Uses pinned zig.
 	@PATH="$(PINNED_PATH)" cargo build -p lazybox-tui
 
-release: ## Build lazybox (optimized). Uses pinned zig.
-	@PATH="$(PINNED_PATH)" cargo build -p lazybox-tui --release
+release: ## Build lazybox optimized, strictly offline (run `make setup` once first).
+	@PATH="$(PINNED_PATH)" LAZYBOX_GHOSTTY_CACHE="$(GHOSTTY_CACHE)" LAZYBOX_OFFLINE=1 CARGO_NET_OFFLINE=true cargo build --offline --locked -p lazybox-tui --release
 
 # `make run` accepts args via ARGS=... (`make run ARGS="--fresh"`).
 # Convenience targets below shorten the common cases.
@@ -137,6 +140,7 @@ clean: ## Clean cargo build artifacts (preserves the shared zig cache).
 distclean: clean ## Clean cargo + the local and shared pinned-zig installs for this host.
 	@rm -rf vendor   # per-worktree local install (and legacy layout)
 	@rm -rf "$(CACHE_ZIG_DIR)"
+	@rm -rf "$(GHOSTTY_CACHE)"
 
 install: release ## Install to ~/.cargo/bin.
 	@cp target/release/lazybox ~/.cargo/bin/lazybox

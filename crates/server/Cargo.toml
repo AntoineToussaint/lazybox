@@ -28,7 +28,8 @@ thiserror        = { workspace = true }
 tracing          = { workspace = true }
 tracing-subscriber = { workspace = true }
 chrono           = { workspace = true }
-portable-pty     = "0.8"
+portable-pty     = { workspace = true }
+parking_lot      = { workspace = true }
 libc             = "0.2"
 uuid             = { version = "1", features = ["v4"] }
 bytes            = "1"
@@ -42,7 +43,7 @@ tempfile       = "3"
 # Frame-size regression tests: assert an assembled Snapshot stays
 # under the socket transport's MAX_FRAME_BYTES once bincode-encoded.
 bincode        = { workspace = true }
-criterion      = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
+criterion      = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 libghostty-vt  = { workspace = true }
 
 [[bench]]

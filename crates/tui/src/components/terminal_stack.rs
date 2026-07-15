@@ -1899,7 +1899,7 @@ impl TerminalStack {
     /// scrolling is intuitive (the mouse wheel works too) and it
     /// crowded out more useful hints (#202).
     ///
-    /// `escape_char` is the configured `ui.terminal_escape_char` (the
+    /// `escape_char` is the configured `terminal.escape_char` (the
     /// `]` in the default `]]` leader). The leader-based hints render
     /// it doubled rather than a hardcoded `]]` so a user who remapped
     /// the escape char sees the chord they actually type (#170).
@@ -1916,7 +1916,7 @@ impl TerminalStack {
         use std::borrow::Cow;
         let leave = ActionDef::for_kind(ActionKind::LeaveTerminal);
         let leader = format!("{escape_char}{escape_char}");
-        // The leave chord is owned by `ui.terminal_escape_char`, NOT the
+        // The leave chord is owned by `terminal.escape_char`, NOT the
         // `leave_terminal` action_keys slot. Terminal-pane dispatch
         // (`model::keys`) matches only the configured escape char and
         // never the catalog chord, so honoring a `leave_terminal`

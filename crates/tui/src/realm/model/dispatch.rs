@@ -54,7 +54,7 @@ impl<T: TerminalAdapter> Model<T> {
             };
             // Archive is the only destructive action that applies to a
             // project header (it deletes the project + cascades). Any
-            // other — e.g. `Shift-Z` long-snooze pressed while the
+            // other — e.g. `x z` long-snooze pressed while the
             // cursor sits on a project header with no workspace
             // selected — has nothing to act on, so drop it silently
             // rather than mount a confirm that would no-op on Yes.
@@ -369,7 +369,7 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Action::Work => {
-                // Bare `w` targets whatever agent is already running on
+                // Default work (`w w`) targets whatever agent is already running on
                 // this workspace (so it injects into an existing Codex /
                 // Cursor session instead of always spawning the default),
                 // falling back to the default agent when none is running.
@@ -379,14 +379,14 @@ impl<T: TerminalAdapter> Model<T> {
                 self.push_work_spawn(&target_agent, session_id, None, &mut cmds);
             }
             Action::WorkWith(agent_id) => {
-                // Scoped `w <agent>`: same contextual prompt as bare `w`,
+                // Scoped `w <agent>`: same contextual prompt as `w w`,
                 // but forced to the chosen agent. `rewrite_spawn_to_inject`
                 // injects when that agent is already running, else spawns.
                 self.push_work_spawn(agent_id, session_id, None, &mut cmds);
             }
             Action::WorkTier(alias) => {
                 // Flat `w S`: work on the same contextual target agent as
-                // bare `w`, but launch it at the picked model tier. The
+                // `w w`, but launch it at the picked model tier. The
                 // alias is resolved against the target agent's menu daemon-
                 // side, so it degrades to the default model for an agent
                 // that doesn't define the tier.
@@ -666,7 +666,7 @@ impl<T: TerminalAdapter> Model<T> {
                 self.force_full_redraw();
             }
             Action::OpenHelp => {
-                self.mount_help();
+                self.mount_help_ask();
             }
             Action::OpenTour => {
                 self.mount_tour();
@@ -904,7 +904,7 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     /// Resolve a "work on this" spawn for `agent_id` and queue it.
-    /// Shared by bare `w` ([`Action::Work`]) and the scoped `w c` / `w x`
+    /// Shared by `w w` ([`Action::Work`]) and the scoped `w c` / `w x`
     /// chords ([`Action::WorkWith`]): both build the same contextual
     /// prompt via [`crate::intent::resolve_work`] and differ only in how
     /// the target agent is chosen. The queued `Spawn` carries the prompt
@@ -914,7 +914,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// it from any focus — reading it here is sound because `set_workspace`
     /// clears the selection whenever the workspace key changes, so the
     /// right pane's indices always belong to the selected workspace.
-    /// The agent a bare `w` (or a flat `w S` tier chord) targets on the
+    /// The agent `w w` (or a `w S` tier chord) targets on the
     /// selected workspace: whatever agent is already running there, else
     /// the configured default. Shared by `Work` and `WorkTier` so both
     /// pick the same agent before layering a tier on top.

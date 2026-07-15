@@ -393,7 +393,7 @@ showing keybinding search only"
                 return cmds;
             };
             // An agent terminal gets the daemon's settle-gated inject
-            // path — the SAME one `w` uses: the body is pasted, then
+            // path — the SAME one `w w` uses: the body is pasted, then
             // Enter is sent as a separate keystroke once the paste's
             // repaint quiesces. A single write with a trailing `\r`
             // (`encode_snippet_for_pty`) is not enough: Claude batches
@@ -558,7 +558,7 @@ showing keybinding search only"
             return cmds;
         }
         // New-workspace repo picker (Id::NewWorkspaceRepo) — the
-        // `Shift-N` entry point. A pick that indexes into the repo
+        // `x p` entry point. A pick that indexes into the repo
         // list funnels into the new-workspace name input under that
         // repo; the trailing escape-hatch row (index == list length)
         // falls back to creating a new local project. Empty / Esc

@@ -1,10 +1,9 @@
 //! Generic "first press arms, second press fires" latch.
 //!
-//! Three sidebar actions follow the same contract: `Shift-X` (kill),
-//! `g m` (merge), `Shift-Z` (long snooze). Each used to maintain
-//! its own `Option<SessionKey>` field + disarm-on-other-key check
-//! inline in `Sidebar::handle_key`. Same shape, three copies —
-//! perfect for a generic.
+//! Reusable primitive for flows where repeating an action on the same
+//! target confirms it. Destructive lazybox actions now prefer the richer
+//! confirmation modal; the latch remains a small, independently-tested
+//! building block for consumers that need a double-press interaction.
 //!
 //! Contract:
 //! - `arm_or_fire(target)` returns `true` when the latch already held
@@ -47,8 +46,7 @@ impl<K: PartialEq + Clone> ConfirmLatch<K> {
     }
 
     /// Force-clear the latch. Called when any non-latch key arrives
-    /// so a user typing `Shift-X j` doesn't leave the kill prompt
-    /// armed.
+    /// so unrelated input cannot leave a pending action armed.
     pub fn disarm(&mut self) {
         self.armed = None;
     }
@@ -339,8 +337,8 @@ mod tests {
 
     #[test]
     fn second_press_on_different_target_re_arms() {
-        // User pressed Shift-X on row A, then walked to row B and
-        // pressed Shift-X again — that's a fresh arm, not a fire.
+        // Repeating the action on a different row is a fresh arm, not
+        // a confirmation of the first row.
         let mut latch: ConfirmLatch<&'static str> = ConfirmLatch::new();
         latch.arm_or_fire("a");
         assert!(!latch.arm_or_fire("b"));

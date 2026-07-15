@@ -12,7 +12,7 @@
 //!
 //! Promoting Project to a first-class entity removes those three
 //! constraints. Provider polling registers a Project per polled
-//! repo/team; the user creates local Projects via `Shift-N`; the
+//! repo/team; the user creates local Projects via `x p`; the
 //! sidebar headers read from the Project table instead of grouping
 //! workspaces by their inferred repo string.
 

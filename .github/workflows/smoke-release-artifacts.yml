@@ -1,0 +1,38 @@
+name: Smoke release artifacts
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  archives:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+          - target: x86_64-apple-darwin
+            runner: macos-14
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Download the exact target archive
+        uses: actions/download-artifact@v7
+        with:
+          pattern: artifacts-build-local-${{ matrix.target }}
+          path: target/distrib
+          merge-multiple: true
+      - name: Extract and exercise packaged commands
+        run: scripts/smoke-release-artifacts.sh target/distrib

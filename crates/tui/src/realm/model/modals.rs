@@ -92,7 +92,7 @@ fn terminals_phrase(count: usize) -> String {
 }
 
 /// Confirm copy for folding an issue with live terminals into the PR
-/// that closes it. Says "join" — matching the `Shift-J` "join issue
+/// that closes it. Says "join" — matching the `x j` "join issue
 /// into PR" action and the follow-up flash — rather than "merge", which
 /// would read like the nearby `g m` git-merge action (issue #314).
 fn merge_prompt_question(pr_label: &str, issue_label: &str, count: usize) -> String {
@@ -228,7 +228,7 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::NewProject, modal);
     }
 
-    /// Drive the `Shift-N` new-workspace flow: pick a tracked repo to
+    /// Drive the `x p` new-workspace flow: pick a tracked repo to
     /// spin a workspace up on, with "create a new local project" kept
     /// as an explicit escape hatch rather than the forced first step.
     ///
@@ -640,7 +640,7 @@ impl<T: TerminalAdapter> Model<T> {
         );
     }
 
-    /// Build + mount the "Ask lazybox" modal (#302): fuzzy search over
+    /// Build + mount the "Ask Lazybox" modal (#302): fuzzy search over
     /// a snapshot of the runtime catalog, plus the shared help
     /// conversation for agent answers. Idempotent like `mount_help`.
     pub(super) fn mount_help_ask(&mut self) {
@@ -651,7 +651,11 @@ impl<T: TerminalAdapter> Model<T> {
         }
         self.mount_modal(
             Id::HelpAsk,
-            HelpAsk::new(self.catalog.clone(), self.help_convo.clone()),
+            HelpAsk::new(
+                self.catalog.clone(),
+                self.help_convo.clone(),
+                self.ui_defaults.terminal_escape_char,
+            ),
         );
     }
 
@@ -713,7 +717,7 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::RemoveOutOfScope, modal);
     }
 
-    /// Mount the `Shift-A` adopt-target picker. Lists every other
+    /// Mount the `x a` adopt-target picker. Lists every other
     /// workspace the user could move sessions into. No-op when there
     /// are no other workspaces — show a hint instead since there's
     /// nothing to pick.
@@ -1007,7 +1011,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// Drive the global "start agent" (`Shift-W`) flow. Resolve the
     /// project set up front:
     ///
-    /// - **No projects** → footer nudge pointing at `Shift-N`; there's
+    /// - **No projects** → footer nudge pointing at `x p`; there's
     ///   nothing to create a workspace under yet.
     /// - **One project** → skip the picker and go straight to the
     ///   name input (the project is unambiguous).
@@ -1021,7 +1025,7 @@ impl<T: TerminalAdapter> Model<T> {
         let projects = self.sidebar.projects_for_picker();
         match projects.len() {
             0 => {
-                self.flash_info("no projects yet — create one with Shift-N");
+                self.flash_info("no projects yet — create one with x p");
             }
             1 => {
                 let (key, _) = projects.into_iter().next().expect("len checked == 1");
@@ -1305,7 +1309,7 @@ mod tests {
     }
 
     /// Issue #314: the issue→PR session-move prompt says "join" —
-    /// matching the `Shift-J` action and the flash — never "merge",
+    /// matching the `x j` action and the flash — never "merge",
     /// which collides with the nearby `g m` git-merge action and reads
     /// like a PR merge.
     #[test]

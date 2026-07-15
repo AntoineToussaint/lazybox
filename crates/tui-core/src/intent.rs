@@ -79,7 +79,7 @@ pub enum Intent {
     KillWorkspace { session_key: SessionKey },
     /// Snooze the workspace until `now + duration`. Producer is
     /// pure (`resolve_short_snooze` / `resolve_long_snooze`); the
-    /// `Shift-Z` confirm latch lives in the model.
+    /// The `x z` confirmation flow lives in the model.
     Snooze {
         session_key: SessionKey,
         duration: Duration,
@@ -374,11 +374,11 @@ pub fn resolve_open_editor(workspace: Option<&Workspace>) -> Intent {
 pub fn resolve_new_workspace(focused_project_key: Option<lazybox_core::ProjectKey>) -> Intent {
     match focused_project_key {
         Some(project_key) => Intent::MountNewWorkspaceInput { project_key },
-        None => Intent::Notice("No project at the cursor — Shift-N picks a repo.".to_string()),
+        None => Intent::Notice("No project at the cursor — x p picks a repo.".to_string()),
     }
 }
 
-/// Resolve `Shift-A` (adopt sessions). Workspace must have at least
+/// Resolve `x a` (adopt sessions). Workspace must have at least
 /// one session to adopt; otherwise we surface a hint via `Notice`.
 pub fn resolve_adopt(workspace: Option<&Workspace>) -> Intent {
     let Some(ws) = workspace else {
@@ -500,7 +500,7 @@ pub fn should_auto_merge(workspace: &Workspace) -> bool {
     merge_block_reason(pr).is_none()
 }
 
-/// Resolve `Shift-X` (kill workspace). Always available when a
+/// Resolve `x x` (archive workspace). Always available when a
 /// workspace is focused — the model's two-press latch handles the
 /// "are you sure" affordance.
 pub fn resolve_kill(workspace: Option<&Workspace>) -> Intent {
@@ -533,7 +533,7 @@ pub fn resolve_short_snooze(
     }
 }
 
-/// Resolve `Shift-Z` (long snooze, ~1 year). No toggle behaviour —
+/// Resolve `x z` (long snooze, ~1 year). No toggle behaviour —
 /// just snooze for `duration`. The model's `long_snooze_pending`
 /// latch handles confirmation.
 pub fn resolve_long_snooze(workspace: Option<&Workspace>, duration: Duration) -> Intent {
@@ -1277,7 +1277,7 @@ mod tests {
     #[test]
     fn long_snooze_always_snoozes() {
         // Unlike short-snooze, the long-snooze does NOT toggle —
-        // pressing Shift-Z twice (after the confirm latch) snoozes
+        // confirming x z snoozes
         // for another year. That's the model's contract; pin it.
         let mut ws = pr("o/r#1", CiStatus::None, ReviewStatus::None);
         ws.snoozed_until = Some(Utc::now() + chrono::Duration::hours(1));

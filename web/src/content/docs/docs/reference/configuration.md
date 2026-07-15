@@ -82,7 +82,7 @@ repos:
 setup:
   providers: [github, linear]
   agents: [claude, codex]
-  default_agent: claude      # what the `w` (work) key spawns; unset → claude
+  default_agent: claude      # what `w w` spawns; unset → claude
 
 # ── agent ────────────────────────────────────────────────────────────
 agent:
@@ -118,9 +118,8 @@ worktree:
 
 # ── terminal ─────────────────────────────────────────────────────────
 terminal:
-  escape_char: "]"           # repeat this char to exit to the sidebar
-  escape_count: 2            # how many in a row (≥ 2)
-  escape_window_ms: 600      # window between presses
+  escape_char: "]"           # press twice to open the terminal command menu
+  escape_window_ms: 600      # window between the two presses
   native_scrollback: true    # keep scrollback in the lazybox client
 
 # ── ui ───────────────────────────────────────────────────────────────
@@ -133,7 +132,6 @@ ui:
     merge_pr: Ctrl-m
     refresh: Ctrl-r
     spawn_agent.claude: c    # restore a top-level Claude spawn key
-  terminal_escape_char: "]"
   short_snooze: 4h
   long_snooze: 365d
   browser: Google Chrome
@@ -224,7 +222,7 @@ hand.
 | `agents` | list of string | `[]` | Agent ids currently enabled (`claude`, `codex`, …) |
 | `filters` | map | `{}` | Per-provider role/type filter keys (e.g. `github: [pr.author, pr.reviewer]`) |
 | `scopes` | map | `{}` | Per-provider scope ids (orgs / repos); empty = all |
-| `default_agent` | string | unset | Agent the `w` (work) shortcut spawns; unset falls back to `claude` |
+| `default_agent` | string | unset | Agent the `w w` work shortcut spawns; unset falls back to `claude` |
 | `wizard_completed` | bool | `false` | Set once the wizard finishes, so an all-empty block doesn't re-trigger it |
 
 ## `agent`
@@ -272,9 +270,8 @@ How you exit an embedded terminal back to the inbox, and how scrollback works.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `escape_char` | char | `]` | Char that, when repeated `escape_count` times, exits to the sidebar |
-| `escape_count` | int | `2` | How many `escape_char` presses in a row trigger the escape (must be ≥ 2) |
-| `escape_window_ms` | int | `600` | Time window between consecutive presses to count as one run |
+| `escape_char` | char | `]` | Press twice to open the non-timed terminal command menu (`q` then exits to the sidebar) |
+| `escape_window_ms` | int | `600` | Time window between the two `escape_char` presses |
 | `native_scrollback` | bool | `true` | Keep scrollback local to the lazybox client so the wheel / `Shift-PageUp` scroll instantly. Set `false` to let tmux own the alternate screen. |
 
 ## `ui`
@@ -300,7 +297,7 @@ ui:
 
 Agent spawn chords are remapped with `spawn_agent.<agent-id>` keys (the
 defaults are the `a` leader chords: `a c` Claude, `a x` Codex, `a u` Cursor).
-Alternatives are separated by `|` (`"g v | Shift-V"`).
+Alternatives are separated by `|` (`"g r | Shift-V"`).
 
 **Key-spec format:**
 
@@ -323,22 +320,26 @@ action in
 | Action id | Default | Does |
 | --- | --- | --- |
 | `refresh` | `Shift-R` | Re-poll every provider |
-| `open_help` | `?` | Help modal |
+| `open_help` | `?` | Ask Lazybox |
 | `open_settings` | `,` | Settings palette |
 | `quit` | `q q` | Quit |
-| `work` | `w` | Spawn the default agent with a contextual prompt |
+| `work` | `w w` | Spawn the default/running agent with a contextual prompt |
 | `spawn_shell` | `s` | Open a shell in the worktree |
 | `open_editor` | `e` | Open the worktree in your editor |
 | `mark_all_read` | `m` | Mark the workspace read |
 | `toggle_snooze` | `z` | Snooze (~4h) |
 | `merge_pr` | `g m` | Merge the PR |
-| `request_reviewers` | `g v` | Request reviewers |
+| `request_reviewers` | `g r` | Request reviewers |
 | `add_assignees` | `g a` | Change assignees |
 | `manage_labels` | `g l` | Edit labels |
 | `open_in_browser` | `g o` | Open the PR / issue in the browser |
-| `archive` | `Shift-X` | Archive the workspace |
-| `new_workspace` | `n` | New pre-PR workspace |
-| `new_project` | `Shift-N` | New project / pick a repo |
+| `archive` | `x x` | Archive the workspace |
+| `new_workspace` | `x n` | New pre-PR workspace |
+| `new_project` | `x p` | New project / pick a repo |
+| `adopt_sessions` | `x a` | Move sessions into another workspace |
+| `collapse_into_pr` | `x j` | Join an issue workspace into its closing PR |
+| `long_snooze` | `x z` | Snooze the workspace for about a year |
+| `close_issue` | `x c` | Close an issue upstream |
 
 See the [keybindings reference](/docs/reference/keybindings/) for the full
 default keymap.
@@ -352,11 +353,11 @@ default keymap.
 | `right_top_pct` | int | `25` | Activity-row height as a percent of the right column |
 | `auto_mark_delay` | duration | `1s` | How long the cursor sits on an unread row before it auto-marks read |
 | `quit_double_tap_window` | duration | `800ms` | Window for the second `q` of the quit chord |
-| `terminal_escape_char` | char | `]` | Char that returns focus from the terminal to the sidebar |
+| `terminal_escape_char` | char | unset | Legacy alias for `terminal.escape_char`; when set, this compatibility value wins |
 | `split_step_percent` | int | `3` | Percent a `Shift-arrow` nudges the focused splitter |
 | `task_body_max_rows` | int | `8` | Max rows the description section expands to |
 | `short_snooze` | duration | `4h` | `z` snooze duration |
-| `long_snooze` | duration | `365d` | `Shift-Z` long-snooze duration |
+| `long_snooze` | duration | `365d` | `x z` long-snooze duration |
 | `log_path` | path | `/tmp/lazybox.log` | Where the client writes its log |
 | `browser` | string | OS default | Preferred browser for `o` / terminal links. macOS: the app name for `open -a` (`"Google Chrome"`); Linux: the executable. |
 | `keymap_preset` | `default` \| `vim` | unset | Base keymap layer shipped in-tree; your `action_keys` still layer on top (`vim` moves pane-cycling to `Ctrl-w`) |

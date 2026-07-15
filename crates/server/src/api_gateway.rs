@@ -19,8 +19,10 @@ use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::fmt::Display;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 
 pub type Body = UnsyncBoxBody<Bytes, Infallible>;
 
@@ -28,6 +30,11 @@ pub type Body = UnsyncBoxBody<Bytes, Infallible>;
 pub struct GatewayOptions {
     pub bind_addr: SocketAddr,
     pub bearer_token: Option<String>,
+    /// Hard cap on simultaneously served HTTP connections, including
+    /// long-lived event streams.
+    pub max_connections: usize,
+    /// Maximum wall time for a one-shot command handler.
+    pub command_timeout: Duration,
 }
 
 impl Default for GatewayOptions {
@@ -35,6 +42,8 @@ impl Default for GatewayOptions {
         Self {
             bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             bearer_token: None,
+            max_connections: 64,
+            command_timeout: Duration::from_secs(5 * 60),
         }
     }
 }
@@ -66,11 +75,16 @@ pub struct HealthResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspacesResponse {
     pub workspaces: Vec<lazybox_core::Workspace>,
+    /// Persisted rows that were preserved but could not be decoded.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandResponse {
     pub ok: bool,
+    /// Set only after the daemon-side handler has returned.
+    pub completed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,20 +161,29 @@ pub async fn workspaces_response(
         .map_err(|error| {
             lazybox_store::StoreError::Backend(format!("workspace scan task failed: {error}"))
         })??;
-    let workspaces = records
-        .into_iter()
-        .filter_map(|record| {
-            let json = record.workspace_json?;
-            match serde_json::from_str::<lazybox_core::Workspace>(&json) {
-                Ok(workspace) => Some(workspace),
+    let mut workspaces = Vec::new();
+    let mut warnings = Vec::new();
+    for record in records {
+        match record.workspace_json {
+            Some(json) => match serde_json::from_str::<lazybox_core::Workspace>(&json) {
+                Ok(workspace) => workspaces.push(workspace),
                 Err(error) => {
-                    tracing::warn!("api gateway: skipping workspace {}: {error}", record.key);
-                    None
+                    tracing::warn!(
+                        "api gateway: preserving unreadable workspace {}: {error}",
+                        record.key
+                    );
+                    warnings.push(format!("workspace {}: {error}", record.key));
                 }
+            },
+            None => {
+                warnings.push(format!("workspace {}: missing JSON payload", record.key));
             }
-        })
-        .collect();
-    Ok(WorkspacesResponse { workspaces })
+        }
+    }
+    Ok(WorkspacesResponse {
+        workspaces,
+        warnings,
+    })
 }
 
 /// Create a local IPC bridge backed by the existing `Server::serve`
@@ -204,13 +227,20 @@ pub async fn serve_listener(
     options: GatewayOptions,
     listener: TcpListener,
 ) -> Result<(), GatewayError> {
+    let connection_limit = Arc::new(Semaphore::new(options.max_connections.max(1)));
     loop {
+        let permit = connection_limit
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("API connection semaphore is never closed");
         let stream = match listener.accept().await {
             Ok((stream, _)) => stream,
             // A transient accept error (e.g. EMFILE under fd pressure)
             // must not tear down the whole listener — log and keep
             // serving, matching the Unix-socket service loop.
             Err(error) => {
+                drop(permit);
                 tracing::warn!("api gateway accept failed: {error}");
                 continue;
             }
@@ -218,6 +248,7 @@ pub async fn serve_listener(
         let config = config.clone();
         let options = options.clone();
         tokio::spawn(async move {
+            let _permit = permit;
             if let Err(error) = serve_connection(config, options, stream).await {
                 tracing::warn!("api gateway connection failed: {error}");
             }
@@ -274,7 +305,9 @@ where
             ),
         },
         (&Method::GET, "/v1/events") => stream_events_response(config),
-        (&Method::POST, "/v1/commands") => command_response(config, request.into_body()).await,
+        (&Method::POST, "/v1/commands") => {
+            command_response(config, &options, request.into_body()).await
+        }
         (&Method::POST, "/v1/stream") => stream_command_response(config, request.into_body()),
         _ => json_response(
             StatusCode::NOT_FOUND,
@@ -283,18 +316,19 @@ where
     }
 }
 
-async fn command_response<B>(config: ServerConfig, body: B) -> Response<Body>
+async fn command_response<B>(
+    config: ServerConfig,
+    options: &GatewayOptions,
+    body: B,
+) -> Response<Body>
 where
     B: HttpBody<Data = Bytes> + Send + Unpin + 'static,
     B::Error: Display + Send + Sync + 'static,
 {
-    let bytes = match body.collect().await {
-        Ok(collected) => collected.to_bytes(),
+    let bytes = match collect_command_body(body).await {
+        Ok(bytes) => bytes,
         Err(error) => {
-            return json_response(
-                StatusCode::BAD_REQUEST,
-                &serde_json::json!({ "error": format!("read request body: {error}") }),
-            );
+            return json_response(error.status, &serde_json::json!({ "error": error.message }));
         }
     };
     let command = match decode_command_frame(&bytes) {
@@ -306,14 +340,74 @@ where
             );
         }
     };
-    let bridge = spawn_local_bridge(config);
-    match bridge.command_tx.send(command) {
-        Ok(()) => json_response(StatusCode::OK, &CommandResponse { ok: true }),
-        Err(error) => json_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &serde_json::json!({ "error": format!("send command: {error}") }),
-        ),
+    if matches!(command, Command::Subscribe | Command::Shutdown) {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            &serde_json::json!({
+                "error": "Subscribe and Shutdown are not valid one-shot API commands"
+            }),
+        );
     }
+
+    // Execute and await the handler itself. Previously this endpoint returned
+    // 200 as soon as an unbounded channel accepted the command, then dropped
+    // the bridge; a slow mutation could be abandoned after the success reply.
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let mut task = tokio::spawn(async move {
+        crate::dispatch_command(&config, &event_tx, command).await;
+    });
+    match tokio::time::timeout(options.command_timeout, &mut task).await {
+        Ok(Ok(())) => json_response(
+            StatusCode::OK,
+            &CommandResponse {
+                ok: true,
+                completed: true,
+            },
+        ),
+        Ok(Err(error)) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &serde_json::json!({ "error": format!("command handler failed: {error}") }),
+        ),
+        Err(_) => {
+            task.abort();
+            json_response(
+                StatusCode::GATEWAY_TIMEOUT,
+                &serde_json::json!({ "error": "command handler timed out" }),
+            )
+        }
+    }
+}
+
+const MAX_COMMAND_BODY_BYTES: usize = 1024 * 1024;
+
+struct BodyReadError {
+    status: StatusCode,
+    message: String,
+}
+
+async fn collect_command_body<B>(mut body: B) -> Result<Bytes, BodyReadError>
+where
+    B: HttpBody<Data = Bytes> + Send + Unpin + 'static,
+    B::Error: Display + Send + Sync + 'static,
+{
+    let mut bytes = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|error| BodyReadError {
+            status: StatusCode::BAD_REQUEST,
+            message: format!("read request body: {error}"),
+        })?;
+        let Ok(data) = frame.into_data() else {
+            continue;
+        };
+        if bytes.len().saturating_add(data.len()) > MAX_COMMAND_BODY_BYTES {
+            return Err(BodyReadError {
+                status: StatusCode::PAYLOAD_TOO_LARGE,
+                message: format!("command body exceeds the {MAX_COMMAND_BODY_BYTES}-byte limit"),
+            });
+        }
+        bytes.extend_from_slice(&data);
+    }
+    Ok(Bytes::from(bytes))
 }
 
 fn stream_events_response(config: ServerConfig) -> Response<Body> {
@@ -365,6 +459,8 @@ fn ndjson_event_response(
 /// unterminated line would otherwise grow `buffer` without bound; no
 /// legitimate `Command` comes anywhere near this.
 const MAX_COMMAND_LINE_BYTES: usize = 1024 * 1024;
+/// Bound the amount of work one duplex request can enqueue before reconnecting.
+const MAX_STREAM_COMMANDS: usize = 256;
 
 async fn pump_ndjson_commands<B>(mut body: B, command_tx: mpsc::UnboundedSender<Command>)
 where
@@ -372,6 +468,7 @@ where
     B::Error: Display + Send + Sync + 'static,
 {
     let mut buffer = Vec::new();
+    let mut command_lines_seen = 0usize;
     while let Some(frame) = body.frame().await {
         let frame = match frame {
             Ok(frame) => frame,
@@ -386,7 +483,20 @@ where
         buffer.extend_from_slice(&data);
         while let Some(pos) = buffer.iter().position(|byte| *byte == b'\n') {
             let line: Vec<u8> = buffer.drain(..=pos).collect();
+            if trim_ascii(&line).is_empty() {
+                continue;
+            }
+            command_lines_seen += 1;
             send_command_line(&line, &command_tx);
+            // Count malformed non-empty lines too. Otherwise a hostile peer
+            // could evade the work cap by streaming invalid JSON forever.
+            if command_lines_seen >= MAX_STREAM_COMMANDS {
+                tracing::warn!(
+                    "api gateway: stream reached {MAX_STREAM_COMMANDS} commands — reconnect required"
+                );
+                let _ = command_tx.send(Command::Shutdown);
+                return;
+            }
         }
         if buffer.len() > MAX_COMMAND_LINE_BYTES {
             // Drop the whole connection, not just the line: a peer
@@ -418,7 +528,9 @@ fn send_command_line(line: &[u8], command_tx: &mpsc::UnboundedSender<Command>) {
                 tracing::warn!("api gateway: command stream closed");
             }
         }
-        Err(error) => tracing::warn!("api gateway: decode command stream line: {error}"),
+        Err(error) => {
+            tracing::warn!("api gateway: decode command stream line: {error}");
+        }
     }
 }
 

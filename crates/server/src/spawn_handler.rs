@@ -69,19 +69,16 @@ const TERMINAL_ID_HIGH_WATER_KEY: &str = "terminal-id-high-water";
 /// persists 5 — regressing the stored high-water mark so a restarted
 /// daemon re-issues 6 to a fresh terminal while a survivor's artifacts
 /// still reference it.
-static TERMINAL_ID_PERSIST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static TERMINAL_ID_PERSIST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 fn alloc_terminal_id(store: &dyn lazybox_store::Store) -> TerminalId {
     // The guard makes the read-max-allocate-persist below atomic with
     // respect to every other in-process allocator, so the persisted
     // mark is always max(stored, allocated). Allocation is rare (one
     // per spawn) and the store calls are quick — a process-wide sync
-    // mutex is fine. Poisoning cannot corrupt anything here (the
-    // critical section only moves values forward), so a poisoned lock
-    // is simply re-entered.
-    let _guard = TERMINAL_ID_PERSIST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // mutex is fine. parking_lot locks are not poisoned by an unrelated
+    // panic, so a later spawn can still advance the high-water mark.
+    let _guard = TERMINAL_ID_PERSIST_LOCK.lock();
     // `fetch_max` (not a one-shot seed) so the allocator is correct
     // even when several stores are seen in one process (tests) — the
     // counter only ever moves forward.
@@ -262,11 +259,11 @@ fn write_hook_settings(
     let user = read_user_claude_settings();
     let settings = agent.build_hook_settings(command, user.as_ref())?;
     let path = hook_settings_path(terminal_id);
-    if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            tracing::warn!("hook settings: create_dir_all {}: {e}", parent.display());
-            return None;
-        }
+    if let Some(parent) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        tracing::warn!("hook settings: create_dir_all {}: {e}", parent.display());
+        return None;
     }
     let json = serde_json::to_string_pretty(&settings).ok()?;
     // Write-to-temp + rename so a concurrent reader (the just-launched
@@ -430,7 +427,7 @@ pub async fn handle_spawn(
             // fall back to the alias the workspace task's declared
             // priority (a `high`/`medium`/`low` label or an
             // `@high`/`@medium`/`@low` body marker) maps to — so every
-            // autonomous "pilot" spawn AND a bare `w` on a prioritized
+            // autonomous "pilot" spawn AND `w w` on a prioritized
             // issue pick the right-sized model automatically (#340).
             let priority_alias = match model_alias {
                 Some(_) => None,
@@ -643,7 +640,8 @@ pub async fn handle_spawn(
     }
     let env = with_worktree_cargo_target(env, cwd_path.as_deref());
     tracing::info!(
-        ?argv,
+        program = argv.first().map(String::as_str).unwrap_or("<empty>"),
+        arg_count = argv.len().saturating_sub(1),
         cwd_path = ?cwd_path,
         %hint,
         env_count = env.len(),
@@ -670,15 +668,15 @@ pub async fn handle_spawn(
     );
     // Phase 2 of 2: now the backend key exists, atomically rewrite the
     // settings file with the real correlated hook command.
-    if hook_settings.is_some() {
-        if let Some(exe) = hook_exe() {
-            let _ = write_hook_settings(
-                config,
-                &kind,
-                terminal_id,
-                &hook_command(&exe, &backend_key),
-            );
-        }
+    if hook_settings.is_some()
+        && let Some(exe) = hook_exe()
+    {
+        let _ = write_hook_settings(
+            config,
+            &kind,
+            terminal_id,
+            &hook_command(&exe, &backend_key),
+        );
     }
 
     // `terminal_id` was allocated above (before argv) so the hook
@@ -1348,25 +1346,17 @@ async fn resolve_or_create_session(
         return Ok((path, session_id.unwrap_or_else(SessionId::new), false));
     }
 
-    // Spawn against a workspace that isn't (yet) persisted — common
-    // in tests and in --test mode, and fine in general: nothing
-    // about the wire-side `session_key` requires the workspace to
-    // exist on disk. Just root the spawn in the user's cwd. Use a
-    // fresh ephemeral session id so terminal_sessions still gets a
-    // mapping for the migration freeze.
-    //
-    // EXCEPT when the row is missing because the workspace was DELETED
-    // while this spawn was in flight (Kill racing a slow provision):
-    // that case must abort — the fallback would silently launch a
-    // skip-permissions agent in the daemon's own cwd. The tombstone set
-    // distinguishes "deleted in this process" from "never existed".
+    // Every non-sandbox spawn without an explicit cwd must resolve to
+    // a persisted workspace. Falling back to the daemon's cwd is unsafe:
+    // a stale key or store failure could otherwise launch an agent in
+    // whichever repository happened to start the daemon. The tombstone
+    // only improves the error for the delete-vs-spawn race.
     let mut workspace = match load_workspace(config, &workspace_key) {
         Ok(w) => w,
-        Err(_) => {
+        Err(error) => {
             if config
                 .deleted_workspaces
                 .lock()
-                .expect("deleted_workspaces poisoned")
                 .contains(workspace_key.as_str())
             {
                 tracing::warn!(
@@ -1378,11 +1368,7 @@ async fn resolve_or_create_session(
                     workspace_key.as_str()
                 )));
             }
-            return Ok((
-                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-                SessionId::new(),
-                false,
-            ));
+            return Err(error);
         }
     };
 
@@ -2172,7 +2158,7 @@ pub(crate) async fn find_existing_singleton(
 /// backend failure, panic) — and pings waiters so collapsing duplicates
 /// and `Kill` re-check promptly.
 struct InflightSpawnGuard {
-    set: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<(String, String)>>>,
+    set: std::sync::Arc<parking_lot::Mutex<std::collections::HashSet<(String, String)>>>,
     changed: std::sync::Arc<tokio::sync::Notify>,
     key: (String, String),
 }
@@ -2199,10 +2185,7 @@ impl InflightSpawnGuard {
             target
         };
         let key = (session_key.as_str().to_string(), target);
-        let mut set = config
-            .inflight_spawns
-            .lock()
-            .expect("inflight_spawns poisoned");
+        let mut set = config.inflight_spawns.lock();
         if !set.insert(key.clone()) {
             return Err(());
         }
@@ -2216,10 +2199,7 @@ impl InflightSpawnGuard {
 
 impl Drop for InflightSpawnGuard {
     fn drop(&mut self) {
-        self.set
-            .lock()
-            .expect("inflight_spawns poisoned")
-            .remove(&self.key);
+        self.set.lock().remove(&self.key);
         self.changed.notify_waiters();
     }
 }
@@ -2301,11 +2281,7 @@ async fn await_inflight_singleton(
         if let Some(id) = live_singleton(config, session_key, &target, on_main).await {
             return Some(id);
         }
-        let claimed = config
-            .inflight_spawns
-            .lock()
-            .expect("inflight_spawns poisoned")
-            .contains(&claim);
+        let claimed = config.inflight_spawns.lock().contains(&claim);
         if !claimed || tokio::time::Instant::now() >= deadline {
             // Winner released (or we timed out). One final scan closes
             // the insert→release window — the maps are populated before
@@ -2371,8 +2347,8 @@ async fn live_singleton(
 /// How long `Kill` waits for an in-flight spawn on the same workspace
 /// before tearing down anyway. Bounded so a wedged provision can't make
 /// the user's explicit Kill hang forever; past the cap the teardown
-/// proceeds and the tombstone in `deleted_workspaces` stops the late
-/// spawn from re-materializing in the daemon's cwd.
+/// proceeds and the tombstone in `deleted_workspaces` makes the late
+/// spawn fail with a precise deletion error.
 const KILL_INFLIGHT_WAIT: Duration = Duration::from_secs(30);
 
 /// Serialize a workspace teardown against any spawn currently
@@ -2385,7 +2361,6 @@ pub(crate) async fn await_inflight_spawns(config: &ServerConfig, workspace_key: 
         let busy = config
             .inflight_spawns
             .lock()
-            .expect("inflight_spawns poisoned")
             .iter()
             .any(|(ws, _)| ws == workspace_key);
         if !busy {
@@ -3793,7 +3768,7 @@ pub async fn handle_ingest_hook(
 /// reattaches each PTY to its owning workspace. Survivors with no
 /// persisted record fall back to a session_key=""/Shell placeholder —
 /// rare in practice (only happens after a store wipe + dangling tmux),
-/// and the user can clean those up via Shift-X.
+/// and the user can clean those up via `x x`.
 pub async fn recover_sessions(config: &ServerConfig) {
     let keys = match config.backend.list().await {
         Ok(k) => k,

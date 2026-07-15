@@ -1,0 +1,6 @@
+[toolchain]
+# Contributors and normal CI builds track the newest stable compiler.
+# `.github/workflows/ci.yml` separately proves the supported floor.
+channel = "stable"
+profile = "minimal"
+components = ["clippy", "rustfmt"]

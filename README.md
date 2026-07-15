@@ -18,8 +18,8 @@ workspace — built for developers juggling many PRs and AI coding agents at onc
 [![Latest release](https://img.shields.io/github/v/release/AntoineToussaint/lazybox?logo=github&label=release&color=6f42c1)](https://github.com/AntoineToussaint/lazybox/releases/latest)
 [![CI](https://img.shields.io/github/actions/workflow/status/AntoineToussaint/lazybox/ci.yml?branch=main&logo=githubactions&logoColor=white&label=CI)](https://github.com/AntoineToussaint/lazybox/actions/workflows/ci.yml)
 [![Homebrew](https://img.shields.io/badge/brew-AntoineToussaint%2Flazybox-FBB040?logo=homebrew&logoColor=white)](https://github.com/AntoineToussaint/homebrew-lazybox)
-[![Rust](https://img.shields.io/badge/rust-1.85%2B-CE412B?logo=rust&logoColor=white)](https://www.rust-lang.org)
-[![Platform](https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux-555?logo=apple&logoColor=white)](#install)
+[![Rust](https://img.shields.io/badge/rust-1.88%2B-CE412B?logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![Platform](https://img.shields.io/badge/platform-macOS%20arm64%2Fx64%20%C2%B7%20Linux%20x64-555?logo=apple&logoColor=white)](#install)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-lazybox.ai-0a7?logo=readthedocs&logoColor=white)](https://lazybox.ai/docs/)
 
@@ -39,14 +39,14 @@ workspace — built for developers juggling many PRs and AI coding agents at onc
 
 - **📨 Reactive inbox** — new comments, CI failures, and review requests surface automatically, with per-row read/unread tracking. No refreshing.
 - **🌳 A worktree per task** — every row opens an isolated git worktree, so PRs never step on each other's working trees.
-- **🤖 Agents built in** — spawn Claude Code, Codex, or Cursor in a row's worktree with one key; `w` picks the right prompt for the row's state (fix CI / address comments / implement issue).
+- **🤖 Agents built in** — spawn Claude Code, Codex, or Cursor in a row's worktree from a fast which-key menu; `w w` picks the right prompt for the row's state (fix CI / address comments / implement issue).
 - **🖥️ Embedded terminals** — a live PTY per workspace (split & tile them), powered by a vendored ghostty VT parser.
 - **🔌 Source-agnostic** — GitHub and Linear today, surfacing in one inbox behind the same interface, with an optional Slack mirror.
 - **🛰️ Remote-friendly** — a client/daemon split runs over an SSH-forwarded socket for working against a remote box.
 
 ## Install
 
-Prebuilt binaries (macOS · Linux):
+Prebuilt binaries (macOS arm64/x86_64 and Linux x86_64):
 
 ```sh
 brew install AntoineToussaint/lazybox/lazybox
@@ -61,13 +61,18 @@ Prefer to build it yourself, or hacking on lazybox? Build from source:
 ```sh
 git clone https://github.com/AntoineToussaint/lazybox.git
 cd lazybox
-make setup     # one-shot: downloads pinned zig 0.15.2 to ~/.cache/lazybox/zig/
+make setup     # one online preparation of pinned Zig, Ghostty, and Cargo caches
 make run       # build + run
+make release   # optimized build; strictly offline after setup
 ```
 
-**Prerequisites:** Rust 1.85+, a C compiler (for bundled SQLite), the
+**Prerequisites:** Rust 1.88+, a C compiler (for bundled SQLite), the
 [GitHub CLI](https://cli.github.com/) logged in (`gh auth login` — lazybox reads
-`gh auth token`), and network access to github.com on the first build.
+`gh auth token`) for real GitHub-backed runs. `lazybox --test` does not require
+`gh`. Network access is used by `make setup` once; the pinned Zig archive is
+checksum-verified and Ghostty/Cargo sources are cached under
+`~/.cache/lazybox/`. After setup, `make release` enables Cargo offline mode and
+does not fetch dependencies.
 
 Linux also needs a C/C++ toolchain plus **libc++ and libc++abi** — the embedded
 ghostty terminal is built by zig against LLVM's libc++ (not GNU libstdc++), so
@@ -85,6 +90,8 @@ sudo pacman -S --needed base-devel pkgconf libc++ libc++abi
 
 Full install options (Homebrew, `curl | sh`, source), build notes, and
 troubleshooting are in the [Quickstart](https://lazybox.ai/docs/tutorials/quickstart/).
+Release history is in [`CHANGELOG.md`](CHANGELOG.md), and private vulnerability
+reports follow [`SECURITY.md`](SECURITY.md).
 
 ## First 60 seconds
 
@@ -99,11 +106,11 @@ You land on the inbox. Then:
 ```
 ↑ / ↓     move between workspaces   (j / k also works)
 Enter     open the selected workspace
-w         put your default agent to work in its worktree   (s for a plain shell)
+w w       put your default agent to work in its worktree   (s for a plain shell)
 ]]q       leave the terminal, back to the inbox
 ```
 
-`w` picks the right prompt for the row's state and needs the agent's CLI
+`w` opens the work menu; `w w` picks the right prompt for the row's state and needs the agent's CLI
 (e.g. `claude`) on your `PATH`; `s` (a plain shell) always works. To pick an
 agent explicitly, `a` opens the agent menu (`a c` Claude · `a x` Codex ·
 `a u` Cursor).
@@ -130,8 +137,9 @@ it — is in [`docs/features/`](docs/features/).
 
 ## Essential keys
 
-The bottom hint bar always shows what's available in the focused pane; press `?`
-for the full overlay. lazybox is also fully mouse-driven — click a pane or row
+The bottom hint bar always shows what's available in the focused pane. Press `?`
+for Ask Lazybox—type to search the live keymap or ask a workflow question, then
+press `?` again for the compact index. lazybox is also fully mouse-driven—click a pane or row
 to focus it, drag the splitters to resize, wheel-scroll, and right-click links
 (or rows) for the context menu. The keys you'll reach for first:
 
@@ -140,10 +148,11 @@ to focus it, drag the splitters to resize, wheel-scroll, and right-click links
 | `Tab` | Cycle Sidebar → Activity → Terminals |
 | `↑` / `↓` · `Enter` | Navigate the inbox (`j` / `k` also works) · open a workspace |
 | `a` · `s` | Agent menu (which-key popup): `a c` Claude · `a x` Codex · `a u` Cursor · `s` spawns a shell (`a c` needs the `claude` CLI on `PATH`; `s` always works) |
-| `w` | "Work" — spawn your default agent with the right prompt for the row's state (fix CI / address comments / implement issue) |
+| `w` | Work menu (which-key popup): `w w` uses the default/running agent · `w c` Claude · `w x` Codex · `w u` Cursor · `w S/M/L` chooses a model tier |
+| `x` | Workspace menu: `x n` new workspace · `x p` new project · `x a` adopt sessions · `x j` join into PR · `x z` long snooze · `x x` archive · `x c` close issue |
 | `m` · `r` | Mark read · reply |
-| `g` | GitHub menu (which-key popup): `g m` merge · `g g` auto-merge on green · `g v` reviewers · `g a` assignees · `g l` labels · `g o` open in browser |
-| `,` · `?` · `q q` | Settings · help · quit |
+| `g` | GitHub menu (which-key popup): `g m` merge · `g g` auto-merge on green · `g r` reviewers · `g a` assignees · `g l` labels · `g o` open in browser |
+| `,` · `?` · `q q` | Settings · Ask Lazybox · quit |
 | `]]` | Terminal leader (which-key popup): `]]q` back to the sidebar · `]]s` snippets · `]]f` focus mode · `]]\|` / `]]-` split · `]]x` close |
 
 Power moves, once the basics feel natural:

@@ -70,7 +70,7 @@ pub enum MentionSource {
 ///
 /// We accept mentions inside `>` quote blocks — the design doc calls
 /// this out as an acceptable false-positive ("user can kill via
-/// Shift-X"). Detecting quotes line-by-line was deemed not worth the
+/// x x"). Detecting quotes line-by-line was deemed not worth the
 /// complexity for an MVP.
 pub fn contains_lazybox_mention(text: &str) -> bool {
     let bytes = text.as_bytes();

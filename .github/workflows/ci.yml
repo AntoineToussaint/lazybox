@@ -19,6 +19,16 @@ on:
     branches: [main]
 
 jobs:
+  msrv:
+    name: msrv (Rust 1.88.0)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/rust-build-env
+        with:
+          rust-toolchain: 1.88.0
+      - run: cargo check --workspace --all-targets
+
   test:
     name: test
     strategy:
@@ -33,8 +43,12 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-targets
 
-      - name: Test
-        run: cargo test --workspace
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Test with per-test timeout enforcement
+        run: cargo nextest run --workspace --profile ci
 
   clippy:
     name: clippy
@@ -55,6 +69,28 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+
+  web:
+    name: web (types, build, Lighthouse budgets)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install web dependencies
+        working-directory: web
+        run: npm ci
+      - name: Type-check and build site
+        working-directory: web
+        run: |
+          npm run check
+          npm run build
+      - name: Enforce Lighthouse and transfer-size budgets
+        working-directory: web
+        run: npm run lighthouse
 
   rustdoc:
     # Broken intra-doc links / bad rustdoc references fail CI. Linux

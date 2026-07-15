@@ -130,7 +130,7 @@ impl SettingsAction {
                 "Skip permission prompts for your sessions · {}",
                 if *enabled { "on" } else { "off" }
             ),
-            Self::EditSnippets => "Browse snippets (]]<key> shortcuts)".into(),
+            Self::EditSnippets => "Browse snippets (]]s<key> shortcuts)".into(),
             Self::EditTheme { current } => format!("Change theme (live preview) · {current}"),
             Self::EditLlmGateway { set } => format!(
                 "Configure LLM gateway · {}",

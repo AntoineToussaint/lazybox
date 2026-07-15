@@ -358,7 +358,7 @@ mod tests {
             binding("w", "work on this"),
             binding("Enter", "open activity"),
             binding("g m", "merge pull request"),
-            binding("Shift-V", "manage reviewers"),
+            binding("g r", "manage reviewers"),
             binding("z", "snooze until later"),
             binding("Shift-X", "delete forever"),
             binding("/", "filter by role"),
@@ -367,7 +367,7 @@ mod tests {
 
     fn globals_tail() -> Vec<Binding> {
         vec![
-            binding("?", "help"),
+            binding("?", "ask lazybox"),
             binding("Shift-T", "tour"),
             binding("q q", "quit"),
         ]
@@ -525,7 +525,7 @@ mod tests {
     fn any_width_keeps_quit_and_whole_labels() {
         let keymap = rich_keymap();
         let globals = globals_tail();
-        // Full globals tail: " ? help  ·  T tour  ·  q q quit" = 31.
+        // Full globals tail: " ? ask lazybox  ·  T tour  ·  q q quit".
         for w in 31u16..=140 {
             let row = render_row_at(w, &keymap, &globals, None, None);
             assert!(row.contains("q q"), "quit chord missing at {w} cols");

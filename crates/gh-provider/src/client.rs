@@ -122,6 +122,17 @@ fn body_excerpt(body: &str) -> String {
     }
 }
 
+/// Prefix bounded by bytes without splitting a UTF-8 scalar. The
+/// boundary walk examines at most three bytes and works on the
+/// workspace MSRV (Rust 1.88).
+fn body_prefix_bytes(body: &str, max_bytes: usize) -> &str {
+    let mut end = body.len().min(max_bytes);
+    while !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    &body[..end]
+}
+
 /// Construct a `GhError::HttpStatus` from a status + content-type +
 /// body. Centralised so the canonical-reason lookup and the body
 /// excerpting stay in sync between the raw-HTTP path and any future
@@ -356,7 +367,7 @@ pub struct GhClient {
     /// `Arc<Mutex>` so multiple `GhClient` clones share one bucket
     /// (currently we only construct one, but cheap insurance against
     /// future "spawn a worker pool" ideas).
-    budget: std::sync::Arc<std::sync::Mutex<crate::rate_budget::RateBudget>>,
+    budget: std::sync::Arc<parking_lot::Mutex<crate::rate_budget::RateBudget>>,
     /// Notifications heartbeat state — `Last-Modified` echo + slow-sweep
     /// timer. Shared across clones so `with_filters` doesn't reset the
     /// 304-conditional or trigger a redundant full sweep.
@@ -440,7 +451,7 @@ impl GhClient {
             pr_filters: vec![],
             issue_filters: vec![],
             watch_repos: vec![],
-            budget: std::sync::Arc::new(std::sync::Mutex::new(
+            budget: std::sync::Arc::new(parking_lot::Mutex::new(
                 crate::rate_budget::RateBudget::default_for_lazybox(),
             )),
             notifications_state: NotificationsState::shared(),
@@ -450,10 +461,7 @@ impl GhClient {
     /// Snapshot of the current rate budget state. Used by the polling
     /// layer to surface a status indicator and decide pacing.
     pub fn rate_snapshot(&self) -> crate::rate_budget::Snapshot {
-        self.budget
-            .lock()
-            .expect("budget mutex poisoned")
-            .snapshot()
+        self.budget.lock().snapshot()
     }
 
     /// The exact GraphQL search string `fetch_all_prs` will issue.
@@ -486,10 +494,7 @@ impl GhClient {
     /// budget. Caller should propagate the `AcquireError` so the
     /// polling layer can surface it as a `Retryable` ProviderError.
     fn try_acquire(&self) -> Result<(), crate::rate_budget::AcquireError> {
-        self.budget
-            .lock()
-            .expect("budget mutex poisoned")
-            .try_acquire()
+        self.budget.lock().try_acquire()
     }
 
     /// POST to `/graphql` with bounded exponential backoff on
@@ -737,9 +742,7 @@ impl GhClient {
             reset_at,
             observed_at: std::time::Instant::now(),
         };
-        if let Ok(mut b) = self.budget.lock() {
-            b.observe(observed);
-        }
+        self.budget.lock().observe(observed);
     }
 
     /// Set both PR and Issue search qualifiers. Polling builds these
@@ -953,7 +956,6 @@ impl GhClient {
     pub fn should_full_sweep(&self) -> bool {
         self.notifications_state
             .lock()
-            .expect("notifications state mutex poisoned")
             .is_full_sweep_due(Self::FULL_SWEEP_INTERVAL)
     }
 
@@ -969,10 +971,7 @@ impl GhClient {
     /// *earlier* than GitHub's, which would re-deliver entries the
     /// heartbeat already covered).
     pub fn mark_full_sweep_done(&self) {
-        let mut state = self
-            .notifications_state
-            .lock()
-            .expect("notifications state mutex poisoned");
+        let mut state = self.notifications_state.lock();
         state.last_full_sweep_at = Some(std::time::Instant::now());
         state.force_full_sweep = false;
         if state.last_modified.is_none() {
@@ -992,10 +991,7 @@ impl GhClient {
     /// sweep succeeds. Only meaningful on a global sweep tick; the
     /// round-robin per-repo path doesn't use a window.
     pub fn next_pr_sweep_window(&self) -> Option<chrono::DateTime<chrono::Utc>> {
-        let state = self
-            .notifications_state
-            .lock()
-            .expect("notifications state mutex poisoned");
+        let state = self.notifications_state.lock();
         if state.is_full_reconcile_due(Self::FULL_RECONCILE_INTERVAL) {
             return None;
         }
@@ -1016,10 +1012,7 @@ impl GhClient {
         sweep_started: chrono::DateTime<chrono::Utc>,
         was_reconcile: bool,
     ) {
-        let mut state = self
-            .notifications_state
-            .lock()
-            .expect("notifications state mutex poisoned");
+        let mut state = self.notifications_state.lock();
         state.last_pr_sweep_at_utc = Some(sweep_started);
         if was_reconcile {
             state.last_full_reconcile_at = Some(std::time::Instant::now());
@@ -1034,20 +1027,14 @@ impl GhClient {
     /// created themselves (no self-notification). The flag is one-shot:
     /// `mark_full_sweep_done` clears it once the sweep completes.
     pub fn force_full_sweep(&self) {
-        self.notifications_state
-            .lock()
-            .expect("notifications state mutex poisoned")
-            .force_full_sweep = true;
+        self.notifications_state.lock().force_full_sweep = true;
     }
 
     /// Snapshot of the current notifications heartbeat state. Read-only;
     /// exists so tests (and a future status indicator) can observe
     /// whether the slow-sweep timer is armed.
     pub fn notifications_snapshot(&self) -> NotificationsSnapshot {
-        let s = self
-            .notifications_state
-            .lock()
-            .expect("notifications state mutex poisoned");
+        let s = self.notifications_state.lock();
         NotificationsSnapshot {
             has_last_modified: s.last_modified.is_some(),
             last_full_sweep_elapsed: s.last_full_sweep_at.map(|i| i.elapsed()),
@@ -1067,10 +1054,7 @@ impl GhClient {
     /// Record a heartbeat success — clears any prior back-off so the
     /// next tick uses the cheap incremental path again.
     fn note_heartbeat_succeeded(&self) {
-        let mut state = self
-            .notifications_state
-            .lock()
-            .expect("notifications state mutex poisoned");
+        let mut state = self.notifications_state.lock();
         if state.heartbeat_back_off_until.is_some() {
             tracing::info!("notifications heartbeat recovered — clearing back-off");
             state.heartbeat_back_off_until = None;
@@ -1082,10 +1066,7 @@ impl GhClient {
     /// round-trip until the deadline passes. Idempotent — re-arming
     /// while already backed off just extends the window.
     fn note_heartbeat_failed(&self) {
-        let mut state = self
-            .notifications_state
-            .lock()
-            .expect("notifications state mutex poisoned");
+        let mut state = self.notifications_state.lock();
         let deadline = std::time::Instant::now() + Self::HEARTBEAT_BACK_OFF;
         let was_armed = state.heartbeat_back_off_until.is_some();
         state.heartbeat_back_off_until = Some(deadline);
@@ -1140,15 +1121,10 @@ impl GhClient {
 
         // Capture the saved header BEFORE the request, so the lock is
         // released before we await the network call. The Mutex is a
-        // std::sync::Mutex (not tokio's), so holding it across `.await`
+        // parking_lot::Mutex (not tokio's), so holding it across `.await`
         // would risk a hang if any other code path tried to lock during
         // the request. Clone-and-drop is the right pattern.
-        let if_modified_since = self
-            .notifications_state
-            .lock()
-            .expect("notifications state mutex poisoned")
-            .last_modified
-            .clone();
+        let if_modified_since = self.notifications_state.lock().last_modified.clone();
 
         let mut headers = HeaderMap::new();
         if let Some(ims) = if_modified_since.as_ref() {
@@ -1216,8 +1192,7 @@ impl GhClient {
                 .body_to_string(response)
                 .await
                 .unwrap_or_else(|_| "<unreadable body>".to_string());
-            let cap = body.len().min(512);
-            let snippet = &body[..body.floor_char_boundary(cap)];
+            let snippet = body_prefix_bytes(&body, 512);
             return Err(GhError::Graphql(format!(
                 "notifications HTTP {}: {snippet}",
                 status.as_u16(),
@@ -1243,10 +1218,7 @@ impl GhClient {
         // `take`-into-the-Mutex avoids the double-copy a `clone` +
         // move return would have paid for.
         if let Some(lm) = new_last_modified {
-            self.notifications_state
-                .lock()
-                .expect("notifications state mutex poisoned")
-                .last_modified = Some(lm);
+            self.notifications_state.lock().last_modified = Some(lm);
         }
 
         Ok(NotificationsPoll::Modified { entries })
@@ -3100,6 +3072,15 @@ mod tests {
         names.iter().map(|s| s.to_string()).collect()
     }
 
+    #[test]
+    fn byte_bounded_body_prefix_preserves_utf8() {
+        let body = format!("{}💥tail", "a".repeat(511));
+        let prefix = body_prefix_bytes(&body, 512);
+        assert_eq!(prefix.len(), 511);
+        assert_eq!(prefix, "a".repeat(511));
+        assert_eq!(body_prefix_bytes(&body, body.len()), body);
+    }
+
     /// Parse a raw GraphQL mutation-response payload the way
     /// `post_graphql_with_retry` does, returning its error list.
     fn mutation_errors(payload: &str) -> Vec<graphql::GqlError> {
@@ -3291,7 +3272,7 @@ mod tests {
             pr_filters: vec![],
             issue_filters: vec![],
             watch_repos: vec![],
-            budget: std::sync::Arc::new(std::sync::Mutex::new(
+            budget: std::sync::Arc::new(parking_lot::Mutex::new(
                 crate::rate_budget::RateBudget::default_for_lazybox(),
             )),
             notifications_state: NotificationsState::shared(),

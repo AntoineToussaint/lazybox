@@ -21,3 +21,5 @@ completion. Pick the one that matches what you need to do.
   machine and the TUI on another over a forwarded Unix socket.
 - **[Mirror to Slack](/docs/how-to/mirror-to-slack/)** — reflect your inbox into
   Slack channels.
+- **[Recover persistent state](/docs/how-to/recover-state/)** — preserve and
+  diagnose an unreadable database without deleting worktrees.

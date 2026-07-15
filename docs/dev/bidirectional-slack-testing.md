@@ -51,7 +51,7 @@ that before continuing.
 ### A1. First agent in a workspace creates one channel
 
 1. In the TUI, open a workspace.
-2. Press `c` to spawn Claude.
+2. Press `a c` to spawn Claude.
 3. Watch Slack.
 
 Expect:
@@ -73,7 +73,7 @@ Expect:
 
 ### A2. Second agent in the same session = second channel
 
-1. With Claude already running, press `x` in the TUI to spawn Codex
+1. With Claude already running, press `a x` in the TUI to spawn Codex
    in the same workspace.
 
 Expect:

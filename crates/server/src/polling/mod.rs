@@ -243,7 +243,7 @@ pub struct GhSource {
     /// triggered by `@lazybox` mentions. Populated inside `fetch` and
     /// drained by `tick_with_state` after the upsert pass so the
     /// freshly-created issue workspace exists before we spawn into it.
-    pending_actions: std::sync::Arc<std::sync::Mutex<Vec<ProviderAction>>>,
+    pending_actions: std::sync::Arc<parking_lot::Mutex<Vec<ProviderAction>>>,
     /// Per-tick scheduling decision from `pick_repos_for_tick`.
     /// `sources_for` computes this against the cursor in
     /// `TickState::repo_sync_cursor` and writes it here so the
@@ -252,11 +252,11 @@ pub struct GhSource {
     /// `sources_for` call produces a fresh source.
     scheduling: RoundRobinPick,
     /// Mode of the last successful fetch — read after `fetch` resolves
-    /// by [`TaskSource::last_fetch_kind`]. `std::sync::Mutex` is fine:
+    /// by [`TaskSource::last_fetch_kind`]. `parking_lot::Mutex` is fine:
     /// trait methods take `&self` and the polling driver writes/reads
     /// strictly in sequence (fetch resolves, THEN last_fetch_kind), so
     /// there's no contention.
-    last_kind: std::sync::Mutex<FetchMode>,
+    last_kind: parking_lot::Mutex<FetchMode>,
     /// Whether the last full sweep was a PARTIAL success — one side
     /// (PRs or Issues) errored while the other returned results, so
     /// `fetch` returned `Ok` with only half the inbox to keep the
@@ -277,14 +277,14 @@ pub struct GhSource {
     /// this tick; the next clean sweep deletes anything genuinely
     /// gone. Initialized `false` (a never-fetched source isn't
     /// partial).
-    last_coverage_partial: std::sync::Mutex<bool>,
+    last_coverage_partial: parking_lot::Mutex<bool>,
     /// Whether the last global sweep narrowed the `involves:` search to
     /// `updated:>=` (issue #14). A windowed sweep only returned changed
     /// PRs, so — like `last_coverage_partial` — it must NOT report
     /// `Exhaustive` coverage or rescope would delete every unchanged
     /// row. Read by [`TaskSource::polled_scope`] after `fetch` resolves.
     /// Initialized `false` (a never-fetched source isn't windowed).
-    last_windowed: std::sync::Mutex<bool>,
+    last_windowed: parking_lot::Mutex<bool>,
 }
 
 /// Out-of-band action a `TaskSource` may surface alongside the
@@ -354,35 +354,26 @@ impl GhSource {
             bus,
             mention_allowed_logins,
             auto_fix,
-            pending_actions: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            pending_actions: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
             scheduling,
             // Default to Full so a never-fetched source doesn't
             // accidentally block rescope.
-            last_kind: std::sync::Mutex::new(FetchMode::Full),
-            last_coverage_partial: std::sync::Mutex::new(false),
-            last_windowed: std::sync::Mutex::new(false),
+            last_kind: parking_lot::Mutex::new(FetchMode::Full),
+            last_coverage_partial: parking_lot::Mutex::new(false),
+            last_windowed: parking_lot::Mutex::new(false),
         }
     }
 
     fn set_last_kind(&self, kind: FetchMode) {
-        *self
-            .last_kind
-            .lock()
-            .expect("GhSource.last_kind mutex poisoned") = kind;
+        *self.last_kind.lock() = kind;
     }
 
     fn set_coverage_partial(&self, partial: bool) {
-        *self
-            .last_coverage_partial
-            .lock()
-            .expect("GhSource.last_coverage_partial mutex poisoned") = partial;
+        *self.last_coverage_partial.lock() = partial;
     }
 
     fn set_windowed(&self, windowed: bool) {
-        *self
-            .last_windowed
-            .lock()
-            .expect("GhSource.last_windowed mutex poisoned") = windowed;
+        *self.last_windowed.lock() = windowed;
     }
 
     fn emit_progress(&self, message: impl Into<String>) {
@@ -411,10 +402,7 @@ impl GhSource {
             return;
         }
         let mut queued = 0usize;
-        let mut pending = self
-            .pending_actions
-            .lock()
-            .expect("GhSource.pending_actions poisoned");
+        let mut pending = self.pending_actions.lock();
         for task in tasks {
             let Some(kind) = lazybox_core::evaluate_auto_fix(task, &self.auto_fix) else {
                 continue;
@@ -613,10 +601,7 @@ impl GhSource {
         // `readmit_mentioned_tasks`.
         let mut mentioned_tasks: Vec<Task> = Vec::new();
         {
-            let mut pending = self
-                .pending_actions
-                .lock()
-                .expect("GhSource.pending_actions poisoned");
+            let mut pending = self.pending_actions.lock();
             for mention in mentions {
                 // Look up the matching task in the freshly-polled set so
                 // we use the real title/body for the prompt + the
@@ -850,7 +835,7 @@ fn log_rate_budget(client: &GhClient) {
 
 /// Default agent id the auto-spawn flow uses when no override is
 /// configured. Mirrors the historical `lazybox-tui` fallback so the
-/// user gets the same agent whether they press `w` or `@lazybox`-tag
+/// user gets the same agent whether they press `w w` or `@lazybox`-tag
 /// the issue. Lives here (not behind a config lookup) because the
 /// polling layer doesn't get a `&PersistedSetup` at fetch time —
 /// the source is constructed once per tick and `fetch` is async.
@@ -1070,14 +1055,8 @@ impl TaskSource for GhSource {
     /// #34: without this, `rescope` would treat unpolled repos as
     /// "fell out of scope" and delete their workspaces every warm tick.
     fn polled_scope(&self) -> PolledScope {
-        let partial = *self
-            .last_coverage_partial
-            .lock()
-            .expect("GhSource.last_coverage_partial mutex poisoned");
-        let windowed = *self
-            .last_windowed
-            .lock()
-            .expect("GhSource.last_windowed mutex poisoned");
+        let partial = *self.last_coverage_partial.lock();
+        let windowed = *self.last_windowed.lock();
         gh_polled_scope(
             self.scheduling.run_global,
             &self.scheduling.repos,
@@ -1086,10 +1065,7 @@ impl TaskSource for GhSource {
         )
     }
     fn drain_actions(&self) -> Vec<ProviderAction> {
-        let mut guard = self
-            .pending_actions
-            .lock()
-            .expect("GhSource.pending_actions poisoned");
+        let mut guard = self.pending_actions.lock();
         std::mem::take(&mut *guard)
     }
     /// Tiered fetch (issue #19):
@@ -1140,10 +1116,7 @@ impl TaskSource for GhSource {
         })
     }
     fn last_fetch_kind(&self) -> FetchMode {
-        *self
-            .last_kind
-            .lock()
-            .expect("GhSource.last_kind mutex poisoned")
+        *self.last_kind.lock()
     }
 }
 
@@ -1159,7 +1132,7 @@ pub struct LinearSource {
     /// non-authoritative and rescope preserves the rest. Read by
     /// [`TaskSource::polled_scope`] AFTER `fetch` resolves (mirrors
     /// `GhSource::last_coverage_partial`).
-    last_coverage_partial: std::sync::Mutex<bool>,
+    last_coverage_partial: parking_lot::Mutex<bool>,
 }
 
 impl LinearSource {
@@ -1172,7 +1145,7 @@ impl LinearSource {
             client,
             filter,
             bus,
-            last_coverage_partial: std::sync::Mutex::new(false),
+            last_coverage_partial: parking_lot::Mutex::new(false),
         }
     }
     fn emit_progress(&self, message: impl Into<String>) {
@@ -1199,10 +1172,7 @@ impl TaskSource for LinearSource {
     /// "covered no repos authoritatively" — and rescope preserves the
     /// stored Linear workspaces instead of deleting them.
     fn polled_scope(&self) -> PolledScope {
-        let partial = *self
-            .last_coverage_partial
-            .lock()
-            .expect("LinearSource.last_coverage_partial mutex poisoned");
+        let partial = *self.last_coverage_partial.lock();
         if partial {
             PolledScope::Repos(Vec::new())
         } else {
@@ -1220,10 +1190,7 @@ impl TaskSource for LinearSource {
                 .fetch_all_with_coverage()
                 .await
                 .map_err(lazybox_core::ProviderError::from)?;
-            *self
-                .last_coverage_partial
-                .lock()
-                .expect("LinearSource.last_coverage_partial mutex poisoned") = outcome.is_partial();
+            *self.last_coverage_partial.lock() = outcome.is_partial();
             self.emit_progress(format!(
                 "Got {} issues, applying filters…",
                 outcome.tasks.len()
@@ -1515,8 +1482,8 @@ pub async fn sources_for(
     setup: &lazybox_core::PersistedSetup,
     bus: tokio::sync::broadcast::Sender<Event>,
     state: &mut TickState,
-    viewer_identities: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
-    gh_client_cache: std::sync::Arc<std::sync::Mutex<Option<GhClient>>>,
+    viewer_identities: std::sync::Arc<parking_lot::Mutex<Vec<(String, String)>>>,
+    gh_client_cache: std::sync::Arc<parking_lot::Mutex<Option<GhClient>>>,
 ) -> Vec<Box<dyn TaskSource>> {
     let mut sources: Vec<Box<dyn TaskSource>> = Vec::new();
 
@@ -1539,7 +1506,6 @@ pub async fn sources_for(
                 // span the `from_credential` network call (issue #92).
                 let cached = gh_client_cache
                     .lock()
-                    .expect("gh_client_cache poisoned")
                     .clone()
                     .filter(|c| c.credential_source() == cred_source.as_str());
                 // Cap the cold-cache client build. `from_credential`
@@ -1610,9 +1576,7 @@ pub async fn sources_for(
                         // poll loop.
                         let viewer = client.username().to_string();
                         if !viewer.is_empty() {
-                            let mut logins = viewer_identities
-                                .lock()
-                                .expect("viewer_identities poisoned");
+                            let mut logins = viewer_identities.lock();
                             let entry = logins.iter_mut().find(|(src, _)| src == "github");
                             let changed = match entry {
                                 Some((_, existing)) if *existing == viewer => false,
@@ -1631,8 +1595,7 @@ pub async fn sources_for(
                                 let _ = bus.send(Event::ViewerIdentities { logins: snapshot });
                             }
                         }
-                        *gh_client_cache.lock().expect("gh_client_cache poisoned") =
-                            Some(client.clone());
+                        *gh_client_cache.lock() = Some(client.clone());
                         // Resolve the `@lazybox` allowlist. Empty YAML
                         // list → fall back to "just the authenticated
                         // viewer", which mirrors the design doc's MVP
@@ -1695,13 +1658,15 @@ pub async fn sources_for(
                             bus: bus.clone(),
                             mention_allowed_logins: mention_allowed,
                             auto_fix,
-                            pending_actions: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                            pending_actions: std::sync::Arc::new(parking_lot::Mutex::new(
+                                Vec::new(),
+                            )),
                             scheduling,
                             // Default to Full so a never-fetched
                             // source doesn't accidentally block rescope.
-                            last_kind: std::sync::Mutex::new(FetchMode::Full),
-                            last_coverage_partial: std::sync::Mutex::new(false),
-                            last_windowed: std::sync::Mutex::new(false),
+                            last_kind: parking_lot::Mutex::new(FetchMode::Full),
+                            last_coverage_partial: parking_lot::Mutex::new(false),
+                            last_windowed: parking_lot::Mutex::new(false),
                         }));
                     }
                     Err(e) => tracing::warn!("github client init failed: {e}"),
@@ -1752,8 +1717,8 @@ pub async fn default_sources(
     // identities also get a throwaway slot: ad-hoc callers don't
     // need the cached value visible to other connections.
     let mut throwaway_state = TickState::default();
-    let throwaway_viewers = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let throwaway_client_cache = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let throwaway_viewers = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let throwaway_client_cache = std::sync::Arc::new(parking_lot::Mutex::new(None));
     sources_for(
         &setup,
         bus,
@@ -2050,11 +2015,7 @@ pub async fn tick_with_state(
                 // Clone the cached GitHub client (Arc-backed, cheap) so
                 // the auto-fix arm can post its PR comment. Read from the
                 // dedicated cache lock, not `poll_state` (issue #92).
-                let gh = config
-                    .gh_client_cache
-                    .lock()
-                    .expect("gh_client_cache poisoned")
-                    .clone();
+                let gh = config.gh_client_cache.lock().clone();
                 for action in actions {
                     dispatch_action(config, source.name(), gh.as_ref(), action).await;
                 }
@@ -2227,7 +2188,7 @@ pub async fn rescope_with_state(
     //     erroring
     // Only the second case is a real intent-to-rescope. Without a
     // way to distinguish, the safest default is "never rescope on
-    // an empty result." The user can press Shift-X / Settings →
+    // an empty result." The user can press `x x` / Settings →
     // Clean to explicitly remove rows.
     //
     // Symptom this fixes: user pressed Shift-R, got
@@ -2947,7 +2908,7 @@ pub async fn upsert(config: &ServerConfig, task: Task) {
 /// once and threads it through; the one-off public `upsert` builds a
 /// fresh context per call (identical behavior, just not batched).
 struct UpsertContext {
-    /// Workspace keys the user explicitly archived (`Shift-X`).
+    /// Workspace keys the user explicitly archived (`x x`).
     archived: std::collections::HashSet<String>,
     /// `closes_issues` TaskId → claiming PR workspace key. Mirrors
     /// what `pr_workspace_claiming_issue` derives per call. Updated
@@ -2987,7 +2948,7 @@ impl UpsertContext {
 
 async fn upsert_with_context(config: &ServerConfig, ctx: &mut UpsertContext, task: Task) {
     // Skip re-creating workspaces the user explicitly archived
-    // (`Shift-X`). Without this, every 60s tick re-creates the row
+    // (`x x`). Without this, every 60s tick re-creates the row
     // from the upstream task and the dismiss feels broken. Cached
     // archive set lives in the store under KV_KEY_ARCHIVED.
     let candidate_key = lazybox_core::workspace_key_for(&task);
@@ -3509,7 +3470,7 @@ fn pr_workspace_claiming_issue(
 /// a merged PR, or a closed issue no PR workspace claims (the PR's
 /// own prompt owns that cleanup — same deferral as the upsert path).
 /// `None` for open work, task-less rows, and session-less workspaces
-/// (nothing to reap; dropping the bare row is `Shift-X` territory).
+/// (nothing to reap; dropping the bare row is `x x` territory).
 fn removal_candidate_state(
     config: &ServerConfig,
     workspace: &Workspace,
@@ -4017,7 +3978,7 @@ pub async fn handle_collapse_into_pr(config: &ServerConfig, issue_workspace_key:
 /// wire-side traffic follows them durably (see `rebadge_terminals`).
 /// Unlike the issue→PR merge, we do NOT delete the source workspace
 /// — the user may still want it as a tracking row (or remove it
-/// explicitly via `Shift-X`).
+/// explicitly via `x x`).
 ///
 /// No-op when either workspace is missing or `source == target`.
 pub async fn handle_adopt_sessions(
@@ -4447,7 +4408,7 @@ pub async fn set_auto_merge_on_green(config: &ServerConfig, key: &WorkspaceKey, 
 
 /// Delete a workspace + all its sessions from the store. Broadcasts
 /// `WorkspaceRemoved` so every connected TUI prunes its sidebar row.
-/// Used by the sidebar's `Shift-X` two-press kill flow.
+/// Used by the sidebar's confirmed `x x` archive flow.
 ///
 /// Does NOT delete the worktree directories on disk — that's a
 /// future enhancement (needs to also kill any live PTY runners
@@ -4456,13 +4417,13 @@ pub async fn set_auto_merge_on_green(config: &ServerConfig, key: &WorkspaceKey, 
 /// reuse or remove manually.
 ///
 /// Also kills every backing terminal (PTY / tmux session) that
-/// belonged to the workspace — without this the user's `Shift-X X`
+/// belonged to the workspace — without this the user's confirmed `x x`
 /// hides the tabs in lazybox but leaves ghost tmux sessions visible
 /// in `tmux ls`, which then re-surface on the next lazybox launch
 /// via `recover_sessions`.
 /// Read the persisted set of archived workspace keys. Used by the
 /// upsert path to skip re-creating a workspace the user explicitly
-/// dismissed via `Shift-X`. Returns an empty set when the kv entry
+/// dismissed via `x x`. Returns an empty set when the kv entry
 /// doesn't exist or fails to parse — degrades gracefully (worst
 /// case the dismissed row reappears one more time).
 pub fn load_archived_set(config: &ServerConfig) -> std::collections::HashSet<String> {
@@ -4511,7 +4472,7 @@ pub async fn delete_workspace(config: &ServerConfig, key: &WorkspaceKey) {
 }
 
 /// Inner delete with the archive decision explicit. User-intent
-/// deletes (`Shift-X`, project cascade, merged-PR removal) archive so
+/// deletes (`x x`, project cascade, merged-PR removal) archive so
 /// the next poll doesn't resurrect the row. System-driven deletes
 /// (rescope) must NOT archive: the workspace fell out of the polled
 /// set for upstream/transient reasons (truncated query, scope edit, a
@@ -4520,7 +4481,7 @@ pub async fn delete_workspace(config: &ServerConfig, key: &WorkspaceKey) {
 async fn delete_workspace_internal(config: &ServerConfig, key: &WorkspaceKey, archive: bool) {
     let key_str = key.as_str();
     // Record the archive so the next poll's upsert skips re-creating
-    // this row. Without this, the user pressed `Shift-X`, the row
+    // this row. Without this, the user pressed `x x`, the row
     // disappeared briefly, then the next 60s tick re-added it from
     // the upstream task — extremely confusing.
     if archive {
@@ -4733,8 +4694,8 @@ mod workspace_lock_tests {
     struct GateStore {
         inner: MemoryStore,
         armed: AtomicBool,
-        entered_tx: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
-        release_rx: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+        entered_tx: parking_lot::Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        release_rx: parking_lot::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
     }
 
     impl Store for GateStore {
@@ -4746,10 +4707,10 @@ mod workspace_lock_tests {
             // post-mark value and mask the bug.
             let result = self.inner.get_kv(key);
             if key.starts_with("workspace:") && self.armed.swap(false, Ordering::SeqCst) {
-                if let Some(tx) = self.entered_tx.lock().expect("gate lock").take() {
+                if let Some(tx) = self.entered_tx.lock().take() {
                     let _ = tx.send(());
                 }
-                if let Some(rx) = self.release_rx.lock().expect("gate lock").take() {
+                if let Some(rx) = self.release_rx.lock().take() {
                     // Blocking a worker thread is fine: the test runs
                     // on a multi-thread runtime with spare workers.
                     let _ = rx.recv_timeout(std::time::Duration::from_secs(10));
@@ -4831,8 +4792,8 @@ mod workspace_lock_tests {
         let store = Arc::new(GateStore {
             inner: MemoryStore::new(),
             armed: AtomicBool::new(false),
-            entered_tx: std::sync::Mutex::new(Some(entered_tx)),
-            release_rx: std::sync::Mutex::new(Some(release_rx)),
+            entered_tx: parking_lot::Mutex::new(Some(entered_tx)),
+            release_rx: parking_lot::Mutex::new(Some(release_rx)),
         });
         let config = ServerConfig::with_store(store.clone());
 
@@ -5679,8 +5640,8 @@ mod tick_noop_skip_tests {
     //! resurrecting the every-tick write+broadcast storm.
     use super::*;
     use lazybox_core::{TaskId, TaskRole, TaskState};
+    use parking_lot::Mutex;
     use std::sync::Arc;
-    use std::sync::Mutex;
 
     /// A `TaskSource` that returns whatever tasks the test stashed in
     /// it. Defaults — `polled_scope = Repos([])`, `last_fetch_kind =
@@ -5697,7 +5658,7 @@ mod tick_noop_skip_tests {
             }
         }
         fn set(&self, tasks: Vec<Task>) {
-            *self.tasks.lock().unwrap() = tasks;
+            *self.tasks.lock() = tasks;
         }
     }
 
@@ -5714,7 +5675,7 @@ mod tick_noop_skip_tests {
                     + 'a,
             >,
         > {
-            let tasks = self.tasks.lock().unwrap().clone();
+            let tasks = self.tasks.lock().clone();
             Box::pin(async move { Ok(tasks) })
         }
     }

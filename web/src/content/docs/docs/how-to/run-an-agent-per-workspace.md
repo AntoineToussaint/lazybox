@@ -34,9 +34,11 @@ Press `]]` then `q` to return to the sidebar; the session keeps running.
 (Prefer the old top-level keys? Remap them via `ui.action_keys`, keyed
 `spawn_agent.<id>` — e.g. `spawn_agent.claude: "c"`.)
 
-## Let lazybox choose the prompt: `w`
+## Let lazybox choose the prompt: `w w`
 
-Press `w` for **work** instead of picking an agent manually. lazybox spawns
+Press `w w` for **work** instead of picking an agent manually. The first `w`
+opens the work menu; the second chooses the default or already-running agent.
+lazybox spawns
 your **default agent** (`setup.default_agent`, falling back to Claude Code)
 with a prompt tailored to the selected row's current state:
 

@@ -66,11 +66,6 @@ impl<T: TerminalAdapter> Model<T> {
         // hardcoded group table.
         if let Some(prefix) = self.leader.take() {
             self.redraw = true;
-            // Taking the leader resolves the `w` timed leader one way or
-            // another (a scoped chord below, an Esc cancel, or a
-            // fall-through) — so the bare-Work idle timeout no longer
-            // applies.
-            self.work_leader_at = None;
             let action = self.resolve_focus_for_keys().and_then(|rfocus| {
                 key_event_to_stroke(realm_key_to_crossterm(&key))
                     .and_then(|stroke| find_action_for_seq(&prefix, &stroke, rfocus, &self.catalog))
@@ -395,34 +390,28 @@ impl<T: TerminalAdapter> Model<T> {
             // Does this keystroke open a leader group? Any catalog entry
             // with a `Seq` starting with it (reachable from this focus)
             // makes it a leader. Most leaders (`g`, `a`) have no direct
-            // action of their own. `w` is the exception (issue #224):
-            // it's BOTH a direct action (Work) AND the prefix for the
-            // scoped `w c` / `w x` chords — so it arms a *timed* leader
-            // (an agent key picks that agent; otherwise bare Work fires
-            // on the idle tick, `tick_work_leader`). The which-key popup
-            // comes for free from `self.leader`. Completion resolves
+            // action of their own. `w` is a regular deterministic leader:
+            // `w w` chooses the default/running agent, while `w c` / `w x`
+            // choose one explicitly. There is no timeout and therefore no
+            // input delay or action that fires after the user's context has
+            // moved. The which-key popup comes for free from `self.leader`.
+            // Completion resolves
             // through `resolve_focus_for_keys` too, so a leader armed
             // from an empty terminal pane completes against the same
             // sidebar scope it armed under.
-            let is_work = matches!(action, Some(lazybox_tui_core::action::Action::Work));
             // Only continuations the completion path can actually fire
             // (`action_from_entry`) make a stroke a leader. Quit's `q q`
             // is a `Seq` too, but it dispatches through the q-latch, not
             // the catalog — arming on it (reachable from an empty
             // terminal pane, where the quit branch is skipped) would
             // show a popup whose completion goes nowhere.
-            let opens_leader = (action.is_none() || is_work)
+            let opens_leader = action.is_none()
                 && seq_continuations(&stroke, rfocus, &self.catalog)
                     .iter()
                     .any(|(_, entry)| action_from_entry(entry).is_some());
             if opens_leader {
                 self.q_latch.disarm();
                 self.leader.arm(stroke);
-                // The `w` leader fires its direct action on timeout; pure
-                // leaders just wait for the next key.
-                if is_work {
-                    self.work_leader_at = Some(std::time::Instant::now());
-                }
                 self.redraw = true;
                 return;
             }
@@ -554,29 +543,18 @@ impl<T: TerminalAdapter> Model<T> {
         self.terminal_leader_armed
     }
 
-    /// Whether the timed `w` leader is currently armed (issue #224) —
-    /// pressing `w` arms it until a scoped agent key (`w c` / `w x`)
-    /// completes the chord or the idle tick fires bare `Work`. Test /
-    /// inspection hook.
-    pub fn work_leader_pending(&self) -> bool {
-        self.work_leader_at.is_some()
-    }
-
-    /// Cancel any armed leader chord — the `g` github group, the timed
-    /// `w` leader (#224), or the non-timed terminal `]]` leader (#252).
+    /// Cancel any armed leader chord — the catalog groups (`g`, `w`,
+    /// `x`, …) or the non-timed terminal `]]` leader (#252).
     /// Called on mouse interaction: a click is an unambiguous "I'm doing
-    /// something else" signal. Without it the `w` leader's idle-tick
-    /// timeout would fire a stray `Work` after the user clicked away,
-    /// and the non-timed `]]` leader would stay armed and swallow the
-    /// user's next terminal keystroke as a snippet trigger. Keystrokes
-    /// resolve each leader through its completion block instead, so they
-    /// don't need this.
+    /// something else" signal. Without it a non-timed leader would stay
+    /// armed and swallow the next key as a menu choice. Keystrokes resolve
+    /// each leader through its completion block instead, so they don't
+    /// need this.
     pub(super) fn cancel_leader_chords(&mut self) {
-        if self.leader.is_armed() || self.work_leader_at.is_some() || self.terminal_leader_armed {
+        if self.leader.is_armed() || self.terminal_leader_armed {
             self.redraw = true;
         }
         self.leader.disarm();
-        self.work_leader_at = None;
         self.terminal_leader_armed = false;
     }
 
@@ -1555,7 +1533,7 @@ pub(super) const PANE_NATIVE_KINDS: &[(lazybox_tui_core::action::ActionKind, &st
         ),
         (
             K::LeaveTerminal,
-            "the terminal `]]` escape latch (keys.rs; chord comes from ui.terminal_escape_char)",
+            "the terminal `]]` escape latch (keys.rs; chord comes from terminal.escape_char)",
             false,
         ),
     ]

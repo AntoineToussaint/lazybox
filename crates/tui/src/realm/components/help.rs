@@ -1,7 +1,6 @@
-//! `Help` — yazi-style which-key panel pinned to the bottom. tuirealm
-//! port of `tui_kit::widgets::HelpModal`.
+//! `Help` — compact, searchable shortcut reference.
 //!
-//! A second `?` swaps it for the "Ask lazybox" modal (#302). Arrow /
+//! A second `?` swaps it for the "Ask Lazybox" modal (#302). Arrow /
 //! `j` `k` / PgUp / PgDn / Home / End scroll the panel when it overflows
 //! a short terminal (#338); any other keyboard event dismisses.
 
@@ -16,7 +15,7 @@ use tuirealm::props::{AttrValue, Attribute, QueryResult};
 use tuirealm::ratatui::Frame;
 use tuirealm::ratatui::layout::{Constraint, Layout, Rect};
 use tuirealm::ratatui::prelude::*;
-use tuirealm::ratatui::widgets::{Block, Clear, Paragraph};
+use tuirealm::ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use tuirealm::state::State;
 
 /// One section of the help panel — title + bindings under it.
@@ -29,24 +28,20 @@ pub struct HelpSection {
     pub bindings: Vec<Binding>,
 }
 
-/// A leader-key chord group rendered as its own labeled block at the
-/// top of the panel — the which-key system surfaced as discoverable
-/// UI so users learn that `g` *opens a menu* rather than memorizing
-/// five separate chords. Derived from the runtime catalog (every entry
-/// whose effective chord is a two-step `<leader> <key>` sequence), the
-/// data-driven replacement for the old `ActionGroup` table so the
-/// leader, chords, and aliases can't drift from the live keymap
-/// (issues #145, #102).
+/// A leader-key menu advertised in the compact menu index. The detailed
+/// continuations remain in `chords` for completeness tests and are shown by
+/// the live which-key popup after the user presses the leader. Repeating all
+/// of them here made Help dominate the entire screen and duplicated the most
+/// discoverable part of the UI.
 pub struct LeaderGroup {
-    /// Heading line, e.g. `press g, then:`.
-    heading: String,
-    /// One row per in-group chord: keys `g m`, label `merge PR`.
+    /// Effective first stroke, e.g. `g`.
+    leader: String,
+    /// Registry label shared with the footer and which-key popup.
+    label: &'static str,
+    /// One row per in-group chord, retained in unit-test builds so the
+    /// compact index is checked against every live which-key continuation.
+    #[cfg(test)]
     chords: Vec<Binding>,
-    /// The full key display for each in-group action, so any
-    /// user-added direct-key aliases stay visible alongside the leader
-    /// chord, e.g. `aliases: g m · g v | Shift-V` after an override
-    /// (the default keymap ships leader chords only, #304).
-    aliases: String,
 }
 
 /// Whether this entry's chord is a timed double-press latch (`q q`
@@ -113,11 +108,12 @@ impl LeaderGroup {
                 members[idx].push((strokes[1], entry));
             }
         }
-        leaders
+        let mut groups: Vec<Self> = leaders
             .iter()
             .zip(members.iter())
             .map(|(leader, group)| {
                 let leader_disp = leader.display();
+                #[cfg(test)]
                 let chords = group
                     .iter()
                     .map(|(second, entry)| Binding {
@@ -128,28 +124,22 @@ impl LeaderGroup {
                         label: entry.label.clone(),
                     })
                     .collect();
-                let aliases = group
-                    .iter()
-                    .map(|(_, entry)| entry.keys_display.as_ref())
-                    .collect::<Vec<_>>()
-                    .join(" · ");
-                // The group's registry name (`github`, `agent`, …)
-                // heads the block — the same label the footer's group
-                // cell and the which-key popup title use (#304).
+                // The group's registry name (`github`, `agent`, …) is
+                // shared with the footer and which-key popup (#304).
                 let label = group
                     .iter()
-                    .find_map(|(_, entry)| action::leader_group_label(entry.kind));
-                let heading = match label {
-                    Some(name) => format!("{name} — press {leader_disp}, then:"),
-                    None => format!("press {leader_disp}, then:"),
-                };
+                    .find_map(|(_, entry)| action::leader_group_label(entry.kind))
+                    .unwrap_or("commands");
                 Self {
-                    heading,
+                    leader: leader_disp,
+                    label,
+                    #[cfg(test)]
                     chords,
-                    aliases: format!("aliases: {aliases}"),
                 }
             })
-            .collect()
+            .collect();
+        groups.sort_by_key(|group| action::leader_group_rank(group.label));
+        groups
     }
 }
 
@@ -173,8 +163,8 @@ impl Help {
     /// reference instead of the pane-stitched subset the legacy
     /// constructor produced.
     ///
-    /// `escape_char` is the configured `ui.terminal_escape_char`: the
-    /// `]]` leave chord and `]]<key>` snippet leader are dispatched by
+    /// `escape_char` is the configured `terminal.escape_char`: the
+    /// `]]q` leave chord and `]]s<key>` snippet leader are dispatched by
     /// the terminal escape-char latch, not the catalog, so their display
     /// is rendered from the char doubled here rather than the catalog's
     /// hardcoded `]]` default — otherwise a user who remaps the escape
@@ -206,7 +196,7 @@ impl Help {
             // catalog default / a `leave_terminal` override the dispatch
             // ignores (#188).
             let keys = if entry.kind == ActionKind::LeaveTerminal {
-                std::borrow::Cow::Owned(leader.clone())
+                std::borrow::Cow::Owned(format!("{leader}q"))
             } else {
                 entry.keys_display.clone()
             };
@@ -219,30 +209,20 @@ impl Help {
                     label: entry.label.clone(),
                 });
         }
-        // The snippet leader (`]]<key>`) isn't a catalog `Action` —
-        // it's a terminal-pane chord whose binding set is the user's
-        // snippet library — so it's hand-added to the Terminal section
-        // here, the same way the hint bar curates it (issue #205).
-        // The tile-management chords (#286) ride the same `]]` leader
-        // and are likewise dispatched by `terminal_leader::LeaderCmd`
-        // rather than the catalog — hand-added too, so the Keys screen
-        // matches what the `]]` which-key popup offers.
+        // The terminal namespace isn't a catalog Action: its runtime menu
+        // comes from `terminal_leader::LeaderCmd`. Advertise the namespace
+        // once here instead of repeating every continuation—the live menu
+        // appears immediately after `]]`, just like the five catalog leaders.
+        // Ask Lazybox search and the generated reference retain the detailed
+        // terminal commands.
         {
             let terminal = by_section
                 .entry(Section::Terminal.order())
                 .or_insert_with(|| (Section::Terminal.title(), Vec::new()));
-            for (suffix, label) in [
-                ("<key>", "snippets"),
-                ("|", "split right"),
-                ("-", "split down"),
-                ("<arrow>", "move tile / switch tab"),
-                ("x", "close terminal"),
-            ] {
-                terminal.1.push(Binding {
-                    keys: std::borrow::Cow::Owned(format!("{leader}{suffix}")),
-                    label: std::borrow::Cow::Borrowed(label),
-                });
-            }
+            terminal.1.push(Binding {
+                keys: std::borrow::Cow::Owned(leader),
+                label: std::borrow::Cow::Borrowed("terminal commands"),
+            });
         }
         let sections: Vec<HelpSection> = by_section
             .into_iter()
@@ -256,24 +236,24 @@ impl Help {
         }
     }
 
-    /// Total content height in rows: the ask hint, the leader band, its
-    /// separator, and every non-empty section (title + grid). Shared by
-    /// `view` (to size + clamp scroll) and the scroll tests.
-    fn content_rows(&self) -> u16 {
-        let leader_rows: u16 = self
-            .leaders
-            .iter()
-            .map(|lg| 1 + lg.chords.len().div_ceil(COLS) as u16 + 1)
-            .sum();
-        let sep_rows = if self.leaders.is_empty() { 0 } else { 1 };
+    /// Total body height: compact leader-menu index, a spacer, then each
+    /// section title and grid. Shared by `view` and the scroll tests.
+    fn content_rows(&self, cols: usize) -> u16 {
+        let leader_rows = if self.leaders.is_empty() {
+            0
+        } else {
+            1 + self.leaders.len().div_ceil(cols) as u16
+        };
+        let sep_rows = u16::from(!self.leaders.is_empty());
         let section_rows: u16 = self
             .sections
             .iter()
             .filter(|s| !s.bindings.is_empty())
-            .map(|s| 1 + s.bindings.len().div_ceil(COLS) as u16)
+            .map(|s| 1 + s.bindings.len().div_ceil(cols) as u16)
             .sum();
-        // +1: the "ask lazybox" hint line at the top of the panel.
-        1 + leader_rows + sep_rows + section_rows
+        // Two-row Ask Lazybox callout leads the reference. Help is a
+        // discovery surface first, a table second.
+        2 + leader_rows + sep_rows + section_rows
     }
 
     fn flat(&self) -> Vec<&Binding> {
@@ -284,98 +264,107 @@ impl Help {
     }
 }
 
-const COLS: usize = 3;
-const PADDING_Y: u16 = 1;
-const PADDING_X: u16 = 1;
+const MAX_MODAL_WIDTH: u16 = 132;
+const MAX_MODAL_HEIGHT: u16 = 38;
+
+fn grid_columns(width: u16) -> usize {
+    if width >= 108 {
+        3
+    } else if width >= 68 {
+        2
+    } else {
+        1
+    }
+}
 
 impl Component for Help {
     fn view(&mut self, frame: &mut Frame, area: Rect) {
         let theme = crate::theme::current();
         let bindings = self.flat();
-        if bindings.is_empty() {
+        let available_w = area.width.saturating_sub(2);
+        let available_h = area.height.saturating_sub(2);
+        if bindings.is_empty() || available_w < 24 || available_h < 6 {
             return;
         }
 
-        let sep_rows = if self.leaders.is_empty() { 0 } else { 1 };
-        let content_rows = self.content_rows();
+        let modal_w = MAX_MODAL_WIDTH.min(available_w);
+        let cols_count = grid_columns(modal_w.saturating_sub(2));
+        let content_rows = self.content_rows(cols_count);
+        // +2 border, +1 persistent footer. On a roomy screen the modal
+        // hugs its content instead of becoming a full-screen wallpaper.
+        let desired_h = (content_rows + 3).clamp(8, MAX_MODAL_HEIGHT);
+        let modal_h = desired_h.min(available_h);
+        let modal = Rect::new(
+            area.x + area.width.saturating_sub(modal_w) / 2,
+            area.y + area.height.saturating_sub(modal_h) / 2,
+            modal_w,
+            modal_h,
+        );
 
-        let panel_h = (content_rows + PADDING_Y * 2).min(area.height);
-        let panel = Rect {
-            x: area.x.saturating_add(PADDING_X.min(area.width)),
-            y: area
-                .y
-                .saturating_add(area.height.saturating_sub(panel_h + 1)),
-            width: area.width.saturating_sub(PADDING_X * 2),
-            height: panel_h,
+        frame.render_widget(Clear, modal);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .title(Span::styled(" Shortcuts ", theme.modal_title()))
+            .border_style(theme.modal_border())
+            .style(Style::default().bg(theme.surface));
+        let inner = block.inner(modal);
+        frame.render_widget(block, modal);
+        if inner.height < 2 {
+            return;
+        }
+
+        let body = Rect {
+            height: inner.height - 1,
+            ..inner
+        };
+        let footer = Rect {
+            y: inner.y + inner.height - 1,
+            height: 1,
+            ..inner
         };
 
-        // Vertical scroll: when the panel doesn't fit, the leader band
-        // plus five section grids overflow and the bottom rows would clip
-        // off-screen unreachable. Reserve the last inner row for a scroll
-        // hint, clamp the offset to the real overflow (area height is
-        // only known here), and window the content to `view_h` rows.
-        let top = panel.y + PADDING_Y;
-        let inner_h = panel.height.saturating_sub(PADDING_Y * 2);
-        let overflow = content_rows > inner_h;
-        let view_h = if overflow {
-            inner_h.saturating_sub(1)
-        } else {
-            inner_h
-        };
+        // The footer is stable; only the body scrolls. This keeps the way
+        // out and the Ask entry point visible at every offset.
+        let view_h = body.height;
+        let overflow = content_rows > view_h;
         let max_scroll = content_rows.saturating_sub(view_h);
         self.scroll = self.scroll.min(max_scroll);
         let scroll = self.scroll;
-
-        if panel.y > area.y {
-            let mask = Rect {
-                x: area.x,
-                y: area.y,
-                width: area.width,
-                height: panel.y - area.y,
-            };
-            frame.render_widget(
-                Block::default().style(Style::default().bg(Color::Black)),
-                mask,
-            );
-        }
-
-        frame.render_widget(Clear, panel);
         let panel_bg = Style::default().bg(theme.surface);
-        frame.render_widget(Block::default().style(panel_bg), panel);
 
-        let col_constraints: Vec<Constraint> = (0..COLS)
-            .map(|_| Constraint::Ratio(1, COLS as u32))
+        let col_constraints: Vec<Constraint> = (0..cols_count)
+            .map(|_| Constraint::Ratio(1, cols_count as u32))
             .collect();
-        let cols = Layout::horizontal(col_constraints).split(panel);
+        let cols = Layout::horizontal(col_constraints).split(body);
 
         // Map a 0-based logical content row to its on-screen y, or `None`
-        // when it's scrolled out of the `[top, top + view_h)` window.
+        // when it's scrolled out of the body window.
         let screen_y = |lrow: u16| -> Option<u16> {
             if lrow < scroll {
                 return None;
             }
-            let sy = top + (lrow - scroll);
-            (sy < top + view_h).then_some(sy)
+            let sy = body.y + (lrow - scroll);
+            (sy < body.y + view_h).then_some(sy)
         };
 
         // Draw a binding grid at logical row `start_lrow`; returns the
-        // logical row just past it. Rows scrolled out of the window are
-        // skipped. Shared by the leader chords and the section grids.
+        // logical row just past it. Rows outside the window are skipped.
         let draw_grid = |frame: &mut Frame, items: &[&Binding], start_lrow: u16| -> u16 {
             for (idx, b) in items.iter().enumerate() {
-                let lrow = start_lrow + (idx / COLS) as u16;
+                let lrow = start_lrow + (idx / cols_count) as u16;
                 let Some(sy) = screen_y(lrow) else { continue };
-                let col = cols[idx % COLS];
+                let col = cols[idx % cols_count];
                 let cell = Rect {
                     x: col.x,
                     y: sy,
                     width: col.width,
                     height: 1,
                 };
-                const KEY_PAD: usize = 14;
-                let mut key = format_keys_for_display(&b.keys);
-                if key.chars().count() < KEY_PAD {
-                    key.push_str(&" ".repeat(KEY_PAD - key.chars().count()));
+                let key_pad = if col.width >= 38 { 14 } else { 10 };
+                let mut key = compact_keys_for_reference(&b.keys);
+                if key.chars().count() < key_pad {
+                    key.push_str(&" ".repeat(key_pad - key.chars().count()));
                 }
                 let key_style = Style::default()
                     .bg(theme.surface)
@@ -391,15 +380,15 @@ impl Component for Help {
                 ]);
                 frame.render_widget(Paragraph::new(line), cell);
             }
-            start_lrow + items.len().div_ceil(COLS) as u16
+            start_lrow + items.len().div_ceil(cols_count) as u16
         };
 
         let full_line = |frame: &mut Frame, text: &str, lrow: u16, style: Style| {
             let Some(sy) = screen_y(lrow) else { return };
             let cell = Rect {
-                x: panel.x,
+                x: body.x,
                 y: sy,
-                width: panel.width,
+                width: body.width,
                 height: 1,
             };
             frame.render_widget(
@@ -409,20 +398,40 @@ impl Component for Help {
         };
 
         let mut lrow: u16 = 0;
+        if let Some(sy) = screen_y(lrow) {
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        " ?  ASK LAZYBOX ",
+                        Style::default()
+                            .bg(theme.accent)
+                            .fg(Color::Black)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        "  search every shortcut or ask in plain language",
+                        Style::default().bg(theme.surface).fg(theme.text_strong),
+                    ),
+                ])),
+                Rect::new(body.x, sy, body.width, 1),
+            );
+        }
+        lrow += 1;
         full_line(
             frame,
-            "? ask lazybox anything (searches your keymap, answers in plain language) · any other key closes",
+            "Press ? to switch back to the assistant",
             lrow,
             Style::default()
                 .bg(theme.surface)
                 .fg(theme.text_dim)
-                .add_modifier(Modifier::ITALIC),
+                .italic(),
         );
         lrow += 1;
-        for lg in &self.leaders {
+
+        if !self.leaders.is_empty() {
             full_line(
                 frame,
-                &lg.heading,
+                "Leader menus  ·  press a key, then choose",
                 lrow,
                 Style::default()
                     .bg(theme.surface)
@@ -430,25 +439,21 @@ impl Component for Help {
                     .add_modifier(Modifier::BOLD),
             );
             lrow += 1;
-            let chords: Vec<&Binding> = lg.chords.iter().collect();
-            lrow = draw_grid(frame, &chords, lrow);
-            full_line(
-                frame,
-                &lg.aliases,
-                lrow,
-                Style::default()
-                    .bg(theme.surface)
-                    .fg(theme.text_dim)
-                    .add_modifier(Modifier::ITALIC),
-            );
+            let leader_bindings: Vec<Binding> = self
+                .leaders
+                .iter()
+                .map(|group| Binding {
+                    keys: std::borrow::Cow::Owned(group.leader.clone()),
+                    label: std::borrow::Cow::Borrowed(group.label),
+                })
+                .collect();
+            let leaders: Vec<&Binding> = leader_bindings.iter().collect();
+            lrow = draw_grid(frame, &leaders, lrow);
             lrow += 1;
         }
-        lrow += sep_rows;
 
-        // Per-section titled grids. Each section's grid is single-key
-        // only (leader chords render in the band above), and the title
-        // scopes it — so a key bound in two sections (`Space`, `z`,
-        // `Enter`) reads unambiguously.
+        // Per-section single-key grids. Detailed leader continuations live
+        // in the popup that appears as soon as its leader is pressed.
         let section_title_style = Style::default()
             .bg(theme.surface)
             .fg(theme.accent)
@@ -463,29 +468,29 @@ impl Component for Help {
             lrow = draw_grid(frame, &items, lrow);
         }
 
-        // Scroll hint on the reserved bottom row when the panel overflows,
-        // so the clipped rows are discoverable and reachable.
+        let mut hint = vec![
+            Span::styled(
+                " ? ",
+                Style::default().fg(Color::Black).bg(theme.accent).bold(),
+            ),
+            Span::styled(" Ask Lazybox  ", Style::default().fg(theme.text_strong)),
+        ];
         if overflow {
             let above = scroll;
             let below = content_rows.saturating_sub(scroll + view_h);
-            let hint = format!("↑/↓ scroll · {above} above · {below} below");
-            let cell = Rect {
-                x: panel.x,
-                y: top + view_h,
-                width: panel.width,
-                height: 1,
-            };
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    format!(" {hint}"),
-                    Style::default()
-                        .bg(theme.surface)
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::ITALIC),
-                ))),
-                cell,
-            );
+            hint.extend([
+                Span::styled("↑↓", Style::default().fg(theme.accent).bold()),
+                Span::styled(
+                    format!(" scroll  {above}↑ {below}↓  "),
+                    Style::default().fg(theme.text_dim),
+                ),
+            ]);
         }
+        hint.extend([
+            Span::styled("Esc", Style::default().fg(theme.error).bold()),
+            Span::styled(" close", Style::default().fg(theme.text_dim)),
+        ]);
+        frame.render_widget(Paragraph::new(Line::from(hint)).style(panel_bg), footer);
     }
 
     fn query(&self, _: Attribute) -> Option<QueryResult<'_>> {
@@ -587,9 +592,24 @@ fn format_keys_for_display(raw: &str) -> String {
     raw.to_string()
 }
 
+/// Keep the overview scannable when one action carries compatibility
+/// aliases. The first chord is the designed/default path; Ask Lazybox's
+/// live search still shows the complete raw binding set.
+fn compact_keys_for_reference(raw: &str) -> String {
+    // Alternatives in the catalog are separated by a padded pipe. A bare
+    // pipe is itself a valid terminal suffix (`]]|`), so splitting on every
+    // `|` would corrupt that designed chord.
+    let alternatives: Vec<&str> = raw.split(" | ").map(str::trim).collect();
+    let primary = format_keys_for_display(alternatives.first().copied().unwrap_or(raw));
+    match alternatives.len() {
+        0 | 1 => primary,
+        n => format!("{primary} (+{})", n - 1),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Help, format_keys_for_display};
+    use super::{Help, compact_keys_for_reference, format_keys_for_display};
 
     /// Collect every (keys, label) row the help panel renders — flat
     /// per-section grid AND leader-group blocks. The Keys screen is the
@@ -611,9 +631,8 @@ mod tests {
     /// The generated Keys screen (#102 P4) is the catalog made visible:
     /// it must list the per-agent spawn rows and the long-snooze guard
     /// row — the bindings that only exist in the runtime catalog — with
-    /// their effective keys. The per-agent spawns are two-step leader
-    /// chords, so they live in the `a` leader block; the single-key
-    /// long-snooze lives in the flat grid (#338).
+    /// their effective keys. Both are two-step leader chords now: agents
+    /// live under `a`, workspace management under `x`.
     #[test]
     fn from_catalog_lists_generated_rows() {
         use lazybox_tui_core::action::ActionDef;
@@ -631,16 +650,9 @@ mod tests {
             rows.iter().any(|(k, l)| k == "a x" && l == "spawn codex"),
             "per-agent codex row missing",
         );
-        // The single-key long-snooze guard row lives in the flat grid.
-        let flat: Vec<(String, String)> = help
-            .sections
-            .iter()
-            .flat_map(|s| s.bindings.iter())
-            .map(|b| (b.keys.to_string(), b.label.to_string()))
-            .collect();
         assert!(
-            flat.iter().any(|(_, l)| l == "long snooze"),
-            "long-snooze guard row missing from the flat grid",
+            rows.iter().any(|(k, l)| k == "x z" && l == "long snooze"),
+            "long-snooze guard row missing from the workspace menu",
         );
         // No bare generic "spawn agent" placeholder survives.
         assert!(!rows.iter().any(|(_, l)| l == "spawn agent"));
@@ -789,13 +801,11 @@ mod tests {
         );
     }
 
-    /// The tile-management chords (#286) ride the `]]` leader and are
-    /// dispatched by `terminal_leader::LeaderCmd`, not the catalog —
-    /// they must still show in the `?` Terminal section (they used to
-    /// appear only in the `]]` which-key popup), rendered from the
-    /// live escape char.
+    /// The terminal namespace is shown once in the compact index; its live
+    /// which-key popup owns the continuations. This mirrors every other leader
+    /// and keeps the secondary index from growing back into a wall of keys.
     #[test]
-    fn terminal_section_lists_the_tile_management_chords() {
+    fn terminal_section_advertises_one_live_command_menu() {
         use lazybox_tui_core::action::ActionDef;
         let catalog = ActionDef::catalog(&[], &std::collections::BTreeMap::new());
         let help = Help::from_catalog(&catalog, ']');
@@ -806,17 +816,17 @@ mod tests {
             .flat_map(|s| s.bindings.iter())
             .map(|b| (b.keys.to_string(), b.label.to_string()))
             .collect();
-        for (keys, label) in [
-            ("]]|", "split right"),
-            ("]]-", "split down"),
-            ("]]<arrow>", "move tile / switch tab"),
-            ("]]x", "close terminal"),
-        ] {
-            assert!(
-                terminal.iter().any(|(k, l)| k == keys && l == label),
-                "Terminal section missing {keys} → {label}: {terminal:?}",
-            );
-        }
+        assert!(
+            terminal
+                .iter()
+                .any(|(k, l)| k == "]]" && l == "terminal commands")
+        );
+        assert!(
+            terminal
+                .iter()
+                .any(|(k, l)| k == "]]q" && l == "exit to sidebar")
+        );
+        assert!(!terminal.iter().any(|(_, l)| l == "split right"));
         // A remapped escape char re-renders the rows from the live char.
         let remapped = Help::from_catalog(&catalog, '}');
         assert!(
@@ -825,8 +835,8 @@ mod tests {
                 .iter()
                 .filter(|s| s.title == "Terminal")
                 .flat_map(|s| s.bindings.iter())
-                .any(|b| b.keys == "}}x"),
-            "tile rows must render from the configured escape char",
+                .any(|b| b.keys == "}}" && b.label == "terminal commands"),
+            "terminal menu row must render from the configured escape char",
         );
     }
 
@@ -848,7 +858,7 @@ mod tests {
         assert!(
             global
                 .iter()
-                .any(|(k, l)| l == "mouse capture" && k.contains("F8") && k.contains("Alt-s")),
+                .any(|(k, l)| l == "text selection" && k.contains("F8") && k.contains("Alt-s")),
             "mouse-capture row missing from the Global grid: {global:?}",
         );
     }
@@ -917,24 +927,22 @@ mod tests {
         // and an over-scroll is clamped back to 0.
         let mut tall = Help::from_catalog(&catalog, ']');
         tall.scroll = 50;
-        let out = render(&mut tall, 110, 60);
+        let out = render(&mut tall, 140, 60);
         assert!(
             out.contains("exit to sidebar"),
             "Terminal row must show when it fits"
         );
-        assert!(
-            !out.contains("below"),
-            "no scroll hint when everything fits"
-        );
+        assert!(!out.contains("↑↓"), "no scroll hint when everything fits");
         assert_eq!(tall.scroll, 0, "over-scroll clamps to 0 when it all fits");
 
         // Short: overflows. At the top the hint shows and the Terminal
         // row is clipped; scrolling to the end reveals it.
         let mut short = Help::from_catalog(&catalog, ']');
         let top = render(&mut short, 110, 16);
-        assert!(top.contains("below"), "overflow must show the scroll hint");
+        assert!(top.contains("↑↓"), "overflow must show the scroll hint");
+        assert!(top.contains('↓'), "overflow must show rows below");
         assert!(
-            top.contains("ask lazybox"),
+            top.contains("ASK LAZYBOX"),
             "top of the panel is visible at scroll 0"
         );
         assert!(
@@ -948,7 +956,7 @@ mod tests {
             bottom.contains("exit to sidebar"),
             "scrolling reveals the Terminal row"
         );
-        assert!(bottom.contains("above"), "hint shows rows scrolled above");
+        assert!(bottom.contains('↑'), "hint shows rows scrolled above");
     }
 
     /// The `g` leader gets its own labeled block built from the catalog:
@@ -962,7 +970,7 @@ mod tests {
         let g = help
             .leaders
             .iter()
-            .find(|lg| lg.heading.contains("press g"))
+            .find(|lg| lg.leader == "g")
             .expect("g leader block missing from help panel");
         let rows: Vec<(String, String)> = g
             .chords
@@ -974,8 +982,8 @@ mod tests {
             // `g g` repeats the leader key but is a real menu member
             // (auto-merge), NOT a q-latch double-press — it must stay in
             // the github block, not fall through to the flat grid (#338).
-            ("g g", "auto-merge"),
-            ("g v", "reviewers"),
+            ("g g", "auto-merge on green"),
+            ("g r", "reviewers"),
             ("g a", "assignees"),
             ("g l", "labels"),
             ("g o", "open in browser"),
@@ -1004,7 +1012,7 @@ mod tests {
         let w = help
             .leaders
             .iter()
-            .find(|lg| lg.heading.contains("press w"))
+            .find(|lg| lg.leader == "w")
             .expect("w leader block missing from help panel");
         let rows: Vec<(String, String)> = w
             .chords
@@ -1023,32 +1031,39 @@ mod tests {
         }
     }
 
-    /// The default keymap is leaders-only (#304): no legacy Shift-*
-    /// alias may reappear on the g group's aliases line, and the
-    /// heading carries the group's registry name so the help panel,
-    /// footer cell, and which-key popup all tell the same story.
+    /// The compact index keeps only group metadata; detailed chords are
+    /// discoverable in the popup after pressing the leader.
     #[test]
-    fn leader_section_is_alias_free_and_carries_the_group_label() {
+    fn leader_index_carries_compact_group_metadata() {
         use lazybox_tui_core::action::ActionDef;
         let catalog = ActionDef::catalog(&[], &std::collections::BTreeMap::new());
         let help = Help::from_catalog(&catalog, ']');
         let g = help
             .leaders
             .iter()
-            .find(|lg| lg.heading.contains("press g"))
+            .find(|lg| lg.leader == "g")
             .expect("g leader block missing from help panel");
+        assert_eq!(g.label, "github");
         assert!(
-            g.heading.starts_with("github"),
-            "g group heading missing its registry label: {:?}",
-            g.heading,
+            g.chords
+                .iter()
+                .all(|binding| binding.keys.starts_with("g "))
         );
-        for alias in ["Shift-M", "Shift-V", "Shift-G", "Shift-L", "Shift-O"] {
-            assert!(
-                !g.aliases.contains(alias),
-                "legacy alias {alias} leaked back into the aliases line: {:?}",
-                g.aliases,
-            );
-        }
+    }
+
+    #[test]
+    fn leader_index_uses_the_designed_teaching_order() {
+        use lazybox_tui_core::action::ActionDef;
+        let agents = ["claude".to_string(), "codex".to_string()];
+        let catalog = ActionDef::catalog(&agents, &std::collections::BTreeMap::new());
+        let help = Help::from_catalog(&catalog, ']');
+        assert_eq!(
+            help.leaders
+                .iter()
+                .map(|group| group.label)
+                .collect::<Vec<_>>(),
+            ["work", "agent", "main branch", "github", "workspace"],
+        );
     }
 
     /// The `a` agent group forms its own leader block, labeled from the
@@ -1066,13 +1081,9 @@ mod tests {
         let a = help
             .leaders
             .iter()
-            .find(|lg| lg.heading.contains("press a"))
+            .find(|lg| lg.leader == "a")
             .expect("a leader block missing from help panel");
-        assert!(
-            a.heading.starts_with("agent"),
-            "a group heading missing its registry label: {:?}",
-            a.heading,
-        );
+        assert_eq!(a.label, "agent");
         let rows: Vec<(String, String)> = a
             .chords
             .iter()
@@ -1111,5 +1122,15 @@ mod tests {
         assert_eq!(format_keys_for_display("q q"), "q q");
         assert_eq!(format_keys_for_display("g/G"), "g/G");
         assert_eq!(format_keys_for_display("↑/↓"), "↑/↓");
+    }
+
+    #[test]
+    fn reference_collapses_compatibility_aliases() {
+        assert_eq!(
+            compact_keys_for_reference("F8 | Alt-s | Ctrl-Alt-s"),
+            "F8 (+2)",
+        );
+        assert_eq!(compact_keys_for_reference("Shift-R"), "Shift+R");
+        assert_eq!(compact_keys_for_reference("]]|"), "]]|");
     }
 }

@@ -1618,7 +1618,7 @@ async fn rescope_with_empty_but_successful_poll_keeps_workspaces() {
     // transient 0-result GitHub response, and watched ALL their
     // workspaces disappear (real incident, 2026-05-27). The fix: a
     // 0-task poll never rescopes. The user can explicitly remove
-    // rows via Shift-X / Settings → Clean.
+    // rows via `x x` / Settings → Clean.
     let config = ServerConfig::in_memory();
     polling::upsert(&config, make_task("o/r#ghost-1")).await;
     polling::upsert(&config, make_task("o/r#ghost-2")).await;
@@ -2057,7 +2057,7 @@ async fn delete_workspace_kills_terminals_via_terminal_meta() {
     // prefix to find which terminals belong to a workspace. After
     // tmux session names switched to `lazybox-{repo}-{kind}-{pid}-{n}`
     // (no longer prefixed with the workspace_key), that filter
-    // matched zero terminals — Shift-X X silently kept the ghosts.
+    // matched zero terminals — confirmed `x x` silently kept the ghosts.
     // Now we use terminal_meta as the source of truth.
     use lazybox_core::{SessionKey, WorkspaceKey};
     use lazybox_ipc::{TerminalId, TerminalKind};
@@ -2461,7 +2461,7 @@ async fn gh_client_cache_is_independent_of_poll_state() {
     // the brief checkout window.
     let _poll_state_held = config.poll_state.lock().await;
     assert!(
-        config.gh_client_cache.try_lock().is_ok(),
+        config.gh_client_cache.try_lock().is_some(),
         "gh_client_cache must be reachable without poll_state (#92)",
     );
 }
@@ -2747,7 +2747,7 @@ async fn details_backfill_collapses_issue_workspace() {
 #[tokio::test]
 async fn rescope_delete_does_not_archive_workspace() {
     // Regression: rescope's silent delete routed through the same
-    // path as the user's Shift-X and ARCHIVED the key — so a
+    // path as the user's `x x` and ARCHIVED the key — so a
     // workspace deleted for upstream/transient reasons (truncated
     // query, scope edit, reopened PR) was permanently blocked from
     // re-creation by the upsert archive guard.
@@ -2784,7 +2784,7 @@ async fn rescope_delete_does_not_archive_workspace() {
 #[tokio::test]
 async fn user_delete_archives_and_blocks_resurrection() {
     // Counterpart to `rescope_delete_does_not_archive_workspace`: a
-    // user-intent delete (Shift-X) still archives, so the next poll
+    // user-intent delete (`x x`) still archives, so the next poll
     // does NOT resurrect the dismissed row.
     use lazybox_core::WorkspaceKey;
     let config = ServerConfig::in_memory();
@@ -3857,7 +3857,7 @@ async fn combining_multiple_issues_with_live_sessions_rebadges_every_terminal() 
 
 #[cfg(test)]
 mod live_collapse_e2e {
-    //! Issue #205, the HARDCORE end-to-end: drive a real `Shift-J`
+    //! Issue #205, the HARDCORE end-to-end: drive a real `x j`
     //! collapse through the actual serve loop — a Client talking to a
     //! Server over the in-process channel, a real agent terminal spawned
     //! via `Command::Spawn`, its state driven by real PTY output / hooks,
@@ -3990,7 +3990,7 @@ mod live_collapse_e2e {
     }
 
     /// Bring in a PR closing the issue (a live terminal stalls the silent
-    /// auto-merge) and accept the merge via the real `Shift-J` command
+    /// auto-merge) and accept the merge via the real `x j` command
     /// (`CollapseIntoPr`). Returns the PR session key once the merge has
     /// fully committed.
     ///
@@ -4194,7 +4194,7 @@ mod live_collapse_e2e {
     #[tokio::test]
     async fn join_immediately_after_spawn_rebadges_the_terminal() {
         // The spawn-then-join race (#90, previously untested): a user
-        // spawns an agent and hits `Shift-J` before touching it — the
+        // spawns an agent and hits `x j` before touching it — the
         // terminal carries no AgentState yet. The rebadge must still
         // catch it, or the fresh terminal is orphaned under the deleted
         // issue key.
@@ -4231,7 +4231,7 @@ mod live_collapse_e2e {
 /// `delete_project` on a project with NO workspaces still removes
 /// the project record and fires `ProjectRemoved`. Covers the "user
 /// just made a local project, hasn't added a workspace yet, presses
-/// Shift-X" path.
+/// x x" path.
 #[tokio::test]
 async fn delete_project_with_no_workspaces_still_removes_project() {
     use lazybox_core::{Project, ProjectKey};

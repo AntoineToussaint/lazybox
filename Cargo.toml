@@ -32,51 +32,33 @@ members = [
 warnings = "deny"
 
 [workspace.lints.clippy]
-# (defaults — tighten here if you want to enforce a style)
 
-# ── cargo-dist (release plumbing) ───────────────────────────────────────
-#
-# `dist` reads this section to scaffold GitHub Releases, a Homebrew
-# formula, and a curl-able `install.sh`. Triggered by pushing a tag
-# matching the `tag-namespace` shape (e.g. `v0.1.0`). Bump
-# `[workspace.package].version` first, then `git tag v0.1.0 && git
-# push --tags` to fire the release workflow generated under
-# `.github/workflows/release.yml`.
-#
-# The CI workflow needs Zig installed before `cargo build` runs — see
-# the `pre-build` step in the generated release workflow.
-
+# Config for 'dist'
 [workspace.metadata.dist]
-# Use the latest stable cargo-dist on every CI run.
-cargo-dist-version = "0.28.0"
-# Generic CI generator (GitHub Actions specifically).
-ci = ["github"]
-# What kinds of installer to publish alongside the prebuilt binaries.
-# `shell` = `curl ... | sh` script for Linux/macOS.
-# `homebrew` = a tap-pushed Homebrew formula.
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.31.0"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
 installers = ["shell", "homebrew"]
-# Enable the dedicated Homebrew publish job that pushes the formula to the tap
-# (needs the HOMEBREW_TAP_TOKEN secret). Without this, the formula is generated
-# but never pushed.
+# Publish jobs to run in CI
 publish-jobs = ["homebrew"]
-# Tap repo to push the Homebrew formula to. Must exist + give the
-# release workflow write access via a deploy key or PAT.
+# Global artifacts jobs to run in CI
+global-artifacts-jobs = ["./smoke-release-artifacts"]
+# A GitHub repo to push Homebrew formulas to
 tap = "AntoineToussaint/homebrew-lazybox"
-# Build matrix. Both macOS arches + Linux x64. Intel macOS is cross-compiled on
-# the macos-14 (Apple Silicon) runner — see github-custom-runners below — to
-# avoid the scarce macos-13 runners. aarch64-unknown-linux-gnu is still deferred
-# (a Zig libc++ sub-compilation error on that target).
-targets = [
-    "aarch64-apple-darwin",
-    "x86_64-apple-darwin",
-    "x86_64-unknown-linux-gnu",
-]
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
 # Extra runner setup steps. libghostty-vt's build.rs invokes
 # `zig build` during compilation — every CI runner needs Zig 0.15.2+
 # on PATH. cargo-dist surfaces these to the generated workflow.
 github-build-setup = "../release-setup.yml"
-# Publish all pushes to GitHub Releases (including pre-releases).
+# Which actions to run on pull requests
 pr-run-mode = "plan"
+# Path that installers should place binaries in
+install-path = "CARGO_HOME"
+# Whether to install an updater program
+install-updater = false
 # Override dist's default runners: it picks macos-13 (Intel, scarce) for the
 # Apple-Silicon build and the retired ubuntu-20.04 for Linux. `global` sets the
 # runner for the orchestration jobs (plan/host/publish/announce).
@@ -89,9 +71,9 @@ x86_64-apple-darwin = "macos-14"
 x86_64-unknown-linux-gnu = "ubuntu-22.04"
 
 [workspace.package]
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT"
 repository = "https://github.com/AntoineToussaint/lazybox"
 homepage = "https://lazybox.ai"
@@ -127,7 +109,10 @@ futures            = "0.3"
 serde              = { version = "1", features = ["derive"] }
 serde_json         = "1"
 serde_yaml         = "0.9"
-bincode            = "1.3"
+# 3.0.0 is a compile-error-only placeholder; 2.0.1 is the final usable
+# bincode release. The IPC layer uses its legacy wire config. Its unmaintained
+# advisory and replacement constraint are documented in deny.toml.
+bincode            = { version = "2.0.1", features = ["serde"] }
 thiserror          = "2"
 anyhow             = "1"
 tracing            = "0.1"
@@ -137,17 +122,33 @@ ratatui            = "0.30"
 tuirealm           = "4.1"
 tui-markdown       = "0.3"
 chrono             = { version = "0.4", features = ["serde"] }
-portable-pty       = "0.8"
-rusqlite           = { version = "0.32", features = ["bundled"] }
+portable-pty       = "0.9"
+# 0.40's libsqlite3 build script requires Rust 1.91; 0.39 is the
+# newest release that preserves the workspace's Rust 1.88 floor.
+rusqlite           = { version = "0.39", features = ["bundled"] }
 parking_lot        = "0.12"
-octocrab           = "0.44"
+octocrab           = { version = "0.54", default-features = false, features = [
+    "default-client",
+    "follow-redirect",
+    "retry",
+    "rustls",
+    "rustls-aws-lc-rs",
+    "jwt-aws-lc-rs",
+    "timeout",
+    "tracing",
+] }
 
 # Vendored libghostty-rs — see `crates/libghostty-vt` and
 # `crates/libghostty-vt-sys`. Both build a Zig-compiled C library
-# under the hood (the build.rs fetches ghostty's source on first
-# compile).
+# under the hood (`make setup` prepares Ghostty's pinned source and Zig
+# packages in a host-level cache before the first offline compile).
 libghostty-vt     = { path = "crates/libghostty-vt" }
 libghostty-vt-sys = { path = "crates/libghostty-vt-sys" }
+
+# Strip local optimized binaries as well as published artifacts. Debug builds
+# retain symbols for profiling and crash diagnosis.
+[profile.release]
+strip = "symbols"
 
 # The release profile cargo-dist (`dist`) builds with: `cargo build --profile
 # dist`. cargo-dist requires this to exist (normally added by `dist init`);

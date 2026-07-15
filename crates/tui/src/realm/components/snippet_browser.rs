@@ -1,12 +1,12 @@
 //! `SnippetBrowser` — read-only catalog of the snippet library (#237).
 //!
 //! Snippets were undiscoverable: the only ways in were typing
-//! `]]<key>` (you had to already know the key) and the terminal-leader
+//! `]]s<key>` (you had to already know the key) and the terminal-leader
 //! popup, which never functions as a browsable list. This modal lists
 //! every merged snippet — key, origin, description, and the full body —
 //! so a user can see what's available and what each one expands to.
 //! Reachable from any pane via `]`, the `,` Settings palette, and listed
-//! in the `?` help.
+//! in Ask Lazybox's shortcut index.
 //!
 //! Deliberately read-only: editing snippets stays "edit the YAML file"
 //! by design (see `docs/snippets.md`). `e` is the bridge to that —
@@ -59,14 +59,17 @@ pub struct SnippetBrowser {
     scroll: u16,
     /// Body viewport height, cached in `view` for page jumps + clamping.
     body_height: u16,
+    /// Live terminal leader character, so examples follow a remap.
+    escape_char: char,
 }
 
 impl SnippetBrowser {
-    pub fn new(rows: Vec<BrowserRow>) -> Self {
+    pub fn new(rows: Vec<BrowserRow>, escape_char: char) -> Self {
         Self {
             rows,
             scroll: 0,
             body_height: 0,
+            escape_char,
         }
     }
 
@@ -89,9 +92,9 @@ impl SnippetBrowser {
             if i > 0 {
                 lines.push(Line::raw(""));
             }
-            // Heading: `]key   description   [origin]`.
+            // Heading: `]]s<key>   description   [origin]`.
             let mut head: Vec<Span<'static>> = vec![Span::styled(
-                format!("]{}", r.key),
+                format!("{0}{0}s{1}", self.escape_char, r.key,),
                 Style::default()
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
@@ -314,11 +317,11 @@ mod tests {
 
     #[test]
     fn lists_keys_descriptions_bodies_and_origins() {
-        let mut comp = SnippetBrowser::new(rows());
+        let mut comp = SnippetBrowser::new(rows(), ']');
         let out = render(&mut comp, 90, 20);
         assert!(out.contains("Snippets"), "missing title: {out}");
-        assert!(out.contains("]pr"), "missing pr key: {out}");
-        assert!(out.contains("]rev"), "missing rev key: {out}");
+        assert!(out.contains("]]spr"), "missing pr key: {out}");
+        assert!(out.contains("]]srev"), "missing rev key: {out}");
         assert!(out.contains("Open a PR"), "missing description: {out}");
         assert!(
             out.contains("Please open a PR for the current branch."),
@@ -330,7 +333,7 @@ mod tests {
 
     #[test]
     fn empty_library_renders_placeholder() {
-        let mut comp = SnippetBrowser::new(vec![]);
+        let mut comp = SnippetBrowser::new(vec![], ']');
         let out = render(&mut comp, 80, 12);
         assert!(out.contains("No snippets configured"), "{out}");
     }
@@ -338,17 +341,20 @@ mod tests {
     #[test]
     fn long_body_wraps_and_continuations_stay_indented() {
         let long = "alpha bravo charlie delta echo foxtrot golf hotel india juliet";
-        let comp = SnippetBrowser::new(vec![BrowserRow::new(
-            "rev",
-            &Snippet {
-                description: "Review".into(),
-                category: "Review".into(),
-                body: long.into(),
-                origin: SnippetOrigin::Global,
-            },
-        )]);
+        let comp = SnippetBrowser::new(
+            vec![BrowserRow::new(
+                "rev",
+                &Snippet {
+                    description: "Review".into(),
+                    category: "Review".into(),
+                    body: long.into(),
+                    origin: SnippetOrigin::Global,
+                },
+            )],
+            ']',
+        );
         let theme = crate::theme::current();
-        // 30 cells: the heading (`]rev  Review  [global]`) fits on one
+        // 30 cells: the heading (`]]srev  Review  [global]`) fits on one
         // line, but the long single-line body is forced to wrap.
         let width = 30u16;
         let lines = comp.body_lines(theme, width);
@@ -360,7 +366,7 @@ mod tests {
                     .map(|s| s.content.as_ref())
                     .collect::<String>()
             })
-            .filter(|s| !s.starts_with("]rev")) // drop the heading row
+            .filter(|s| !s.starts_with("]]srev")) // drop the heading row
             .filter(|s| !s.trim().is_empty())
             .collect();
         assert!(body.len() > 1, "a long body must wrap: {body:?}");
@@ -382,13 +388,13 @@ mod tests {
 
     #[test]
     fn e_opens_the_yaml_file() {
-        let mut comp = SnippetBrowser::new(rows());
+        let mut comp = SnippetBrowser::new(rows(), ']');
         assert_eq!(comp.on(&keyed(Key::Char('e'))), Some(Msg::OpenSnippetsFile));
     }
 
     #[test]
     fn navigation_scrolls_other_keys_dismiss() {
-        let mut comp = SnippetBrowser::new(rows());
+        let mut comp = SnippetBrowser::new(rows(), ']');
         let _ = render(&mut comp, 80, 12);
         assert_eq!(comp.on(&keyed(Key::Down)), None);
         assert_eq!(comp.scroll, 1);

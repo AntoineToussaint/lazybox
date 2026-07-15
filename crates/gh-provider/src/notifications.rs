@@ -16,8 +16,8 @@
 //! tier on top of the existing slow full-sweep.
 
 use chrono::{DateTime, Utc};
+use parking_lot::Mutex;
 use serde::Deserialize;
-use std::sync::Mutex;
 
 /// Outcome of one `GET /notifications` call.
 ///

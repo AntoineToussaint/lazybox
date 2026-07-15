@@ -6,8 +6,8 @@
 //! The tests use `Model::new_for_test` (a cfg(test)-only constructor
 //! that swaps `CrosstermTerminalAdapter` for `TestTerminalAdapter`)
 //! so they don't need a real terminal or raw mode.
-// Tests may block (sleeps to cross latch windows); the crate-wide
-// blocking-call ban in clippy.toml targets the run loop.
+// Tests may block while crossing UI timing thresholds; the crate-wide
+// blocking-call ban in clippy.toml targets production paths.
 #![allow(clippy::disallowed_methods)]
 
 use chrono::Utc;
@@ -28,17 +28,13 @@ fn key(code: Key) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
-/// Press bare `w` and drive the timed work-leader (#224) to its
-/// idle-tick timeout, so `Work` fires against the running-or-default
-/// agent. `w` now arms a leader (for the scoped `w c` / `w x` chords);
-/// with no agent key following, the bare action resolves on the idle
-/// tick — exactly the keyboard path a user gets when they press `w`
-/// alone. The sleep clears the default `escape_window` (~600ms).
-fn press_bare_w(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>) {
+/// Choose the default/running agent from the deterministic work menu.
+/// The second `w` dispatches immediately; there is no ambiguity timeout.
+fn press_default_work(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>) {
     m.dispatch_key(key(Key::Char('w')));
-    assert!(m.work_leader_pending(), "`w` arms the work leader");
-    std::thread::sleep(std::time::Duration::from_millis(650));
-    m.tick_work_leader();
+    assert!(m.leader_pending().is_some(), "`w` opens the work menu");
+    m.dispatch_key(key(Key::Char('w')));
+    assert!(m.leader_pending().is_none(), "`w w` resolves the menu");
 }
 
 fn key_with(code: Key, mods: KeyModifiers) -> KeyEvent {
@@ -132,7 +128,7 @@ fn remapped_new_workspace_binding_mounts_input() {
 }
 
 /// Regression for the "new-project row is unreachable" UX bug. The
-/// user presses Shift-N, types a name, and submits → the daemon
+/// user presses `x p`, types a name, and submits → the daemon
 /// creates the project + broadcasts `ProjectUpserted`. Pre-fix, the
 /// new RepoHeader row appeared but the cursor stayed put and j/k
 /// skips header rows, so `n` (new workspace) had no project to
@@ -161,7 +157,7 @@ fn create_project_auto_focuses_new_header_and_opens_workspace_input() {
     assert_eq!(
         m.top_modal(),
         Some(&Id::NewWorkspace),
-        "ProjectUpserted matching a just-submitted Shift-N should auto-open the new-workspace input",
+        "ProjectUpserted matching a just-submitted x p should auto-open the new-workspace input",
     );
 }
 
@@ -192,7 +188,7 @@ fn shift_j_on_issue_with_claiming_pr_emits_collapse_command() {
     });
 
     // Force cursor onto the issue row — default sort can place
-    // the PR first, which would route Shift+J at the PR (where
+    // the PR first, which would route `x j` at the PR (where
     // CollapseIntoPr isn't available because the workspace has a
     // PR).
     let issue_key: SessionKey = (&issue_ws.key).into();
@@ -201,7 +197,8 @@ fn shift_j_on_issue_with_claiming_pr_emits_collapse_command() {
         "test setup: failed to focus the issue row",
     );
 
-    m.dispatch_key(key_with(Key::Char('J'), KeyModifiers::SHIFT));
+    m.dispatch_key(key(Key::Char('x')));
+    m.dispatch_key(key(Key::Char('j')));
 
     let mut commands: Vec<Command> = Vec::new();
     while let Ok(cmd) = server.rx.try_recv() {
@@ -212,11 +209,11 @@ fn shift_j_on_issue_with_claiming_pr_emits_collapse_command() {
         .find(|c| matches!(c, Command::CollapseIntoPr { .. }));
     assert!(
         collapse.is_some(),
-        "Shift+J on issue with claiming PR must emit CollapseIntoPr, got: {commands:#?}",
+        "x j on issue with claiming PR must emit CollapseIntoPr, got: {commands:#?}",
     );
 }
 
-/// Shift+J on an issue whose PR isn't in local state surfaces a
+/// `x j` on an issue whose PR isn't in local state surfaces a
 /// footer notice instead of firing a no-op IPC.
 #[test]
 fn shift_j_on_orphan_issue_surfaces_notice_no_ipc() {
@@ -232,7 +229,8 @@ fn shift_j_on_orphan_issue_surfaces_notice_no_ipc() {
         projects: vec![],
     });
 
-    m.dispatch_key(key_with(Key::Char('J'), KeyModifiers::SHIFT));
+    m.dispatch_key(key(Key::Char('x')));
+    m.dispatch_key(key(Key::Char('j')));
 
     let mut commands: Vec<Command> = Vec::new();
     while let Ok(cmd) = server.rx.try_recv() {
@@ -252,7 +250,7 @@ fn create_project_with_no_matching_upsert_does_not_auto_open_input() {
     let (client, _server) = channel::pair();
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
 
-    // A `ProjectUpserted` arriving outside the Shift-N flow (e.g.
+    // A `ProjectUpserted` arriving outside the x p flow (e.g.
     // first-sight registration during polling) must not hijack the
     // user — no modal should mount.
     let project = Project::new(
@@ -265,14 +263,14 @@ fn create_project_with_no_matching_upsert_does_not_auto_open_input() {
 }
 
 #[test]
-fn remapped_help_binding_mounts_help_modal() {
-    // Remap help to lowercase `h` and verify the modal opens.
+fn remapped_help_binding_mounts_ask_lazybox() {
+    // Remap the discovery surface to lowercase `h` and verify Ask opens.
     let mut m = build_model();
     let mut overrides = std::collections::BTreeMap::new();
     overrides.insert("open_help".to_string(), "h".to_string());
     m.apply_action_key_overrides(overrides);
     m.dispatch_key(key(Key::Char('h')));
-    assert_eq!(m.top_modal(), Some(&Id::Help));
+    assert_eq!(m.top_modal(), Some(&Id::HelpAsk));
 }
 
 #[test]
@@ -373,13 +371,13 @@ fn shift_arrows_clamp_at_min_max() {
 }
 
 #[test]
-fn question_mark_mounts_help_modal() {
+fn question_mark_mounts_ask_lazybox() {
     // `dispatch_key` bypasses the run-loop's "modal is up" guard
     // and drives `handle_pane_key` directly, so this test verifies
     // the orchestrator-side wiring rather than the run-loop guard.
     let mut m = build_model();
     m.dispatch_key(key(Key::Char('?')));
-    assert_eq!(m.top_modal(), Some(&Id::Help));
+    assert_eq!(m.top_modal(), Some(&Id::HelpAsk));
 }
 
 #[test]
@@ -759,11 +757,11 @@ fn out_of_scope_queued_during_help_modal_drains_on_help_dismiss() {
     // drain. Now ANY ModalDismissed retries the queue.
     let (client, _server) = channel::pair();
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
-    // Open Help. The Help modal subscribes to the bus the same way
+    // Open Ask Lazybox. The help modal subscribes to the bus the same way
     // any modal does; we don't drive its construction directly so
     // we just verify the queue behavior via the run-through.
     m.dispatch_key(key(Key::Char('?')));
-    assert_eq!(m.top_modal(), Some(&Id::Help));
+    assert_eq!(m.top_modal(), Some(&Id::HelpAsk));
     // Daemon sends an out-of-scope event while Help is up.
     m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
         workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
@@ -771,9 +769,9 @@ fn out_of_scope_queued_during_help_modal_drains_on_help_dismiss() {
         title: None,
         active_terminal_count: 1,
     });
-    // Help still on top — the queued prompt hasn't surfaced yet.
-    assert_eq!(m.top_modal(), Some(&Id::Help));
-    // Dismiss Help. Now the prompt should mount.
+    // Ask still on top — the queued prompt hasn't surfaced yet.
+    assert_eq!(m.top_modal(), Some(&Id::HelpAsk));
+    // Dismiss Ask. Now the prompt should mount.
     m.update(lazybox_tui::realm::Msg::ModalDismissed);
     assert_eq!(
         m.top_modal(),
@@ -935,8 +933,8 @@ fn w_on_issue_with_running_claude_injects_implement_prompt() {
         m.dispatch_key(key(Key::Tab));
     }
 
-    // Press `w` (bare → running-or-default agent).
-    press_bare_w(&mut m);
+    // Choose default work (`w w` → running-or-default agent).
+    press_default_work(&mut m);
 
     // Drain and look for the inject (NOT a duplicate spawn).
     let mut commands: Vec<Command> = Vec::new();
@@ -1020,7 +1018,7 @@ fn w_on_issue_from_right_pane_also_injects() {
         m.dispatch_key(key(Key::Tab));
     }
 
-    press_bare_w(&mut m);
+    press_default_work(&mut m);
 
     let mut commands: Vec<Command> = Vec::new();
     while let Ok(cmd) = server.rx.try_recv() {
@@ -1086,8 +1084,8 @@ fn sidebar_w_honors_activity_selection() {
         m.dispatch_key(key(Key::Tab));
     }
 
-    // Press `w` from the sidebar (bare → default agent here).
-    press_bare_w(&mut m);
+    // Choose default work (`w w`) from the sidebar.
+    press_default_work(&mut m);
 
     let mut commands: Vec<Command> = Vec::new();
     while let Ok(cmd) = server.rx.try_recv() {
@@ -1161,12 +1159,13 @@ fn shift_a_with_no_sessions_does_not_mount_picker() {
         terminals: vec![],
         projects: vec![],
     });
-    // Shift-A should be a no-op (no sessions to adopt).
-    m.dispatch_key(key_with(Key::Char('A'), KeyModifiers::SHIFT));
+    // `x a` should be a no-op (no sessions to adopt).
+    m.dispatch_key(key(Key::Char('x')));
+    m.dispatch_key(key(Key::Char('a')));
     assert_eq!(
         m.top_modal(),
         None,
-        "Shift-A on a session-less workspace must not mount a picker",
+        "x a on a session-less workspace must not mount a picker",
     );
 }
 
@@ -1180,7 +1179,7 @@ fn shift_a_with_sessions_mounts_adopt_picker() {
     // Sidebar sorts by `updated_at` desc within a repo group, so we
     // bias `source` slightly newer than `target` to make the cursor
     // (which starts at row 0) land on the source — the workspace
-    // Shift-A is supposed to read from.
+    // `x a` is supposed to read from.
     let now = Utc::now();
     let mut src_task = task_with_pr("o/r#1");
     src_task.updated_at = now + Duration::seconds(1);
@@ -1200,18 +1199,19 @@ fn shift_a_with_sessions_mounts_adopt_picker() {
         projects: vec![],
     });
     // Sanity: the cursor must be on a workspace with sessions for
-    // Shift-A to fire. If this fails, the picker test diagnoses the
+    // `x a` to fire. If this fails, the picker test diagnoses the
     // selection state rather than the keybinding wiring.
     let selected = m.sidebar().selected_workspace().cloned();
     assert!(
         selected.as_ref().is_some_and(|w| !w.sessions.is_empty()),
         "fixture: cursor must land on the source workspace; got {selected:?}"
     );
-    m.dispatch_key(key_with(Key::Char('A'), KeyModifiers::SHIFT));
+    m.dispatch_key(key(Key::Char('x')));
+    m.dispatch_key(key(Key::Char('a')));
     assert_eq!(
         m.top_modal(),
         Some(&Id::AdoptTarget),
-        "Shift-A on a workspace with sessions must mount the picker",
+        "x a on a workspace with sessions must mount the picker",
     );
 }
 
@@ -1495,7 +1495,7 @@ fn spawn_agent_key_is_remappable() {
 
 // ── Long-snooze is a Confirm-guarded catalog row (#102 P3) ───────────
 
-/// `Shift-Z` long-snooze is `Confirm`-guarded: it mounts the unified
+/// `x z` long-snooze is `Confirm`-guarded: it mounts the unified
 /// ActionConfirm modal instead of the old sidebar two-press latch, and
 /// only snoozes (~1 year) once the user confirms with `y`.
 #[test]
@@ -1513,12 +1513,13 @@ fn long_snooze_confirms_then_snoozes_a_year_out() {
     assert!(m.__test_sidebar_mut().focus_workspace_key(&pr_key));
     while server.rx.try_recv().is_ok() {}
 
-    // First press mounts the confirm — no snooze yet.
-    m.dispatch_key(key(Key::Char('Z')));
+    // The workspace-menu chord mounts the confirm — no snooze yet.
+    m.dispatch_key(key(Key::Char('x')));
+    m.dispatch_key(key(Key::Char('z')));
     assert_eq!(
         m.top_modal(),
         Some(&Id::ActionConfirm),
-        "Shift-Z must mount the Confirm modal, not snooze immediately",
+        "x z must mount the Confirm modal, not snooze immediately",
     );
     let before_confirm: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok()).collect();
     assert!(
@@ -1535,7 +1536,7 @@ fn long_snooze_confirms_then_snoozes_a_year_out() {
         Command::Snooze { until, .. } => Some(*until),
         _ => None,
     });
-    let until = snooze.expect("confirming Shift-Z snoozes");
+    let until = snooze.expect("confirming x z snoozes");
     let days = (until - Utc::now()).num_days();
     assert!(
         (360..=370).contains(&days),
@@ -1561,13 +1562,13 @@ fn render_to_string(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>) -> S
     out
 }
 
-/// Regression for #35: `g v` on a PR with no candidate reviewers must
+/// Regression for #35: `g r` on a PR with no candidate reviewers must
 /// surface a framed empty-state over the still-visible panes — NOT a
 /// blank/black screen. Previously the empty case only fired a footer
 /// flash, and an empty `Choice` (when it was mounted) rendered as a
 /// full-height blank rectangle.
 #[test]
-fn gv_with_no_candidate_reviewers_shows_framed_empty_state() {
+fn gr_with_no_candidate_reviewers_shows_framed_empty_state() {
     let mut m = build_model();
     let ws = Workspace::from_task(task_with_pr("o/r#1"), Utc::now());
     m.handle_daemon_event(IpcEvent::Snapshot {
@@ -1577,13 +1578,13 @@ fn gv_with_no_candidate_reviewers_shows_framed_empty_state() {
     });
 
     m.dispatch_key(key(Key::Char('g')));
-    m.dispatch_key(key(Key::Char('v')));
+    m.dispatch_key(key(Key::Char('r')));
 
     // A framed picker is mounted (not a bare flash).
     assert_eq!(
         m.top_modal(),
         Some(&Id::RequestReviewers),
-        "empty-candidate g v must mount the reviewers picker, not bail with only a flash",
+        "empty-candidate g r must mount the reviewers picker, not bail with only a flash",
     );
 
     let screen = render_to_string(&mut m);

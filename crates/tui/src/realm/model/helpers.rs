@@ -1234,7 +1234,6 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
         model.tick_right();
         model.tick_working();
         model.tick_terminal_leader();
-        model.tick_work_leader();
         // Surface a dead daemon channel within a frame of the first
         // failed `send_cmd` — without this a `--connect` client whose
         // daemon died keeps rendering as if everything works while

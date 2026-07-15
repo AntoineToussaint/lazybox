@@ -412,8 +412,11 @@ fn all_events() -> Vec<Event> {
 #[test]
 fn command_bincode_round_trip() {
     for cmd in all_commands() {
-        let bytes = bincode::serialize(&cmd).expect("serialize");
-        let back: Command = bincode::deserialize(&bytes).expect("deserialize");
+        let config = bincode::config::legacy();
+        let bytes = bincode::serde::encode_to_vec(&cmd, config).expect("serialize");
+        let (back, consumed): (Command, usize) =
+            bincode::serde::decode_from_slice(&bytes, config).expect("deserialize");
+        assert_eq!(consumed, bytes.len());
         // Debug-equality since the wire types intentionally don't
         // derive PartialEq (Sessions carry timestamps we can't compare
         // structurally). Debug output uniqueness is the contract.
@@ -443,8 +446,11 @@ fn provider_credential_command_debug_redacts_token() {
 #[test]
 fn event_bincode_round_trip() {
     for ev in all_events() {
-        let bytes = bincode::serialize(&ev).expect("serialize");
-        let back: Event = bincode::deserialize(&bytes).expect("deserialize");
+        let config = bincode::config::legacy();
+        let bytes = bincode::serde::encode_to_vec(&ev, config).expect("serialize");
+        let (back, consumed): (Event, usize) =
+            bincode::serde::decode_from_slice(&bytes, config).expect("deserialize");
+        assert_eq!(consumed, bytes.len());
         assert_eq!(format!("{ev:?}"), format!("{back:?}"));
     }
 }
@@ -469,7 +475,8 @@ async fn socket_framing_round_trip() {
     let mut seen = 0usize;
     while let Some(cmd) = read_frame::<_, Command>(&mut b).await.expect("read") {
         // Serialize again; if we got it we should be able to re-emit.
-        let _bytes = bincode::serialize(&cmd).expect("reserialize");
+        let _bytes =
+            bincode::serde::encode_to_vec(&cmd, bincode::config::legacy()).expect("reserialize");
         seen += 1;
     }
     assert_eq!(seen, all_commands().len());

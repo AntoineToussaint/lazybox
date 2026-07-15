@@ -7,14 +7,15 @@ In a few minutes you will install lazybox, launch it, and open a workspace with
 a live embedded terminal. That is the whole goal of this tutorial — one visible
 win. Everything else can wait.
 
-One prerequisite either way: the **GitHub CLI**, logged in. Run `gh auth login`
-once — lazybox reads your token from `gh auth token`.
+For a real GitHub inbox you need the **GitHub CLI**, logged in. Run
+`gh auth login` once — lazybox reads your token from `gh auth token`. The
+zero-setup `--test` mode does not need GitHub or `gh`.
 
 ## 1. Install
 
 The fastest path is a prebuilt binary.
 
-**Homebrew** (macOS · Linux):
+**Homebrew** (macOS arm64/x86_64 or Linux x86_64):
 
 ```sh
 brew install AntoineToussaint/lazybox/lazybox
@@ -36,7 +37,7 @@ tested. Expect sharp edges — logs land in `/tmp/lazybox.log`.
 
 ### Build from source instead
 
-Prefer to build it yourself, or hacking on lazybox? You will need **Rust 1.85+**
+Prefer to build it yourself, or hacking on lazybox? You will need **Rust 1.88+**
 and a **C compiler** (lazybox bundles SQLite). On Debian/Ubuntu also install
 libc++:
 
@@ -49,11 +50,15 @@ Then clone and build:
 ```sh
 git clone https://github.com/AntoineToussaint/lazybox.git
 cd lazybox
-make setup   # one-shot: downloads pinned Zig 0.15.2 to ~/.cache/lazybox/zig/
+make setup     # one online preparation of Zig, Ghostty, and Cargo caches
+make release   # optional optimized build; strictly offline after setup
 ```
 
-The first compile builds the bundled SQLite and the embedded terminal, so it
-takes around 30 seconds longer than later builds.
+`make setup` verifies the pinned Zig archive, caches the pinned Ghostty source,
+fetches the locked Cargo graph, and prebuilds the native terminal dependency.
+It is the only step that requires network access. Later `make release` runs
+Cargo with `--offline --locked`, including after `cargo clean` or from another
+worktree sharing the same cache.
 
 ## 2. Launch
 
@@ -83,8 +88,8 @@ In the sidebar:
 
 1. Press `j` / `k` to move the selection to a workspace.
 2. Press `Enter` to open it.
-3. Press `w` to put your **default agent** to work — or `s` for a plain
-   **shell** if you'd rather not start an agent yet. `w` needs the agent's CLI
+3. Press `w w` to put your **default agent** to work — or `s` for a plain
+   **shell** if you'd rather not start an agent yet. `w w` needs the agent's CLI
    (e.g. `claude`) on your `PATH`; `s` always works. To pick a specific agent,
    press `a` for the agent menu: `a c` Claude Code, `a x` Codex, `a u` Cursor.
 
@@ -104,7 +109,7 @@ An empty sidebar right after setup is normal, not a bug:
 - Rows can be hidden by the role filter. Press `f` to widen it
   (`all → author → reviewer → assignee → mentioned → all`).
 - If you simply have little GitHub activity, there may be nothing to show. You
-  don't need a PR to get the win above — press `n` to spin up a fresh scratch
+  don't need a PR to get the win above — press `x n` to spin up a fresh scratch
   workspace and open a session in it.
 :::
 

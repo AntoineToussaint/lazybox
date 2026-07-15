@@ -7,8 +7,8 @@ expression: rendered
 
  g ▸ github
   m  merge PR
-  g  auto-merge
-  v  reviewers
+  g  auto-merge on green
+  r  reviewers
   a  assignees
   l  labels
   o  open in browser

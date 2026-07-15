@@ -24,6 +24,9 @@ export default defineConfig({
       title: 'lazybox',
       description: 'A reactive PR inbox in your terminal.',
       tagline: 'A reactive PR inbox in your terminal.',
+      // The product site owns a custom, standalone `/404.html` page. Disabling
+      // Starlight's generated route avoids a collision with Astro's page route.
+      disable404Route: true,
       logo: { src: './src/assets/mark.svg', replacesTitle: false },
       favicon: '/favicon.svg',
       social: [

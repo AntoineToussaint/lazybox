@@ -125,7 +125,10 @@ fn subsequence_icase(haystack: &str, needle: &str) -> bool {
 fn section_scope(section: crate::action::Section) -> &'static str {
     use crate::action::Section;
     match section {
-        Section::Global => "active from any pane",
+        Section::Global => {
+            "active from non-terminal panes; a focused terminal forwards keys to its program \
+             (use the terminal leader first), except for explicitly noted global exceptions"
+        }
         Section::Workspace => {
             "acts on the focused workspace; active while the sidebar or activity pane has focus"
         }
@@ -144,7 +147,7 @@ fn section_scope(section: crate::action::Section) -> &'static str {
 /// follow-up questions ride the same conversation so the context is
 /// prompt-cached.
 ///
-/// `escape_char` is the configured `ui.terminal_escape_char`; the
+/// `escape_char` is the configured `terminal.escape_char`; the
 /// terminal leave/leader chord is rendered from it (doubled) exactly
 /// like the `?` help panel does (#188).
 pub fn agent_context(catalog: &[CatalogEntry], escape_char: char) -> String {
@@ -161,7 +164,7 @@ Rules:\n\
 - The keybinding tables are THIS user's effective keymap — their `ui.keymap_preset` and \
 `ui.action_keys` overrides are already applied. Quote keys exactly as written there.\n\
 - A binding only works in its section's scope; the scope is noted on each section header. \
-Always mention the scope when it isn't Global.\n\
+Global bindings generally do not intercept a focused terminal, so mention terminal scope when relevant.\n\
 - Be brief: a few sentences, and when keys are the answer list them as `` `key` — action `` lines.\n\
 - Do not use tools, do not read or write files, do not run commands. Everything you need is below.\n\
 - If the reference doesn't cover something, say so plainly instead of guessing.\n",
@@ -181,8 +184,9 @@ Always mention the scope when it isn't Global.\n\
         // The terminal leave/leader chord is dispatched by the escape-
         // char latch, not the catalog — render it from the live char
         // (#188), same as the `?` panel.
+        let terminal_exit = format!("{leader}q");
         let keys: &str = if entry.kind == ActionKind::LeaveTerminal {
-            &leader
+            &terminal_exit
         } else {
             entry.keys_display.as_ref()
         };
@@ -199,7 +203,7 @@ Always mention the scope when it isn't Global.\n\
         }
     }
     out.push_str(&format!(
-        "- `{leader}<snippet key>` — snippets: from a terminal, send a saved snippet \
+        "- `{leader}s<snippet key>` — snippets: from a terminal, send a saved snippet \
 (see the Snippets doc below).\n"
     ));
 
@@ -220,6 +224,13 @@ the next keystroke picks an action:\n",
             }
         }
     }
+    leaders.sort_by_key(|(_, members)| {
+        members
+            .first()
+            .and_then(|(_, entry)| crate::action::leader_group_label(entry.kind))
+            .map(crate::action::leader_group_rank)
+            .unwrap_or(usize::MAX)
+    });
     for (leader_stroke, members) in &leaders {
         let picks = members
             .iter()
@@ -232,8 +243,16 @@ the next keystroke picks an action:\n",
         ));
     }
     out.push_str(&format!(
-        "- inside a terminal, press `{leader}` (the terminal escape char `{escape_char}`, \
-doubled) to open the terminal command menu listed in the Terminal section above; \
+        "\n# Terminal command menu\n\nInside a terminal, press `{leader}` (the terminal escape \
+char `{escape_char}`, doubled), then choose:\n\
+- `{leader}s<snippet key>` — send a saved snippet\n\
+- `{leader}f` — toggle focus mode\n\
+- `{leader}q` — exit to the sidebar\n\
+- `{leader}\u{60}` — jump to any workspace\n\
+- `{leader}1`…`{leader}9` — jump to an agent workspace by sidebar position\n\
+- `{leader}|` / `{leader}-` — split right / down\n\
+- `{leader}<arrow>` — move tile focus or switch tabs\n\
+- `{leader}x` — close the focused terminal\n\
 `Esc` or any unbound key cancels back to the terminal.\n"
     ));
 
@@ -324,13 +343,15 @@ fallback shouldn't resurrect it)",
         assert!(ctx.contains("spawn claude"));
         assert!(ctx.contains("## Activity — active while the activity pane"));
         assert!(
-            ctx.contains("`}}` — "),
-            "leave-terminal binding should render the live escape char doubled"
+            ctx.contains("`}}q` — exit to sidebar"),
+            "leave-terminal binding should render the complete live exit chord"
         );
         assert!(
-            !ctx.contains("`]]` — "),
-            "no binding line may render the default escape char"
+            !ctx.contains("`]]q` — exit to sidebar"),
+            "no exit binding may render the default escape char"
         );
+        assert!(ctx.contains("`}}s<snippet key>` — send a saved snippet"));
+        assert!(ctx.contains("`}}|` / `}}-` — split right / down"));
     }
 
     /// The embedded docs ride along — the snippets doc is the agent's

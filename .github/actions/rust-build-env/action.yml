@@ -18,6 +18,10 @@ name: rust-build-env
 description: Install Zig, C toolchain, Rust stable, and Cargo cache.
 
 inputs:
+  rust-toolchain:
+    description: Rust toolchain to install (stable or the workspace MSRV, 1.88.0).
+    required: false
+    default: stable
   rust-components:
     description: Extra rustup components, comma-separated (e.g. "clippy" or "rustfmt").
     required: false
@@ -49,14 +53,24 @@ runs:
       # Keyed on `.zig-version` so a version bump invalidates the cache.
       uses: actions/cache@v4
       with:
-        path: ~/.cache/lazybox/zig
-        key: lazybox-zig-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.zig-version') }}
+        path: |
+          ~/.cache/lazybox/zig
+          ~/.cache/lazybox/ghostty
+        key: lazybox-native-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.zig-version', '.ghostty-version') }}
 
     - name: Install pinned Zig (scripts/bootstrap.sh)
       shell: bash
       run: ./scripts/bootstrap.sh
 
-    - uses: dtolnay/rust-toolchain@stable
+    - name: Install Rust stable
+      if: inputs.rust-toolchain == 'stable'
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: ${{ inputs.rust-components }}
+
+    - name: Install Rust 1.88.0 (workspace MSRV)
+      if: inputs.rust-toolchain == '1.88.0'
+      uses: dtolnay/rust-toolchain@1.88.0
       with:
         components: ${{ inputs.rust-components }}
 

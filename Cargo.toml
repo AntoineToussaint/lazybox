@@ -125,7 +125,7 @@ chrono             = { version = "0.4", features = ["serde"] }
 portable-pty       = "0.9"
 # 0.40's libsqlite3 build script requires Rust 1.91; 0.39 is the
 # newest release that preserves the workspace's Rust 1.88 floor.
-rusqlite           = { version = "0.39", features = ["bundled"] }
+rusqlite           = { version = "0.40", features = ["bundled"] }
 parking_lot        = "0.12"
 octocrab           = { version = "0.54", default-features = false, features = [
     "default-client",

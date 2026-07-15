@@ -19,14 +19,14 @@ jobs:
     name: Track Criterion regressions
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/rust-build-env
 
       # A unique save key plus a broad restore prefix makes each run compare
       # with the newest retained main-branch result while still allowing the
       # cache action to persist the updated history at job teardown.
       - name: Restore benchmark history
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .benchmark-cache
           key: criterion-${{ runner.os }}-${{ github.run_id }}

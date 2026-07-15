@@ -46,7 +46,7 @@ jobs:
     name: render
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/rust-build-env
 
       - name: Build lazybox (release)
@@ -110,7 +110,7 @@ jobs:
         # without guessing. Runs before the check so it captures the render
         # even when the diff fails the job.
         if: github.event_name == 'pull_request'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: golden-ascii-rendered
           path: demo/golden.ascii
@@ -161,7 +161,7 @@ jobs:
         # NOT commit them from CI — maintainers regenerate and commit locally
         # so the binary diff stays reviewable. The PR golden check guards drift.
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lazybox-demo
           path: |

@@ -243,7 +243,7 @@ impl<T: TerminalAdapter> Model<T> {
 
     /// A question submitted from the `HelpAsk` modal (#302). Records
     /// the turn in the shared conversation and routes it to the help
-    /// agent: the first question starts the headless stream-json run
+    /// agent: the first question starts a headless structured run
     /// with the generated catalog + docs context as its opening
     /// message; follow-ups ride the same run so the context stays
     /// prompt-cached. Questions racing the run start are queued and
@@ -252,7 +252,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// **Effects**: returns commands as a `Vec` for testability.
     pub fn handle_help_asked(&mut self, question: String) -> Vec<IpcCommand> {
         use lazybox_ipc::{AgentInputMessage, AgentRuntimeMode};
-        use lazybox_tui_core::help::{HELP_AGENT_ID, HELP_SESSION_KEY};
+        use lazybox_tui_core::help::{HELP_AGENT_PREFERENCE, HELP_SESSION_KEY, select_help_agent};
 
         let question = question.trim().to_string();
         if question.is_empty() {
@@ -269,17 +269,19 @@ impl<T: TerminalAdapter> Model<T> {
                 });
         }
         self.redraw = true;
-        if !self.agents.iter().any(|a| a == HELP_AGENT_ID) {
+        let Some(help_agent) = select_help_agent(&self.agents, Some(self.sidebar.default_agent()))
+        else {
             let mut convo = self.help_convo_mut();
             convo.notice = Some(format!(
-                "the help assistant needs the `{HELP_AGENT_ID}` agent enabled — \
-showing keybinding search only"
+                "the help assistant needs a structured agent ({}) enabled — \
+showing keybinding search only",
+                HELP_AGENT_PREFERENCE.join(" or ")
             ));
             if let Some(turn) = convo.streaming_turn_mut() {
                 turn.done = true;
             }
             return Vec::new();
-        }
+        };
         if let Some(run_id) = self.help_run {
             return vec![IpcCommand::SendAgentInput {
                 run_id,
@@ -301,7 +303,7 @@ showing keybinding search only"
         vec![IpcCommand::StartAgentRun {
             session_key: lazybox_core::SessionKey::new(HELP_SESSION_KEY),
             session_id: None,
-            agent: HELP_AGENT_ID.to_string(),
+            agent: help_agent.to_string(),
             mode: AgentRuntimeMode::StreamJson,
             // Left to the daemon: the sentinel key resolves to no
             // workspace and `resolve_cwd` picks a neutral cwd on ITS

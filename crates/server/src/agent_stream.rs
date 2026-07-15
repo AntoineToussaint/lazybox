@@ -1,10 +1,13 @@
-//! Runtime helpers for Claude Code's `stream-json` print mode.
+//! Provider-neutral runtime helpers for headless structured agents.
 //!
 //! This module intentionally stays independent of the daemon IPC event
 //! types. Callers can map `ParsedAgentEvent` into whatever wire events
 //! exist at integration time while still preserving the original JSON.
+//! Claude Code and Codex have different process lifecycles and JSONL
+//! schemas; both are normalized here before they reach clients.
 
 use crate::{ResultExt, ServerError};
+use lazybox_agents::StructuredAgentProtocol;
 use serde::{Deserialize, Serialize};
 
 // Local shorthands so the migration touches each `?`/`Context` line
@@ -22,28 +25,30 @@ use std::process::Stdio;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
-/// Configuration for launching Claude Code in bidirectional JSONL mode.
+/// Configuration for launching one provider-specific structured child.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClaudeStreamConfig {
-    /// Program name or absolute path. Defaults to `claude`.
+pub struct AgentStreamConfig {
+    pub protocol: StructuredAgentProtocol,
+    /// Program name or absolute path.
     pub program: String,
     /// Working directory for the child process.
     pub cwd: Option<PathBuf>,
-    /// Resume an existing Claude session id.
+    /// Resume an existing provider session/thread id.
     pub resume_session_id: Option<String>,
     /// Continue the most recent Claude session.
     pub continue_latest: bool,
-    /// Extra arguments appended after the required stream-json flags.
+    /// Extra arguments appended after the required provider flags.
     pub extra_args: Vec<String>,
     /// Extra environment variables for the child (e.g. the LLM-gateway
     /// base URL the interactive PTY path also injects).
     pub env: Vec<(String, String)>,
 }
 
-impl Default for ClaudeStreamConfig {
-    fn default() -> Self {
+impl AgentStreamConfig {
+    pub fn new(protocol: StructuredAgentProtocol, program: impl Into<String>) -> Self {
         Self {
-            program: "claude".to_string(),
+            protocol,
+            program: program.into(),
             cwd: None,
             resume_session_id: None,
             continue_latest: false,
@@ -51,11 +56,16 @@ impl Default for ClaudeStreamConfig {
             env: Vec::new(),
         }
     }
-}
 
-impl ClaudeStreamConfig {
-    /// Build the argv vector for Claude Code stream-json mode.
+    /// Build the complete provider argv, including the program.
     pub fn argv(&self) -> Vec<String> {
+        match self.protocol {
+            StructuredAgentProtocol::ClaudeStreamJson => self.claude_argv(),
+            StructuredAgentProtocol::CodexExecJson => self.codex_argv(),
+        }
+    }
+
+    fn claude_argv(&self) -> Vec<String> {
         let mut argv = vec![
             self.program.clone(),
             "-p".to_string(),
@@ -80,6 +90,29 @@ impl ClaudeStreamConfig {
         }
 
         argv.extend(self.extra_args.iter().cloned());
+        argv
+    }
+
+    fn codex_argv(&self) -> Vec<String> {
+        let mut argv = vec![self.program.clone(), "exec".to_string()];
+        if self.resume_session_id.is_some() {
+            argv.push("resume".to_string());
+        }
+        argv.extend(["--json".to_string(), "--skip-git-repo-check".to_string()]);
+        // The initial turn establishes the thread's sandbox policy.
+        // Help is read-only; future meta-agent actions are executed by
+        // lazybox's own allowlisted command layer, never by granting the
+        // model an unrestricted shell here.
+        if self.resume_session_id.is_none() {
+            argv.extend(["--sandbox".to_string(), "read-only".to_string()]);
+        }
+        argv.extend(self.extra_args.iter().cloned());
+        if let Some(session_id) = &self.resume_session_id {
+            argv.push(session_id.clone());
+        }
+        // Read the prompt body from stdin. Unlike Claude's persistent
+        // stream, Codex consumes stdin to EOF once per turn.
+        argv.push("-".to_string());
         argv
     }
 }
@@ -127,7 +160,7 @@ pub fn encode_user_text_jsonl(text: impl Into<String>) -> Result<String> {
     ClaudeUserTextMessage::new(text).to_jsonl()
 }
 
-/// Internal, IPC-independent representation of interesting Claude output.
+/// Internal, IPC-independent representation of structured provider output.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParsedAgentEvent {
     SessionInit {
@@ -156,6 +189,9 @@ pub enum ParsedAgentEvent {
     },
     ToolUseStop {
         index: Option<u64>,
+        id: Option<String>,
+        output: Option<Value>,
+        error: Option<String>,
         raw: Value,
     },
     Usage {
@@ -188,15 +224,31 @@ pub enum ParsedAgentEvent {
 }
 
 pub fn parse_jsonl_line(line: &str) -> Result<ParsedAgentEvent> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        bail!("empty Claude stream line");
-    }
-    let raw: Value = serde_json::from_str(trimmed).ctx("parse Claude stream JSONL line")?;
-    Ok(parse_value(raw))
+    parse_agent_jsonl_line(StructuredAgentProtocol::ClaudeStreamJson, line)
 }
 
-fn parse_value(raw: Value) -> ParsedAgentEvent {
+/// Parse one JSONL record using the selected provider protocol.
+pub fn parse_agent_jsonl_line(
+    protocol: StructuredAgentProtocol,
+    line: &str,
+) -> Result<ParsedAgentEvent> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        bail!("empty {} line", protocol.display_name());
+    }
+    let raw: Value = serde_json::from_str(trimmed).map_err(|error| {
+        ServerError::Agent(format!(
+            "parse {} JSONL line: {error}",
+            protocol.display_name()
+        ))
+    })?;
+    Ok(match protocol {
+        StructuredAgentProtocol::ClaudeStreamJson => parse_claude_value(raw),
+        StructuredAgentProtocol::CodexExecJson => parse_codex_value(raw),
+    })
+}
+
+fn parse_claude_value(raw: Value) -> ParsedAgentEvent {
     let type_name = string_at(&raw, &["type"]);
     let subtype = string_at(&raw, &["subtype"]);
 
@@ -303,6 +355,9 @@ fn parse_stream_event(raw: Value) -> Option<ParsedAgentEvent> {
         }
         "content_block_stop" => Some(ParsedAgentEvent::ToolUseStop {
             index: u64_at(event, &["index"]),
+            id: None,
+            output: None,
+            error: None,
             raw,
         }),
         "message_delta" => {
@@ -321,6 +376,110 @@ fn parse_stream_event(raw: Value) -> Option<ParsedAgentEvent> {
         }
         _ => None,
     }
+}
+
+fn parse_codex_value(raw: Value) -> ParsedAgentEvent {
+    match string_at(&raw, &["type"]) {
+        Some("thread.started") => ParsedAgentEvent::SessionInit {
+            session_id: string_at(&raw, &["thread_id"]).map(str::to_string),
+            raw,
+        },
+        Some("item.started") => {
+            let Some(item) = raw.get("item") else {
+                return ParsedAgentEvent::Raw(raw);
+            };
+            if let Some(name) = codex_tool_name(item) {
+                ParsedAgentEvent::ToolUseStart {
+                    index: None,
+                    id: string_at(item, &["id"]).map(str::to_string),
+                    name: Some(name),
+                    input: Some(item.clone()),
+                    raw,
+                }
+            } else {
+                ParsedAgentEvent::Raw(raw)
+            }
+        }
+        Some("item.completed") => {
+            let Some(item) = raw.get("item") else {
+                return ParsedAgentEvent::Raw(raw);
+            };
+            if string_at(item, &["type"]) == Some("agent_message") {
+                ParsedAgentEvent::TextDelta {
+                    text: string_at(item, &["text"]).unwrap_or_default().to_string(),
+                    raw,
+                }
+            } else if codex_tool_name(item).is_some() {
+                ParsedAgentEvent::ToolUseStop {
+                    index: None,
+                    id: string_at(item, &["id"]).map(str::to_string),
+                    output: Some(item.clone()),
+                    error: codex_item_error(item),
+                    raw,
+                }
+            } else {
+                ParsedAgentEvent::Raw(raw)
+            }
+        }
+        Some("turn.completed") => ParsedAgentEvent::Result {
+            result: None,
+            session_id: None,
+            usage: raw.get("usage").cloned(),
+            raw,
+        },
+        Some("turn.failed") => ParsedAgentEvent::Result {
+            result: None,
+            session_id: None,
+            usage: raw.get("usage").cloned(),
+            raw,
+        },
+        _ => ParsedAgentEvent::Raw(raw),
+    }
+}
+
+/// Codex emits several typed "items" for tools. Treat all completed
+/// operational items uniformly so clients—and the future meta-agent
+/// control plane—do not need provider-specific branches.
+fn codex_tool_name(item: &Value) -> Option<String> {
+    let item_type = string_at(item, &["type"])?;
+    match item_type {
+        "reasoning" | "agent_message" => None,
+        "mcp_tool_call" => {
+            let server = string_at(item, &["server"]);
+            let tool = string_at(item, &["tool"]);
+            Some(match (server, tool) {
+                (Some(server), Some(tool)) => format!("{server}.{tool}"),
+                (_, Some(tool)) => tool.to_string(),
+                _ => item_type.to_string(),
+            })
+        }
+        other => Some(other.to_string()),
+    }
+}
+
+fn codex_item_error(item: &Value) -> Option<String> {
+    let failed = string_at(item, &["status"]) == Some("failed")
+        || item
+            .get("exit_code")
+            .and_then(Value::as_i64)
+            .is_some_and(|code| code != 0)
+        || item.get("error").is_some_and(|error| !error.is_null());
+    if !failed {
+        return None;
+    }
+    nested_error_message(item).or_else(|| Some("Codex tool call failed".to_string()))
+}
+
+fn nested_error_message(value: &Value) -> Option<String> {
+    value
+        .get("error")
+        .and_then(|error| {
+            error
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| string_at(error, &["message"]).map(str::to_string))
+        })
+        .or_else(|| string_at(value, &["message"]).map(str::to_string))
 }
 
 fn message_text(raw: &Value) -> Option<String> {
@@ -397,11 +556,11 @@ fn first_string_field(value: &Value, keys: &[&str]) -> Option<String> {
     }
 }
 
-fn spawn_claude_command(config: &ClaudeStreamConfig) -> Result<(Child, ChildStdin, ChildStdout)> {
+fn spawn_agent_command(config: &AgentStreamConfig) -> Result<(Child, ChildStdin, ChildStdout)> {
     let argv = config.argv();
     let (program, args) = argv
         .split_first()
-        .ctx("Claude argv must contain a program")?;
+        .ctx("structured-agent argv must contain a program")?;
 
     let mut command = Command::new(program);
     command.args(args);
@@ -414,16 +573,22 @@ fn spawn_claude_command(config: &ClaudeStreamConfig) -> Result<(Child, ChildStdi
     command.stderr(Stdio::inherit());
     command.kill_on_drop(true);
 
-    let mut child = command.spawn().ctx("spawn Claude stream child")?;
-    let stdin = child.stdin.take().ctx("Claude child stdin unavailable")?;
-    let stdout = child.stdout.take().ctx("Claude child stdout unavailable")?;
+    let mut child = command.spawn().ctx("spawn structured-agent child")?;
+    let stdin = child
+        .stdin
+        .take()
+        .ctx("structured-agent child stdin unavailable")?;
+    let stdout = child
+        .stdout
+        .take()
+        .ctx("structured-agent child stdout unavailable")?;
     Ok((child, stdin, stdout))
 }
 
 /// Split, owned async I/O for one structured agent run, decoupled from
 /// the concrete child process. The production spawner wires these to a
 /// real subprocess; tests inject in-memory readers/writers so they
-/// never launch `claude` or a shell (CONTRIBUTING rule #5).
+/// never launch an agent CLI or a shell (CONTRIBUTING rule #5).
 pub struct AgentStreamIo {
     pub stdin: Pin<Box<dyn AsyncWrite + Send>>,
     pub stdout: Pin<Box<dyn AsyncRead + Send>>,
@@ -439,7 +604,7 @@ pub struct AgentStreamIo {
 pub trait AgentStreamSpawner: Send + Sync + 'static {
     fn spawn<'a>(
         &'a self,
-        config: ClaudeStreamConfig,
+        config: AgentStreamConfig,
     ) -> Pin<Box<dyn Future<Output = Result<AgentStreamIo>> + Send + 'a>>;
 }
 
@@ -450,10 +615,10 @@ pub struct ProcessAgentStreamSpawner;
 impl AgentStreamSpawner for ProcessAgentStreamSpawner {
     fn spawn<'a>(
         &'a self,
-        config: ClaudeStreamConfig,
+        config: AgentStreamConfig,
     ) -> Pin<Box<dyn Future<Output = Result<AgentStreamIo>> + Send + 'a>> {
         Box::pin(async move {
-            let (mut child, stdin, stdout) = spawn_claude_command(&config)?;
+            let (mut child, stdin, stdout) = spawn_agent_command(&config)?;
             Ok(AgentStreamIo {
                 stdin: Box::pin(stdin),
                 stdout: Box::pin(stdout),

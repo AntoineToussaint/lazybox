@@ -311,9 +311,9 @@ pub struct ServerConfig {
     pub prompt_submit_signals: Arc<Mutex<HashMap<TerminalId, Arc<tokio::sync::Notify>>>>,
     /// Factory for a structured agent run's underlying process I/O.
     /// Defaults to spawning a real subprocess; tests swap in an
-    /// in-memory fake so they never launch `claude` or a shell.
+    /// in-memory fake so they never launch an agent CLI or a shell.
     pub agent_stream_spawner: Arc<dyn agent_stream::AgentStreamSpawner>,
-    /// Structured stream-json agent runs. Keyed by wire-side run id.
+    /// Provider-neutral structured agent runs. Keyed by wire-side run id.
     pub agent_runs: Arc<Mutex<HashMap<AgentRunId, agent_runs::AgentRunHandle>>>,
     /// Process-wide structured run id allocator.
     pub next_agent_run_id: Arc<AtomicU64>,

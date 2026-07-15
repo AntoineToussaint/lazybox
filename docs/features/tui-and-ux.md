@@ -111,11 +111,14 @@ returns to Ask. `Esc` closes either surface.
 ### How it works (brief)
 Both surfaces build from the runtime catalog and render effective keys
 (honoring overrides). Conversational answers receive that same catalog plus the
-embedded feature docs as context.
+embedded feature docs as context. Ask uses the configured default agent when it
+is Claude or Codex; otherwise the fallback order is Claude, then Codex. The
+fuzzy search layer remains fully local and works without either CLI.
 
 ### Test checklist
 - [ ] `?` opens Ask Lazybox directly; another `?` toggles the compact index.
 - [ ] Overridden keys show their effective binding.
+- [ ] A Codex-only agent configuration can answer conversational help.
 - [ ] `Esc` dismisses either surface; the index also closes on non-navigation keys.
 
 ### Known sharp edges

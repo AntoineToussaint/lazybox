@@ -11,7 +11,7 @@ pub mod hook;
 pub mod hook_settings;
 pub mod state_machine;
 
-pub use agent::{Agent, LlmProvider, PromptShape, Registry, SpawnCtx};
+pub use agent::{Agent, LlmProvider, PromptShape, Registry, SpawnCtx, StructuredAgentProtocol};
 pub use lazybox_ipc::AgentState;
 pub use state_machine::{AgentStateMachine, Outcome, Reading};
 

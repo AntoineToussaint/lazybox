@@ -5,7 +5,7 @@
 //! ## Why this exists
 //!
 //! The daemon emits one `Event::TerminalOutput` per PTY chunk. A chatty
-//! agent (Claude streaming) can produce them faster than a client
+//! agent can produce them faster than a client
 //! consumes. The client-facing channel is bounded
 //! ([`lazybox_ipc::EVENT_CHANNEL_CAPACITY`]) so inbound memory has a hard
 //! ceiling — but a naive bounded send would either block the daemon

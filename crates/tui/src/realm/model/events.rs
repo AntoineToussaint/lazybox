@@ -225,7 +225,7 @@ impl<T: TerminalAdapter> Model<T> {
             }
             return;
         }
-        // Help-assistant run traffic (#302): structured stream-json
+        // Help-assistant run traffic (#302): structured agent JSONL
         // events no pane consumes. Route them into the shared help
         // conversation and stop — this must run before the general
         // fan-out so an `agent_run` provider error lands in the help

@@ -280,15 +280,15 @@ pub enum ScrollOutcome {
 /// focused-terminal lookup rather than probing several booleans.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WheelRoute {
-    /// Primary screen: the pane history belongs to lazybox, so scroll
-    /// the local libghostty scrollback in-process (no daemon round
-    /// trip). Covers plain shells AND primary-screen apps that enable
-    /// mouse tracking only for clicks (Claude Code) — they do not own
-    /// the transcript scrollback, so the wheel is lazybox's (#321).
+    /// Primary screen with actual pane history: scroll the local
+    /// libghostty scrollback in-process (no daemon round trip). Covers
+    /// plain shells and primary-screen apps after they have emitted
+    /// enough line-oriented output to create local history (#321).
     LocalScrollback,
-    /// Alt-screen app that enabled mouse reporting (vim `mouse=a`,
-    /// htop, less `--mouse`): forward the wheel as an SGR mouse report
-    /// so the app scrolls its own buffer.
+    /// Mouse-reporting app that owns the only scrollable history:
+    /// either an alt-screen app (vim, htop, less) or a fresh tmux-
+    /// relayed agent whose outer client is primary-screen but has no
+    /// local history yet. Forward SGR so the app scrolls its buffer.
     ForwardSgr,
     /// Alt-screen app that did NOT enable mouse reporting (less, man,
     /// the git pager, vim without `mouse`): it owns the visible buffer
@@ -1205,14 +1205,30 @@ impl TerminalStack {
             || t.mode(vt::terminal::Mode::ALT_SCREEN_SAVE).unwrap_or(false)
             || t.mode(vt::terminal::Mode::ALT_SCREEN_LEGACY)
                 .unwrap_or(false);
-        // Primary screen → the pane history is lazybox's, scroll it —
-        // even for a Claude Code that tracks mouse for clicks (#321).
+        let tracks_mouse = t.is_mouse_tracking().unwrap_or(false);
+        // Primary-screen history normally belongs to lazybox (#321),
+        // but a freshly attached tmux client can have NONE: Claude is
+        // on tmux's inner alt-screen (`history_size=0`) and tmux only
+        // repaints that screen into our outer primary screen. Old
+        // clients may have accumulated local history while new ones
+        // have `total == len`, which made old sessions scroll and new
+        // sessions silently no-op. When no local history exists and
+        // the inner app requested mouse events, forward SGR to let the
+        // app scroll its own transcript. As soon as real local history
+        // exists, retain the instant in-process path.
         if !on_alt_screen {
-            return WheelRoute::LocalScrollback;
+            let has_local_scrollback = t
+                .scrollbar()
+                .is_ok_and(|scrollbar| scrollbar.total > scrollbar.len);
+            return if has_local_scrollback || !tracks_mouse {
+                WheelRoute::LocalScrollback
+            } else {
+                WheelRoute::ForwardSgr
+            };
         }
         // Alt-screen: the app owns the buffer. If it speaks mouse,
         // forward SGR; otherwise fall back to xterm alternateScroll.
-        if t.is_mouse_tracking().unwrap_or(false) {
+        if tracks_mouse {
             WheelRoute::ForwardSgr
         } else {
             let app_cursor = t.mode(vt::terminal::Mode::DECCKM).unwrap_or(false);

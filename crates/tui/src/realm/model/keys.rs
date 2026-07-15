@@ -1251,11 +1251,11 @@ impl<T: TerminalAdapter> Model<T> {
                 // is on (see `WheelRoute`). The whole decision is one
                 // focused-terminal lookup so the branches can't disagree.
                 // Once tmux stopped setting `mouse on` (#306),
-                // `is_mouse_tracking` began reflecting the inner app,
-                // which silently routed every primary-screen Claude wheel
-                // into an SGR report the app ignores — scrolling looked
-                // dead (#321). Gating the forward on the alt-screen fixes
-                // it.
+                // `is_mouse_tracking` began reflecting the inner app.
+                // Primary-screen history stays local when it exists
+                // (#321); a fresh tmux-relayed agent with no local
+                // history falls back to SGR so its own transcript can
+                // scroll instead of silently no-oping.
                 use crate::components::terminal_stack::WheelRoute;
                 match self.terminals.wheel_route() {
                     WheelRoute::ForwardSgr => {
@@ -1335,7 +1335,8 @@ impl<T: TerminalAdapter> Model<T> {
                         self.redraw = true;
                     }
                     WheelRoute::LocalScrollback => {
-                        // Primary screen — the pane history is lazybox's.
+                        // Primary screen with local pane history — the
+                        // history is lazybox's.
                         // The viewport move is a pure in-process libghostty
                         // call, no daemon round trip, so no damper: every
                         // OS wheel event moves a fixed small step and the

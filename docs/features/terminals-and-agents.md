@@ -228,9 +228,11 @@ back the fixtures in `tests/detect_fixtures.rs`.
 **Key bindings:** — (not yet a TUI surface; for non-terminal clients)
 
 ### What it does
-Runs Claude in `stream-json` mode behind structured commands/events instead of a
-raw PTY, so non-terminal clients (Tauri, iOS, the JSON API) can render assistant
-text deltas, tool calls, approvals, and questions as data.
+Runs supported agent CLIs behind provider-neutral structured commands/events
+instead of a raw PTY, so non-terminal clients (Ask Lazybox, Tauri, iOS, the JSON
+API) can render assistant text, tool calls, approvals, and questions as data.
+Claude Code's persistent `stream-json` mode and Codex's turn-based `exec --json`
+mode both map to the same lazybox IPC event vocabulary.
 
 ### How to use it
 Not a TUI key — exercised via IPC / the [JSON API](daemon-and-deployment.md#json-http-api-gateway):
@@ -239,12 +241,14 @@ Not a TUI key — exercised via IPC / the [JSON API](daemon-and-deployment.md#js
 
 ### How it works (brief)
 `handle_start_agent_run` (`crates/server/src/agent_runs.rs`) launches
-`claude -p --input-format stream-json --output-format stream-json
---include-partial-messages --include-hook-events --replay-user-messages` and
-emits `AgentRunStarted`, `AgentAssistantTextDelta`, `AgentToolUse*`,
+the structured adapter declared by the selected `Agent`: Claude stays in one
+bidirectional process, while Codex exits after each turn and lazybox resumes its
+thread for follow-ups while preserving one logical run id. Both emit
+`AgentRunStarted`, `AgentAssistantTextDelta`, `AgentToolUse*`,
 `AgentPermissionRequest`, `AgentTurnFinished`, `AgentRunFinished`, plus
 `AgentRawJson` (always forwarded so clients can adopt new fields first). A
-Claude `result` line finishes a *turn*; the process exiting is the *run*.
+provider completion finishes a *turn*; only ending the logical adapter finishes
+the *run*.
 
 ### Test checklist
 - [ ] `StartAgentRun` with `StreamJson` starts a run and emits `AgentRunStarted`.
@@ -253,10 +257,13 @@ Claude `result` line finishes a *turn*; the process exiting is the *run*.
 - [ ] `InterruptAgentRun` stops the run and cleans up the child.
 - [ ] Raw JSON is forwarded for every event.
 - [ ] A `result` line emits `AgentTurnFinished`, not `AgentRunFinished`.
+- [ ] A Codex follow-up uses `exec resume` without changing the lazybox run id.
 
 ### Known sharp edges
 - Foundation only (ROADMAP §1–3): structured runs aren't persisted yet, so a reconnecting client can't rediscover an active run.
 - Token/cost accounting from the stream isn't fully wired here yet.
+- Claude and Codex are currently the structured adapters; other enabled agents
+  continue to work in PTYs and fail structured starts with a capability error.
 - Only `StreamJson` mode is handled; `Terminal` mode goes through the [terminal path](#embedded-terminal).
 
 ---
@@ -361,7 +368,9 @@ leaving, splitting, scrolling, and copying.
 - `Tab` cycles focus only before you've typed in the current visit; after the first keystroke it routes to the PTY (autocomplete).
 - `Ctrl-c` is forwarded as SIGINT.
 - `]]` then `|`/`\` (split vertical), `-` (split horizontal), arrows (move tile focus / cycle tabs), `x` (close the focused terminal). `Ctrl-w` is not a lazybox prefix — it reaches the inner program (readline word-erase).
-- Mouse wheel scrolls scrollback (8 rows/notch), or forwards to programs with mouse tracking on (Claude, vim, less).
+- Mouse wheel scrolls local history (3 rows/notch). When a fresh tmux-relayed
+  agent has no local history yet, or an alternate-screen program owns the
+  buffer, lazybox forwards the wheel to that mouse-tracking program instead.
 - Left-click + drag does pane-scoped selection; release copies via OSC 52 (footer shows `copied N lines`). For host-native selection across the whole screen, press `F8` to flip mouse capture off, drag, then `F8` back.
 - `Shift-PageUp/PageDown` and `Shift-Home/End` move through scrollback.
 
@@ -375,7 +384,9 @@ management and scrollback in `components/terminal_stack.rs`. The escape char is
 - [ ] `Tab` on a fresh visit cycles panes; after typing, `Tab` reaches the shell.
 - [ ] `Ctrl-c` interrupts the running program.
 - [ ] `]]-` / `]]|` split the terminal stack; `]]x` closes a tile.
-- [ ] Mouse wheel scrolls scrollback; programs with mouse tracking receive wheel events instead.
+- [ ] Old/recovered sessions with local history scroll in-process.
+- [ ] A freshly spawned tmux agent with no local history receives forwarded wheel events.
+- [ ] Alternate-screen programs with mouse tracking receive wheel events.
 - [ ] Drag-select copies via OSC 52 and the footer confirms the line count.
 - [ ] `F8` toggles mouse capture for host-native selection.
 

@@ -4,15 +4,17 @@
 // `crate::ResultExt`, which only resolve when compiled as part of
 // lazybox-server. Import via the public re-export instead;
 // `agent_stream` is already `pub mod` in lib.rs.
+use lazybox_agents::StructuredAgentProtocol;
 use lazybox_server::agent_stream::{
-    ClaudeStreamConfig, ParsedAgentEvent, encode_user_text_jsonl, parse_jsonl_line, user_text_value,
+    AgentStreamConfig, ParsedAgentEvent, encode_user_text_jsonl, parse_agent_jsonl_line,
+    parse_jsonl_line, user_text_value,
 };
 use serde_json::json;
 use std::path::PathBuf;
 
 #[test]
 fn builds_required_claude_stream_json_argv() {
-    let argv = ClaudeStreamConfig::default().argv();
+    let argv = AgentStreamConfig::new(StructuredAgentProtocol::ClaudeStreamJson, "claude").argv();
 
     assert_eq!(
         argv,
@@ -33,12 +35,10 @@ fn builds_required_claude_stream_json_argv() {
 
 #[test]
 fn builds_resume_and_extra_args_without_encoding_cwd_as_argv() {
-    let config = ClaudeStreamConfig {
-        cwd: Some(PathBuf::from("/tmp/worktree")),
-        resume_session_id: Some("session-123".to_string()),
-        extra_args: vec!["--model".to_string(), "sonnet".to_string()],
-        ..ClaudeStreamConfig::default()
-    };
+    let mut config = AgentStreamConfig::new(StructuredAgentProtocol::ClaudeStreamJson, "claude");
+    config.cwd = Some(PathBuf::from("/tmp/worktree"));
+    config.resume_session_id = Some("session-123".to_string());
+    config.extra_args = vec!["--model".to_string(), "sonnet".to_string()];
 
     assert_eq!(
         config.argv(),
@@ -57,6 +57,38 @@ fn builds_resume_and_extra_args_without_encoding_cwd_as_argv() {
             "session-123",
             "--model",
             "sonnet",
+        ]
+    );
+}
+
+#[test]
+fn builds_codex_initial_and_resume_argv() {
+    let initial = AgentStreamConfig::new(StructuredAgentProtocol::CodexExecJson, "codex");
+    assert_eq!(
+        initial.argv(),
+        vec![
+            "codex",
+            "exec",
+            "--json",
+            "--skip-git-repo-check",
+            "--sandbox",
+            "read-only",
+            "-",
+        ]
+    );
+
+    let mut resume = initial;
+    resume.resume_session_id = Some("thread-123".into());
+    assert_eq!(
+        resume.argv(),
+        vec![
+            "codex",
+            "exec",
+            "resume",
+            "--json",
+            "--skip-git-repo-check",
+            "thread-123",
+            "-",
         ]
     );
 }
@@ -241,4 +273,84 @@ fn parses_permission_question_hook_and_unknown_fallbacks() {
     }
 
     assert!(matches!(unknown, ParsedAgentEvent::Raw(_)));
+}
+
+#[test]
+fn parses_codex_thread_message_tool_and_completion() {
+    let protocol = StructuredAgentProtocol::CodexExecJson;
+    let thread = parse_agent_jsonl_line(
+        protocol,
+        r#"{"type":"thread.started","thread_id":"thread-1"}"#,
+    )
+    .unwrap();
+    let tool_start = parse_agent_jsonl_line(
+        protocol,
+        r#"{"type":"item.started","item":{"id":"item-1","type":"command_execution","command":"pwd","status":"in_progress"}}"#,
+    )
+    .unwrap();
+    let tool_stop = parse_agent_jsonl_line(
+        protocol,
+        r#"{"type":"item.completed","item":{"id":"item-1","type":"command_execution","command":"pwd","aggregated_output":"/tmp\n","exit_code":0,"status":"completed"}}"#,
+    )
+    .unwrap();
+    let message = parse_agent_jsonl_line(
+        protocol,
+        r#"{"type":"item.completed","item":{"id":"item-2","type":"agent_message","text":"Press `v`."}}"#,
+    )
+    .unwrap();
+    let completed = parse_agent_jsonl_line(
+        protocol,
+        r#"{"type":"turn.completed","usage":{"input_tokens":12,"cached_input_tokens":3,"output_tokens":4}}"#,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        thread,
+        ParsedAgentEvent::SessionInit { session_id: Some(id), .. } if id == "thread-1"
+    ));
+    assert!(matches!(
+        tool_start,
+        ParsedAgentEvent::ToolUseStart { id: Some(id), name: Some(name), .. }
+            if id == "item-1" && name == "command_execution"
+    ));
+    assert!(matches!(
+        tool_stop,
+        ParsedAgentEvent::ToolUseStop { id: Some(id), error: None, .. } if id == "item-1"
+    ));
+    assert!(matches!(
+        message,
+        ParsedAgentEvent::TextDelta { text, .. } if text == "Press `v`."
+    ));
+    assert!(matches!(
+        completed,
+        ParsedAgentEvent::Result {
+            result: None,
+            usage: Some(_),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn parses_codex_failures_without_losing_error_text() {
+    let failed = parse_agent_jsonl_line(
+        StructuredAgentProtocol::CodexExecJson,
+        r#"{"type":"turn.failed","error":{"message":"model unavailable"}}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        failed,
+        ParsedAgentEvent::Result { result: None, .. }
+    ));
+
+    let failed_tool = parse_agent_jsonl_line(
+        StructuredAgentProtocol::CodexExecJson,
+        r#"{"type":"item.completed","item":{"id":"item-3","type":"mcp_tool_call","server":"lazybox","tool":"broadcast","status":"failed","error":{"message":"not authorized"}}}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        failed_tool,
+        ParsedAgentEvent::ToolUseStop { id: Some(id), error: Some(error), .. }
+            if id == "item-3" && error == "not authorized"
+    ));
 }

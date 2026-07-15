@@ -7,10 +7,10 @@
 //!   answers most "where is X" queries instantly, with the user's
 //!   effective (post-override) keys.
 //! - **Enter** escalates the typed text as a question to a headless
-//!   Claude run (`Command::StartAgentRun`, stream-json — no PTY, no
-//!   worktree) whose first message is the generated catalog + docs
-//!   context. The streamed markdown answer renders here via
-//!   `comment_render`.
+//!   structured agent run (`Command::StartAgentRun` — Claude first,
+//!   Codex fallback; no PTY or worktree) whose first message is the
+//!   generated catalog + docs context. The streamed markdown answer
+//!   renders here via `comment_render`.
 //!
 //! The conversation state lives in a `SharedHelpConvo` owned by the
 //! `Model` and mutated by daemon-event handlers while this component

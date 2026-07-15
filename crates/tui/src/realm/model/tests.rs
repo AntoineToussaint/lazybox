@@ -4394,6 +4394,42 @@ mod wheel_routing_tests {
         );
     }
 
+    /// A freshly spawned/re-attached Claude can be on tmux's inner
+    /// alt-screen while tmux paints it onto lazybox's outer PRIMARY
+    /// screen. Before the client accumulates local history its
+    /// scrollbar is `total == len`: local Delta is a no-op. Forward
+    /// the wheel to the mouse-tracking app until local history exists.
+    #[test]
+    fn fresh_primary_screen_agent_without_local_history_forwards_wheel() {
+        let (mut m, mut server, bottom) = build_model_with_terminal();
+        m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
+            terminal_id: TerminalId(7),
+            // Claude/tmux advertises mouse input, but the outer client
+            // remains on the primary screen and has no scrolled lines.
+            bytes: b"\x1b[?1002h\x1b[?1006h".to_vec(),
+            seq: 1,
+        });
+        assert_eq!(
+            m.terminals.wheel_route(),
+            WheelRoute::ForwardSgr,
+            "a fresh no-history agent must delegate scrolling to its app",
+        );
+        while server.rx.try_recv().is_ok() {}
+
+        m.handle_mouse(wheel_up_at(bottom.x + 6, bottom.y + 8));
+
+        match server.rx.try_recv() {
+            Ok(lazybox_ipc::Command::Write { terminal_id, bytes }) => {
+                assert_eq!(terminal_id, TerminalId(7));
+                assert!(
+                    bytes.starts_with(b"\x1b[<64;6;6"),
+                    "fresh agent wheel must be SGR-forwarded, got {bytes:?}",
+                );
+            }
+            other => panic!("expected SGR Write for fresh agent, got {other:?}"),
+        }
+    }
+
     /// An alt-screen app that never enabled mouse reporting (less, man,
     /// the git pager, vim without `mouse`) owns the visible buffer but
     /// speaks no mouse protocol — so a wheel synthesizes arrow keys
@@ -7424,7 +7460,7 @@ mod help_ask_tests {
     use lazybox_core::SessionKey;
     use lazybox_ipc::Event as IpcEvent;
     use lazybox_ipc::{AgentRunId, AgentRuntimeMode, Command as IpcCommand, channel};
-    use lazybox_tui_core::help::{HELP_AGENT_ID, HELP_SESSION_KEY};
+    use lazybox_tui_core::help::{HELP_AGENT_PREFERENCE, HELP_SESSION_KEY};
     use tuirealm::ratatui::layout::Size;
 
     fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
@@ -7437,7 +7473,7 @@ mod help_ask_tests {
             run_id: AgentRunId(run_id),
             session_key: SessionKey::new(HELP_SESSION_KEY),
             session_id: None,
-            agent: HELP_AGENT_ID.into(),
+            agent: HELP_AGENT_PREFERENCE[0].into(),
             mode: AgentRuntimeMode::StreamJson,
         }
     }
@@ -7460,7 +7496,7 @@ mod help_ask_tests {
                 ..
             } => {
                 assert_eq!(session_key.as_str(), HELP_SESSION_KEY);
-                assert_eq!(agent, HELP_AGENT_ID);
+                assert_eq!(agent, HELP_AGENT_PREFERENCE[0]);
                 assert_eq!(*mode, AgentRuntimeMode::StreamJson);
                 assert!(
                     cwd.is_none(),
@@ -7648,7 +7684,7 @@ mod help_ask_tests {
         let _ = m.handle_help_asked("q".into());
         let _ = m.handle_help_asked("queued while starting".into());
         m.handle_daemon_event(IpcEvent::ProviderError {
-            source: format!("agent_run:{HELP_AGENT_ID}"),
+            source: format!("agent_run:{}", HELP_AGENT_PREFERENCE[0]),
             message: "No such file or directory".into(),
             detail: String::new(),
             kind: "permanent".into(),
@@ -7695,24 +7731,46 @@ mod help_ask_tests {
         assert!(convo.notice.is_none());
     }
 
-    /// Without the claude agent enabled there's nothing to escalate
-    /// to: the turn closes immediately with an explanatory notice and
-    /// no command goes out (keybinding search still works).
+    /// Codex is the structured fallback when Claude is not enabled.
     #[test]
-    fn missing_claude_agent_sets_notice_instead_of_dispatching() {
+    fn codex_only_configuration_starts_help_with_codex() {
         let mut m = build_model();
         m.set_agents(vec!["codex".into()]);
+        let cmds = m.handle_help_asked("q".into());
+        assert!(matches!(
+            cmds.first(),
+            Some(IpcCommand::StartAgentRun { agent, .. }) if agent == "codex"
+        ));
+        assert!(m.help_convo_mut().notice.is_none());
+    }
+
+    /// With both structured adapters available, Ask follows the user's
+    /// configured work-agent preference instead of hardcoding Claude.
+    #[test]
+    fn configured_default_agent_wins_when_it_is_structured() {
+        let mut m = build_model();
+        m.set_agents(vec!["claude".into(), "codex".into()]);
+        m.set_default_agent("codex");
+        let cmds = m.handle_help_asked("q".into());
+        assert!(matches!(
+            cmds.first(),
+            Some(IpcCommand::StartAgentRun { agent, .. }) if agent == "codex"
+        ));
+    }
+
+    /// An enabled PTY-only agent cannot be fed structured help turns:
+    /// close the turn with a useful notice and leave fuzzy search live.
+    #[test]
+    fn no_structured_help_agent_sets_notice_instead_of_dispatching() {
+        let mut m = build_model();
+        m.set_agents(vec!["cursor-agent".into()]);
         let cmds = m.handle_help_asked("q".into());
         assert!(cmds.is_empty());
         let convo = m.help_convo_mut();
         assert!(convo.turns[0].done);
-        assert!(
-            convo
-                .notice
-                .as_deref()
-                .unwrap_or("")
-                .contains(HELP_AGENT_ID)
-        );
+        let notice = convo.notice.as_deref().unwrap_or("");
+        assert!(notice.contains("claude"), "got: {notice}");
+        assert!(notice.contains("codex"), "got: {notice}");
     }
 
     /// Ask and the compact shortcut index swap in both directions;

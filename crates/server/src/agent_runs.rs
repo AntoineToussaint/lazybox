@@ -1,15 +1,17 @@
 //! Structured agent runtime wiring.
 //!
 //! This is the daemon-side bridge between IPC `StartAgentRun` commands
-//! and Claude Code's stream-json mode. Terminal clients keep using the
-//! PTY path; API/Tauri/iOS clients can consume the normalized
-//! `Agent*` events emitted here.
+//! and each supported provider's structured mode. Terminal clients
+//! keep using the PTY path; API/Tauri/iOS clients—and eventually the
+//! meta-agent control plane—consume the same normalized `Agent*`
+//! events regardless of which CLI is configured.
 
 use crate::ServerConfig;
 use crate::agent_stream::{
-    AgentStreamIo, ClaudeStreamConfig, ParsedAgentEvent, encode_user_text_jsonl,
+    AgentStreamConfig, AgentStreamIo, AgentStreamSpawner, ParsedAgentEvent, encode_user_text_jsonl,
+    parse_agent_jsonl_line,
 };
-use lazybox_agents::SpawnCtx;
+use lazybox_agents::{SpawnCtx, StructuredAgentProtocol};
 use lazybox_ipc::{
     AgentApprovalDecision, AgentInputMessage, AgentQuestionAnswer, AgentRunId, AgentRuntimeMode,
     AgentUsage, Event,
@@ -17,6 +19,7 @@ use lazybox_ipc::{
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
@@ -51,6 +54,13 @@ pub async fn handle_start_agent_run(
         ));
         return;
     };
+    let Some(protocol) = agent_impl.structured_protocol() else {
+        let _ = config.bus.send(Event::provider_error_permanent(
+            &format!("agent_run:{agent}"),
+            "this agent supports interactive terminals but has no structured runtime adapter",
+        ));
+        return;
+    };
 
     let cwd_path = resolve_cwd(config, &session_key, session_id, cwd).await;
     let spawn_ctx = SpawnCtx {
@@ -62,10 +72,9 @@ pub async fn handle_start_agent_run(
         pr_number: None,
         env: Default::default(),
         skip_permissions: false,
-        // Structured stream-json runs receive hook events inline via
-        // `--include-hook-events` (see `ClaudeStreamConfig`), so they
-        // don't need the `--settings` hook-command injection the
-        // interactive PTY path uses.
+        // Structured runs expose lifecycle events through their own
+        // JSONL protocol, so they don't need the interactive PTY
+        // path's hook-command settings injection.
         hook_settings_path: None,
     };
     let argv = agent_impl.spawn(&spawn_ctx);
@@ -83,15 +92,16 @@ pub async fn handle_start_agent_run(
     let yaml = lazybox_config::Config::load().unwrap_or_default();
     let env = crate::spawn_handler::gateway_env_for_agent(&yaml, Some(agent_impl.as_ref()));
 
-    let stream_config = ClaudeStreamConfig {
-        program: program.clone(),
-        cwd: cwd_path,
-        extra_args: extra_args.to_vec(),
-        env,
-        ..ClaudeStreamConfig::default()
-    };
+    let mut stream_config = AgentStreamConfig::new(protocol, program.clone());
+    stream_config.cwd = cwd_path;
+    stream_config.extra_args = extra_args.to_vec();
+    stream_config.env = env;
 
-    let io = match config.agent_stream_spawner.spawn(stream_config).await {
+    let io = match config
+        .agent_stream_spawner
+        .spawn(stream_config.clone())
+        .await
+    {
         Ok(io) => io,
         Err(e) => {
             let _ = config.bus.send(Event::provider_error_permanent(
@@ -107,18 +117,28 @@ pub async fn handle_start_agent_run(
 
     let bus = config.bus.clone();
     let runs = config.agent_runs.clone();
+    let spawner = config.agent_stream_spawner.clone();
     let session_key_for_task = session_key.clone();
     let agent_for_event = agent.clone();
     // Gate the spawned task on a oneshot so it can't reach the
     // post-completion `runs.remove(&run_id)` before the outer code
     // has inserted the handle. Without the gate, a child process
     // that exits immediately (bad argv, missing binary) could let
-    // `drive_claude_stream` return before the insert lands, leaving
+    // `drive_agent_stream` return before the insert lands, leaving
     // a stale orphan handle in the map.
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
     let task = tokio::spawn(async move {
         let _ = ready_rx.await;
-        let outcome = drive_claude_stream(run_id, io, input_rx, bus.clone()).await;
+        let outcome = drive_agent_stream(
+            run_id,
+            protocol,
+            io,
+            stream_config,
+            spawner,
+            input_rx,
+            bus.clone(),
+        )
+        .await;
         // The handle in `runs` is the single token for the terminal
         // event: whoever removes it owns the `AgentRunFinished`. If
         // `handle_interrupt_agent_run` removed it first it already sent
@@ -264,7 +284,7 @@ async fn resolve_cwd(
     workspace.default_session().map(|s| s.worktree_path.clone())
 }
 
-/// How `drive_claude_stream` ended, so the spawning task can decide
+/// How a structured driver ended, so the spawning task can decide
 /// whether to emit the terminal `AgentRunFinished` event.
 enum DriveOutcome {
     /// Agent stdout reached EOF — the run completed.
@@ -275,8 +295,29 @@ enum DriveOutcome {
     Errored { error: String },
 }
 
-async fn drive_claude_stream(
+async fn drive_agent_stream(
     run_id: AgentRunId,
+    protocol: StructuredAgentProtocol,
+    io: AgentStreamIo,
+    config: AgentStreamConfig,
+    spawner: Arc<dyn AgentStreamSpawner>,
+    input_rx: mpsc::UnboundedReceiver<AgentInputMessage>,
+    bus: tokio::sync::broadcast::Sender<Event>,
+) -> DriveOutcome {
+    match protocol {
+        StructuredAgentProtocol::ClaudeStreamJson => {
+            drive_persistent_stream(run_id, protocol, io, input_rx, bus).await
+        }
+        StructuredAgentProtocol::CodexExecJson => {
+            drive_codex_exec(run_id, io, config, spawner, input_rx, bus).await
+        }
+    }
+}
+
+/// Claude accepts turns over one persistent bidirectional JSONL child.
+async fn drive_persistent_stream(
+    run_id: AgentRunId,
+    protocol: StructuredAgentProtocol,
     io: AgentStreamIo,
     mut input_rx: mpsc::UnboundedReceiver<AgentInputMessage>,
     bus: tokio::sync::broadcast::Sender<Event>,
@@ -305,7 +346,7 @@ async fn drive_claude_stream(
             }
             line = stdout.next_line() => {
                 match line {
-                    Ok(Some(line)) => match crate::agent_stream::parse_jsonl_line(&line) {
+                    Ok(Some(line)) => match parse_agent_jsonl_line(protocol, &line) {
                         Ok(parsed) => {
                             for event in mapper.map(run_id, parsed) {
                                 let _ = bus.send(event);
@@ -314,7 +355,10 @@ async fn drive_claude_stream(
                         Err(e) => {
                             let _ = bus.send(Event::AgentDebug {
                                 run_id,
-                                message: format!("unparseable Claude stream line: {e}: {line}"),
+                                message: format!(
+                                    "unparseable {} line: {e}: {line}",
+                                    protocol.display_name()
+                                ),
                             });
                         }
                     },
@@ -330,6 +374,118 @@ async fn drive_claude_stream(
             }
         }
     }
+}
+
+/// Codex's stable non-interactive surface is one `exec --json` process
+/// per turn. This loop keeps a single lazybox run alive, captures the
+/// emitted thread id, and launches `exec resume` for each queued
+/// follow-up so clients observe the same lifecycle as Claude's
+/// persistent stream.
+async fn drive_codex_exec(
+    run_id: AgentRunId,
+    first_io: AgentStreamIo,
+    base_config: AgentStreamConfig,
+    spawner: Arc<dyn AgentStreamSpawner>,
+    mut input_rx: mpsc::UnboundedReceiver<AgentInputMessage>,
+    bus: tokio::sync::broadcast::Sender<Event>,
+) -> DriveOutcome {
+    let protocol = StructuredAgentProtocol::CodexExecJson;
+    let mut first_io = Some(first_io);
+    let mut session_id: Option<String> = None;
+    let mut mapper = StreamEventMapper::default();
+
+    while let Some(input) = input_rx.recv().await {
+        let io = if let Some(io) = first_io.take() {
+            io
+        } else {
+            let Some(resume_id) = session_id.clone() else {
+                return DriveOutcome::Errored {
+                    error: "Codex completed a turn without returning a thread id; cannot resume"
+                        .into(),
+                };
+            };
+            let mut resume_config = base_config.clone();
+            resume_config.resume_session_id = Some(resume_id);
+            match spawner.spawn(resume_config).await {
+                Ok(io) => io,
+                Err(error) => {
+                    return DriveOutcome::Errored {
+                        error: format!("spawn Codex follow-up: {error}"),
+                    };
+                }
+            }
+        };
+
+        let AgentStreamIo {
+            mut stdin,
+            stdout,
+            wait,
+        } = io;
+        if let Err(error) = write_codex_input(&mut stdin, input).await {
+            return DriveOutcome::Errored {
+                error: format!("write Codex turn: {error}"),
+            };
+        }
+        if let Err(error) = stdin.shutdown().await {
+            return DriveOutcome::Errored {
+                error: format!("close Codex turn input: {error}"),
+            };
+        }
+        drop(stdin);
+
+        let mut stdout = BufReader::new(stdout).lines();
+        loop {
+            match stdout.next_line().await {
+                Ok(Some(line)) => match parse_agent_jsonl_line(protocol, &line) {
+                    Ok(mut parsed) => {
+                        if let ParsedAgentEvent::SessionInit {
+                            session_id: Some(id),
+                            ..
+                        } = &parsed
+                        {
+                            session_id = Some(id.clone());
+                        }
+                        if let ParsedAgentEvent::Result {
+                            session_id: event_session_id,
+                            ..
+                        } = &mut parsed
+                            && event_session_id.is_none()
+                        {
+                            *event_session_id = session_id.clone();
+                        }
+                        for event in mapper.map(run_id, parsed) {
+                            let _ = bus.send(event);
+                        }
+                    }
+                    Err(error) => {
+                        let _ = bus.send(Event::AgentDebug {
+                            run_id,
+                            message: format!(
+                                "unparseable {} line: {error}: {line}",
+                                protocol.display_name()
+                            ),
+                        });
+                    }
+                },
+                Ok(None) => break,
+                Err(error) => {
+                    return DriveOutcome::Errored {
+                        error: format!("agent stdout read failed: {error}"),
+                    };
+                }
+            }
+        }
+
+        if let Some(exit_code) = wait.await
+            && exit_code != 0
+        {
+            return DriveOutcome::Errored {
+                error: format!("Codex turn exited with status {exit_code}"),
+            };
+        }
+    }
+
+    DriveOutcome::Completed { exit_code: Some(0) }
 }
 
 async fn write_agent_input<W>(
@@ -351,6 +507,19 @@ where
         return Ok(());
     };
     stdin.write_all(line.as_bytes()).await?;
+    stdin.flush().await?;
+    Ok(())
+}
+
+async fn write_codex_input<W>(
+    stdin: &mut W,
+    input: AgentInputMessage,
+) -> Result<(), crate::ServerError>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let prompt = input.text.or(input.json).unwrap_or_default();
+    stdin.write_all(prompt.as_bytes()).await?;
     stdin.flush().await?;
     Ok(())
 }
@@ -411,16 +580,22 @@ impl StreamEventMapper {
                     delta_json: partial_json,
                 });
             }
-            ParsedAgentEvent::ToolUseStop { index, .. } => {
-                let call_id = index
-                    .and_then(|i| self.tool_ids_by_index.get(&i).cloned())
+            ParsedAgentEvent::ToolUseStop {
+                index,
+                id,
+                output,
+                error,
+                ..
+            } => {
+                let call_id = id
+                    .or_else(|| index.and_then(|i| self.tool_ids_by_index.get(&i).cloned()))
                     .or_else(|| index.map(|i| format!("tool-index-{i}")))
                     .unwrap_or_else(|| "tool-unknown".into());
                 events.push(Event::AgentToolCallFinished {
                     run_id,
                     call_id,
-                    output_json: None,
-                    error: None,
+                    output_json: output.map(|value| value.to_string()),
+                    error,
                 });
             }
             ParsedAgentEvent::Usage {
@@ -500,6 +675,10 @@ fn is_error_result(raw: &Value) -> bool {
         .and_then(Value::as_bool)
         .unwrap_or(false)
         || raw.get("subtype").and_then(Value::as_str) == Some("error")
+        || matches!(
+            raw.get("type").and_then(Value::as_str),
+            Some("turn.failed" | "error")
+        )
 }
 
 fn result_error(raw: &Value) -> Option<String> {
@@ -507,7 +686,12 @@ fn result_error(raw: &Value) -> Option<String> {
         return None;
     }
     raw.get("error")
-        .and_then(Value::as_str)
+        .and_then(|error| {
+            error
+                .as_str()
+                .or_else(|| error.get("message").and_then(Value::as_str))
+        })
+        .or_else(|| raw.get("message").and_then(Value::as_str))
         .or_else(|| raw.get("result").and_then(Value::as_str))
         .map(str::to_string)
 }
@@ -522,7 +706,10 @@ fn agent_usage_from_value(raw: &Value) -> Option<AgentUsage> {
         cache_creation_input_tokens: raw
             .get("cache_creation_input_tokens")
             .and_then(Value::as_u64),
-        cache_read_input_tokens: raw.get("cache_read_input_tokens").and_then(Value::as_u64),
+        cache_read_input_tokens: raw
+            .get("cache_read_input_tokens")
+            .or_else(|| raw.get("cached_input_tokens"))
+            .and_then(Value::as_u64),
         cost_usd_micros: None,
     })
 }

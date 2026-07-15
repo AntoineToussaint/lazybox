@@ -50,6 +50,27 @@ impl LlmProvider {
     }
 }
 
+/// Provider-specific wire protocol available for a headless structured
+/// run. Interactive terminal support alone does not imply this
+/// capability: the daemon only advertises agents whose machine-readable
+/// protocol it can normalize into lazybox `Agent*` events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StructuredAgentProtocol {
+    /// Claude Code's persistent, bidirectional `stream-json` print mode.
+    ClaudeStreamJson,
+    /// Codex's one-process-per-turn `exec --json` JSONL mode.
+    CodexExecJson,
+}
+
+impl StructuredAgentProtocol {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::ClaudeStreamJson => "Claude stream-json",
+            Self::CodexExecJson => "Codex exec-json",
+        }
+    }
+}
+
 /// Shape of the prompt behind an `InputNeeded` reading: whether a bare
 /// chooser keystroke (`1`-`9`, `y`, `n`, Esc) is a complete answer. The
 /// daemon records this alongside the cached state so the optimistic
@@ -76,6 +97,16 @@ pub trait Agent: Send + Sync {
     /// covers agents whose upstream lazybox can't infer (a `GenericCli`
     /// pointed at an arbitrary command) — they get no gateway injection.
     fn llm_provider(&self) -> Option<LlmProvider> {
+        None
+    }
+
+    /// Machine-readable runtime supported by this agent, if any.
+    ///
+    /// This is deliberately separate from [`Agent::spawn`]: a CLI can
+    /// work perfectly in a PTY while lacking a stable structured mode.
+    /// The daemon uses this capability to reject unsupported headless
+    /// runs before trying provider-specific flags.
+    fn structured_protocol(&self) -> Option<StructuredAgentProtocol> {
         None
     }
 
@@ -347,6 +378,9 @@ pub mod builtins {
         fn llm_provider(&self) -> Option<LlmProvider> {
             Some(LlmProvider::Anthropic)
         }
+        fn structured_protocol(&self) -> Option<StructuredAgentProtocol> {
+            Some(StructuredAgentProtocol::ClaudeStreamJson)
+        }
         fn spawn(&self, ctx: &SpawnCtx) -> Vec<String> {
             let mut argv = vec!["claude".into()];
             push_unattended_flags(&mut argv, ctx);
@@ -474,6 +508,9 @@ pub mod builtins {
         fn llm_provider(&self) -> Option<LlmProvider> {
             Some(LlmProvider::OpenAI)
         }
+        fn structured_protocol(&self) -> Option<StructuredAgentProtocol> {
+            Some(StructuredAgentProtocol::CodexExecJson)
+        }
         fn spawn(&self, _ctx: &SpawnCtx) -> Vec<String> {
             vec!["codex".into()]
         }
@@ -591,7 +628,7 @@ pub mod builtins {
 #[cfg(test)]
 mod tests {
     use super::builtins::Claude;
-    use super::{Agent, LlmProvider, SpawnCtx};
+    use super::{Agent, LlmProvider, SpawnCtx, StructuredAgentProtocol};
 
     const SKIP_FLAG: &str = "--dangerously-skip-permissions";
     const STRICT_MCP_FLAG: &str = "--strict-mcp-config";
@@ -610,6 +647,19 @@ mod tests {
     }
 
     #[test]
+    fn only_adapted_builtins_advertise_a_structured_protocol() {
+        assert_eq!(
+            Claude.structured_protocol(),
+            Some(StructuredAgentProtocol::ClaudeStreamJson)
+        );
+        assert_eq!(
+            super::builtins::Codex.structured_protocol(),
+            Some(StructuredAgentProtocol::CodexExecJson)
+        );
+        assert_eq!(super::builtins::Cursor.structured_protocol(), None);
+    }
+
+    #[test]
     fn generic_cli_has_no_inferable_provider() {
         let agent = super::builtins::GenericCli {
             id: "custom",
@@ -619,6 +669,7 @@ mod tests {
             asking_patterns: vec![],
         };
         assert_eq!(agent.llm_provider(), None);
+        assert_eq!(agent.structured_protocol(), None);
     }
 
     #[test]

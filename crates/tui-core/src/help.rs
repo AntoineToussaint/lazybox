@@ -16,10 +16,27 @@ use crate::action::{ActionKind, CatalogEntry, Chord, KeyStroke};
 /// matching `AgentRunStarted` on the shared event bus.
 pub const HELP_SESSION_KEY: &str = "lazybox:help";
 
-/// Agent id the help assistant runs on. The structured stream-json
-/// run path is Claude-shaped (`crates/server/src/agent_stream.rs`),
-/// so this is fixed rather than following the user's default agent.
-pub const HELP_AGENT_ID: &str = "claude";
+/// Provider fallback order for the help assistant. A compatible
+/// configured default agent wins first; this order only applies when
+/// that default cannot serve structured runs.
+pub const HELP_AGENT_PREFERENCE: &[&str] = &["claude", "codex"];
+
+/// Choose the first compatible configured agent for Ask Lazybox.
+pub fn select_help_agent(enabled: &[String], default_agent: Option<&str>) -> Option<&'static str> {
+    if let Some(default_agent) = default_agent
+        && let Some(agent) = HELP_AGENT_PREFERENCE
+            .iter()
+            .copied()
+            .find(|candidate| *candidate == default_agent)
+        && enabled.iter().any(|enabled| enabled == agent)
+    {
+        return Some(agent);
+    }
+    HELP_AGENT_PREFERENCE
+        .iter()
+        .copied()
+        .find(|candidate| enabled.iter().any(|agent| agent == candidate))
+}
 
 /// In-tree docs embedded into the help agent's context. Titles are
 /// section headers in the generated document.

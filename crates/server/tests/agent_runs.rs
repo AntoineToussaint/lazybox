@@ -1,12 +1,13 @@
-use lazybox_agents::{Agent, SpawnCtx};
+use lazybox_agents::{Agent, SpawnCtx, StructuredAgentProtocol};
 use lazybox_ipc::{AgentInputMessage, AgentRunId, AgentRuntimeMode, Command, Event, channel};
 use lazybox_server::ServerError;
-use lazybox_server::agent_stream::{AgentStreamIo, AgentStreamSpawner, ClaudeStreamConfig};
+use lazybox_server::agent_stream::{AgentStreamConfig, AgentStreamIo, AgentStreamSpawner};
 use lazybox_server::{Server, ServerConfig};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 struct FakeStreamAgent;
 
@@ -17,6 +18,10 @@ impl Agent for FakeStreamAgent {
 
     fn display_name(&self) -> &'static str {
         "Fake Stream"
+    }
+
+    fn structured_protocol(&self) -> Option<StructuredAgentProtocol> {
+        Some(StructuredAgentProtocol::ClaudeStreamJson)
     }
 
     fn spawn(&self, _ctx: &SpawnCtx) -> Vec<String> {
@@ -53,7 +58,7 @@ struct FakeStreamSpawner {
 impl AgentStreamSpawner for FakeStreamSpawner {
     fn spawn<'a>(
         &'a self,
-        _config: ClaudeStreamConfig,
+        _config: AgentStreamConfig,
     ) -> Pin<Box<dyn Future<Output = Result<AgentStreamIo, ServerError>> + Send + 'a>> {
         let script = self.script;
         Box::pin(async move {
@@ -104,7 +109,7 @@ async fn stream_json_agent_run_emits_normalized_events_until_process_exit() {
         })
         .unwrap();
 
-    let run_id = wait_for_started(&mut client).await;
+    let run_id = wait_for_started(&mut client, "fake-stream").await;
     client
         .send(Command::SendAgentInput {
             run_id,
@@ -183,7 +188,7 @@ async fn stream_json_agent_run_emits_normalized_events_until_process_exit() {
     assert!(saw_usage);
     assert!(saw_turn_finished);
 }
-async fn wait_for_started(client: &mut lazybox_ipc::Client) -> AgentRunId {
+async fn wait_for_started(client: &mut lazybox_ipc::Client, expected_agent: &str) -> AgentRunId {
     loop {
         match recv_agent_event(client).await {
             Event::AgentRunStarted {
@@ -192,7 +197,7 @@ async fn wait_for_started(client: &mut lazybox_ipc::Client) -> AgentRunId {
                 mode,
                 ..
             } => {
-                assert_eq!(agent, "fake-stream");
+                assert_eq!(agent, expected_agent);
                 assert_eq!(mode, AgentRuntimeMode::StreamJson);
                 return run_id;
             }
@@ -209,16 +214,194 @@ async fn recv_agent_event(client: &mut lazybox_ipc::Client) -> Event {
         .expect("event")
 }
 
-/// Captures the `ClaudeStreamConfig` the server builds, then behaves
+struct FakeCodexAgent;
+
+impl Agent for FakeCodexAgent {
+    fn id(&self) -> &'static str {
+        "fake-codex"
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Fake Codex"
+    }
+
+    fn structured_protocol(&self) -> Option<StructuredAgentProtocol> {
+        Some(StructuredAgentProtocol::CodexExecJson)
+    }
+
+    fn spawn(&self, _ctx: &SpawnCtx) -> Vec<String> {
+        vec!["fake-codex".into()]
+    }
+}
+
+const FAKE_CODEX_FIRST_TURN: &str = concat!(
+    r#"{"type":"thread.started","thread_id":"thread-help"}"#,
+    "\n",
+    r#"{"type":"item.completed","item":{"id":"message-1","type":"agent_message","text":"first answer"}}"#,
+    "\n",
+    r#"{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":2}}"#,
+    "\n",
+);
+
+const FAKE_CODEX_SECOND_TURN: &str = concat!(
+    r#"{"type":"item.completed","item":{"id":"message-2","type":"agent_message","text":"follow-up answer"}}"#,
+    "\n",
+    r#"{"type":"turn.completed","usage":{"input_tokens":12,"cached_input_tokens":8,"output_tokens":3}}"#,
+    "\n",
+);
+
+/// Codex exits after every turn, so this spawner supplies two distinct
+/// in-memory children and records the resume config and raw prompts.
+struct FakeCodexSpawner {
+    calls: AtomicUsize,
+    configs: Arc<Mutex<Vec<AgentStreamConfig>>>,
+    prompts: Arc<Mutex<Vec<String>>>,
+}
+
+impl AgentStreamSpawner for FakeCodexSpawner {
+    fn spawn<'a>(
+        &'a self,
+        config: AgentStreamConfig,
+    ) -> Pin<Box<dyn Future<Output = Result<AgentStreamIo, ServerError>> + Send + 'a>> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        self.configs.lock().unwrap().push(config);
+        let prompts = self.prompts.clone();
+        Box::pin(async move {
+            let (driver_stdin, mut fake_in) = tokio::io::duplex(4096);
+            let (mut fake_out, driver_stdout) = tokio::io::duplex(4096);
+            tokio::spawn(async move {
+                let mut input = Vec::new();
+                let _ = fake_in.read_to_end(&mut input).await;
+                prompts
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&input).into_owned());
+                let script = if call == 0 {
+                    FAKE_CODEX_FIRST_TURN
+                } else {
+                    FAKE_CODEX_SECOND_TURN
+                };
+                let _ = fake_out.write_all(script.as_bytes()).await;
+            });
+            Ok(AgentStreamIo {
+                stdin: Box::pin(driver_stdin),
+                stdout: Box::pin(driver_stdout),
+                wait: Box::pin(async { Some(0) }),
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn codex_turn_processes_resume_as_one_logical_run() {
+    let configs = Arc::new(Mutex::new(Vec::new()));
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let mut config = ServerConfig::in_memory();
+    config.agents.register(Arc::new(FakeCodexAgent));
+    config.agent_stream_spawner = Arc::new(FakeCodexSpawner {
+        calls: AtomicUsize::new(0),
+        configs: configs.clone(),
+        prompts: prompts.clone(),
+    });
+
+    let (mut client, server) = channel::pair();
+    tokio::spawn(async move {
+        Server::new(config).serve(server).await.unwrap();
+    });
+
+    client
+        .send(Command::StartAgentRun {
+            session_key: "lazybox:help".into(),
+            session_id: None,
+            agent: "fake-codex".into(),
+            mode: AgentRuntimeMode::StreamJson,
+            cwd: None,
+            initial_input: Some(AgentInputMessage {
+                text: Some("first question".into()),
+                json: None,
+            }),
+        })
+        .unwrap();
+    let run_id = wait_for_started(&mut client, "fake-codex").await;
+    assert_turn_answer(&mut client, run_id, "first answer").await;
+
+    // The first child has exited, but lazybox keeps the logical run id
+    // alive and resumes the captured Codex thread for this input.
+    client
+        .send(Command::SendAgentInput {
+            run_id,
+            message: AgentInputMessage {
+                text: Some("follow-up question".into()),
+                json: None,
+            },
+        })
+        .unwrap();
+    assert_turn_answer(&mut client, run_id, "follow-up answer").await;
+
+    {
+        let configs = configs.lock().unwrap();
+        assert_eq!(configs.len(), 2);
+        assert_eq!(configs[0].protocol, StructuredAgentProtocol::CodexExecJson);
+        assert_eq!(configs[0].resume_session_id, None);
+        assert_eq!(configs[1].resume_session_id.as_deref(), Some("thread-help"));
+    }
+    assert_eq!(
+        prompts.lock().unwrap().as_slice(),
+        ["first question", "follow-up question"]
+    );
+
+    client.send(Command::InterruptAgentRun { run_id }).unwrap();
+    assert!(matches!(
+        recv_agent_event(&mut client).await,
+        Event::AgentRunFinished { run_id: id, .. } if id == run_id
+    ));
+}
+
+async fn assert_turn_answer(
+    client: &mut lazybox_ipc::Client,
+    expected_run_id: AgentRunId,
+    expected_answer: &str,
+) {
+    let mut answer = String::new();
+    loop {
+        match recv_agent_event(client).await {
+            Event::AgentAssistantTextDelta { run_id, delta } => {
+                assert_eq!(run_id, expected_run_id);
+                answer.push_str(&delta);
+            }
+            Event::AgentTurnFinished {
+                run_id,
+                result,
+                session_id,
+                error,
+                ..
+            } => {
+                assert_eq!(run_id, expected_run_id);
+                assert!(result.is_none());
+                assert_eq!(session_id.as_deref(), Some("thread-help"));
+                assert!(error.is_none());
+                assert_eq!(answer, expected_answer);
+                return;
+            }
+            Event::AgentRawJson { .. } | Event::AgentUsage { .. } => {}
+            Event::AgentRunFinished { .. } => {
+                panic!("Codex logical run ended between turns")
+            }
+            other => panic!("unexpected Codex event: {other:?}"),
+        }
+    }
+}
+
+/// Captures the `AgentStreamConfig` the server builds, then behaves
 /// like a process whose stdout is immediately at EOF.
 struct CapturingSpawner {
-    captured: Arc<std::sync::Mutex<Option<ClaudeStreamConfig>>>,
+    captured: Arc<std::sync::Mutex<Option<AgentStreamConfig>>>,
 }
 
 impl AgentStreamSpawner for CapturingSpawner {
     fn spawn<'a>(
         &'a self,
-        config: ClaudeStreamConfig,
+        config: AgentStreamConfig,
     ) -> Pin<Box<dyn Future<Output = Result<AgentStreamIo, ServerError>> + Send + 'a>> {
         *self.captured.lock().unwrap() = Some(config);
         Box::pin(async move {
@@ -260,7 +443,7 @@ async fn workspace_less_run_resolves_to_neutral_cwd() {
             initial_input: None,
         })
         .unwrap();
-    wait_for_started(&mut client).await;
+    wait_for_started(&mut client, "fake-stream").await;
 
     let config = captured.lock().unwrap().take().expect("spawner invoked");
     assert_eq!(config.cwd.as_deref(), Some(std::env::temp_dir().as_path()));
@@ -287,7 +470,7 @@ struct FailingStreamSpawner;
 impl AgentStreamSpawner for FailingStreamSpawner {
     fn spawn<'a>(
         &'a self,
-        _config: ClaudeStreamConfig,
+        _config: AgentStreamConfig,
     ) -> Pin<Box<dyn Future<Output = Result<AgentStreamIo, ServerError>> + Send + 'a>> {
         Box::pin(async move {
             Ok(AgentStreamIo {
@@ -323,7 +506,7 @@ async fn stdout_error_emits_run_finished_with_error() {
             initial_input: None,
         })
         .unwrap();
-    let run_id = wait_for_started(&mut client).await;
+    let run_id = wait_for_started(&mut client, "fake-stream").await;
 
     match recv_agent_event(&mut client).await {
         Event::AgentRunFinished {

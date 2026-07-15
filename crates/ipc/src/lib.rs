@@ -95,7 +95,7 @@ pub const IS_RELEASE_BUILD: bool = matches!(env!("LAZYBOX_RELEASE_BUILD").as_byt
 pub struct TerminalId(pub u64);
 
 /// Stable id for a structured agent runtime. This is intentionally
-/// separate from `TerminalId`: a run may be stream-json only, terminal
+/// separate from `TerminalId`: a run may be structured-JSON only, terminal
 /// only, or mirrored into both surfaces by higher layers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AgentRunId(pub u64);
@@ -105,7 +105,8 @@ pub struct AgentRunId(pub u64);
 pub enum AgentRuntimeMode {
     /// Traditional PTY/terminal byte stream.
     Terminal,
-    /// Structured stream-json, independent of PTY bytes.
+    /// Provider-neutral structured JSON events, independent of PTY bytes.
+    /// The wire name remains `StreamJson` for protocol compatibility.
     StreamJson,
 }
 
@@ -1228,7 +1229,7 @@ pub enum Event {
         agent: String,
         mode: AgentRuntimeMode,
     },
-    /// Lossless raw stream-json line or object text from the runtime.
+    /// Lossless raw provider JSONL object text from the runtime.
     AgentRawJson {
         run_id: AgentRunId,
         json: String,

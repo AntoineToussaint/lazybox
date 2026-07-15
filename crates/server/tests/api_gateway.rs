@@ -14,11 +14,11 @@ use chrono::Utc;
 use http_body_util::{BodyExt, Full};
 use hyper::header::{AUTHORIZATION, HeaderValue};
 use hyper::{Method, Request, StatusCode};
-use lazybox_agents::{Agent, SpawnCtx};
+use lazybox_agents::{Agent, SpawnCtx, StructuredAgentProtocol};
 use lazybox_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace};
 use lazybox_ipc::{AgentInputMessage, AgentRuntimeMode, Command, Event};
 use lazybox_server::ServerError;
-use lazybox_server::agent_stream::{AgentStreamIo, AgentStreamSpawner, ClaudeStreamConfig};
+use lazybox_server::agent_stream::{AgentStreamConfig, AgentStreamIo, AgentStreamSpawner};
 use lazybox_store::WorkspaceRecord;
 use std::future::Future;
 use std::pin::Pin;
@@ -34,6 +34,10 @@ impl Agent for FakeStreamAgent {
 
     fn display_name(&self) -> &'static str {
         "Fake API Stream"
+    }
+
+    fn structured_protocol(&self) -> Option<StructuredAgentProtocol> {
+        Some(StructuredAgentProtocol::ClaudeStreamJson)
     }
 
     fn spawn(&self, _ctx: &SpawnCtx) -> Vec<String> {
@@ -52,7 +56,7 @@ struct FakeStreamSpawner {
 impl AgentStreamSpawner for FakeStreamSpawner {
     fn spawn<'a>(
         &'a self,
-        _config: ClaudeStreamConfig,
+        _config: AgentStreamConfig,
     ) -> Pin<Box<dyn Future<Output = Result<AgentStreamIo, ServerError>> + Send + 'a>> {
         let script = self.script;
         Box::pin(async move {

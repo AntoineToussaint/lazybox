@@ -165,6 +165,10 @@ struct ClickHits {
     /// Row containing the `▶ Description` / `▼ Description` header,
     /// or `None` when the section isn't being rendered (no body).
     body_header_row: Option<u16>,
+    /// Row containing the `+N more lines …` trailer that closes a
+    /// truncated Preview. Clicking it jumps straight to `Full`.
+    /// `None` unless the body is capped and there's more to show.
+    body_more_row: Option<u16>,
     /// Row containing the `▸ Activity` / `▾ Activity` header.
     activity_header_row: Option<u16>,
     /// One `(activity_index, row_range)` entry per visible card.
@@ -241,6 +245,36 @@ impl TaskBodyView {
 
     pub fn is_visible(self) -> bool {
         !matches!(self, Self::Collapsed)
+    }
+}
+
+/// The trailer row that closes a truncated description body. `dropped`
+/// is the number of hidden lines; `can_expand` is true in Preview
+/// (there's a `Full` to jump to) and false in Full (already uncapped —
+/// the pane is just too short). When expandable it spells out the
+/// affordance so the previously-dead-end `+N more lines` reads as a
+/// live control.
+fn more_lines_trailer(
+    dropped: usize,
+    can_expand: bool,
+    theme: &crate::theme::Theme,
+) -> Line<'static> {
+    let count = Span::styled(
+        format!("+{dropped} more lines"),
+        Style::default()
+            .fg(theme.text_dim)
+            .add_modifier(Modifier::ITALIC),
+    );
+    if can_expand {
+        Line::from(vec![
+            count,
+            Span::styled(
+                "  —  click or press d to expand",
+                Style::default().fg(theme.accent),
+            ),
+        ])
+    } else {
+        Line::from(count)
     }
 }
 
@@ -807,6 +841,13 @@ impl RightPane {
             // same effect as pressing `b`. Three taps cycles back
             // to collapsed.
             self.task_body_view = self.task_body_view.cycle();
+            return true;
+        }
+        if Some(row) == self.click_hits.body_more_row {
+            // The `+N more lines` trailer is a direct jump to the
+            // whole body — clicking the thing that says "there's
+            // more" should reveal all of it, not advance one step.
+            self.task_body_view = TaskBodyView::Full;
             return true;
         }
         if Some(row) == self.click_hits.activity_header_row {
@@ -1941,6 +1982,7 @@ impl RightPane {
             Some(s) => s.to_string(),
             None => {
                 self.click_hits.body_header_row = None;
+                self.click_hits.body_more_row = None;
                 return;
             }
         };
@@ -1967,19 +2009,41 @@ impl RightPane {
             Span::styled(suffix.to_string(), Style::default().fg(theme.text_dim)),
         ]);
         let mut lines = vec![header];
+        // No trailer until we find the body overflows the rect below.
+        self.click_hits.body_more_row = None;
         if self.task_body_view.is_visible() {
             // Render at most `area.height - 1` body rows — anything
             // more would overflow the rect ratatui carved out for us.
             // In Full mode the layout solver already gave us a tall
-            // rect, so `body_rows` lets `render_body` produce as
-            // many lines as the area allows.
+            // rect, so this produces as many lines as the area allows.
             let body_rows = area.height.saturating_sub(1) as usize;
             if body_rows > 0 {
-                lines.extend(crate::components::comment_render::render_body(
+                // Render uncapped, then truncate here so we control
+                // the trailer — `render_body`'s own `+N more lines`
+                // row is inert; ours carries the expand affordance
+                // and gets registered as a click target. (The cap
+                // only trims the tail, so rendering uncapped costs
+                // no more work.)
+                let rendered = crate::components::comment_render::render_body(
                     body,
                     area.width.saturating_sub(2),
-                    body_rows,
-                ));
+                    usize::MAX,
+                );
+                if rendered.len() > body_rows {
+                    let kept = body_rows.saturating_sub(1);
+                    let dropped = rendered.len() - kept;
+                    lines.extend(rendered.into_iter().take(kept));
+                    // The trailer is the next row. In Full the click
+                    // has nowhere further to go, so only Preview gets
+                    // the jump-to-Full affordance and hit target.
+                    let can_expand = self.task_body_view != TaskBodyView::Full;
+                    if can_expand {
+                        self.click_hits.body_more_row = Some(area.y + lines.len() as u16);
+                    }
+                    lines.push(more_lines_trailer(dropped, can_expand, theme));
+                } else {
+                    lines.extend(rendered);
+                }
             }
         }
         let para = Paragraph::new(lines).wrap(Wrap { trim: false });

@@ -871,3 +871,136 @@ mod mark_workspace_merged_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod description_expand_tests {
+    //! Issue #344: the `+N more lines` trailer closing a capped Preview
+    //! is a click target that jumps straight to Full, and it spells out
+    //! the affordance so it stops reading as a dead end.
+    use super::super::{PaneId, RightPane, TaskBodyView, more_lines_trailer};
+    use chrono::Utc;
+    use lazybox_core::{Task, TaskId, Workspace};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+
+    fn task_with_body(body: &str) -> Task {
+        Task {
+            id: TaskId {
+                source: "github".into(),
+                key: "github:o/r#1".into(),
+            },
+            title: "an issue".into(),
+            body: Some(body.into()),
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: "https://github.com/o/r/issues/1".into(),
+            repo: Some("o/r".into()),
+            branch: Some("main".into()),
+            base_branch: None,
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        }
+    }
+
+    fn pane_showing(body: &str) -> RightPane {
+        let ws = Workspace::from_task(task_with_body(body), Utc::now());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        pane
+    }
+
+    fn draw(pane: &mut RightPane, term: &mut Terminal<TestBackend>) {
+        term.draw(|f| pane.render(Rect::new(0, 0, 80, 24), f, true))
+            .unwrap();
+    }
+
+    // A body far taller than any Preview / Full pane in an 80x24
+    // terminal, so truncation always produces the trailer.
+    fn long_body() -> String {
+        (0..40).map(|i| format!("line {i}\n")).collect()
+    }
+
+    #[test]
+    fn preview_trailer_is_a_clickable_jump_to_full() {
+        let mut pane = pane_showing(&long_body());
+        pane.toggle_task_body(); // Collapsed → Preview
+        assert_eq!(pane.task_body_view, TaskBodyView::Preview);
+
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        draw(&mut pane, &mut term);
+
+        let row = pane
+            .click_hits
+            .body_more_row
+            .expect("a capped preview registers the trailer as a click target");
+        assert!(pane.handle_mouse_click(0, row));
+        assert_eq!(
+            pane.task_body_view,
+            TaskBodyView::Full,
+            "clicking the trailer jumps straight to Full, not one cycle step",
+        );
+    }
+
+    #[test]
+    fn full_view_trailer_is_not_a_click_target() {
+        // Full is already uncapped; if a short pane still truncates,
+        // the trailer must not offer a jump (there's nowhere to go).
+        let mut pane = pane_showing(&long_body());
+        pane.toggle_task_body();
+        pane.toggle_task_body(); // → Full
+        assert_eq!(pane.task_body_view, TaskBodyView::Full);
+
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        draw(&mut pane, &mut term);
+        assert!(pane.click_hits.body_more_row.is_none());
+    }
+
+    #[test]
+    fn short_body_has_no_trailer() {
+        let mut pane = pane_showing("one line only");
+        pane.toggle_task_body(); // Preview — but nothing to truncate
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        draw(&mut pane, &mut term);
+        assert!(pane.click_hits.body_more_row.is_none());
+    }
+
+    #[test]
+    fn trailer_spells_out_the_expand_affordance() {
+        let theme = crate::theme::current();
+        let expandable = more_lines_trailer(44, true, theme);
+        let text: String = expandable
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.starts_with("+44 more lines"));
+        assert!(
+            text.contains("expand"),
+            "an expandable trailer names the affordance: {text}",
+        );
+        // Full's trailer is inert — just the count, no false promise.
+        let inert = more_lines_trailer(44, false, theme);
+        let inert_text: String = inert.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(inert_text, "+44 more lines");
+    }
+}

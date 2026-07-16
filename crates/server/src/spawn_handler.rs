@@ -325,6 +325,8 @@ enum StateSource {
     Flip,
     /// A structured lifecycle hook ingested from the agent.
     Hook,
+    /// The PTY-exit teardown moving a dead agent to `Exited` (#357).
+    Exit,
 }
 
 /// The single place an `Event::AgentState` is born — the output pump, the
@@ -920,6 +922,14 @@ pub async fn handle_spawn(
                 first_output_signal_for_pump.notify_one();
                 signaled_first_output = true;
                 check_ready(&state_buf, &mut signaled_ready, &ready_signal_for_pump);
+                // The composer being drawn is the "agent has booted" signal
+                // the state machine needs to stop holding byte-flow `Working`
+                // as boot chrome — crucial for the autonomous flow, whose
+                // work prompt is injected during boot, before the first quiet
+                // classification could latch it (#357).
+                if signaled_ready {
+                    state_machine.mark_booted();
+                }
             }
             // High-water mark of everything delivered downstream so far
             // — the replay's `last_seq` at subscribe time, then advanced
@@ -1047,6 +1057,9 @@ pub async fn handle_spawn(
                     );
                 }
                 check_ready(&state_buf, &mut signaled_ready, &ready_signal_for_pump);
+                if signaled_ready {
+                    state_machine.mark_booted();
+                }
                 let _ = bus.send(Event::TerminalOutput {
                     terminal_id: id_for_pump,
                     bytes: chunk.bytes,
@@ -2737,6 +2750,25 @@ pub(crate) async fn teardown_exited_terminal(
             "teardown_exited_terminal: terminal exited with no exit status (killed by signal?)"
         ),
     }
+    // A dead agent must leave its last live pill: a crashed Codex that was
+    // `Working` (or a `Done`/`InputNeeded` agent the user closed) has to move
+    // to the terminal `Exited` state, not linger as a false "working" spinner
+    // (#356/#357). Broadcast it before the maps are swept — `agent_states`
+    // still holds the prior value and `terminal_meta` still resolves the live
+    // session key. Only agent terminals carry a state pill; shells don't.
+    if let Some((session_key, TerminalKind::Agent(_))) = meta {
+        let previous = config.agent_states.lock().await.get(&terminal_id).copied();
+        broadcast_agent_state(
+            &config.terminal_meta,
+            &config.bus,
+            terminal_id,
+            &session_key,
+            previous,
+            lazybox_ipc::AgentState::Exited { code: exit_code },
+            StateSource::Exit,
+        )
+        .await;
+    }
     let _ = config.bus.send(Event::TerminalExited {
         terminal_id,
         exit_code,
@@ -3127,12 +3159,23 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
     if !pressed_enter && !answered_chooser {
         return;
     }
-    // Only flip a terminal that's actually parked on a prompt — a flip
-    // only makes sense as the answer to a live `?`, and the bare-keystroke
-    // shape check below is meaningful only for an `InputNeeded` terminal.
-    // This is a fast pre-check; the flip is re-validated atomically under
-    // the state lock below, since the terminal can resolve in between.
-    if config.agent_state_for(terminal_id).await != Some(lazybox_ipc::AgentState::InputNeeded) {
+    // Flip a terminal that's either parked on a prompt (answering a live
+    // `?`) or finished (`Done`) and just handed a fresh prompt via Enter —
+    // a submitted line at a `Done` agent starts a new turn, and for a
+    // hookless agent (Codex, Cursor) this optimistic flip is the ONLY thing
+    // that leaves `Done`: byte-flow `Working` can't clear it (a stray repaint
+    // must not un-finish a turn), and there's no `UserPromptSubmit` hook to
+    // do it either. A raced bare Enter that wasn't really a new turn
+    // self-corrects: the agent settles back to `Done` on the next quiet
+    // classification (#357). The bare-keystroke shape check below is only
+    // meaningful for `InputNeeded`. Fast pre-check; re-validated atomically
+    // under the state lock below, since the terminal can resolve in between.
+    let flippable = |state: Option<lazybox_ipc::AgentState>| match state {
+        Some(lazybox_ipc::AgentState::InputNeeded) => true,
+        Some(lazybox_ipc::AgentState::Done) => pressed_enter,
+        _ => false,
+    };
+    if !flippable(config.agent_state_for(terminal_id).await) {
         return;
     }
     // A bare chooser keystroke only ANSWERS chooser/permission-shaped
@@ -3169,18 +3212,16 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
         return;
     };
     // Atomic compare-and-set under the state lock: flip ONLY if the
-    // terminal is still parked on the prompt. If it raced to Working / Idle
-    // / Done since the pre-check above, the `?` is already gone (or the
-    // agent finished) — leave it alone. This re-check, not the transition
-    // table, is what protects a raced-in `Done`: `Done → Working` is itself
-    // an allowed edge, so committing the flip against a `Done` would stomp
-    // the "finished" alert. The `transition` call keeps the flip behind the
-    // same choke point as the detection paths (it always commits here,
-    // since `InputNeeded → Working` is legal and state-changing).
+    // terminal is still in a flippable state (parked on a prompt, or a
+    // `Done` agent handed a fresh Enter). If it raced to `Working`/`Idle`
+    // since the pre-check, leave it alone. The `transition` call keeps the
+    // flip behind the same choke point as the detection paths (it always
+    // commits here, since both `InputNeeded → Working` and `Done → Working`
+    // are legal, state-changing edges).
     let prev = {
         let mut map = config.agent_states.lock().await;
         let prev = map.get(&terminal_id).copied();
-        if prev != Some(lazybox_ipc::AgentState::InputNeeded) {
+        if !flippable(prev) {
             return;
         }
         let Some(committed) =
@@ -6220,7 +6261,13 @@ mod tests {
     }
 
     impl PumpDriver {
-        fn new(input_hysteresis: Duration, working_hysteresis: Duration) -> Self {
+        // `working_hysteresis` is vestigial — the `Working → Idle` edge is
+        // now forbidden outright, so there is no working-exit flap left to
+        // damp — but kept in the signature so the many call sites read
+        // uniformly. The driver starts booted: these tests exercise the
+        // steady-state pump, not the boot gate (that lives in the
+        // state-machine unit tests).
+        fn new(input_hysteresis: Duration, _working_hysteresis: Duration) -> Self {
             let id = TerminalId(7);
             let session_key: SessionKey = "github-o-r-1".into();
             let (bus, rx) = tokio::sync::broadcast::channel(256);
@@ -6248,10 +6295,12 @@ mod tests {
                 id,
                 session_key,
                 terminal_meta,
-                state_machine: lazybox_agents::AgentStateMachine::with_hysteresis(
-                    input_hysteresis,
-                    working_hysteresis,
-                ),
+                state_machine: {
+                    let mut m =
+                        lazybox_agents::AgentStateMachine::with_input_hysteresis(input_hysteresis);
+                    m.mark_booted();
+                    m
+                },
                 hook_driven: std::sync::Arc::new(tokio::sync::Mutex::new(
                     std::collections::HashMap::new(),
                 )),
@@ -6321,34 +6370,38 @@ mod tests {
         }
     }
 
-    /// The pump's two-path model (#289): chunks only ever read `Working`
-    /// (bytes flowing = the agent is doing something); the classifier runs
-    /// at the quiet boundary and decides the terminal state. Real
-    /// per-state PTY transcripts driven through both paths must produce
-    /// the matching emitted-on-change sequence. ZERO hysteresis so timing
-    /// damping can't interfere — this pins the stream the per-fixture
+    /// The pump's two-path model (#289) under the one-way-door rule (#357):
+    /// chunks only ever read `Working` (bytes flowing = the agent is doing
+    /// something); the classifier runs at the quiet boundary and decides the
+    /// terminal state. A working agent that settles at a resting composer has
+    /// **finished a turn** — the classifier promotes it to `Done`, never back
+    /// to the never-worked `Idle`. And `Done` then resists ambiguous byte
+    /// flow (a fresh prompt at rest, or the user answering, is what moves it),
+    /// so the resumed-stream chunk after `Done` is held. ZERO hysteresis so
+    /// timing damping can't interfere — this pins the stream the per-fixture
     /// corpus (`detect_fixtures.rs`) can't, since each of those asserts a
     /// single frame in isolation.
     #[tokio::test]
     async fn agent_state_transitions_emit_an_ordered_sequence() {
-        use lazybox_ipc::AgentState::{Idle, InputNeeded, Working};
+        use lazybox_ipc::AgentState::{Done, InputNeeded, Working};
         let idle = include_bytes!("../../agents/tests/fixtures/idle_composer.bin");
         let working = include_bytes!("../../agents/tests/fixtures/working_status_line.bin");
         let input = include_bytes!("../../agents/tests/fixtures/permission_prompt_fragmented.bin");
 
         let mut p = PumpDriver::new(Duration::ZERO, Duration::ZERO);
         let mut seq = Vec::new();
-        seq.extend(p.feed(idle).await); // bytes flowing → Working
-        seq.extend(p.quiet().await); // resting composer → Idle
-        seq.extend(p.feed(working).await); // streaming again → Working
-        seq.extend(p.feed(input).await); // dialog paints mid-stream → still Working
+        seq.extend(p.feed(working).await); // bytes flowing → Working
+        seq.extend(p.feed(idle).await); // still streaming → Working (deduped)
+        seq.extend(p.quiet().await); // came to rest after working → Done
+        seq.extend(p.feed(working).await); // stray byte flow can't un-finish Done
+        seq.extend(p.feed(input).await); // dialog paints → still held against Done
         seq.extend(p.quiet().await); // dialog at rest → InputNeeded
-        seq.extend(p.feed(working).await); // stream resumes → Working
+        seq.extend(p.feed(working).await); // user answered / resumed → Working
 
         assert_eq!(
             seq,
-            vec![Working, Idle, Working, InputNeeded, Working],
-            "the emitted-on-change sequence must track chunks + quiet boundaries",
+            vec![Working, Done, InputNeeded, Working],
+            "a settled worker is Done (never Idle), and Done resists byte flow",
         );
     }
 
@@ -6571,8 +6624,11 @@ mod tests {
         let agent = lazybox_agents::registry().get("claude").unwrap();
         let working = include_bytes!("../../agents/tests/fixtures/working_status_line.bin");
         let mut buf = Vec::new();
-        let mut state_machine =
-            lazybox_agents::AgentStateMachine::with_hysteresis(Duration::ZERO, Duration::ZERO);
+        let mut state_machine = {
+            let mut m = lazybox_agents::AgentStateMachine::with_input_hysteresis(Duration::ZERO);
+            m.mark_booted();
+            m
+        };
         note_pty_activity(
             Some(&agent),
             &mut buf,

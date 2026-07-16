@@ -1962,6 +1962,36 @@ mod done_alert_tests {
         assert_eq!(sb.agent_state(&key), Some(AgentState::Working));
     }
 
+    /// #356/#357: a dead agent's `Exited` pill must SURVIVE the
+    /// `TerminalExited` event that tears its terminal down — the workspace
+    /// stays with the exit marker (a restart affordance), rather than the
+    /// pill blanking to nothing. Only a new agent, or removing the
+    /// workspace, clears it.
+    #[test]
+    fn exited_state_survives_the_terminal_exit_event() {
+        let (mut sb, key) = sidebar_with_one_workspace();
+        sb.on_event(&agent_state(&key, AgentState::Working));
+        // The daemon broadcasts the terminal Exited state, then the
+        // TerminalExited that removes the terminal itself.
+        sb.on_event(&agent_state(&key, AgentState::Exited { code: Some(1) }));
+        assert_eq!(
+            sb.agent_state(&key),
+            Some(AgentState::Exited { code: Some(1) })
+        );
+        sb.on_event(&Event::TerminalExited {
+            terminal_id: lazybox_ipc::TerminalId(1),
+            exit_code: Some(1),
+        });
+        assert_eq!(
+            sb.agent_state(&key),
+            Some(AgentState::Exited { code: Some(1) }),
+            "the exit marker must persist as a restart affordance",
+        );
+        // A fresh agent spawn clears it.
+        sb.on_event(&agent_state(&key, AgentState::Working));
+        assert_eq!(sb.agent_state(&key), Some(AgentState::Working));
+    }
+
     /// Removing a workspace drops its agent-state entry, so a churn of
     /// closed/merged workspaces can't leak stale keys into the map over
     /// a long session.

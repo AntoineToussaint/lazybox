@@ -688,6 +688,8 @@ impl Sidebar {
                     .is_some_and(|w| crate::agent_attention::workspace_is_working(w, &self.agents)),
                 done: workspace
                     .is_some_and(|w| crate::agent_attention::workspace_is_done(w, &self.agents)),
+                exited: workspace
+                    .is_some_and(|w| crate::agent_attention::workspace_is_exited(w, &self.agents)),
                 working_glyph: crate::components::workspace_row::working_glyph(
                     self.working_spinner_frame,
                 ),

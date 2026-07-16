@@ -32,11 +32,11 @@ Set Width 1200
 # below, so it must be on screen for the render to settle. The keybinding table
 # keeps growing (issue #224 added the `w c` / `w x` / `w u` scoped-work group;
 # #315 added the ask-lazybox search, messages log, theme, and change-default
-# rows), so each bump reveals the clipped tail: 720 → 1000 → 1600. Height only
-# reveals more of the overlay and never changes the table's byte content
-# (that's width/content-driven), so this is generously oversized on purpose to
-# absorb the next few rows before it clips the anchor again.
-Set Height 1600
+# rows), so each bump reveals the clipped tail: 720 → 1000 → 1600 → 2000.
+# Height only reveals more of the overlay and never changes the table's byte
+# content (that's width/content-driven), so this is generously oversized on
+# purpose to absorb the next few rows before it clips the anchor again.
+Set Height 2000
 Set Theme "Catppuccin Mocha"
 
 Hide

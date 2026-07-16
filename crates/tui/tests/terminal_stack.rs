@@ -120,6 +120,7 @@ fn exit_event_closes_the_terminal_window() {
     t.on_event(&Event::TerminalExited {
         terminal_id: TerminalId(1),
         exit_code: Some(0),
+        last_output: None,
     });
     assert_eq!(t.terminal_count(), 0, "exit removes the slot");
 }

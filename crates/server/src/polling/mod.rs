@@ -4533,6 +4533,7 @@ async fn delete_workspace_internal(config: &ServerConfig, key: &WorkspaceKey, ar
             let _ = config.bus.send(Event::TerminalExited {
                 terminal_id: tid,
                 exit_code: None,
+                last_output: None,
             });
         }
     }

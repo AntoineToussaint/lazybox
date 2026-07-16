@@ -321,6 +321,10 @@ pub struct UiDefaults {
     /// Preferred browser app/executable, or None for the OS default.
     /// See [`UiSection::browser`].
     pub browser: Option<String>,
+    /// Dead-on-arrival grace window for exited agent terminals.
+    /// Sourced from `terminal.agent_dead_on_arrival_ms`. See
+    /// [`TerminalSection::agent_dead_on_arrival_ms`].
+    pub agent_dead_on_arrival: Duration,
 }
 
 impl Default for UiDefaults {
@@ -336,6 +340,7 @@ impl Default for UiDefaults {
             long_snooze: Duration::from_secs(365 * 24 * 60 * 60),
             log_path: std::path::PathBuf::from("/tmp/lazybox.log"),
             browser: None,
+            agent_dead_on_arrival: Duration::from_millis(10_000),
         }
     }
 }
@@ -363,6 +368,10 @@ impl UiSection {
             long_snooze: self.long_snooze.unwrap_or(d.long_snooze),
             log_path: self.log_path.clone().unwrap_or(d.log_path),
             browser: self.browser.clone(),
+            // Sourced from the `terminal` section (see
+            // `Config::resolved_ui`); the default stands until that
+            // override is applied.
+            agent_dead_on_arrival: d.agent_dead_on_arrival,
         }
     }
 }
@@ -712,6 +721,14 @@ pub struct TerminalSection {
     /// behavior (tmux owns the alternate screen + copy-mode wheel
     /// scrolling) if an inner-app regression shows up.
     pub native_scrollback: bool,
+    /// Grace window (ms) after an agent terminal spawns during which a
+    /// clean (`code 0`) exit that never engaged is treated as
+    /// dead-on-arrival — kept open with a restart affordance instead
+    /// of auto-closing. An agent that ran past this window, or that
+    /// reached a working/input/done state, auto-closes on a clean exit;
+    /// a non-zero code or death-by-signal always keeps the pane. See
+    /// #367 (and #356/#357 for why the linger view exists).
+    pub agent_dead_on_arrival_ms: u64,
 }
 
 impl Default for TerminalSection {
@@ -720,6 +737,7 @@ impl Default for TerminalSection {
             escape_char: ']',
             escape_window_ms: 600,
             native_scrollback: true,
+            agent_dead_on_arrival_ms: 10_000,
         }
     }
 }
@@ -737,6 +755,7 @@ impl Config {
             ui.terminal_escape_char = self.terminal.escape_char;
         }
         ui.escape_window = Duration::from_millis(self.terminal.escape_window_ms);
+        ui.agent_dead_on_arrival = Duration::from_millis(self.terminal.agent_dead_on_arrival_ms);
         ui
     }
 

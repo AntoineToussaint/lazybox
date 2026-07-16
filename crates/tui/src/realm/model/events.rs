@@ -14,6 +14,12 @@ use super::{Id, Model, Msg, PaneFocus};
 use lazybox_ipc::{Command as IpcCommand, Event as IpcEvent};
 use tuirealm::terminal::TerminalAdapter;
 
+/// Left in a help turn when the agent proposed an action (#353) but the
+/// user had already closed Ask, so it never surfaced a confirm. Marks
+/// the answer so a reopened transcript reads as an unapplied proposal.
+const ACTION_DROPPED_NOTE: &str =
+    "\n\n_(Proposed an action, but Ask was closed before you could confirm — ask again to apply.)_";
+
 impl<T: TerminalAdapter> Model<T> {
     /// Flip lazybox's mouse capture on/off. Issues
     /// `EnableMouseCapture` / `DisableMouseCapture` to stdout so the
@@ -126,21 +132,46 @@ impl<T: TerminalAdapter> Model<T> {
                 error,
                 ..
             } if Some(*run_id) == self.help_run => {
-                let mut convo = self.help_convo_mut();
-                if let Some(turn) = convo.streaming_turn_mut() {
-                    // The result carries the authoritative final text;
-                    // prefer it over the accumulated deltas so a
-                    // dropped delta can't leave a truncated answer.
-                    if let Some(result) = result.as_deref().filter(|r| !r.trim().is_empty()) {
-                        turn.answer = result.to_string();
+                let mut intent = None;
+                {
+                    let mut convo = self.help_convo_mut();
+                    if let Some(turn) = convo.streaming_turn_mut() {
+                        // The result carries the authoritative final text;
+                        // prefer it over the accumulated deltas so a
+                        // dropped delta can't leave a truncated answer.
+                        if let Some(result) = result.as_deref().filter(|r| !r.trim().is_empty()) {
+                            turn.answer = result.to_string();
+                        }
+                        turn.done = true;
+                        // A finished answer may carry a proposed action
+                        // (#353). Always strip the raw block so no intent
+                        // JSON leaks into the transcript, then decide what
+                        // to do with it. The confirm mounts below, off the
+                        // lock — but only while the help modal is still
+                        // open (the same gate `propose_help_action` uses).
+                        // If the user closed Ask before the answer arrived
+                        // the action is dropped; leave a short note in its
+                        // place so a reopened transcript doesn't read as if
+                        // it ran.
+                        if let Some(parsed) =
+                            lazybox_tui_core::help::parse_action_intent(&turn.answer)
+                        {
+                            turn.answer = lazybox_tui_core::help::strip_action_block(&turn.answer);
+                            if self.modal_stack.last() == Some(&Id::HelpAsk) {
+                                intent = Some(parsed);
+                            } else {
+                                turn.answer.push_str(ACTION_DROPPED_NOTE);
+                            }
+                        }
                     }
-                    turn.done = true;
+                    if let Some(error) = error {
+                        convo.notice = Some(error.clone());
+                    }
                 }
-                if let Some(error) = error {
-                    convo.notice = Some(error.clone());
-                }
-                drop(convo);
                 self.redraw = true;
+                if let Some(intent) = intent {
+                    self.propose_help_action(intent);
+                }
                 true
             }
             IpcEvent::AgentRunFinished { run_id, error, .. } if Some(*run_id) == self.help_run => {

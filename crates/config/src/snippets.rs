@@ -43,6 +43,29 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// Serialize `value` and write it to `path` atomically: a sibling
+/// `.tmp` file, then a rename, so a crash mid-write can never leave a
+/// half-written (and unparseable) snippets file behind. Creates the
+/// parent directory if needed. Mirrors `Config::save_to`.
+///
+/// The tmp sibling carries a per-process, per-call suffix so a second
+/// writer — another lazybox instance, or a concurrent call — can't
+/// clash on a fixed name and clobber the other's in-flight write.
+fn write_yaml_atomically(path: &Path, value: &serde_yaml::Value) -> Result<(), SnippetsError> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    let yaml = serde_yaml::to_string(value)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("yaml.tmp.{}.{seq}", std::process::id()));
+    std::fs::write(&tmp, &yaml)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 /// Single snippet definition.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Snippet {
@@ -116,6 +139,8 @@ pub enum SnippetsError {
     Io(#[from] std::io::Error),
     #[error("failed to parse snippets: {0}")]
     Parse(#[from] serde_yaml::Error),
+    #[error("{0} is not a snippets mapping — refusing to overwrite it")]
+    NotAMapping(PathBuf),
 }
 
 impl Snippets {
@@ -783,6 +808,58 @@ impl Snippets {
         }
     }
 
+    /// Upsert one snippet into the global `<lazybox_home>/snippets.yaml`
+    /// and return the path written. Missing file/dir are created; an
+    /// existing `key` is replaced in place, every other entry (and the
+    /// mapping's order) is preserved. The write round-trips through
+    /// `serde_yaml::Value` rather than editing text, so YAML comments in
+    /// the file are not preserved — the trade-off for letting lazybox
+    /// own the mutation safely.
+    ///
+    /// Used by the Ask Lazybox help agent's `add_snippet` action (#353):
+    /// the agent proposes a snippet, the TUI confirms it, and this
+    /// applies it natively before hot-reloading the picker.
+    pub fn upsert_global_snippet(key: &str, snippet: &Snippet) -> Result<PathBuf, SnippetsError> {
+        Self::upsert_snippet_at(&Self::default_global_path(), key, snippet)
+    }
+
+    /// The path-parameterized core of [`Self::upsert_global_snippet`],
+    /// split out so tests exercise the read-modify-write without
+    /// touching the real `LAZYBOX_HOME`.
+    fn upsert_snippet_at(
+        path: &Path,
+        key: &str,
+        snippet: &Snippet,
+    ) -> Result<PathBuf, SnippetsError> {
+        let existing = match std::fs::read_to_string(path) {
+            Ok(raw) => Some(raw),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
+        let mut root = match existing.as_deref().map(str::trim) {
+            Some(raw) if !raw.is_empty() => serde_yaml::from_str(raw)?,
+            _ => serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        };
+        // A file that parsed to a non-mapping (a bare scalar or list) is
+        // not a snippets file we can safely extend — refuse rather than
+        // clobber whatever the user actually has there.
+        let Some(map) = root.as_mapping_mut() else {
+            return Err(SnippetsError::NotAMapping(path.to_path_buf()));
+        };
+        let snippets = map
+            .entry(serde_yaml::Value::from("snippets"))
+            .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+        // Same guard one level down: a `snippets:` that isn't a mapping
+        // (e.g. `snippets: []`) can't take a keyed entry.
+        let Some(snippets) = snippets.as_mapping_mut() else {
+            return Err(SnippetsError::NotAMapping(path.to_path_buf()));
+        };
+        snippets.insert(serde_yaml::Value::from(key), serde_yaml::to_value(snippet)?);
+
+        write_yaml_atomically(path, &root)?;
+        Ok(path.to_path_buf())
+    }
+
     /// Merge two snippet sets. Entries in `overlay` win on key
     /// conflict. Used to stack repo-local on top of global so a
     /// project can override a shared shortcut without touching the
@@ -1193,5 +1270,134 @@ snippets:
         let err = Snippets::load_from(&path, SnippetOrigin::Global)
             .expect_err("malformed YAML should error");
         assert!(matches!(err, SnippetsError::Parse(_)));
+    }
+
+    fn snippet(category: &str, description: &str, body: &str) -> Snippet {
+        Snippet {
+            description: description.to_string(),
+            category: category.to_string(),
+            body: body.to_string(),
+            origin: SnippetOrigin::Unknown,
+        }
+    }
+
+    /// Writing into a directory that doesn't exist yet creates the file
+    /// (and its parent) and the snippet reads back through `load_from`.
+    #[test]
+    fn upsert_creates_missing_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "lazybox-snippets-upsert-create-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("nested").join("snippets.yaml");
+        Snippets::upsert_snippet_at(
+            &path,
+            "integrate",
+            &snippet("Review", "Integrate feedback", "Do the thing"),
+        )
+        .expect("write succeeds");
+
+        let loaded = Snippets::load_from(&path, SnippetOrigin::Global).expect("reloads");
+        let s = loaded.get("integrate").expect("key present");
+        assert_eq!(s.category, "Review");
+        assert_eq!(s.body, "Do the thing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Upserting a new key preserves every existing entry — the write
+    /// is a merge, not a replace.
+    #[test]
+    fn upsert_preserves_existing_entries() {
+        let path = write_tmp(
+            "upsert-preserve",
+            "snippets:\n  rev:\n    description: Review\n    body: review it\n",
+        );
+        Snippets::upsert_snippet_at(
+            &path,
+            "integrate",
+            &snippet("Review", "Integrate", "integrate it"),
+        )
+        .expect("write succeeds");
+
+        let loaded = Snippets::load_from(&path, SnippetOrigin::Global).expect("reloads");
+        assert!(loaded.get("rev").is_some(), "existing snippet must survive");
+        assert_eq!(
+            loaded.get("integrate").expect("new key").body,
+            "integrate it"
+        );
+    }
+
+    /// Upserting an existing key replaces its value in place.
+    #[test]
+    fn upsert_replaces_existing_key() {
+        let path = write_tmp(
+            "upsert-replace",
+            "snippets:\n  rev:\n    description: Old\n    body: old body\n",
+        );
+        Snippets::upsert_snippet_at(&path, "rev", &snippet("Review", "New", "new body"))
+            .expect("write succeeds");
+
+        let loaded = Snippets::load_from(&path, SnippetOrigin::Global).expect("reloads");
+        assert_eq!(loaded.len(), 1, "replace, not append");
+        assert_eq!(loaded.get("rev").expect("rev").body, "new body");
+    }
+
+    /// A file that exists but has no `snippets:` key still gets the new
+    /// entry (and keeps whatever other top-level keys it had).
+    #[test]
+    fn upsert_adds_snippets_key_when_absent() {
+        let path = write_tmp("upsert-no-key", "some_other_top_level: 1\n");
+        Snippets::upsert_snippet_at(&path, "rev", &snippet("", "", "body"))
+            .expect("write succeeds");
+
+        let loaded = Snippets::load_from(&path, SnippetOrigin::Global).expect("reloads");
+        assert!(loaded.get("rev").is_some());
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            raw.contains("some_other_top_level"),
+            "sibling key preserved"
+        );
+    }
+
+    /// A valid-YAML-but-non-mapping file (e.g. a bare list) is refused,
+    /// not silently overwritten — the user's content is never destroyed.
+    #[test]
+    fn upsert_refuses_to_clobber_a_non_mapping_file() {
+        let path = write_tmp("upsert-non-mapping", "- one\n- two\n");
+        let err = Snippets::upsert_snippet_at(&path, "rev", &snippet("", "", "body"))
+            .expect_err("must refuse");
+        assert!(matches!(err, SnippetsError::NotAMapping(_)));
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("- one"), "original content intact");
+    }
+
+    /// A `snippets:` value that isn't a mapping is likewise refused
+    /// rather than replaced.
+    #[test]
+    fn upsert_refuses_when_snippets_key_is_not_a_mapping() {
+        let path = write_tmp("upsert-snippets-list", "snippets: []\n");
+        let err = Snippets::upsert_snippet_at(&path, "rev", &snippet("", "", "body"))
+            .expect_err("must refuse");
+        assert!(matches!(err, SnippetsError::NotAMapping(_)));
+    }
+
+    /// The atomic write leaves no stray `.tmp` sibling behind — the
+    /// rename consumes whatever unique tmp name the write picked.
+    #[test]
+    fn upsert_cleans_up_its_temp_file() {
+        let path = write_tmp("upsert-tmp", "snippets:\n  rev:\n    body: x\n");
+        Snippets::upsert_snippet_at(&path, "pr", &snippet("", "", "y")).expect("write");
+        let dir = path.parent().expect("has parent");
+        let leftovers: Vec<_> = std::fs::read_dir(dir)
+            .expect("read dir")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "tmp siblings left behind: {leftovers:?}"
+        );
     }
 }

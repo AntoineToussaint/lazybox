@@ -8357,6 +8357,275 @@ mod help_ask_tests {
         );
         assert_eq!(m.help_convo_mut().turns.len(), 1);
     }
+
+    // ── Ask Lazybox actions (#353) ──────────────────────────────────
+
+    /// Serializes tests that mutate the process-global `LAZYBOX_HOME`
+    /// so a parallel test can't observe another's temp home (or the
+    /// real one). Held for the whole body of each such test.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A finished answer carrying an `add_snippet` block.
+    fn add_snippet_answer(key: &str) -> String {
+        format!(
+            "I'll add that snippet.\n\n```lazybox-action\n\
+{{\"action\":\"add_snippet\",\"key\":\"{key}\",\"category\":\"Review\",\
+\"description\":\"Integrate feedback\",\"body\":\"Address the review and commit.\"}}\n\
+```\n\nSend it with ]]s{key}.",
+        )
+    }
+
+    fn finish_help_turn(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>, answer: String) {
+        m.handle_daemon_event(run_started(1));
+        m.handle_daemon_event(IpcEvent::AgentTurnFinished {
+            run_id: AgentRunId(1),
+            result: Some(answer),
+            session_id: None,
+            error: None,
+        });
+    }
+
+    /// The motivating flow: asking to add a snippet produces a
+    /// confirm-with-preview, stashes the intent, and hides the raw
+    /// action JSON from the transcript.
+    #[test]
+    fn add_snippet_action_proposes_a_confirm_and_strips_the_block() {
+        let mut m = build_model();
+        m.update(Msg::HelpAskOpen);
+        let _ = m.handle_help_asked("add a snippet".into());
+        finish_help_turn(&mut m, add_snippet_answer("integrate"));
+
+        assert_eq!(m.modal_stack.last(), Some(&Id::HelpActionConfirm));
+        match m.pending_help_action.clone().expect("intent stashed") {
+            lazybox_tui_core::help::HelpActionIntent::AddSnippet {
+                key,
+                category,
+                body,
+                ..
+            } => {
+                assert_eq!(key, "integrate");
+                assert_eq!(category, "Review");
+                assert_eq!(body, "Address the review and commit.");
+            }
+            other => panic!("expected AddSnippet, got {other:?}"),
+        }
+
+        let convo = m.help_convo_mut();
+        assert!(
+            !convo.turns[0].answer.contains("lazybox-action"),
+            "raw action block must not show in the transcript",
+        );
+        assert!(convo.turns[0].answer.contains("I'll add that snippet."));
+        assert!(convo.turns[0].answer.contains("Send it with ]]sintegrate."));
+    }
+
+    /// Declining the confirm drops the stash and writes nothing —
+    /// control returns to the help modal.
+    #[test]
+    fn declining_the_snippet_confirm_changes_nothing() {
+        let mut m = build_model();
+        m.update(Msg::HelpAskOpen);
+        let _ = m.handle_help_asked("add a snippet".into());
+        finish_help_turn(&mut m, add_snippet_answer("integrate"));
+        assert_eq!(m.modal_stack.last(), Some(&Id::HelpActionConfirm));
+
+        let before = m.snippets.len();
+        let _ = m.handle_modal_dismissed();
+        assert!(m.pending_help_action.is_none());
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::HelpAsk),
+            "back to Ask Lazybox"
+        );
+        assert_eq!(
+            m.snippets.len(),
+            before,
+            "nothing added to the live catalog"
+        );
+        assert!(m.snippets.get("integrate").is_none());
+    }
+
+    /// Accepting writes the snippet to the global file and hot-reloads
+    /// the catalog so `]]s<key>` works immediately — no restart (#353).
+    #[test]
+    fn confirming_writes_the_snippet_and_hot_reloads() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home =
+            std::env::temp_dir().join(format!("lazybox-help-snippet-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator in this
+        // binary, so this single-writer mutation can't race.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        let mut m = build_model();
+        m.update(Msg::HelpAskOpen);
+        let _ = m.handle_help_asked("add a snippet".into());
+        finish_help_turn(&mut m, add_snippet_answer("integrate"));
+        assert_eq!(m.modal_stack.last(), Some(&Id::HelpActionConfirm));
+
+        let _ = m.handle_confirmed(true);
+
+        assert!(
+            home.join("snippets.yaml").exists(),
+            "written to the global file"
+        );
+        let s = m
+            .snippets
+            .get("integrate")
+            .expect("hot-reloaded into the live catalog");
+        assert_eq!(s.body, "Address the review and commit.");
+        assert_eq!(m.modal_stack.last(), Some(&Id::HelpAsk), "confirm popped");
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The run outlives the modal — an action that resolves after the
+    /// user closed Ask must not pop a surprise confirm. The raw JSON is
+    /// still stripped (no intent leaks into the transcript), but because
+    /// the action was dropped a short "not applied" note replaces it, so
+    /// a reopened transcript never reads as if the action ran.
+    #[test]
+    fn dropped_action_strips_block_and_notes_it_was_not_applied() {
+        let mut m = build_model();
+        let _ = m.handle_help_asked("add a snippet".into());
+        finish_help_turn(&mut m, add_snippet_answer("integrate"));
+
+        assert!(m.pending_help_action.is_none());
+        assert_ne!(m.modal_stack.last(), Some(&Id::HelpActionConfirm));
+        let answer = m.help_convo_mut().turns[0].answer.clone();
+        assert!(
+            !answer.contains("lazybox-action"),
+            "raw block stripped even when the action was dropped: {answer:?}",
+        );
+        assert!(
+            answer.contains("ask again to apply"),
+            "dropped action leaves a not-applied note: {answer:?}",
+        );
+    }
+
+    /// A malformed intent (whitespace key) is rejected at the boundary:
+    /// no confirm, and a notice explains why nothing happened.
+    #[test]
+    fn invalid_snippet_key_sets_a_notice_and_no_confirm() {
+        let mut m = build_model();
+        m.update(Msg::HelpAskOpen);
+        let _ = m.handle_help_asked("add a snippet".into());
+        finish_help_turn(
+            &mut m,
+            "```lazybox-action\n{\"action\":\"add_snippet\",\"key\":\"has space\",\"body\":\"x\"}\n```"
+                .into(),
+        );
+
+        assert!(m.pending_help_action.is_none());
+        assert_ne!(m.modal_stack.last(), Some(&Id::HelpActionConfirm));
+        let convo = m.help_convo_mut();
+        assert!(
+            convo
+                .notice
+                .as_deref()
+                .unwrap_or("")
+                .contains("invalid key"),
+            "notice: {:?}",
+            convo.notice,
+        );
+    }
+
+    fn edit_config_answer(key: &str, value: &str) -> String {
+        format!(
+            "Sure.\n\n```lazybox-action\n{{\"action\":\"edit_config\",\"key\":\"{key}\",\"value\":\"{value}\"}}\n```",
+        )
+    }
+
+    /// `validate_config_edit` is the security boundary: it canonicalizes
+    /// a theme's case, flags restart-only keys, and rejects anything
+    /// off the allowlist or with an unknown value.
+    #[test]
+    fn validate_config_edit_enforces_the_allowlist() {
+        let mut m = build_model();
+        m.set_agents(vec!["claude".into(), "codex".into()]);
+
+        // Theme: case-insensitive match, canonicalized to the registered
+        // spelling, applies live.
+        let edit = m
+            .validate_config_edit("ui.theme", "lazybox light")
+            .expect("known theme");
+        assert_eq!(edit.value, "Lazybox Light");
+        assert!(!edit.needs_restart);
+
+        // default_agent: must be enabled.
+        assert!(
+            m.validate_config_edit("setup.default_agent", "codex")
+                .is_ok()
+        );
+        assert!(
+            m.validate_config_edit("setup.default_agent", "nope")
+                .is_err()
+        );
+
+        // keymap preset: valid but restart-only.
+        let km = m
+            .validate_config_edit("ui.keymap_preset", "vim")
+            .expect("vim preset");
+        assert!(km.needs_restart);
+        assert!(m.validate_config_edit("ui.keymap_preset", "emacs").is_err());
+
+        // Off-allowlist key and unknown theme value are rejected.
+        assert!(
+            m.validate_config_edit("agent.skip_permissions", "true")
+                .is_err()
+        );
+        assert!(m.validate_config_edit("ui.theme", "Nonexistent").is_err());
+    }
+
+    /// An `edit_config` for an allowlisted key proposes a
+    /// confirm-with-preview; accepting persists it to `config.yaml`.
+    #[test]
+    fn edit_config_proposes_confirm_and_persists() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("lazybox-help-config-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator here.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        let mut m = build_model();
+        m.set_agents(vec!["claude".into(), "codex".into()]);
+        m.update(Msg::HelpAskOpen);
+        let _ = m.handle_help_asked("use codex by default".into());
+        finish_help_turn(&mut m, edit_config_answer("setup.default_agent", "codex"));
+
+        assert_eq!(m.modal_stack.last(), Some(&Id::HelpActionConfirm));
+        let _ = m.handle_confirmed(true);
+
+        let cfg = lazybox_config::Config::load_from(&home.join("config.yaml")).expect("config");
+        assert_eq!(cfg.setup.default_agent.as_deref(), Some("codex"));
+        assert_eq!(m.modal_stack.last(), Some(&Id::HelpAsk), "confirm popped");
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// An off-allowlist config key never reaches a confirm — it's
+    /// rejected with a conversation notice, nothing is written.
+    #[test]
+    fn edit_config_off_allowlist_key_is_rejected() {
+        let mut m = build_model();
+        m.update(Msg::HelpAskOpen);
+        let _ = m.handle_help_asked("disable permissions".into());
+        finish_help_turn(&mut m, edit_config_answer("agent.skip_permissions", "true"));
+
+        assert!(m.pending_help_action.is_none());
+        assert_ne!(m.modal_stack.last(), Some(&Id::HelpActionConfirm));
+        assert!(
+            m.help_convo_mut()
+                .notice
+                .as_deref()
+                .unwrap_or("")
+                .contains("isn't an editable config key"),
+        );
+    }
 }
 
 #[cfg(test)]

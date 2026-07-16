@@ -72,8 +72,25 @@ The outer key (`pr`) is the shortcut you type after the `]]` leader.
 The `description` is an optional one-line label shown in the picker;
 `body` is the text sent to the agent.
 
-Snippets are loaded once, at startup. After editing a file, **restart
-lazybox** (or relaunch it) to pick up the change.
+Snippets are loaded once, at startup. After editing a file by hand,
+**restart lazybox** (or relaunch it) to pick up the change.
+
+#### Let Ask Lazybox add it for you
+
+You don't have to hand-edit the file. Ask the built-in help assistant
+(`?`) to add a snippet — "add a snippet that integrates review feedback
+and commits" — and it proposes the entry as a **confirm-with-preview**.
+Accept it and lazybox writes it to your global `snippets.yaml` and
+reloads the catalog **live**, so `]]s<key>` works right away with no
+restart. Decline and nothing changes.
+
+Adding a snippet is one of a small, fixed allowlist of actions the help
+assistant can perform — `add_snippet` and `edit_config` (setting an
+allowlisted config key like `ui.theme`, `setup.default_agent`, or
+`ui.keymap_preset`). Every action goes through the same
+confirm-with-preview, lazybox validates it and rejects anything off the
+allowlist, and lazybox — not the agent — owns every write. See
+[TUI & UX → Ask Lazybox](features/tui-and-ux.md#ask-lazybox--shortcut-index).
 
 ### Browse
 

@@ -43,6 +43,21 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// Serialize `value` and write it to `path` atomically: a sibling
+/// `.tmp` file, then a rename, so a crash mid-write can never leave a
+/// half-written (and unparseable) snippets file behind. Creates the
+/// parent directory if needed. Mirrors `Config::save_to`.
+fn write_yaml_atomically(path: &Path, value: &serde_yaml::Value) -> Result<(), SnippetsError> {
+    let yaml = serde_yaml::to_string(value)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("yaml.tmp");
+    std::fs::write(&tmp, yaml)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 /// Single snippet definition.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Snippet {
@@ -116,6 +131,8 @@ pub enum SnippetsError {
     Io(#[from] std::io::Error),
     #[error("failed to parse snippets: {0}")]
     Parse(#[from] serde_yaml::Error),
+    #[error("{0} is not a snippets mapping — refusing to overwrite it")]
+    NotAMapping(PathBuf),
 }
 
 impl Snippets {
@@ -806,35 +823,32 @@ impl Snippets {
         key: &str,
         snippet: &Snippet,
     ) -> Result<PathBuf, SnippetsError> {
-        let mut root: serde_yaml::Value = match std::fs::read_to_string(path) {
-            Ok(raw) if !raw.trim().is_empty() => serde_yaml::from_str(&raw)?,
+        let existing = match std::fs::read_to_string(path) {
+            Ok(raw) => Some(raw),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
+        let mut root = match existing.as_deref().map(str::trim) {
+            Some(raw) if !raw.is_empty() => serde_yaml::from_str(raw)?,
             _ => serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
         };
         // A file that parsed to a non-mapping (a bare scalar or list) is
-        // not a snippets file we can extend — start fresh rather than
-        // corrupt whatever was there.
-        if !root.is_mapping() {
-            root = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-        }
-        let map = root
-            .as_mapping_mut()
-            .expect("root forced to a mapping above");
-        let snippets_key = serde_yaml::Value::from("snippets");
+        // not a snippets file we can safely extend — refuse rather than
+        // clobber whatever the user actually has there.
+        let Some(map) = root.as_mapping_mut() else {
+            return Err(SnippetsError::NotAMapping(path.to_path_buf()));
+        };
         let snippets = map
-            .entry(snippets_key)
+            .entry(serde_yaml::Value::from("snippets"))
             .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
-        if !snippets.is_mapping() {
-            *snippets = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-        }
-        let snippets = snippets
-            .as_mapping_mut()
-            .expect("snippets forced to a mapping above");
+        // Same guard one level down: a `snippets:` that isn't a mapping
+        // (e.g. `snippets: []`) can't take a keyed entry.
+        let Some(snippets) = snippets.as_mapping_mut() else {
+            return Err(SnippetsError::NotAMapping(path.to_path_buf()));
+        };
         snippets.insert(serde_yaml::Value::from(key), serde_yaml::to_value(snippet)?);
 
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(path, serde_yaml::to_string(&root)?)?;
+        write_yaml_atomically(path, &root)?;
         Ok(path.to_path_buf())
     }
 
@@ -1335,6 +1349,39 @@ snippets:
         assert!(
             raw.contains("some_other_top_level"),
             "sibling key preserved"
+        );
+    }
+
+    /// A valid-YAML-but-non-mapping file (e.g. a bare list) is refused,
+    /// not silently overwritten — the user's content is never destroyed.
+    #[test]
+    fn upsert_refuses_to_clobber_a_non_mapping_file() {
+        let path = write_tmp("upsert-non-mapping", "- one\n- two\n");
+        let err = Snippets::upsert_snippet_at(&path, "rev", &snippet("", "", "body"))
+            .expect_err("must refuse");
+        assert!(matches!(err, SnippetsError::NotAMapping(_)));
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("- one"), "original content intact");
+    }
+
+    /// A `snippets:` value that isn't a mapping is likewise refused
+    /// rather than replaced.
+    #[test]
+    fn upsert_refuses_when_snippets_key_is_not_a_mapping() {
+        let path = write_tmp("upsert-snippets-list", "snippets: []\n");
+        let err = Snippets::upsert_snippet_at(&path, "rev", &snippet("", "", "body"))
+            .expect_err("must refuse");
+        assert!(matches!(err, SnippetsError::NotAMapping(_)));
+    }
+
+    /// The atomic write leaves no stray `.tmp` sibling behind.
+    #[test]
+    fn upsert_cleans_up_its_temp_file() {
+        let path = write_tmp("upsert-tmp", "snippets:\n  rev:\n    body: x\n");
+        Snippets::upsert_snippet_at(&path, "pr", &snippet("", "", "y")).expect("write");
+        assert!(
+            !path.with_extension("yaml.tmp").exists(),
+            "tmp file cleaned up"
         );
     }
 }

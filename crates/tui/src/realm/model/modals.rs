@@ -779,82 +779,98 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::ActionConfirm, modal);
     }
 
-    /// Mount the confirm-with-preview for a snippet the Ask Lazybox
-    /// help agent proposed (#353). Shows the key, category/description,
-    /// and body; stashes `(key, snippet)` in `pending_snippet_intent`
-    /// for the `Msg::Confirmed(true)` handler to write and hot-reload.
-    /// Enter defaults to Yes for a brand-new key (the user asked for
-    /// it) and to No when it would overwrite an existing snippet.
-    pub(super) fn mount_snippet_confirm(&mut self, key: String, snippet: lazybox_config::Snippet) {
-        use crate::realm::components::confirm::Confirm;
-        if self.modal_stack.last() == Some(&Id::SnippetConfirm) {
-            return;
-        }
-        let replaces = self.snippets.get(&key).is_some();
-        let path = lazybox_config::Snippets::default_global_path();
-        let mut preview = format!(
-            "{} snippet `{key}` in {}?\n\n",
-            if replaces { "Replace" } else { "Add" },
-            path.display()
-        );
-        if !snippet.category.is_empty() {
-            preview.push_str(&format!("category: {}\n", snippet.category));
-        }
-        if !snippet.description.is_empty() {
-            preview.push_str(&format!("description: {}\n", snippet.description));
-        }
-        preview.push('\n');
-        preview.push_str(&snippet_body_preview(&snippet.body));
-        preview.push_str(&format!(
-            "\n\nApplied live — send it with ]]s{key}, no restart."
-        ));
-        self.pending_snippet_intent = Some((key, snippet));
-        let modal = Confirm::new(preview);
-        let modal = if replaces {
-            modal.default_no()
-        } else {
-            modal.default_yes()
-        };
-        self.mount_modal(Id::SnippetConfirm, modal);
-    }
-
     /// Turn an action the help agent proposed (#353) into a
     /// confirm-with-preview. Validates the payload at this boundary —
-    /// an empty body or a whitespace-bearing key can't drive a write —
-    /// and only surfaces the confirm while the user is still on the
-    /// help modal that produced it (the run outlives the modal, so a
-    /// confirm popping up long after they closed it would be jarring).
+    /// a bad snippet key/body or an off-allowlist config edit is
+    /// rejected with a conversation notice, never a modal — and only
+    /// surfaces the confirm while the user is still on the help modal
+    /// that produced it (the run outlives the modal, so a confirm
+    /// popping up long after they closed it would be jarring).
     pub(super) fn propose_help_action(&mut self, intent: lazybox_tui_core::help::HelpActionIntent) {
+        use crate::realm::components::confirm::Confirm;
+        use lazybox_tui_core::help::HelpActionIntent;
+
         if self.modal_stack.last() != Some(&Id::HelpAsk) {
             return;
         }
-        match intent {
-            lazybox_tui_core::help::HelpActionIntent::AddSnippet {
+        let (preview, default_yes) = match &intent {
+            HelpActionIntent::AddSnippet {
                 key,
                 category,
                 description,
                 body,
             } => {
-                let key = key.trim().to_string();
+                let key = key.trim();
                 if key.is_empty() || key.chars().any(char::is_whitespace) || body.trim().is_empty()
                 {
-                    self.help_convo_mut().notice = Some(
+                    self.reject_help_action(
                         "the assistant proposed a snippet with an invalid key or empty \
-                         body — nothing was written"
-                            .into(),
+                         body — nothing was written",
                     );
-                    self.redraw = true;
                     return;
                 }
-                let snippet = lazybox_config::Snippet {
-                    description: description.trim().to_string(),
-                    category: category.trim().to_string(),
-                    body,
-                    origin: Default::default(),
-                };
-                self.mount_snippet_confirm(key, snippet);
+                let replaces = self.snippets.get(key).is_some();
+                let path = lazybox_config::Snippets::default_global_path();
+                let mut preview = format!(
+                    "{} snippet `{key}` in {}?\n\n",
+                    if replaces { "Replace" } else { "Add" },
+                    path.display(),
+                );
+                if !category.trim().is_empty() {
+                    preview.push_str(&format!("category: {}\n", category.trim()));
+                }
+                if !description.trim().is_empty() {
+                    preview.push_str(&format!("description: {}\n", description.trim()));
+                }
+                preview.push('\n');
+                preview.push_str(&snippet_body_preview(body));
+                preview.push_str(&format!(
+                    "\n\nApplied live — send it with ]]s{key}, no restart."
+                ));
+                // Default Yes for a brand-new key (the user asked for it);
+                // No when it would overwrite an existing snippet.
+                (preview, !replaces)
             }
-        }
+            HelpActionIntent::EditConfig { key, value } => {
+                match self.validate_config_edit(key, value) {
+                    Ok(edit) => {
+                        let path = lazybox_config::Config::default_path();
+                        let mut preview = format!(
+                            "Update {} in {}?\n\n{}",
+                            edit.key,
+                            path.display(),
+                            edit.summary
+                        );
+                        preview.push_str(if edit.needs_restart {
+                            "\n\nTakes effect after you restart lazybox."
+                        } else {
+                            "\n\nApplied live — no restart."
+                        });
+                        (preview, true)
+                    }
+                    Err(msg) => {
+                        self.reject_help_action(msg);
+                        return;
+                    }
+                }
+            }
+        };
+        self.pending_help_action = Some(intent);
+        let modal = Confirm::new(preview);
+        let modal = if default_yes {
+            modal.default_yes()
+        } else {
+            modal.default_no()
+        };
+        self.mount_modal(Id::HelpActionConfirm, modal);
+    }
+
+    /// Reject a proposed help action: surface `why` as the help
+    /// conversation's notice (so the user sees it under the transcript)
+    /// and repaint. No modal, no state change.
+    fn reject_help_action(&mut self, why: impl Into<String>) {
+        self.help_convo_mut().notice = Some(why.into());
+        self.redraw = true;
     }
 
     /// Kick off the in-app worktree inspector. Dispatches the IPC

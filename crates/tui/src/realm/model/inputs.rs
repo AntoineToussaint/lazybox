@@ -840,10 +840,10 @@ showing keybinding search only",
             Some(Id::InspectConfirm) => {
                 self.pending_inspect_target = None;
             }
-            Some(Id::SnippetConfirm) => {
-                // Esc = decline the proposed snippet; drop the stash,
+            Some(Id::HelpActionConfirm) => {
+                // Esc = decline the proposed action; drop the stash,
                 // change nothing (#353).
-                self.pending_snippet_intent = None;
+                self.pending_help_action = None;
             }
             Some(Id::RequestReviewers) => {
                 // Esc cancels; drop the stashed workspace key +
@@ -1006,13 +1006,13 @@ showing keybinding search only",
                     });
                 }
             }
-            Some(Id::SnippetConfirm) => {
-                // Snippet proposed by the Ask Lazybox help agent (#353).
-                // Yes → write it + hot-reload; No / Esc → drop the stash,
-                // nothing changes. Local-only work, no IPC.
-                let pending = self.pending_snippet_intent.take();
-                if yes && let Some((key, snippet)) = pending {
-                    self.apply_snippet_intent(key, snippet);
+            Some(Id::HelpActionConfirm) => {
+                // Action proposed by the Ask Lazybox help agent (#353).
+                // Yes → apply it; No / Esc → drop the stash, nothing
+                // changes.
+                let pending = self.pending_help_action.take();
+                if yes && let Some(intent) = pending {
+                    self.apply_help_action(intent);
                 }
             }
             _ => {}
@@ -1021,19 +1021,146 @@ showing keybinding search only",
         cmds
     }
 
-    /// Write a help-agent-proposed snippet to the global
-    /// `snippets.yaml` and hot-reload the merged catalog so `]]s<key>`
-    /// works immediately — the "no restart" half of #353. On write
-    /// failure nothing is reloaded and the error surfaces in the footer.
-    fn apply_snippet_intent(&mut self, key: String, snippet: lazybox_config::Snippet) {
-        match lazybox_config::Snippets::upsert_global_snippet(&key, &snippet) {
-            Ok(_) => {
-                self.apply_snippets(lazybox_config::Snippets::load_merged(
-                    std::env::current_dir().ok().as_deref(),
-                ));
-                self.flash_info(format!("snippet saved — send it with ]]s{key}"));
+    /// Apply an allowlisted action the user confirmed (#353). Snippets
+    /// are written + hot-reloaded (no restart); config edits are
+    /// persisted through the same safe `save_with` path the settings UI
+    /// uses, then live-applied where possible. Re-validates config edits
+    /// so a value that went stale between propose and confirm can't slip
+    /// through. All local — no IPC.
+    fn apply_help_action(&mut self, intent: lazybox_tui_core::help::HelpActionIntent) {
+        use lazybox_tui_core::help::HelpActionIntent;
+        match intent {
+            HelpActionIntent::AddSnippet {
+                key,
+                category,
+                description,
+                body,
+            } => {
+                let key = key.trim().to_string();
+                let snippet = lazybox_config::Snippet {
+                    description: description.trim().to_string(),
+                    category: category.trim().to_string(),
+                    body,
+                    origin: Default::default(),
+                };
+                match lazybox_config::Snippets::upsert_global_snippet(&key, &snippet) {
+                    Ok(_) => {
+                        self.apply_snippets(lazybox_config::Snippets::load_merged(
+                            std::env::current_dir().ok().as_deref(),
+                        ));
+                        self.flash_info(format!("snippet saved — send it with ]]s{key}"));
+                    }
+                    Err(e) => self.flash_error(format!("failed to save snippet: {e}")),
+                }
             }
-            Err(e) => self.flash_error(format!("failed to save snippet: {e}")),
+            HelpActionIntent::EditConfig { key, value } => {
+                match self.validate_config_edit(&key, &value) {
+                    Ok(edit) => self.apply_config_edit(edit),
+                    Err(msg) => self.flash_error(msg),
+                }
+            }
+        }
+    }
+
+    /// Validate an `edit_config` intent against the allowlist and live
+    /// state, canonicalizing the value. This is the security boundary:
+    /// only these keys can be set, each value is checked against what's
+    /// actually available (a registered theme, an enabled agent, a known
+    /// preset), and the returned [`ConfigEdit`] carries a `&'static`
+    /// key so the apply step can never be steered off the allowlist.
+    pub(super) fn validate_config_edit(
+        &self,
+        key: &str,
+        value: &str,
+    ) -> Result<super::ConfigEdit, String> {
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(format!("no value given for `{key}`"));
+        }
+        match key {
+            "ui.theme" => {
+                // Match case-insensitively but store the theme's exact
+                // registered spelling — `set_by_name` is an exact match.
+                match crate::theme::list()
+                    .iter()
+                    .find(|t| t.name.eq_ignore_ascii_case(value))
+                {
+                    Some(t) => Ok(super::ConfigEdit {
+                        key: "ui.theme",
+                        value: t.name.to_string(),
+                        summary: format!("theme → {}", t.name),
+                        needs_restart: false,
+                    }),
+                    None => Err(format!(
+                        "unknown theme \"{value}\" — pick one from the theme picker (t)"
+                    )),
+                }
+            }
+            "setup.default_agent" => {
+                if self.agents.iter().any(|a| a == value) {
+                    Ok(super::ConfigEdit {
+                        key: "setup.default_agent",
+                        value: value.to_string(),
+                        summary: format!("default agent → {value}"),
+                        needs_restart: false,
+                    })
+                } else {
+                    Err(format!("\"{value}\" isn't one of your enabled agents"))
+                }
+            }
+            "ui.keymap_preset" => {
+                if lazybox_tui_core::action::keymap_preset(value).is_some() {
+                    Ok(super::ConfigEdit {
+                        key: "ui.keymap_preset",
+                        value: value.to_string(),
+                        summary: format!("keymap preset → {value}"),
+                        needs_restart: true,
+                    })
+                } else {
+                    Err(format!(
+                        "unknown keymap preset \"{value}\" — use `default` or `vim`"
+                    ))
+                }
+            }
+            other => Err(format!("\"{other}\" isn't an editable config key")),
+        }
+    }
+
+    /// Persist a validated config edit through `Config::save_with` (the
+    /// atomic, 0600, mutex-serialized write the settings UI uses), then
+    /// live-apply it where lazybox has a running-component hook. Keys
+    /// with no live path (the keymap preset) land after a restart.
+    fn apply_config_edit(&mut self, edit: super::ConfigEdit) {
+        let value = edit.value.clone();
+        let saved = match edit.key {
+            "ui.theme" => lazybox_config::Config::save_with(move |c| c.ui.theme = Some(value)),
+            "setup.default_agent" => {
+                lazybox_config::Config::save_with(move |c| c.setup.default_agent = Some(value))
+            }
+            "ui.keymap_preset" => {
+                lazybox_config::Config::save_with(move |c| c.ui.keymap_preset = Some(value))
+            }
+            // Unreachable: `edit.key` came from `validate_config_edit`,
+            // which only ever emits the arms above.
+            _ => return,
+        };
+        match saved {
+            Ok(()) => {
+                match edit.key {
+                    "ui.theme" => {
+                        crate::theme::set_by_name(&edit.value);
+                    }
+                    "setup.default_agent" => self.set_default_agent(&edit.value),
+                    _ => {}
+                }
+                if edit.needs_restart {
+                    self.flash_info(format!("{} — restart to apply", edit.summary));
+                } else {
+                    self.flash_info(edit.summary);
+                }
+                self.redraw = true;
+            }
+            Err(e) => self.flash_error(format!("couldn't save config: {e}")),
         }
     }
 

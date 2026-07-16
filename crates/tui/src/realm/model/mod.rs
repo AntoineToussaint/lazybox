@@ -244,12 +244,12 @@ pub enum Id {
     /// persist `setup.default_agent` and update the panes live. Ids
     /// live in `default_agent_choices`.
     DefaultAgentPicker,
-    /// Confirm-with-preview for an `add_snippet` action the Ask Lazybox
-    /// help agent proposed (#353). The pending `(key, Snippet)` lives
-    /// in `pending_snippet_intent`; `Msg::Confirmed(true)` writes it to
-    /// the global snippets file and hot-reloads the picker. Esc / No
-    /// drops the stash and changes nothing.
-    SnippetConfirm,
+    /// Confirm-with-preview for an action the Ask Lazybox help agent
+    /// proposed (#353) — `add_snippet` or `edit_config`. The pending
+    /// intent lives in `pending_help_action`; `Msg::Confirmed(true)`
+    /// applies it natively (write + hot-reload / persist + live-apply).
+    /// Esc / No drops the stash and changes nothing.
+    HelpActionConfirm,
 }
 
 impl Id {
@@ -307,6 +307,26 @@ pub(crate) enum ActionConfirmTarget {
     Workspace(lazybox_core::SessionKey),
     /// A project header — `Archive` here deletes the whole project.
     Project(lazybox_core::ProjectKey),
+}
+
+/// A validated `edit_config` edit (#353), derived by
+/// `Model::validate_config_edit` from an allowlisted help-agent intent.
+/// Carries everything the confirm preview and the apply step need, so
+/// neither re-derives the mapping from key string to typed field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConfigEdit {
+    /// Canonical dotted key, one of the allowlisted `&'static` paths —
+    /// the apply step matches on it to pick the typed `save_with` field.
+    key: &'static str,
+    /// The validated value to persist (canonicalized, e.g. a theme
+    /// name normalized to its exact registered spelling).
+    value: String,
+    /// Human summary for the confirm preview and the post-apply notice,
+    /// e.g. `theme → Lazybox Light`.
+    summary: String,
+    /// True when the change only takes effect after a restart (the
+    /// keymap preset is read once at startup).
+    needs_restart: bool,
 }
 
 /// In-flight broadcast (`Shift-B`): the targets resolved from the
@@ -797,12 +817,11 @@ pub struct Model<T: TerminalAdapter> {
     /// the selection on "Yes" would kill / merge a different row than
     /// the prompt named.
     pending_action_confirm: Option<(lazybox_tui_core::action::Action, ActionConfirmTarget)>,
-    /// Snippet proposed by the Ask Lazybox help agent's `add_snippet`
-    /// action (#353), paired with its trigger key, queued behind a
-    /// `SnippetConfirm` modal. Set when the agent's answer parses to an
-    /// intent, taken (and written + hot-reloaded if Yes) by the
-    /// `Msg::Confirmed` handler. None when no snippet confirm is up.
-    pending_snippet_intent: Option<(String, lazybox_config::Snippet)>,
+    /// Action proposed by the Ask Lazybox help agent (#353), queued
+    /// behind a `HelpActionConfirm` modal. Set when the agent's answer
+    /// parses to an allowlisted intent, taken (and applied if Yes) by
+    /// the `Msg::Confirmed` handler. None when no action confirm is up.
+    pending_help_action: Option<lazybox_tui_core::help::HelpActionIntent>,
     /// Latest inspector report driving the `InspectList` modal. The
     /// first slot in the Choice modal is the "delete all safe"
     /// shortcut, hence the wrapper enum on indices.
@@ -1135,7 +1154,7 @@ impl<T: TerminalAdapter> Model<T> {
                 &std::collections::BTreeMap::new(),
             ),
             pending_action_confirm: None,
-            pending_snippet_intent: None,
+            pending_help_action: None,
             pending_inspect_rows: Vec::new(),
             pending_inspect_target: None,
             pending_new_workspace_project: None,

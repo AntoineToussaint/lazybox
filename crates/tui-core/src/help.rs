@@ -62,7 +62,36 @@ pub enum HelpActionIntent {
         description: String,
         body: String,
     },
+    /// Set one allowlisted key in `~/.lazybox/config.yaml` (see
+    /// [`EDITABLE_CONFIG_KEYS`]). `key` is a dotted path; `value` is
+    /// the scalar to store. The client validates both against the
+    /// allowlist before doing anything.
+    EditConfig { key: String, value: String },
 }
+
+/// The config keys the `edit_config` action may set, each with a
+/// one-line description of its accepted values. This is the *only*
+/// surface `edit_config` can touch — the client rejects any key not
+/// listed here, and the help agent is told to stay within it.
+///
+/// Kept here (not client-side) so the generated prompt and the client
+/// allowlist read from one list; the client still validates each
+/// value against live state (a theme must exist, an agent must be
+/// enabled) before applying.
+pub const EDITABLE_CONFIG_KEYS: &[(&str, &str)] = &[
+    (
+        "ui.theme",
+        "the color theme, by exact name (see the Themes doc for the list); applies live",
+    ),
+    (
+        "setup.default_agent",
+        "the agent id spawned by `w` / new workspace (must be one of the enabled agents); applies live",
+    ),
+    (
+        "ui.keymap_preset",
+        "the starter keymap: `default` or `vim`; takes effect after a restart",
+    ),
+];
 
 /// Parse the first `lazybox-action` fenced block out of the help
 /// agent's answer into an allowlisted [`HelpActionIntent`]. Returns
@@ -310,6 +339,23 @@ review feedback and commit\", \"body\": \"Address every review comment on this P
 See the Snippets doc below for how snippet bodies should read.\n"
     ));
 
+    out.push_str(
+        "- **edit_config** — set one allowlisted key in the user's config. Fields: `key` (one of the paths \
+below, exactly) and `value` (the new value). You can ONLY set these keys — refuse anything else and never \
+invent a key:\n",
+    );
+    for (key, describe) in EDITABLE_CONFIG_KEYS {
+        out.push_str(&format!("  - `{key}` — {describe}\n"));
+    }
+    out.push_str(&format!(
+        "\n  Use the exact spelling the reference gives (theme names come from the Themes doc; agent ids are \
+the ones enabled above). lazybox validates the value and rejects anything unknown, so if you're unsure of the \
+exact value, ask the user rather than guessing. Example:\n\n\
+```{ACTION_FENCE}\n\
+{{\"action\": \"edit_config\", \"key\": \"ui.theme\", \"value\": \"Lazybox Light\"}}\n\
+```\n"
+    ));
+
     out.push_str("\n# Key bindings (effective)\n");
     let mut current_section = None;
     for entry in catalog {
@@ -504,14 +550,32 @@ fallback shouldn't resurrect it)",
         assert!(ctx.contains("## Doc: Themes"));
     }
 
-    /// The context teaches the agent the action vocabulary: the
-    /// `add_snippet` verb and the exact fence tag lazybox parses.
+    /// The context teaches the agent the action vocabulary: both verbs,
+    /// every editable config key, and the exact fence tag lazybox parses.
     #[test]
     fn agent_context_describes_actions() {
         let ctx = agent_context(&catalog(), ']');
         assert!(ctx.contains("# Performing actions"));
         assert!(ctx.contains("add_snippet"));
+        assert!(ctx.contains("edit_config"));
         assert!(ctx.contains(&format!("```{ACTION_FENCE}")));
+        for (key, _) in EDITABLE_CONFIG_KEYS {
+            assert!(ctx.contains(key), "prompt must list editable key {key}");
+        }
+    }
+
+    /// An `edit_config` block parses into the intent verbatim; the
+    /// client is what enforces the key allowlist, not the parser.
+    #[test]
+    fn parses_edit_config_intent() {
+        let answer = "```lazybox-action\n{\"action\":\"edit_config\",\"key\":\"ui.theme\",\"value\":\"Dracula\"}\n```";
+        assert_eq!(
+            parse_action_intent(answer),
+            Some(HelpActionIntent::EditConfig {
+                key: "ui.theme".into(),
+                value: "Dracula".into(),
+            })
+        );
     }
 
     /// A well-formed `lazybox-action` block parses into the allowlisted

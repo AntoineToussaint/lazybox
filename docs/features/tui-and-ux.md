@@ -107,9 +107,10 @@ every continuation.
 Press `?` to open Ask Lazybox. Type to search immediately or press Enter to ask.
 At an empty prompt, press `?` again to switch to the shortcut index; `?` there
 returns to Ask. `Esc` closes either surface. Beyond explaining, Ask can *do* a
-small, allowlisted set of things: ask it to "add a snippet …" and it proposes
-the entry as a confirm-with-preview, then — on accept — writes it and reloads
-the catalog live (no restart). Decline and nothing changes.
+small, allowlisted set of things: ask it to "add a snippet …" or "switch to the
+vim keymap" and it proposes the change as a confirm-with-preview, then — on
+accept — applies it (writing a snippet and reloading it live, or persisting a
+config key). Decline and nothing changes.
 
 ### How it works (brief)
 Both surfaces build from the runtime catalog and render effective keys
@@ -118,14 +119,19 @@ embedded feature docs as context. Ask uses the configured default agent when it
 is Claude or Codex; otherwise the fallback order is Claude, then Codex. The
 fuzzy search layer remains fully local and works without either CLI. Actions are
 a fixed allowlist emitted as a `lazybox-action` block the agent proposes;
-lazybox parses it, confirms with the user, and owns every mutation — the agent
-never touches the filesystem. Today the set is just `add_snippet`.
+lazybox parses it, validates it against the allowlist (and against live state —
+a theme must exist, an agent must be enabled), confirms with the user, and owns
+every mutation — the agent never touches the filesystem. The set is
+`add_snippet` (written + hot-reloaded) and `edit_config` (an allowlisted config
+key: `ui.theme` and `setup.default_agent` apply live, `ui.keymap_preset` after a
+restart).
 
 ### Test checklist
 - [ ] `?` opens Ask Lazybox directly; another `?` toggles the compact index.
 - [ ] Overridden keys show their effective binding.
 - [ ] A Codex-only agent configuration can answer conversational help.
 - [ ] Asking to add a snippet pops a confirm-with-preview; accept writes + hot-reloads it, decline changes nothing.
+- [ ] Asking to change an allowlisted config key (`ui.theme`) pops a confirm; accept persists + live-applies it. An off-allowlist key or bad value is refused before any confirm.
 - [ ] `Esc` dismisses either surface; the index also closes on non-navigation keys.
 
 ### Known sharp edges

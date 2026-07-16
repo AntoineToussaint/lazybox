@@ -44,9 +44,6 @@ pub struct TermSession {
     last_output_at: Instant,
     /// Rolling buffer of recent PTY output (last ~4KB) for callers to inspect.
     recent_output: Vec<u8>,
-    /// True when the viewport has been scrolled up into scrollback history.
-    /// Used to display the `[SCROLLBACK]` indicator.
-    scrolled_back: bool,
     /// Explicit `!Send + !Sync` marker — see struct doc.
     _not_send: std::marker::PhantomData<*mut ()>,
 }
@@ -155,7 +152,6 @@ impl TermSession {
             shadow: None,
             last_output_at: Instant::now(),
             recent_output: Vec::with_capacity(4096),
-            scrolled_back: false,
             _not_send: std::marker::PhantomData,
         })
     }
@@ -237,46 +233,6 @@ impl TermSession {
             &mut self.cell_iter,
             &mut self.shadow,
         )
-    }
-
-    /// Scroll the viewport up by N lines (into the scrollback history).
-    pub fn scroll_up(&mut self, lines: usize) {
-        if lines == 0 {
-            return;
-        }
-        self.terminal
-            .scroll_viewport(libghostty_vt::terminal::ScrollViewport::Delta(
-                -(lines as isize),
-            ));
-        self.scrolled_back = true;
-    }
-
-    /// Scroll the viewport down by N lines (back toward the live area).
-    pub fn scroll_down(&mut self, lines: usize) {
-        if lines == 0 {
-            return;
-        }
-        self.terminal
-            .scroll_viewport(libghostty_vt::terminal::ScrollViewport::Delta(
-                lines as isize,
-            ));
-        // If we scrolled all the way back to the bottom, clear the flag.
-        if let Ok(rows) = self.terminal.scrollback_rows()
-            && rows == 0
-        {
-            self.scrolled_back = false;
-        }
-    }
-
-    /// Jump back to the live (bottom) area.
-    pub fn scroll_reset(&mut self) {
-        self.terminal
-            .scroll_viewport(libghostty_vt::terminal::ScrollViewport::Bottom);
-        self.scrolled_back = false;
-    }
-
-    pub fn is_scrolled(&self) -> bool {
-        self.scrolled_back
     }
 
     /// True when the inner app has enabled any mouse tracking mode.

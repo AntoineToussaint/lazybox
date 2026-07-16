@@ -274,6 +274,25 @@ pub enum ScrollOutcome {
     Moved { offset: u64, total: u64, len: u64 },
 }
 
+/// A viewport scroll request — the entire vocabulary the scroll owner
+/// (`TerminalVt::scroll`) accepts. Every scroll surface (wheel,
+/// `Shift-PgUp/PgDn`, `Shift-Home/End`, the per-tile hover scroll)
+/// speaks only these three verbs; nothing outside `TerminalVt::scroll`
+/// calls libghostty's `scroll_viewport` directly. That single choke
+/// point is what makes a silent no-op impossible (the #42/#371 promise):
+/// a request either moves the viewport or comes back with a typed
+/// [`ScrollOutcome`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollRequest {
+    /// Move by a signed row delta — negative scrolls up into
+    /// scrollback, positive scrolls down toward the live content.
+    By(isize),
+    /// Jump the viewport to the top of scrollback.
+    Top,
+    /// Jump the viewport to the live bottom.
+    Bottom,
+}
+
 /// How a mouse-wheel tick over the focused terminal should be handled.
 /// The wheel always means "scroll", but *who* scrolls depends on which
 /// screen the inner program is on and whether it asked for mouse
@@ -924,6 +943,47 @@ impl TerminalVt {
         self.terminal.vt_write(bytes);
     }
 
+    /// THE one and only mutation of this terminal's viewport pin. Every
+    /// scroll surface funnels here (`scroll_terminal`/`scroll_active` for
+    /// the wheel + focused keyboard scroll, `scroll_to_top`/
+    /// `scroll_to_bottom` for the jumps) and no other code in the crate
+    /// calls `scroll_viewport` — a grep for it must return exactly the
+    /// three lines below. A request either moves the viewport or the
+    /// returned [`ScrollOutcome`] explains why it could not
+    /// (`NoScrollback` when `total <= len`, `alternate` when the inner
+    /// program owns the buffer), so a scroll can never silently no-op.
+    /// That single choke point is the #42/#371 encapsulation: one owner
+    /// of scroll state, and it cannot fail quietly.
+    fn scroll(&mut self, request: ScrollRequest) -> ScrollOutcome {
+        let alternate = matches!(
+            self.terminal.active_screen().ok(),
+            Some(vt::screen::Screen::Alternate)
+        );
+        match request {
+            // A zero delta is a no-op move — fall through to report the
+            // current scrollbar without touching the pin.
+            ScrollRequest::By(0) => {}
+            ScrollRequest::By(delta) => self
+                .terminal
+                .scroll_viewport(vt::terminal::ScrollViewport::Delta(delta)),
+            ScrollRequest::Top => self
+                .terminal
+                .scroll_viewport(vt::terminal::ScrollViewport::Top),
+            ScrollRequest::Bottom => self
+                .terminal
+                .scroll_viewport(vt::terminal::ScrollViewport::Bottom),
+        }
+        match self.terminal.scrollbar().ok() {
+            Some(s) if s.total <= s.len => ScrollOutcome::NoScrollback { alternate },
+            Some(s) => ScrollOutcome::Moved {
+                offset: s.offset,
+                total: s.total,
+                len: s.len,
+            },
+            None => ScrollOutcome::NoTerminal,
+        }
+    }
+
     fn ensure_size(&mut self, cols: u16, rows: u16) {
         if cols == self.cols && rows == self.rows {
             return;
@@ -1437,18 +1497,14 @@ impl TerminalStack {
     pub fn scroll_to_top(&mut self) -> Option<String> {
         let id = self.focused_terminal_id()?;
         let slot = self.terminals.get_mut(&id)?;
-        slot.vt
-            .terminal
-            .scroll_viewport(vt::terminal::ScrollViewport::Top);
+        slot.vt.scroll(ScrollRequest::Top);
         self.scrollbar_summary()
     }
 
     pub fn scroll_to_bottom(&mut self) -> Option<String> {
         let id = self.focused_terminal_id()?;
         let slot = self.terminals.get_mut(&id)?;
-        slot.vt
-            .terminal
-            .scroll_viewport(vt::terminal::ScrollViewport::Bottom);
+        slot.vt.scroll(ScrollRequest::Bottom);
         self.scrollbar_summary()
     }
 
@@ -1807,41 +1863,18 @@ impl TerminalStack {
         self.scroll_terminal(id, delta)
     }
 
-    /// Scroll a specific terminal's viewport by `delta` rows. Used by
-    /// the mouse-wheel handler to move the scrollback of the tile under
-    /// the cursor (#362) rather than the focused one; `scroll_active`
-    /// is the focused-terminal wrapper used by keyboard scroll.
+    /// Scroll a specific terminal's viewport by `delta` rows through the
+    /// single scroll owner (`TerminalVt::scroll`). Used by the
+    /// mouse-wheel handler to move the scrollback of the tile under the
+    /// cursor (#362) rather than the focused one; `scroll_active` is the
+    /// focused-terminal wrapper used by keyboard scroll. A zero delta is
+    /// treated as a no-op query rather than a move.
     pub fn scroll_terminal(&mut self, id: TerminalId, delta: isize) -> ScrollOutcome {
         if delta == 0 {
             return ScrollOutcome::NoTerminal;
         }
-        let Some(slot) = self.terminals.get_mut(&id) else {
-            return ScrollOutcome::NoTerminal;
-        };
-        let screen = slot.vt.terminal.active_screen().ok();
-        let before = slot.vt.terminal.scrollbar().ok();
-        slot.vt
-            .terminal
-            .scroll_viewport(vt::terminal::ScrollViewport::Delta(delta));
-        let after = slot.vt.terminal.scrollbar().ok();
-        tracing::debug!(
-            terminal_id = ?id,
-            delta = delta,
-            screen = ?screen,
-            before_total = before.as_ref().map(|s| s.total),
-            before_offset = before.as_ref().map(|s| s.offset),
-            after_total = after.as_ref().map(|s| s.total),
-            after_offset = after.as_ref().map(|s| s.offset),
-            "scroll_active: viewport state",
-        );
-        let alternate = matches!(screen, Some(vt::screen::Screen::Alternate));
-        match after {
-            Some(s) if s.total <= s.len => ScrollOutcome::NoScrollback { alternate },
-            Some(s) => ScrollOutcome::Moved {
-                offset: s.offset,
-                total: s.total,
-                len: s.len,
-            },
+        match self.terminals.get_mut(&id) {
+            Some(slot) => slot.vt.scroll(ScrollRequest::By(delta)),
             None => ScrollOutcome::NoTerminal,
         }
     }

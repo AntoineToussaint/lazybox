@@ -372,15 +372,22 @@ leaving, splitting, scrolling, and copying.
 - `]]t` toggles that default live (split ⇄ tabs), persisting it to `ui.terminal_new_layout` so it survives restart; the `]]` popup's `t` row shows the current setting. The change affects the *next* spawn, not terminals already open.
 - Mouse wheel scrolls local history (3 rows/notch) whenever the inner program
   is on the primary screen — including a brand-new agent, from its first frame.
-  Only an alternate-screen program that enabled mouse tracking (vim, htop, less)
-  gets the wheel forwarded, since it owns the only scrollable buffer.
+  In a split, the wheel scrolls the tile **under the cursor**, not the focused
+  one (#362). Only an alternate-screen program that enabled mouse tracking (vim,
+  htop, less) gets the wheel forwarded, since it owns the only scrollable buffer.
 - Left-click + drag does pane-scoped selection; release copies via OSC 52 (footer shows `copied N lines`). For host-native selection across the whole screen, press `F8` to flip mouse capture off, drag, then `F8` back.
-- `Shift-PageUp/PageDown` and `Shift-Home/End` move through scrollback.
+- `Shift-PageUp/PageDown` and `Shift-Home/End` move through scrollback (focused tile).
 
 ### How it works (brief)
 Terminal key routing lives in `crates/tui/src/realm/model/keys.rs`; tile
 management and scrollback in `components/terminal_stack.rs`. The escape char is
 `terminal.escape_char`. OSC 52 emission is `emit_clipboard_copy`.
+
+Scrolling has one encapsulated owner (`TerminalVt::scroll`, the sole caller of
+libghostty's `scroll_viewport`); every wheel/keyboard surface routes through it
+and gets back a typed `ScrollOutcome`, so a scroll can never silently no-op. The
+full model and its regression harness (`crates/tui/tests/terminal_scroll.rs`)
+are documented in [`docs/terminal-scrolling.md`](../terminal-scrolling.md).
 
 ### Test checklist
 - [ ] `]]` returns to the sidebar from a terminal.
@@ -389,6 +396,7 @@ management and scrollback in `components/terminal_stack.rs`. The escape char is
 - [ ] `]]-` / `]]|` split the terminal stack; `]]x` closes a tile.
 - [ ] Old/recovered sessions with local history scroll in-process.
 - [ ] A freshly spawned agent scrolls its scrollback in-process (wheel / `Shift-PageUp` / `Shift-Home`) from the first frame — no forward to the app.
+- [ ] In a split, the wheel scrolls the tile under the cursor, not the focused one (#362).
 - [ ] Alternate-screen programs with mouse tracking receive wheel events.
 - [ ] Drag-select copies via OSC 52 and the footer confirms the line count.
 - [ ] `F8` toggles mouse capture for host-native selection.

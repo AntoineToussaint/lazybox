@@ -4849,6 +4849,40 @@ mod leader_tile_tests {
         );
     }
 
+    /// In a split layout the popup carries a `←↓↑→ move tile` aggregate
+    /// row that has no single `Enter`-fireable key; `j`/`k` step past it
+    /// so the highlight only ever lands on a dispatchable row (#343).
+    #[test]
+    fn terminal_leader_jk_skips_the_non_dispatchable_aggregate_row() {
+        let (mut m, mut server) = build_model_with_terminals(2);
+        m.terminals.set_layout(two_leaf_split());
+        while server.rx.try_recv().is_ok() {}
+        arm_leader(&mut m);
+
+        // Splits menu order: s,f,q,`,|,- then the `move tile` aggregate
+        // at index 6, then `x` at index 7. Six `j` presses reach index 5.
+        for _ in 0..6 {
+            m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
+        }
+        assert_eq!(
+            m.terminal_leader_highlight(),
+            Some(5),
+            "reached the last row before the aggregate"
+        );
+        m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
+        assert_eq!(
+            m.terminal_leader_highlight(),
+            Some(7),
+            "`j` jumps over the aggregate at index 6"
+        );
+        m.dispatch_key(RealmKey::new(Key::Char('k'), RealmMods::NONE));
+        assert_eq!(
+            m.terminal_leader_highlight(),
+            Some(5),
+            "`k` skips it going back too"
+        );
+    }
+
     /// `]]x` closes the focused tile: its PTY is killed daemon-side and
     /// the two-leaf split collapses back to Tabs.
     #[test]

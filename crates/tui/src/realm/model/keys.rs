@@ -1506,10 +1506,14 @@ impl<T: TerminalAdapter> Model<T> {
 /// for the letters-only variant the `]]` leader uses (its arrows are
 /// bound to tile movement). Callers only treat `j`/`k` as navigation
 /// after ruling out an in-group binding for the same key (#343).
+///
+/// The arrows require an unmodified press, same as the letters, so a
+/// `Shift-arrow` still reaches the splitter-resize arm rather than being
+/// swallowed as popup navigation.
 fn popup_nav_delta(key: &RealmKey) -> Option<i32> {
     match key.code {
-        Key::Up => Some(-1),
-        Key::Down => Some(1),
+        Key::Up if key.modifiers.is_empty() => Some(-1),
+        Key::Down if key.modifiers.is_empty() => Some(1),
         _ => popup_letter_nav_delta(key),
     }
 }
@@ -1537,8 +1541,17 @@ fn advance_highlight(current: Option<usize>, delta: i32, len: usize) -> usize {
 }
 
 /// The sole character of a single-char menu key, or `None` for a
-/// multi-char display aggregate (e.g. the `←↓↑→` tile-move row) that
-/// has no single dispatching key and so can't be `Enter`-fired (#343).
+/// multi-char display aggregate (e.g. the `←↓↑→` tile-move row) that has
+/// no single dispatching key and so can't be `Enter`-fired (#343).
+///
+/// INVARIANT: this is how `Enter` on a highlighted `]]` row re-derives
+/// its command — it feeds the returned char straight back through
+/// [`terminal_leader::LeaderCmd::from_key`]. That only resolves because
+/// every `menu_rows` display key is *literally* its dispatch character
+/// (`s`, `|`, `1`, …), never a prettified glyph. The lone exception is
+/// the arrow aggregate, which is multi-char and so lands here as `None`.
+/// If a future row shows a decorative key, give it a real single
+/// dispatch char or it will silently no-op on `Enter`.
 fn single_menu_char(key: &str) -> Option<char> {
     let mut chars = key.chars();
     let c = chars.next()?;
@@ -1741,4 +1754,76 @@ pub(super) fn override_takes_effect(entry: &lazybox_tui_core::action::CatalogEnt
         .find(|(k, _, _)| *k == entry.kind)
         .map(|(_, _, effective)| *effective)
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod popup_nav_tests {
+    use super::*;
+
+    fn key(code: Key, mods: KeyModifiers) -> RealmKey {
+        RealmKey::new(code, mods)
+    }
+
+    /// From no highlight, the first step lands on an edge; further steps
+    /// wrap around within `len` in both directions (#343).
+    #[test]
+    fn advance_highlight_wraps_and_seeds_from_empty() {
+        // Seed: down → first row, up → last row.
+        assert_eq!(advance_highlight(None, 1, 4), 0);
+        assert_eq!(advance_highlight(None, -1, 4), 3);
+        // Wrap: past the end returns to the top, before the top to the end.
+        assert_eq!(advance_highlight(Some(3), 1, 4), 0);
+        assert_eq!(advance_highlight(Some(0), -1, 4), 3);
+        // Interior steps are plain increments.
+        assert_eq!(advance_highlight(Some(1), 1, 4), 2);
+        assert_eq!(advance_highlight(Some(2), -1, 4), 1);
+        // A stale index (list shrank under it) is normalised into range,
+        // never panics.
+        assert_eq!(advance_highlight(Some(9), 1, 4), 2);
+    }
+
+    /// Arrows and `j`/`k` navigate only unmodified; a `Shift-arrow` is
+    /// left for the splitter-resize arm (#343).
+    #[test]
+    fn nav_deltas_require_an_unmodified_press() {
+        assert_eq!(popup_nav_delta(&key(Key::Up, KeyModifiers::NONE)), Some(-1));
+        assert_eq!(
+            popup_nav_delta(&key(Key::Down, KeyModifiers::NONE)),
+            Some(1)
+        );
+        assert_eq!(
+            popup_nav_delta(&key(Key::Char('k'), KeyModifiers::NONE)),
+            Some(-1)
+        );
+        assert_eq!(
+            popup_nav_delta(&key(Key::Char('j'), KeyModifiers::NONE)),
+            Some(1)
+        );
+        assert_eq!(popup_nav_delta(&key(Key::Down, KeyModifiers::SHIFT)), None);
+        assert_eq!(
+            popup_nav_delta(&key(Key::Char('j'), KeyModifiers::CONTROL)),
+            None
+        );
+        // The `]]` variant never claims the arrows (they move tiles, #286).
+        assert_eq!(
+            popup_letter_nav_delta(&key(Key::Down, KeyModifiers::NONE)),
+            None
+        );
+        assert_eq!(
+            popup_letter_nav_delta(&key(Key::Char('j'), KeyModifiers::NONE)),
+            Some(1)
+        );
+    }
+
+    /// A single-char key yields its dispatch char; the multi-char arrow
+    /// aggregate has none, so it's skipped for `Enter` (#343).
+    #[test]
+    fn single_menu_char_isolates_dispatchable_rows() {
+        assert_eq!(single_menu_char("s"), Some('s'));
+        assert_eq!(single_menu_char("|"), Some('|'));
+        assert_eq!(single_menu_char("1"), Some('1'));
+        assert_eq!(single_menu_char("←↓↑→"), None);
+        assert_eq!(single_menu_char("←→"), None);
+        assert_eq!(single_menu_char(""), None);
+    }
 }

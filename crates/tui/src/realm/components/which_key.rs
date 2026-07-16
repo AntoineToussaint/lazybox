@@ -79,9 +79,9 @@ pub fn render(
     highlight: Option<usize>,
 ) {
     let theme = crate::theme::current();
-    // One title row + one row per continuation, plus a blank row top
-    // and bottom for breathing room.
-    let panel_h = (rows.len() as u16 + 3).min(area.height);
+    // Title + one row per continuation + a footer hint, plus a blank row
+    // top and bottom for breathing room.
+    let panel_h = (rows.len() as u16 + 4).min(area.height);
     let panel_w = PANEL_W.min(area.width);
     let panel = Rect {
         x: area.x,
@@ -138,6 +138,29 @@ pub fn render(
             theme,
         );
     }
+
+    // Footer hint: the two ways to pick (type the key, or move the
+    // highlight and confirm) plus cancel — the affordance the arrow
+    // navigation would otherwise be invisible without (#343).
+    render_nav_hint(frame, panel, "↑↓ select · ↵ · Esc", theme);
+}
+
+/// Draw the bottom-row navigation hint for a popup panel. Dim, matching
+/// the yazi-style chrome, on the panel's last row.
+fn render_nav_hint(frame: &mut Frame, panel: Rect, hint: &str, theme: &crate::theme::Theme) {
+    let hint_y = panel.y + panel.height.saturating_sub(1);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!(" {hint} "),
+            Style::default().bg(theme.surface).fg(theme.text_dim),
+        ))),
+        Rect {
+            x: panel.x,
+            y: hint_y,
+            width: panel.width,
+            height: 1,
+        },
+    );
 }
 
 /// Render the which-key nudge shown after the FIRST press of the
@@ -311,22 +334,12 @@ pub fn render_terminal_leader(
             );
         }
     }
-    // Footer hint on the bottom row of the panel. The commands (incl.
-    // `q` exit) are listed above; Esc cancels back to the terminal. The
-    // leader is non-timed (#252), so nothing leaves on its own.
-    let hint_y = panel.y + panel.height.saturating_sub(1);
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            " Esc cancel ".to_string(),
-            Style::default().bg(theme.surface).fg(theme.text_dim),
-        ))),
-        Rect {
-            x: panel.x,
-            y: hint_y,
-            width: panel.width,
-            height: 1,
-        },
-    );
+    // Footer hint on the bottom row. The commands (incl. `q` exit) are
+    // listed above; you can also move the highlight with `j`/`k` and
+    // confirm — arrows stay bound to tile / tab movement here (#286), so
+    // the hint names the letters, not the arrows (#343). `Esc` cancels;
+    // the leader is non-timed (#252) so nothing leaves on its own.
+    render_nav_hint(frame, panel, "j/k select · ↵ · Esc", theme);
 }
 
 #[cfg(test)]
@@ -406,7 +419,8 @@ mod tests {
         );
     }
 
-    /// The leader popup lists the command menu and an Esc hint.
+    /// The leader popup lists the command menu and a footer that names
+    /// both the `j`/`k` highlight nav and the `Esc` cancel (#343).
     #[test]
     fn terminal_leader_shows_command_menu() {
         let rows = vec![
@@ -417,7 +431,8 @@ mod tests {
         let out = render_leader(&rows);
         assert!(out.contains("snippets"), "missing snippets row: {out}");
         assert!(out.contains("exit to sidebar"), "missing exit row: {out}");
-        assert!(out.contains("Esc cancel"), "missing cancel hint: {out}");
+        assert!(out.contains("j/k"), "missing highlight-nav hint: {out}");
+        assert!(out.contains("Esc"), "missing cancel affordance: {out}");
     }
 
     /// With more rows than the popup caps at, the *head* of the list

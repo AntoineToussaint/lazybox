@@ -81,6 +81,13 @@ impl LeaderCmd {
     /// the popup never advertises a chord that would be a no-op:
     /// `move tile` only exists in Splits, `switch tab` only with two
     /// or more tabs.
+    ///
+    /// INVARIANT: each row's key column is *literally* the dispatch
+    /// character (`s`, `|`, `x`, …), never a decorative glyph — this is
+    /// what lets `Enter` on a highlighted row re-derive its command by
+    /// feeding that char back through [`Self::from_key`] (#343). The one
+    /// multi-char entry, the arrow aggregate, is deliberately
+    /// non-dispatchable (it needs a direction) and is skipped there.
     pub(super) fn menu_rows(splits: bool, tab_count: usize) -> Vec<(String, String)> {
         let mut rows: Vec<(&str, &str)> = vec![
             ("s", "snippets"),

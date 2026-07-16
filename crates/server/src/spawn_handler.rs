@@ -504,7 +504,7 @@ pub async fn handle_spawn(
             // into `handle_spawn`, and a recursive async cycle needs one
             // pointer indirection to keep the futures finitely sized.
             // (This call passes no fallback, so it can't actually recurse.)
-            Box::pin(handle_inject_prompt(config, existing, prompt, None)).await;
+            Box::pin(handle_inject_prompt(config, existing, prompt, None, true)).await;
         }
         let _ = config.bus.send(Event::TerminalFocusRequested {
             terminal_id: existing,
@@ -2282,7 +2282,7 @@ async fn collapse_onto_inflight_spawn(
         // `handle_spawn`: `handle_inject_prompt`'s fallback arm can
         // recurse into `handle_spawn`. (No fallback passed here, so it
         // can't actually recurse.)
-        Box::pin(handle_inject_prompt(config, existing, prompt, None)).await;
+        Box::pin(handle_inject_prompt(config, existing, prompt, None, true)).await;
     }
     let _ = config.bus.send(Event::TerminalFocusRequested {
         terminal_id: existing,
@@ -3644,6 +3644,7 @@ pub async fn handle_inject_prompt(
     terminal_id: TerminalId,
     prompt: &str,
     fallback_spawn: Option<lazybox_ipc::SpawnFallback>,
+    submit: bool,
 ) {
     // Look up — and drop the guard — before any further await so
     // a nested handle_spawn (in the fallback path) can re-acquire
@@ -3713,7 +3714,10 @@ pub async fn handle_inject_prompt(
         }
     };
     let paste = agent.inject_prompt(prompt);
-    let submit = agent.inject_submit();
+    // Recall (`submit == false`) drops the recovered text into the
+    // composer for the user to edit — skip the Enter keystroke and the
+    // settle gate that guards it.
+    let submit = if submit { agent.inject_submit() } else { None };
 
     // Readiness gate (issue #32). If the agent is parked on a
     // permission gate / chooser / Y-N prompt, that dialog owns input —
@@ -4218,6 +4222,52 @@ async fn load_user_message(config: &ServerConfig, backend_key: &str) -> Option<S
         .flatten()
 }
 
+/// Persist the in-flight composer buffer (typed but not submitted) for
+/// an agent terminal, keyed by backend session key so a half-typed
+/// prompt survives a daemon restart (which reassigns `TerminalId`s but
+/// keeps backend keys). An empty buffer clears the stored draft — the
+/// composer emptied out, so there's nothing to recall. Replayed to
+/// clients in `snapshot_terminals` as `composing_buffer` and recalled
+/// into the composer with `]]r`.
+pub async fn handle_record_composing_buffer(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    buffer: &str,
+) {
+    let Some(backend_key) = config.backend_key_for(terminal_id).await else {
+        tracing::trace!("record composing buffer for unknown terminal {terminal_id:?}");
+        return;
+    };
+    let store = config.store.clone();
+    let kv_key = format!("terminal-draft:{backend_key}");
+    let buffer = buffer.to_string();
+    let write = tokio::task::spawn_blocking(move || {
+        if buffer.is_empty() {
+            store.delete_kv(&kv_key)
+        } else {
+            store.set_kv(&kv_key, &buffer)
+        }
+    })
+    .await;
+    match write {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!("persist terminal composing buffer: store write failed: {e}"),
+        Err(e) => tracing::warn!("persist terminal composing buffer: store task failed: {e}"),
+    }
+}
+
+/// Read back the value `handle_record_composing_buffer` stored, or
+/// `None` when the terminal has no pending draft.
+async fn load_composing_buffer(config: &ServerConfig, backend_key: &str) -> Option<String> {
+    let store = config.store.clone();
+    let kv_key = format!("terminal-draft:{backend_key}");
+    tokio::task::spawn_blocking(move || store.get_kv(&kv_key))
+        .await
+        .ok()?
+        .ok()
+        .flatten()
+}
+
 /// Used by `Subscribe` to seed a new client with what's already
 /// running. Reads the parallel `terminal_meta` map populated by
 /// `handle_spawn` so each snapshot carries the right session_key
@@ -4300,6 +4350,7 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
             on_main: on_main.contains(&id),
             model_label: terminal_models.get(&id).cloned(),
             last_user_message: load_user_message(config, &key).await,
+            composing_buffer: load_composing_buffer(config, &key).await,
             terminal_id: id,
             session_key,
             kind,
@@ -5117,6 +5168,67 @@ mod tests {
                 .last_user_message
                 .as_deref(),
             Some("rebase onto main"),
+        );
+    }
+
+    /// Issue #373: the in-flight composer buffer persisted via
+    /// `handle_record_composing_buffer` is keyed by backend session key
+    /// and round-trips back through `snapshot_terminals`, so a client
+    /// restarted onto a fresh daemon can recall a half-typed prompt.
+    /// An empty buffer clears the stored draft.
+    #[tokio::test]
+    async fn recorded_composing_buffer_round_trips_and_clears() {
+        let (config, _mock) = ServerConfig::in_memory_with_mock();
+        let key = config
+            .backend
+            .spawn(&["claude".into()], None, &[], "t")
+            .await
+            .unwrap();
+        let id = TerminalId(7);
+        let session_key: SessionKey = "acme/widget#1".into();
+        let kind = TerminalKind::Agent("claude".into());
+        config.terminals.lock().await.insert(id, key.clone());
+        config
+            .terminal_meta
+            .lock()
+            .await
+            .insert(id, (session_key.clone(), kind.clone()));
+
+        // No draft yet → the snapshot carries None.
+        let before = snapshot_terminals(&config).await;
+        assert_eq!(
+            before
+                .iter()
+                .find(|s| s.terminal_id == id)
+                .unwrap()
+                .composing_buffer,
+            None,
+        );
+
+        handle_record_composing_buffer(&config, id, "fix the flaky ret").await;
+
+        let after = snapshot_terminals(&config).await;
+        assert_eq!(
+            after
+                .iter()
+                .find(|s| s.terminal_id == id)
+                .unwrap()
+                .composing_buffer
+                .as_deref(),
+            Some("fix the flaky ret"),
+        );
+
+        // Emptying the buffer (the user submitted or cleared the line)
+        // clears the stored draft rather than persisting "".
+        handle_record_composing_buffer(&config, id, "").await;
+        let cleared = snapshot_terminals(&config).await;
+        assert_eq!(
+            cleared
+                .iter()
+                .find(|s| s.terminal_id == id)
+                .unwrap()
+                .composing_buffer,
+            None,
         );
     }
 

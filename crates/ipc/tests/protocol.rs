@@ -220,6 +220,7 @@ fn all_events() -> Vec<Event> {
                 on_main: true,
                 model_label: Some("Opus".into()),
                 last_user_message: Some("fix the flaky test".into()),
+                composing_buffer: None,
             }],
             projects: vec![],
         },

@@ -178,6 +178,7 @@ fn snapshot_replaces_all_terminals() {
             no_permission: false,
             on_main: false,
             last_user_message: None,
+            composing_buffer: None,
         }],
         projects: vec![],
     });
@@ -1157,6 +1158,7 @@ fn snapshot_restores_recap_for_agent_terminal() {
             no_permission: false,
             on_main: false,
             last_user_message: Some("rebase onto main".into()),
+            composing_buffer: None,
         }],
         projects: vec![],
     });

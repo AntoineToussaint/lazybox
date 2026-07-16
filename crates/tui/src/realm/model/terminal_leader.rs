@@ -19,6 +19,10 @@ pub(super) enum LeaderCmd {
     JumpAgent(usize),
     /// `]]s` — open the snippet picker.
     Snippets,
+    /// `]]r` — recall the last prompt (the in-flight draft, else the
+    /// last submitted message) back into the agent's composer, without
+    /// submitting it, so a restart doesn't lose what you'd typed.
+    RecallPrompt,
     /// `]]f` — toggle focus mode.
     ToggleFocusMode,
     /// `]]q` — exit the terminal back to the sidebar.
@@ -58,6 +62,7 @@ impl LeaderCmd {
             return match c {
                 '1'..='9' => Some(Self::JumpAgent(c.to_digit(10)? as usize)),
                 's' => Some(Self::Snippets),
+                'r' => Some(Self::RecallPrompt),
                 'f' => Some(Self::ToggleFocusMode),
                 'q' => Some(Self::ExitToSidebar),
                 '`' => Some(Self::JumpPicker),
@@ -100,6 +105,7 @@ impl LeaderCmd {
     ) -> Vec<(String, String)> {
         let mut rows: Vec<(&str, &str)> = vec![
             ("s", "snippets"),
+            ("r", "recall prompt"),
             ("f", "focus mode"),
             ("q", "exit to sidebar"),
             ("`", "jump to workspace"),

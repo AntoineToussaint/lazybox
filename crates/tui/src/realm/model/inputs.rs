@@ -99,6 +99,7 @@ impl<T: TerminalAdapter> Model<T> {
                         terminal_id,
                         prompt: body.to_string(),
                         fallback_spawn: None,
+                        submit: true,
                     });
                     sent += 1;
                 }
@@ -422,6 +423,7 @@ showing keybinding search only",
                     terminal_id,
                     prompt: snippet.body.clone(),
                     fallback_spawn: None,
+                    submit: true,
                 });
             } else {
                 let bytes = encode_snippet_for_pty(&snippet.body);

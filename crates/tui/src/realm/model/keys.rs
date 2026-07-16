@@ -622,6 +622,7 @@ impl<T: TerminalAdapter> Model<T> {
         match cmd {
             LeaderCmd::JumpAgent(n) => self.jump_to_agent_workspace(n),
             LeaderCmd::Snippets => self.mount_snippet_picker(String::new()),
+            LeaderCmd::RecallPrompt => self.recall_prompt(cmds),
             LeaderCmd::ToggleFocusMode => self.toggle_focus_mode(),
             LeaderCmd::ExitToSidebar => self.leave_terminal_to_sidebar(),
             LeaderCmd::JumpPicker => self.mount_jump_picker(),
@@ -649,6 +650,26 @@ impl<T: TerminalAdapter> Model<T> {
             Err(e) => self.flash_info(format!("new terminals open as {word} (couldn't save: {e})")),
         }
         self.redraw = true;
+    }
+
+    /// `]]r` — drop the last prompt (in-flight draft, else last
+    /// submitted message) back into the focused agent's composer without
+    /// submitting it, so the user can edit and re-send. Both sources are
+    /// restored from the daemon snapshot, so this recovers a prompt lost
+    /// to a restart (issue #373). The daemon pastes without the settle-
+    /// gated Enter (`submit: false`).
+    fn recall_prompt(&mut self, cmds: &mut Vec<IpcCommand>) {
+        match self.terminals.recall_prompt() {
+            Some((terminal_id, prompt)) => {
+                cmds.push(IpcCommand::InjectPrompt {
+                    terminal_id,
+                    prompt,
+                    fallback_spawn: None,
+                    submit: false,
+                });
+            }
+            None => self.flash_info("nothing to recall"),
+        }
     }
 
     /// The focus catalog lookups resolve under, given the real pane
@@ -810,6 +831,7 @@ impl<T: TerminalAdapter> Model<T> {
                         terminal_id,
                         prompt,
                         fallback_spawn,
+                        submit: true,
                     }
                 } else {
                     IpcCommand::Spawn {
@@ -995,12 +1017,20 @@ impl<T: TerminalAdapter> Model<T> {
         // terminals; without this, a pasted prompt would commit on
         // Enter as a blank recap (the keystroke tracker only sees the
         // CR, not the paste payload).
-        self.terminals.record_paste(text);
+        let draft = self.terminals.record_paste(text);
         let mut bytes = Vec::with_capacity(text.len() + 12);
         bytes.extend_from_slice(b"\x1b[200~");
         bytes.extend_from_slice(text.as_bytes());
         bytes.extend_from_slice(b"\x1b[201~");
         self.send_cmd(IpcCommand::Write { terminal_id, bytes });
+        // Persist the pasted-but-unsubmitted draft (issue #373) so a
+        // restart can recall it — the same path key-by-key typing takes.
+        if let Some((id, buffer)) = draft {
+            self.send_cmd(IpcCommand::RecordComposingBuffer {
+                terminal_id: id,
+                buffer,
+            });
+        }
         self.redraw = true;
     }
 

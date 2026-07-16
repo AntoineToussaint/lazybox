@@ -355,9 +355,18 @@ impl Terminals {
     /// that arrives via paste (not just key-by-key typing). No-op
     /// when the focused terminal isn't an Agent. The caller is still
     /// responsible for sending the paste bytes to the PTY — this
-    /// only updates lazybox's own composing buffer.
-    pub fn record_paste(&mut self, text: &str) {
-        self.inner.record_paste(text);
+    /// only updates lazybox's own composing buffer. Returns the focused
+    /// terminal id and its updated draft so the caller can persist it
+    /// via `Command::RecordComposingBuffer`.
+    pub fn record_paste(&mut self, text: &str) -> Option<(lazybox_ipc::TerminalId, String)> {
+        self.inner.record_paste(text)
+    }
+
+    /// The text a `]]r` recall should drop back into the focused agent
+    /// composer (in-flight draft, else last submitted message), with the
+    /// target terminal id. `None` when there's nothing to recall.
+    pub fn recall_prompt(&self) -> Option<(lazybox_ipc::TerminalId, String)> {
+        self.inner.recall_prompt()
     }
 
     /// Mirror bytes written straight to a terminal's PTY (e.g. a

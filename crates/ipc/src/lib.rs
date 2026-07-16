@@ -422,6 +422,13 @@ pub struct WorktreeInspectionDto {
     pub is_safe_to_delete: bool,
 }
 
+/// serde `default` for a `bool` field that must default to `true`
+/// (a field absent from an older peer's serialized command should read
+/// as `true`, not `false`).
+fn default_true() -> bool {
+    true
+}
+
 /// TUI → daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Command {
@@ -510,6 +517,23 @@ pub enum Command {
         prompt: String,
         #[serde(default)]
         fallback_spawn: Option<SpawnFallback>,
+        /// Whether to press Enter after pasting `prompt`. `true` for the
+        /// `w` / snippet inject paths (paste + run). `false` for prompt
+        /// *recall* (`]]r`): the recovered text is dropped into the
+        /// composer for the user to edit and submit themselves, so the
+        /// daemon skips the settle-gated submit keystroke.
+        #[serde(default = "default_true")]
+        submit: bool,
+    },
+    /// Persist the in-flight composer buffer (typed but not yet
+    /// submitted) for an agent terminal so a half-typed prompt survives
+    /// a lazybox restart. Sent whenever the buffer changes; an empty
+    /// `buffer` clears the stored draft. The daemon keys it by backend
+    /// session key and replays it via `TerminalSnapshot::composing_buffer`
+    /// so a reconnecting or restarted client can recall it (`]]r`).
+    RecordComposingBuffer {
+        terminal_id: TerminalId,
+        buffer: String,
     },
     Resize {
         terminal_id: TerminalId,
@@ -1472,6 +1496,13 @@ pub struct TerminalSnapshot {
     /// input we composed, so the recap can't be reconstructed from it.
     #[serde(default)]
     pub last_user_message: Option<String>,
+    /// In-flight composer buffer (typed but not yet submitted) for this
+    /// agent terminal, persisted daemon-side from
+    /// `Command::RecordComposingBuffer`. Restored into the client's
+    /// composing state so a restart can recall the half-typed prompt
+    /// via `]]r`. `None` for shells and agents with no pending draft.
+    #[serde(default)]
+    pub composing_buffer: Option<String>,
 }
 
 // ── Transport abstraction ──────────────────────────────────────────────

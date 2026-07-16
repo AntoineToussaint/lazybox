@@ -275,7 +275,10 @@ read, `z` undo mark-read, `r` reply.
 
 **TerminalStack**: all keys forward to the PTY. `]]` (configurable
 escape sequence) is a *non-timed* leader (#252) that opens a small
-command menu (which-key popup): `]]s` opens the snippet picker, `]]f`
+command menu (which-key popup): `]]s` opens the snippet picker, `]]r`
+recalls the last prompt (in-flight draft, else last submitted message)
+back into the agent composer without submitting it — both survive a
+restart (persisted per terminal in the store, #373), `]]f`
 toggles focus mode, `]]q` exits to the sidebar, `]]<digit>` jumps to
 the Nth agent workspace, and `` ]]` `` opens the fuzzy workspace
 switcher. The snippet picker (see

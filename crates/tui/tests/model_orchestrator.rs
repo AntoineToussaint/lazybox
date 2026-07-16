@@ -946,6 +946,7 @@ fn w_on_issue_with_running_claude_injects_implement_prompt() {
             terminal_id,
             prompt,
             fallback_spawn,
+            submit: _,
         } => Some((*terminal_id, prompt.clone(), fallback_spawn.clone())),
         _ => None,
     });
@@ -1950,6 +1951,7 @@ fn snapshot_terminal_backstops_worktree_progress_dismissal() {
             no_permission: false,
             on_main: false,
             last_user_message: None,
+            composing_buffer: None,
         }],
         projects: vec![],
     });

@@ -294,6 +294,7 @@ fn all_non_shutdown_commands() -> Vec<Command> {
             terminal_id: tid,
             prompt: "p".into(),
             fallback_spawn: None,
+            submit: true,
         },
         Command::Resize {
             terminal_id: tid,

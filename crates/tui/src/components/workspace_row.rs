@@ -83,6 +83,10 @@ pub struct WorkspaceRowCtx<'a> {
     /// pill ahead of the status pills so the user can see, at a glance,
     /// which rows will merge themselves once CI goes green.
     pub auto_merge_armed: bool,
+    /// This workspace has an auto-fix behavior explicitly armed
+    /// (`Workspace::policies` — issue #363). Renders a ` FIX ` pill so an
+    /// explicit per-session auto-fix arm is visible, never invisible.
+    pub auto_fix_armed: bool,
 }
 
 impl<'a> WorkspaceRowCtx<'a> {
@@ -603,7 +607,7 @@ fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // pill, handing the slack back to the title flex. An armed row
     // always shows its ` ARM ` marker even when no CI/review pill
     // applies yet (e.g. armed before CI runs).
-    if primary.is_none() && secondary.is_none() && !ctx.auto_merge_armed {
+    if primary.is_none() && secondary.is_none() && !ctx.auto_merge_armed && !ctx.auto_fix_armed {
         return Cell::empty();
     }
     // Emit only the pills that are actually present, each trimmed to
@@ -613,7 +617,7 @@ fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // Right-aligned by the column, so the rightmost pill sits one clean
     // gap off the duration — its block's trailing space plus the time
     // cell's leading space, nothing more.
-    let mut spans = Vec::with_capacity(3);
+    let mut spans = Vec::with_capacity(4);
     if ctx.auto_merge_armed {
         let arm_style = if ctx.is_cursor {
             ctx.row_style()
@@ -624,6 +628,17 @@ fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
                 .add_modifier(Modifier::BOLD)
         };
         spans.push(Span::styled(" ARM ", arm_style));
+    }
+    if ctx.auto_fix_armed {
+        let fix_style = if ctx.is_cursor {
+            ctx.row_style()
+        } else {
+            Style::default()
+                .bg(ctx.theme.warn)
+                .fg(ratatui::style::Color::Black)
+                .add_modifier(Modifier::BOLD)
+        };
+        spans.push(Span::styled(" FIX ", fix_style));
     }
     if let Some(p) = primary {
         spans.push(Span::styled(p.label, p.style));
@@ -742,6 +757,7 @@ mod tests {
             agent_number: None,
             ascii_glyphs: false,
             auto_merge_armed: false,
+            auto_fix_armed: false,
         }
     }
 
@@ -1058,6 +1074,7 @@ mod tests {
             agent_number: None,
             ascii_glyphs: false,
             auto_merge_armed: false,
+            auto_fix_armed: false,
         };
         assert_eq!(cell_type(&ctx).width(), 0);
     }
@@ -1204,6 +1221,7 @@ mod tests {
             agent_number: None,
             ascii_glyphs: false,
             auto_merge_armed: false,
+            auto_fix_armed: false,
         };
         assert_eq!(cell_title(&ctx).spans[0].content.as_ref(), "lonely");
     }
@@ -1256,6 +1274,27 @@ mod tests {
         let cell = cell_status(&ctx);
         assert!(cell.width() > 0, "armed row renders a status cell");
         assert_eq!(cell.spans[0].content.as_ref(), " ARM ");
+    }
+
+    /// A workspace with an auto-fix policy explicitly armed surfaces a
+    /// ` FIX ` pill (issue #363) so the per-session arm is never
+    /// invisible — even before any CI pill applies.
+    #[test]
+    fn cell_status_shows_fix_pill_when_auto_fix_armed() {
+        let mut task = make_task("owner/repo#1", "x");
+        task.review = ReviewStatus::None;
+        task.ci = CiStatus::None;
+        task.state = TaskState::Open;
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.auto_fix_armed = true;
+        let cell = cell_status(&ctx);
+        assert!(cell.width() > 0, "auto-fix-armed row renders a status cell");
+        assert!(
+            cell.spans.iter().any(|s| s.content.as_ref() == " FIX "),
+            "FIX marker present"
+        );
     }
 
     /// The ARM marker rides ahead of the live CI pill rather than
@@ -1981,6 +2020,7 @@ mod tests {
             agent_number: None,
             ascii_glyphs: false,
             auto_merge_armed: false,
+            auto_fix_armed: false,
         };
         let columns = build_columns(4);
         let rows = vec![build_row(&ctx_task), build_row(&ctx_scratch)];

@@ -668,6 +668,17 @@ pub enum Command {
         session_key: SessionKey,
         enabled: bool,
     },
+    /// Set the per-session auto-fix arm for one [`AutoFixKind`] on the
+    /// workspace (issue #363). `Arm` overrides a label opt-out, `Disarm`
+    /// forces auto-fix off for this workspace, `Default` follows the
+    /// global config. The daemon persists it on the `Workspace`
+    /// (like `SetAutoMergeOnGreen`) and re-broadcasts; the auto-fix
+    /// dispatcher reads it back to gate the fix.
+    SetAutoFixPolicy {
+        session_key: SessionKey,
+        kind: lazybox_core::AutoFixKind,
+        arm: lazybox_core::PolicyArm,
+    },
     /// Post a top-level reply to the workspace's primary task. Today
     /// this maps to "create an issue/PR comment" on GitHub; future
     /// providers (Linear, etc.) wire their own send path. The daemon

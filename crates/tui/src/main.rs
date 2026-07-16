@@ -736,6 +736,7 @@ async fn run_embedded_realm(
             &user_config.display,
             &ui_defaults,
         );
+        model.apply_auto_fix_opt_out_labels(user_config.auto_fix.opt_out_labels.clone());
         // Generate the per-agent SpawnAgent catalog rows (#102 P2):
         // exactly the agents the wizard enabled. An unconfigured user
         // (empty `setup.agents`) falls back to the built-in trio so the

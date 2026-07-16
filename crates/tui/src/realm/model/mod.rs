@@ -139,6 +139,13 @@ pub enum Id {
     /// Works on issues too — both PRs and issues implement GraphQL's
     /// `Labelable` interface.
     ManageLabels,
+    /// Automation-policies menu mounted on `g p` (`ManagePolicies`,
+    /// issue #363). Single-pick `Choice` listing every policy on the
+    /// focused PR/issue with its on/off state; picking a row toggles
+    /// that policy and re-opens the menu. Rows + the workspace key live
+    /// in `policy_choices` / `pending_policy_workspace`;
+    /// `Msg::ChoicePicked` resolves the index to a toggle command.
+    PolicyPicker,
     /// Duration picker mounted on `z` (ToggleSnooze) when the
     /// workspace is NOT currently snoozed. Single-pick choice
     /// modal with several common snooze durations (1h, today,
@@ -630,6 +637,13 @@ pub struct Model<T: TerminalAdapter> {
     /// The duration each picker option maps to. Order MUST match
     /// the labels rendered in `mount_snooze_picker`.
     snooze_choices: Vec<std::time::Duration>,
+    /// Workspace the `PolicyPicker` (`g p`, issue #363) is targeting.
+    /// `Msg::ChoicePicked` reads it + `policy_choices` to turn the
+    /// picked index into a toggle command. Cleared on dismiss.
+    pending_policy_workspace: Option<lazybox_core::WorkspaceKey>,
+    /// The toggle each policy-menu row maps to, in row order. Order
+    /// MUST match the labels rendered in `mount_policy_picker`.
+    policy_choices: Vec<crate::realm::model::modals::PolicyToggle>,
     /// Queued workspace-removal prompts — either out-of-scope
     /// workspaces with running terminals (`WorkspaceOutOfScope`) or
     /// merged PRs (`MergedPrRemovable`). The daemon won't auto-remove
@@ -697,6 +711,12 @@ pub struct Model<T: TerminalAdapter> {
     /// module-level `const`s — read from `~/.lazybox/config.yaml::ui`,
     /// or `UiDefaults::default()` when unset / not loaded.
     ui_defaults: lazybox_config::UiDefaults,
+    /// Auto-fix opt-out label names (`auto_fix.opt_out_labels`), used by
+    /// the policies menu (issue #363) to reflect which labels currently
+    /// opt a PR out of auto-fix. Display-only — the daemon enforces the
+    /// authoritative set. Defaults to the standard set until config is
+    /// applied.
+    auto_fix_opt_out_labels: Vec<String>,
     /// Workspace keys for which we've already fired
     /// `Command::FetchPrDetails` this session — the lazy-fetch path
     /// that back-fills review-thread activity. Used to dedupe the
@@ -1099,6 +1119,8 @@ impl<T: TerminalAdapter> Model<T> {
             labels_choices: Vec::new(),
             pending_snooze_workspace: None,
             snooze_choices: Vec::new(),
+            pending_policy_workspace: None,
+            policy_choices: Vec::new(),
             pending_removal_prompts: std::collections::VecDeque::new(),
             active_removal_prompt: None,
             pending_merge_prompts: std::collections::VecDeque::new(),
@@ -1111,6 +1133,7 @@ impl<T: TerminalAdapter> Model<T> {
             new_workspace_repo_choices: Vec::new(),
             status: StatusCtx::new(),
             ui_defaults: lazybox_config::UiDefaults::default(),
+            auto_fix_opt_out_labels: lazybox_core::AutoFixSettings::default().opt_out_labels,
             pr_details_fetched: std::collections::HashSet::new(),
             auto_merge_fired: std::collections::HashSet::new(),
             merge_confirmed: std::collections::HashSet::new(),
@@ -1337,6 +1360,13 @@ impl<T: TerminalAdapter> Model<T> {
     /// directly, so this is the only handoff needed.
     pub fn apply_snippets(&mut self, snippets: lazybox_config::Snippets) {
         self.snippets = snippets;
+    }
+
+    /// Install the configured auto-fix opt-out label set so the policies
+    /// menu (`g p`, issue #363) reflects which labels opt a PR out.
+    /// Display-only — the daemon enforces the authoritative set.
+    pub fn apply_auto_fix_opt_out_labels(&mut self, labels: Vec<String>) {
+        self.auto_fix_opt_out_labels = labels;
     }
 
     /// Arm the auto-launch of the feature tour. `main.rs` passes

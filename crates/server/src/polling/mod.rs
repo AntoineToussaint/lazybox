@@ -326,6 +326,11 @@ pub enum ProviderAction {
         /// CI failure vs merge conflict: picks the comment wording and
         /// namespaces the attempt counter.
         kind: AutoFixKind,
+        /// Whether a global opt-out label is present on the PR. Computed
+        /// in the source (it has the `Task`); the dispatcher combines it
+        /// with the workspace's per-session [`lazybox_core::PolicyArm`]
+        /// to decide whether to proceed (issue #363).
+        opted_out: bool,
         /// Cooldown / max-attempts thresholds, carried from the
         /// source so the dispatcher (which only has `&ServerConfig`)
         /// doesn't have to reload config.
@@ -404,9 +409,15 @@ impl GhSource {
         let mut queued = 0usize;
         let mut pending = self.pending_actions.lock();
         for task in tasks {
-            let Some(kind) = lazybox_core::evaluate_auto_fix(task, &self.auto_fix) else {
+            // Task-shape eligibility only (global enable is gated above).
+            // The label opt-out + per-session policy are resolved in the
+            // dispatcher, which has the workspace store — so a
+            // label-opted-out PR is still queued here and dropped there
+            // unless the workspace explicitly armed it (issue #363).
+            let Some(kind) = lazybox_core::auto_fix_candidate(task) else {
                 continue;
             };
+            let opted_out = lazybox_core::is_auto_fix_opted_out(task, &self.auto_fix);
             // Need a repo + numeric PR id to comment + key the counter.
             let Some(repo) = task.repo.clone() else {
                 continue;
@@ -430,6 +441,7 @@ impl GhSource {
                 repo,
                 pr_number,
                 kind,
+                opted_out,
                 settings: self.auto_fix.clone(),
                 reason,
             });
@@ -911,9 +923,30 @@ async fn dispatch_action(
             repo,
             pr_number,
             kind,
+            opted_out,
             settings,
             reason,
         } => {
+            // Per-session policy gate (issue #363). The source queued
+            // this on task-shape eligibility alone; here — with the store
+            // — resolve the workspace's arm against the label opt-out. A
+            // `Disarm` (or a `Default` on a label-opted-out PR) drops the
+            // fix before any comment, attempt, or spawn.
+            let arm = load_workspace_offloaded(config, &WorkspaceKey::new(session_key.as_str()))
+                .await
+                .map(|ws| ws.policies.arm(kind))
+                .unwrap_or_default();
+            if !lazybox_core::auto_fix_permitted(arm, opted_out) {
+                tracing::info!(
+                    source = source_name,
+                    %session_key,
+                    ?kind,
+                    arm = arm.as_str(),
+                    opted_out,
+                    "auto-fix disarmed for this workspace — skipping"
+                );
+                return;
+            }
             let term_kind = lazybox_ipc::TerminalKind::Agent(agent_id.clone());
             // If a fix agent is ALREADY running on this PR, let it
             // finish — don't burn an attempt, post a duplicate "I'm
@@ -4403,6 +4436,25 @@ pub async fn set_auto_merge_on_green(config: &ServerConfig, key: &WorkspaceKey, 
         return;
     };
     workspace.auto_merge_on_green = enabled;
+    commit_upsert_offloaded(config, key, workspace).await;
+}
+
+/// Persist the workspace's per-session auto-fix arm for one
+/// [`lazybox_core::AutoFixKind`] (issue #363). Mirrors
+/// [`set_auto_merge_on_green`]: load, set the policy, commit (persists +
+/// broadcasts `WorkspaceUpserted`). The auto-fix dispatcher reads the
+/// stored arm back on the next fix candidate.
+pub async fn set_auto_fix_policy(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    kind: lazybox_core::AutoFixKind,
+    arm: lazybox_core::PolicyArm,
+) {
+    let _ws_guard = config.lock_workspace(key.as_str()).await;
+    let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
+        return;
+    };
+    workspace.policies.set(kind, arm);
     commit_upsert_offloaded(config, key, workspace).await;
 }
 

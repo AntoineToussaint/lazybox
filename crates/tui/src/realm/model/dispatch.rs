@@ -647,6 +647,17 @@ impl<T: TerminalAdapter> Model<T> {
                     | Intent::MarkAllRead { .. } => {}
                 }
             }
+            Action::ManagePolicies => {
+                // Unified automation-policies menu (issue #363). Surfaces
+                // for any workspace carrying a PR or a GitHub issue; the
+                // menu itself marks which policies apply to PRs vs issues.
+                if let Some(ws) = self.sidebar.selected_workspace()
+                    && (ws.pr.is_some() || !ws.gh_issues.is_empty())
+                {
+                    let ws_key = ws.key.clone();
+                    self.mount_policy_picker(ws_key);
+                }
+            }
             Action::Refresh => {
                 cmds.push(IpcCommand::Refresh);
                 // Pre-arm the bg_poll indicator so the user gets

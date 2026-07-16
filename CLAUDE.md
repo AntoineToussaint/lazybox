@@ -251,9 +251,15 @@ rides a `◆ Opus` tab badge. `g` is a leader that
 opens the **github** group the same way: `g m` merge, `g g` toggle
 auto-merge on green (lazybox merges automatically once CI passes —
 own PR, no conflicts, no changes requested; only while lazybox runs),
-`g v` reviewers, `g a` assignees, `g l` labels, `g o` open in
-browser — leader chords only, the legacy `Shift-{M,V,G,L,O}` direct
-aliases are gone (#304). `b` is a leader
+`g p` policies (the unified automation-policies menu — one surface
+listing merge-on-green, per-session auto-fix arm/disarm, and
+GitHub-native auto-merge status for the focused PR/issue, each toggled
+in place; #363), `g v` reviewers, `g a` assignees, `g l` labels,
+`g o` open in browser — leader chords only, the legacy
+`Shift-{M,V,G,L,O}` direct aliases are gone (#304). Armed policies
+surface as row pills (`ARM` merge-on-green, `FIX` auto-fix); the
+per-session auto-fix arm/disarm overrides the global `no-auto-fix` /
+`do-not-lazybox` label opt-out, which the menu still reflects. `b` is a leader
 for the **on-main** group (which-key popup): `b c` / `b x` / `b u`
 start an agent, `b s` a shell, on the repo's shared **main checkout**
 (default branch) instead of an isolated worktree — confirmed first

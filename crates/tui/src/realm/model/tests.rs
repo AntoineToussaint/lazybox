@@ -3273,6 +3273,85 @@ mod merge_focus_follow_tests {
         );
     }
 
+    /// Policies menu (`g p`, issue #363): opening it on a PR workspace
+    /// with merge-on-green already armed, then picking the merge-on-green
+    /// row, emits `SetAutoMergeOnGreen { enabled: false }` — a toggle
+    /// read from the live workspace state. Side state clears on pick.
+    #[test]
+    fn policy_picker_toggles_merge_on_green_off() {
+        let mut m = build_model();
+        let mut ws = workspace("owner/repo#1", true, Duration::hours(1));
+        ws.auto_merge_on_green = true;
+        let ws_key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
+
+        m.mount_policy_picker(ws_key.clone());
+        assert_eq!(m.modal_stack.last(), Some(&Id::PolicyPicker));
+        // Row 0 is merge-on-green (see `build_policy_rows`).
+        let cmds = m.handle_choice_picked(vec![0]);
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IpcCommand::SetAutoMergeOnGreen {
+                session_key,
+                enabled,
+            } => {
+                assert_eq!(session_key.as_str(), ws_key.as_str());
+                assert!(!enabled, "armed → toggling off");
+            }
+            other => panic!("expected SetAutoMergeOnGreen, got {other:?}"),
+        }
+        assert!(m.pending_policy_workspace.is_none());
+        assert!(m.policy_choices.is_empty());
+    }
+
+    /// Picking an auto-fix row toggles the per-session arm. On a default
+    /// (unlabeled) PR that means Default → Disarm →
+    /// `SetAutoFixPolicy { kind: CiFailure, arm: Disarm }`.
+    #[test]
+    fn policy_picker_toggles_auto_fix_ci() {
+        let mut m = build_model();
+        let ws = workspace("owner/repo#7", true, Duration::hours(1));
+        let ws_key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
+
+        m.mount_policy_picker(ws_key.clone());
+        // Rows: 0 merge-on-green, 1 native (info), 2 auto-fix CI.
+        let cmds = m.handle_choice_picked(vec![2]);
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IpcCommand::SetAutoFixPolicy {
+                session_key,
+                kind,
+                arm,
+            } => {
+                assert_eq!(session_key.as_str(), ws_key.as_str());
+                assert_eq!(*kind, lazybox_core::AutoFixKind::CiFailure);
+                assert_eq!(*arm, lazybox_core::PolicyArm::Disarm);
+            }
+            other => panic!("expected SetAutoFixPolicy, got {other:?}"),
+        }
+    }
+
+    /// The native-auto-merge row is read-only: picking it emits no
+    /// command (it's a status row, not a toggle).
+    #[test]
+    fn policy_picker_native_auto_merge_row_is_read_only() {
+        let mut m = build_model();
+        let ws = workspace("owner/repo#8", true, Duration::hours(1));
+        let ws_key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
+
+        m.mount_policy_picker(ws_key);
+        let cmds = m.handle_choice_picked(vec![1]);
+        assert!(
+            cmds.is_empty(),
+            "native auto-merge status row emits no command"
+        );
+    }
+
     /// Regression for #160: the daemon's issue→PR merge burst
     /// (`TerminalsRebadged` → `WorkspaceRemoved` → `WorkspaceMerged`)
     /// arrives as one drain batch and must leave the loop responsive —

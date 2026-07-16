@@ -113,6 +113,11 @@ pub enum Action {
     /// PR becomes merge-ready. Distinct from GitHub's native
     /// auto-merge; acts only while lazybox is running.
     ToggleAutoMerge,
+    /// Open the unified automation-policies menu for the focused
+    /// PR/issue (issue #363): one surface listing every policy
+    /// (merge-on-green, per-session auto-fix arm/disarm, GitHub-native
+    /// auto-merge status) with its on/off state, toggled in place.
+    ManagePolicies,
     /// Move every session from the focused workspace to another.
     AdoptSessions,
     /// Manually fold an issue workspace into the PR workspace that
@@ -332,6 +337,7 @@ pub enum ActionKind {
     CloseIssue,
     MergePr,
     ToggleAutoMerge,
+    ManagePolicies,
     AdoptSessions,
     CollapseIntoPr,
     RequestReviewers,
@@ -446,6 +452,7 @@ impl Action {
             Action::CloseIssue => ActionKind::CloseIssue,
             Action::MergePr => ActionKind::MergePr,
             Action::ToggleAutoMerge => ActionKind::ToggleAutoMerge,
+            Action::ManagePolicies => ActionKind::ManagePolicies,
             Action::AdoptSessions => ActionKind::AdoptSessions,
             Action::CollapseIntoPr => ActionKind::CollapseIntoPr,
             Action::RequestReviewers => ActionKind::RequestReviewers,
@@ -785,6 +792,13 @@ impl ActionDef {
                 default_keys: "g g",
                 label: "auto-merge on green",
                 describe: "Toggle \"auto-merge on green\": arm the workspace so lazybox merges your PR automatically once CI goes green (own PR, no conflicts, no changes requested). Fires only while lazybox is running.",
+                section: Section::Workspace,
+            },
+            ActionKind::ManagePolicies => &Self {
+                kind: ActionKind::ManagePolicies,
+                default_keys: "g p",
+                label: "policies",
+                describe: "Open the automation-policies menu for the focused PR/issue: one surface listing every policy (merge-on-green, per-session auto-fix arm/disarm, GitHub-native auto-merge status) with its on/off state, toggled in place.",
                 section: Section::Workspace,
             },
             ActionKind::AdoptSessions => &Self {
@@ -1506,6 +1520,7 @@ impl ActionKind {
             ActionKind::CloseIssue => "close_issue",
             ActionKind::MergePr => "merge_pr",
             ActionKind::ToggleAutoMerge => "toggle_auto_merge",
+            ActionKind::ManagePolicies => "manage_policies",
             ActionKind::AdoptSessions => "adopt_sessions",
             ActionKind::CollapseIntoPr => "collapse_into_pr",
             ActionKind::RequestReviewers => "request_reviewers",
@@ -1704,6 +1719,7 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
     match kind {
         ActionKind::MergePr
         | ActionKind::ToggleAutoMerge
+        | ActionKind::ManagePolicies
         | ActionKind::RequestReviewers
         | ActionKind::AddAssignees
         | ActionKind::ManageLabels
@@ -2063,6 +2079,12 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         // can do something; the resolver Notices on non-PR workspaces
         // if the user presses it anyway.
         ActionKind::ToggleAutoMerge => workspace.map(|w| w.pr.is_some()).unwrap_or(false),
+        // The policies menu surfaces on any workspace carrying a PR or a
+        // GitHub issue — the "tag this PR/issue" surface (issue #363).
+        // The menu itself marks which policies apply to PRs vs issues.
+        ActionKind::ManagePolicies => workspace
+            .map(|w| w.pr.is_some() || !w.gh_issues.is_empty())
+            .unwrap_or(false),
         ActionKind::Work | ActionKind::WorkWith => intent::classify_work(workspace, &[]).is_some(),
         ActionKind::OpenEditor => matches!(
             intent::resolve_open_editor(workspace),

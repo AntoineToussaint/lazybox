@@ -258,7 +258,7 @@ fn collapse_injected_path(msg: &str) -> std::borrow::Cow<'_, str> {
 /// A viewport scroll request — the entire vocabulary the scroll owner
 /// accepts. Every scroll surface (wheel, `Shift-PgUp/PgDn`,
 /// `Shift-Home/End`, per-tile wheel) speaks only these three verbs;
-/// nothing outside [`TerminalVt::scroll`] pokes a raw offset or calls
+/// nothing outside `TerminalVt::scroll` pokes a raw offset or calls
 /// `scroll_viewport` directly. That single choke point is what makes a
 /// silent no-op impossible (the #42/#371 promise): a request either
 /// moves the viewport or comes back with a typed [`ScrollOutcome`].
@@ -1543,7 +1543,7 @@ impl TerminalStack {
     }
 
     /// Route a scroll request to a specific terminal through the single
-    /// owner ([`TerminalVt::scroll`]). The one internal chokepoint every
+    /// owner (`TerminalVt::scroll`). The one internal chokepoint every
     /// public scroll entry point delegates to — keeping the "who owns
     /// scroll state" answer to exactly one place.
     fn scroll_terminal(&mut self, id: Option<TerminalId>, request: ScrollRequest) -> ScrollOutcome {
@@ -2006,7 +2006,7 @@ impl TerminalStack {
     /// scroll owner. The keyboard scrollback path uses this; the
     /// mouse-wheel path uses [`Self::scroll_at`] so it can target the
     /// tile under the cursor (#362). Both funnel into
-    /// [`TerminalVt::scroll`], so neither can silently no-op.
+    /// `TerminalVt::scroll`, so neither can silently no-op.
     pub fn scroll_active(&mut self, delta: isize) -> ScrollOutcome {
         self.scroll_focused(ScrollRequest::By(delta))
     }

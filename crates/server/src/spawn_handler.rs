@@ -638,6 +638,7 @@ pub async fn handle_spawn(
             env.push((k, v));
         }
     }
+    let env = with_agent_spawn_defaults(env, agent_for_env.is_some());
     let env = with_worktree_cargo_target(env, cwd_path.as_deref());
     tracing::info!(
         program = argv.first().map(String::as_str).unwrap_or("<empty>"),
@@ -2045,6 +2046,40 @@ pub(crate) fn gateway_env_for_agent(
         .gateway_url()
         .map(|u| vec![(provider.base_url_env().to_string(), u.to_string())])
         .unwrap_or_default()
+}
+
+/// Env that keeps a spawned agent's first minutes on its actual work
+/// instead of on package management. A Homebrew-installed agent CLI can
+/// shell out to `brew` on launch as part of its own update path — Codex's
+/// homebrew build runs `brew upgrade --cask codex` when the user accepts
+/// its update banner — and *any* `brew` invocation first triggers
+/// Homebrew's implicit self-update (portable-ruby pour, tap refresh,
+/// "Auto-updated Homebrew!") unless suppressed, a heavy network+disk
+/// side effect the session never asked for (issue #355).
+/// `HOMEBREW_NO_AUTO_UPDATE=1` skips only that self-update preamble; it
+/// does not block an explicitly requested upgrade, so the agent CLI is
+/// never silently pinned to a stale version.
+fn homebrew_no_auto_update_env() -> Vec<(String, String)> {
+    vec![("HOMEBREW_NO_AUTO_UPDATE".to_string(), "1".to_string())]
+}
+
+/// Layer agent-only spawn-env defaults onto `env`. Non-agent spawns
+/// (shells, log tails) get nothing — a shell the user opened should
+/// keep its normal `brew` behavior. Each default is skipped when the
+/// per-repo env already set that key, so an explicit choice wins.
+fn with_agent_spawn_defaults(
+    mut env: Vec<(String, String)>,
+    is_agent: bool,
+) -> Vec<(String, String)> {
+    if !is_agent {
+        return env;
+    }
+    for (k, v) in homebrew_no_auto_update_env() {
+        if !env.iter().any(|(ek, _)| ek == &k) {
+            env.push((k, v));
+        }
+    }
+    env
 }
 
 /// Pure-data lookup so tests don't need a real YAML on disk.
@@ -4321,6 +4356,33 @@ mod tests {
     fn cargo_target_dir_is_not_added_without_a_worktree() {
         let out = with_worktree_cargo_target(Vec::new(), None);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn agent_spawn_suppresses_homebrew_auto_update() {
+        let out = with_agent_spawn_defaults(Vec::new(), true);
+        let map: std::collections::BTreeMap<_, _> = out.into_iter().collect();
+        assert_eq!(
+            map.get("HOMEBREW_NO_AUTO_UPDATE").map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn non_agent_spawn_leaves_homebrew_alone() {
+        let out = with_agent_spawn_defaults(Vec::new(), false);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn homebrew_suppression_respects_an_explicit_repo_setting() {
+        let env = vec![("HOMEBREW_NO_AUTO_UPDATE".to_string(), "0".to_string())];
+        let out = with_agent_spawn_defaults(env, true);
+        let map: std::collections::BTreeMap<_, _> = out.into_iter().collect();
+        assert_eq!(
+            map.get("HOMEBREW_NO_AUTO_UPDATE").map(String::as_str),
+            Some("0")
+        );
     }
 
     /// Regression for #161: after an issue→PR collapse, `rebadge_terminals`

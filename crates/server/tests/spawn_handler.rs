@@ -1158,6 +1158,7 @@ async fn inject_prompt_falls_back_to_spawn_when_terminal_dead() {
                     kind: TerminalKind::Shell,
                     cwd: test_cwd(),
                 }),
+                submit: true,
             })
             .unwrap();
 
@@ -1192,6 +1193,7 @@ async fn inject_prompt_without_fallback_is_silent_noop() {
                 terminal_id: dead_id,
                 prompt: "should disappear".into(),
                 fallback_spawn: None,
+                submit: true,
             })
             .unwrap();
 
@@ -1268,6 +1270,7 @@ async fn inject_prompt_waits_for_input_needed_to_clear() {
                 terminal_id,
                 prompt: WORK.into(),
                 fallback_spawn: None,
+                submit: true,
             })
             .unwrap();
 

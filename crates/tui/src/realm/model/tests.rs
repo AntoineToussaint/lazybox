@@ -1200,6 +1200,7 @@ snippets:
                 terminal_id,
                 prompt,
                 fallback_spawn,
+                submit: _,
             }) => {
                 assert_eq!(prompt, "review the diff", "body injected verbatim");
                 assert_eq!(*terminal_id, lazybox_ipc::TerminalId(1));
@@ -1426,6 +1427,7 @@ snippets:
                     terminal_id,
                     prompt,
                     fallback_spawn,
+                    submit: _,
                 } => {
                     assert_eq!(prompt, "merge when the PR is green");
                     assert!(fallback_spawn.is_none());
@@ -5107,8 +5109,10 @@ mod leader_tile_tests {
         assert_eq!(m.terminal_leader_highlight(), Some(1));
         m.dispatch_key(RealmKey::new(Key::Char('k'), RealmMods::NONE));
         assert_eq!(m.terminal_leader_highlight(), Some(0));
+        // Menu order: s,r,f,… — step to `focus mode` at index 2.
         m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
-        assert_eq!(m.terminal_leader_highlight(), Some(1));
+        m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
+        assert_eq!(m.terminal_leader_highlight(), Some(2));
 
         assert!(!m.focus_mode, "focus mode starts off");
         m.dispatch_key(RealmKey::new(Key::Enter, RealmMods::NONE));
@@ -5157,26 +5161,26 @@ mod leader_tile_tests {
         while server.rx.try_recv().is_ok() {}
         arm_leader(&mut m);
 
-        // Splits menu order: s,f,q,`,|,- then the `move tile` aggregate
-        // at index 6, then `x` at index 7. Six `j` presses reach index 5.
-        for _ in 0..6 {
+        // Splits menu order: s,r,f,q,`,|,- then the `move tile` aggregate
+        // at index 7, then `x` at index 8. Seven `j` presses reach index 6.
+        for _ in 0..7 {
             m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
         }
         assert_eq!(
             m.terminal_leader_highlight(),
-            Some(5),
+            Some(6),
             "reached the last row before the aggregate"
         );
         m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
         assert_eq!(
             m.terminal_leader_highlight(),
-            Some(7),
-            "`j` jumps over the aggregate at index 6"
+            Some(8),
+            "`j` jumps over the aggregate at index 7"
         );
         m.dispatch_key(RealmKey::new(Key::Char('k'), RealmMods::NONE));
         assert_eq!(
             m.terminal_leader_highlight(),
-            Some(5),
+            Some(6),
             "`k` skips it going back too"
         );
     }
@@ -5198,6 +5202,60 @@ mod leader_tile_tests {
             }
         }
         assert!(saw_close, "`]]x` kills the focused tile's PTY");
+    }
+
+    /// Issue #373: after a restart the daemon snapshot restores the
+    /// in-flight draft; `]]r` recalls it back into the agent composer as
+    /// an `InjectPrompt` with `submit: false`, so the recovered text
+    /// lands editable rather than being auto-sent.
+    #[test]
+    fn leader_r_recalls_the_restored_draft_without_submitting() {
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let key = lazybox_core::SessionKey::from("github:o/r#1");
+        m.terminals.set_active_session(Some(key.clone()));
+        // A reconnect / fresh-daemon snapshot carrying the persisted
+        // draft — the state a restart lands in.
+        m.terminals.on_daemon_event(&IpcEvent::Snapshot {
+            workspaces: vec![],
+            projects: vec![],
+            terminals: vec![lazybox_ipc::TerminalSnapshot {
+                terminal_id: TerminalId(1),
+                session_key: key.clone(),
+                kind: TerminalKind::Agent("claude".into()),
+                replay: Vec::new(),
+                last_seq: 0,
+                no_permission: false,
+                on_main: false,
+                model_label: None,
+                last_user_message: None,
+                composing_buffer: Some("recover me".into()),
+            }],
+        });
+        m.focus = PaneFocus::Terminals;
+        while server.rx.try_recv().is_ok() {}
+
+        arm_leader(&mut m);
+        m.dispatch_key(RealmKey::new(Key::Char('r'), RealmMods::NONE));
+        assert!(!m.terminal_leader_pending(), "leader consumed");
+
+        let inject = std::iter::from_fn(|| server.rx.try_recv().ok()).find_map(|c| match c {
+            IpcCommand::InjectPrompt {
+                terminal_id,
+                prompt,
+                submit,
+                ..
+            } => Some((terminal_id, prompt, submit)),
+            _ => None,
+        });
+        match inject {
+            Some((terminal_id, prompt, submit)) => {
+                assert_eq!(terminal_id, TerminalId(1));
+                assert_eq!(prompt, "recover me");
+                assert!(!submit, "recall drops text in the composer, unsubmitted");
+            }
+            None => panic!("`]]r` must emit an InjectPrompt"),
+        }
     }
 }
 
@@ -7032,6 +7090,7 @@ mod worktree_progress_recovery_tests {
             no_permission: false,
             on_main: false,
             last_user_message: None,
+            composing_buffer: None,
         }
     }
 

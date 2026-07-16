@@ -516,6 +516,7 @@ mod tests {
                 on_main: false,
                 model_label: None,
                 last_user_message: None,
+                composing_buffer: None,
             }],
             projects: Vec::new(),
         };

@@ -1991,6 +1991,7 @@ impl TerminalStack {
         slot.last_seq = seq;
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn make_slot(
         session_key: SessionKey,
         kind: TerminalKind,
@@ -1999,6 +2000,7 @@ impl TerminalStack {
         on_main: bool,
         model_label: Option<String>,
         last_user_message: Option<String>,
+        composing: String,
     ) -> TerminalSlot {
         let vt = TerminalVt::new().expect("libghostty-vt init");
         TerminalSlot {
@@ -2010,7 +2012,7 @@ impl TerminalStack {
             osc52_carry: Vec::new(),
             agent_state: lazybox_ipc::AgentState::Idle,
             last_rendered_size: None,
-            composing: String::new(),
+            composing,
             last_user_message,
             no_permission,
             on_main,
@@ -2035,6 +2037,26 @@ impl TerminalStack {
             .and_then(|s| s.last_user_message.as_deref())
     }
 
+    /// The text a `]]r` recall should drop back into the focused agent
+    /// composer: the in-flight draft if one survived, otherwise the last
+    /// submitted message. Returns the focused agent terminal id with
+    /// that text; `None` when the focused terminal isn't an agent or has
+    /// nothing to recall. Both sources are restored from the daemon
+    /// snapshot, so this works after a full restart (issue #373).
+    pub fn recall_prompt(&self) -> Option<(TerminalId, String)> {
+        let id = self.focused_terminal_id()?;
+        let slot = self.terminals.get(&id)?;
+        if !matches!(slot.kind, TerminalKind::Agent(_)) {
+            return None;
+        }
+        let text = if !slot.composing.trim().is_empty() {
+            slot.composing.clone()
+        } else {
+            slot.last_user_message.clone()?
+        };
+        Some((id, text))
+    }
+
     /// In-flight characters the user has typed but not yet
     /// submitted to the given terminal. Exposed primarily for tests
     /// so they can verify buffer management (commit on Enter, clear
@@ -2050,16 +2072,18 @@ impl TerminalStack {
     /// `handle_key` (they arrive as a single `Event::Paste` and the
     /// realm forwards them straight to the PTY), so without this
     /// hook a long pasted prompt would commit on Enter as a blank
-    /// recap. No-op for non-Agent terminals.
-    pub fn record_paste(&mut self, text: &str) {
-        let Some(id) = self.focused_terminal_id() else {
-            return;
-        };
-        if let Some(slot) = self.terminals.get_mut(&id)
-            && matches!(slot.kind, TerminalKind::Agent(_))
-        {
-            slot.append_paste(text);
+    /// recap. No-op for non-Agent terminals. Returns the focused
+    /// terminal id and its updated draft so the caller can persist it
+    /// via `Command::RecordComposingBuffer`; `None` when the paste
+    /// didn't land on an agent.
+    pub fn record_paste(&mut self, text: &str) -> Option<(TerminalId, String)> {
+        let id = self.focused_terminal_id()?;
+        let slot = self.terminals.get_mut(&id)?;
+        if !matches!(slot.kind, TerminalKind::Agent(_)) {
+            return None;
         }
+        slot.append_paste(text);
+        Some((id, slot.composing.clone()))
     }
 
     /// Mirror bytes written straight to a terminal's PTY — bypassing
@@ -2266,12 +2290,19 @@ impl TerminalStack {
         // the agent receives. Scoped to Agent terminals — shells don't
         // have a single semantic "user prompt", so the recap would be
         // noisy (every cd, every grep) and surprising.
-        let committed = if let Some(slot) = self.terminals.get_mut(&id)
+        let (committed, draft) = if let Some(slot) = self.terminals.get_mut(&id)
             && matches!(slot.kind, TerminalKind::Agent(_))
         {
-            slot.record_pty_bytes(&bytes)
+            let before = slot.composing.clone();
+            let committed = slot.record_pty_bytes(&bytes);
+            // Only the keys that actually edit the in-flight line
+            // (text, backspace, Ctrl-U, a commit that clears it) yield a
+            // draft to persist; arrows / mouse / Ctrl-C leave it be, so
+            // this is `Some` on real edits only.
+            let draft = (slot.composing != before).then(|| slot.composing.clone());
+            (committed, draft)
         } else {
-            None
+            (None, None)
         };
         cmds.push(Command::Write {
             terminal_id: id,
@@ -2284,6 +2315,16 @@ impl TerminalStack {
             cmds.push(Command::RecordUserMessage {
                 terminal_id: id,
                 message,
+            });
+        }
+        // Persist the in-flight draft too (issue #373) so a restart can
+        // recall a half-typed prompt via `]]r`. A commit clears the
+        // buffer, so this ships an empty string that clears the stored
+        // draft — the submitted message it carried lives on in the recap.
+        if let Some(buffer) = draft {
+            cmds.push(Command::RecordComposingBuffer {
+                terminal_id: id,
+                buffer,
             });
         }
         PaneOutcome::Consumed
@@ -2302,6 +2343,7 @@ impl TerminalStack {
                         snap.on_main,
                         snap.model_label.clone(),
                         snap.last_user_message.clone(),
+                        snap.composing_buffer.clone().unwrap_or_default(),
                     );
                     // Defer the daemon-ring replay instead of parsing
                     // it here: a reconnect / broadcast-lag snapshot
@@ -2376,6 +2418,7 @@ impl TerminalStack {
                     *on_main,
                     model_label.clone(),
                     None,
+                    String::new(),
                 );
                 self.terminals.insert(*terminal_id, slot);
                 // A fresh terminal arrived for the active session —
@@ -4215,8 +4258,16 @@ mod ctrl_w_tests {
     fn shell_stack() -> TerminalStack {
         let sk = SessionKey::new("session");
         let mut stack = TerminalStack::new(PaneId::new(0));
-        let slot =
-            TerminalStack::make_slot(sk.clone(), TerminalKind::Shell, 0, false, false, None, None);
+        let slot = TerminalStack::make_slot(
+            sk.clone(),
+            TerminalKind::Shell,
+            0,
+            false,
+            false,
+            None,
+            None,
+            String::new(),
+        );
         stack.terminals.insert(TerminalId(1), slot);
         stack.set_active_session(Some(sk));
         stack
@@ -4452,6 +4503,7 @@ mod extract_text_offset_tests {
             false,
             None,
             last_user_message.map(str::to_string),
+            String::new(),
         );
         let mut payload = String::new();
         for line in lines {
@@ -4558,6 +4610,7 @@ mod extract_text_offset_tests {
             false,
             None,
             None,
+            String::new(),
         );
         slot.last_user_message = Some("hi".into());
         assert_eq!(TerminalStack::recap_rows(&slot, 2), 0);
@@ -4842,6 +4895,7 @@ mod hidden_feed_tests {
             on_main: false,
             model_label: None,
             last_user_message: None,
+            composing_buffer: None,
         };
         stack.on_event(&Event::Snapshot {
             workspaces: vec![],
@@ -4968,6 +5022,7 @@ mod footer_scroll_independence {
             false,
             None,
             None,
+            String::new(),
         );
         slot.vt.ensure_size(W - 3, H - 4);
         let mut payload = String::new();
@@ -5153,6 +5208,7 @@ mod footer_scroll_independence {
             false,
             Some("Opus".into()),
             None,
+            String::new(),
         );
         stack.terminals.insert(TerminalId(1), slot);
         stack.set_active_session(Some(sk));
@@ -5433,8 +5489,16 @@ mod hover_scroll_tests {
     const H: u16 = 24;
 
     fn shell_with_scrollback(sk: &SessionKey, tag: &str) -> TerminalSlot {
-        let mut slot =
-            TerminalStack::make_slot(sk.clone(), TerminalKind::Shell, 0, false, false, None, None);
+        let mut slot = TerminalStack::make_slot(
+            sk.clone(),
+            TerminalKind::Shell,
+            0,
+            false,
+            false,
+            None,
+            None,
+            String::new(),
+        );
         slot.vt.ensure_size(W / 2, H - 4);
         let mut payload = String::new();
         for i in 0..60 {
@@ -6063,6 +6127,132 @@ mod terminal_availability_tests {
                 def.default_keys,
             );
         }
+    }
+
+    fn type_chars(stack: &mut TerminalStack, text: &str, cmds: &mut Vec<Command>) {
+        for ch in text.chars() {
+            stack.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE), cmds);
+        }
+    }
+
+    fn last_recorded_draft(cmds: &[Command]) -> Option<&str> {
+        cmds.iter().rev().find_map(|c| match c {
+            Command::RecordComposingBuffer { buffer, .. } => Some(buffer.as_str()),
+            _ => None,
+        })
+    }
+
+    /// Issue #373: each keystroke that edits the in-flight line ships a
+    /// `RecordComposingBuffer` so a restart can recover a half-typed
+    /// prompt — the daemon ring only carries output, not this input.
+    #[test]
+    fn typing_persists_the_in_flight_draft() {
+        let mut stack = stack_with_agent();
+        let mut cmds = Vec::new();
+        type_chars(&mut stack, "fix", &mut cmds);
+        assert_eq!(last_recorded_draft(&cmds), Some("fix"));
+        assert_eq!(stack.composing_of(TerminalId(1)), Some("fix"));
+    }
+
+    /// Submitting commits the message AND clears the persisted draft
+    /// (an empty `RecordComposingBuffer`), so the recovered line is the
+    /// live one, never a stale already-sent prompt.
+    #[test]
+    fn submitting_records_the_message_and_clears_the_draft() {
+        let mut stack = stack_with_agent();
+        let mut cmds = Vec::new();
+        type_chars(&mut stack, "ship it", &mut cmds);
+        cmds.clear();
+        stack.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut cmds);
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                Command::RecordUserMessage { message, .. } if message == "ship it"
+            )),
+            "the submit records the committed message",
+        );
+        assert_eq!(
+            last_recorded_draft(&cmds),
+            Some(""),
+            "the submit clears the stored draft",
+        );
+        assert_eq!(stack.composing_of(TerminalId(1)), Some(""));
+    }
+
+    /// A snapshot (client reconnect or fresh-daemon restart) restores
+    /// both the in-flight draft and the last submitted message into the
+    /// slot, so `]]r` recall has something to recover.
+    #[test]
+    fn snapshot_restores_draft_and_last_message() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        stack.set_active_session(Some(sk.clone()));
+        stack.on_event(&Event::Snapshot {
+            workspaces: vec![],
+            projects: vec![],
+            terminals: vec![lazybox_ipc::TerminalSnapshot {
+                terminal_id: TerminalId(1),
+                session_key: sk.clone(),
+                kind: TerminalKind::Agent("claude".into()),
+                replay: Vec::new(),
+                last_seq: 0,
+                no_permission: false,
+                on_main: false,
+                model_label: None,
+                last_user_message: Some("last submitted".into()),
+                composing_buffer: Some("half typed".into()),
+            }],
+        });
+        assert_eq!(stack.composing_of(TerminalId(1)), Some("half typed"));
+        assert_eq!(
+            stack.last_user_message_of(TerminalId(1)),
+            Some("last submitted"),
+        );
+    }
+
+    /// Recall prefers the in-flight draft; with none it falls back to
+    /// the last submitted message; with neither there's nothing to
+    /// recall.
+    #[test]
+    fn recall_prefers_draft_then_last_message() {
+        let mut stack = stack_with_agent();
+        assert_eq!(stack.recall_prompt(), None, "nothing typed or sent yet");
+
+        stack
+            .terminals
+            .get_mut(&TerminalId(1))
+            .unwrap()
+            .last_user_message = Some("previous prompt".into());
+        assert_eq!(
+            stack.recall_prompt(),
+            Some((TerminalId(1), "previous prompt".into())),
+            "falls back to the last submitted message",
+        );
+
+        let mut cmds = Vec::new();
+        type_chars(&mut stack, "new draft", &mut cmds);
+        assert_eq!(
+            stack.recall_prompt(),
+            Some((TerminalId(1), "new draft".into())),
+            "an in-flight draft wins over the last message",
+        );
+    }
+
+    /// Recall is agent-only: a shell has no meaningful "last prompt".
+    #[test]
+    fn recall_is_none_for_a_shell() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(1),
+            session_key: sk.clone(),
+            kind: TerminalKind::Shell,
+            no_permission: false,
+            on_main: false,
+        });
+        stack.set_active_session(Some(sk));
+        assert_eq!(stack.recall_prompt(), None);
     }
 }
 

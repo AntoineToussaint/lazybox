@@ -655,6 +655,9 @@ impl Server {
                         lazybox_ipc::Command::Refresh => "Refresh",
                         lazybox_ipc::Command::Write { .. } => "Write",
                         lazybox_ipc::Command::RecordUserMessage { .. } => "RecordUserMessage",
+                        lazybox_ipc::Command::RecordComposingBuffer { .. } => {
+                            "RecordComposingBuffer"
+                        }
                         lazybox_ipc::Command::Resize { .. } => "Resize",
                         lazybox_ipc::Command::InjectPrompt { .. } => "InjectPrompt",
                         lazybox_ipc::Command::MarkRead { .. } => "MarkRead",
@@ -874,6 +877,7 @@ fn command_lane(cmd: &lazybox_ipc::Command) -> CommandLane {
         Command::Write { .. }
         | Command::Resize { .. }
         | Command::RecordUserMessage { .. }
+        | Command::RecordComposingBuffer { .. }
         | Command::Subscribe => CommandLane::Inline,
         _ => CommandLane::Detached,
     }
@@ -994,8 +998,22 @@ pub async fn dispatch_command(
             terminal_id,
             prompt,
             fallback_spawn,
+            submit,
         } => {
-            spawn_handler::handle_inject_prompt(config, terminal_id, &prompt, fallback_spawn).await;
+            spawn_handler::handle_inject_prompt(
+                config,
+                terminal_id,
+                &prompt,
+                fallback_spawn,
+                submit,
+            )
+            .await;
+        }
+        lazybox_ipc::Command::RecordComposingBuffer {
+            terminal_id,
+            buffer,
+        } => {
+            spawn_handler::handle_record_composing_buffer(config, terminal_id, &buffer).await;
         }
         lazybox_ipc::Command::Resize {
             terminal_id,
@@ -1502,6 +1520,7 @@ mod snapshot_budget_tests {
             on_main: false,
             model_label: None,
             last_user_message: None,
+            composing_buffer: None,
         }
     }
 

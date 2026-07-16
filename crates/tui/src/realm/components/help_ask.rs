@@ -396,15 +396,30 @@ impl Component for HelpAsk {
             return;
         }
 
-        let input_rect = Rect { height: 1, ..inner };
+        let input_line = Line::from(vec![
+            Span::styled("› ", Style::default().fg(theme.accent).bold()),
+            Span::styled(self.query.clone(), Style::default().fg(theme.text_strong)),
+            Span::styled("▌", Style::default().fg(theme.accent)),
+        ]);
+        let input_lines = comment_render::wrap_one(input_line, inner.width);
+        // Grow the input to fit the wrapped query, capped so the divider,
+        // transcript, and footer keep room; past the cap the input scrolls
+        // to keep the cursor on the last row.
+        const MAX_INPUT_ROWS: u16 = 4;
+        let input_h =
+            (input_lines.len() as u16).clamp(1, MAX_INPUT_ROWS.min(inner.height.saturating_sub(3)));
+        let input_rect = Rect {
+            height: input_h,
+            ..inner
+        };
         let div_rect = Rect {
-            y: inner.y + 1,
+            y: inner.y + input_h,
             height: 1,
             ..inner
         };
         let body_rect = Rect {
-            y: inner.y + 2,
-            height: inner.height - 3,
+            y: inner.y + input_h + 1,
+            height: inner.height - input_h - 2,
             ..inner
         };
         let help_rect = Rect {
@@ -413,12 +428,9 @@ impl Component for HelpAsk {
             ..inner
         };
 
+        let input_scroll = (input_lines.len() as u16).saturating_sub(input_h);
         frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("› ", Style::default().fg(theme.accent).bold()),
-                Span::styled(self.query.clone(), Style::default().fg(theme.text_strong)),
-                Span::styled("▌", Style::default().fg(theme.accent)),
-            ])),
+            Paragraph::new(input_lines).scroll((input_scroll, 0)),
             input_rect,
         );
         frame.render_widget(
@@ -647,6 +659,61 @@ mod tests {
         let rendered = text(&c.body_lines(80));
         assert!(!rendered.contains("▌"));
         assert!(rendered.contains("⚠ assistant exited"));
+    }
+
+    /// Read each row of a rendered `TestBackend` buffer as a trimmed
+    /// string.
+    fn buffer_rows(backend: &tuirealm::ratatui::backend::TestBackend) -> Vec<String> {
+        let buf = backend.buffer();
+        let area = buf.area;
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// A query wider than the modal wraps onto further input rows, and
+    /// the divider drops below the grown input instead of overwriting it.
+    #[test]
+    fn long_query_wraps_input_and_pushes_divider_down() {
+        use tuirealm::ratatui::Terminal;
+        use tuirealm::ratatui::backend::TestBackend;
+        let mut c = component();
+        // Distinct words so each wrapped row is identifiable, long
+        // enough to exceed the ~54-col inner width and span >1 row.
+        for ch in
+            "alpha bravo charlie delta echo foxtrot golf hotel india juliett kilo lima".chars()
+        {
+            let _ = c.on_key(&ke(ch));
+        }
+        let mut term = Terminal::new(TestBackend::new(60, 34)).unwrap();
+        term.draw(|f| c.view(f, f.area())).unwrap();
+        let rows = buffer_rows(term.backend());
+
+        let prompt_row = rows.iter().position(|r| r.contains('›')).expect("prompt");
+        // The query wrapped: text lands on the prompt row and the row
+        // below it, before any divider.
+        assert!(rows[prompt_row].contains("alpha"), "first word on row 1");
+        assert!(
+            rows[prompt_row + 1].contains("lima") || rows[prompt_row + 1].contains("kilo"),
+            "wrapped tail on row 2: {:?}",
+            rows[prompt_row + 1]
+        );
+        // The divider sits below the grown input, not on the second
+        // input row.
+        let div_row = rows
+            .iter()
+            .skip(prompt_row + 1)
+            .position(|r| r.contains("──────"))
+            .map(|i| i + prompt_row + 1)
+            .expect("divider");
+        assert!(
+            div_row > prompt_row + 1,
+            "divider must clear the wrapped input (prompt={prompt_row}, div={div_row})"
+        );
     }
 
     /// Full-frame render smoke over a `TestBackend`: title, input

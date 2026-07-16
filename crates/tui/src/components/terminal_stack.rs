@@ -2336,10 +2336,20 @@ impl TerminalStack {
                     && matches!(slot.kind, TerminalKind::Agent(_))
                 {
                     slot.agent_state = *state;
-                    // Any non-`Idle` reading means the agent engaged —
-                    // the signal that separates a genuine clean exit
-                    // from a dead-on-arrival one (#367).
-                    if !matches!(state, lazybox_ipc::AgentState::Idle) {
+                    // A `Working` / `InputNeeded` / `Done` reading means
+                    // the agent engaged — the signal that separates a
+                    // genuine clean exit from a dead-on-arrival one (#367).
+                    // `Exited` is NOT engagement: it's the death itself,
+                    // and the PTY-exit teardown broadcasts it right before
+                    // `TerminalExited` (#357/#369). Counting it as work
+                    // would flip `did_work` true a beat before the exit is
+                    // triaged, so a dead-on-arrival launch would read as
+                    // "clean" and auto-close instead of keeping its
+                    // failed-to-start pane (#367/#368).
+                    if !matches!(
+                        state,
+                        lazybox_ipc::AgentState::Idle | lazybox_ipc::AgentState::Exited { .. }
+                    ) {
                         slot.did_work = true;
                     }
                 }
@@ -2364,14 +2374,21 @@ impl TerminalStack {
                 // the workspace survives and a restart is offered
                 // (#356/#357).
                 if is_agent && !user_closed && !self.agent_exit_is_clean(terminal_id, *exit_code) {
-                    // Dead-on-arrival is decided here, at exit, from the
-                    // same engagement/grace signals `agent_exit_is_clean`
-                    // uses (#367) — not at render time, where the elapsed
-                    // window would keep growing. It drives the "failed to
-                    // start" wording and painting the captured tail (#368).
-                    let dead_on_arrival =
-                        self.agent_exit_is_dead_on_arrival(terminal_id, *exit_code);
+                    let window = self.dead_on_arrival;
                     if let Some(slot) = self.terminals.get_mut(terminal_id) {
+                        // Decide dead-on-arrival here, at exit, from the
+                        // same engagement/grace signals `agent_exit_is_clean`
+                        // reads — never at render time, where `elapsed`
+                        // keeps growing and would eventually flip a frozen
+                        // pane. A kept `code 0` exit that never engaged and
+                        // died inside the window failed to launch (#367);
+                        // that drives the "failed to start" wording and
+                        // painting the captured tail (#368). A non-zero
+                        // code or signal death is kept too, but as a plain
+                        // crash — not dead-on-arrival.
+                        let dead_on_arrival = *exit_code == Some(0)
+                            && !slot.did_work
+                            && slot.spawned_at.elapsed() < window;
                         slot.exited = Some(TerminalExit {
                             code: *exit_code,
                             dead_on_arrival,
@@ -2814,24 +2831,6 @@ impl TerminalStack {
         self.terminals
             .get(terminal_id)
             .is_some_and(|slot| slot.did_work || slot.spawned_at.elapsed() >= self.dead_on_arrival)
-    }
-
-    /// Whether a kept (non-clean) agent exit is specifically a
-    /// dead-on-arrival launch failure: it exited `code 0` yet never
-    /// engaged and never outran the grace window (#367). This is the
-    /// exact complement of `agent_exit_is_clean`'s `code 0` branch, and
-    /// it drives the pane's "failed to start" wording plus painting the
-    /// captured output tail (#368). A non-zero code or death by signal is
-    /// kept too, but as a plain crash — not a dead-on-arrival.
-    fn agent_exit_is_dead_on_arrival(
-        &self,
-        terminal_id: &TerminalId,
-        exit_code: Option<i32>,
-    ) -> bool {
-        exit_code == Some(0)
-            && self.terminals.get(terminal_id).is_some_and(|slot| {
-                !slot.did_work && slot.spawned_at.elapsed() < self.dead_on_arrival
-            })
     }
 
     fn drop_slot(&mut self, terminal_id: TerminalId) {
@@ -5953,6 +5952,42 @@ mod agent_crash_tests {
         assert!(
             screen.contains("not logged in") && screen.contains("codex login"),
             "the captured output is painted over the blank pane:\n{screen}",
+        );
+    }
+
+    #[test]
+    fn dead_on_arrival_survives_the_preceding_exited_state_event() {
+        // Regression: the real teardown broadcasts `AgentState::Exited`
+        // right before `TerminalExited` (#357/#369). `Exited` must NOT
+        // count as engagement, or `did_work` flips true and the
+        // dead-on-arrival launch reads as a clean exit and auto-closes —
+        // silently reaping the pane the user needs to see and restart.
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
+        stack.on_event(&Event::AgentState {
+            terminal_id: TerminalId(1),
+            session_key: sk.clone(),
+            state: lazybox_ipc::AgentState::Exited { code: Some(0) },
+        });
+        stack.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(1),
+            exit_code: Some(0),
+            last_output: Some("Error: not logged in".into()),
+        });
+
+        let slot = stack
+            .terminals
+            .get(&TerminalId(1))
+            .expect("a dead-on-arrival pane must survive, not auto-close");
+        assert!(
+            matches!(
+                &slot.exited,
+                Some(TerminalExit {
+                    dead_on_arrival: true,
+                    ..
+                })
+            ),
+            "it must still classify as dead-on-arrival despite the Exited pill",
         );
     }
 

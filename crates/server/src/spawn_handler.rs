@@ -2778,7 +2778,11 @@ fn strip_ansi(input: &str) -> String {
                 _ => {}
             },
             '\n' | '\t' | '\r' => out.push(c),
-            c if (c as u32) < 0x20 || c == '\u{7f}' => {}
+            // Control bytes and `from_utf8_lossy`'s replacement char (an
+            // undecodable byte — a truncated multibyte at the ring
+            // boundary, or an 8-bit C1 control the lossy decode mangled)
+            // are never legible text.
+            c if (c as u32) < 0x20 || c == '\u{7f}' || c == '\u{fffd}' => {}
             c => out.push(c),
         }
     }
@@ -6073,6 +6077,19 @@ mod tests {
         assert_eq!(
             last_output_tail(raw).as_deref(),
             Some("Fatal: config missing")
+        );
+    }
+
+    #[test]
+    fn last_output_tail_drops_undecodable_bytes() {
+        // A raw byte the ring couldn't decode (a truncated multibyte at
+        // the ring boundary, or an 8-bit C1 control) becomes
+        // `from_utf8_lossy`'s replacement char — noise that must not
+        // litter the readable tail.
+        let raw = b"Fatal: bad config\xff (see log)\n";
+        assert_eq!(
+            last_output_tail(raw).as_deref(),
+            Some("Fatal: bad config (see log)")
         );
     }
 

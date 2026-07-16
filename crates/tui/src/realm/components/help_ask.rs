@@ -404,10 +404,14 @@ impl Component for HelpAsk {
         let input_lines = comment_render::wrap_one(input_line, inner.width);
         // Grow the input to fit the wrapped query, capped so the divider,
         // transcript, and footer keep room; past the cap the input scrolls
-        // to keep the cursor on the last row.
+        // to keep the cursor on the last row. Clamp in `usize` so a
+        // pathological paste can't truncate the row count through `as u16`.
         const MAX_INPUT_ROWS: u16 = 4;
-        let input_h =
-            (input_lines.len() as u16).clamp(1, MAX_INPUT_ROWS.min(inner.height.saturating_sub(3)));
+        let wrapped = input_lines.len();
+        let input_h = wrapped.clamp(
+            1,
+            MAX_INPUT_ROWS.min(inner.height.saturating_sub(3)) as usize,
+        ) as u16;
         let input_rect = Rect {
             height: input_h,
             ..inner
@@ -428,7 +432,7 @@ impl Component for HelpAsk {
             ..inner
         };
 
-        let input_scroll = (input_lines.len() as u16).saturating_sub(input_h);
+        let input_scroll = wrapped.saturating_sub(input_h as usize) as u16;
         frame.render_widget(
             Paragraph::new(input_lines).scroll((input_scroll, 0)),
             input_rect,

@@ -2046,7 +2046,16 @@ impl RightPane {
                 }
             }
         }
-        let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+        // No `Wrap`: `render_body` already wrapped every body line to
+        // `area.width - 2`, so each `Line` maps to exactly one screen
+        // row. That 1:1 mapping is what makes `body_more_row` above a
+        // sound click target — a wrapping Paragraph re-measures by
+        // display column (vs. `render_body`'s char count) and can re-wrap
+        // a wide-unicode line or the un-pre-wrapped header, silently
+        // pushing the trailer off its recorded row. Overlong lines clip
+        // instead; the body is already width-fitted, so only the header /
+        // trailer decoration clips, and only in a pane too narrow for it.
+        let para = Paragraph::new(lines);
         // One-cell left margin so the body indents past the header's
         // crumbs + state pill — reads as "this belongs to the task
         // above" rather than as another full-width section.

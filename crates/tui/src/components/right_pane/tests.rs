@@ -985,6 +985,41 @@ mod description_expand_tests {
     }
 
     #[test]
+    fn click_row_matches_the_trailer_even_when_the_header_would_wrap() {
+        // A pane narrower than the `▼ Description  (d · full)` header:
+        // a wrapping Paragraph would push the trailer down a row and
+        // desync the recorded click target from where the trailer
+        // actually paints. The recorded row must equal the trailer's
+        // real screen row, and clicking it must still reach Full.
+        let mut pane = pane_showing(&long_body());
+        pane.toggle_task_body(); // Collapsed → Preview
+        let w = 24u16;
+        let mut term = Terminal::new(TestBackend::new(w, 24)).unwrap();
+        term.draw(|f| pane.render(Rect::new(0, 0, w, 24), f, true))
+            .unwrap();
+
+        let recorded = pane
+            .click_hits
+            .body_more_row
+            .expect("a capped preview registers the trailer as a click target");
+        let buf = term.backend().buffer();
+        let painted = (0..24u16)
+            .find(|&y| {
+                (0..w)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .contains("more lines")
+            })
+            .expect("the trailer paints somewhere on screen");
+        assert_eq!(
+            recorded, painted,
+            "click target must match the trailer's real screen row",
+        );
+        assert!(pane.handle_mouse_click(0, recorded));
+        assert_eq!(pane.task_body_view, TaskBodyView::Full);
+    }
+
+    #[test]
     fn trailer_spells_out_the_expand_affordance() {
         let theme = crate::theme::current();
         let expandable = more_lines_trailer(44, true, theme);

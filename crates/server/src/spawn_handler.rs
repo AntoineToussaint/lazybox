@@ -638,7 +638,7 @@ pub async fn handle_spawn(
             env.push((k, v));
         }
     }
-    let env = with_agent_spawn_defaults(env, agent_for_env.is_some());
+    let env = with_agent_spawn_defaults(env, agent_for_env.as_deref());
     let env = with_worktree_cargo_target(env, cwd_path.as_deref());
     tracing::info!(
         program = argv.first().map(String::as_str).unwrap_or("<empty>"),
@@ -2048,36 +2048,31 @@ pub(crate) fn gateway_env_for_agent(
         .unwrap_or_default()
 }
 
-/// Env that keeps a spawned agent's first minutes on its actual work
-/// instead of on package management. A Homebrew-installed agent CLI can
-/// shell out to `brew` on launch as part of its own update path — Codex's
-/// homebrew build runs `brew upgrade --cask codex` when the user accepts
-/// its update banner — and *any* `brew` invocation first triggers
+/// Layer per-agent spawn-env defaults onto `env`, shared by the PTY and
+/// structured (`codex exec`) spawn paths.
+///
+/// Currently one default, and it's Codex-only: Codex's Homebrew build
+/// shells out to `brew upgrade --cask codex` when the user accepts its
+/// on-launch update banner, and *any* `brew` invocation first triggers
 /// Homebrew's implicit self-update (portable-ruby pour, tap refresh,
-/// "Auto-updated Homebrew!") unless suppressed, a heavy network+disk
+/// "Auto-updated Homebrew!") unless suppressed — a heavy network+disk
 /// side effect the session never asked for (issue #355).
-/// `HOMEBREW_NO_AUTO_UPDATE=1` skips only that self-update preamble; it
-/// does not block an explicitly requested upgrade, so the agent CLI is
-/// never silently pinned to a stale version.
-fn homebrew_no_auto_update_env() -> Vec<(String, String)> {
-    vec![("HOMEBREW_NO_AUTO_UPDATE".to_string(), "1".to_string())]
-}
-
-/// Layer agent-only spawn-env defaults onto `env`. Non-agent spawns
-/// (shells, log tails) get nothing — a shell the user opened should
-/// keep its normal `brew` behavior. Each default is skipped when the
-/// per-repo env already set that key, so an explicit choice wins.
-fn with_agent_spawn_defaults(
+/// `HOMEBREW_NO_AUTO_UPDATE=1` skips only that self-update preamble; the
+/// upgrade the user explicitly asked for still runs, so Codex is never
+/// silently pinned to a stale version.
+///
+/// Scoped to Codex on purpose: it's the built-in whose launch path runs
+/// `brew`. Suppressing auto-update for every agent (or in shells the user
+/// opened) would silently change `brew` behavior for unrelated work — a
+/// `brew install` of a formula added upstream since the last refresh would
+/// fail. A per-repo `env` value for the key wins.
+pub(crate) fn with_agent_spawn_defaults(
     mut env: Vec<(String, String)>,
-    is_agent: bool,
+    agent: Option<&dyn lazybox_agents::Agent>,
 ) -> Vec<(String, String)> {
-    if !is_agent {
-        return env;
-    }
-    for (k, v) in homebrew_no_auto_update_env() {
-        if !env.iter().any(|(ek, _)| ek == &k) {
-            env.push((k, v));
-        }
+    let is_codex = agent.is_some_and(|a| a.id() == "codex");
+    if is_codex && !env.iter().any(|(k, _)| k == "HOMEBREW_NO_AUTO_UPDATE") {
+        env.push(("HOMEBREW_NO_AUTO_UPDATE".to_string(), "1".to_string()));
     }
     env
 }
@@ -4359,8 +4354,9 @@ mod tests {
     }
 
     #[test]
-    fn agent_spawn_suppresses_homebrew_auto_update() {
-        let out = with_agent_spawn_defaults(Vec::new(), true);
+    fn codex_spawn_suppresses_homebrew_auto_update() {
+        let codex = lazybox_agents::agent::builtins::Codex;
+        let out = with_agent_spawn_defaults(Vec::new(), Some(&codex));
         let map: std::collections::BTreeMap<_, _> = out.into_iter().collect();
         assert_eq!(
             map.get("HOMEBREW_NO_AUTO_UPDATE").map(String::as_str),
@@ -4369,15 +4365,24 @@ mod tests {
     }
 
     #[test]
+    fn non_codex_agent_leaves_homebrew_alone() {
+        // Claude / Cursor don't self-update through `brew`, so suppressing
+        // auto-update would only risk staling an unrelated `brew install`.
+        let claude = lazybox_agents::agent::builtins::Claude;
+        assert!(with_agent_spawn_defaults(Vec::new(), Some(&claude)).is_empty());
+    }
+
+    #[test]
     fn non_agent_spawn_leaves_homebrew_alone() {
-        let out = with_agent_spawn_defaults(Vec::new(), false);
+        let out = with_agent_spawn_defaults(Vec::new(), None);
         assert!(out.is_empty());
     }
 
     #[test]
     fn homebrew_suppression_respects_an_explicit_repo_setting() {
+        let codex = lazybox_agents::agent::builtins::Codex;
         let env = vec![("HOMEBREW_NO_AUTO_UPDATE".to_string(), "0".to_string())];
-        let out = with_agent_spawn_defaults(env, true);
+        let out = with_agent_spawn_defaults(env, Some(&codex));
         let map: std::collections::BTreeMap<_, _> = out.into_iter().collect();
         assert_eq!(
             map.get("HOMEBREW_NO_AUTO_UPDATE").map(String::as_str),

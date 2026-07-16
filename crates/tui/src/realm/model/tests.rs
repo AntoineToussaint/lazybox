@@ -2359,6 +2359,7 @@ mod coalesce_tests {
             Event::TerminalExited {
                 terminal_id: TerminalId(1),
                 exit_code: Some(0),
+                last_output: None,
             },
             out(1, b"after", 2),
         ];
@@ -9308,6 +9309,7 @@ mod focus_mode_terminal_exit_tests {
         m.handle_daemon_event(IpcEvent::TerminalExited {
             terminal_id: TerminalId(7),
             exit_code: Some(0),
+            last_output: None,
         });
 
         assert!(
@@ -9347,6 +9349,7 @@ mod focus_mode_terminal_exit_tests {
         m.handle_daemon_event(IpcEvent::TerminalExited {
             terminal_id: TerminalId(7),
             exit_code: Some(1),
+            last_output: None,
         });
 
         // The crashed agent keeps its pane (frozen + "restart?"), so the
@@ -9388,6 +9391,7 @@ mod focus_mode_terminal_exit_tests {
         m.handle_daemon_event(IpcEvent::TerminalExited {
             terminal_id: TerminalId(8),
             exit_code: Some(0),
+            last_output: None,
         });
         assert!(
             m.focus_mode,

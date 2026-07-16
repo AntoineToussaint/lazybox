@@ -1149,6 +1149,13 @@ pub enum Event {
     TerminalExited {
         terminal_id: TerminalId,
         exit_code: Option<i32>,
+        /// Cleaned tail of an *agent* terminal's last PTY output, so the
+        /// frozen "exited" pane can show *why* it died instead of a blank
+        /// screen (issue #368). `None` for shells, forced removals,
+        /// recovered sessions, or when the agent produced no output. The
+        /// client decides whether to surface it (a dead-on-arrival pane
+        /// paints it; a normal crash keeps its own last screen).
+        last_output: Option<String>,
     },
     /// Daemon-driven "focus this existing terminal instead of
     /// spawning a duplicate". Fired by the singleton guard in

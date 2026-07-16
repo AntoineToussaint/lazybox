@@ -1981,6 +1981,7 @@ mod done_alert_tests {
         sb.on_event(&Event::TerminalExited {
             terminal_id: lazybox_ipc::TerminalId(1),
             exit_code: Some(1),
+            last_output: None,
         });
         assert_eq!(
             sb.agent_state(&key),

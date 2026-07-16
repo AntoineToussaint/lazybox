@@ -2699,6 +2699,96 @@ async fn resync_replay_after_gap(
     }
 }
 
+/// Extract a readable tail from a terminal's raw replay ring for the
+/// frozen exit pane (issue #368): strip ANSI/OSC escape sequences and
+/// control bytes, collapse carriage-return overwrites, drop blank lines,
+/// and keep the last few lines. `None` when nothing printable remains
+/// (the "produced no output" case — the pane then just shows the failure
+/// banner). Bounded so a full 64 KiB ring can't blow up the wire payload.
+fn last_output_tail(bytes: &[u8]) -> Option<String> {
+    const MAX_LINES: usize = 8;
+    const MAX_LINE_CHARS: usize = 200;
+
+    let text = String::from_utf8_lossy(bytes);
+    // Normalize CRLF line breaks first so the trailing `\r` isn't mistaken
+    // for an in-place overwrite below.
+    let stripped = strip_ansi(&text).replace("\r\n", "\n");
+    let mut lines: Vec<String> = stripped
+        .split('\n')
+        .map(|line| {
+            // A bare `\r` (progress bars, spinners) overwrites the line
+            // in place — keep only what a real terminal would show: the
+            // content after the last carriage return.
+            let visible = line.rsplit('\r').next().unwrap_or(line).trim_end();
+            visible.chars().take(MAX_LINE_CHARS).collect::<String>()
+        })
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    let tail = lines.split_off(lines.len().saturating_sub(MAX_LINES));
+    Some(tail.join("\n"))
+}
+
+/// Drop ANSI escape sequences and non-printing control bytes from
+/// terminal output, leaving text, tabs, and newlines. Deliberately small
+/// — enough to make a dying agent's final lines legible, not a full VT.
+///
+/// A caveat inherent to reading a fixed-capacity ring: `snapshot` can
+/// begin mid-sequence (the oldest bytes were overwritten), so an orphan
+/// escape *tail* — e.g. a leading `31m` with no `ESC [` — leaks as text.
+/// It only ever affects the first line, which the tail extractor usually
+/// drops, so it's left as-is rather than guessed at.
+fn strip_ansi(input: &str) -> String {
+    // Consume the body of a string sequence (DCS/OSC/APC/PM/SOS),
+    // terminated by ST (ESC \) or, tolerantly, BEL.
+    fn skip_string_sequence(chars: &mut std::iter::Peekable<std::str::Chars>) {
+        while let Some(p) = chars.next() {
+            if p == '\u{07}' {
+                break;
+            }
+            if p == '\u{1b}' {
+                if chars.peek() == Some(&'\\') {
+                    chars.next();
+                }
+                break;
+            }
+        }
+    }
+
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\u{1b}' => match chars.next() {
+                // CSI: ESC [ … final byte in 0x40–0x7E.
+                Some('[') => {
+                    for p in chars.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&p) {
+                            break;
+                        }
+                    }
+                }
+                // String sequences terminated by ST/BEL: OSC (]), DCS (P),
+                // SOS (X), APC (_), PM (^). Their payloads (window titles,
+                // sixel/kitty-graphics data, query replies) are never text.
+                Some(']' | 'P' | 'X' | '_' | '^') => skip_string_sequence(&mut chars),
+                // Charset / other two-byte escapes: drop ESC + one byte.
+                _ => {}
+            },
+            '\n' | '\t' | '\r' => out.push(c),
+            // Control bytes and `from_utf8_lossy`'s replacement char (an
+            // undecodable byte — a truncated multibyte at the ring
+            // boundary, or an 8-bit C1 control the lossy decode mangled)
+            // are never legible text.
+            c if (c as u32) < 0x20 || c == '\u{7f}' || c == '\u{fffd}' => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Exit teardown shared by `handle_spawn`'s output pump and
 /// `recover_sessions`' recovery pump: broadcast `TerminalExited`, sweep
 /// every per-terminal map, delete the persisted kv rows, release the
@@ -2725,6 +2815,28 @@ pub(crate) async fn teardown_exited_terminal(
     let (session, kind) = match &meta {
         Some((session_key, kind)) => (Some(session_key.as_str()), Some(kind)),
         None => (None, None),
+    };
+    // Capture the cleaned tail of an exiting agent's output so a frozen
+    // pane can show *why* it died instead of a blank screen (issue #368).
+    // The client decides whether to surface it — a dead-on-arrival launch
+    // paints it (#367), a clean exit auto-closes and ignores it — so the
+    // capture is unconditional for agents but cheap (one bounded snapshot
+    // per process exit, a rare event). Bounded by the same per-session
+    // timeout every other reader uses so a wedged backend can't stall
+    // teardown and leak the slot; read here, before `release` drops the
+    // ring below.
+    let last_output = if matches!(kind, Some(TerminalKind::Agent(_))) {
+        match tokio::time::timeout(
+            SNAPSHOT_PER_SESSION_TIMEOUT,
+            config.backend.snapshot(backend_key),
+        )
+        .await
+        {
+            Ok(Ok((bytes, _seq))) => last_output_tail(&bytes),
+            _ => None,
+        }
+    } else {
+        None
     };
     match exit_code {
         Some(0) => tracing::info!(
@@ -2772,6 +2884,7 @@ pub(crate) async fn teardown_exited_terminal(
     let _ = config.bus.send(Event::TerminalExited {
         terminal_id,
         exit_code,
+        last_output,
     });
     // INTENTIONAL non-canonical sequence: terminals first (so
     // `snapshot_terminals` stops seeing this id immediately) and
@@ -4556,6 +4669,7 @@ mod tests {
         tx.send(Event::TerminalExited {
             terminal_id: id,
             exit_code: Some(0),
+            last_output: None,
         })
         .unwrap();
         assert!(
@@ -5923,6 +6037,68 @@ mod tests {
         let config = ServerConfig::in_memory();
         let ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", Utc::now());
         assert!(clonable_repo_from_project(&config, &ws, None).is_err());
+    }
+
+    #[test]
+    fn last_output_tail_strips_ansi_and_keeps_final_lines() {
+        // A dying codex prints a colored error to the PTY; the frozen
+        // pane must show the plain error, not escape soup (#368).
+        let raw =
+            b"\x1b[?1049h\x1b[2J\x1b[H\x1b[31mError:\x1b[0m not logged in\r\nrun `codex login`\r\n";
+        let tail = last_output_tail(raw).expect("printable output yields a tail");
+        assert_eq!(tail, "Error: not logged in\nrun `codex login`");
+    }
+
+    #[test]
+    fn last_output_tail_keeps_only_content_after_carriage_return() {
+        // Progress bars overwrite in place with a bare `\r`; only the
+        // last-written state should survive.
+        let raw = b"Downloading 10%\rDownloading 100%\n";
+        assert_eq!(last_output_tail(raw).as_deref(), Some("Downloading 100%"));
+    }
+
+    #[test]
+    fn last_output_tail_caps_to_the_last_lines() {
+        let raw: Vec<u8> = (0..20)
+            .flat_map(|n| format!("line {n}\n").into_bytes())
+            .collect();
+        let tail = last_output_tail(&raw).expect("tail");
+        let lines: Vec<&str> = tail.lines().collect();
+        assert_eq!(lines.len(), 8);
+        assert_eq!(lines.first(), Some(&"line 12"));
+        assert_eq!(lines.last(), Some(&"line 19"));
+    }
+
+    #[test]
+    fn last_output_tail_drops_string_sequences_not_just_osc() {
+        // OSC window title, then a DCS payload (terminated by ST), then
+        // the real error — none of the sequence bodies may leak.
+        let raw = b"\x1b]0;codex\x07\x1bPq#0;2;0;0;0\x1b\\Fatal: config missing\n";
+        assert_eq!(
+            last_output_tail(raw).as_deref(),
+            Some("Fatal: config missing")
+        );
+    }
+
+    #[test]
+    fn last_output_tail_drops_undecodable_bytes() {
+        // A raw byte the ring couldn't decode (a truncated multibyte at
+        // the ring boundary, or an 8-bit C1 control) becomes
+        // `from_utf8_lossy`'s replacement char — noise that must not
+        // litter the readable tail.
+        let raw = b"Fatal: bad config\xff (see log)\n";
+        assert_eq!(
+            last_output_tail(raw).as_deref(),
+            Some("Fatal: bad config (see log)")
+        );
+    }
+
+    #[test]
+    fn last_output_tail_is_none_for_blank_output() {
+        // An agent that exits before printing anything (or only emits
+        // screen-control bytes) leaves no readable tail.
+        assert_eq!(last_output_tail(b""), None);
+        assert_eq!(last_output_tail(b"\x1b[2J\x1b[H\r\n\r\n"), None);
     }
 
     /// Regression for #223: two workspaces with the same name in

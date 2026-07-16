@@ -403,12 +403,20 @@ pub struct TerminalStack {
 /// Records that a terminal's process has exited. Agent terminals keep
 /// their slot when this is set (frozen last screen + a restart banner)
 /// instead of the whole pane vanishing on a crash (#356).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct TerminalExit {
     /// Exit code the daemon reported, or `None` when it couldn't — e.g.
     /// death by signal (the classic outcome when a Homebrew self-upgrade
     /// swaps the agent binary out mid-run, #355).
     code: Option<i32>,
+    /// The agent exited within seconds of spawn — a startup failure, not
+    /// a real session end (#368). An immediate `code 0` otherwise reads
+    /// as success; this makes the banner say "failed to start".
+    dead_on_arrival: bool,
+    /// The cleaned tail of the agent's last output, painted over an
+    /// otherwise-blank frozen pane so a dead-on-arrival exit shows *why*
+    /// instead of a black screen (#368).
+    last_output: Option<String>,
 }
 
 /// How long an armed pending split waits for its shell's
@@ -2328,10 +2336,20 @@ impl TerminalStack {
                     && matches!(slot.kind, TerminalKind::Agent(_))
                 {
                     slot.agent_state = *state;
-                    // Any non-`Idle` reading means the agent engaged —
-                    // the signal that separates a genuine clean exit
-                    // from a dead-on-arrival one (#367).
-                    if !matches!(state, lazybox_ipc::AgentState::Idle) {
+                    // A `Working` / `InputNeeded` / `Done` reading means
+                    // the agent engaged — the signal that separates a
+                    // genuine clean exit from a dead-on-arrival one (#367).
+                    // `Exited` is NOT engagement: it's the death itself,
+                    // and the PTY-exit teardown broadcasts it right before
+                    // `TerminalExited` (#357/#369). Counting it as work
+                    // would flip `did_work` true a beat before the exit is
+                    // triaged, so a dead-on-arrival launch would read as
+                    // "clean" and auto-close instead of keeping its
+                    // failed-to-start pane (#367/#368).
+                    if !matches!(
+                        state,
+                        lazybox_ipc::AgentState::Idle | lazybox_ipc::AgentState::Exited { .. }
+                    ) {
                         slot.did_work = true;
                     }
                 }
@@ -2339,6 +2357,7 @@ impl TerminalStack {
             Event::TerminalExited {
                 terminal_id,
                 exit_code,
+                last_output,
             } => {
                 let user_closed = self.closing.remove(terminal_id);
                 let is_agent = self
@@ -2355,8 +2374,26 @@ impl TerminalStack {
                 // the workspace survives and a restart is offered
                 // (#356/#357).
                 if is_agent && !user_closed && !self.agent_exit_is_clean(terminal_id, *exit_code) {
+                    let window = self.dead_on_arrival;
                     if let Some(slot) = self.terminals.get_mut(terminal_id) {
-                        slot.exited = Some(TerminalExit { code: *exit_code });
+                        // Decide dead-on-arrival here, at exit, from the
+                        // same engagement/grace signals `agent_exit_is_clean`
+                        // reads — never at render time, where `elapsed`
+                        // keeps growing and would eventually flip a frozen
+                        // pane. A kept `code 0` exit that never engaged and
+                        // died inside the window failed to launch (#367);
+                        // that drives the "failed to start" wording and
+                        // painting the captured tail (#368). A non-zero
+                        // code or signal death is kept too, but as a plain
+                        // crash — not dead-on-arrival.
+                        let dead_on_arrival = *exit_code == Some(0)
+                            && !slot.did_work
+                            && slot.spawned_at.elapsed() < window;
+                        slot.exited = Some(TerminalExit {
+                            code: *exit_code,
+                            dead_on_arrival,
+                            last_output: last_output.clone(),
+                        });
                     }
                 } else {
                     self.drop_slot(*terminal_id);
@@ -2498,8 +2535,8 @@ impl TerminalStack {
             // An exited agent pane (#356) overrides the live state hint —
             // a stale "working" on a crashed tab would be actively
             // misleading.
-            let exited = self.terminals.get(id).and_then(|s| s.exited);
-            let (hint, hint_style) = if exited.is_some() {
+            let exited = self.terminals.get(id).is_some_and(|s| s.exited.is_some());
+            let (hint, hint_style) = if exited {
                 (
                     " ✗ exited",
                     Style::default()
@@ -3077,7 +3114,7 @@ impl TerminalStack {
             }
             // An exited agent pane overlays a restart banner on its last
             // row, leaving the frozen screen visible above it (#356).
-            if let Some(exit) = slot.exited {
+            if let Some(exit) = &slot.exited {
                 Self::render_exit_banner(frame, grid, exit);
             }
         }
@@ -3087,7 +3124,13 @@ impl TerminalStack {
     /// of an exited pane's grid (#356). The frozen last screen stays
     /// visible above it; this row is a filled bar so it reads as an
     /// alert over whatever output the crash left behind.
-    fn render_exit_banner(frame: &mut Frame, grid: Rect, exit: TerminalExit) {
+    ///
+    /// A dead-on-arrival exit (#368) — the agent gone within seconds of
+    /// spawn — reads as "failed to start" rather than a plain "exited",
+    /// so an immediate `code 0` isn't mistaken for success, and the
+    /// captured tail of its output is painted just above the banner so
+    /// the pane shows *why* instead of a blank black screen.
+    fn render_exit_banner(frame: &mut Frame, grid: Rect, exit: &TerminalExit) {
         if grid.width == 0 || grid.height == 0 {
             return;
         }
@@ -3096,7 +3139,12 @@ impl TerminalStack {
             Some(code) => format!("code {code}"),
             None => "killed".to_string(),
         };
-        let text = format!("⚠ agent exited ({status}) — r restart · ]]x close");
+        let verb = if exit.dead_on_arrival {
+            "failed to start"
+        } else {
+            "exited"
+        };
+        let text = format!("⚠ agent {verb} ({status}) — r restart · ]]x close");
         let width = grid.width as usize;
         // Pad (or truncate) to the full row so the fill spans it.
         let display: String = if text.chars().count() > width {
@@ -3105,6 +3153,37 @@ impl TerminalStack {
             let pad = width - text.chars().count();
             format!("{text}{}", " ".repeat(pad))
         };
+        // A dead-on-arrival pane is blank (the agent produced no lasting
+        // screen), so paint the captured output tail in the rows directly
+        // above the banner — the error/last lines the agent printed
+        // before dying, bottom-aligned so they read as one block with the
+        // banner. Skipped for a normal exit, whose frozen screen already
+        // shows its real final state.
+        if exit.dead_on_arrival
+            && let Some(last) = &exit.last_output
+        {
+            let avail = grid.height.saturating_sub(1);
+            // Most-recent `avail` lines, back into chronological order.
+            let mut tail: Vec<&str> = last.lines().rev().take(avail as usize).collect();
+            tail.reverse();
+            let base_y = grid.y + avail - tail.len() as u16;
+            for (i, line) in tail.iter().enumerate() {
+                let shown: String = line.chars().take(width).collect();
+                let row = Rect {
+                    x: grid.x,
+                    y: base_y + i as u16,
+                    width: grid.width,
+                    height: 1,
+                };
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        shown,
+                        Style::default().fg(theme.text_dim),
+                    ))),
+                    row,
+                );
+            }
+        }
         let row = Rect {
             x: grid.x,
             y: grid.y + grid.height - 1,
@@ -5654,6 +5733,7 @@ mod agent_crash_tests {
         stack.on_event(&Event::TerminalExited {
             terminal_id: TerminalId(1),
             exit_code: Some(1),
+            last_output: None,
         });
 
         let slot = stack
@@ -5661,7 +5741,7 @@ mod agent_crash_tests {
             .get(&TerminalId(1))
             .expect("crashed agent pane must survive");
         assert!(
-            matches!(slot.exited, Some(TerminalExit { code: Some(1) })),
+            matches!(slot.exited, Some(TerminalExit { code: Some(1), .. })),
             "the exit code is recorded so the banner can show it",
         );
     }
@@ -5675,11 +5755,15 @@ mod agent_crash_tests {
         stack.on_event(&Event::TerminalExited {
             terminal_id: TerminalId(1),
             exit_code: None,
+            last_output: None,
         });
 
         assert!(matches!(
-            stack.terminals.get(&TerminalId(1)).map(|s| s.exited),
-            Some(Some(TerminalExit { code: None })),
+            stack
+                .terminals
+                .get(&TerminalId(1))
+                .map(|s| s.exited.clone()),
+            Some(Some(TerminalExit { code: None, .. })),
         ));
     }
 
@@ -5691,6 +5775,7 @@ mod agent_crash_tests {
         stack.on_event(&Event::TerminalExited {
             terminal_id: TerminalId(1),
             exit_code: Some(0),
+            last_output: None,
         });
 
         assert!(
@@ -5721,6 +5806,7 @@ mod agent_crash_tests {
         stack.on_event(&Event::TerminalExited {
             terminal_id: TerminalId(1),
             exit_code: Some(0),
+            last_output: None,
         });
 
         assert!(stack.terminals.get(&TerminalId(1)).is_none());
@@ -5733,6 +5819,7 @@ mod agent_crash_tests {
         stack.on_event(&Event::TerminalExited {
             terminal_id: TerminalId(1),
             exit_code: Some(1),
+            last_output: None,
         });
 
         let mut cmds = Vec::new();
@@ -5762,6 +5849,7 @@ mod agent_crash_tests {
         stack.on_event(&Event::TerminalExited {
             terminal_id: TerminalId(1),
             exit_code: Some(1),
+            last_output: None,
         });
 
         // A printable key that isn't the restart affordance is swallowed
@@ -5782,6 +5870,7 @@ mod agent_crash_tests {
         stack.on_event(&Event::TerminalExited {
             terminal_id: TerminalId(1),
             exit_code: Some(1),
+            last_output: None,
         });
 
         // The restart's fresh terminal lands as a new id — the exited
@@ -5808,6 +5897,7 @@ mod agent_crash_tests {
         stack.on_event(&Event::TerminalExited {
             terminal_id: TerminalId(1),
             exit_code: Some(137),
+            last_output: None,
         });
 
         let backend = TestBackend::new(80, 24);
@@ -5831,12 +5921,84 @@ mod agent_crash_tests {
     }
 
     #[test]
+    fn dead_on_arrival_pane_reads_as_failed_and_shows_the_reason() {
+        // A codex that dies on arrival with code 0 (#368): a freshly
+        // spawned agent that never engaged and exits `code 0` inside the
+        // grace window is dead-on-arrival (#367), so the banner must say
+        // "failed to start" — not "exited", which reads as success — and
+        // the captured error must fill the otherwise-blank pane.
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
+        stack.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(1),
+            exit_code: Some(0),
+            last_output: Some("Error: not logged in\nrun `codex login`".into()),
+        });
+
+        let backend = TestBackend::new(80, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| stack.render(Rect::new(0, 0, 80, 24), f, true))
+            .unwrap();
+        let buf = term.backend().buffer().clone();
+        let screen: String = (0..24)
+            .map(|y| (0..80).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            screen.contains("agent failed to start (code 0)"),
+            "an immediate code-0 exit is surfaced as a failure:\n{screen}",
+        );
+        assert!(
+            screen.contains("not logged in") && screen.contains("codex login"),
+            "the captured output is painted over the blank pane:\n{screen}",
+        );
+    }
+
+    #[test]
+    fn dead_on_arrival_survives_the_preceding_exited_state_event() {
+        // Regression: the real teardown broadcasts `AgentState::Exited`
+        // right before `TerminalExited` (#357/#369). `Exited` must NOT
+        // count as engagement, or `did_work` flips true and the
+        // dead-on-arrival launch reads as a clean exit and auto-closes —
+        // silently reaping the pane the user needs to see and restart.
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
+        stack.on_event(&Event::AgentState {
+            terminal_id: TerminalId(1),
+            session_key: sk.clone(),
+            state: lazybox_ipc::AgentState::Exited { code: Some(0) },
+        });
+        stack.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(1),
+            exit_code: Some(0),
+            last_output: Some("Error: not logged in".into()),
+        });
+
+        let slot = stack
+            .terminals
+            .get(&TerminalId(1))
+            .expect("a dead-on-arrival pane must survive, not auto-close");
+        assert!(
+            matches!(
+                &slot.exited,
+                Some(TerminalExit {
+                    dead_on_arrival: true,
+                    ..
+                })
+            ),
+            "it must still classify as dead-on-arrival despite the Exited pill",
+        );
+    }
+
+    #[test]
     fn a_different_agent_spawn_leaves_the_exited_pane() {
         let sk = SessionKey::new("github:o/r#1");
         let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
         stack.on_event(&Event::TerminalExited {
             terminal_id: TerminalId(1),
             exit_code: Some(1),
+            last_output: None,
         });
 
         // Spawning a *different* agent in the same workspace must not
@@ -5877,6 +6039,7 @@ mod agent_crash_tests {
         stack.on_event(&Event::TerminalExited {
             terminal_id: TerminalId(1),
             exit_code: Some(0),
+            last_output: None,
         });
 
         assert!(
@@ -5901,6 +6064,7 @@ mod agent_crash_tests {
         stack.on_event(&Event::TerminalExited {
             terminal_id: TerminalId(1),
             exit_code: Some(0),
+            last_output: None,
         });
 
         assert!(
@@ -5920,12 +6084,16 @@ mod agent_crash_tests {
         stack.on_event(&Event::TerminalExited {
             terminal_id: TerminalId(1),
             exit_code: Some(0),
+            last_output: None,
         });
 
         assert!(
             matches!(
-                stack.terminals.get(&TerminalId(1)).map(|s| s.exited),
-                Some(Some(TerminalExit { code: Some(0) })),
+                stack
+                    .terminals
+                    .get(&TerminalId(1))
+                    .map(|s| s.exited.clone()),
+                Some(Some(TerminalExit { code: Some(0), .. })),
             ),
             "a dead-on-arrival code-0 exit keeps the pane for a restart",
         );
@@ -5947,6 +6115,7 @@ mod agent_crash_tests {
         stack.on_event(&Event::TerminalExited {
             terminal_id: TerminalId(1),
             exit_code: Some(0),
+            last_output: None,
         });
 
         assert!(

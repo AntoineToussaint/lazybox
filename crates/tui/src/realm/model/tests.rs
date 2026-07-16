@@ -7919,24 +7919,26 @@ mod help_ask_tests {
     }
 
     /// The run outlives the modal — an action that resolves after the
-    /// user closed Ask must not pop a surprise confirm. Because the
-    /// action is dropped, the raw block is *kept* in the recorded answer
-    /// rather than stripped: a resurrected transcript must not read as if
-    /// the action ran (it didn't) — the surviving JSON marks it as an
-    /// unexecuted proposal, and the prose never claims otherwise.
+    /// user closed Ask must not pop a surprise confirm. The raw JSON is
+    /// still stripped (no intent leaks into the transcript), but because
+    /// the action was dropped a short "not applied" note replaces it, so
+    /// a reopened transcript never reads as if the action ran.
     #[test]
-    fn dropped_action_keeps_its_block_when_the_help_modal_is_closed() {
+    fn dropped_action_strips_block_and_notes_it_was_not_applied() {
         let mut m = build_model();
         let _ = m.handle_help_asked("add a snippet".into());
         finish_help_turn(&mut m, add_snippet_answer("integrate"));
 
         assert!(m.pending_help_action.is_none());
         assert_ne!(m.modal_stack.last(), Some(&Id::HelpActionConfirm));
+        let answer = m.help_convo_mut().turns[0].answer.clone();
         assert!(
-            m.help_convo_mut().turns[0]
-                .answer
-                .contains("lazybox-action"),
-            "raw block kept when the action was dropped, not stripped",
+            !answer.contains("lazybox-action"),
+            "raw block stripped even when the action was dropped: {answer:?}",
+        );
+        assert!(
+            answer.contains("ask again to apply"),
+            "dropped action leaves a not-applied note: {answer:?}",
         );
     }
 

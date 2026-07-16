@@ -7919,10 +7919,13 @@ mod help_ask_tests {
     }
 
     /// The run outlives the modal — an action that resolves after the
-    /// user closed Ask must not pop a surprise confirm. The block is
-    /// still stripped from the recorded answer.
+    /// user closed Ask must not pop a surprise confirm. Because the
+    /// action is dropped, the raw block is *kept* in the recorded answer
+    /// rather than stripped: a resurrected transcript must not read as if
+    /// the action ran (it didn't) — the surviving JSON marks it as an
+    /// unexecuted proposal, and the prose never claims otherwise.
     #[test]
-    fn action_is_ignored_when_the_help_modal_is_closed() {
+    fn dropped_action_keeps_its_block_when_the_help_modal_is_closed() {
         let mut m = build_model();
         let _ = m.handle_help_asked("add a snippet".into());
         finish_help_turn(&mut m, add_snippet_answer("integrate"));
@@ -7930,10 +7933,10 @@ mod help_ask_tests {
         assert!(m.pending_help_action.is_none());
         assert_ne!(m.modal_stack.last(), Some(&Id::HelpActionConfirm));
         assert!(
-            !m.help_convo_mut().turns[0]
+            m.help_convo_mut().turns[0]
                 .answer
                 .contains("lazybox-action"),
-            "block stripped even when not proposed",
+            "raw block kept when the action was dropped, not stripped",
         );
     }
 

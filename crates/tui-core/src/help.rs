@@ -102,25 +102,24 @@ pub fn parse_action_intent(answer: &str) -> Option<HelpActionIntent> {
     serde_json::from_str::<HelpActionIntent>(&json).ok()
 }
 
-/// Return `answer` with the `lazybox-action` fenced block removed, so
-/// the transcript shows the agent's prose without the raw intent JSON.
-/// Collapses the blank lines the removed block leaves behind. When
+/// Return `answer` with every `lazybox-action` fenced block removed, so
+/// the transcript shows the agent's prose without any raw intent JSON.
+/// Collapses the blank lines the removed blocks leave behind. When
 /// there's no such block, returns the input trimmed of trailing
-/// whitespace unchanged.
+/// whitespace unchanged. Only the first block is ever *executed*, but a
+/// stray second one must not leak raw JSON into the transcript either.
 pub fn strip_action_block(answer: &str) -> String {
     let Some((start, end)) = action_block_span(answer) else {
         return answer.trim_end().to_string();
     };
-    let mut out = String::with_capacity(answer.len());
-    out.push_str(answer[..start].trim_end());
-    let tail = answer[end..].trim_start_matches(['\n', '\r']);
-    if !tail.trim().is_empty() {
-        if !out.is_empty() {
-            out.push_str("\n\n");
-        }
-        out.push_str(tail.trim_end());
+    let head = answer[..start].trim_end();
+    // Recurse on the remainder so a second block is stripped too.
+    let tail = strip_action_block(answer[end..].trim_start_matches(['\n', '\r']));
+    match (head.is_empty(), tail.trim().is_empty()) {
+        (_, true) => head.to_string(),
+        (true, false) => tail,
+        (false, false) => format!("{head}\n\n{tail}"),
     }
-    out
 }
 
 /// Byte span `[start, end)` of a `lazybox-action` fenced block within
@@ -651,5 +650,21 @@ Trigger it with `]]sgo`.";
         assert!(!stripped.contains("add_snippet"));
         assert!(stripped.contains("I'll add that snippet."));
         assert!(stripped.contains("Trigger it with `]]sgo`."));
+    }
+
+    /// Only the first block is executed, but a stray second block must
+    /// not survive in the transcript either — every `lazybox-action`
+    /// fence is stripped, and the prose between them is kept.
+    #[test]
+    fn strip_removes_every_action_block() {
+        let answer = "First.\n\n\
+```lazybox-action\n{\"action\":\"add_snippet\",\"key\":\"a\",\"body\":\"A.\"}\n```\n\n\
+Middle.\n\n\
+```lazybox-action\n{\"action\":\"add_snippet\",\"key\":\"b\",\"body\":\"B.\"}\n```\n\n\
+Last.";
+        let stripped = strip_action_block(answer);
+        assert!(!stripped.contains("lazybox-action"), "both blocks gone");
+        assert!(!stripped.contains("add_snippet"));
+        assert_eq!(stripped, "First.\n\nMiddle.\n\nLast.");
     }
 }

@@ -47,13 +47,21 @@ use std::path::{Path, PathBuf};
 /// `.tmp` file, then a rename, so a crash mid-write can never leave a
 /// half-written (and unparseable) snippets file behind. Creates the
 /// parent directory if needed. Mirrors `Config::save_to`.
+///
+/// The tmp sibling carries a per-process, per-call suffix so a second
+/// writer — another lazybox instance, or a concurrent call — can't
+/// clash on a fixed name and clobber the other's in-flight write.
 fn write_yaml_atomically(path: &Path, value: &serde_yaml::Value) -> Result<(), SnippetsError> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
     let yaml = serde_yaml::to_string(value)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("yaml.tmp");
-    std::fs::write(&tmp, yaml)?;
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("yaml.tmp.{}.{seq}", std::process::id()));
+    std::fs::write(&tmp, &yaml)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
 }
@@ -1374,14 +1382,22 @@ snippets:
         assert!(matches!(err, SnippetsError::NotAMapping(_)));
     }
 
-    /// The atomic write leaves no stray `.tmp` sibling behind.
+    /// The atomic write leaves no stray `.tmp` sibling behind — the
+    /// rename consumes whatever unique tmp name the write picked.
     #[test]
     fn upsert_cleans_up_its_temp_file() {
         let path = write_tmp("upsert-tmp", "snippets:\n  rev:\n    body: x\n");
         Snippets::upsert_snippet_at(&path, "pr", &snippet("", "", "y")).expect("write");
+        let dir = path.parent().expect("has parent");
+        let leftovers: Vec<_> = std::fs::read_dir(dir)
+            .expect("read dir")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp"))
+            .collect();
         assert!(
-            !path.with_extension("yaml.tmp").exists(),
-            "tmp file cleaned up"
+            leftovers.is_empty(),
+            "tmp siblings left behind: {leftovers:?}"
         );
     }
 }

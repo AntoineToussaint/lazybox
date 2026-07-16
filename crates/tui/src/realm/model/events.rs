@@ -140,9 +140,16 @@ impl<T: TerminalAdapter> Model<T> {
                         // A finished answer may carry a proposed action
                         // (#353). Lift it out and strip the raw block so
                         // the transcript shows only the agent's prose;
-                        // the confirm mounts below, off the lock.
+                        // the confirm mounts below, off the lock. Strip
+                        // only when the action will actually surface —
+                        // i.e. the help modal is still open, the same
+                        // gate `propose_help_action` uses. If the user
+                        // closed Ask before the answer arrived the action
+                        // is dropped, so keeping the block avoids a
+                        // resurrected transcript claiming an action that
+                        // never ran.
                         intent = lazybox_tui_core::help::parse_action_intent(&turn.answer);
-                        if intent.is_some() {
+                        if intent.is_some() && self.modal_stack.last() == Some(&Id::HelpAsk) {
                             turn.answer = lazybox_tui_core::help::strip_action_block(&turn.answer);
                         }
                     }

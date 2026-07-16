@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tokio::process::Command;
 
 mod inspect;
-pub use inspect::{OrphanReason, TrackedSession, WorktreeInspection};
+pub use inspect::{
+    DiscoveredCheckout, OrphanReason, TrackedSession, WorktreeInspection, scan_external_checkouts,
+};
 
 /// Process-wide per-repo serialization. Keyed by the bare-clone path:
 /// two concurrent cold spawns for the same repo would otherwise race

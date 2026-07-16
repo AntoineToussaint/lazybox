@@ -216,6 +216,7 @@ Remote & services:
   lazybox --connect <socket>  attach a TUI to a running daemon
   lazybox slack init          set up the optional Slack mirror
   lazybox slack doctor        validate an existing Slack setup
+  lazybox scan [ROOTS...]     list git repos/worktrees under ROOTS (or scan.roots)
 
 Advanced:
   lazybox --fresh             wipe ~/.lazybox/v2/state.db and re-run setup (destructive)
@@ -274,6 +275,7 @@ async fn main() -> anyhow::Result<()> {
     match args.first().map(String::as_str) {
         Some("server") => server_subcommand(&args[1..]).await,
         Some("slack") => slack_subcommand(&args[1..]).await,
+        Some("scan") => scan_subcommand(&args[1..]).await,
         Some("hook-ingest") => hook_ingest_subcommand(&args[1..]).await,
         Some("--connect") => {
             let socket_path = args
@@ -874,6 +876,149 @@ fn load_user_editors() -> Vec<lazybox_tui::editors::UserEditorEntry> {
 
 /// `lazybox slack <init|doctor>` — Slack-side setup helpers. See
 /// `lazybox_tui::slack_init` for the actual flow; this is just the
+/// `lazybox scan [ROOTS...] [--depth N]` — read-only discovery of git
+/// checkouts (normal clones and linked `git worktree`s) the user
+/// created outside lazybox. Roots come from the command line, or from
+/// `scan.roots` in the config when none are given. Prints a table;
+/// nothing is imported or modified. This is stage one of issue #348 —
+/// the scanner that a future import flow will build on.
+///
+/// Output goes through `println!` (stdout) because `init_tracing`
+/// already redirected fd 2 into the log file.
+async fn scan_subcommand(args: &[String]) -> anyhow::Result<()> {
+    let mut args = args.to_vec();
+    let depth_override = take_value(&mut args, "--depth").and_then(|s| s.parse::<usize>().ok());
+    // Everything left that isn't a flag is a root to scan.
+    let cli_roots: Vec<PathBuf> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(PathBuf::from)
+        .collect();
+
+    let config = lazybox_config::Config::load().unwrap_or_default();
+    let roots = if cli_roots.is_empty() {
+        config.scan.roots.clone()
+    } else {
+        cli_roots
+    };
+    if roots.is_empty() {
+        // stdout, not an `Err`: `init_tracing` redirected fd 2 into the
+        // log file, so an anyhow error would never reach the terminal.
+        println!(
+            "No scan roots. Pass one or more directories (`lazybox scan ~/code`) \
+             or set `scan.roots` in {}.",
+            lazybox_config::Config::default_path().display()
+        );
+        std::process::exit(2);
+    }
+    let roots: Vec<PathBuf> = roots.iter().map(|p| scan_expand_tilde(p)).collect();
+    let max_depth = depth_override.unwrap_or(config.scan.max_depth);
+    // Skip anything under lazybox's own managed base — those aren't
+    // "external" checkouts and the sidebar already tracks them.
+    let exclude = lazybox_core::paths::state_root();
+
+    let found = lazybox_git_ops::scan_external_checkouts(&roots, max_depth, &exclude).await;
+    print_scan_results(&roots, &found);
+    Ok(())
+}
+
+/// Expand a leading `~/` against `$HOME`. Mirrors the daemon's mount
+/// path expansion so `scan.roots: [~/code]` resolves the same way.
+fn scan_expand_tilde(p: &std::path::Path) -> PathBuf {
+    if let Some(rest) = p.to_str().and_then(|s| s.strip_prefix("~/"))
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return PathBuf::from(home).join(rest);
+    }
+    p.to_path_buf()
+}
+
+/// Render the scan as a plain aligned table on stdout, most-recently
+/// active first. Read-only: purely informational.
+fn print_scan_results(roots: &[PathBuf], found: &[lazybox_git_ops::DiscoveredCheckout]) {
+    let root_list = roots
+        .iter()
+        .map(|r| r.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if found.is_empty() {
+        println!("No git checkouts found under {root_list}.");
+        return;
+    }
+
+    // Most-recent activity first; unknown-age entries sink to the bottom.
+    let mut rows: Vec<&lazybox_git_ops::DiscoveredCheckout> = found.iter().collect();
+    rows.sort_by_key(|c| std::cmp::Reverse(c.last_commit_unix));
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    println!(
+        "Found {} git checkout{} under {root_list}:\n",
+        found.len(),
+        if found.len() == 1 { "" } else { "s" },
+    );
+    for c in rows {
+        let age = c
+            .last_commit_unix
+            .map(|t| humanize_unix_age(now, t))
+            .unwrap_or_else(|| "—".to_string());
+        let branch = c.branch.as_deref().unwrap_or("(detached)");
+        let mut tags = Vec::new();
+        if c.is_linked_worktree {
+            tags.push("worktree");
+        }
+        if c.has_uncommitted_changes {
+            tags.push("dirty");
+        }
+        let tag_str = if tags.is_empty() {
+            String::new()
+        } else {
+            format!("  [{}]", tags.join(", "))
+        };
+        println!(
+            "  {:>12}  {:<24}  {}{}",
+            age,
+            truncate(branch, 24),
+            c.path.display(),
+            tag_str,
+        );
+    }
+    println!("\nImport into lazybox is not wired up yet (issue #348, stage two).");
+}
+
+/// `secs`-ago-style relative age. Coarse buckets are enough for a
+/// scan listing — the point is recency ordering, not precision.
+fn humanize_unix_age(now: u64, then: u64) -> String {
+    let secs = now.saturating_sub(then);
+    let (n, unit) = if secs < 60 {
+        (secs, "s")
+    } else if secs < 3600 {
+        (secs / 60, "m")
+    } else if secs < 86_400 {
+        (secs / 3600, "h")
+    } else if secs < 86_400 * 30 {
+        (secs / 86_400, "d")
+    } else if secs < 86_400 * 365 {
+        (secs / (86_400 * 30), "mo")
+    } else {
+        (secs / (86_400 * 365), "y")
+    };
+    format!("{n}{unit} ago")
+}
+
+/// Clip `s` to `max` chars with an ellipsis, for column alignment.
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let head: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{head}…")
+    }
+}
+
 /// argv dispatch.
 ///
 /// User-facing output goes through `println!` (stdout) because
@@ -1159,6 +1304,51 @@ mod argv_tests {
         let destructive = HELP.find("--fresh").expect("--fresh mention");
         assert!(getting_started < destructive);
         assert!(HELP.contains("(destructive)"));
+    }
+
+    #[test]
+    fn humanize_unix_age_buckets_by_magnitude() {
+        let day = 86_400u64;
+        assert_eq!(humanize_unix_age(100, 100), "0s ago");
+        assert_eq!(humanize_unix_age(100, 70), "30s ago");
+        assert_eq!(humanize_unix_age(600, 60), "9m ago");
+        assert_eq!(humanize_unix_age(2 * 3600, 3600), "1h ago");
+        assert_eq!(humanize_unix_age(3 * day, day), "2d ago");
+        assert_eq!(humanize_unix_age(90 * day, day), "2mo ago");
+        assert_eq!(humanize_unix_age(800 * day, day), "2y ago");
+        // A clock skew (then in the future) must not panic or underflow.
+        assert_eq!(humanize_unix_age(10, 100), "0s ago");
+    }
+
+    #[test]
+    fn truncate_clips_with_ellipsis() {
+        assert_eq!(truncate("short", 24), "short");
+        assert_eq!(truncate("exactly-ten", 11), "exactly-ten");
+        assert_eq!(truncate("way-too-long-branch-name", 10), "way-too-l…");
+    }
+
+    #[test]
+    fn scan_expand_tilde_only_touches_leading_tilde_slash() {
+        let prev = std::env::var("HOME").ok();
+        // SAFETY: single-threaded test body; HOME is restored below.
+        unsafe { std::env::set_var("HOME", "/home/tester") };
+        assert_eq!(
+            scan_expand_tilde(std::path::Path::new("~/code")),
+            std::path::PathBuf::from("/home/tester/code"),
+        );
+        assert_eq!(
+            scan_expand_tilde(std::path::Path::new("/abs/path")),
+            std::path::PathBuf::from("/abs/path"),
+        );
+        // A bare `~` (no slash) is left alone — not a home reference.
+        assert_eq!(
+            scan_expand_tilde(std::path::Path::new("~weird")),
+            std::path::PathBuf::from("~weird"),
+        );
+        match prev {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
     }
 
     #[test]

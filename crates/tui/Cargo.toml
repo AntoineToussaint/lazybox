@@ -48,6 +48,7 @@ harness = false
 lazybox-core       = { workspace = true }
 lazybox-auth       = { workspace = true }
 lazybox-config     = { workspace = true }
+lazybox-git-ops    = { workspace = true }
 lazybox-store      = { workspace = true }
 lazybox-gh         = { workspace = true }
 lazybox-slack      = { workspace = true }

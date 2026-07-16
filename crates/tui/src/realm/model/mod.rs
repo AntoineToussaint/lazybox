@@ -1329,6 +1329,7 @@ impl<T: TerminalAdapter> Model<T> {
         // hardcoded consts.
         self.ui_defaults = ui.clone();
         self.right.apply_ui_defaults(ui);
+        self.terminals.apply_ui_defaults(ui);
     }
 
     /// Install the loaded snippet collection. Called from the

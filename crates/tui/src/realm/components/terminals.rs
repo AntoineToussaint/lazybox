@@ -38,6 +38,13 @@ impl Terminals {
         }
     }
 
+    /// Fold resolved UI config into the terminal stack (currently the
+    /// dead-on-arrival grace window that gates auto-close of exited
+    /// agent panes, #367).
+    pub fn apply_ui_defaults(&mut self, ui: &lazybox_config::UiDefaults) {
+        self.inner.apply_ui_defaults(ui);
+    }
+
     /// Drain queued IPC commands (writes / resizes / etc).
     pub fn drain_cmds(&mut self) -> Vec<IpcCommand> {
         // Render-time resizes also need to drain.

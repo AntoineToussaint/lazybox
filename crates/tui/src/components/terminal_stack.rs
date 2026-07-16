@@ -390,6 +390,14 @@ pub struct TerminalStack {
     /// exited on its OWN (crash, killed binary — #356) is instead kept
     /// as a frozen "exited — restart?" pane. Drained on that event.
     closing: HashSet<TerminalId>,
+    /// Grace window: an agent that exits `code 0` within this window of
+    /// its spawn without ever engaging is treated as dead-on-arrival —
+    /// its pane is kept (frozen + restart) rather than auto-closed. A
+    /// clean exit past the window, or after the agent engaged, auto-
+    /// closes. Sourced from `terminal.agent_dead_on_arrival_ms` via
+    /// `apply_ui_defaults`; the const is the fallback for tests and any
+    /// stack built before config lands. See #367.
+    dead_on_arrival: std::time::Duration,
 }
 
 /// Records that a terminal's process has exited. Agent terminals keep
@@ -408,6 +416,10 @@ struct TerminalExit {
 /// in-process round trip is sub-second; the window only has to beat
 /// a daemon-side spawn that silently failed.
 const PENDING_SPLIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Fallback dead-on-arrival grace window (see
+/// [`TerminalStack::dead_on_arrival`]) until config is applied.
+const DEFAULT_DEAD_ON_ARRIVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Direction of a pending split. `Vertical` = `|` = side-by-side =
 /// `HSplit`. `Horizontal` = `-` = stacked = `VSplit`. (Vim
@@ -647,6 +659,16 @@ struct TerminalSlot {
     /// offered — a crashing agent (#356) must not take the workspace
     /// down with it. `None` for a live terminal.
     exited: Option<TerminalExit>,
+    /// When this slot's terminal was spawned. Used to tell a clean
+    /// exit that ran for a while from a dead-on-arrival one that
+    /// exited `code 0` almost immediately without doing anything (#367).
+    spawned_at: std::time::Instant,
+    /// Set once this (agent) terminal reached a non-`Idle` state
+    /// (`Working` / `InputNeeded` / `Done`) — i.e. it actually engaged.
+    /// A clean exit auto-closes only if the agent engaged or outran the
+    /// dead-on-arrival window; one that never engaged and exited fast is
+    /// treated as a failed launch and kept open with a restart (#367).
+    did_work: bool,
 }
 
 impl TerminalSlot {
@@ -924,7 +946,15 @@ impl TerminalStack {
             tab_strip_hits: Vec::new(),
             last_focused: HashMap::new(),
             closing: HashSet::new(),
+            dead_on_arrival: DEFAULT_DEAD_ON_ARRIVAL,
         }
+    }
+
+    /// Fold resolved UI config into the stack. Currently just the
+    /// dead-on-arrival grace window that gates auto-close of exited
+    /// agent panes (#367).
+    pub fn apply_ui_defaults(&mut self, ui: &lazybox_config::UiDefaults) {
+        self.dead_on_arrival = ui.agent_dead_on_arrival;
     }
 
     /// Drain queued resize requests from the last frame. The App calls
@@ -1843,6 +1873,8 @@ impl TerminalStack {
             pending_feed: Vec::new(),
             pending_truncated: false,
             exited: None,
+            spawned_at: std::time::Instant::now(),
+            did_work: false,
         }
     }
 
@@ -2296,6 +2328,12 @@ impl TerminalStack {
                     && matches!(slot.kind, TerminalKind::Agent(_))
                 {
                     slot.agent_state = *state;
+                    // Any non-`Idle` reading means the agent engaged —
+                    // the signal that separates a genuine clean exit
+                    // from a dead-on-arrival one (#367).
+                    if !matches!(state, lazybox_ipc::AgentState::Idle) {
+                        slot.did_work = true;
+                    }
                 }
             }
             Event::TerminalExited {
@@ -2309,12 +2347,14 @@ impl TerminalStack {
                     .is_some_and(|s| matches!(s.kind, TerminalKind::Agent(_)));
                 // A shell going away — or any terminal the user closed
                 // with `]]x` — takes its pane with it, like every other
-                // terminal emulator. But an AGENT that exited on its own
-                // (crash, ^D, or its binary swapped out mid-run by a
-                // Homebrew self-upgrade, #355) must NOT silently vanish:
-                // keep the slot frozen on its last screen so the
-                // workspace survives and a restart is offered (#356).
-                if is_agent && !user_closed {
+                // terminal emulator. An AGENT that exited on its own is
+                // triaged: a clean, expected exit auto-closes as it used
+                // to (#367), but an abnormal one (non-zero code, killed
+                // by signal, or dead-on-arrival) must NOT silently
+                // vanish — its slot is kept frozen on the last screen so
+                // the workspace survives and a restart is offered
+                // (#356/#357).
+                if is_agent && !user_closed && !self.agent_exit_is_clean(terminal_id, *exit_code) {
                     if let Some(slot) = self.terminals.get_mut(terminal_id) {
                         slot.exited = Some(TerminalExit { code: *exit_code });
                     }
@@ -2739,6 +2779,23 @@ impl TerminalStack {
     /// collapsing splits and re-clamping the tab strip. Shared by the
     /// exit teardown, the restart path (#356), and the
     /// spawn-supersedes-crashed-pane path.
+    /// Whether an exited agent terminal exited cleanly enough to
+    /// auto-close (as pre-#356 behavior did) rather than linger with a
+    /// restart affordance. Clean = `code 0` AND the agent actually came
+    /// to rest: it either engaged (reached a non-`Idle` state) or ran
+    /// past the dead-on-arrival window. A non-zero code, death by signal
+    /// (`None`), or a fast never-engaged exit is abnormal — kept open.
+    /// Exit code alone is insufficient (an agent can exit `0` while
+    /// failing to launch, #357), hence the runtime/engagement gate.
+    fn agent_exit_is_clean(&self, terminal_id: &TerminalId, exit_code: Option<i32>) -> bool {
+        if exit_code != Some(0) {
+            return false;
+        }
+        self.terminals
+            .get(terminal_id)
+            .is_some_and(|slot| slot.did_work || slot.spawned_at.elapsed() >= self.dead_on_arrival)
+    }
+
     fn drop_slot(&mut self, terminal_id: TerminalId) {
         self.terminals.remove(&terminal_id);
         // Prune the tile tree so the removal surfaces visually: a
@@ -5564,10 +5621,12 @@ mod spawn_projection_tests {
 
 #[cfg(test)]
 mod agent_crash_tests {
-    //! A spawned agent that exits on its own (crash, killed binary —
-    //! #356) must NOT take its workspace down with it: the pane stays,
-    //! frozen on its last screen, and offers a restart. Only a shell
-    //! exit or an explicit user close (`]]x`) tears the pane down.
+    //! A spawned agent that exits *abnormally* on its own (crash,
+    //! killed binary — #356 — or dead-on-arrival — #367) must NOT take
+    //! its workspace down with it: the pane stays, frozen on its last
+    //! screen, and offers a restart. A *clean* agent exit (code 0 after
+    //! it engaged or matured past the grace window), a shell exit, or an
+    //! explicit user close (`]]x`) tears the pane down (#367).
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
@@ -5793,5 +5852,106 @@ mod agent_crash_tests {
 
         assert!(stack.terminals.get(&TerminalId(1)).is_some());
         assert!(stack.terminals.get(&TerminalId(2)).is_some());
+    }
+
+    /// Backdate a slot's spawn so it reads as having run past the
+    /// dead-on-arrival grace window.
+    fn age_slot(stack: &mut TerminalStack, id: TerminalId, by: std::time::Duration) {
+        let slot = stack.terminals.get_mut(&id).expect("slot");
+        slot.spawned_at = slot.spawned_at.checked_sub(by).expect("backdate");
+    }
+
+    #[test]
+    fn clean_exit_after_grace_auto_closes() {
+        // The regression #367 targets: an agent that ran for a while and
+        // exited cleanly (code 0) auto-closes as it did pre-#356 — no
+        // lingering `[exited]` tile to `]]x` by hand.
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("claude".into()));
+        age_slot(
+            &mut stack,
+            TerminalId(1),
+            std::time::Duration::from_secs(30),
+        );
+
+        stack.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(1),
+            exit_code: Some(0),
+        });
+
+        assert!(
+            stack.terminals.get(&TerminalId(1)).is_none(),
+            "a clean, matured agent exit auto-closes its pane",
+        );
+    }
+
+    #[test]
+    fn clean_exit_after_engaging_auto_closes_even_when_fast() {
+        // An agent that reached a working/done state has "come to rest";
+        // a subsequent clean exit auto-closes even inside the grace
+        // window — engagement, not just elapsed time, satisfies "clean".
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("claude".into()));
+        stack.on_event(&Event::AgentState {
+            terminal_id: TerminalId(1),
+            session_key: sk.clone(),
+            state: lazybox_ipc::AgentState::Working,
+        });
+
+        stack.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(1),
+            exit_code: Some(0),
+        });
+
+        assert!(
+            stack.terminals.get(&TerminalId(1)).is_none(),
+            "an engaged agent's clean exit auto-closes even before the grace window",
+        );
+    }
+
+    #[test]
+    fn dead_on_arrival_clean_exit_keeps_pane() {
+        // Exit code alone isn't enough (#357): an agent that exits code 0
+        // almost immediately without ever engaging failed to launch —
+        // keep the pane frozen with a restart, don't silently reap it.
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
+
+        stack.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(1),
+            exit_code: Some(0),
+        });
+
+        assert!(
+            matches!(
+                stack.terminals.get(&TerminalId(1)).map(|s| s.exited),
+                Some(Some(TerminalExit { code: Some(0) })),
+            ),
+            "a dead-on-arrival code-0 exit keeps the pane for a restart",
+        );
+    }
+
+    #[test]
+    fn config_threshold_gates_dead_on_arrival() {
+        // The grace window is configurable: shrink it so an exit that
+        // would be dead-on-arrival under the default counts as matured
+        // and auto-closes.
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
+        let ui = lazybox_config::UiDefaults {
+            agent_dead_on_arrival: std::time::Duration::ZERO,
+            ..Default::default()
+        };
+        stack.apply_ui_defaults(&ui);
+
+        stack.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(1),
+            exit_code: Some(0),
+        });
+
+        assert!(
+            stack.terminals.get(&TerminalId(1)).is_none(),
+            "a zero grace window makes even an instant clean exit auto-close",
+        );
     }
 }

@@ -147,6 +147,13 @@ pub struct Workspace {
     /// acts while lazybox is running.
     #[serde(default)]
     pub auto_merge_on_green: bool,
+    /// Unified per-session automation policies (issue #363) — today the
+    /// per-workspace auto-fix arm/disarm overrides. merge-on-green stays
+    /// in [`Workspace::auto_merge_on_green`] above for back-compat but is
+    /// presented in the same policies surface. Serde-defaulted so
+    /// pre-#363 records read back as all-`Default` and behave unchanged.
+    #[serde(default)]
+    pub policies: crate::AutomationPolicies,
     pub created_at: DateTime<Utc>,
     pub last_viewed_at: Option<DateTime<Utc>>,
 }
@@ -171,6 +178,7 @@ impl Workspace {
             read_indices: HashSet::new(),
             snoozed_until: None,
             auto_merge_on_green: false,
+            policies: crate::AutomationPolicies::default(),
             created_at: now,
             last_viewed_at: None,
         }

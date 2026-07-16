@@ -482,6 +482,10 @@ pub fn resolve_toggle_auto_merge(workspace: Option<&Workspace>) -> Intent {
 /// 4. Everything the manual gate blocks on still blocks
 ///    ([`merge_block_reason`]): the PR must be open (drafts, merged and
 ///    closed PRs are out), no changes-requested review, no conflict.
+/// 5. GitHub's **native** auto-merge is not already enabled. Precedence
+///    (issue #363): native auto-merge wins — GitHub will land the PR
+///    itself once it's ready, so firing lazybox's client-side merge on
+///    top is redundant and races the server-side merge.
 ///
 /// Nothing here that `g m` wouldn't also merge — this is a subset.
 pub fn should_auto_merge(workspace: &Workspace) -> bool {
@@ -491,6 +495,10 @@ pub fn should_auto_merge(workspace: &Workspace) -> bool {
     let Some(pr) = workspace.pr.as_ref() else {
         return false;
     };
+    // Native auto-merge takes precedence — let GitHub land it.
+    if pr.auto_merge_enabled {
+        return false;
+    }
     if pr.role != lazybox_core::TaskRole::Author {
         return false;
     }
@@ -1203,6 +1211,22 @@ mod tests {
         let mut armed_failing = pr("o/r#1", CiStatus::Failure, ReviewStatus::Approved);
         armed_failing.auto_merge_on_green = true;
         assert!(!should_auto_merge(&armed_failing), "red CI blocks");
+    }
+
+    #[test]
+    fn should_auto_merge_defers_to_native_auto_merge() {
+        // Precedence (issue #363): when GitHub's native auto-merge is
+        // already enabled, lazybox's client-side merge-on-green stands
+        // down — GitHub will land it, so a second client merge is
+        // redundant and races the server-side one.
+        let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::Approved);
+        ws.auto_merge_on_green = true;
+        assert!(should_auto_merge(&ws), "armed + green fires without native");
+        ws.pr.as_mut().unwrap().auto_merge_enabled = true;
+        assert!(
+            !should_auto_merge(&ws),
+            "native auto-merge takes precedence over client merge-on-green"
+        );
     }
 
     #[test]

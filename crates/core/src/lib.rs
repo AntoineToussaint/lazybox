@@ -8,6 +8,7 @@ pub mod autofix;
 pub mod config;
 pub mod issue_links;
 pub mod paths;
+pub mod policy;
 pub mod priority;
 pub mod project;
 pub mod prompts;
@@ -20,12 +21,15 @@ pub mod time;
 mod workspace;
 
 pub use agent::{AgentConfig, AgentModels, ModelTier};
-pub use autofix::{AutoFixKind, AutoFixSettings, evaluate_auto_fix};
+pub use autofix::{
+    AutoFixKind, AutoFixSettings, auto_fix_candidate, evaluate_auto_fix, is_auto_fix_opted_out,
+};
 pub use config::{
     KV_KEY_ARCHIVED, KV_KEY_LAYOUT, KV_KEY_SETUP, KV_KEY_THEME, PaneLayout, PersistedSetup,
     ProviderConfig,
 };
 pub use issue_links::{IssueLink, extract as extract_issue_links};
+pub use policy::{AutomationPolicies, PolicyArm, auto_fix_permitted, toggled_arm};
 pub use priority::{PriorityTier, resolve_priority_tier};
 pub use project::{Project, ProjectKey};
 pub use provider::{ProviderError, TaskProvider};

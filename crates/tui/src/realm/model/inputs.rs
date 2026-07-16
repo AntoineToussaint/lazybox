@@ -641,15 +641,12 @@ showing keybinding search only",
                     });
                 }
                 PolicyToggle::AutoFix(kind) => {
-                    let opted_out = ws.pr.as_ref().is_some_and(|pr| {
-                        pr.labels.iter().any(|l| {
-                            self.auto_fix_opt_out_labels
-                                .iter()
-                                .any(|o| o.eq_ignore_ascii_case(&l.name))
-                        })
-                    });
-                    let arm = ws.policies.arm(kind);
-                    let next = lazybox_core::toggled_arm(arm, opted_out);
+                    // Label-agnostic cycle (Default → Disarm → Arm): the
+                    // next state depends only on the current arm, so the
+                    // daemon's authoritative opt-out set — which this
+                    // client may not share in remote mode — never changes
+                    // the outcome.
+                    let next = lazybox_core::toggled_arm(ws.policies.arm(kind));
                     cmds.push(IpcCommand::SetAutoFixPolicy {
                         session_key,
                         kind,
@@ -659,10 +656,10 @@ showing keybinding search only",
                         lazybox_core::AutoFixKind::CiFailure => "auto-fix CI",
                         lazybox_core::AutoFixKind::MergeConflict => "auto-fix conflict",
                     };
-                    let state = if lazybox_core::auto_fix_permitted(next, opted_out) {
-                        "on"
-                    } else {
-                        "off"
+                    let state = match next {
+                        lazybox_core::PolicyArm::Default => "follows config",
+                        lazybox_core::PolicyArm::Arm => "armed",
+                        lazybox_core::PolicyArm::Disarm => "disarmed",
                     };
                     self.flash_info(format!("{name}: {state}"));
                 }

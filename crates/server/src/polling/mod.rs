@@ -433,7 +433,13 @@ impl GhSource {
                 }
             };
             let reason = format!("auto-fix ({}) on {repo}#{pr_number}", kind.describe());
-            tracing::info!(%reason, %session_key, "queued auto-fix");
+            // A label-opted-out PR is still queued so an explicit
+            // per-session `Arm` can override the label in the dispatcher
+            // (issue #363) — but by default it will be dropped there, so
+            // it must NOT inflate the user-visible "Queued N" notice or
+            // read as an actioned fix in the log. Only count / announce
+            // the candidates that proceed without an explicit arm.
+            tracing::info!(%reason, %session_key, opted_out, "queued auto-fix candidate");
             pending.push(ProviderAction::AutoFixPr {
                 session_key,
                 agent_id: DEFAULT_AGENT_ID.to_string(),
@@ -445,7 +451,9 @@ impl GhSource {
                 settings: self.auto_fix.clone(),
                 reason,
             });
-            queued += 1;
+            if !opted_out {
+                queued += 1;
+            }
         }
         if queued > 0 {
             self.emit_progress(format!("Queued {queued} auto-fix action(s)"));
@@ -932,10 +940,27 @@ async fn dispatch_action(
             // — resolve the workspace's arm against the label opt-out. A
             // `Disarm` (or a `Default` on a label-opted-out PR) drops the
             // fix before any comment, attempt, or spawn.
-            let arm = load_workspace_offloaded(config, &WorkspaceKey::new(session_key.as_str()))
-                .await
-                .map(|ws| ws.policies.arm(kind))
-                .unwrap_or_default();
+            //
+            // Fail closed: `load_workspace_offloaded` returns `None` for a
+            // genuinely-absent workspace AND for a transient store/deserialize
+            // error, so we cannot tell them apart. The workspace was upserted
+            // earlier in this same tick, so `None` here almost always means a
+            // read error — and defaulting to `Default` would silently fire on
+            // a workspace the user explicitly `Disarm`ed. Skipping instead is
+            // safe: the CI-fail / conflict trigger persists, so the next sweep
+            // retries once the workspace reads cleanly.
+            let Some(workspace) =
+                load_workspace_offloaded(config, &WorkspaceKey::new(session_key.as_str())).await
+            else {
+                tracing::warn!(
+                    source = source_name,
+                    %session_key,
+                    ?kind,
+                    "auto-fix: workspace policy unreadable — skipping this sweep (retries next tick)"
+                );
+                return;
+            };
+            let arm = workspace.policies.arm(kind);
             if !lazybox_core::auto_fix_permitted(arm, opted_out) {
                 tracing::info!(
                     source = source_name,
@@ -943,7 +968,7 @@ async fn dispatch_action(
                     ?kind,
                     arm = arm.as_str(),
                     opted_out,
-                    "auto-fix disarmed for this workspace — skipping"
+                    "auto-fix not permitted for this workspace (per-session policy) — skipping"
                 );
                 return;
             }

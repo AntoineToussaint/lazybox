@@ -78,11 +78,20 @@ impl PolicyArm {
     }
 }
 
-/// The unified per-workspace automation-policy set. Persisted on
-/// [`crate::Workspace`] (serde-defaulted, so pre-#363 records read back
-/// as all-`Default` and behave unchanged). merge-on-green lives on its
-/// own `Workspace` field for back-compat; this struct owns the
-/// per-session auto-fix arms.
+/// Per-workspace automation-policy set. Persisted on [`crate::Workspace`]
+/// (serde-defaulted, so pre-#363 records read back as all-`Default` and
+/// behave unchanged).
+///
+/// **Scope, deliberately:** this struct owns only the per-session
+/// auto-fix arms. It is *not* the whole automation model — `merge_on_green`
+/// stays on its own `Workspace::auto_merge_on_green` field and
+/// GitHub-native auto-merge stays on `Task::auto_merge_enabled`. Those two
+/// were already wired end-to-end and persisted; folding them in here would
+/// mean migrating live user state for no behavioral gain. The *unification*
+/// #363 asked for is at the **surface** — one menu and one pill vocabulary
+/// present all three together (see the module docs) — not a single storage
+/// field. Keep new per-session, lazybox-owned policies here; leave
+/// GitHub-owned server state on `Task`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct AutomationPolicies {
     #[serde(default)]
@@ -131,21 +140,23 @@ pub fn auto_fix_permitted(arm: PolicyArm, label_opted_out: bool) -> bool {
     }
 }
 
-/// The `PolicyArm` a menu toggle should land on to flip the *effective*
-/// on/off state, given whether a label currently opts the PR out. One
-/// keypress moves between armed and disarmed regardless of which
-/// underlying variant expresses it:
+/// The next `PolicyArm` in the policies-menu toggle cycle:
+/// `Default → Disarm → Arm → Default`.
 ///
-/// - effective-on  → `Disarm` (turn off).
-/// - effective-off → `Arm` if a label is the reason (override it), else
-///   `Default` (a plain "back to normal, on").
-pub fn toggled_arm(arm: PolicyArm, label_opted_out: bool) -> PolicyArm {
-    if auto_fix_permitted(arm, label_opted_out) {
-        PolicyArm::Disarm
-    } else if label_opted_out {
-        PolicyArm::Arm
-    } else {
-        PolicyArm::Default
+/// Deliberately **label-agnostic** — it depends only on the current arm,
+/// never on whether a label opts the PR out. The daemon holds the
+/// authoritative opt-out set, so a client that can't see it (e.g. a
+/// remote `--connect` session whose local config differs) still produces
+/// a correct, unambiguous next state: each variant means the same thing
+/// on both sides regardless of labels. From the common `Default` a
+/// single press `Disarm`s (the usual "make auto-fix stop here"); a
+/// second `Arm`s (force on, overriding any opt-out label); a third
+/// returns to `Default`.
+pub fn toggled_arm(arm: PolicyArm) -> PolicyArm {
+    match arm {
+        PolicyArm::Default => PolicyArm::Disarm,
+        PolicyArm::Disarm => PolicyArm::Arm,
+        PolicyArm::Arm => PolicyArm::Default,
     }
 }
 
@@ -171,20 +182,14 @@ mod tests {
         assert!(auto_fix_permitted(PolicyArm::Arm, false));
     }
 
-    /// Toggling walks a clean two-state cycle from every starting point.
+    /// Toggling walks a fixed, label-agnostic cycle so the same keypress
+    /// produces the same next state on any client, regardless of what it
+    /// knows about the PR's labels.
     #[test]
-    fn toggle_flips_effective_state() {
-        // Default, no label → on. Toggle → Disarm (off).
-        assert_eq!(toggled_arm(PolicyArm::Default, false), PolicyArm::Disarm);
-        // Disarm → off. Toggle → Default (on), no label to override.
-        assert_eq!(toggled_arm(PolicyArm::Disarm, false), PolicyArm::Default);
-        // Default + label → off. Toggle → Arm (override the label).
-        assert_eq!(toggled_arm(PolicyArm::Default, true), PolicyArm::Arm);
-        // Arm → on. Toggle → Disarm (off).
-        assert_eq!(toggled_arm(PolicyArm::Arm, true), PolicyArm::Disarm);
-        // Disarm + label → off. Toggle → Arm (turning on must override
-        // the label, else it would read as on but never fire).
-        assert_eq!(toggled_arm(PolicyArm::Disarm, true), PolicyArm::Arm);
+    fn toggle_cycles_default_disarm_arm() {
+        assert_eq!(toggled_arm(PolicyArm::Default), PolicyArm::Disarm);
+        assert_eq!(toggled_arm(PolicyArm::Disarm), PolicyArm::Arm);
+        assert_eq!(toggled_arm(PolicyArm::Arm), PolicyArm::Default);
     }
 
     #[test]

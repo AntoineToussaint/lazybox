@@ -3732,6 +3732,114 @@ mod merge_focus_follow_tests {
         );
     }
 
+    /// Arrow / `j` / `k` move a highlight through the which-key leader
+    /// popup and keep the leader armed; no action fires until `Enter`,
+    /// and `Esc` clears both the leader and the highlight (#343).
+    #[test]
+    fn leader_popup_arrows_move_highlight_without_firing() {
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let mut m = build_model();
+        let pr = workspace("owner/repo#1", true, Duration::hours(1));
+        let sk: SessionKey = (&pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        assert!(m.sidebar.focus_workspace_key(&sk));
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+
+        // `g` arms the github group (6 continuations); nothing highlighted.
+        m.dispatch_key(KeyEvent::new(Key::Char('g'), KeyModifiers::NONE));
+        assert!(m.leader_pending().is_some(), "`g` arms the github leader");
+        assert_eq!(m.leader_highlight(), None, "no highlight until navigation");
+
+        // Down/Up move the highlight; the leader stays armed and nothing
+        // fires.
+        m.dispatch_key(KeyEvent::new(Key::Down, KeyModifiers::NONE));
+        assert_eq!(m.leader_highlight(), Some(0));
+        m.dispatch_key(KeyEvent::new(Key::Down, KeyModifiers::NONE));
+        assert_eq!(m.leader_highlight(), Some(1));
+        m.dispatch_key(KeyEvent::new(Key::Up, KeyModifiers::NONE));
+        assert_eq!(m.leader_highlight(), Some(0));
+        assert!(
+            m.leader_pending().is_some(),
+            "navigation keeps the leader armed"
+        );
+        assert!(m.top_modal().is_none(), "navigation fires no action");
+
+        // `j`/`k` navigate too — the github group binds neither.
+        m.dispatch_key(KeyEvent::new(Key::Char('j'), KeyModifiers::NONE));
+        assert_eq!(m.leader_highlight(), Some(1));
+        m.dispatch_key(KeyEvent::new(Key::Char('k'), KeyModifiers::NONE));
+        assert_eq!(m.leader_highlight(), Some(0));
+
+        // Esc cancels: leader disarmed, highlight cleared.
+        m.dispatch_key(KeyEvent::new(Key::Esc, KeyModifiers::NONE));
+        assert!(m.leader_pending().is_none(), "Esc cancels the leader");
+        assert_eq!(m.leader_highlight(), None);
+    }
+
+    /// `Enter` fires the highlighted continuation, then disarms the
+    /// leader and clears the highlight (#343).
+    #[test]
+    fn leader_popup_enter_fires_highlighted_entry() {
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let pr = workspace("owner/repo#1", true, Duration::hours(1));
+        let sk: SessionKey = (&pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        assert!(m.sidebar.focus_workspace_key(&sk));
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        while server.rx.try_recv().is_ok() {}
+
+        m.dispatch_key(KeyEvent::new(Key::Char('g'), KeyModifiers::NONE));
+        m.dispatch_key(KeyEvent::new(Key::Down, KeyModifiers::NONE));
+        assert_eq!(m.leader_highlight(), Some(0));
+
+        m.dispatch_key(KeyEvent::new(Key::Enter, KeyModifiers::NONE));
+        assert!(m.leader_pending().is_none(), "Enter resolves the leader");
+        assert_eq!(m.leader_highlight(), None);
+        // Every github continuation either mounts a modal (merge confirm,
+        // label editor) or emits a command — so *some* effect proves the
+        // highlighted action dispatched rather than silently cancelling.
+        let fired = m.top_modal().is_some() || server.rx.try_recv().is_ok();
+        assert!(fired, "Enter dispatches the highlighted github action");
+    }
+
+    /// An active highlight never shadows the direct-letter path: typing a
+    /// continuation's own key still fires it (arrows are additive, #343).
+    #[test]
+    fn leader_popup_direct_letter_still_fires_with_highlight_active() {
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let mut m = build_model();
+        let pr = workspace("owner/repo#1", true, Duration::hours(1));
+        let sk: SessionKey = (&pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        assert!(m.sidebar.focus_workspace_key(&sk));
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+
+        m.dispatch_key(KeyEvent::new(Key::Char('g'), KeyModifiers::NONE));
+        m.dispatch_key(KeyEvent::new(Key::Down, KeyModifiers::NONE));
+        assert_eq!(m.leader_highlight(), Some(0), "a row is highlighted");
+
+        // `g m` = merge, a destructive action → confirm modal, regardless
+        // of which row the highlight sat on.
+        m.dispatch_key(KeyEvent::new(Key::Char('m'), KeyModifiers::NONE));
+        assert!(
+            m.leader_pending().is_none(),
+            "the direct letter resolves the leader"
+        );
+        assert_eq!(m.leader_highlight(), None);
+        assert!(
+            m.top_modal().is_some(),
+            "`g m` fires merge despite the active highlight"
+        );
+    }
+
     /// Issue #304: `q` in an empty terminal pane must not arm a leader.
     /// Quit's `q q` is a catalog `Seq`, but it dispatches through the
     /// q-latch, not `dispatch_action` — arming on it would pop a
@@ -4675,6 +4783,104 @@ mod leader_tile_tests {
             }
         }
         assert!(saw_persist, "tile-focus moves persist the layout");
+    }
+
+    /// `]]` + `j`/`k` move a highlight through the command popup and keep
+    /// the leader armed; `Enter` fires the highlighted command (#343).
+    /// Row 0 is `s` (snippets), row 1 is `f` (focus mode).
+    #[test]
+    fn terminal_leader_jk_highlight_and_enter_fire() {
+        let (mut m, mut server) = build_model_with_terminals(1);
+        while server.rx.try_recv().is_ok() {}
+        arm_leader(&mut m);
+        assert_eq!(
+            m.terminal_leader_highlight(),
+            None,
+            "no highlight until navigation"
+        );
+
+        m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
+        assert_eq!(m.terminal_leader_highlight(), Some(0));
+        assert!(
+            m.terminal_leader_pending(),
+            "`j` navigates, the leader stays armed"
+        );
+        m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
+        assert_eq!(m.terminal_leader_highlight(), Some(1));
+        m.dispatch_key(RealmKey::new(Key::Char('k'), RealmMods::NONE));
+        assert_eq!(m.terminal_leader_highlight(), Some(0));
+        m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
+        assert_eq!(m.terminal_leader_highlight(), Some(1));
+
+        assert!(!m.focus_mode, "focus mode starts off");
+        m.dispatch_key(RealmKey::new(Key::Enter, RealmMods::NONE));
+        assert!(!m.terminal_leader_pending(), "Enter resolves the leader");
+        assert_eq!(m.terminal_leader_highlight(), None);
+        assert!(
+            m.focus_mode,
+            "Enter fires the highlighted `focus mode` command"
+        );
+    }
+
+    /// `]]` + an arrow key still moves tile focus (#286): arrows keep
+    /// their tile / tab meaning and are never hijacked for popup
+    /// navigation (#343).
+    #[test]
+    fn terminal_leader_arrows_still_move_tiles_not_the_highlight() {
+        let (mut m, mut server) = build_model_with_terminals(2);
+        m.terminals.set_layout(two_leaf_split());
+        while server.rx.try_recv().is_ok() {}
+        arm_leader(&mut m);
+
+        m.dispatch_key(RealmKey::new(Key::Right, RealmMods::NONE));
+        assert_eq!(
+            m.terminal_leader_highlight(),
+            None,
+            "arrows don't navigate the popup"
+        );
+        assert!(
+            !m.terminal_leader_pending(),
+            "the arrow fired MoveTile and consumed the leader"
+        );
+        assert_eq!(
+            m.terminals.focused_terminal_id(),
+            Some(TerminalId(2)),
+            "`]]→` moved tile focus, not a highlight"
+        );
+    }
+
+    /// In a split layout the popup carries a `←↓↑→ move tile` aggregate
+    /// row that has no single `Enter`-fireable key; `j`/`k` step past it
+    /// so the highlight only ever lands on a dispatchable row (#343).
+    #[test]
+    fn terminal_leader_jk_skips_the_non_dispatchable_aggregate_row() {
+        let (mut m, mut server) = build_model_with_terminals(2);
+        m.terminals.set_layout(two_leaf_split());
+        while server.rx.try_recv().is_ok() {}
+        arm_leader(&mut m);
+
+        // Splits menu order: s,f,q,`,|,- then the `move tile` aggregate
+        // at index 6, then `x` at index 7. Six `j` presses reach index 5.
+        for _ in 0..6 {
+            m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
+        }
+        assert_eq!(
+            m.terminal_leader_highlight(),
+            Some(5),
+            "reached the last row before the aggregate"
+        );
+        m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
+        assert_eq!(
+            m.terminal_leader_highlight(),
+            Some(7),
+            "`j` jumps over the aggregate at index 6"
+        );
+        m.dispatch_key(RealmKey::new(Key::Char('k'), RealmMods::NONE));
+        assert_eq!(
+            m.terminal_leader_highlight(),
+            Some(5),
+            "`k` skips it going back too"
+        );
     }
 
     /// `]]x` closes the focused tile: its PTY is killed daemon-side and

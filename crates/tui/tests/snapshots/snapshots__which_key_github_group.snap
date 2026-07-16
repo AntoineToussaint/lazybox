@@ -4,7 +4,6 @@ expression: rendered
 ---
 
 
-
  g ▸ github
   m  merge PR
   g  auto-merge on green
@@ -12,3 +11,5 @@ expression: rendered
   a  assignees
   l  labels
   o  open in browser
+
+ ↑↓ select · ↵ · Esc

@@ -493,6 +493,12 @@ pub struct Model<T: TerminalAdapter> {
     /// Drives the which-key popup in `view`. Operator-pending, not
     /// timed — see `LeaderLatch`.
     leader: crate::confirm_latch::LeaderLatch<lazybox_tui_core::action::KeyStroke>,
+    /// Highlighted row in the armed catalog leader's which-key popup, or
+    /// `None` when nothing is highlighted yet (the direct-letter default).
+    /// Arrow / `j` / `k` set and move it; `Enter` fires the highlighted
+    /// continuation. Reset whenever the leader (re)arms or disarms so the
+    /// highlight never outlives its popup (#343).
+    leader_highlight: Option<usize>,
     /// Last left-click position + timestamp. A second left-click on
     /// the same row within `DOUBLE_CLICK_WINDOW` is treated as a
     /// double-click; the right pane's double-click handler then
@@ -569,6 +575,11 @@ pub struct Model<T: TerminalAdapter> {
     /// Cleared by the completing key, or on an abandonment signal (a
     /// mouse click, via `cancel_leader_chords`).
     terminal_leader_armed: bool,
+    /// Highlighted row in the armed `]]` leader popup, or `None` for the
+    /// direct-key default. `j` / `k` move it (arrows stay bound to tile /
+    /// tab movement, #286); `Enter` fires the highlighted command. Reset
+    /// on every (dis)arm of the leader (#343).
+    terminal_leader_highlight: Option<usize>,
     /// Pending `--workspace` / `--session` preselect from the CLI.
     /// Applied after the daemon's first Snapshot — by then the
     /// sidebar has the full workspace list and `focus_workspace_key`
@@ -1064,8 +1075,10 @@ impl<T: TerminalAdapter> Model<T> {
             modal_event_tx,
             q_latch: crate::confirm_latch::DoubleTapLatch::new(),
             leader: crate::confirm_latch::LeaderLatch::new(),
+            leader_highlight: None,
             escape_latch: crate::confirm_latch::DoubleTapLatch::new(),
             terminal_leader_armed: false,
+            terminal_leader_highlight: None,
             last_click: None,
             terminal_user_typed_since_focus: false,
             pending_refresh_ack: false,
@@ -3008,23 +3021,7 @@ impl<T: TerminalAdapter> Model<T> {
         // Built only while the leader is armed so the steady-state
         // render pays nothing.
         let leader_menu_rows: Vec<(String, String)> = if self.terminal_leader_armed {
-            let mut rows = terminal_leader::LeaderCmd::menu_rows(
-                self.terminals.layout_is_splits(),
-                self.terminals.visible_terminal_count(),
-            );
-            rows.extend(
-                self.sidebar
-                    .agent_workspace_keys()
-                    .into_iter()
-                    .take(9)
-                    .enumerate()
-                    .filter_map(|(i, k)| {
-                        self.sidebar
-                            .workspace_by_key(&k)
-                            .map(|w| ((i + 1).to_string(), w.name.clone()))
-                    }),
-            );
-            rows
+            self.terminal_leader_menu_rows()
         } else {
             Vec::new()
         };
@@ -3127,6 +3124,7 @@ impl<T: TerminalAdapter> Model<T> {
                     prefix,
                     leader_group,
                     &leader_rows,
+                    self.leader_highlight,
                 );
             }
             // Which-key popup for the armed terminal `]]` leader (#205,
@@ -3139,6 +3137,7 @@ impl<T: TerminalAdapter> Model<T> {
                     area,
                     self.ui_defaults.terminal_escape_char,
                     &leader_menu_rows,
+                    self.terminal_leader_highlight,
                 );
             }
             // After the first press of the `q q` quit chord, surface a

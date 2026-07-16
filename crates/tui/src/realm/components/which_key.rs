@@ -21,6 +21,42 @@ use tuirealm::ratatui::widgets::{Block, Clear, Paragraph};
 /// wrapping; clamped to the frame width on a narrow terminal.
 const PANEL_W: u16 = 28;
 
+/// Draw one `key  label` menu row into `rect`, styled selected when it
+/// carries the popup highlight (arrow / `j`/`k` navigation, #343): a
+/// `fill` background across the row plus a `▸` caret, matching the
+/// snippet picker's cursor row. Unselected rows keep the flat `surface`
+/// look. Shared by the catalog and terminal-leader popups so their
+/// highlight reads identically.
+fn render_menu_row(
+    frame: &mut Frame,
+    rect: Rect,
+    key: &str,
+    label: &str,
+    selected: bool,
+    theme: &crate::theme::Theme,
+) {
+    let row_bg = if selected { theme.fill } else { theme.surface };
+    if selected {
+        frame.render_widget(Block::default().style(Style::default().bg(row_bg)), rect);
+    }
+    let mut key_style = Style::default()
+        .bg(row_bg)
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let mut label_style = Style::default().bg(row_bg).fg(theme.text_strong);
+    if selected {
+        label_style = label_style.add_modifier(Modifier::BOLD);
+        key_style = key_style.fg(theme.text_strong);
+    }
+    let caret = if selected { "▸ " } else { "  " };
+    let line = Line::from(vec![
+        Span::styled(format!("{caret}{key}"), key_style),
+        Span::styled("  ", Style::default().bg(row_bg)),
+        Span::styled(label.to_string(), label_style),
+    ]);
+    frame.render_widget(Paragraph::new(line), rect);
+}
+
 /// Render the which-key popup for an armed leader `prefix`. `rows` are
 /// the `(next-key-display, label)` continuations of that prefix — a
 /// pure function of the catalog supplied by the caller, no longer a
@@ -30,17 +66,22 @@ const PANEL_W: u16 = 28;
 /// advertises (#304). `area` is the full frame; the popup floats in
 /// the bottom-left corner, one row above the footer so it doesn't
 /// cover the hint bar.
+///
+/// `highlight` is the row the arrow / `j` / `k` keys have moved the
+/// selection to (`None` in the direct-letter default); it's drawn with
+/// a `fill`-backed caret so `Enter` has a visible target (#343).
 pub fn render(
     frame: &mut Frame,
     area: Rect,
     prefix: KeyStroke,
     group: Option<&str>,
     rows: &[(String, String)],
+    highlight: Option<usize>,
 ) {
     let theme = crate::theme::current();
-    // One title row + one row per continuation, plus a blank row top
-    // and bottom for breathing room.
-    let panel_h = (rows.len() as u16 + 3).min(area.height);
+    // Title + one row per continuation + a footer hint, plus a blank row
+    // top and bottom for breathing room.
+    let panel_h = (rows.len() as u16 + 4).min(area.height);
     let panel_w = PANEL_W.min(area.width);
     let panel = Rect {
         x: area.x,
@@ -78,31 +119,48 @@ pub fn render(
         },
     );
 
-    let key_style = Style::default()
-        .bg(theme.surface)
-        .fg(theme.accent)
-        .add_modifier(Modifier::BOLD);
-    let label_style = Style::default().bg(theme.surface).fg(theme.text_strong);
     for (i, (k, label)) in rows.iter().enumerate() {
         let y = panel.y + 2 + i as u16;
         if y >= panel.y + panel.height {
             break;
         }
-        let line = Line::from(vec![
-            Span::styled(format!("  {k}"), key_style),
-            Span::styled("  ", bg),
-            Span::styled(label.clone(), label_style),
-        ]);
-        frame.render_widget(
-            Paragraph::new(line),
+        render_menu_row(
+            frame,
             Rect {
                 x: panel.x,
                 y,
                 width: panel.width,
                 height: 1,
             },
+            k,
+            label,
+            highlight == Some(i),
+            theme,
         );
     }
+
+    // Footer hint: the two ways to pick (type the key, or move the
+    // highlight and confirm) plus cancel — the affordance the arrow
+    // navigation would otherwise be invisible without (#343).
+    render_nav_hint(frame, panel, "↑↓ select · ↵ · Esc", theme);
+}
+
+/// Draw the bottom-row navigation hint for a popup panel. Dim, matching
+/// the yazi-style chrome, on the panel's last row.
+fn render_nav_hint(frame: &mut Frame, panel: Rect, hint: &str, theme: &crate::theme::Theme) {
+    let hint_y = panel.y + panel.height.saturating_sub(1);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!(" {hint} "),
+            Style::default().bg(theme.surface).fg(theme.text_dim),
+        ))),
+        Rect {
+            x: panel.x,
+            y: hint_y,
+            width: panel.width,
+            height: 1,
+        },
+    );
 }
 
 /// Render the which-key nudge shown after the FIRST press of the
@@ -178,8 +236,9 @@ pub fn render_quit_hint(frame: &mut Frame, area: Rect, quit_keys: &str) {
 /// when the agent roster is long. Sized so the fixed command menu (8
 /// rows: snippets/focus/exit/jump + the tile chords, #286) never eats
 /// the whole budget — a few agent-jump rows always show before the
-/// overflow marker.
-const LEADER_MAX_ROWS: usize = 12;
+/// overflow marker. `pub(crate)` so the model can bound `]]`-leader
+/// highlight navigation to the rows the popup actually shows (#343).
+pub(crate) const LEADER_MAX_ROWS: usize = 12;
 
 /// Render the which-key popup for the armed terminal `]]` leader
 /// (issues #205, #252). Lists the leader's command menu — the caller
@@ -190,11 +249,16 @@ const LEADER_MAX_ROWS: usize = 12;
 /// `LEADER_MAX_ROWS` with the tail collapsed to "+N more", so the head
 /// (commands) always survives. Visual twin of [`render`], but the
 /// binding set is the leader menu, so it takes the rows directly.
+///
+/// `highlight` is the row `j` / `k` have moved the selection to (`None`
+/// in the direct-key default), drawn with a `fill`-backed caret so
+/// `Enter` has a visible target (#343).
 pub fn render_terminal_leader(
     frame: &mut Frame,
     area: Rect,
     escape_char: char,
     rows: &[(String, String)],
+    highlight: Option<usize>,
 ) {
     let theme = crate::theme::current();
     let shown = rows.len().min(LEADER_MAX_ROWS);
@@ -234,29 +298,23 @@ pub fn render_terminal_leader(
         },
     );
 
-    let key_style = Style::default()
-        .bg(theme.surface)
-        .fg(theme.accent)
-        .add_modifier(Modifier::BOLD);
-    let label_style = Style::default().bg(theme.surface).fg(theme.text_strong);
     for (i, (k, desc)) in rows.iter().take(shown).enumerate() {
         let y = panel.y + 2 + i as u16;
         if y >= panel.y + panel.height {
             break;
         }
-        let line = Line::from(vec![
-            Span::styled(format!("  {k}"), key_style),
-            Span::styled("  ", bg),
-            Span::styled(desc.clone(), label_style),
-        ]);
-        frame.render_widget(
-            Paragraph::new(line),
+        render_menu_row(
+            frame,
             Rect {
                 x: panel.x,
                 y,
                 width: panel.width,
                 height: 1,
             },
+            k,
+            desc,
+            highlight == Some(i),
+            theme,
         );
     }
     if overflow > 0 {
@@ -276,22 +334,12 @@ pub fn render_terminal_leader(
             );
         }
     }
-    // Footer hint on the bottom row of the panel. The commands (incl.
-    // `q` exit) are listed above; Esc cancels back to the terminal. The
-    // leader is non-timed (#252), so nothing leaves on its own.
-    let hint_y = panel.y + panel.height.saturating_sub(1);
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            " Esc cancel ".to_string(),
-            Style::default().bg(theme.surface).fg(theme.text_dim),
-        ))),
-        Rect {
-            x: panel.x,
-            y: hint_y,
-            width: panel.width,
-            height: 1,
-        },
-    );
+    // Footer hint on the bottom row. The commands (incl. `q` exit) are
+    // listed above; you can also move the highlight with `j`/`k` and
+    // confirm — arrows stay bound to tile / tab movement here (#286), so
+    // the hint names the letters, not the arrows (#343). `Esc` cancels;
+    // the leader is non-timed (#252) so nothing leaves on its own.
+    render_nav_hint(frame, panel, "j/k select · ↵ · Esc", theme);
 }
 
 #[cfg(test)]
@@ -331,9 +379,13 @@ mod tests {
     }
 
     fn render_leader(rows: &[(String, String)]) -> String {
+        render_leader_highlight(rows, None)
+    }
+
+    fn render_leader_highlight(rows: &[(String, String)], highlight: Option<usize>) -> String {
         let (w, h) = (80u16, 24u16);
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
-        term.draw(|f| render_terminal_leader(f, Rect::new(0, 0, w, h), ']', rows))
+        term.draw(|f| render_terminal_leader(f, Rect::new(0, 0, w, h), ']', rows, highlight))
             .unwrap();
         let buf = term.backend().buffer().clone();
         (0..h)
@@ -342,7 +394,33 @@ mod tests {
             .join("\n")
     }
 
-    /// The leader popup lists the command menu and an Esc hint.
+    /// The highlighted row carries a `▸` caret so `Enter` has a visible
+    /// target; the others don't (#343).
+    #[test]
+    fn highlighted_row_shows_a_caret() {
+        let rows = vec![
+            ("s".to_string(), "snippets".to_string()),
+            ("f".to_string(), "focus mode".to_string()),
+            ("q".to_string(), "exit to sidebar".to_string()),
+        ];
+        let out = render_leader_highlight(&rows, Some(1));
+        let caret_line = out
+            .lines()
+            .find(|l| l.contains('▸'))
+            .expect("a row is caret-marked");
+        assert!(
+            caret_line.contains("focus mode"),
+            "the caret sits on the highlighted row: {caret_line}"
+        );
+        assert_eq!(out.matches('▸').count(), 1, "only one row is highlighted");
+        assert!(
+            !render_leader(&rows).contains('▸'),
+            "no caret without a highlight"
+        );
+    }
+
+    /// The leader popup lists the command menu and a footer that names
+    /// both the `j`/`k` highlight nav and the `Esc` cancel (#343).
     #[test]
     fn terminal_leader_shows_command_menu() {
         let rows = vec![
@@ -353,7 +431,8 @@ mod tests {
         let out = render_leader(&rows);
         assert!(out.contains("snippets"), "missing snippets row: {out}");
         assert!(out.contains("exit to sidebar"), "missing exit row: {out}");
-        assert!(out.contains("Esc cancel"), "missing cancel hint: {out}");
+        assert!(out.contains("j/k"), "missing highlight-nav hint: {out}");
+        assert!(out.contains("Esc"), "missing cancel affordance: {out}");
     }
 
     /// With more rows than the popup caps at, the *head* of the list

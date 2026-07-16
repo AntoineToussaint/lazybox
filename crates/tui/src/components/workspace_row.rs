@@ -54,6 +54,11 @@ pub struct WorkspaceRowCtx<'a> {
     /// slot. Mutually exclusive with `asking`/`working` upstream;
     /// asking and working take precedence defensively if both were set.
     pub done: bool,
+    /// The workspace's agent process has exited (`AgentState::Exited` —
+    /// clean or crash; #356/#357). Renders `✗` in the same slot so a dead
+    /// agent reads as "ended, restart it" instead of blanking to nothing.
+    /// Lowest precedence: a live signal (asking/working/done) always wins.
+    pub exited: bool,
     /// Current spinner glyph for the `working` slot. Shared across all
     /// rows in a render pass — the sidebar advances a single frame
     /// counter on a low-rate tick (see `Sidebar::tick_working`), so
@@ -324,10 +329,14 @@ fn cell_role(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 ///     glyph: the agent is making progress right now.
 ///   - `Done`        → ` ✓ ` (success, bold) — a static glyph: the
 ///     agent finished its turn and is waiting to be looked at (#80).
+///   - `Exited`      → ` ✗ ` (dim) — a static glyph: the agent process
+///     ended (clean or crash; #356/#357). Not an alert color — a dead
+///     agent is a fact to notice, not an emergency.
 ///   - `Idle`        → blank.
 /// Reserved width either way so the kind/title to the right don't
 /// jitter as a row moves between states. Precedence asking > working >
-/// done, applied defensively though the states are disjoint upstream.
+/// done > exited, applied defensively though the states are disjoint
+/// upstream (a live signal always wins over the terminal exit marker).
 fn cell_state(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     let (glyph, fg) = if ctx.asking {
         ("?", ctx.theme.warn)
@@ -335,6 +344,8 @@ fn cell_state(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         (ctx.working_glyph, ctx.theme.accent)
     } else if ctx.done {
         ("✓", ctx.theme.success)
+    } else if ctx.exited {
+        ("✗", ctx.theme.text_dim)
     } else {
         return Cell::empty();
     };
@@ -725,6 +736,7 @@ mod tests {
             asking: false,
             working: false,
             done: false,
+            exited: false,
             working_glyph: working_glyph(0),
             badges: vec![],
             agent_number: None,
@@ -909,6 +921,34 @@ mod tests {
         assert_eq!(cell_text(&cell), " ✓ ");
     }
 
+    /// State slot: exited → 3 cells with a `✗`, same reserved width as the
+    /// other pills (#356/#357).
+    #[test]
+    fn cell_state_three_cells_with_cross_when_exited() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.exited = true;
+        let cell = cell_state(&ctx);
+        assert_eq!(cell.width(), 3);
+        assert_eq!(cell_text(&cell), " ✗ ");
+    }
+
+    /// State slot precedence: a live signal (here `done`) wins over the
+    /// terminal `exited` marker if both are somehow set.
+    #[test]
+    fn cell_state_done_wins_over_exited() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.done = true;
+        ctx.exited = true;
+        let cell = cell_state(&ctx);
+        assert_eq!(cell_text(&cell), " ✓ ");
+    }
+
     /// State slot precedence: working wins over done if both flags are
     /// somehow set (disjoint upstream, but the slot renders one thing).
     #[test]
@@ -1012,6 +1052,7 @@ mod tests {
             asking: false,
             working: false,
             done: false,
+            exited: false,
             working_glyph: working_glyph(0),
             badges: vec![],
             agent_number: None,
@@ -1157,6 +1198,7 @@ mod tests {
             asking: false,
             working: false,
             done: false,
+            exited: false,
             working_glyph: working_glyph(0),
             badges: vec![],
             agent_number: None,
@@ -1933,6 +1975,7 @@ mod tests {
             asking: false,
             working: false,
             done: false,
+            exited: false,
             working_glyph: working_glyph(0),
             badges: vec![],
             agent_number: None,

@@ -1505,8 +1505,10 @@ async fn answering_a_prompt_clears_input_needed_and_does_not_bounce_back() {
         mock.emit(&key, "Created the file.\nAll done.").await;
 
         // The next state transition (the quiet classification of the
-        // resting screen) must be Idle, NOT InputNeeded — the pill is
-        // gone and stays gone.
+        // resting screen) must be Done — the agent worked (answered, acted)
+        // and came to rest, so it settles to Done, NOT back to InputNeeded.
+        // The #101 stale-buffer regression was the bounce to InputNeeded;
+        // the #357 one-way door is why the settle is Done and never Idle.
         let next = wait_for(
             &mut client,
             |e| matches!(e, Event::AgentState { .. }),
@@ -1517,8 +1519,8 @@ async fn answering_a_prompt_clears_input_needed_and_does_not_bounce_back() {
         match next {
             Event::AgentState { state, .. } => assert_eq!(
                 state,
-                lazybox_ipc::AgentState::Idle,
-                "after answering, the prompt-free follow-up must settle to Idle, \
+                lazybox_ipc::AgentState::Done,
+                "after answering, the prompt-free follow-up must settle to Done, \
                  not bounce back to InputNeeded (the #101 stale-buffer regression)"
             ),
             _ => unreachable!(),
@@ -1818,6 +1820,104 @@ async fn bare_keystroke_does_not_clear_free_text_elicitation() {
     .expect("deadline");
 }
 
+/// #357: a `Done` agent handed a fresh prompt (Enter) resumes to
+/// `Working`. For a hookless agent (Codex, Cursor) this optimistic flip is
+/// the ONLY path out of `Done` — byte-flow `Working` can't clear it (a
+/// stray repaint must not un-finish a turn) and there is no
+/// `UserPromptSubmit` hook — so without it the pill would stay stuck on
+/// `✓ done` through the whole next turn.
+#[tokio::test]
+async fn done_agent_resumes_working_on_a_fresh_prompt() {
+    timeout(TEST_DEADLINE, async {
+        let (config, _mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config.clone()).await;
+        let terminal_id = spawn_and_wait(&mut client, TerminalKind::Agent("codex".into())).await;
+
+        // The agent finished a turn: its pill is Done.
+        config
+            .agent_states
+            .lock()
+            .await
+            .insert(terminal_id, lazybox_ipc::AgentState::Done);
+
+        // The user submits a new prompt (text + Enter) → a new turn.
+        client
+            .send(Command::Write {
+                terminal_id,
+                bytes: b"do more\r".to_vec(),
+            })
+            .unwrap();
+        let resumed = wait_for(
+            &mut client,
+            |e| {
+                matches!(
+                    e,
+                    Event::AgentState {
+                        state: lazybox_ipc::AgentState::Working,
+                        ..
+                    }
+                )
+            },
+            Duration::from_secs(2),
+        )
+        .await;
+        assert!(
+            resumed.is_some(),
+            "a Done agent handed a fresh prompt must resume Working"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
+/// The other half: a BARE keystroke (no Enter) at a `Done` agent must NOT
+/// resume Working — only a submitted line starts a new turn. A stray key
+/// at a finished agent leaves the `✓` in place.
+#[tokio::test]
+async fn done_agent_ignores_a_bare_keystroke() {
+    timeout(TEST_DEADLINE, async {
+        let (config, _mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config.clone()).await;
+        let terminal_id = spawn_and_wait(&mut client, TerminalKind::Agent("codex".into())).await;
+        config
+            .agent_states
+            .lock()
+            .await
+            .insert(terminal_id, lazybox_ipc::AgentState::Done);
+
+        client
+            .send(Command::Write {
+                terminal_id,
+                bytes: b"d".to_vec(),
+            })
+            .unwrap();
+        let flipped = wait_for(
+            &mut client,
+            |e| {
+                matches!(
+                    e,
+                    Event::AgentState {
+                        state: lazybox_ipc::AgentState::Working,
+                        ..
+                    }
+                )
+            },
+            Duration::from_millis(400),
+        )
+        .await;
+        assert!(
+            flipped.is_none(),
+            "a bare keystroke at a Done agent must not resume Working"
+        );
+        assert_eq!(
+            config.agent_state_for(terminal_id).await,
+            Some(lazybox_ipc::AgentState::Done),
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
 /// Companion regression to the above: Claude's choosers accept a BARE
 /// digit (1-9), y/n, or Esc — no Enter at all. Pre-fix the optimistic
 /// InputNeeded → Working flip (and the detect-buffer reset behind it)
@@ -1932,6 +2032,32 @@ async fn streaming_holds_working_until_quiet_window_elapses() {
                 }
             )
         };
+
+        // A fresh spawn's very first output is boot, not work — so the agent
+        // boots and settles at its composer first. Emitting the real
+        // idle-composer render lets the pump recognize "ready" (latching the
+        // state machine's booted flag) and classify the resting screen to
+        // Idle. Only past boot does byte flow read as Working rather than
+        // being held as boot chrome (#357).
+        let idle_composer = include_bytes!("../../agents/tests/fixtures/idle_composer.bin");
+        mock.emit(&key, idle_composer).await;
+        tokio::time::sleep(Duration::from_secs(6)).await; // past the quiet window
+        assert!(
+            wait_for(
+                &mut client,
+                |e| matches!(
+                    e,
+                    Event::AgentState {
+                        state: lazybox_ipc::AgentState::Idle,
+                        ..
+                    }
+                ),
+                Duration::from_secs(2),
+            )
+            .await
+            .is_some(),
+            "the booted agent settles to Idle at its composer",
+        );
 
         // A permission prompt paints mid-stream. Bytes flowing → the
         // immediate reading is the spinner, never the `?`.

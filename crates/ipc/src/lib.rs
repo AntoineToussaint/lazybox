@@ -155,20 +155,29 @@ impl TerminalKind {
 }
 
 /// What the agent's PTY is doing right now. Drives the side-panel
-/// state slot (working spinner / "needs input" pill / done / idle) and
-/// the TerminalStack tab badge.
+/// state slot (working spinner / "needs input" pill / done / idle /
+/// exited) and the TerminalStack tab badge.
 ///
-/// The four states are mutually exclusive and share a single UI
-/// slot per session. They're produced per-agent-kind by
-/// [`Agent::detect_state`](../lazybox_agents/trait.Agent.html) and the
-/// agent's lifecycle hooks — each agent decides how to recognise
-/// "working" / "input needed" from its own PTY output. An agent with
-/// no opinion returns `None`, which consumers treat as `Idle` (so an
-/// unknown agent never falsely reports `Working`).
+/// The states are mutually exclusive and share a single UI slot per
+/// session. They're produced per-agent-kind by
+/// [`Agent::detect_state`](../lazybox_agents/trait.Agent.html), the
+/// agent's lifecycle hooks, and the PTY-exit path — each agent decides
+/// how to recognise "working" / "input needed" from its own PTY output.
+/// An agent with no opinion returns `None`, which consumers treat as
+/// `Idle` (so an unknown agent never falsely reports `Working`).
+///
+/// The lifecycle is a real state machine (see
+/// `lazybox_agents::AgentStateMachine`). The load-bearing rule: **once
+/// an agent is `Working` it can only leave for `Done`, `InputNeeded`,
+/// or `Exited`** — never back to `Idle`. A working agent that comes to
+/// rest has *finished a turn* (`Done`); it hasn't reverted to the
+/// never-worked `Idle`. That makes the "working spinner silently
+/// vanishes to a blank pill" flap structurally impossible rather than
+/// something the UI has to damp.
 ///
 /// `InputNeeded` and `Done` are the two states where the user must
 /// act, so they raise an alert (desktop notification + footer notice);
-/// `Working` and `Idle` are silent.
+/// `Working`, `Idle`, and `Exited` are silent.
 ///
 /// Variants are appended, never reordered: the socket transport
 /// encodes this enum by bincode ordinal.
@@ -183,17 +192,29 @@ pub enum AgentState {
     InputNeeded,
     /// Idle with no active work: freshly launched, or sitting at a
     /// ready composer having never run a task. The safe default for
-    /// any agent that can't tell. Silent — nothing to act on.
+    /// any agent that can't tell. Silent — nothing to act on. An agent
+    /// only sits here *before* its first turn; once it has worked it
+    /// resolves to `Done`, not back to `Idle`.
     Idle,
-    /// Finished its turn — the agent ran work and has now come to rest
-    /// (Claude's `Stop` hook). Distinct from `Idle`, which never
-    /// worked. → alert. Sticky: a subsequent idle reading keeps `Done`
-    /// until the agent works again or asks for input.
+    /// Finished its turn — the agent ran work and has now come to rest.
+    /// Distinct from `Idle`, which never worked. → alert. Sticky: a
+    /// subsequent idle reading keeps `Done` until the agent works again
+    /// or asks for input.
     ///
-    /// Hook-exclusive: only the lifecycle-hook path ever emits `Done`.
-    /// The PTY screen-scrape detector has no "finished" anchor to read
-    /// and tops out at `Idle`, so a hookless agent never reaches `Done`.
+    /// Reached two ways: a lifecycle hook (Claude's `Stop`), or — for
+    /// hookless agents (Codex, Cursor) — the PTY state machine promoting
+    /// a `Working`-agent that settles at a resting composer, since
+    /// "came to rest after working" is the only finished-turn signal a
+    /// screen-scrape can offer.
     Done,
+    /// The agent's process ended — a clean exit or a crash (issue #356:
+    /// the `w x` Codex that died and left a stuck "working" pill). The
+    /// terminal, final state: the PTY is gone, so no reading can move
+    /// off it. `code` is the process exit status when observable
+    /// (`Some(0)` clean, `Some(n)` failed, `None` when the exit couldn't
+    /// be read). Set by the PTY-exit teardown, cleared when a fresh
+    /// agent is spawned into the same workspace.
+    Exited { code: Option<i32> },
 }
 
 /// A normalized lifecycle hook fired by an agent, decoupled from the

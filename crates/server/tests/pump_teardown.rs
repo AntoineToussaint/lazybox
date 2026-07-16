@@ -108,6 +108,31 @@ async fn spawn_shell(client: &mut lazybox_ipc::Client) -> lazybox_ipc::TerminalI
     }
 }
 
+async fn spawn_agent(client: &mut lazybox_ipc::Client) -> lazybox_ipc::TerminalId {
+    client
+        .send(Command::Spawn {
+            model_alias: None,
+            session_key: "test:ws-agent-exit".into(),
+            session_id: None,
+            kind: TerminalKind::Agent("claude".into()),
+            cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
+            initial_prompt: None,
+            on_main: false,
+        })
+        .unwrap();
+    match wait_for(
+        client,
+        |e| matches!(e, Event::TerminalSpawned { .. }),
+        Duration::from_secs(2),
+    )
+    .await
+    .expect("TerminalSpawned arrived")
+    {
+        Event::TerminalSpawned { terminal_id, .. } => terminal_id,
+        _ => unreachable!(),
+    }
+}
+
 /// Poll `probe` until it returns true or the budget lapses.
 async fn eventually<F, Fut>(mut probe: F, budget: Duration) -> bool
 where
@@ -167,6 +192,101 @@ async fn self_exiting_terminal_releases_backend_slot() {
             )
             .await,
             "pump teardown must release the backend session slot on self-exit"
+        );
+    })
+    .await
+    .expect("test deadline exceeded");
+}
+
+/// #356/#357: an agent whose process dies must leave its last live pill
+/// for the terminal `Exited` state — it must NEVER stay stuck on
+/// `Working` (the `w x` Codex that crashed and kept spinning forever).
+/// The teardown broadcasts `AgentState::Exited { code }` before it sweeps
+/// the maps, carrying the process exit status.
+#[tokio::test]
+async fn exiting_agent_broadcasts_exited_not_stuck_working() {
+    timeout(TEST_DEADLINE, async {
+        let _home = IsolatedConfigHome::new();
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config.clone()).await;
+        let terminal_id = spawn_agent(&mut client).await;
+        let key = config
+            .backend_key_for(terminal_id)
+            .await
+            .expect("terminal registered");
+
+        // The agent is mid-turn: its pill is `Working`.
+        config
+            .agent_states
+            .lock()
+            .await
+            .insert(terminal_id, lazybox_ipc::AgentState::Working);
+
+        // The process crashes (non-zero exit), nobody calls Close/kill.
+        mock.finish(&key, 1).await;
+
+        // The terminal state must move OFF Working onto Exited, carrying
+        // the exit code — this is the assertion that fails if a dead agent
+        // is left stuck "working".
+        let exited = wait_for(
+            &mut client,
+            |e| {
+                matches!(
+                    e,
+                    Event::AgentState {
+                        terminal_id: t,
+                        state: lazybox_ipc::AgentState::Exited { .. },
+                        ..
+                    } if *t == terminal_id
+                )
+            },
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("a dead agent must broadcast Exited, not stay Working");
+        match exited {
+            Event::AgentState {
+                state: lazybox_ipc::AgentState::Exited { code },
+                ..
+            } => assert_eq!(code, Some(1), "Exited carries the process exit code"),
+            _ => unreachable!(),
+        }
+    })
+    .await
+    .expect("test deadline exceeded");
+}
+
+/// A plain shell that exits must NOT emit an `AgentState` at all — only
+/// agent terminals carry a state pill, so a shell's exit is just
+/// `TerminalExited`. Guards the teardown's agent-only gate.
+#[tokio::test]
+async fn exiting_shell_emits_no_agent_state() {
+    timeout(TEST_DEADLINE, async {
+        let _home = IsolatedConfigHome::new();
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config.clone()).await;
+        let terminal_id = spawn_shell(&mut client).await;
+        let key = config
+            .backend_key_for(terminal_id)
+            .await
+            .expect("terminal registered");
+
+        mock.finish(&key, 0).await;
+
+        // The exit itself must arrive, but no AgentState may precede or
+        // follow it for a shell.
+        let saw_agent_state = wait_for(
+            &mut client,
+            |e| match e {
+                Event::AgentState { terminal_id: t, .. } => *t == terminal_id,
+                _ => false,
+            },
+            Duration::from_millis(400),
+        )
+        .await;
+        assert!(
+            saw_agent_state.is_none(),
+            "a shell exit must not broadcast any AgentState"
         );
     })
     .await

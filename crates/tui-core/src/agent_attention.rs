@@ -160,6 +160,20 @@ pub fn workspace_is_asking(
     )
 }
 
+/// True iff the workspace's agent process has exited (clean or crash;
+/// drives the `✗` indicator). Kept distinct from a blank/`Idle` row so a
+/// dead agent reads as "the process ended, restart it" rather than
+/// silently vanishing (#356/#357).
+pub fn workspace_is_exited(
+    workspace: &Workspace,
+    states: &HashMap<SessionKey, AgentState>,
+) -> bool {
+    matches!(
+        workspace_agent_state(workspace, states),
+        Some(AgentState::Exited { .. })
+    )
+}
+
 /// Pick the next workspace that needs the user's attention, starting
 /// after `current` in `keys_order`. Wraps around. Returns `None`
 /// when no workspace is asking.
@@ -229,7 +243,8 @@ mod tests {
     use lazybox_core::WorkspaceKey;
     use std::collections::HashSet;
 
-    const ALL: [AgentState; 4] = [Working, InputNeeded, Idle, Done];
+    const EXITED: AgentState = AgentState::Exited { code: Some(1) };
+    const ALL: [AgentState; 5] = [Working, InputNeeded, Idle, Done, EXITED];
 
     fn ws_key(n: u32) -> SessionKey {
         SessionKey::from(&WorkspaceKey::new(format!("owner/repo#{n}")))
@@ -353,6 +368,7 @@ mod tests {
                     workspace_is_asking(&ws, &states),
                     workspace_is_working(&ws, &states),
                     workspace_is_done(&ws, &states),
+                    workspace_is_exited(&ws, &states),
                 ]
                 .iter()
                 .filter(|p| **p)

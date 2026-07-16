@@ -1,23 +1,26 @@
-  Tab             cycle panes       Shift+R         refresh            Ctrl+L          redraw
-  ,               settings          t               theme              ]               snippets
-  ?               help              Shift+T         tour               Shift+D         sync status
-  Shift+M         messages          Esc             dismiss            `               jump to workspace
-  !               next asking       Shift+F         next failing       .               focus mode
-  Shift+W         start agent       Shift+P         activity pane      F8 | Alt-s | Ctrl-Alt-s  mouse ca
-  Shift+Arrows    resize splitters  q q             quit
-  Workspace
-  Enter           open              w               work on this       s               shell
-  e               editor            m               mark read          z               snooze
-  Shift+Z         long snooze       Shift+N         new project        n               new workspace
-  r               reply             Shift+A         adopt sessions     Shift+J         join into PR
-  Shift+X         archive           Shift+C         close issue
-  Sidebar
-  f               filter            o               sort               Shift+S         mailbox
-  /               search            Space           collapse group     v               select
-  Shift+B         broadcast
-  Activity
-  Enter           toggle section    →/←             expand/collapse    g               top
-  Shift+G         bottom            d               description        Space           select row
-  z               undo mark-read
-  Terminal
-  Shift+PgUp/Dn   scroll            ]]              exit to sidebar    ]]<key>         snippets
+ │ Tab             cycle panes                        Shift+R         refresh                          │
+ │ Ctrl+L          redraw                             ,               settings                         │
+ │ t               theme                              ]               snippets                         │
+ │ ?               ask lazybox                        Shift+T         tour                             │
+ │ Shift+D         sync diagnostics                   Shift+M         messages                         │
+ │ Esc             dismiss                            `               jump to workspace                │
+ │ !               next asking                        Shift+F         next failing                     │
+ │ .               focus mode                         Shift+W         start work                       │
+ │ Shift+P         activity pane                      F8 (+2)         text selection                   │
+ │ Shift+Arrows    resize splitters                   q q             quit                             │
+ │ Workspace                                                                                           │
+ │ Enter           open                               s               shell                            │
+ │ e               editor                             m               mark read                        │
+ │ z               snooze                             r               reply                            │
+ │ Sidebar                                                                                             │
+ │ f               filter                             o               order                            │
+ │ Shift+S         switch mailbox                     /               search                           │
+ │ Space           collapse group                     v               select                           │
+ │ Shift+B         broadcast                                                                           │
+ │ Activity                                                                                            │
+ │ Enter           toggle section                     →/←             expand/collapse                  │
+ │ g               top                                Shift+G         bottom                           │
+ │ d               description                        Space           select row                       │
+ │ z               undo mark-read                                                                      │
+ │ Terminal                                                                                            │
+ │ Shift+PgUp/Dn   scroll                             ]]q             exit to sidebar                  │

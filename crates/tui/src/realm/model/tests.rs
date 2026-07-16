@@ -4396,6 +4396,18 @@ mod wheel_routing_tests {
             m.layout.right_top_pct,
             m.layout.sidebar_user_resized,
         );
+        // Render once so the terminal pane records its tile rect. The
+        // wheel handler hit-tests wheel coordinates against it (#362),
+        // and in the real app a render always precedes a mouse event.
+        {
+            use tuirealm::ratatui::{Terminal, backend::TestBackend};
+            let mut term = Terminal::new(TestBackend::new(
+                m.layout.last_area.width,
+                m.layout.last_area.height,
+            ))
+            .unwrap();
+            term.draw(|f| m.terminals.view_in(bottom, f)).unwrap();
+        }
         (m, server, bottom)
     }
 
@@ -4923,6 +4935,152 @@ mod leader_tile_tests {
             }
         }
         assert!(saw_persist, "tile-focus moves persist the layout");
+    }
+
+    /// #362: a wheel event over the LEFT tile scrolls the left
+    /// terminal's scrollback, not the focused RIGHT one. Before the fix
+    /// the handler always scrolled the focused terminal, so hovering the
+    /// left tile moved the right shell. Drives the real `handle_mouse`
+    /// route end to end.
+    #[test]
+    fn wheel_over_unfocused_tile_leaves_the_focused_tile_unscrolled() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        use tuirealm::ratatui::{Terminal, backend::TestBackend};
+
+        let (mut m, mut server) = build_model_with_terminals(2);
+        m.layout.last_area = Rect::new(0, 0, 120, 40);
+        // Focus the RIGHT tile (terminal 2); hover will land on the left.
+        m.terminals.set_layout(lazybox_core::SessionLayout::Splits {
+            tree: lazybox_core::TileTree::HSplit {
+                left: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 1 }),
+                right: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 2 }),
+                ratio: 50,
+            },
+            focused: vec![1],
+        });
+        assert_eq!(m.terminals.focused_terminal_id(), Some(TerminalId(2)));
+
+        // Fill both shells with scrollback so there's somewhere to move.
+        for id in [1u64, 2] {
+            let mut bytes = Vec::new();
+            for i in 0..200 {
+                bytes.extend_from_slice(format!("t{id} line {i}\r\n").as_bytes());
+            }
+            m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
+                terminal_id: TerminalId(id),
+                bytes,
+                seq: 1,
+            });
+        }
+
+        // Render the terminal pane so each tile's rect is recorded for
+        // the wheel hit-test.
+        let area = m.layout.last_area;
+        let (_, _, bottom) = m.effective_pane_rects(area);
+        let mut term = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        term.draw(|f| m.terminals.view_in(bottom, f)).unwrap();
+
+        let focused_offset = |m: &Model<tuirealm::terminal::TestTerminalAdapter>| -> u64 {
+            m.terminals
+                .scrollbar_summary()
+                .expect("summary")
+                .split_whitespace()
+                .find_map(|kv| kv.strip_prefix("offset="))
+                .expect("offset field")
+                .parse()
+                .expect("numeric offset")
+        };
+        let before = focused_offset(&m);
+        while server.rx.try_recv().is_ok() {}
+
+        // Wheel a few cells into the LEFT half of the body.
+        m.redraw = false;
+        m.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: bottom.x + 4,
+            row: bottom.y + 6,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        });
+
+        assert_eq!(
+            focused_offset(&m),
+            before,
+            "wheeling over the unfocused left tile must not scroll the focused right tile",
+        );
+        assert!(m.redraw, "scrolling the hovered tile repaints");
+        assert!(
+            server.rx.try_recv().is_err(),
+            "a local scroll of the hovered tile sends no IPC",
+        );
+    }
+
+    /// #362: a wheel over a non-focused tile running a mouse-tracking
+    /// alt-screen app forwards the SGR report to THAT tile, not the
+    /// focused one. Proves the forward path (not just local scrollback)
+    /// routes by hover — the SGR write must target the hovered terminal.
+    #[test]
+    fn wheel_over_unfocused_tile_forwards_sgr_to_that_tile() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        use tuirealm::ratatui::{Terminal, backend::TestBackend};
+
+        let (mut m, mut server) = build_model_with_terminals(2);
+        m.layout.last_area = Rect::new(0, 0, 120, 40);
+        // Focus the LEFT tile; the RIGHT tile (terminal 2) will be the
+        // mouse-tracking app the wheel hovers.
+        m.terminals.set_layout(lazybox_core::SessionLayout::Splits {
+            tree: lazybox_core::TileTree::HSplit {
+                left: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 1 }),
+                right: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 2 }),
+                ratio: 50,
+            },
+            focused: vec![0],
+        });
+        assert_eq!(m.terminals.focused_terminal_id(), Some(TerminalId(1)));
+
+        // The right tile switches to the alt-screen and enables SGR
+        // mouse reporting (vim / htop / less).
+        m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
+            terminal_id: TerminalId(2),
+            bytes: b"\x1b[?1049h\x1b[?1002h\x1b[?1006h".to_vec(),
+            seq: 1,
+        });
+
+        let area = m.layout.last_area;
+        let (_, _, bottom) = m.effective_pane_rects(area);
+        let mut term = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        term.draw(|f| m.terminals.view_in(bottom, f)).unwrap();
+
+        // A point in the right half of the body lands in the right tile.
+        let col = bottom.x + bottom.width * 3 / 4;
+        let row = bottom.y + 6;
+        assert_eq!(
+            m.terminals.terminal_at(col, row),
+            Some(TerminalId(2)),
+            "the point is over the right tile",
+        );
+        while server.rx.try_recv().is_ok() {}
+
+        m.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: col,
+            row,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        });
+
+        match server.rx.try_recv() {
+            Ok(lazybox_ipc::Command::Write { terminal_id, bytes }) => {
+                assert_eq!(
+                    terminal_id,
+                    TerminalId(2),
+                    "the SGR report goes to the hovered tile, not the focused one",
+                );
+                assert!(
+                    bytes.starts_with(b"\x1b[<64;"),
+                    "wheel-up must SGR-encode as button 64, got {bytes:?}",
+                );
+            }
+            other => panic!("expected an SGR Write to the hovered tile, got {other:?}"),
+        }
     }
 
     /// `]]` + `j`/`k` move a highlight through the command popup and keep

@@ -195,14 +195,29 @@ impl Terminals {
         crate::components::terminal_stack::TerminalStack::contextual_bindings(escape_char)
     }
 
-    /// Scroll the active terminal's viewport by `delta` rows. Negative
-    /// = into scrollback; positive = back toward the live content.
-    /// Driven from the orchestrator's mouse-wheel handler.
-    pub fn scroll_active(
+    /// Scroll a specific terminal's viewport — the tile under the mouse
+    /// cursor (#362). The wheel handler resolves the hovered tile via
+    /// [`Self::terminal_at`] and routes the scroll here so focus never
+    /// has to move for the wheel to hit the right pane.
+    pub fn scroll_terminal(
         &mut self,
+        id: TerminalId,
         delta: isize,
     ) -> crate::components::terminal_stack::ScrollOutcome {
-        self.inner.scroll_active(delta)
+        self.inner.scroll_terminal(id, delta)
+    }
+
+    /// Terminal whose tile the point `(col, row)` lands in. Drives
+    /// hover-to-scroll in the wheel handler. `None` over pane chrome.
+    pub fn terminal_at(&self, col: u16, row: u16) -> Option<TerminalId> {
+        self.inner.terminal_at(col, row)
+    }
+
+    /// Frame-space `(col, row)` → 0-based cell coords inside `id`'s
+    /// tile, or `None` outside its grid. Used to forward a wheel event
+    /// to the hovered tile's mouse-tracking program.
+    pub fn cell_in_tile(&self, id: TerminalId, col: u16, row: u16) -> Option<(u32, u32)> {
+        self.inner.cell_in_tile(id, col, row)
     }
 
     /// Forward `extract_text` — read the focused terminal's grid
@@ -307,6 +322,14 @@ impl Terminals {
         self.inner.wheel_route()
     }
 
+    /// Wheel route for a specific terminal — the tile under the cursor
+    /// (#362). Resolves the local-scrollback vs SGR-forward vs
+    /// arrow-key decision against the hovered pane so the wheel behaves
+    /// like every tiling terminal.
+    pub fn wheel_route_for(&self, id: TerminalId) -> crate::components::terminal_stack::WheelRoute {
+        self.inner.wheel_route_for(id)
+    }
+
     /// Wire id of the currently focused terminal, if any. Needed by
     /// the wheel handler so it can address its synthetic arrow-key
     /// `Write` at the right pane.
@@ -353,6 +376,21 @@ impl Terminals {
     ) -> Option<(lazybox_ipc::TerminalId, Vec<u8>)> {
         self.inner
             .encode_mouse_for_focused(action, button, cell_col, cell_row)
+    }
+
+    /// Encode a mouse event for a specific terminal — the tile under
+    /// the cursor (#362). Lets the wheel handler forward an SGR scroll
+    /// to the hovered pane's inner program instead of the focused one.
+    pub fn encode_mouse_for(
+        &mut self,
+        id: TerminalId,
+        action: libghostty_vt::mouse::Action,
+        button: Option<libghostty_vt::mouse::Button>,
+        cell_col: u32,
+        cell_row: u32,
+    ) -> Option<(TerminalId, Vec<u8>)> {
+        self.inner
+            .encode_mouse_for(id, action, button, cell_col, cell_row)
     }
 }
 

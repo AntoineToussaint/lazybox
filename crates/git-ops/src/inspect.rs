@@ -307,8 +307,8 @@ impl WorktreeManager {
 /// `git worktree`s alike — that the user created outside lazybox.
 ///
 /// Read-only and daemon-free: a plain filesystem walk plus cheap
-/// read-only `git` probes per checkout, each capped by
-/// [`SCAN_PROBE_TIMEOUT`] so a checkout on a dead network mount can't
+/// read-only `git` probes per checkout, each capped by a short
+/// per-probe timeout so a checkout on a dead network mount can't
 /// wedge the scan. A directory that is itself a git checkout is
 /// reported and NOT descended into — its subdirectories belong to that
 /// repo, not to separate ones — which also keeps the walk bounded on

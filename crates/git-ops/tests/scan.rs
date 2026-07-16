@@ -98,7 +98,7 @@ async fn discovers_clone_worktree_and_nested_but_not_plain_dirs() {
     // A plain directory tree that is NOT a repo — must not appear.
     std::fs::create_dir_all(root.join("notrepo").join("sub")).unwrap();
 
-    let found = scan_default(&[root.clone()], 4, &nowhere()).await;
+    let found = scan_default(std::slice::from_ref(&root), 4, &nowhere()).await;
     let paths: Vec<_> = found.iter().map(|c| c.path.clone()).collect();
 
     assert_eq!(found.len(), 3, "expected repoA, its worktree, and repoB");
@@ -131,13 +131,13 @@ async fn max_depth_bounds_the_walk() {
     let deep = root.join("a").join("b").join("repo");
     init_repo(&deep).await;
 
-    let shallow = scan_default(&[root.clone()], 1, &nowhere()).await;
+    let shallow = scan_default(std::slice::from_ref(&root), 1, &nowhere()).await;
     assert!(
         shallow.is_empty(),
         "depth 1 must not reach a repo three levels down, got {shallow:?}"
     );
 
-    let deep_scan = scan_default(&[root.clone()], 3, &nowhere()).await;
+    let deep_scan = scan_default(std::slice::from_ref(&root), 3, &nowhere()).await;
     assert_eq!(deep_scan.len(), 1);
     assert_eq!(deep_scan[0].path, deep);
 }
@@ -181,7 +181,7 @@ async fn excludes_checkouts_under_the_managed_base() {
     let managed = managed_base.join("worktrees").join("wt");
     init_repo(&managed).await;
 
-    let found = scan_default(&[root.clone()], 4, &managed_base).await;
+    let found = scan_default(std::slice::from_ref(&root), 4, &managed_base).await;
     let paths: Vec<_> = found.iter().map(|c| c.path.clone()).collect();
     assert!(paths.contains(&external));
     assert!(
@@ -214,7 +214,7 @@ async fn follows_symlinked_repo_directory() {
     init_repo(&real).await;
     std::os::unix::fs::symlink(&real, root.join("proj-link")).unwrap();
 
-    let found = scan_default(&[root.clone()], 4, &nowhere()).await;
+    let found = scan_default(std::slice::from_ref(&root), 4, &nowhere()).await;
     assert_eq!(
         found.len(),
         1,
@@ -235,7 +235,7 @@ async fn symlink_cycle_terminates() {
     // guard must make the walk terminate and still report the repo once.
     std::os::unix::fs::symlink(&root, root.join("loop")).unwrap();
 
-    let found = scan_default(&[root.clone()], 6, &nowhere()).await;
+    let found = scan_default(std::slice::from_ref(&root), 6, &nowhere()).await;
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].path, repo);
 }
@@ -249,19 +249,20 @@ async fn hidden_dirs_skipped_by_default_and_included_on_request() {
     let hidden_repo = root.join(".dotfiles");
     init_repo(&hidden_repo).await;
 
-    let default = scan_default(&[root.clone()], 4, &nowhere()).await;
+    let default = scan_default(std::slice::from_ref(&root), 4, &nowhere()).await;
     assert!(
         default.is_empty(),
         "a dot-dir repo is skipped by default, got {default:?}"
     );
 
-    let with_hidden = scan_external_checkouts(&[root.clone()], 4, true, &nowhere()).await;
+    let with_hidden =
+        scan_external_checkouts(std::slice::from_ref(&root), 4, true, &nowhere()).await;
     assert_eq!(with_hidden.len(), 1);
     assert_eq!(with_hidden[0].path, hidden_repo);
 
     // A dot-dir passed as the ROOT is always walked, hidden flag or not —
     // the skip only applies to descending into discovered subdirectories.
-    let as_root = scan_default(&[hidden_repo.clone()], 1, &nowhere()).await;
+    let as_root = scan_default(std::slice::from_ref(&hidden_repo), 1, &nowhere()).await;
     assert_eq!(as_root.len(), 1, "an explicit hidden root is still scanned");
     assert_eq!(as_root[0].path, hidden_repo);
 }

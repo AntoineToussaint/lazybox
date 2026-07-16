@@ -378,6 +378,15 @@ pub struct TerminalStack {
     /// Cleared at the start of every render so removed terminals
     /// don't leave stale hit targets.
     tab_strip_hits: Vec<(usize, std::ops::Range<u16>, u16)>,
+    /// Per-tile hover targets, populated each render — one entry per
+    /// visible terminal. `tile` is the tile's on-screen rect (used to
+    /// hit-test which pane the mouse cursor is over); `grid` is the
+    /// cell grid inside it (used to translate a wheel/mouse event into
+    /// 0-based cell coordinates for the inner program). Lets the wheel
+    /// handler scroll the tile *under the cursor* rather than the
+    /// focused one. Cleared at the start of every render so a closed
+    /// tile leaves no stale target.
+    tile_hits: Vec<(TerminalId, Rect, Rect)>,
     /// Last-focused terminal per session. Recorded when we leave a
     /// session so returning restores the pane the user was last on
     /// instead of snapping back to the first. Keyed by terminal id
@@ -944,6 +953,7 @@ impl TerminalStack {
             synced_layout: None,
             pending_resizes: Vec::new(),
             tab_strip_hits: Vec::new(),
+            tile_hits: Vec::new(),
             last_focused: HashMap::new(),
             closing: HashSet::new(),
             dead_on_arrival: DEFAULT_DEAD_ON_ARRIVAL,
@@ -1250,9 +1260,18 @@ impl TerminalStack {
     /// decision is one place instead of the handler probing several
     /// booleans that could disagree if the focus moved between them.
     pub fn wheel_route(&self) -> WheelRoute {
-        let Some(id) = self.focused_terminal_id() else {
-            return WheelRoute::LocalScrollback;
-        };
+        match self.focused_terminal_id() {
+            Some(id) => self.wheel_route_for(id),
+            None => WheelRoute::LocalScrollback,
+        }
+    }
+
+    /// Same routing decision as [`Self::wheel_route`] but for an
+    /// explicit terminal — the tile under the mouse cursor. The wheel
+    /// scrolls the hovered pane, not the focused one (#362), so the
+    /// route must be resolved against whichever terminal the pointer
+    /// is over.
+    pub fn wheel_route_for(&self, id: TerminalId) -> WheelRoute {
         let Some(slot) = self.terminals.get(&id) else {
             return WheelRoute::LocalScrollback;
         };
@@ -1300,6 +1319,21 @@ impl TerminalStack {
         cell_row: u32,
     ) -> Option<(TerminalId, Vec<u8>)> {
         let id = self.focused_terminal_id()?;
+        self.encode_mouse_for(id, action, button, cell_col, cell_row)
+    }
+
+    /// Same as [`Self::encode_mouse_for_focused`] but for an explicit
+    /// terminal — the tile under the mouse cursor. Lets the wheel
+    /// handler forward a scroll to the hovered pane's inner program
+    /// rather than the focused one (#362).
+    pub fn encode_mouse_for(
+        &mut self,
+        id: TerminalId,
+        action: vt::mouse::Action,
+        button: Option<vt::mouse::Button>,
+        cell_col: u32,
+        cell_row: u32,
+    ) -> Option<(TerminalId, Vec<u8>)> {
         let slot = self.terminals.get_mut(&id)?;
         if !slot.vt.terminal.is_mouse_tracking().unwrap_or(false) {
             return None;
@@ -1395,6 +1429,43 @@ impl TerminalStack {
             .iter()
             .find(|(_, range, hit_row)| *hit_row == row && range.contains(&col))
             .map(|(idx, _, _)| *idx)
+    }
+
+    /// Terminal whose tile the point `(col, row)` lands in, from the
+    /// tile rects recorded during render. Drives hover-to-scroll: the
+    /// wheel targets the pane under the cursor, not the focused one
+    /// (#362). `None` when the point is over pane chrome (the tab
+    /// strip, a divider) or outside every tile — including the 1-cell
+    /// accent bar / split seams between tiles, where the wheel falls
+    /// back to scrolling the focused tile.
+    pub fn terminal_at(&self, col: u16, row: u16) -> Option<TerminalId> {
+        self.tile_hits
+            .iter()
+            .find(|(_, tile, _)| Self::rect_contains(*tile, col, row))
+            .map(|(id, _, _)| *id)
+    }
+
+    fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
+        col >= rect.x
+            && col < rect.x.saturating_add(rect.width)
+            && row >= rect.y
+            && row < rect.y.saturating_add(rect.height)
+    }
+
+    /// Frame-space `(col, row)` → 0-based cell coordinates inside the
+    /// tile owned by `id`, using the grid rect recorded during render —
+    /// correct even when tiles are split. Mirrors [`Self::screen_to_cell`]
+    /// but keyed on a specific tile so the wheel handler can forward an
+    /// event to the hovered pane's inner program (#362). `None` when the
+    /// point is outside that tile's cell grid (chrome, gutter, or the
+    /// tile was never rendered).
+    pub fn cell_in_tile(&self, id: TerminalId, col: u16, row: u16) -> Option<(u32, u32)> {
+        let (_, _, grid) = self.tile_hits.iter().find(|(t, _, _)| *t == id)?;
+        if Self::rect_contains(*grid, col, row) {
+            Some(((col - grid.x) as u32, (row - grid.y) as u32))
+        } else {
+            None
+        }
     }
 
     /// Set the active tab by index. Called from the mouse handler
@@ -1696,12 +1767,20 @@ impl TerminalStack {
     }
 
     pub fn scroll_active(&mut self, delta: isize) -> ScrollOutcome {
-        if delta == 0 {
-            return ScrollOutcome::NoTerminal;
-        }
         let Some(id) = self.focused_terminal_id() else {
             return ScrollOutcome::NoTerminal;
         };
+        self.scroll_terminal(id, delta)
+    }
+
+    /// Scroll a specific terminal's viewport by `delta` rows. Used by
+    /// the mouse-wheel handler to move the scrollback of the tile under
+    /// the cursor (#362) rather than the focused one; `scroll_active`
+    /// is the focused-terminal wrapper used by keyboard scroll.
+    pub fn scroll_terminal(&mut self, id: TerminalId, delta: isize) -> ScrollOutcome {
+        if delta == 0 {
+            return ScrollOutcome::NoTerminal;
+        }
         let Some(slot) = self.terminals.get_mut(&id) else {
             return ScrollOutcome::NoTerminal;
         };
@@ -2423,6 +2502,10 @@ impl TerminalStack {
         // come or gone, indices shifted, area resized. We'll
         // repopulate as the tab spans go in.
         self.tab_strip_hits.clear();
+        // Cleared for the same reason as the tab hits — each render
+        // re-records every visible tile's rect from scratch so the
+        // wheel handler hit-tests against the current layout.
+        self.tile_hits.clear();
         // Title row: "Terminals" plus an icon+label per active terminal
         // (e.g. `Terminals    claude   _ shell`). Active is bold-accent;
         // inactive is dim grey. Two-tab common case looks like a tab
@@ -3045,6 +3128,11 @@ impl TerminalStack {
             } else {
                 (body, None)
             };
+            // Record this tile's on-screen geometry so the wheel handler
+            // can route a scroll to the pane under the cursor. `rect` is
+            // the full tile (hover hit-test); `grid` is the cell grid
+            // (event → cell coordinates for a mouse-tracking program).
+            self.tile_hits.push((id, rect, grid));
             slot.vt.ensure_size(grid.width, grid.height);
             // Backend PTY also needs to know the new size — otherwise
             // the shell process keeps writing at its spawn dimensions
@@ -5174,6 +5262,145 @@ mod rebadge_tests {
             issue.as_str().to_string(),
         )));
         assert!(!stack.terminals.contains_key(&TerminalId(1)));
+    }
+}
+
+#[cfg(test)]
+mod hover_scroll_tests {
+    //! #362: the mouse wheel scrolls the tile UNDER THE CURSOR, not the
+    //! focused one. After a render records each tile's rect, a wheel
+    //! event's coordinates must resolve to the tile they landed in so
+    //! its scrollback moves — even while a different tile holds focus.
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    const W: u16 = 80;
+    const H: u16 = 24;
+
+    fn shell_with_scrollback(sk: &SessionKey, tag: &str) -> TerminalSlot {
+        let mut slot =
+            TerminalStack::make_slot(sk.clone(), TerminalKind::Shell, 0, false, false, None, None);
+        slot.vt.ensure_size(W / 2, H - 4);
+        let mut payload = String::new();
+        for i in 0..60 {
+            payload.push_str(&format!("{tag} line {i}\r\n"));
+        }
+        slot.vt.feed(payload.as_bytes());
+        slot
+    }
+
+    /// Two shells side by side, each with its own scrollback. Focus is
+    /// on the RIGHT tile; the layout matches what a `]]|` split builds.
+    fn split_stack() -> TerminalStack {
+        let sk = SessionKey::new("s");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        stack
+            .terminals
+            .insert(TerminalId(1), shell_with_scrollback(&sk, "left"));
+        stack
+            .terminals
+            .insert(TerminalId(2), shell_with_scrollback(&sk, "right"));
+        stack.set_active_session(Some(sk));
+        stack.layout = lazybox_core::SessionLayout::Splits {
+            tree: lazybox_core::TileTree::HSplit {
+                left: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 1 }),
+                right: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 2 }),
+                ratio: 50,
+            },
+            focused: vec![1],
+        };
+        stack
+    }
+
+    fn render(stack: &mut TerminalStack) {
+        let mut term = Terminal::new(TestBackend::new(W, H)).unwrap();
+        term.draw(|f| stack.render(Rect::new(0, 0, W, H), f, true))
+            .unwrap();
+    }
+
+    fn offset(stack: &TerminalStack, id: TerminalId) -> u64 {
+        stack.terminals[&id]
+            .vt
+            .terminal
+            .scrollbar()
+            .expect("scrollbar")
+            .offset
+    }
+
+    /// A wheel event at coordinates inside the LEFT tile scrolls the
+    /// left terminal, even though the RIGHT tile is focused — and focus
+    /// never moves.
+    #[test]
+    fn wheel_in_left_tile_scrolls_left_while_right_is_focused() {
+        let mut stack = split_stack();
+        render(&mut stack);
+        assert_eq!(
+            stack.focused_terminal_id(),
+            Some(TerminalId(2)),
+            "the right tile is focused",
+        );
+
+        // A point well inside the left half of the body (past the pane
+        // border + top chrome) hit-tests to the left tile.
+        let (col, row) = (5, 6);
+        assert_eq!(
+            stack.terminal_at(col, row),
+            Some(TerminalId(1)),
+            "coordinates in the left tile resolve to the left terminal",
+        );
+
+        let left_before = offset(&stack, TerminalId(1));
+        let right_before = offset(&stack, TerminalId(2));
+
+        // Route the wheel exactly as the handler does: resolve the tile
+        // under the cursor, then scroll it.
+        let target = stack.terminal_at(col, row).unwrap();
+        stack.scroll_terminal(target, -3);
+
+        assert_eq!(
+            offset(&stack, TerminalId(1)),
+            left_before - 3,
+            "the hovered (left) terminal scrolled up into its scrollback",
+        );
+        assert_eq!(
+            offset(&stack, TerminalId(2)),
+            right_before,
+            "the focused (right) terminal must not move",
+        );
+        assert_eq!(
+            stack.focused_terminal_id(),
+            Some(TerminalId(2)),
+            "hover-to-scroll must not change focus",
+        );
+    }
+
+    /// The symmetric case: hovering the right tile scrolls the right
+    /// terminal while the left tile is focused.
+    #[test]
+    fn wheel_in_right_tile_scrolls_right_while_left_is_focused() {
+        let mut stack = split_stack();
+        stack.layout = lazybox_core::SessionLayout::Splits {
+            tree: lazybox_core::TileTree::HSplit {
+                left: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 1 }),
+                right: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 2 }),
+                ratio: 50,
+            },
+            focused: vec![0],
+        };
+        render(&mut stack);
+        assert_eq!(stack.focused_terminal_id(), Some(TerminalId(1)));
+
+        let (col, row) = (W - 6, 6);
+        assert_eq!(stack.terminal_at(col, row), Some(TerminalId(2)));
+
+        let left_before = offset(&stack, TerminalId(1));
+        let right_before = offset(&stack, TerminalId(2));
+        let target = stack.terminal_at(col, row).unwrap();
+        stack.scroll_terminal(target, -3);
+
+        assert_eq!(offset(&stack, TerminalId(2)), right_before - 3);
+        assert_eq!(offset(&stack, TerminalId(1)), left_before);
     }
 }
 

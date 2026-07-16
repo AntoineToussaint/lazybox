@@ -1390,9 +1390,22 @@ impl<T: TerminalAdapter> Model<T> {
                 if !rect_contains(right_bottom_rect, m.column, m.row) {
                     return;
                 }
-                // Who scrolls depends on which screen the inner program
-                // is on (see `WheelRoute`). The whole decision is one
-                // focused-terminal lookup so the branches can't disagree.
+                // Scroll the tile UNDER THE CURSOR, not the focused one
+                // (#362) — hover-to-scroll like every tiling terminal.
+                // Hit-test the wheel coordinates against the tile rects
+                // recorded during render; fall back to the focused
+                // terminal when the pointer is over pane chrome (a
+                // divider, the tab strip) so the wheel is never a no-op.
+                let Some(target) = self
+                    .terminals
+                    .terminal_at(m.column, m.row)
+                    .or_else(|| self.terminals.focused_terminal_id())
+                else {
+                    return;
+                };
+                // Who scrolls depends on which screen the target
+                // program is on (see `WheelRoute`). The whole decision
+                // is one lookup so the branches can't disagree.
                 // Once tmux stopped setting `mouse on` (#306),
                 // `is_mouse_tracking` began reflecting the inner app.
                 // A primary-screen wheel is always lazybox's scrollback,
@@ -1400,7 +1413,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // only an alt-screen app that asked for the mouse gets
                 // the wheel forwarded.
                 use crate::components::terminal_stack::WheelRoute;
-                match self.terminals.wheel_route() {
+                match self.terminals.wheel_route_for(target) {
                     WheelRoute::ForwardSgr => {
                         // Damped: every wheel event on this path is a
                         // daemon round trip + inner-program repaint, so
@@ -1409,16 +1422,15 @@ impl<T: TerminalAdapter> Model<T> {
                         if scaled == 0 {
                             return;
                         }
-                        let cell =
-                            self.terminals
-                                .screen_to_cell(right_bottom_rect, m.column, m.row);
+                        let cell = self.terminals.cell_in_tile(target, m.column, m.row);
                         let encoded = cell.and_then(|(cell_col, cell_row)| {
                             let button = if raw_up {
                                 libghostty_vt::mouse::Button::Four
                             } else {
                                 libghostty_vt::mouse::Button::Five
                             };
-                            self.terminals.encode_mouse(
+                            self.terminals.encode_mouse_for(
+                                target,
                                 libghostty_vt::mouse::Action::Press,
                                 Some(button),
                                 cell_col,
@@ -1452,7 +1464,7 @@ impl<T: TerminalAdapter> Model<T> {
                         // the tab strip / chrome is not a scroll target.
                         if self
                             .terminals
-                            .screen_to_cell(right_bottom_rect, m.column, m.row)
+                            .cell_in_tile(target, m.column, m.row)
                             .is_none()
                         {
                             return;
@@ -1461,9 +1473,7 @@ impl<T: TerminalAdapter> Model<T> {
                         if scaled == 0 {
                             return;
                         }
-                        let Some(terminal_id) = self.terminals.focused_terminal_id() else {
-                            return;
-                        };
+                        let terminal_id = target;
                         let arrow: &[u8] = match (raw_up, app_cursor) {
                             (true, false) => b"\x1b[A",
                             (false, false) => b"\x1b[B",
@@ -1490,7 +1500,7 @@ impl<T: TerminalAdapter> Model<T> {
                         } else {
                             LOCAL_WHEEL_STEP
                         };
-                        let _ = self.terminals.scroll_active(delta);
+                        let _ = self.terminals.scroll_terminal(target, delta);
                         self.redraw = true;
                     }
                 }

@@ -2057,9 +2057,11 @@ pub(crate) fn gateway_env_for_agent(
 /// Homebrew's implicit self-update (portable-ruby pour, tap refresh,
 /// "Auto-updated Homebrew!") unless suppressed — a heavy network+disk
 /// side effect the session never asked for (issue #355).
-/// `HOMEBREW_NO_AUTO_UPDATE=1` skips only that self-update preamble; the
-/// upgrade the user explicitly asked for still runs, so Codex is never
-/// silently pinned to a stale version.
+/// `HOMEBREW_NO_AUTO_UPDATE=1` skips that implicit `brew update`; the
+/// `brew upgrade` codex runs on an explicit `ctrl+u` still proceeds. The
+/// accepted cost is that brew also won't refresh its cached cask index, so
+/// an explicit upgrade against a long-stale cache can no-op — the price of
+/// not auto-updating on every fresh session.
 ///
 /// Scoped to Codex on purpose: it's the built-in whose launch path runs
 /// `brew`. Suppressing auto-update for every agent (or in shells the user

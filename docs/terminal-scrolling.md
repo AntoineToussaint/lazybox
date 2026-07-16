@@ -91,26 +91,32 @@ terminal reports a reason rather than a fake move.
 ## Per-tile targeting (#362)
 
 In a split layout the wheel used to scroll the *focused* tile no matter
-which tile the pointer was over. The local-scrollback wheel now resolves
-the tile under the cursor:
+which tile the pointer was over. **Every** wheel branch — the route
+decision, the local scroll, and the alt-screen forward — now resolves the
+tile under the cursor, all through one resolver so they can't disagree:
 
-- `terminal_at(rect, col, row)` walks the tile tree with the SAME
-  geometry `render` lays out with (`pane_body_rect` applies the identical
-  top-chrome / margin inset; `tile_at` mirrors the HSplit/VSplit ratio
-  math). In Tabs mode it resolves to the active terminal, so the common
+- `wheel_target(rect, col, row)` is the single resolver: `terminal_at`
+  walks the tile tree with the SAME geometry `render` lays out with
+  (`pane_body_rect` applies the identical top-chrome / margin inset;
+  `tile_at` mirrors the HSplit/VSplit ratio math), filtered to a *live*
+  terminal, falling back to the focused terminal over chrome or a dead
+  tile. In Tabs mode it resolves to the active terminal, so the common
   single-pane case is unchanged.
-- The wheel's `LocalScrollback` branch calls `scroll_at`, which scrolls
-  the terminal `terminal_at` resolves — the tile under the cursor. The
-  overwhelmingly common split (two primary-screen agents, or agent +
-  shell) is fully fixed: whichever tile the pointer is over scrolls.
-- The primary-vs-alt-screen routing decision (`wheel_route`) stays keyed
-  to the focused terminal, because the alt-screen *forward* branches
-  encode a mouse report for the focused terminal's grid. Routing an
-  alt-screen forward off a different tile would mis-encode against the
-  focused grid, so per-tile forwarding to an alt-screen program in a
-  split is deliberately left out of scope here; only the local-scrollback
-  target is cursor-directed.
+- `wheel_route_at` reads the primary-vs-alt-screen decision off that tile;
+  `scroll_at` scrolls that tile; `encode_mouse_at` / `wheel_arrow_target`
+  forward to that tile. Because they share `wheel_target`, the route, the
+  scroll, and the forwarded report always name the same terminal.
+- Forwarded reports get **tile-correct coordinates**: `leaf_render_rect`
+  reproduces the exact rect `render_one_terminal` drew the target into
+  (the leaf body past its one-row focus rule, recap rows and the
+  scrollbar gutter excluded), so `cell_at` translates the pointer into
+  that tile's grid — not the whole pane's. An alt-screen `mouse=a` app in
+  a non-focused tile scrolls correctly on a wheel over it.
 - The keyboard path stays focus-directed — it has no pointer.
+
+(Click / drag forwarding still translate against the focused terminal;
+making those per-tile is a separate concern from scroll and out of this
+change's scope.)
 
 ## Where scroll state is initialised, mutated, or can (legitimately) reset
 
@@ -147,10 +153,13 @@ real entry points:
 - Fresh and reattach reach identical scroll state.
 - Split tiles — the wheel scrolls the tile under the cursor, not the
   focused one (#362); the keyboard scrolls the focused tile.
+- Split tiles — a wheel over a non-focused alt-screen tile routes *and*
+  forwards its SGR report to that tile, not the focused one.
 - Alt-screen vs. normal screen.
 - No silent no-op: `Moved` whenever scrollback exists; a typed reason
-  when it doesn't.
-- The single-owner source guard.
+  when it doesn't; `By(0)` is a no-move state query.
+- The single-owner source guard (brace-matches the owner's body, so it
+  survives reformatting and a legitimately-added verb).
 
 The bar: a change that breaks any scroll surface turns a test red. If a
 "scrolling broken again" report ever appears, it points at a **missing

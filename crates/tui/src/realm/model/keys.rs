@@ -1391,8 +1391,13 @@ impl<T: TerminalAdapter> Model<T> {
                     return;
                 }
                 // Who scrolls depends on which screen the inner program
-                // is on (see `WheelRoute`). The whole decision is one
-                // focused-terminal lookup so the branches can't disagree.
+                // is on (see `WheelRoute`). Resolved off the tile UNDER
+                // THE CURSOR (#362), so the routing decision, the scroll
+                // target, and any forwarded report all name the same
+                // terminal — in a split, a wheel over the right tile acts
+                // on the right tile even while the left holds focus. In
+                // Tabs mode this is the active terminal, so the common
+                // single-pane case is unchanged.
                 // Once tmux stopped setting `mouse on` (#306),
                 // `is_mouse_tracking` began reflecting the inner app.
                 // A primary-screen wheel is always lazybox's scrollback,
@@ -1400,7 +1405,10 @@ impl<T: TerminalAdapter> Model<T> {
                 // only an alt-screen app that asked for the mouse gets
                 // the wheel forwarded.
                 use crate::components::terminal_stack::WheelRoute;
-                match self.terminals.wheel_route() {
+                match self
+                    .terminals
+                    .wheel_route_at(right_bottom_rect, m.column, m.row)
+                {
                     WheelRoute::ForwardSgr => {
                         // Damped: every wheel event on this path is a
                         // daemon round trip + inner-program repaint, so
@@ -1409,22 +1417,20 @@ impl<T: TerminalAdapter> Model<T> {
                         if scaled == 0 {
                             return;
                         }
-                        let cell =
-                            self.terminals
-                                .screen_to_cell(right_bottom_rect, m.column, m.row);
-                        let encoded = cell.and_then(|(cell_col, cell_row)| {
-                            let button = if raw_up {
-                                libghostty_vt::mouse::Button::Four
-                            } else {
-                                libghostty_vt::mouse::Button::Five
-                            };
-                            self.terminals.encode_mouse(
-                                libghostty_vt::mouse::Action::Press,
-                                Some(button),
-                                cell_col,
-                                cell_row,
-                            )
-                        });
+                        let button = if raw_up {
+                            libghostty_vt::mouse::Button::Four
+                        } else {
+                            libghostty_vt::mouse::Button::Five
+                        };
+                        // Encode + address at the tile under the cursor,
+                        // cell coords translated into that tile's grid.
+                        let encoded = self.terminals.encode_mouse_at(
+                            right_bottom_rect,
+                            m.column,
+                            m.row,
+                            libghostty_vt::mouse::Action::Press,
+                            Some(button),
+                        );
                         if let Some((terminal_id, bytes)) = encoded {
                             // One wheel notch encodes one line for the
                             // inner program, but the damper computed a
@@ -1448,22 +1454,19 @@ impl<T: TerminalAdapter> Model<T> {
                         // xterm alternateScroll: an alt-screen app that
                         // never enabled mouse reporting (less, man, the
                         // git pager, vim without `mouse`) still scrolls on
-                        // arrow keys. Only fire over the grid — a wheel on
-                        // the tab strip / chrome is not a scroll target.
-                        if self
-                            .terminals
-                            .screen_to_cell(right_bottom_rect, m.column, m.row)
-                            .is_none()
-                        {
+                        // arrow keys. Only fire over the grid of the tile
+                        // under the cursor — a wheel on the tab strip /
+                        // chrome is not a scroll target.
+                        let Some(terminal_id) =
+                            self.terminals
+                                .wheel_arrow_target(right_bottom_rect, m.column, m.row)
+                        else {
                             return;
-                        }
+                        };
                         let scaled = self.dampen_scroll_step(raw_up);
                         if scaled == 0 {
                             return;
                         }
-                        let Some(terminal_id) = self.terminals.focused_terminal_id() else {
-                            return;
-                        };
                         let arrow: &[u8] = match (raw_up, app_cursor) {
                             (true, false) => b"\x1b[A",
                             (false, false) => b"\x1b[B",

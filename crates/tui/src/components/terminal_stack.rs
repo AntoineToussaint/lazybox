@@ -397,6 +397,58 @@ fn tile_at(tree: &lazybox_core::TileTree, rect: Rect, col: u16, row: u16) -> Opt
     }
 }
 
+/// The rect `render_one_terminal` receives for the leaf carrying
+/// `terminal_id`, walking the tree with the SAME split geometry as
+/// [`tile_at`] and applying the same one-row focus rule
+/// `render_tile_tree` carves off each leaf (`rect.height >= 2 &&
+/// rect.width > 0`). Returns the leaf's post-rule body so a forwarded
+/// mouse event's cell coordinates match the grid the renderer drew.
+fn leaf_rect_of(tree: &lazybox_core::TileTree, rect: Rect, terminal_id: u64) -> Option<Rect> {
+    match tree {
+        lazybox_core::TileTree::Leaf { terminal_id: leaf } => (*leaf == terminal_id).then(|| {
+            if rect.height >= 2 && rect.width > 0 {
+                Rect {
+                    y: rect.y + 1,
+                    height: rect.height - 1,
+                    ..rect
+                }
+            } else {
+                rect
+            }
+        }),
+        lazybox_core::TileTree::HSplit { left, right, ratio } => {
+            let split_at = (rect.width as u32 * (*ratio).min(100) as u32 / 100) as u16;
+            let left_w = split_at.min(rect.width.saturating_sub(1));
+            let left_rect = Rect {
+                width: left_w,
+                ..rect
+            };
+            let right_rect = Rect {
+                x: rect.x + left_w + 1,
+                width: rect.width.saturating_sub(left_w + 1),
+                ..rect
+            };
+            leaf_rect_of(left, left_rect, terminal_id)
+                .or_else(|| leaf_rect_of(right, right_rect, terminal_id))
+        }
+        lazybox_core::TileTree::VSplit { top, bottom, ratio } => {
+            let split_at = (rect.height as u32 * (*ratio).min(100) as u32 / 100) as u16;
+            let top_h = split_at.min(rect.height.saturating_sub(1));
+            let top_rect = Rect {
+                height: top_h,
+                ..rect
+            };
+            let bottom_rect = Rect {
+                y: rect.y + top_h + 1,
+                height: rect.height.saturating_sub(top_h + 1),
+                ..rect
+            };
+            leaf_rect_of(top, top_rect, terminal_id)
+                .or_else(|| leaf_rect_of(bottom, bottom_rect, terminal_id))
+        }
+    }
+}
+
 pub struct TerminalStack {
     id: PaneId,
     terminals: HashMap<TerminalId, TerminalSlot>,
@@ -1330,7 +1382,25 @@ impl TerminalStack {
     /// decision is one place instead of the handler probing several
     /// booleans that could disagree if the focus moved between them.
     pub fn wheel_route(&self) -> WheelRoute {
-        let Some(id) = self.focused_terminal_id() else {
+        self.wheel_route_for(self.focused_terminal_id())
+    }
+
+    /// Route a wheel tick that landed at frame-space `(col, row)` in the
+    /// terminal pane `rect` off the tile UNDER THE CURSOR (#362), so the
+    /// routing decision, the scroll target, and any forwarded report all
+    /// name the same terminal. Falls back to the focused terminal when
+    /// the point is over pane chrome. In Tabs mode this resolves to the
+    /// active terminal, leaving the single-pane case unchanged.
+    pub fn wheel_route_at(&self, rect: Rect, col: u16, row: u16) -> WheelRoute {
+        self.wheel_route_for(self.wheel_target(rect, col, row))
+    }
+
+    /// Shared routing decision for a specific terminal. `wheel_route`
+    /// (focused) and `wheel_route_at` (tile under cursor) both delegate
+    /// here so the primary/alt-screen split and the mouse-tracking probe
+    /// are computed in exactly one place.
+    fn wheel_route_for(&self, id: Option<TerminalId>) -> WheelRoute {
+        let Some(id) = id else {
             return WheelRoute::LocalScrollback;
         };
         let Some(slot) = self.terminals.get(&id) else {
@@ -1380,6 +1450,22 @@ impl TerminalStack {
         cell_row: u32,
     ) -> Option<(TerminalId, Vec<u8>)> {
         let id = self.focused_terminal_id()?;
+        self.encode_mouse_for(id, action, button, cell_col, cell_row)
+    }
+
+    /// Encode a mouse event for a SPECIFIC terminal (the tile under the
+    /// cursor, resolved by [`Self::cell_at`]). Same contract as
+    /// [`Self::encode_mouse_for_focused`] but addressed by id, so a wheel
+    /// forwarded on a split targets the terminal the pointer is over
+    /// rather than whichever holds focus.
+    fn encode_mouse_for(
+        &mut self,
+        id: TerminalId,
+        action: vt::mouse::Action,
+        button: Option<vt::mouse::Button>,
+        cell_col: u32,
+        cell_row: u32,
+    ) -> Option<(TerminalId, Vec<u8>)> {
         let slot = self.terminals.get_mut(&id)?;
         if !slot.vt.terminal.is_mouse_tracking().unwrap_or(false) {
             return None;
@@ -1515,8 +1601,8 @@ impl TerminalStack {
     /// here so a scroll always moves the terminal the pointer is over,
     /// in both Tabs and Splits layouts — not whichever tile happens to
     /// hold keyboard focus. Falls back to the focused terminal when the
-    /// point resolves to no tile (pane chrome) so a near-miss still
-    /// scrolls something sensible.
+    /// point resolves to no live tile (pane chrome, or a tile whose
+    /// terminal just exited) so a near-miss still scrolls something.
     pub fn scroll_at(
         &mut self,
         rect: Rect,
@@ -1524,10 +1610,85 @@ impl TerminalStack {
         row: u16,
         request: ScrollRequest,
     ) -> ScrollOutcome {
-        let id = self
-            .terminal_at(rect, col, row)
-            .or_else(|| self.focused_terminal_id());
+        let id = self.wheel_target(rect, col, row);
         self.scroll_terminal(id, request)
+    }
+
+    /// The LIVE terminal a wheel at `(col, row)` in pane `rect` targets:
+    /// the tile under the cursor, or the focused terminal when the point
+    /// is over pane chrome / a divider, or when the resolved tile's
+    /// terminal has gone (a tile tree that still names an exited runner).
+    /// The single resolver `wheel_route_at` / `scroll_at` / `cell_at` all
+    /// share, so route, scroll, and forward always name the same tile.
+    fn wheel_target(&self, rect: Rect, col: u16, row: u16) -> Option<TerminalId> {
+        self.terminal_at(rect, col, row)
+            .filter(|id| self.terminals.contains_key(id))
+            .or_else(|| self.focused_terminal_id())
+    }
+
+    /// The rect [`Self::render_one_terminal`] draws terminal `id` into:
+    /// the pane body in Tabs mode, or the leaf's body (past its one-row
+    /// focus rule) in Splits. `None` when `id` isn't currently laid out.
+    /// Mirrors `render` / `render_tile_tree` so cell translation for a
+    /// forwarded event lands on the same grid the renderer drew.
+    fn leaf_render_rect(&self, pane_rect: Rect, id: TerminalId) -> Option<Rect> {
+        let body = Self::pane_body_rect(pane_rect);
+        match &self.layout {
+            lazybox_core::SessionLayout::Tabs { .. } => {
+                (self.active_terminal_id() == Some(id)).then_some(body)
+            }
+            lazybox_core::SessionLayout::Splits { tree, .. } => leaf_rect_of(tree, body, id.0),
+        }
+    }
+
+    /// Resolve a wheel/forward point to `(target terminal, cell col, cell
+    /// row)` within that terminal's grid, tile-aware for both layouts, or
+    /// `None` when the point is over chrome (tab strip, borders, the
+    /// scrollbar gutter, or the focus rule). Undoes exactly the insets
+    /// [`Self::render_one_terminal`] applies to the terminal's render
+    /// rect (recap rows off the top, the gutter column off the right).
+    fn cell_at(&self, rect: Rect, col: u16, row: u16) -> Option<(TerminalId, u32, u32)> {
+        let id = self.wheel_target(rect, col, row)?;
+        let render_rect = self.leaf_render_rect(rect, id)?;
+        let slot = self.terminals.get(&id)?;
+        let recap = Self::recap_rows(slot, render_rect.height);
+        let grid_x = render_rect.x;
+        let grid_y = render_rect.y.saturating_add(recap);
+        // Rightmost column is the scrollbar gutter; the bottom is bounded
+        // by the render rect itself (the pane already held back a margin).
+        let grid_right = render_rect
+            .x
+            .saturating_add(render_rect.width)
+            .saturating_sub(1);
+        let grid_bottom = render_rect.y.saturating_add(render_rect.height);
+        if col < grid_x || row < grid_y || col >= grid_right || row >= grid_bottom {
+            return None;
+        }
+        Some((id, u32::from(col - grid_x), u32::from(row - grid_y)))
+    }
+
+    /// Encode a mouse event for the tile UNDER THE CURSOR (#362), with
+    /// cell coordinates translated into that tile's grid. Returns the
+    /// bytes to `Write` plus the target terminal id, or `None` when the
+    /// point is over chrome or the target isn't tracking the mouse. The
+    /// wheel handler's SGR-forward branch routes here.
+    pub fn encode_mouse_at(
+        &mut self,
+        rect: Rect,
+        col: u16,
+        row: u16,
+        action: vt::mouse::Action,
+        button: Option<vt::mouse::Button>,
+    ) -> Option<(TerminalId, Vec<u8>)> {
+        let (id, cell_col, cell_row) = self.cell_at(rect, col, row)?;
+        self.encode_mouse_for(id, action, button, cell_col, cell_row)
+    }
+
+    /// The tile under the cursor for the alternate-scroll arrow-key
+    /// fallback — only when the point sits on a real grid cell (not
+    /// chrome), so a wheel over the tab strip never synthesizes arrows.
+    pub fn wheel_arrow_target(&self, rect: Rect, col: u16, row: u16) -> Option<TerminalId> {
+        self.cell_at(rect, col, row).map(|(id, _, _)| id)
     }
 
     /// Did the user click on a terminal-tab label? Returns the tab

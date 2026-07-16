@@ -287,6 +287,90 @@ fn wheel_targets_the_tile_under_the_cursor_not_the_focused_tile() {
 }
 
 #[test]
+fn wheel_forward_routes_and_encodes_for_the_tile_under_the_cursor() {
+    // Left tile: a primary-screen agent (focused). Right tile: an
+    // alt-screen mouse-tracking app (vim `mouse=a`-style). A wheel over
+    // the RIGHT tile must route ForwardSgr (read off the right tile) and
+    // the encoded SGR report must be ADDRESSED to the right terminal —
+    // not the focused left one. The old focused-only path both routed and
+    // forwarded off the left tile.
+    let mut stack = TerminalStack::new(PaneId::new(0));
+    for id in [1u64, 2] {
+        stack.on_event(&Event::TerminalSpawned {
+            terminal_id: TerminalId(id),
+            session_key: sk("s"),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+        });
+    }
+    stack.set_active_session(Some(sk("s")));
+    stack.set_layout(SessionLayout::Splits {
+        tree: TileTree::HSplit {
+            left: Box::new(TileTree::Leaf { terminal_id: 1 }),
+            right: Box::new(TileTree::Leaf { terminal_id: 2 }),
+            ratio: 50,
+        },
+        focused: vec![0], // left (primary) holds focus
+    });
+    render(&mut stack);
+    // Right tile enters the alternate screen and enables SGR mouse.
+    stack.on_event(&Event::TerminalOutput {
+        terminal_id: TerminalId(2),
+        bytes: b"\x1b[?1049h\x1b[?1006h\x1b[?1002h".to_vec(),
+        seq: 1,
+    });
+    render(&mut stack);
+
+    let rect = Rect::new(0, 0, W, H);
+    let right_col = (W * 3) / 4;
+    let row = H / 2;
+
+    // Focused (left) tile is primary → its own route is LocalScrollback.
+    assert_eq!(stack.wheel_route(), WheelRoute::LocalScrollback);
+    // But over the right tile the wheel routes to the alt-screen app.
+    assert_eq!(
+        stack.wheel_route_at(rect, right_col, row),
+        WheelRoute::ForwardSgr,
+        "route reads the alt-screen tile under the cursor, not the focused tile",
+    );
+
+    let encoded = stack.encode_mouse_at(
+        rect,
+        right_col,
+        row,
+        libghostty_vt::mouse::Action::Press,
+        Some(libghostty_vt::mouse::Button::Four),
+    );
+    let (target, bytes) = encoded.expect("wheel over an alt-screen mouse tile encodes a report");
+    assert_eq!(
+        target,
+        TerminalId(2),
+        "the SGR report is addressed to the tile under the cursor, not the focused one",
+    );
+    assert!(
+        !bytes.is_empty(),
+        "a non-empty SGR mouse report is produced"
+    );
+}
+
+#[test]
+fn by_zero_reports_state_without_moving() {
+    // `By(0)` is a deliberate state query — it returns the current
+    // scrollbar without touching the viewport. Pinned so the semantic is
+    // a documented contract, not an accident (the split test relies on it
+    // to read a tile's offset without disturbing it).
+    let mut stack = fresh_agent();
+    let before = offset(&stack);
+    match stack.scroll_active(0) {
+        ScrollOutcome::Moved { offset, .. } => assert_eq!(offset, before),
+        other => panic!("By(0) on a scrolled terminal reports Moved(state): {other:?}"),
+    }
+    assert_eq!(offset(&stack), before, "By(0) must not move the viewport");
+}
+
+#[test]
 fn keyboard_scroll_targets_the_focused_tile() {
     // The keyboard path has no cursor, so it acts on the focused tile —
     // the left one here. This pins the complement of the #362 fix: only
@@ -397,6 +481,11 @@ fn scroll_viewport_has_a_single_owner() {
     // The whole point of #371: exactly one place mutates the viewport.
     // If a handler reintroduces a raw `scroll_viewport` poke, this fails
     // — the mechanical backstop that makes a regression un-mergeable.
+    //
+    // Robust to reformatting: rather than a fixed byte window, we brace-
+    // match the owner function's body and assert EVERY `scroll_viewport`
+    // call in the file lands inside it. A new verb the owner adds is fine;
+    // a call added anywhere else fails.
     let src = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/components/terminal_stack.rs"
@@ -405,19 +494,38 @@ fn scroll_viewport_has_a_single_owner() {
 
     let owner = "fn scroll(&mut self, request: ScrollRequest)";
     let owner_at = src.find(owner).expect("the scroll owner still exists");
-    // The three verbs (Delta/Top/Bottom) live in the owner's body; no
-    // `scroll_viewport` call may appear anywhere else in the file.
-    for (idx, _) in src.match_indices(".scroll_viewport(") {
+    // Body spans from the owner's opening brace to its matching close.
+    let body_open = owner_at + src[owner_at..].find('{').expect("owner has a body");
+    let mut depth = 0usize;
+    let mut body_close = body_open;
+    for (off, ch) in src[body_open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    body_close = body_open + off;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(body_close > body_open, "owner body brace-match failed");
+
+    let calls: Vec<usize> = src
+        .match_indices(".scroll_viewport(")
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        !calls.is_empty(),
+        "no scroll_viewport calls found — did the owner or its call syntax change?",
+    );
+    for idx in calls {
         assert!(
-            idx > owner_at && idx < owner_at + 1200,
-            "a `scroll_viewport` call escaped the scroll owner \
-             (byte {idx}, owner at {owner_at}) — route it through \
-             `TerminalVt::scroll`",
+            idx > body_open && idx < body_close,
+            "a `scroll_viewport` call escaped the scroll owner (byte {idx}, owner \
+             body {body_open}..{body_close}) — route it through `TerminalVt::scroll`",
         );
     }
-    assert_eq!(
-        src.matches(".scroll_viewport(").count(),
-        3,
-        "the owner calls scroll_viewport exactly three times (Delta/Top/Bottom)",
-    );
 }

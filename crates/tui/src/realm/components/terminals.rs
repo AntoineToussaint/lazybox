@@ -313,6 +313,44 @@ impl Terminals {
         self.inner.wheel_route()
     }
 
+    /// Route a wheel tick by the tile under the cursor (#362): the
+    /// primary/alt-screen decision reads the terminal the pointer is
+    /// over, so the route, the scroll target, and any forwarded report
+    /// all name the same tile.
+    pub fn wheel_route_at(
+        &self,
+        rect: tuirealm::ratatui::layout::Rect,
+        col: u16,
+        row: u16,
+    ) -> crate::components::terminal_stack::WheelRoute {
+        self.inner.wheel_route_at(rect, col, row)
+    }
+
+    /// Encode a mouse event for the tile under the cursor (#362), cell
+    /// coordinates translated into that tile's grid. Used by the wheel
+    /// handler's SGR-forward branch.
+    pub fn encode_mouse_at(
+        &mut self,
+        rect: tuirealm::ratatui::layout::Rect,
+        col: u16,
+        row: u16,
+        action: libghostty_vt::mouse::Action,
+        button: Option<libghostty_vt::mouse::Button>,
+    ) -> Option<(lazybox_ipc::TerminalId, Vec<u8>)> {
+        self.inner.encode_mouse_at(rect, col, row, action, button)
+    }
+
+    /// The tile under the cursor for the alternate-scroll arrow fallback,
+    /// only when the point is over a real grid cell (not chrome).
+    pub fn wheel_arrow_target(
+        &self,
+        rect: tuirealm::ratatui::layout::Rect,
+        col: u16,
+        row: u16,
+    ) -> Option<lazybox_ipc::TerminalId> {
+        self.inner.wheel_arrow_target(rect, col, row)
+    }
+
     /// Wire id of the currently focused terminal, if any. Needed by
     /// the wheel handler so it can address its synthetic arrow-key
     /// `Write` at the right pane.

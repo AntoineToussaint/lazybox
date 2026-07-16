@@ -1490,7 +1490,14 @@ impl<T: TerminalAdapter> Model<T> {
                         } else {
                             LOCAL_WHEEL_STEP
                         };
-                        let _ = self.terminals.scroll_active(delta);
+                        // Target the tile under the cursor (#362), not
+                        // the focused one.
+                        let _ = self.terminals.scroll_at(
+                            right_bottom_rect,
+                            m.column,
+                            m.row,
+                            crate::components::terminal_stack::ScrollRequest::By(delta),
+                        );
                         self.redraw = true;
                     }
                 }

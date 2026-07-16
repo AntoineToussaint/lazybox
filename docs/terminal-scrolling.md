@@ -1,0 +1,157 @@
+# Terminal scrolling — the canonical model (#371)
+
+Terminal scrolling regressed over and over (#306, #321, #360, #42,
+#362). Each point-fix closed and the bug came back in a new guise. This
+document is the root-cause writeup the recurrence never had, and it
+describes the structure that now makes a silent regression a compile- or
+test-time failure instead of a shipped bug.
+
+Everything here lives in **`crates/tui/src/components/terminal_stack.rs`**
+unless noted. The regression harness is
+**`crates/tui/tests/terminal_scroll.rs`**.
+
+## The model, end to end
+
+```
+daemon PTY ─▶ Event::TerminalOutput / Snapshot.replay (raw bytes over IPC)
+           │
+           ▼
+TerminalStack::append_output / on_event(Snapshot)
+           │  (focused/visible → feed now; hidden → stash in pending_feed)
+           ▼
+TerminalSlot.vt : TerminalVt   (one libghostty-vt parser per terminal)
+           │  vt.feed(bytes) → vt_write → grid + scrollback pin
+           ▼
+      viewport pin  ── the ONLY scroll state. There is no lazybox-side
+                       offset field; the position lives inside libghostty
+                       and is read back on demand via `scrollbar()`
+                       ({total, offset, len}).
+```
+
+Key consequences:
+
+- **libghostty owns the offset.** lazybox never caches a scroll offset;
+  it reads `scrollbar()` when it needs to render the gutter or report an
+  outcome. There is exactly one viewport per terminal.
+- **Rendering follows the pin.** `GhosttyTerminal`
+  (`crates/tui-term`) walks whatever rows the current viewport exposes.
+  It holds no scroll state.
+- **Fresh spawn and reattach share one init.** Both `TerminalSpawned`
+  and `Snapshot` build the slot through `make_slot` (a fresh
+  `TerminalVt`); reattach just seeds `pending_feed` with the daemon ring
+  replay, which flushes into the same parser on first render. The
+  `fresh_and_reattach_reach_identical_scroll_state` test pins that they
+  cannot diverge.
+
+## The single owner (the #42 promise, kept)
+
+There is **one** function that mutates a viewport:
+
+```rust
+impl TerminalVt {
+    fn scroll(&mut self, request: ScrollRequest) -> ScrollOutcome
+}
+```
+
+`ScrollRequest` is the entire vocabulary — `By(delta)`, `Top`, `Bottom`.
+`scroll` is the only caller of libghostty's `scroll_viewport` in the
+whole TUI; `scroll_viewport_has_a_single_owner` reads the source and
+fails the build if a second call appears anywhere else. No handler pokes
+a raw offset.
+
+Every surface funnels through it:
+
+| Surface | Entry point | Targets |
+|---|---|---|
+| Mouse wheel | `scroll_at(rect, col, row, By(±3))` | tile **under the cursor** |
+| `Shift-PageUp/PageDown` | `scroll_active(±8)` | focused tile |
+| `Shift-Home` / `Shift-End` | `scroll_to_top` / `scroll_to_bottom` | focused tile |
+
+Both `scroll_at` (cursor-directed) and `scroll_active` (focus-directed)
+delegate to the private `scroll_terminal(id, request)`, which calls
+`TerminalVt::scroll`. One choke point, one owner.
+
+### A no-op can never be silent
+
+`scroll` always returns a typed `ScrollOutcome`:
+
+- `Moved { offset, total, len }` — the viewport moved (or was already
+  where asked, for a `By(0)` query).
+- `NoScrollback { alternate }` — `total <= len`: there is nothing to
+  scroll into. `alternate` flags an alt-screen program that owns its own
+  buffer (its scrollback is intentionally empty).
+- `NoTerminal` — no terminal resolved.
+
+This is why "no history yet" is no longer indistinguishable from "the
+Delta path broke" — the recurring confusion behind #306/#321/#360. The
+harness asserts that whenever scrollback exists, the outcome is `Moved`
+(`scroll_never_silently_noops_when_scrollback_exists`), and that an empty
+terminal reports a reason rather than a fake move.
+
+## Per-tile targeting (#362)
+
+In a split layout the wheel used to scroll the *focused* tile no matter
+which tile the pointer was over. The local-scrollback wheel now resolves
+the tile under the cursor:
+
+- `terminal_at(rect, col, row)` walks the tile tree with the SAME
+  geometry `render` lays out with (`pane_body_rect` applies the identical
+  top-chrome / margin inset; `tile_at` mirrors the HSplit/VSplit ratio
+  math). In Tabs mode it resolves to the active terminal, so the common
+  single-pane case is unchanged.
+- The wheel's `LocalScrollback` branch calls `scroll_at`, which scrolls
+  the terminal `terminal_at` resolves — the tile under the cursor. The
+  overwhelmingly common split (two primary-screen agents, or agent +
+  shell) is fully fixed: whichever tile the pointer is over scrolls.
+- The primary-vs-alt-screen routing decision (`wheel_route`) stays keyed
+  to the focused terminal, because the alt-screen *forward* branches
+  encode a mouse report for the focused terminal's grid. Routing an
+  alt-screen forward off a different tile would mis-encode against the
+  focused grid, so per-tile forwarding to an alt-screen program in a
+  split is deliberately left out of scope here; only the local-scrollback
+  target is cursor-directed.
+- The keyboard path stays focus-directed — it has no pointer.
+
+## Where scroll state is initialised, mutated, or can (legitimately) reset
+
+- **Fresh spawn / reattach** — `make_slot`; viewport starts pinned at the
+  bottom. Identical init (see above).
+- **Resync after dropped output** (`resync_terminal`) and **hidden-buffer
+  overflow** (`flush_pending`) rebuild the parser from the daemon ring;
+  the viewport resets to the bottom. This is correct: the byte stream is
+  being reconstructed, and the ring is authoritative.
+- **`\x1b[3J`** (erase-scrollback) from the inner program legitimately
+  empties scrollback → the next scroll reports `NoScrollback`. Not a bug.
+
+## Wheel routing (primary vs. alt-screen)
+
+`wheel_route_for` decides, off the target terminal:
+
+- **Primary screen → `LocalScrollback` always.** A primary-screen program
+  owns no pager, so the wheel is lazybox's scrollback from the first frame
+  of a fresh spawn — even before history accumulates and even if the app
+  tracks the mouse for clicks (Claude Code). Gating this on
+  `total > len`, as an earlier fix did, is what broke fresh agents (#360):
+  an empty scrollback is not a reason to hand the wheel away.
+- **Alt-screen + mouse tracking → `ForwardSgr`** (the app scrolls).
+- **Alt-screen, no mouse tracking → `AlternateScrollArrows`** (synthesised
+  arrow keys, xterm `alternateScroll`).
+
+## The regression harness
+
+`crates/tui/tests/terminal_scroll.rs` drives every surface through the
+real entry points:
+
+- Fresh-spawned agent — wheel, `Shift-PageUp/PageDown/Home/End`.
+- Reattached session (Snapshot replay).
+- Fresh and reattach reach identical scroll state.
+- Split tiles — the wheel scrolls the tile under the cursor, not the
+  focused one (#362); the keyboard scrolls the focused tile.
+- Alt-screen vs. normal screen.
+- No silent no-op: `Moved` whenever scrollback exists; a typed reason
+  when it doesn't.
+- The single-owner source guard.
+
+The bar: a change that breaks any scroll surface turns a test red. If a
+"scrolling broken again" report ever appears, it points at a **missing
+surface in this harness** — add the case, then fix the code.

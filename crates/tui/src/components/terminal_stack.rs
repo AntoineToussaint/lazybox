@@ -255,11 +255,29 @@ fn collapse_injected_path(msg: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// Outcome of a scroll attempt on the focused terminal. Used by the
+/// A viewport scroll request — the entire vocabulary the scroll owner
+/// accepts. Every scroll surface (wheel, `Shift-PgUp/PgDn`,
+/// `Shift-Home/End`, per-tile wheel) speaks only these three verbs;
+/// nothing outside [`TerminalVt::scroll`] pokes a raw offset or calls
+/// `scroll_viewport` directly. That single choke point is what makes a
+/// silent no-op impossible (the #42/#371 promise): a request either
+/// moves the viewport or comes back with a typed [`ScrollOutcome`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollRequest {
+    /// Move by a signed row delta — negative scrolls up into
+    /// scrollback, positive scrolls down toward the live content.
+    By(isize),
+    /// Jump the viewport to the top of scrollback.
+    Top,
+    /// Jump the viewport to the live bottom.
+    Bottom,
+}
+
+/// Outcome of a scroll attempt on a terminal. Used by the
 /// orchestrator's mouse-wheel handler to surface why a scroll might
 /// have looked like nothing happened — without this, "no scrollback
 /// content yet" was indistinguishable from a broken Delta path.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrollOutcome {
     /// No focused terminal (Tabs mode with no active tab, or an
     /// empty session).
@@ -325,6 +343,58 @@ pub enum ClickTarget {
     /// `repo` is `None` for a bare `#42`, which the model resolves
     /// against the focused workspace's repo.
     Issue { repo: Option<String>, number: u64 },
+}
+
+/// True when `(col, row)` lies inside `rect` (half-open on the far
+/// edges, matching how ratatui addresses cells).
+fn rect_contains_point(rect: Rect, col: u16, row: u16) -> bool {
+    col >= rect.x
+        && col < rect.x.saturating_add(rect.width)
+        && row >= rect.y
+        && row < rect.y.saturating_add(rect.height)
+}
+
+/// The leaf `terminal_id` whose rect contains `(col, row)`, walking the
+/// tile tree with the EXACT geometry [`TerminalStack::render`] lays out
+/// with (`render_tile_tree`): an `HSplit` gives its first child
+/// `width * ratio / 100` columns (capped one short of the full width),
+/// a one-column divider, then the remainder; a `VSplit` splits rows the
+/// same way. Kept a pure function of `(tree, rect)` so it can be unit
+/// tested against the renderer's split math without a frame.
+fn tile_at(tree: &lazybox_core::TileTree, rect: Rect, col: u16, row: u16) -> Option<u64> {
+    match tree {
+        lazybox_core::TileTree::Leaf { terminal_id } => {
+            rect_contains_point(rect, col, row).then_some(*terminal_id)
+        }
+        lazybox_core::TileTree::HSplit { left, right, ratio } => {
+            let split_at = (rect.width as u32 * (*ratio).min(100) as u32 / 100) as u16;
+            let left_w = split_at.min(rect.width.saturating_sub(1));
+            let left_rect = Rect {
+                width: left_w,
+                ..rect
+            };
+            let right_rect = Rect {
+                x: rect.x + left_w + 1,
+                width: rect.width.saturating_sub(left_w + 1),
+                ..rect
+            };
+            tile_at(left, left_rect, col, row).or_else(|| tile_at(right, right_rect, col, row))
+        }
+        lazybox_core::TileTree::VSplit { top, bottom, ratio } => {
+            let split_at = (rect.height as u32 * (*ratio).min(100) as u32 / 100) as u16;
+            let top_h = split_at.min(rect.height.saturating_sub(1));
+            let top_rect = Rect {
+                height: top_h,
+                ..rect
+            };
+            let bottom_rect = Rect {
+                y: rect.y + top_h + 1,
+                height: rect.height.saturating_sub(top_h + 1),
+                ..rect
+            };
+            tile_at(top, top_rect, col, row).or_else(|| tile_at(bottom, bottom_rect, col, row))
+        }
+    }
 }
 
 pub struct TerminalStack {
@@ -879,6 +949,46 @@ impl TerminalVt {
         self.terminal.vt_write(bytes);
     }
 
+    /// THE one and only mutation of this terminal's viewport pin.
+    /// Every scroll surface funnels here (`scroll_active`,
+    /// `scroll_to_top`/`scroll_to_bottom`, the per-tile wheel path) and
+    /// no other code in the crate calls `scroll_viewport` — a grep for
+    /// it must return exactly this line. A request either moves the
+    /// viewport or the returned [`ScrollOutcome`] explains why it could
+    /// not (`NoScrollback` when `total <= len`, `alternate` when the
+    /// inner program owns the buffer), so a scroll can never silently
+    /// no-op. That single choke point is the #42/#371 encapsulation:
+    /// there is one owner of scroll state and it cannot fail quietly.
+    fn scroll(&mut self, request: ScrollRequest) -> ScrollOutcome {
+        let alternate = matches!(
+            self.terminal.active_screen().ok(),
+            Some(vt::screen::Screen::Alternate)
+        );
+        match request {
+            // A zero delta is a state query, not a move — fall through
+            // to report the current scrollbar without touching the pin.
+            ScrollRequest::By(0) => {}
+            ScrollRequest::By(delta) => self
+                .terminal
+                .scroll_viewport(vt::terminal::ScrollViewport::Delta(delta)),
+            ScrollRequest::Top => self
+                .terminal
+                .scroll_viewport(vt::terminal::ScrollViewport::Top),
+            ScrollRequest::Bottom => self
+                .terminal
+                .scroll_viewport(vt::terminal::ScrollViewport::Bottom),
+        }
+        match self.terminal.scrollbar().ok() {
+            Some(s) if s.total <= s.len => ScrollOutcome::NoScrollback { alternate },
+            Some(s) => ScrollOutcome::Moved {
+                offset: s.offset,
+                total: s.total,
+                len: s.len,
+            },
+            None => ScrollOutcome::NoTerminal,
+        }
+    }
+
     fn ensure_size(&mut self, cols: u16, rows: u16) {
         if cols == self.cols && rows == self.rows {
             return;
@@ -1337,21 +1447,87 @@ impl TerminalStack {
     /// `ScrollOutcome::NoScrollback`.) Returns the scrollbar state
     /// for the diagnostic notice.
     pub fn scroll_to_top(&mut self) -> Option<String> {
-        let id = self.focused_terminal_id()?;
-        let slot = self.terminals.get_mut(&id)?;
-        slot.vt
-            .terminal
-            .scroll_viewport(vt::terminal::ScrollViewport::Top);
+        self.scroll_focused(ScrollRequest::Top);
         self.scrollbar_summary()
     }
 
     pub fn scroll_to_bottom(&mut self) -> Option<String> {
-        let id = self.focused_terminal_id()?;
-        let slot = self.terminals.get_mut(&id)?;
-        slot.vt
-            .terminal
-            .scroll_viewport(vt::terminal::ScrollViewport::Bottom);
+        self.scroll_focused(ScrollRequest::Bottom);
         self.scrollbar_summary()
+    }
+
+    /// Route a scroll request to a specific terminal through the single
+    /// owner ([`TerminalVt::scroll`]). The one internal chokepoint every
+    /// public scroll entry point delegates to — keeping the "who owns
+    /// scroll state" answer to exactly one place.
+    fn scroll_terminal(&mut self, id: Option<TerminalId>, request: ScrollRequest) -> ScrollOutcome {
+        let Some(id) = id else {
+            return ScrollOutcome::NoTerminal;
+        };
+        match self.terminals.get_mut(&id) {
+            Some(slot) => slot.vt.scroll(request),
+            None => ScrollOutcome::NoTerminal,
+        }
+    }
+
+    /// Scroll the focused terminal — the keyboard scrollback path
+    /// (`Shift-PgUp/PgDn/Home/End`), which has no pointer to target a
+    /// tile with, so it acts on wherever typing currently lands.
+    fn scroll_focused(&mut self, request: ScrollRequest) -> ScrollOutcome {
+        let id = self.focused_terminal_id();
+        self.scroll_terminal(id, request)
+    }
+
+    /// The terminal whose tile contains frame-space `(col, row)` inside
+    /// the terminal pane `rect`. Tabs mode → the active terminal (the
+    /// whole body is one tile). Splits mode → the leaf under the point,
+    /// resolved with the SAME geometry [`Self::render`] lays out with.
+    /// `None` when the point falls outside every leaf (pane chrome).
+    /// This is what lets the wheel target the tile under the cursor
+    /// rather than the focused one (#362).
+    pub fn terminal_at(&self, rect: Rect, col: u16, row: u16) -> Option<TerminalId> {
+        let body = Self::pane_body_rect(rect);
+        match &self.layout {
+            lazybox_core::SessionLayout::Tabs { .. } => rect_contains_point(body, col, row)
+                .then(|| self.active_terminal_id())
+                .flatten(),
+            lazybox_core::SessionLayout::Splits { tree, .. } => {
+                tile_at(tree, body, col, row).map(TerminalId)
+            }
+        }
+    }
+
+    /// The `inner` body rect [`Self::render`] insets `area` to before
+    /// laying out tiles: left border (+1 col), three rows of top chrome
+    /// (tab strip + divider + blank), one held-back bottom margin.
+    /// `terminal_at` walks the tile tree in this space, so it must stay
+    /// in lockstep with the `inner` computation in `render`.
+    fn pane_body_rect(rect: Rect) -> Rect {
+        Rect {
+            x: rect.x.saturating_add(1),
+            y: rect.y.saturating_add(3),
+            width: rect.width.saturating_sub(2),
+            height: rect.height.saturating_sub(4),
+        }
+    }
+
+    /// Scroll the tile under the cursor (#362). The wheel handler routes
+    /// here so a scroll always moves the terminal the pointer is over,
+    /// in both Tabs and Splits layouts — not whichever tile happens to
+    /// hold keyboard focus. Falls back to the focused terminal when the
+    /// point resolves to no tile (pane chrome) so a near-miss still
+    /// scrolls something sensible.
+    pub fn scroll_at(
+        &mut self,
+        rect: Rect,
+        col: u16,
+        row: u16,
+        request: ScrollRequest,
+    ) -> ScrollOutcome {
+        let id = self
+            .terminal_at(rect, col, row)
+            .or_else(|| self.focused_terminal_id());
+        self.scroll_terminal(id, request)
     }
 
     /// Did the user click on a terminal-tab label? Returns the tab
@@ -1665,42 +1841,13 @@ impl TerminalStack {
         Some(((col - inner_x) as u32, (row - inner_y) as u32))
     }
 
+    /// Scroll the focused terminal by `delta` rows through the single
+    /// scroll owner. The keyboard scrollback path uses this; the
+    /// mouse-wheel path uses [`Self::scroll_at`] so it can target the
+    /// tile under the cursor (#362). Both funnel into
+    /// [`TerminalVt::scroll`], so neither can silently no-op.
     pub fn scroll_active(&mut self, delta: isize) -> ScrollOutcome {
-        if delta == 0 {
-            return ScrollOutcome::NoTerminal;
-        }
-        let Some(id) = self.focused_terminal_id() else {
-            return ScrollOutcome::NoTerminal;
-        };
-        let Some(slot) = self.terminals.get_mut(&id) else {
-            return ScrollOutcome::NoTerminal;
-        };
-        let screen = slot.vt.terminal.active_screen().ok();
-        let before = slot.vt.terminal.scrollbar().ok();
-        slot.vt
-            .terminal
-            .scroll_viewport(vt::terminal::ScrollViewport::Delta(delta));
-        let after = slot.vt.terminal.scrollbar().ok();
-        tracing::debug!(
-            terminal_id = ?id,
-            delta = delta,
-            screen = ?screen,
-            before_total = before.as_ref().map(|s| s.total),
-            before_offset = before.as_ref().map(|s| s.offset),
-            after_total = after.as_ref().map(|s| s.total),
-            after_offset = after.as_ref().map(|s| s.offset),
-            "scroll_active: viewport state",
-        );
-        let alternate = matches!(screen, Some(vt::screen::Screen::Alternate));
-        match after {
-            Some(s) if s.total <= s.len => ScrollOutcome::NoScrollback { alternate },
-            Some(s) => ScrollOutcome::Moved {
-                offset: s.offset,
-                total: s.total,
-                len: s.len,
-            },
-            None => ScrollOutcome::NoTerminal,
-        }
+        self.scroll_focused(ScrollRequest::By(delta))
     }
 
     pub fn cycle_tab_forward(&mut self) {

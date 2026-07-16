@@ -198,6 +198,30 @@ impl Terminals {
         self.inner.scroll_active(delta)
     }
 
+    /// Scroll the tile under the cursor (#362) rather than the focused
+    /// tile. The wheel handler routes here with the pointer's frame-space
+    /// coordinates so a scroll targets whichever terminal it's over.
+    pub fn scroll_at(
+        &mut self,
+        rect: tuirealm::ratatui::layout::Rect,
+        col: u16,
+        row: u16,
+        request: crate::components::terminal_stack::ScrollRequest,
+    ) -> crate::components::terminal_stack::ScrollOutcome {
+        self.inner.scroll_at(rect, col, row, request)
+    }
+
+    /// The terminal whose tile contains `(col, row)`, or `None` for pane
+    /// chrome. Used by the wheel handler to route scroll per-tile.
+    pub fn terminal_at(
+        &self,
+        rect: tuirealm::ratatui::layout::Rect,
+        col: u16,
+        row: u16,
+    ) -> Option<lazybox_ipc::TerminalId> {
+        self.inner.terminal_at(rect, col, row)
+    }
+
     /// Forward `extract_text` — read the focused terminal's grid
     /// between two absolute frame-space coordinates and return the
     /// plain text. Used by the mouse-up selection-copy path.

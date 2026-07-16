@@ -7,6 +7,7 @@
 //! up in the popup and resolves on the keyboard, and the unit tests
 //! below fail if a menu row stops mapping to a command.
 
+use lazybox_config::NewTerminalLayout;
 use lazybox_core::TileDirection;
 use tuirealm::event::{Key, KeyModifiers};
 
@@ -33,6 +34,9 @@ pub(super) enum LeaderCmd {
     /// `]]x` — close the focused terminal (the focused tile in Splits,
     /// the active tab in Tabs).
     CloseTerminal,
+    /// `]]t` — flip the new-terminal layout preference (split ⇄ tabs)
+    /// and persist it. Affects the *next* spawn, not open terminals.
+    ToggleNewLayout,
 }
 
 impl LeaderCmd {
@@ -60,6 +64,7 @@ impl LeaderCmd {
                 '|' | '\\' => Some(Self::SplitVertical),
                 '-' => Some(Self::SplitHorizontal),
                 'x' => Some(Self::CloseTerminal),
+                't' => Some(Self::ToggleNewLayout),
                 _ => None,
             };
         }
@@ -88,7 +93,11 @@ impl LeaderCmd {
     /// feeding that char back through [`Self::from_key`] (#343). The one
     /// multi-char entry, the arrow aggregate, is deliberately
     /// non-dispatchable (it needs a direction) and is skipped there.
-    pub(super) fn menu_rows(splits: bool, tab_count: usize) -> Vec<(String, String)> {
+    pub(super) fn menu_rows(
+        splits: bool,
+        tab_count: usize,
+        new_layout: NewTerminalLayout,
+    ) -> Vec<(String, String)> {
         let mut rows: Vec<(&str, &str)> = vec![
             ("s", "snippets"),
             ("f", "focus mode"),
@@ -103,6 +112,13 @@ impl LeaderCmd {
             rows.push(("←→", "switch tab"));
         }
         rows.push(("x", "close terminal"));
+        // The `t` label shows the *current* default so the popup reads
+        // as a status line; pressing it flips to the other.
+        let layout_row = match new_layout {
+            NewTerminalLayout::Split => ("t", "new shells: split"),
+            NewTerminalLayout::Tabs => ("t", "new shells: tabs"),
+        };
+        rows.push(layout_row);
         rows.into_iter()
             .map(|(k, l)| (k.to_string(), l.to_string()))
             .collect()
@@ -119,7 +135,7 @@ mod tests {
     /// they're vouched for by the dedicated arrow test below.
     #[test]
     fn every_menu_row_key_resolves_to_a_command() {
-        for (key, label) in LeaderCmd::menu_rows(true, 1) {
+        for (key, label) in LeaderCmd::menu_rows(true, 1, NewTerminalLayout::Split) {
             if key.contains('←') {
                 continue;
             }
@@ -170,16 +186,39 @@ mod tests {
         let labels = |rows: Vec<(String, String)>| -> Vec<String> {
             rows.into_iter().map(|(_, l)| l).collect()
         };
-        let splits = labels(LeaderCmd::menu_rows(true, 2));
+        let splits = labels(LeaderCmd::menu_rows(true, 2, NewTerminalLayout::Split));
         assert!(splits.iter().any(|l| l == "move tile"));
         assert!(!splits.iter().any(|l| l == "switch tab"));
 
-        let one_tab = labels(LeaderCmd::menu_rows(false, 1));
+        let one_tab = labels(LeaderCmd::menu_rows(false, 1, NewTerminalLayout::Split));
         assert!(!one_tab.iter().any(|l| l == "move tile"));
         assert!(!one_tab.iter().any(|l| l == "switch tab"));
         assert!(one_tab.iter().any(|l| l == "close terminal"));
 
-        let two_tabs = labels(LeaderCmd::menu_rows(false, 2));
+        let two_tabs = labels(LeaderCmd::menu_rows(false, 2, NewTerminalLayout::Split));
         assert!(two_tabs.iter().any(|l| l == "switch tab"));
+    }
+
+    /// The `]]t` row always shows and reflects the current default;
+    /// its key resolves like every other command row.
+    #[test]
+    fn layout_toggle_row_reflects_current_preference() {
+        let split = LeaderCmd::menu_rows(false, 1, NewTerminalLayout::Split);
+        assert!(
+            split
+                .iter()
+                .any(|(k, l)| k == "t" && l == "new shells: split")
+        );
+
+        let tabs = LeaderCmd::menu_rows(false, 1, NewTerminalLayout::Tabs);
+        assert!(
+            tabs.iter()
+                .any(|(k, l)| k == "t" && l == "new shells: tabs")
+        );
+
+        assert!(matches!(
+            LeaderCmd::from_key(Key::Char('t'), KeyModifiers::NONE),
+            Some(LeaderCmd::ToggleNewLayout)
+        ));
     }
 }

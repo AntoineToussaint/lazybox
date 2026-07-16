@@ -563,6 +563,7 @@ impl<T: TerminalAdapter> Model<T> {
         let mut rows = super::terminal_leader::LeaderCmd::menu_rows(
             self.terminals.layout_is_splits(),
             self.terminals.visible_terminal_count(),
+            self.terminals.terminal_new_layout(),
         );
         rows.extend(
             self.sidebar
@@ -628,7 +629,26 @@ impl<T: TerminalAdapter> Model<T> {
             LeaderCmd::SplitHorizontal => self.terminals.split_tile(PendingSplit::Horizontal, cmds),
             LeaderCmd::MoveTile(dir) => self.terminals.move_tile_focus(dir, cmds),
             LeaderCmd::CloseTerminal => self.terminals.close_focused_tile(cmds),
+            LeaderCmd::ToggleNewLayout => self.toggle_terminal_new_layout(),
         }
+    }
+
+    /// `]]t` — flip the new-terminal layout preference live and persist
+    /// it to `ui.terminal_new_layout` so it survives restart. The
+    /// runtime flip lands first (it can't fail); a write error only
+    /// costs persistence, which we surface but don't roll back — the
+    /// user's explicit toggle still holds for this session.
+    fn toggle_terminal_new_layout(&mut self) {
+        let now = self.terminals.toggle_terminal_new_layout();
+        let word = match now {
+            lazybox_config::NewTerminalLayout::Split => "split",
+            lazybox_config::NewTerminalLayout::Tabs => "tabs",
+        };
+        match lazybox_config::Config::save_with(|c| c.ui.terminal_new_layout = now) {
+            Ok(()) => self.flash_info(format!("new terminals open as {word}")),
+            Err(e) => self.flash_info(format!("new terminals open as {word} (couldn't save: {e})")),
+        }
+        self.redraw = true;
     }
 
     /// The focus catalog lookups resolve under, given the real pane

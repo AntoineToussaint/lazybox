@@ -38,11 +38,24 @@ impl Terminals {
         }
     }
 
-    /// Fold resolved UI config into the terminal stack (currently the
+    /// Fold resolved UI config into the terminal stack: the
     /// dead-on-arrival grace window that gates auto-close of exited
-    /// agent panes, #367).
+    /// agent panes (#367) and the `terminal_new_layout` preference
+    /// (tab vs split for auto spawns, #361).
     pub fn apply_ui_defaults(&mut self, ui: &lazybox_config::UiDefaults) {
         self.inner.apply_ui_defaults(ui);
+    }
+
+    /// Current new-terminal layout preference (tab vs split for auto
+    /// spawns). Read by the `]]` leader popup to label the `]]t` row.
+    pub fn terminal_new_layout(&self) -> lazybox_config::NewTerminalLayout {
+        self.inner.terminal_new_layout()
+    }
+
+    /// `]]t` — flip the new-terminal layout preference, returning the
+    /// new value so the caller can persist + flash it.
+    pub fn toggle_terminal_new_layout(&mut self) -> lazybox_config::NewTerminalLayout {
+        self.inner.toggle_terminal_new_layout()
     }
 
     /// Drain queued IPC commands (writes / resizes / etc).

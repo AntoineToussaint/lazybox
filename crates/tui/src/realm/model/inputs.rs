@@ -602,6 +602,73 @@ showing keybinding search only",
             }
             return cmds;
         }
+        // Automation-policies menu (Id::PolicyPicker, issue #363) —
+        // single-pick. Resolve the picked row's `PolicyToggle` against
+        // the *live* workspace so the toggle acts on current state, then
+        // dispatch the matching command and close. `Info` rows are
+        // read-only — re-inform and close.
+        if matches!(self.modal_stack.last(), Some(Id::PolicyPicker)) {
+            use crate::realm::model::modals::PolicyToggle;
+            let toggle = picks
+                .first()
+                .and_then(|i| self.policy_choices.get(*i).cloned());
+            let workspace_key = self.pending_policy_workspace.take();
+            self.policy_choices.clear();
+            self.pop_modal();
+            let (Some(toggle), Some(workspace_key)) = (toggle, workspace_key) else {
+                return cmds;
+            };
+            let session_key = lazybox_core::SessionKey::from(&workspace_key);
+            let ws = self
+                .sidebar
+                .workspace_iter()
+                .find(|(k, _)| k.as_str() == workspace_key.as_str())
+                .map(|(_, w)| w);
+            let Some(ws) = ws else {
+                return cmds;
+            };
+            match toggle {
+                PolicyToggle::MergeOnGreen => {
+                    let enabled = !ws.auto_merge_on_green;
+                    cmds.push(IpcCommand::SetAutoMergeOnGreen {
+                        session_key,
+                        enabled,
+                    });
+                    self.flash_info(if enabled {
+                        "merge on green: armed"
+                    } else {
+                        "merge on green: off"
+                    });
+                }
+                PolicyToggle::AutoFix(kind) => {
+                    // Label-agnostic cycle (Default → Disarm → Arm): the
+                    // next state depends only on the current arm, so the
+                    // daemon's authoritative opt-out set — which this
+                    // client may not share in remote mode — never changes
+                    // the outcome.
+                    let next = lazybox_core::toggled_arm(ws.policies.arm(kind));
+                    cmds.push(IpcCommand::SetAutoFixPolicy {
+                        session_key,
+                        kind,
+                        arm: next,
+                    });
+                    let name = match kind {
+                        lazybox_core::AutoFixKind::CiFailure => "auto-fix CI",
+                        lazybox_core::AutoFixKind::MergeConflict => "auto-fix conflict",
+                    };
+                    let state = match next {
+                        lazybox_core::PolicyArm::Default => "follows config",
+                        lazybox_core::PolicyArm::Arm => "armed",
+                        lazybox_core::PolicyArm::Disarm => "disarmed",
+                    };
+                    self.flash_info(format!("{name}: {state}"));
+                }
+                PolicyToggle::Info(msg) => {
+                    self.flash_info(msg);
+                }
+            }
+            return cmds;
+        }
         // Snooze duration picker (Id::SnoozeDuration) — single-pick.
         // Translate the chosen index into a snooze deadline via the
         // stashed `snooze_choices`. Empty / Esc dismisses without
@@ -858,6 +925,10 @@ showing keybinding search only",
             Some(Id::SnoozeDuration) => {
                 self.pending_snooze_workspace = None;
                 self.snooze_choices.clear();
+            }
+            Some(Id::PolicyPicker) => {
+                self.pending_policy_workspace = None;
+                self.policy_choices.clear();
             }
             Some(Id::WorktreeProgress) => {
                 // Esc on the checklist — remember WHICH provisioning op

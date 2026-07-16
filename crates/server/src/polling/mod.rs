@@ -326,6 +326,11 @@ pub enum ProviderAction {
         /// CI failure vs merge conflict: picks the comment wording and
         /// namespaces the attempt counter.
         kind: AutoFixKind,
+        /// Whether a global opt-out label is present on the PR. Computed
+        /// in the source (it has the `Task`); the dispatcher combines it
+        /// with the workspace's per-session [`lazybox_core::PolicyArm`]
+        /// to decide whether to proceed (issue #363).
+        opted_out: bool,
         /// Cooldown / max-attempts thresholds, carried from the
         /// source so the dispatcher (which only has `&ServerConfig`)
         /// doesn't have to reload config.
@@ -404,9 +409,15 @@ impl GhSource {
         let mut queued = 0usize;
         let mut pending = self.pending_actions.lock();
         for task in tasks {
-            let Some(kind) = lazybox_core::evaluate_auto_fix(task, &self.auto_fix) else {
+            // Task-shape eligibility only (global enable is gated above).
+            // The label opt-out + per-session policy are resolved in the
+            // dispatcher, which has the workspace store — so a
+            // label-opted-out PR is still queued here and dropped there
+            // unless the workspace explicitly armed it (issue #363).
+            let Some(kind) = lazybox_core::auto_fix_candidate(task) else {
                 continue;
             };
+            let opted_out = lazybox_core::is_auto_fix_opted_out(task, &self.auto_fix);
             // Need a repo + numeric PR id to comment + key the counter.
             let Some(repo) = task.repo.clone() else {
                 continue;
@@ -422,7 +433,13 @@ impl GhSource {
                 }
             };
             let reason = format!("auto-fix ({}) on {repo}#{pr_number}", kind.describe());
-            tracing::info!(%reason, %session_key, "queued auto-fix");
+            // A label-opted-out PR is still queued so an explicit
+            // per-session `Arm` can override the label in the dispatcher
+            // (issue #363) — but by default it will be dropped there, so
+            // it must NOT inflate the user-visible "Queued N" notice or
+            // read as an actioned fix in the log. Only count / announce
+            // the candidates that proceed without an explicit arm.
+            tracing::info!(%reason, %session_key, opted_out, "queued auto-fix candidate");
             pending.push(ProviderAction::AutoFixPr {
                 session_key,
                 agent_id: DEFAULT_AGENT_ID.to_string(),
@@ -430,10 +447,13 @@ impl GhSource {
                 repo,
                 pr_number,
                 kind,
+                opted_out,
                 settings: self.auto_fix.clone(),
                 reason,
             });
-            queued += 1;
+            if !opted_out {
+                queued += 1;
+            }
         }
         if queued > 0 {
             self.emit_progress(format!("Queued {queued} auto-fix action(s)"));
@@ -911,9 +931,47 @@ async fn dispatch_action(
             repo,
             pr_number,
             kind,
+            opted_out,
             settings,
             reason,
         } => {
+            // Per-session policy gate (issue #363). The source queued
+            // this on task-shape eligibility alone; here — with the store
+            // — resolve the workspace's arm against the label opt-out. A
+            // `Disarm` (or a `Default` on a label-opted-out PR) drops the
+            // fix before any comment, attempt, or spawn.
+            //
+            // Fail closed: `load_workspace_offloaded` returns `None` for a
+            // genuinely-absent workspace AND for a transient store/deserialize
+            // error, so we cannot tell them apart. The workspace was upserted
+            // earlier in this same tick, so `None` here almost always means a
+            // read error — and defaulting to `Default` would silently fire on
+            // a workspace the user explicitly `Disarm`ed. Skipping instead is
+            // safe: the CI-fail / conflict trigger persists, so the next sweep
+            // retries once the workspace reads cleanly.
+            let Some(workspace) =
+                load_workspace_offloaded(config, &WorkspaceKey::new(session_key.as_str())).await
+            else {
+                tracing::warn!(
+                    source = source_name,
+                    %session_key,
+                    ?kind,
+                    "auto-fix: workspace policy unreadable — skipping this sweep (retries next tick)"
+                );
+                return;
+            };
+            let arm = workspace.policies.arm(kind);
+            if !lazybox_core::auto_fix_permitted(arm, opted_out) {
+                tracing::info!(
+                    source = source_name,
+                    %session_key,
+                    ?kind,
+                    arm = arm.as_str(),
+                    opted_out,
+                    "auto-fix not permitted for this workspace (per-session policy) — skipping"
+                );
+                return;
+            }
             let term_kind = lazybox_ipc::TerminalKind::Agent(agent_id.clone());
             // If a fix agent is ALREADY running on this PR, let it
             // finish — don't burn an attempt, post a duplicate "I'm
@@ -4403,6 +4461,25 @@ pub async fn set_auto_merge_on_green(config: &ServerConfig, key: &WorkspaceKey, 
         return;
     };
     workspace.auto_merge_on_green = enabled;
+    commit_upsert_offloaded(config, key, workspace).await;
+}
+
+/// Persist the workspace's per-session auto-fix arm for one
+/// [`lazybox_core::AutoFixKind`] (issue #363). Mirrors
+/// [`set_auto_merge_on_green`]: load, set the policy, commit (persists +
+/// broadcasts `WorkspaceUpserted`). The auto-fix dispatcher reads the
+/// stored arm back on the next fix candidate.
+pub async fn set_auto_fix_policy(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    kind: lazybox_core::AutoFixKind,
+    arm: lazybox_core::PolicyArm,
+) {
+    let _ws_guard = config.lock_workspace(key.as_str()).await;
+    let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
+        return;
+    };
+    workspace.policies.set(kind, arm);
     commit_upsert_offloaded(config, key, workspace).await;
 }
 

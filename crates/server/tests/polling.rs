@@ -4383,6 +4383,7 @@ async fn tick_dispatches_auto_fix_action_spawns_agent() {
         repo: "o/r".to_string(),
         pr_number: 202,
         kind: lazybox_core::AutoFixKind::CiFailure,
+        opted_out: false,
         settings: lazybox_core::AutoFixSettings {
             enabled: true,
             ..Default::default()
@@ -4426,6 +4427,126 @@ async fn tick_dispatches_auto_fix_action_spawns_agent() {
     );
 }
 
+/// Seed a workspace record carrying `policies`, so the dispatcher's
+/// per-session auto-fix gate (issue #363) reads a non-default arm.
+fn seed_workspace_with_policy(
+    config: &ServerConfig,
+    task: &Task,
+    kind: lazybox_core::AutoFixKind,
+    arm: lazybox_core::PolicyArm,
+) {
+    let key = lazybox_core::WorkspaceKey::new(lazybox_core::workspace_key_for(task));
+    let mut ws = lazybox_core::Workspace::from_task(task.clone(), Utc::now());
+    ws.policies.set(kind, arm);
+    let record = lazybox_store::WorkspaceRecord {
+        key: key.as_str().to_string(),
+        created_at: ws.created_at,
+        workspace_json: serde_json::to_string(&ws).ok(),
+    };
+    config.store.save_workspace(&record).unwrap();
+}
+
+#[tokio::test]
+async fn auto_fix_disarm_policy_skips_spawn() {
+    // A workspace that explicitly disarmed CI auto-fix must not spawn,
+    // even though the action is otherwise eligible and under budget.
+    let (config, _mock) = ServerConfig::in_memory_with_mock();
+    let mut bus_rx = config.bus.subscribe();
+
+    let task = make_task("o/r#505");
+    let session_key = lazybox_core::SessionKey::new(lazybox_core::workspace_key_for(&task));
+    seed_workspace_with_policy(
+        &config,
+        &task,
+        lazybox_core::AutoFixKind::CiFailure,
+        lazybox_core::PolicyArm::Disarm,
+    );
+
+    let action = polling::ProviderAction::AutoFixPr {
+        session_key,
+        agent_id: "claude".to_string(),
+        prompt: Some("Fix CI".to_string()),
+        repo: "o/r".to_string(),
+        pr_number: 505,
+        kind: lazybox_core::AutoFixKind::CiFailure,
+        opted_out: false,
+        settings: lazybox_core::AutoFixSettings {
+            enabled: true,
+            ..Default::default()
+        },
+        reason: "auto-fix (fixing CI) on o/r#505".to_string(),
+    };
+    // Empty task list: the tick only dispatches the action against the
+    // pre-seeded (disarmed) workspace, no re-upsert.
+    let source: Box<dyn TaskSource> = Box::new(ActionEmittingSource {
+        name: "github".into(),
+        tasks: vec![],
+        actions: std::sync::Mutex::new(vec![action]),
+    });
+    polling::tick(&config, &[source]).await;
+
+    let mut saw_spawn = false;
+    while let Ok(evt) = bus_rx.try_recv() {
+        if let Event::TerminalSpawned { .. } = evt {
+            saw_spawn = true;
+        }
+    }
+    assert!(!saw_spawn, "a disarmed auto-fix policy must skip the spawn");
+}
+
+#[tokio::test]
+async fn auto_fix_arm_overrides_label_opt_out() {
+    // A PR carrying an opt-out label arrives with `opted_out: true`;
+    // an explicit per-session Arm overrides the label and spawns.
+    let (config, _mock) = ServerConfig::in_memory_with_mock();
+    let mut bus_rx = config.bus.subscribe();
+
+    let task = make_task("o/r#606");
+    let session_key = lazybox_core::SessionKey::new(lazybox_core::workspace_key_for(&task));
+    seed_workspace_with_policy(
+        &config,
+        &task,
+        lazybox_core::AutoFixKind::CiFailure,
+        lazybox_core::PolicyArm::Arm,
+    );
+
+    let action = polling::ProviderAction::AutoFixPr {
+        session_key: session_key.clone(),
+        agent_id: "claude".to_string(),
+        prompt: Some("Fix CI".to_string()),
+        repo: "o/r".to_string(),
+        pr_number: 606,
+        kind: lazybox_core::AutoFixKind::CiFailure,
+        opted_out: true,
+        settings: lazybox_core::AutoFixSettings {
+            enabled: true,
+            ..Default::default()
+        },
+        reason: "auto-fix (fixing CI) on o/r#606".to_string(),
+    };
+    let source: Box<dyn TaskSource> = Box::new(ActionEmittingSource {
+        name: "github".into(),
+        tasks: vec![],
+        actions: std::sync::Mutex::new(vec![action]),
+    });
+    polling::tick(&config, &[source]).await;
+
+    let mut saw_spawn = false;
+    while let Ok(evt) = bus_rx.try_recv() {
+        if let Event::TerminalSpawned {
+            session_key: sk, ..
+        } = evt
+        {
+            assert_eq!(sk, session_key);
+            saw_spawn = true;
+        }
+    }
+    assert!(
+        saw_spawn,
+        "an explicit Arm must override a label opt-out and spawn"
+    );
+}
+
 #[tokio::test]
 async fn tick_auto_fix_respects_exhausted_budget() {
     // `max_attempts: 0` means the very first dispatch is already over
@@ -4444,6 +4565,7 @@ async fn tick_auto_fix_respects_exhausted_budget() {
         repo: "o/r".to_string(),
         pr_number: 303,
         kind: lazybox_core::AutoFixKind::CiFailure,
+        opted_out: false,
         settings: lazybox_core::AutoFixSettings {
             enabled: true,
             max_attempts: 0,
@@ -4492,6 +4614,7 @@ async fn auto_fix_skips_and_burns_no_attempt_while_agent_already_running() {
         repo: "o/r".to_string(),
         pr_number: 404,
         kind: lazybox_core::AutoFixKind::CiFailure,
+        opted_out: false,
         settings: lazybox_core::AutoFixSettings {
             enabled: true,
             ..Default::default()

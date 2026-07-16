@@ -28,6 +28,103 @@ pub(super) enum InspectRow {
     Inspection(lazybox_ipc::WorktreeInspectionDto),
 }
 
+/// What picking one row of the automation-policies menu (`g p`, issue
+/// #363) does. The `ChoicePicked` handler resolves the index into this
+/// against the live workspace so the toggle reads current state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PolicyToggle {
+    /// Flip the workspace's client-side merge-on-green arm.
+    MergeOnGreen,
+    /// Flip the per-session auto-fix arm for one failure kind.
+    AutoFix(lazybox_core::AutoFixKind),
+    /// A read-only / not-applicable row (native auto-merge status, or a
+    /// PR-only policy shown on an issue). Selecting re-informs, no
+    /// command.
+    Info(String),
+}
+
+/// Build the automation-policies menu rows for `ws`: one `(label,
+/// toggle)` pair per policy, reflecting current state. `opt_out_labels`
+/// is the configured auto-fix opt-out set so a label that disables
+/// auto-fix is surfaced rather than invisible (issue #363 acceptance).
+pub(crate) fn build_policy_rows(
+    ws: &lazybox_core::Workspace,
+    opt_out_labels: &[String],
+) -> (Vec<String>, Vec<PolicyToggle>) {
+    let mut labels = Vec::new();
+    let mut toggles = Vec::new();
+    let glyph = |on: bool| if on { "●" } else { "○" };
+
+    match ws.pr.as_ref() {
+        Some(pr) => {
+            // 1. merge-on-green (client-side). Superseded by native
+            //    auto-merge when that's on (precedence, issue #363).
+            let on = ws.auto_merge_on_green;
+            let detail = if pr.auto_merge_enabled {
+                "  (GitHub auto-merge takes over)"
+            } else {
+                ""
+            };
+            labels.push(format!("{} merge on green{detail}", glyph(on)));
+            toggles.push(PolicyToggle::MergeOnGreen);
+
+            // 2. GitHub-native auto-merge — read-only status.
+            labels.push(format!(
+                "{} GitHub auto-merge  (managed on github.com)",
+                glyph(pr.auto_merge_enabled)
+            ));
+            toggles.push(PolicyToggle::Info(
+                "GitHub-native auto-merge is set on github.com, not in lazybox".into(),
+            ));
+
+            // 3 + 4. per-session auto-fix arms.
+            for kind in [
+                lazybox_core::AutoFixKind::CiFailure,
+                lazybox_core::AutoFixKind::MergeConflict,
+            ] {
+                let opted_out = auto_fix_label_opt_out(pr, opt_out_labels);
+                let arm = ws.policies.arm(kind);
+                let on = lazybox_core::auto_fix_permitted(arm, opted_out);
+                let name = match kind {
+                    lazybox_core::AutoFixKind::CiFailure => "auto-fix CI",
+                    lazybox_core::AutoFixKind::MergeConflict => "auto-fix conflict",
+                };
+                let detail = match arm {
+                    lazybox_core::PolicyArm::Disarm => "  (disarmed here)".to_string(),
+                    lazybox_core::PolicyArm::Arm => "  (armed here · overrides label)".to_string(),
+                    lazybox_core::PolicyArm::Default if opted_out => {
+                        "  (off · opt-out label)".to_string()
+                    }
+                    lazybox_core::PolicyArm::Default => "  (follows config)".to_string(),
+                };
+                labels.push(format!("{} {name}{detail}", glyph(on)));
+                toggles.push(PolicyToggle::AutoFix(kind));
+            }
+        }
+        None => {
+            // Issue-only workspace: every policy here targets a PR.
+            // Surface them as unavailable so "which apply to issues vs
+            // PRs" is explicit rather than a silent absence.
+            for name in ["merge on green", "auto-fix CI", "auto-fix conflict"] {
+                labels.push(format!("○ {name}  (PR only)"));
+                toggles.push(PolicyToggle::Info(format!("{name} applies to a PR")));
+            }
+        }
+    }
+    (labels, toggles)
+}
+
+/// Whether any configured opt-out label is present on the PR
+/// (case-insensitive). Mirrors `lazybox_core::is_auto_fix_opted_out`
+/// but on the client's display-only label set.
+fn auto_fix_label_opt_out(pr: &lazybox_core::Task, opt_out_labels: &[String]) -> bool {
+    pr.labels.iter().any(|label| {
+        opt_out_labels
+            .iter()
+            .any(|opt| opt.eq_ignore_ascii_case(&label.name))
+    })
+}
+
 /// Tabular label for one inspector row. Single-line — the Choice
 /// modal truncates with an ellipsis when it overflows. Pack the
 /// signal-dense bits first: name, reasons, size, age, flags.
@@ -297,6 +394,35 @@ impl<T: TerminalAdapter> Model<T> {
         };
         self.pending_review_request = Some(workspace_key);
         self.mount_modal(Id::RequestReviewers, modal);
+    }
+
+    /// Mount the unified automation-policies menu (`g p`, issue #363)
+    /// for `workspace_key`. Single-pick `Choice` whose rows are every
+    /// policy on the focused PR/issue with its on/off state; picking a
+    /// row dispatches its toggle (see `choice_picked_inner`). Rows +
+    /// their toggles are stashed in `policy_choices` so the picked index
+    /// resolves back.
+    pub(crate) fn mount_policy_picker(&mut self, workspace_key: lazybox_core::WorkspaceKey) {
+        use crate::realm::components::choice::Choice;
+
+        if matches!(self.modal_stack.last(), Some(Id::PolicyPicker)) {
+            return;
+        }
+        let Some(ws) = self
+            .sidebar
+            .workspace_iter()
+            .find(|(k, _)| k.as_str() == workspace_key.as_str())
+            .map(|(_, w)| w)
+        else {
+            return;
+        };
+        let (labels, toggles) = build_policy_rows(ws, &self.auto_fix_opt_out_labels);
+        self.policy_choices = toggles;
+        self.pending_policy_workspace = Some(workspace_key);
+        let modal = Choice::single("● armed · ○ off — Enter toggles", labels)
+            .title("Automation policies")
+            .label(|s: &String| s.clone());
+        self.mount_modal(Id::PolicyPicker, modal);
     }
 
     /// Mount the "assignees" multi-select picker for the workspace's

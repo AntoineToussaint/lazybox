@@ -21,13 +21,14 @@
 //! once.
 
 use crate::{CiStatus, ReviewStatus, Task, TaskRole, TaskState};
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// Which failure mode triggered an auto-fix. Determines the prompt
 /// the agent gets and the key the attempt counter is tracked under
 /// (CI failures and merge conflicts get *separate* attempt budgets —
 /// a flaky test shouldn't burn the conflict budget and vice versa).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AutoFixKind {
     /// A required check transitioned to failing.
     CiFailure,
@@ -128,6 +129,38 @@ pub fn evaluate_auto_fix(task: &Task, settings: &AutoFixSettings) -> Option<Auto
     if !settings.enabled {
         return None;
     }
+    if is_auto_fix_opted_out(task, settings) {
+        return None;
+    }
+    auto_fix_candidate(task)
+}
+
+/// The **task-shape** half of the auto-fix decision: everything that
+/// depends only on the PR's own state, with no reference to the global
+/// feature switch, the label opt-out, or per-session
+/// [`crate::AutomationPolicies`]. Returns the failure kind a PR is a
+/// candidate to auto-fix for, or `None` when its shape rules it out.
+///
+/// Split out from [`evaluate_auto_fix`] so the per-session policy layer
+/// (issue #363) can resolve the label opt-out and the workspace's arm
+/// state in the daemon's dispatcher — which has the store the pure
+/// source path lacks — while the source still filters down to the small
+/// candidate set (your own broken open PRs) here.
+///
+/// Guards (all must pass):
+///
+/// 1. Task is a PR (issues have nothing to "fix CI" on).
+/// 2. PR is in an actionable state — not merged/closed and not a draft
+///    (WIP: its CI is expected to be red and the author is mid-work).
+/// 3. **Author scope** — `role == Author`: only PRs the configured
+///    viewer authored. We never touch a third party's PR.
+/// 4. **Human in the loop** — no requested reviewers and no
+///    changes-requested review.
+/// 5. **Merge queue** — not currently in GitHub's merge queue.
+///
+/// Trigger priority: a conflict outranks a CI failure (you can't get
+/// clean CI on a branch that won't even merge).
+pub fn auto_fix_candidate(task: &Task) -> Option<AutoFixKind> {
     if !task.is_pr() {
         return None;
     }
@@ -141,16 +174,6 @@ pub fn evaluate_auto_fix(task: &Task, settings: &AutoFixSettings) -> Option<Auto
     }
     // Author scope — only our own PRs.
     if task.role != TaskRole::Author {
-        return None;
-    }
-    // Opt-out label (case-insensitive).
-    let opted_out = task.labels.iter().any(|label| {
-        settings
-            .opt_out_labels
-            .iter()
-            .any(|opt| opt.eq_ignore_ascii_case(&label.name))
-    });
-    if opted_out {
         return None;
     }
     // Hold off while a human is actively reviewing: a requested
@@ -170,6 +193,20 @@ pub fn evaluate_auto_fix(task: &Task, settings: &AutoFixSettings) -> Option<Auto
         return Some(AutoFixKind::CiFailure);
     }
     None
+}
+
+/// Whether any of `settings.opt_out_labels` (case-insensitive) is
+/// present on `task`. This is the **label** half of the auto-fix
+/// decision — kept separate so the per-session policy layer can let an
+/// explicit [`crate::PolicyArm::Arm`] override it (issue #363) while
+/// [`evaluate_auto_fix`] still honors it for the default case.
+pub fn is_auto_fix_opted_out(task: &Task, settings: &AutoFixSettings) -> bool {
+    task.labels.iter().any(|label| {
+        settings
+            .opt_out_labels
+            .iter()
+            .any(|opt| opt.eq_ignore_ascii_case(&label.name))
+    })
 }
 
 #[cfg(test)]
@@ -361,5 +398,47 @@ mod tests {
     fn store_keys_are_distinct_and_stable() {
         assert_eq!(AutoFixKind::CiFailure.store_key(), "ci");
         assert_eq!(AutoFixKind::MergeConflict.store_key(), "conflict");
+    }
+
+    /// The task-shape half ignores the global switch and the label
+    /// opt-out — it answers "is this PR's own state a fixable shape?"
+    /// only. A label-opted-out PR is still a candidate here (the label
+    /// is resolved by the policy layer in the dispatcher, issue #363).
+    #[test]
+    fn candidate_ignores_enable_and_label() {
+        let mut t = pr();
+        t.labels = vec![crate::Label::new("no-auto-fix")];
+        // Global-disabled `evaluate_auto_fix` says no…
+        assert_eq!(evaluate_auto_fix(&t, &AutoFixSettings::default()), None);
+        // …but the pure candidate still sees a fixable CI failure.
+        assert_eq!(auto_fix_candidate(&t), Some(AutoFixKind::CiFailure));
+    }
+
+    /// The label half is exactly the opt-out check, case-insensitive.
+    #[test]
+    fn opted_out_matches_labels_case_insensitively() {
+        let mut t = pr();
+        assert!(!is_auto_fix_opted_out(&t, &enabled()));
+        t.labels = vec![crate::Label::new("Do-Not-Lazybox")];
+        assert!(is_auto_fix_opted_out(&t, &enabled()));
+    }
+
+    /// `evaluate_auto_fix` == candidate gated by enable + !opted_out —
+    /// the composition the split must preserve for the source path.
+    #[test]
+    fn evaluate_is_candidate_gated_by_enable_and_label() {
+        let t = pr();
+        assert_eq!(
+            evaluate_auto_fix(&t, &enabled()),
+            auto_fix_candidate(&t),
+            "no label, enabled → same as candidate"
+        );
+        let mut labeled = pr();
+        labeled.labels = vec![crate::Label::new("no-auto-fix")];
+        assert_eq!(
+            evaluate_auto_fix(&labeled, &enabled()),
+            None,
+            "label opt-out drops it in the composed fn"
+        );
     }
 }

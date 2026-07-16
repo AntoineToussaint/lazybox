@@ -355,7 +355,7 @@ leader (`]]`) followed by `s` mounts the snippet picker
 
 **Status:** stable
 **Crate(s):** `tui` (`realm/model/keys.rs`, `components/terminal_stack.rs`)
-**Config / flags:** `terminal.escape_char` (default `]`)
+**Config / flags:** `terminal.escape_char` (default `]`), `ui.terminal_new_layout` (`split` default / `tabs`)
 **Key bindings:** `]]` exit to sidebar, `Tab` focus (pre-input), `Ctrl-c` SIGINT, `]]…` tile management, mouse wheel scrollback, drag-select → OSC 52 copy
 
 ### What it does
@@ -368,6 +368,8 @@ leaving, splitting, scrolling, and copying.
 - `Tab` cycles focus only before you've typed in the current visit; after the first keystroke it routes to the PTY (autocomplete).
 - `Ctrl-c` is forwarded as SIGINT.
 - `]]` then `|`/`\` (split vertical), `-` (split horizontal), arrows (move tile focus / cycle tabs), `x` (close the focused terminal). `Ctrl-w` is not a lazybox prefix — it reaches the inner program (readline word-erase).
+- By default a second terminal in a workspace opens side-by-side (a split tile). Set `ui.terminal_new_layout: tabs` to have ordinary `s`/agent spawns stack behind the tab strip instead — the existing tile keeps its full size. Explicit `]]|` / `]]-` splits are unaffected.
+- `]]t` toggles that default live (split ⇄ tabs), persisting it to `ui.terminal_new_layout` so it survives restart; the `]]` popup's `t` row shows the current setting. The change affects the *next* spawn, not terminals already open.
 - Mouse wheel scrolls local history (3 rows/notch) whenever the inner program
   is on the primary screen — including a brand-new agent, from its first frame.
   Only an alternate-screen program that enabled mouse tracking (vim, htop, less)

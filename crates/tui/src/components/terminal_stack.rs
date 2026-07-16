@@ -398,6 +398,12 @@ pub struct TerminalStack {
     /// `apply_ui_defaults`; the const is the fallback for tests and any
     /// stack built before config lands. See #367.
     dead_on_arrival: std::time::Duration,
+    /// User preference (`ui.terminal_new_layout`) for how an
+    /// auto-spawned second-or-later terminal lands: `Split`
+    /// (side-by-side tiles, the default) or `Tabs` (stacked behind the
+    /// tab strip). Only consulted for the automatic layout on
+    /// `TerminalSpawned`; explicit `]]|` / `]]-` splits ignore it.
+    terminal_new_layout: lazybox_config::NewTerminalLayout,
 }
 
 /// Records that a terminal's process has exited. Agent terminals keep
@@ -947,14 +953,34 @@ impl TerminalStack {
             last_focused: HashMap::new(),
             closing: HashSet::new(),
             dead_on_arrival: DEFAULT_DEAD_ON_ARRIVAL,
+            terminal_new_layout: lazybox_config::NewTerminalLayout::default(),
         }
     }
 
-    /// Fold resolved UI config into the stack. Currently just the
-    /// dead-on-arrival grace window that gates auto-close of exited
-    /// agent panes (#367).
+    /// Fold resolved UI config into the stack: the dead-on-arrival
+    /// grace window that gates auto-close of exited agent panes (#367),
+    /// and the `terminal_new_layout` preference that decides whether an
+    /// auto-spawned second terminal promotes the session into a
+    /// side-by-side split or simply lands as a new tab (#361).
     pub fn apply_ui_defaults(&mut self, ui: &lazybox_config::UiDefaults) {
         self.dead_on_arrival = ui.agent_dead_on_arrival;
+        self.terminal_new_layout = ui.terminal_new_layout;
+    }
+
+    /// The current new-terminal layout preference.
+    pub fn terminal_new_layout(&self) -> lazybox_config::NewTerminalLayout {
+        self.terminal_new_layout
+    }
+
+    /// Flip the new-terminal layout preference (`]]t`) and return the
+    /// new value so the caller can persist it and flash a notice. Takes
+    /// effect on the *next* spawn; terminals already open are untouched.
+    pub fn toggle_terminal_new_layout(&mut self) -> lazybox_config::NewTerminalLayout {
+        self.terminal_new_layout = match self.terminal_new_layout {
+            lazybox_config::NewTerminalLayout::Split => lazybox_config::NewTerminalLayout::Tabs,
+            lazybox_config::NewTerminalLayout::Tabs => lazybox_config::NewTerminalLayout::Split,
+        };
+        self.terminal_new_layout
     }
 
     /// Drain queued resize requests from the last frame. The App calls
@@ -2272,7 +2298,7 @@ impl TerminalStack {
                         .iter()
                         .filter(|(_, slot)| Some(&slot.session_key) == self.active_session.as_ref())
                         .count();
-                    if session_count >= 2 {
+                    if session_count >= 2 && self.auto_split_on_spawn() {
                         // Two-or-more terminals on the same session: the
                         // user wants to see both. Auto-promote (Tabs) or
                         // extend (Splits) into a vertical split so the new
@@ -2286,9 +2312,11 @@ impl TerminalStack {
                         .iter()
                         .position(|id| id == terminal_id)
                     {
-                        // First terminal in this session — stay in Tabs
-                        // (cheaper render, no wasted dividers) but make the
-                        // fresh spawn the active tab so the user lands on it.
+                        // Stay in Tabs and make the fresh spawn the active
+                        // tab so the user lands on it. Reached for the first
+                        // terminal (cheaper render, no wasted dividers) and,
+                        // under `ui.terminal_new_layout: tabs`, for every
+                        // later spawn too — a new tab instead of a split.
                         self.active_tab_idx = idx;
                     }
                 }
@@ -2658,6 +2686,20 @@ impl TerminalStack {
 }
 
 impl TerminalStack {
+    /// Whether an auto-spawned second-or-later terminal should promote
+    /// the session into a side-by-side split (vs land as a new tab).
+    /// `Split` (the default) always splits; `Tabs` only splits a
+    /// session the user has *already* split by hand — a Tabs-mode
+    /// session stays tabbed so the existing tile keeps its full size.
+    fn auto_split_on_spawn(&self) -> bool {
+        match self.terminal_new_layout {
+            lazybox_config::NewTerminalLayout::Split => true,
+            lazybox_config::NewTerminalLayout::Tabs => {
+                matches!(self.layout, lazybox_core::SessionLayout::Splits { .. })
+            }
+        }
+    }
+
     /// Commit a pending split: take the currently-focused leaf in
     /// the layout (or fabricate one if we're still in Tabs mode) and
     /// wrap it in a fresh `HSplit`/`VSplit` whose other side is the
@@ -5478,6 +5520,132 @@ mod spawn_focus_tests {
 
         // The background spawn must not pull focus off the active session.
         assert_eq!(stack.focused_terminal_id(), Some(TerminalId(1)));
+    }
+}
+
+#[cfg(test)]
+mod new_terminal_layout_tests {
+    //! Issue #361: `ui.terminal_new_layout: tabs` makes an
+    //! auto-spawned second terminal land as a new tab instead of
+    //! promoting the session into a side-by-side split. The default
+    //! (`split`) is unchanged.
+    use super::*;
+
+    fn spawn(stack: &mut TerminalStack, id: u64, sk: &SessionKey, kind: TerminalKind) {
+        stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(id),
+            session_key: sk.clone(),
+            kind,
+            no_permission: false,
+            on_main: false,
+        });
+    }
+
+    fn with_pref(pref: lazybox_config::NewTerminalLayout) -> TerminalStack {
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        let ui = lazybox_config::UiDefaults {
+            terminal_new_layout: pref,
+            ..Default::default()
+        };
+        stack.apply_ui_defaults(&ui);
+        stack
+    }
+
+    #[test]
+    fn tabs_pref_keeps_a_second_spawn_as_a_tab() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = with_pref(lazybox_config::NewTerminalLayout::Tabs);
+        stack.set_active_session(Some(sk.clone()));
+
+        spawn(&mut stack, 1, &sk, TerminalKind::Agent("claude".into()));
+        spawn(&mut stack, 2, &sk, TerminalKind::Shell);
+
+        assert!(
+            matches!(stack.layout(), lazybox_core::SessionLayout::Tabs { .. }),
+            "tabs preference must not promote to a split: {:?}",
+            stack.layout(),
+        );
+        // Both terminals are visible tabs and the fresh spawn is active.
+        assert_eq!(stack.visible_terminals().len(), 2);
+        assert_eq!(stack.focused_terminal_id(), Some(TerminalId(2)));
+    }
+
+    #[test]
+    fn split_pref_is_the_unchanged_default() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = with_pref(lazybox_config::NewTerminalLayout::Split);
+        stack.set_active_session(Some(sk.clone()));
+
+        spawn(&mut stack, 1, &sk, TerminalKind::Agent("claude".into()));
+        spawn(&mut stack, 2, &sk, TerminalKind::Shell);
+
+        assert!(
+            matches!(stack.layout(), lazybox_core::SessionLayout::Splits { .. }),
+            "split preference must promote to a split: {:?}",
+            stack.layout(),
+        );
+        assert_eq!(stack.focused_terminal_id(), Some(TerminalId(2)));
+    }
+
+    #[test]
+    fn tabs_pref_still_extends_a_hand_made_split() {
+        // A session the user split by hand (`]]|`) stays in Splits; a
+        // later ordinary spawn extends the tree rather than snapping
+        // back to tabs.
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = with_pref(lazybox_config::NewTerminalLayout::Tabs);
+        stack.set_active_session(Some(sk.clone()));
+
+        spawn(&mut stack, 1, &sk, TerminalKind::Agent("claude".into()));
+        let mut cmds = Vec::new();
+        stack.split_tile(PendingSplit::Vertical, &mut cmds);
+        spawn(&mut stack, 2, &sk, TerminalKind::Shell);
+        assert!(matches!(
+            stack.layout(),
+            lazybox_core::SessionLayout::Splits { .. }
+        ));
+
+        spawn(&mut stack, 3, &sk, TerminalKind::Shell);
+        let leaves = match stack.layout() {
+            lazybox_core::SessionLayout::Splits { tree, .. } => tree.leaves(),
+            other => panic!("expected Splits layout, got {other:?}"),
+        };
+        assert!(
+            leaves.contains(&3),
+            "a spawn into an existing split still joins the tree: {leaves:?}",
+        );
+    }
+
+    #[test]
+    fn toggle_flips_and_takes_effect_on_the_next_spawn() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = with_pref(lazybox_config::NewTerminalLayout::Split);
+        stack.set_active_session(Some(sk.clone()));
+
+        // Flip Split → Tabs before the second spawn.
+        assert_eq!(
+            stack.toggle_terminal_new_layout(),
+            lazybox_config::NewTerminalLayout::Tabs
+        );
+        assert_eq!(
+            stack.terminal_new_layout(),
+            lazybox_config::NewTerminalLayout::Tabs
+        );
+
+        spawn(&mut stack, 1, &sk, TerminalKind::Agent("claude".into()));
+        spawn(&mut stack, 2, &sk, TerminalKind::Shell);
+        assert!(
+            matches!(stack.layout(), lazybox_core::SessionLayout::Tabs { .. }),
+            "post-toggle the second spawn stays a tab: {:?}",
+            stack.layout(),
+        );
+
+        // Flip back Tabs → Split.
+        assert_eq!(
+            stack.toggle_terminal_new_layout(),
+            lazybox_config::NewTerminalLayout::Split
+        );
     }
 }
 

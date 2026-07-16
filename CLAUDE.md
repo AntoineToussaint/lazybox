@@ -287,7 +287,10 @@ is forwarded as an interrupt. Tile management rides the same leader
 (#286): `]]|` / `]]-` split, `]]<arrow>` moves tile focus (cycles
 tabs in Tabs mode), `]]x` closes the focused terminal (tile or active
 tab) — `Ctrl-w` is no longer a lazybox prefix and reaches the inner
-program (readline word-erase). `Shift-PgUp/PgDn` scroll the
+program (readline word-erase). `]]t` toggles whether a new shell/agent
+opens as a split or a tab (#361), persisting `ui.terminal_new_layout`;
+the `]]` popup's `t` row shows the current setting.
+`Shift-PgUp/PgDn` scroll the
 scrollback, `Shift-Home/End` jump top/bottom (mouse wheel works too).
 
 ## Conventions

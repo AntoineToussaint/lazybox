@@ -939,8 +939,54 @@ async fn scan_subcommand(args: &[String]) -> anyhow::Result<()> {
 
     let found =
         lazybox_git_ops::scan_external_checkouts(&roots, max_depth, include_hidden, &exclude).await;
-    print_scan_results(&roots, &found);
+    let tracked = tracked_worktree_paths(&lazybox_core::paths::state_db());
+    print_scan_results(&roots, &found, &tracked);
     Ok(())
+}
+
+/// Canonical worktree paths of every session lazybox already tracks,
+/// read best-effort from the state DB at `db_path`. Used to mark
+/// discovered checkouts lazybox is already working in — today that's
+/// only its own managed worktrees (already excluded from the scan),
+/// but once import (issue #348 stage two) references external
+/// checkouts in place, a re-scan would otherwise re-offer them as
+/// fresh finds.
+///
+/// Empty on any failure — missing DB, a lock the busy-timeout couldn't
+/// outwait, unreadable JSON — so the scan degrades to "unannotated"
+/// rather than failing. Skipped entirely when the DB doesn't exist so
+/// a scan never creates one (`SqliteStore::open` would).
+fn tracked_worktree_paths(db_path: &std::path::Path) -> std::collections::HashSet<PathBuf> {
+    use lazybox_store::Store;
+    let mut out = std::collections::HashSet::new();
+    if !db_path.exists() {
+        return out;
+    }
+    let Ok(store) = lazybox_store::SqliteStore::open(db_path) else {
+        return out;
+    };
+    let Ok(records) = store.list_workspaces() else {
+        return out;
+    };
+    for record in records {
+        let Some(json) = record.workspace_json else {
+            continue;
+        };
+        let Ok(workspace) = serde_json::from_str::<lazybox_core::Workspace>(&json) else {
+            continue;
+        };
+        for session in workspace.sessions {
+            out.insert(scan_canonicalize(&session.worktree_path));
+        }
+    }
+    out
+}
+
+/// Canonicalize when possible (resolves symlinks + macOS `/var` →
+/// `/private/var`), falling back to the literal path so a
+/// not-yet-created path still compares equal to itself.
+fn scan_canonicalize(p: &std::path::Path) -> PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
 /// Expand a leading `~/` against `$HOME`. Mirrors the daemon's mount
@@ -955,8 +1001,14 @@ fn scan_expand_tilde(p: &std::path::Path) -> PathBuf {
 }
 
 /// Render the scan as a plain aligned table on stdout, most-recently
-/// active first. Read-only: purely informational.
-fn print_scan_results(roots: &[PathBuf], found: &[lazybox_git_ops::DiscoveredCheckout]) {
+/// active first. Read-only: purely informational. `tracked` holds the
+/// canonical worktree paths lazybox already knows about, used to tag
+/// checkouts it's already working in.
+fn print_scan_results(
+    roots: &[PathBuf],
+    found: &[lazybox_git_ops::DiscoveredCheckout],
+    tracked: &std::collections::HashSet<PathBuf>,
+) {
     let root_list = roots
         .iter()
         .map(|r| r.display().to_string())
@@ -993,6 +1045,9 @@ fn print_scan_results(roots: &[PathBuf], found: &[lazybox_git_ops::DiscoveredChe
         }
         if c.has_uncommitted_changes {
             tags.push("dirty");
+        }
+        if tracked.contains(&scan_canonicalize(&c.path)) {
+            tags.push("tracked");
         }
         let tag_str = if tags.is_empty() {
             String::new()
@@ -1370,6 +1425,46 @@ mod argv_tests {
             Some(v) => unsafe { std::env::set_var("HOME", v) },
             None => unsafe { std::env::remove_var("HOME") },
         }
+    }
+
+    #[test]
+    fn tracked_worktree_paths_reads_session_paths_and_never_creates_the_db() {
+        use lazybox_store::{SqliteStore, Store, WorkspaceRecord};
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db = tmp.path().join("state.db");
+
+        // Missing DB → empty set, and the read must not create the file
+        // (SqliteStore::open would, so the existence guard matters).
+        assert!(tracked_worktree_paths(&db).is_empty());
+        assert!(!db.exists(), "reading a missing DB must not create it");
+
+        // Seed one workspace whose session points at a real directory.
+        let wt = tmp.path().join("some-checkout");
+        std::fs::create_dir_all(&wt).expect("mkdir wt");
+        let key = lazybox_core::WorkspaceKey::new("ws-1");
+        let mut ws = lazybox_core::Workspace::empty(key.clone(), "main", chrono::Utc::now());
+        ws.add_session(lazybox_core::WorkspaceSession::new(
+            key.clone(),
+            lazybox_core::SessionKind::Shell,
+            wt.clone(),
+            chrono::Utc::now(),
+        ));
+        let json = serde_json::to_string(&ws).expect("serialize workspace");
+        let store = SqliteStore::open(&db).expect("open store");
+        store
+            .save_workspace(&WorkspaceRecord {
+                key: key.as_str().to_string(),
+                created_at: chrono::Utc::now(),
+                workspace_json: Some(json),
+            })
+            .expect("save workspace");
+        drop(store);
+
+        let tracked = tracked_worktree_paths(&db);
+        assert!(
+            tracked.contains(&scan_canonicalize(&wt)),
+            "the session's worktree path must be reported as tracked, got {tracked:?}"
+        );
     }
 
     #[test]

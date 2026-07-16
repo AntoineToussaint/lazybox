@@ -251,10 +251,12 @@ fn all_events() -> Vec<Event> {
         Event::TerminalExited {
             terminal_id: TerminalId(2),
             exit_code: Some(0),
+            last_output: None,
         },
         Event::TerminalExited {
             terminal_id: TerminalId(2),
             exit_code: None,
+            last_output: Some("boom: could not start".into()),
         },
         Event::AgentState {
             session_key: key.clone(),

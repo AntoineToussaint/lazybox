@@ -170,6 +170,42 @@ impl Default for AttentionConfig {
     }
 }
 
+/// Where a newly spawned terminal lands when its session already has
+/// one open: as a side-by-side `Split` tile (the historical default)
+/// or a stacked `Tabs` entry behind the tab strip. Only governs the
+/// automatic layout of an ordinary shell/agent spawn — explicit
+/// `]]|` / `]]-` splits are unaffected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum NewTerminalLayout {
+    #[default]
+    Split,
+    Tabs,
+}
+
+/// Lenient field deserializer for `ui.terminal_new_layout`: an
+/// unrecognized value warns and falls back to the default rather than
+/// failing the *entire* config load. A cosmetic per-terminal
+/// preference must never be the reason lazybox can't start and read
+/// the repos / Slack tokens alongside it. Absent keys never reach here
+/// — `#[serde(default)]` handles them.
+fn de_lenient_new_terminal_layout<'de, D>(de: D) -> Result<NewTerminalLayout, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(de)?;
+    Ok(match raw.trim().to_ascii_lowercase().as_str() {
+        "tabs" => NewTerminalLayout::Tabs,
+        "split" => NewTerminalLayout::Split,
+        other => {
+            tracing::warn!(
+                "unknown ui.terminal_new_layout {other:?}; expected `split` or `tabs`, using `split`"
+            );
+            NewTerminalLayout::Split
+        }
+    })
+}
+
 /// `ui:` block — user-facing view state lazybox writes back so UI
 /// preferences survive restart.
 ///
@@ -270,6 +306,14 @@ pub struct UiSection {
     /// fresh install starts with every tip available.
     #[serde(default)]
     pub tips_seen: Vec<String>,
+    /// How a second (or later) terminal in a session opens: as a
+    /// side-by-side `split` (default) or a stacked `tabs`. Explicit
+    /// `]]|` / `]]-` splits ignore this — it only governs the
+    /// automatic layout of an ordinary shell/agent spawn. Toggle live
+    /// with the `]]t` terminal-leader command, which persists back
+    /// here.
+    #[serde(default, deserialize_with = "de_lenient_new_terminal_layout")]
+    pub terminal_new_layout: NewTerminalLayout,
 }
 
 fn default_true() -> bool {
@@ -297,6 +341,7 @@ impl Default for UiSection {
             tour_seen: false,
             show_tips: true,
             tips_seen: Vec::new(),
+            terminal_new_layout: NewTerminalLayout::default(),
         }
     }
 }
@@ -325,6 +370,9 @@ pub struct UiDefaults {
     /// Sourced from `terminal.agent_dead_on_arrival_ms`. See
     /// [`TerminalSection::agent_dead_on_arrival_ms`].
     pub agent_dead_on_arrival: Duration,
+    /// Layout for an auto-spawned second-or-later terminal. See
+    /// [`UiSection::terminal_new_layout`].
+    pub terminal_new_layout: NewTerminalLayout,
 }
 
 impl Default for UiDefaults {
@@ -341,6 +389,7 @@ impl Default for UiDefaults {
             log_path: std::path::PathBuf::from("/tmp/lazybox.log"),
             browser: None,
             agent_dead_on_arrival: Duration::from_millis(10_000),
+            terminal_new_layout: NewTerminalLayout::default(),
         }
     }
 }
@@ -372,6 +421,7 @@ impl UiSection {
             // `Config::resolved_ui`); the default stands until that
             // override is applied.
             agent_dead_on_arrival: d.agent_dead_on_arrival,
+            terminal_new_layout: self.terminal_new_layout,
         }
     }
 }
@@ -1315,6 +1365,47 @@ repos:
         let written = serde_yaml::to_string(&cfg).expect("serialize");
         let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
         assert!(!reparsed.terminal.native_scrollback, "survives round-trip");
+    }
+
+    /// `ui.terminal_new_layout` defaults to `split` (unchanged
+    /// side-by-side behavior), accepts `tabs`, and round-trips.
+    #[test]
+    fn terminal_new_layout_defaults_to_split_and_parses_tabs() {
+        let cfg: Config = serde_yaml::from_str("{}").expect("parse");
+        assert_eq!(
+            cfg.ui.resolved().terminal_new_layout,
+            NewTerminalLayout::Split,
+            "absent → the historical split default"
+        );
+
+        let cfg: Config =
+            serde_yaml::from_str("ui:\n  terminal_new_layout: tabs\n").expect("parse");
+        assert_eq!(
+            cfg.ui.resolved().terminal_new_layout,
+            NewTerminalLayout::Tabs
+        );
+
+        let written = serde_yaml::to_string(&cfg).expect("serialize");
+        let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
+        assert_eq!(
+            reparsed.ui.resolved().terminal_new_layout,
+            NewTerminalLayout::Tabs,
+            "survives round-trip"
+        );
+    }
+
+    /// A typo'd `ui.terminal_new_layout` must not sink the whole config
+    /// load — it warns and falls back to `split`, so repos / tokens in
+    /// the same file still load.
+    #[test]
+    fn terminal_new_layout_tolerates_a_bad_value() {
+        let cfg: Config = serde_yaml::from_str("ui:\n  terminal_new_layout: splurt\n")
+            .expect("a bad layout value must not fail the whole parse");
+        assert_eq!(
+            cfg.ui.resolved().terminal_new_layout,
+            NewTerminalLayout::Split,
+            "unknown value falls back to the default"
+        );
     }
 
     /// Missing `repos:` section should land as an empty map, not

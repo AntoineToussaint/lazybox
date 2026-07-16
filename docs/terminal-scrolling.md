@@ -63,13 +63,14 @@ Every surface funnels through it:
 
 | Surface | Entry point | Targets |
 |---|---|---|
-| Mouse wheel | `scroll_at(rect, col, row, By(±3))` | tile **under the cursor** |
+| Mouse wheel | `scroll_terminal(id, ±3)` on `terminal_at(col, row)` | tile **under the cursor** |
 | `Shift-PageUp/PageDown` | `scroll_active(±8)` | focused tile |
 | `Shift-Home` / `Shift-End` | `scroll_to_top` / `scroll_to_bottom` | focused tile |
 
-Both `scroll_at` (cursor-directed) and `scroll_active` (focus-directed)
-delegate to the private `scroll_terminal(id, request)`, which calls
-`TerminalVt::scroll`. One choke point, one owner.
+`scroll_terminal(id, delta)` (cursor-directed, by id) and `scroll_active`
+(focus-directed) both call `TerminalVt::scroll`, and `scroll_to_top` /
+`scroll_to_bottom` call it with `Top` / `Bottom`. One choke point, one
+owner.
 
 ### A no-op can never be silent
 
@@ -91,32 +92,25 @@ terminal reports a reason rather than a fake move.
 ## Per-tile targeting (#362)
 
 In a split layout the wheel used to scroll the *focused* tile no matter
-which tile the pointer was over. **Every** wheel branch — the route
-decision, the local scroll, and the alt-screen forward — now resolves the
-tile under the cursor, all through one resolver so they can't disagree:
+which tile the pointer was over. The wheel now resolves the tile under
+the cursor (landed on `main` as #377, this effort absorbs it):
 
-- `wheel_target(rect, col, row)` is the single resolver: `terminal_at`
-  walks the tile tree with the SAME geometry `render` lays out with
-  (`pane_body_rect` applies the identical top-chrome / margin inset;
-  `tile_at` mirrors the HSplit/VSplit ratio math), filtered to a *live*
-  terminal, falling back to the focused terminal over chrome or a dead
-  tile. In Tabs mode it resolves to the active terminal, so the common
-  single-pane case is unchanged.
-- `wheel_route_at` reads the primary-vs-alt-screen decision off that tile;
-  `scroll_at` scrolls that tile; `encode_mouse_at` / `wheel_arrow_target`
-  forward to that tile. Because they share `wheel_target`, the route, the
-  scroll, and the forwarded report always name the same terminal.
-- Forwarded reports get **tile-correct coordinates**: `leaf_render_rect`
-  reproduces the exact rect `render_one_terminal` drew the target into
-  (the leaf body past its one-row focus rule, recap rows and the
-  scrollbar gutter excluded), so `cell_at` translates the pointer into
-  that tile's grid — not the whole pane's. An alt-screen `mouse=a` app in
-  a non-focused tile scrolls correctly on a wheel over it.
+- Each tile's on-screen rect is **recorded during render** (`tile_hits`);
+  `terminal_at(col, row)` hit-tests the wheel event against them and
+  returns the terminal the pointer is over, or `None` over pane chrome (a
+  tab strip, a divider, the accent seam) — where the wheel falls back to
+  the focused tile. Recording the real rendered rects avoids re-deriving
+  the split geometry and can't drift from what was drawn.
+- The wheel handler routes the primary-vs-alt-screen decision
+  (`wheel_route_for(id)`), the local scroll (`scroll_terminal(id, delta)`),
+  and any SGR/arrow forward (`encode_mouse_for(id, …)`) all at that
+  terminal, so the route, the scroll, and the forwarded report name the
+  same tile.
 - The keyboard path stays focus-directed — it has no pointer.
 
-(Click / drag forwarding still translate against the focused terminal;
-making those per-tile is a separate concern from scroll and out of this
-change's scope.)
+The scroll *mutation* for every one of those still funnels through the
+single owner (`TerminalVt::scroll`), so per-tile targeting and the
+no-silent-no-op guarantee compose rather than fight.
 
 ## Where scroll state is initialised, mutated, or can (legitimately) reset
 
@@ -151,15 +145,18 @@ real entry points:
 - Fresh-spawned agent — wheel, `Shift-PageUp/PageDown/Home/End`.
 - Reattached session (Snapshot replay).
 - Fresh and reattach reach identical scroll state.
-- Split tiles — the wheel scrolls the tile under the cursor, not the
-  focused one (#362); the keyboard scrolls the focused tile.
-- Split tiles — a wheel over a non-focused alt-screen tile routes *and*
-  forwards its SGR report to that tile, not the focused one.
+- Split tiles — scrolling a non-focused tile leaves the focused one put
+  (#362); the keyboard scrolls the focused tile.
 - Alt-screen vs. normal screen.
 - No silent no-op: `Moved` whenever scrollback exists; a typed reason
-  when it doesn't; `By(0)` is a no-move state query.
+  when it doesn't.
 - The single-owner source guard (brace-matches the owner's body, so it
   survives reformatting and a legitimately-added verb).
+
+The full end-to-end wheel routing for #362 (which tile a real
+`handle_mouse` scrolls, including the SGR/arrow forward) is covered in
+`crates/tui/src/realm/model/tests.rs`; this harness owns the seams below
+that.
 
 The bar: a change that breaks any scroll surface turns a test red. If a
 "scrolling broken again" report ever appears, it points at a **missing

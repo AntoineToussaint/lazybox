@@ -255,29 +255,11 @@ fn collapse_injected_path(msg: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// A viewport scroll request — the entire vocabulary the scroll owner
-/// accepts. Every scroll surface (wheel, `Shift-PgUp/PgDn`,
-/// `Shift-Home/End`, per-tile wheel) speaks only these three verbs;
-/// nothing outside `TerminalVt::scroll` pokes a raw offset or calls
-/// `scroll_viewport` directly. That single choke point is what makes a
-/// silent no-op impossible (the #42/#371 promise): a request either
-/// moves the viewport or comes back with a typed [`ScrollOutcome`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScrollRequest {
-    /// Move by a signed row delta — negative scrolls up into
-    /// scrollback, positive scrolls down toward the live content.
-    By(isize),
-    /// Jump the viewport to the top of scrollback.
-    Top,
-    /// Jump the viewport to the live bottom.
-    Bottom,
-}
-
-/// Outcome of a scroll attempt on a terminal. Used by the
+/// Outcome of a scroll attempt on the focused terminal. Used by the
 /// orchestrator's mouse-wheel handler to surface why a scroll might
 /// have looked like nothing happened — without this, "no scrollback
 /// content yet" was indistinguishable from a broken Delta path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub enum ScrollOutcome {
     /// No focused terminal (Tabs mode with no active tab, or an
     /// empty session).
@@ -290,6 +272,25 @@ pub enum ScrollOutcome {
     NoScrollback { alternate: bool },
     /// Scroll succeeded. Carries the post-state for the footer notice.
     Moved { offset: u64, total: u64, len: u64 },
+}
+
+/// A viewport scroll request — the entire vocabulary the scroll owner
+/// (`TerminalVt::scroll`) accepts. Every scroll surface (wheel,
+/// `Shift-PgUp/PgDn`, `Shift-Home/End`, the per-tile hover scroll)
+/// speaks only these three verbs; nothing outside `TerminalVt::scroll`
+/// calls libghostty's `scroll_viewport` directly. That single choke
+/// point is what makes a silent no-op impossible (the #42/#371 promise):
+/// a request either moves the viewport or comes back with a typed
+/// [`ScrollOutcome`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollRequest {
+    /// Move by a signed row delta — negative scrolls up into
+    /// scrollback, positive scrolls down toward the live content.
+    By(isize),
+    /// Jump the viewport to the top of scrollback.
+    Top,
+    /// Jump the viewport to the live bottom.
+    Bottom,
 }
 
 /// How a mouse-wheel tick over the focused terminal should be handled.
@@ -345,110 +346,6 @@ pub enum ClickTarget {
     Issue { repo: Option<String>, number: u64 },
 }
 
-/// True when `(col, row)` lies inside `rect` (half-open on the far
-/// edges, matching how ratatui addresses cells).
-fn rect_contains_point(rect: Rect, col: u16, row: u16) -> bool {
-    col >= rect.x
-        && col < rect.x.saturating_add(rect.width)
-        && row >= rect.y
-        && row < rect.y.saturating_add(rect.height)
-}
-
-/// The leaf `terminal_id` whose rect contains `(col, row)`, walking the
-/// tile tree with the EXACT geometry [`TerminalStack::render`] lays out
-/// with (`render_tile_tree`): an `HSplit` gives its first child
-/// `width * ratio / 100` columns (capped one short of the full width),
-/// a one-column divider, then the remainder; a `VSplit` splits rows the
-/// same way. Kept a pure function of `(tree, rect)` so it can be unit
-/// tested against the renderer's split math without a frame.
-fn tile_at(tree: &lazybox_core::TileTree, rect: Rect, col: u16, row: u16) -> Option<u64> {
-    match tree {
-        lazybox_core::TileTree::Leaf { terminal_id } => {
-            rect_contains_point(rect, col, row).then_some(*terminal_id)
-        }
-        lazybox_core::TileTree::HSplit { left, right, ratio } => {
-            let split_at = (rect.width as u32 * (*ratio).min(100) as u32 / 100) as u16;
-            let left_w = split_at.min(rect.width.saturating_sub(1));
-            let left_rect = Rect {
-                width: left_w,
-                ..rect
-            };
-            let right_rect = Rect {
-                x: rect.x + left_w + 1,
-                width: rect.width.saturating_sub(left_w + 1),
-                ..rect
-            };
-            tile_at(left, left_rect, col, row).or_else(|| tile_at(right, right_rect, col, row))
-        }
-        lazybox_core::TileTree::VSplit { top, bottom, ratio } => {
-            let split_at = (rect.height as u32 * (*ratio).min(100) as u32 / 100) as u16;
-            let top_h = split_at.min(rect.height.saturating_sub(1));
-            let top_rect = Rect {
-                height: top_h,
-                ..rect
-            };
-            let bottom_rect = Rect {
-                y: rect.y + top_h + 1,
-                height: rect.height.saturating_sub(top_h + 1),
-                ..rect
-            };
-            tile_at(top, top_rect, col, row).or_else(|| tile_at(bottom, bottom_rect, col, row))
-        }
-    }
-}
-
-/// The rect `render_one_terminal` receives for the leaf carrying
-/// `terminal_id`, walking the tree with the SAME split geometry as
-/// [`tile_at`] and applying the same one-row focus rule
-/// `render_tile_tree` carves off each leaf (`rect.height >= 2 &&
-/// rect.width > 0`). Returns the leaf's post-rule body so a forwarded
-/// mouse event's cell coordinates match the grid the renderer drew.
-fn leaf_rect_of(tree: &lazybox_core::TileTree, rect: Rect, terminal_id: u64) -> Option<Rect> {
-    match tree {
-        lazybox_core::TileTree::Leaf { terminal_id: leaf } => (*leaf == terminal_id).then(|| {
-            if rect.height >= 2 && rect.width > 0 {
-                Rect {
-                    y: rect.y + 1,
-                    height: rect.height - 1,
-                    ..rect
-                }
-            } else {
-                rect
-            }
-        }),
-        lazybox_core::TileTree::HSplit { left, right, ratio } => {
-            let split_at = (rect.width as u32 * (*ratio).min(100) as u32 / 100) as u16;
-            let left_w = split_at.min(rect.width.saturating_sub(1));
-            let left_rect = Rect {
-                width: left_w,
-                ..rect
-            };
-            let right_rect = Rect {
-                x: rect.x + left_w + 1,
-                width: rect.width.saturating_sub(left_w + 1),
-                ..rect
-            };
-            leaf_rect_of(left, left_rect, terminal_id)
-                .or_else(|| leaf_rect_of(right, right_rect, terminal_id))
-        }
-        lazybox_core::TileTree::VSplit { top, bottom, ratio } => {
-            let split_at = (rect.height as u32 * (*ratio).min(100) as u32 / 100) as u16;
-            let top_h = split_at.min(rect.height.saturating_sub(1));
-            let top_rect = Rect {
-                height: top_h,
-                ..rect
-            };
-            let bottom_rect = Rect {
-                y: rect.y + top_h + 1,
-                height: rect.height.saturating_sub(top_h + 1),
-                ..rect
-            };
-            leaf_rect_of(top, top_rect, terminal_id)
-                .or_else(|| leaf_rect_of(bottom, bottom_rect, terminal_id))
-        }
-    }
-}
-
 pub struct TerminalStack {
     id: PaneId,
     terminals: HashMap<TerminalId, TerminalSlot>,
@@ -500,6 +397,15 @@ pub struct TerminalStack {
     /// Cleared at the start of every render so removed terminals
     /// don't leave stale hit targets.
     tab_strip_hits: Vec<(usize, std::ops::Range<u16>, u16)>,
+    /// Per-tile hover targets, populated each render — one entry per
+    /// visible terminal. `tile` is the tile's on-screen rect (used to
+    /// hit-test which pane the mouse cursor is over); `grid` is the
+    /// cell grid inside it (used to translate a wheel/mouse event into
+    /// 0-based cell coordinates for the inner program). Lets the wheel
+    /// handler scroll the tile *under the cursor* rather than the
+    /// focused one. Cleared at the start of every render so a closed
+    /// tile leaves no stale target.
+    tile_hits: Vec<(TerminalId, Rect, Rect)>,
     /// Last-focused terminal per session. Recorded when we leave a
     /// session so returning restores the pane the user was last on
     /// instead of snapping back to the first. Keyed by terminal id
@@ -520,17 +426,31 @@ pub struct TerminalStack {
     /// `apply_ui_defaults`; the const is the fallback for tests and any
     /// stack built before config lands. See #367.
     dead_on_arrival: std::time::Duration,
+    /// User preference (`ui.terminal_new_layout`) for how an
+    /// auto-spawned second-or-later terminal lands: `Split`
+    /// (side-by-side tiles, the default) or `Tabs` (stacked behind the
+    /// tab strip). Only consulted for the automatic layout on
+    /// `TerminalSpawned`; explicit `]]|` / `]]-` splits ignore it.
+    terminal_new_layout: lazybox_config::NewTerminalLayout,
 }
 
 /// Records that a terminal's process has exited. Agent terminals keep
 /// their slot when this is set (frozen last screen + a restart banner)
 /// instead of the whole pane vanishing on a crash (#356).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct TerminalExit {
     /// Exit code the daemon reported, or `None` when it couldn't — e.g.
     /// death by signal (the classic outcome when a Homebrew self-upgrade
     /// swaps the agent binary out mid-run, #355).
     code: Option<i32>,
+    /// The agent exited within seconds of spawn — a startup failure, not
+    /// a real session end (#368). An immediate `code 0` otherwise reads
+    /// as success; this makes the banner say "failed to start".
+    dead_on_arrival: bool,
+    /// The cleaned tail of the agent's last output, painted over an
+    /// otherwise-blank frozen pane so a dead-on-arrival exit shows *why*
+    /// instead of a black screen (#368).
+    last_output: Option<String>,
 }
 
 /// How long an armed pending split waits for its shell's
@@ -1023,24 +943,25 @@ impl TerminalVt {
         self.terminal.vt_write(bytes);
     }
 
-    /// THE one and only mutation of this terminal's viewport pin.
-    /// Every scroll surface funnels here (`scroll_active`,
-    /// `scroll_to_top`/`scroll_to_bottom`, the per-tile wheel path) and
-    /// no other code in the crate calls `scroll_viewport` — a grep for
-    /// it must return exactly this line. A request either moves the
-    /// viewport or the returned [`ScrollOutcome`] explains why it could
-    /// not (`NoScrollback` when `total <= len`, `alternate` when the
-    /// inner program owns the buffer), so a scroll can never silently
-    /// no-op. That single choke point is the #42/#371 encapsulation:
-    /// there is one owner of scroll state and it cannot fail quietly.
+    /// THE one and only mutation of this terminal's viewport pin. Every
+    /// scroll surface funnels here (`scroll_terminal`/`scroll_active` for
+    /// the wheel + focused keyboard scroll, `scroll_to_top`/
+    /// `scroll_to_bottom` for the jumps) and no other code in the crate
+    /// calls `scroll_viewport` — a grep for it must return exactly the
+    /// three lines below. A request either moves the viewport or the
+    /// returned [`ScrollOutcome`] explains why it could not
+    /// (`NoScrollback` when `total <= len`, `alternate` when the inner
+    /// program owns the buffer), so a scroll can never silently no-op.
+    /// That single choke point is the #42/#371 encapsulation: one owner
+    /// of scroll state, and it cannot fail quietly.
     fn scroll(&mut self, request: ScrollRequest) -> ScrollOutcome {
         let alternate = matches!(
             self.terminal.active_screen().ok(),
             Some(vt::screen::Screen::Alternate)
         );
         match request {
-            // A zero delta is a state query, not a move — fall through
-            // to report the current scrollbar without touching the pin.
+            // A zero delta is a no-op move — fall through to report the
+            // current scrollbar without touching the pin.
             ScrollRequest::By(0) => {}
             ScrollRequest::By(delta) => self
                 .terminal
@@ -1106,17 +1027,38 @@ impl TerminalStack {
             synced_layout: None,
             pending_resizes: Vec::new(),
             tab_strip_hits: Vec::new(),
+            tile_hits: Vec::new(),
             last_focused: HashMap::new(),
             closing: HashSet::new(),
             dead_on_arrival: DEFAULT_DEAD_ON_ARRIVAL,
+            terminal_new_layout: lazybox_config::NewTerminalLayout::default(),
         }
     }
 
-    /// Fold resolved UI config into the stack. Currently just the
-    /// dead-on-arrival grace window that gates auto-close of exited
-    /// agent panes (#367).
+    /// Fold resolved UI config into the stack: the dead-on-arrival
+    /// grace window that gates auto-close of exited agent panes (#367),
+    /// and the `terminal_new_layout` preference that decides whether an
+    /// auto-spawned second terminal promotes the session into a
+    /// side-by-side split or simply lands as a new tab (#361).
     pub fn apply_ui_defaults(&mut self, ui: &lazybox_config::UiDefaults) {
         self.dead_on_arrival = ui.agent_dead_on_arrival;
+        self.terminal_new_layout = ui.terminal_new_layout;
+    }
+
+    /// The current new-terminal layout preference.
+    pub fn terminal_new_layout(&self) -> lazybox_config::NewTerminalLayout {
+        self.terminal_new_layout
+    }
+
+    /// Flip the new-terminal layout preference (`]]t`) and return the
+    /// new value so the caller can persist it and flash a notice. Takes
+    /// effect on the *next* spawn; terminals already open are untouched.
+    pub fn toggle_terminal_new_layout(&mut self) -> lazybox_config::NewTerminalLayout {
+        self.terminal_new_layout = match self.terminal_new_layout {
+            lazybox_config::NewTerminalLayout::Split => lazybox_config::NewTerminalLayout::Tabs,
+            lazybox_config::NewTerminalLayout::Tabs => lazybox_config::NewTerminalLayout::Split,
+        };
+        self.terminal_new_layout
     }
 
     /// Drain queued resize requests from the last frame. The App calls
@@ -1412,27 +1354,18 @@ impl TerminalStack {
     /// decision is one place instead of the handler probing several
     /// booleans that could disagree if the focus moved between them.
     pub fn wheel_route(&self) -> WheelRoute {
-        self.wheel_route_for(self.focused_terminal_id())
+        match self.focused_terminal_id() {
+            Some(id) => self.wheel_route_for(id),
+            None => WheelRoute::LocalScrollback,
+        }
     }
 
-    /// Route a wheel tick that landed at frame-space `(col, row)` in the
-    /// terminal pane `rect` off the tile UNDER THE CURSOR (#362), so the
-    /// routing decision, the scroll target, and any forwarded report all
-    /// name the same terminal. Falls back to the focused terminal when
-    /// the point is over pane chrome. In Tabs mode this resolves to the
-    /// active terminal, leaving the single-pane case unchanged.
-    pub fn wheel_route_at(&self, rect: Rect, col: u16, row: u16) -> WheelRoute {
-        self.wheel_route_for(self.wheel_target(rect, col, row))
-    }
-
-    /// Shared routing decision for a specific terminal. `wheel_route`
-    /// (focused) and `wheel_route_at` (tile under cursor) both delegate
-    /// here so the primary/alt-screen split and the mouse-tracking probe
-    /// are computed in exactly one place.
-    fn wheel_route_for(&self, id: Option<TerminalId>) -> WheelRoute {
-        let Some(id) = id else {
-            return WheelRoute::LocalScrollback;
-        };
+    /// Same routing decision as [`Self::wheel_route`] but for an
+    /// explicit terminal — the tile under the mouse cursor. The wheel
+    /// scrolls the hovered pane, not the focused one (#362), so the
+    /// route must be resolved against whichever terminal the pointer
+    /// is over.
+    pub fn wheel_route_for(&self, id: TerminalId) -> WheelRoute {
         let Some(slot) = self.terminals.get(&id) else {
             return WheelRoute::LocalScrollback;
         };
@@ -1483,12 +1416,11 @@ impl TerminalStack {
         self.encode_mouse_for(id, action, button, cell_col, cell_row)
     }
 
-    /// Encode a mouse event for a SPECIFIC terminal (the tile under the
-    /// cursor, resolved by [`Self::cell_at`]). Same contract as
-    /// [`Self::encode_mouse_for_focused`] but addressed by id, so a wheel
-    /// forwarded on a split targets the terminal the pointer is over
-    /// rather than whichever holds focus.
-    fn encode_mouse_for(
+    /// Same as [`Self::encode_mouse_for_focused`] but for an explicit
+    /// terminal — the tile under the mouse cursor. Lets the wheel
+    /// handler forward a scroll to the hovered pane's inner program
+    /// rather than the focused one (#362).
+    pub fn encode_mouse_for(
         &mut self,
         id: TerminalId,
         action: vt::mouse::Action,
@@ -1563,162 +1495,17 @@ impl TerminalStack {
     /// `ScrollOutcome::NoScrollback`.) Returns the scrollbar state
     /// for the diagnostic notice.
     pub fn scroll_to_top(&mut self) -> Option<String> {
-        self.scroll_focused(ScrollRequest::Top);
+        let id = self.focused_terminal_id()?;
+        let slot = self.terminals.get_mut(&id)?;
+        slot.vt.scroll(ScrollRequest::Top);
         self.scrollbar_summary()
     }
 
     pub fn scroll_to_bottom(&mut self) -> Option<String> {
-        self.scroll_focused(ScrollRequest::Bottom);
+        let id = self.focused_terminal_id()?;
+        let slot = self.terminals.get_mut(&id)?;
+        slot.vt.scroll(ScrollRequest::Bottom);
         self.scrollbar_summary()
-    }
-
-    /// Route a scroll request to a specific terminal through the single
-    /// owner (`TerminalVt::scroll`). The one internal chokepoint every
-    /// public scroll entry point delegates to — keeping the "who owns
-    /// scroll state" answer to exactly one place.
-    fn scroll_terminal(&mut self, id: Option<TerminalId>, request: ScrollRequest) -> ScrollOutcome {
-        let Some(id) = id else {
-            return ScrollOutcome::NoTerminal;
-        };
-        match self.terminals.get_mut(&id) {
-            Some(slot) => slot.vt.scroll(request),
-            None => ScrollOutcome::NoTerminal,
-        }
-    }
-
-    /// Scroll the focused terminal — the keyboard scrollback path
-    /// (`Shift-PgUp/PgDn/Home/End`), which has no pointer to target a
-    /// tile with, so it acts on wherever typing currently lands.
-    fn scroll_focused(&mut self, request: ScrollRequest) -> ScrollOutcome {
-        let id = self.focused_terminal_id();
-        self.scroll_terminal(id, request)
-    }
-
-    /// The terminal whose tile contains frame-space `(col, row)` inside
-    /// the terminal pane `rect`. Tabs mode → the active terminal (the
-    /// whole body is one tile). Splits mode → the leaf under the point,
-    /// resolved with the SAME geometry [`Self::render`] lays out with.
-    /// `None` when the point falls outside every leaf (pane chrome).
-    /// This is what lets the wheel target the tile under the cursor
-    /// rather than the focused one (#362).
-    pub fn terminal_at(&self, rect: Rect, col: u16, row: u16) -> Option<TerminalId> {
-        let body = Self::pane_body_rect(rect);
-        match &self.layout {
-            lazybox_core::SessionLayout::Tabs { .. } => rect_contains_point(body, col, row)
-                .then(|| self.active_terminal_id())
-                .flatten(),
-            lazybox_core::SessionLayout::Splits { tree, .. } => {
-                tile_at(tree, body, col, row).map(TerminalId)
-            }
-        }
-    }
-
-    /// The `inner` body rect [`Self::render`] insets `area` to before
-    /// laying out tiles: left border (+1 col), three rows of top chrome
-    /// (tab strip + divider + blank), one held-back bottom margin.
-    /// `terminal_at` walks the tile tree in this space, so it must stay
-    /// in lockstep with the `inner` computation in `render`.
-    fn pane_body_rect(rect: Rect) -> Rect {
-        Rect {
-            x: rect.x.saturating_add(1),
-            y: rect.y.saturating_add(3),
-            width: rect.width.saturating_sub(2),
-            height: rect.height.saturating_sub(4),
-        }
-    }
-
-    /// Scroll the tile under the cursor (#362). The wheel handler routes
-    /// here so a scroll always moves the terminal the pointer is over,
-    /// in both Tabs and Splits layouts — not whichever tile happens to
-    /// hold keyboard focus. Falls back to the focused terminal when the
-    /// point resolves to no live tile (pane chrome, or a tile whose
-    /// terminal just exited) so a near-miss still scrolls something.
-    pub fn scroll_at(
-        &mut self,
-        rect: Rect,
-        col: u16,
-        row: u16,
-        request: ScrollRequest,
-    ) -> ScrollOutcome {
-        let id = self.wheel_target(rect, col, row);
-        self.scroll_terminal(id, request)
-    }
-
-    /// The LIVE terminal a wheel at `(col, row)` in pane `rect` targets:
-    /// the tile under the cursor, or the focused terminal when the point
-    /// is over pane chrome / a divider, or when the resolved tile's
-    /// terminal has gone (a tile tree that still names an exited runner).
-    /// The single resolver `wheel_route_at` / `scroll_at` / `cell_at` all
-    /// share, so route, scroll, and forward always name the same tile.
-    fn wheel_target(&self, rect: Rect, col: u16, row: u16) -> Option<TerminalId> {
-        self.terminal_at(rect, col, row)
-            .filter(|id| self.terminals.contains_key(id))
-            .or_else(|| self.focused_terminal_id())
-    }
-
-    /// The rect [`Self::render_one_terminal`] draws terminal `id` into:
-    /// the pane body in Tabs mode, or the leaf's body (past its one-row
-    /// focus rule) in Splits. `None` when `id` isn't currently laid out.
-    /// Mirrors `render` / `render_tile_tree` so cell translation for a
-    /// forwarded event lands on the same grid the renderer drew.
-    fn leaf_render_rect(&self, pane_rect: Rect, id: TerminalId) -> Option<Rect> {
-        let body = Self::pane_body_rect(pane_rect);
-        match &self.layout {
-            lazybox_core::SessionLayout::Tabs { .. } => {
-                (self.active_terminal_id() == Some(id)).then_some(body)
-            }
-            lazybox_core::SessionLayout::Splits { tree, .. } => leaf_rect_of(tree, body, id.0),
-        }
-    }
-
-    /// Resolve a wheel/forward point to `(target terminal, cell col, cell
-    /// row)` within that terminal's grid, tile-aware for both layouts, or
-    /// `None` when the point is over chrome (tab strip, borders, the
-    /// scrollbar gutter, or the focus rule). Undoes exactly the insets
-    /// [`Self::render_one_terminal`] applies to the terminal's render
-    /// rect (recap rows off the top, the gutter column off the right).
-    fn cell_at(&self, rect: Rect, col: u16, row: u16) -> Option<(TerminalId, u32, u32)> {
-        let id = self.wheel_target(rect, col, row)?;
-        let render_rect = self.leaf_render_rect(rect, id)?;
-        let slot = self.terminals.get(&id)?;
-        let recap = Self::recap_rows(slot, render_rect.height);
-        let grid_x = render_rect.x;
-        let grid_y = render_rect.y.saturating_add(recap);
-        // Rightmost column is the scrollbar gutter; the bottom is bounded
-        // by the render rect itself (the pane already held back a margin).
-        let grid_right = render_rect
-            .x
-            .saturating_add(render_rect.width)
-            .saturating_sub(1);
-        let grid_bottom = render_rect.y.saturating_add(render_rect.height);
-        if col < grid_x || row < grid_y || col >= grid_right || row >= grid_bottom {
-            return None;
-        }
-        Some((id, u32::from(col - grid_x), u32::from(row - grid_y)))
-    }
-
-    /// Encode a mouse event for the tile UNDER THE CURSOR (#362), with
-    /// cell coordinates translated into that tile's grid. Returns the
-    /// bytes to `Write` plus the target terminal id, or `None` when the
-    /// point is over chrome or the target isn't tracking the mouse. The
-    /// wheel handler's SGR-forward branch routes here.
-    pub fn encode_mouse_at(
-        &mut self,
-        rect: Rect,
-        col: u16,
-        row: u16,
-        action: vt::mouse::Action,
-        button: Option<vt::mouse::Button>,
-    ) -> Option<(TerminalId, Vec<u8>)> {
-        let (id, cell_col, cell_row) = self.cell_at(rect, col, row)?;
-        self.encode_mouse_for(id, action, button, cell_col, cell_row)
-    }
-
-    /// The tile under the cursor for the alternate-scroll arrow-key
-    /// fallback — only when the point sits on a real grid cell (not
-    /// chrome), so a wheel over the tab strip never synthesizes arrows.
-    pub fn wheel_arrow_target(&self, rect: Rect, col: u16, row: u16) -> Option<TerminalId> {
-        self.cell_at(rect, col, row).map(|(id, _, _)| id)
     }
 
     /// Did the user click on a terminal-tab label? Returns the tab
@@ -1732,6 +1519,43 @@ impl TerminalStack {
             .iter()
             .find(|(_, range, hit_row)| *hit_row == row && range.contains(&col))
             .map(|(idx, _, _)| *idx)
+    }
+
+    /// Terminal whose tile the point `(col, row)` lands in, from the
+    /// tile rects recorded during render. Drives hover-to-scroll: the
+    /// wheel targets the pane under the cursor, not the focused one
+    /// (#362). `None` when the point is over pane chrome (the tab
+    /// strip, a divider) or outside every tile — including the 1-cell
+    /// accent bar / split seams between tiles, where the wheel falls
+    /// back to scrolling the focused tile.
+    pub fn terminal_at(&self, col: u16, row: u16) -> Option<TerminalId> {
+        self.tile_hits
+            .iter()
+            .find(|(_, tile, _)| Self::rect_contains(*tile, col, row))
+            .map(|(id, _, _)| *id)
+    }
+
+    fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
+        col >= rect.x
+            && col < rect.x.saturating_add(rect.width)
+            && row >= rect.y
+            && row < rect.y.saturating_add(rect.height)
+    }
+
+    /// Frame-space `(col, row)` → 0-based cell coordinates inside the
+    /// tile owned by `id`, using the grid rect recorded during render —
+    /// correct even when tiles are split. Mirrors [`Self::screen_to_cell`]
+    /// but keyed on a specific tile so the wheel handler can forward an
+    /// event to the hovered pane's inner program (#362). `None` when the
+    /// point is outside that tile's cell grid (chrome, gutter, or the
+    /// tile was never rendered).
+    pub fn cell_in_tile(&self, id: TerminalId, col: u16, row: u16) -> Option<(u32, u32)> {
+        let (_, _, grid) = self.tile_hits.iter().find(|(t, _, _)| *t == id)?;
+        if Self::rect_contains(*grid, col, row) {
+            Some(((col - grid.x) as u32, (row - grid.y) as u32))
+        } else {
+            None
+        }
     }
 
     /// Set the active tab by index. Called from the mouse handler
@@ -2032,13 +1856,27 @@ impl TerminalStack {
         Some(((col - inner_x) as u32, (row - inner_y) as u32))
     }
 
-    /// Scroll the focused terminal by `delta` rows through the single
-    /// scroll owner. The keyboard scrollback path uses this; the
-    /// mouse-wheel path uses [`Self::scroll_at`] so it can target the
-    /// tile under the cursor (#362). Both funnel into
-    /// `TerminalVt::scroll`, so neither can silently no-op.
     pub fn scroll_active(&mut self, delta: isize) -> ScrollOutcome {
-        self.scroll_focused(ScrollRequest::By(delta))
+        let Some(id) = self.focused_terminal_id() else {
+            return ScrollOutcome::NoTerminal;
+        };
+        self.scroll_terminal(id, delta)
+    }
+
+    /// Scroll a specific terminal's viewport by `delta` rows through the
+    /// single scroll owner (`TerminalVt::scroll`). Used by the
+    /// mouse-wheel handler to move the scrollback of the tile under the
+    /// cursor (#362) rather than the focused one; `scroll_active` is the
+    /// focused-terminal wrapper used by keyboard scroll. A zero delta is
+    /// treated as a no-op query rather than a move.
+    pub fn scroll_terminal(&mut self, id: TerminalId, delta: isize) -> ScrollOutcome {
+        if delta == 0 {
+            return ScrollOutcome::NoTerminal;
+        }
+        match self.terminals.get_mut(&id) {
+            Some(slot) => slot.vt.scroll(ScrollRequest::By(delta)),
+            None => ScrollOutcome::NoTerminal,
+        }
     }
 
     pub fn cycle_tab_forward(&mut self) {
@@ -2580,7 +2418,7 @@ impl TerminalStack {
                         .iter()
                         .filter(|(_, slot)| Some(&slot.session_key) == self.active_session.as_ref())
                         .count();
-                    if session_count >= 2 {
+                    if session_count >= 2 && self.auto_split_on_spawn() {
                         // Two-or-more terminals on the same session: the
                         // user wants to see both. Auto-promote (Tabs) or
                         // extend (Splits) into a vertical split so the new
@@ -2594,9 +2432,11 @@ impl TerminalStack {
                         .iter()
                         .position(|id| id == terminal_id)
                     {
-                        // First terminal in this session — stay in Tabs
-                        // (cheaper render, no wasted dividers) but make the
-                        // fresh spawn the active tab so the user lands on it.
+                        // Stay in Tabs and make the fresh spawn the active
+                        // tab so the user lands on it. Reached for the first
+                        // terminal (cheaper render, no wasted dividers) and,
+                        // under `ui.terminal_new_layout: tabs`, for every
+                        // later spawn too — a new tab instead of a split.
                         self.active_tab_idx = idx;
                     }
                 }
@@ -2636,10 +2476,20 @@ impl TerminalStack {
                     && matches!(slot.kind, TerminalKind::Agent(_))
                 {
                     slot.agent_state = *state;
-                    // Any non-`Idle` reading means the agent engaged —
-                    // the signal that separates a genuine clean exit
-                    // from a dead-on-arrival one (#367).
-                    if !matches!(state, lazybox_ipc::AgentState::Idle) {
+                    // A `Working` / `InputNeeded` / `Done` reading means
+                    // the agent engaged — the signal that separates a
+                    // genuine clean exit from a dead-on-arrival one (#367).
+                    // `Exited` is NOT engagement: it's the death itself,
+                    // and the PTY-exit teardown broadcasts it right before
+                    // `TerminalExited` (#357/#369). Counting it as work
+                    // would flip `did_work` true a beat before the exit is
+                    // triaged, so a dead-on-arrival launch would read as
+                    // "clean" and auto-close instead of keeping its
+                    // failed-to-start pane (#367/#368).
+                    if !matches!(
+                        state,
+                        lazybox_ipc::AgentState::Idle | lazybox_ipc::AgentState::Exited { .. }
+                    ) {
                         slot.did_work = true;
                     }
                 }
@@ -2647,6 +2497,7 @@ impl TerminalStack {
             Event::TerminalExited {
                 terminal_id,
                 exit_code,
+                last_output,
             } => {
                 let user_closed = self.closing.remove(terminal_id);
                 let is_agent = self
@@ -2663,8 +2514,26 @@ impl TerminalStack {
                 // the workspace survives and a restart is offered
                 // (#356/#357).
                 if is_agent && !user_closed && !self.agent_exit_is_clean(terminal_id, *exit_code) {
+                    let window = self.dead_on_arrival;
                     if let Some(slot) = self.terminals.get_mut(terminal_id) {
-                        slot.exited = Some(TerminalExit { code: *exit_code });
+                        // Decide dead-on-arrival here, at exit, from the
+                        // same engagement/grace signals `agent_exit_is_clean`
+                        // reads — never at render time, where `elapsed`
+                        // keeps growing and would eventually flip a frozen
+                        // pane. A kept `code 0` exit that never engaged and
+                        // died inside the window failed to launch (#367);
+                        // that drives the "failed to start" wording and
+                        // painting the captured tail (#368). A non-zero
+                        // code or signal death is kept too, but as a plain
+                        // crash — not dead-on-arrival.
+                        let dead_on_arrival = *exit_code == Some(0)
+                            && !slot.did_work
+                            && slot.spawned_at.elapsed() < window;
+                        slot.exited = Some(TerminalExit {
+                            code: *exit_code,
+                            dead_on_arrival,
+                            last_output: last_output.clone(),
+                        });
                     }
                 } else {
                     self.drop_slot(*terminal_id);
@@ -2731,6 +2600,10 @@ impl TerminalStack {
         // come or gone, indices shifted, area resized. We'll
         // repopulate as the tab spans go in.
         self.tab_strip_hits.clear();
+        // Cleared for the same reason as the tab hits — each render
+        // re-records every visible tile's rect from scratch so the
+        // wheel handler hit-tests against the current layout.
+        self.tile_hits.clear();
         // Title row: "Terminals" plus an icon+label per active terminal
         // (e.g. `Terminals    claude   _ shell`). Active is bold-accent;
         // inactive is dim grey. Two-tab common case looks like a tab
@@ -2806,8 +2679,8 @@ impl TerminalStack {
             // An exited agent pane (#356) overrides the live state hint —
             // a stale "working" on a crashed tab would be actively
             // misleading.
-            let exited = self.terminals.get(id).and_then(|s| s.exited);
-            let (hint, hint_style) = if exited.is_some() {
+            let exited = self.terminals.get(id).is_some_and(|s| s.exited.is_some());
+            let (hint, hint_style) = if exited {
                 (
                     " ✗ exited",
                     Style::default()
@@ -2966,6 +2839,20 @@ impl TerminalStack {
 }
 
 impl TerminalStack {
+    /// Whether an auto-spawned second-or-later terminal should promote
+    /// the session into a side-by-side split (vs land as a new tab).
+    /// `Split` (the default) always splits; `Tabs` only splits a
+    /// session the user has *already* split by hand — a Tabs-mode
+    /// session stays tabbed so the existing tile keeps its full size.
+    fn auto_split_on_spawn(&self) -> bool {
+        match self.terminal_new_layout {
+            lazybox_config::NewTerminalLayout::Split => true,
+            lazybox_config::NewTerminalLayout::Tabs => {
+                matches!(self.layout, lazybox_core::SessionLayout::Splits { .. })
+            }
+        }
+    }
+
     /// Commit a pending split: take the currently-focused leaf in
     /// the layout (or fabricate one if we're still in Tabs mode) and
     /// wrap it in a fresh `HSplit`/`VSplit` whose other side is the
@@ -3353,6 +3240,11 @@ impl TerminalStack {
             } else {
                 (body, None)
             };
+            // Record this tile's on-screen geometry so the wheel handler
+            // can route a scroll to the pane under the cursor. `rect` is
+            // the full tile (hover hit-test); `grid` is the cell grid
+            // (event → cell coordinates for a mouse-tracking program).
+            self.tile_hits.push((id, rect, grid));
             slot.vt.ensure_size(grid.width, grid.height);
             // Backend PTY also needs to know the new size — otherwise
             // the shell process keeps writing at its spawn dimensions
@@ -3385,7 +3277,7 @@ impl TerminalStack {
             }
             // An exited agent pane overlays a restart banner on its last
             // row, leaving the frozen screen visible above it (#356).
-            if let Some(exit) = slot.exited {
+            if let Some(exit) = &slot.exited {
                 Self::render_exit_banner(frame, grid, exit);
             }
         }
@@ -3395,7 +3287,13 @@ impl TerminalStack {
     /// of an exited pane's grid (#356). The frozen last screen stays
     /// visible above it; this row is a filled bar so it reads as an
     /// alert over whatever output the crash left behind.
-    fn render_exit_banner(frame: &mut Frame, grid: Rect, exit: TerminalExit) {
+    ///
+    /// A dead-on-arrival exit (#368) — the agent gone within seconds of
+    /// spawn — reads as "failed to start" rather than a plain "exited",
+    /// so an immediate `code 0` isn't mistaken for success, and the
+    /// captured tail of its output is painted just above the banner so
+    /// the pane shows *why* instead of a blank black screen.
+    fn render_exit_banner(frame: &mut Frame, grid: Rect, exit: &TerminalExit) {
         if grid.width == 0 || grid.height == 0 {
             return;
         }
@@ -3404,7 +3302,12 @@ impl TerminalStack {
             Some(code) => format!("code {code}"),
             None => "killed".to_string(),
         };
-        let text = format!("⚠ agent exited ({status}) — r restart · ]]x close");
+        let verb = if exit.dead_on_arrival {
+            "failed to start"
+        } else {
+            "exited"
+        };
+        let text = format!("⚠ agent {verb} ({status}) — r restart · ]]x close");
         let width = grid.width as usize;
         // Pad (or truncate) to the full row so the fill spans it.
         let display: String = if text.chars().count() > width {
@@ -3413,6 +3316,37 @@ impl TerminalStack {
             let pad = width - text.chars().count();
             format!("{text}{}", " ".repeat(pad))
         };
+        // A dead-on-arrival pane is blank (the agent produced no lasting
+        // screen), so paint the captured output tail in the rows directly
+        // above the banner — the error/last lines the agent printed
+        // before dying, bottom-aligned so they read as one block with the
+        // banner. Skipped for a normal exit, whose frozen screen already
+        // shows its real final state.
+        if exit.dead_on_arrival
+            && let Some(last) = &exit.last_output
+        {
+            let avail = grid.height.saturating_sub(1);
+            // Most-recent `avail` lines, back into chronological order.
+            let mut tail: Vec<&str> = last.lines().rev().take(avail as usize).collect();
+            tail.reverse();
+            let base_y = grid.y + avail - tail.len() as u16;
+            for (i, line) in tail.iter().enumerate() {
+                let shown: String = line.chars().take(width).collect();
+                let row = Rect {
+                    x: grid.x,
+                    y: base_y + i as u16,
+                    width: grid.width,
+                    height: 1,
+                };
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        shown,
+                        Style::default().fg(theme.text_dim),
+                    ))),
+                    row,
+                );
+            }
+        }
         let row = Rect {
             x: grid.x,
             y: grid.y + grid.height - 1,
@@ -5486,6 +5420,145 @@ mod rebadge_tests {
 }
 
 #[cfg(test)]
+mod hover_scroll_tests {
+    //! #362: the mouse wheel scrolls the tile UNDER THE CURSOR, not the
+    //! focused one. After a render records each tile's rect, a wheel
+    //! event's coordinates must resolve to the tile they landed in so
+    //! its scrollback moves — even while a different tile holds focus.
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    const W: u16 = 80;
+    const H: u16 = 24;
+
+    fn shell_with_scrollback(sk: &SessionKey, tag: &str) -> TerminalSlot {
+        let mut slot =
+            TerminalStack::make_slot(sk.clone(), TerminalKind::Shell, 0, false, false, None, None);
+        slot.vt.ensure_size(W / 2, H - 4);
+        let mut payload = String::new();
+        for i in 0..60 {
+            payload.push_str(&format!("{tag} line {i}\r\n"));
+        }
+        slot.vt.feed(payload.as_bytes());
+        slot
+    }
+
+    /// Two shells side by side, each with its own scrollback. Focus is
+    /// on the RIGHT tile; the layout matches what a `]]|` split builds.
+    fn split_stack() -> TerminalStack {
+        let sk = SessionKey::new("s");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        stack
+            .terminals
+            .insert(TerminalId(1), shell_with_scrollback(&sk, "left"));
+        stack
+            .terminals
+            .insert(TerminalId(2), shell_with_scrollback(&sk, "right"));
+        stack.set_active_session(Some(sk));
+        stack.layout = lazybox_core::SessionLayout::Splits {
+            tree: lazybox_core::TileTree::HSplit {
+                left: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 1 }),
+                right: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 2 }),
+                ratio: 50,
+            },
+            focused: vec![1],
+        };
+        stack
+    }
+
+    fn render(stack: &mut TerminalStack) {
+        let mut term = Terminal::new(TestBackend::new(W, H)).unwrap();
+        term.draw(|f| stack.render(Rect::new(0, 0, W, H), f, true))
+            .unwrap();
+    }
+
+    fn offset(stack: &TerminalStack, id: TerminalId) -> u64 {
+        stack.terminals[&id]
+            .vt
+            .terminal
+            .scrollbar()
+            .expect("scrollbar")
+            .offset
+    }
+
+    /// A wheel event at coordinates inside the LEFT tile scrolls the
+    /// left terminal, even though the RIGHT tile is focused — and focus
+    /// never moves.
+    #[test]
+    fn wheel_in_left_tile_scrolls_left_while_right_is_focused() {
+        let mut stack = split_stack();
+        render(&mut stack);
+        assert_eq!(
+            stack.focused_terminal_id(),
+            Some(TerminalId(2)),
+            "the right tile is focused",
+        );
+
+        // A point well inside the left half of the body (past the pane
+        // border + top chrome) hit-tests to the left tile.
+        let (col, row) = (5, 6);
+        assert_eq!(
+            stack.terminal_at(col, row),
+            Some(TerminalId(1)),
+            "coordinates in the left tile resolve to the left terminal",
+        );
+
+        let left_before = offset(&stack, TerminalId(1));
+        let right_before = offset(&stack, TerminalId(2));
+
+        // Route the wheel exactly as the handler does: resolve the tile
+        // under the cursor, then scroll it.
+        let target = stack.terminal_at(col, row).unwrap();
+        stack.scroll_terminal(target, -3);
+
+        assert_eq!(
+            offset(&stack, TerminalId(1)),
+            left_before - 3,
+            "the hovered (left) terminal scrolled up into its scrollback",
+        );
+        assert_eq!(
+            offset(&stack, TerminalId(2)),
+            right_before,
+            "the focused (right) terminal must not move",
+        );
+        assert_eq!(
+            stack.focused_terminal_id(),
+            Some(TerminalId(2)),
+            "hover-to-scroll must not change focus",
+        );
+    }
+
+    /// The symmetric case: hovering the right tile scrolls the right
+    /// terminal while the left tile is focused.
+    #[test]
+    fn wheel_in_right_tile_scrolls_right_while_left_is_focused() {
+        let mut stack = split_stack();
+        stack.layout = lazybox_core::SessionLayout::Splits {
+            tree: lazybox_core::TileTree::HSplit {
+                left: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 1 }),
+                right: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 2 }),
+                ratio: 50,
+            },
+            focused: vec![0],
+        };
+        render(&mut stack);
+        assert_eq!(stack.focused_terminal_id(), Some(TerminalId(1)));
+
+        let (col, row) = (W - 6, 6);
+        assert_eq!(stack.terminal_at(col, row), Some(TerminalId(2)));
+
+        let left_before = offset(&stack, TerminalId(1));
+        let right_before = offset(&stack, TerminalId(2));
+        let target = stack.terminal_at(col, row).unwrap();
+        stack.scroll_terminal(target, -3);
+
+        assert_eq!(offset(&stack, TerminalId(2)), right_before - 3);
+        assert_eq!(offset(&stack, TerminalId(1)), left_before);
+    }
+}
+
+#[cfg(test)]
 mod set_layout_tests {
     //! `set_layout` runs inside `sync_panes`, i.e. after EVERY key
     //! dispatch and daemon event. It must be a no-op when the layout
@@ -5790,6 +5863,132 @@ mod spawn_focus_tests {
 }
 
 #[cfg(test)]
+mod new_terminal_layout_tests {
+    //! Issue #361: `ui.terminal_new_layout: tabs` makes an
+    //! auto-spawned second terminal land as a new tab instead of
+    //! promoting the session into a side-by-side split. The default
+    //! (`split`) is unchanged.
+    use super::*;
+
+    fn spawn(stack: &mut TerminalStack, id: u64, sk: &SessionKey, kind: TerminalKind) {
+        stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(id),
+            session_key: sk.clone(),
+            kind,
+            no_permission: false,
+            on_main: false,
+        });
+    }
+
+    fn with_pref(pref: lazybox_config::NewTerminalLayout) -> TerminalStack {
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        let ui = lazybox_config::UiDefaults {
+            terminal_new_layout: pref,
+            ..Default::default()
+        };
+        stack.apply_ui_defaults(&ui);
+        stack
+    }
+
+    #[test]
+    fn tabs_pref_keeps_a_second_spawn_as_a_tab() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = with_pref(lazybox_config::NewTerminalLayout::Tabs);
+        stack.set_active_session(Some(sk.clone()));
+
+        spawn(&mut stack, 1, &sk, TerminalKind::Agent("claude".into()));
+        spawn(&mut stack, 2, &sk, TerminalKind::Shell);
+
+        assert!(
+            matches!(stack.layout(), lazybox_core::SessionLayout::Tabs { .. }),
+            "tabs preference must not promote to a split: {:?}",
+            stack.layout(),
+        );
+        // Both terminals are visible tabs and the fresh spawn is active.
+        assert_eq!(stack.visible_terminals().len(), 2);
+        assert_eq!(stack.focused_terminal_id(), Some(TerminalId(2)));
+    }
+
+    #[test]
+    fn split_pref_is_the_unchanged_default() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = with_pref(lazybox_config::NewTerminalLayout::Split);
+        stack.set_active_session(Some(sk.clone()));
+
+        spawn(&mut stack, 1, &sk, TerminalKind::Agent("claude".into()));
+        spawn(&mut stack, 2, &sk, TerminalKind::Shell);
+
+        assert!(
+            matches!(stack.layout(), lazybox_core::SessionLayout::Splits { .. }),
+            "split preference must promote to a split: {:?}",
+            stack.layout(),
+        );
+        assert_eq!(stack.focused_terminal_id(), Some(TerminalId(2)));
+    }
+
+    #[test]
+    fn tabs_pref_still_extends_a_hand_made_split() {
+        // A session the user split by hand (`]]|`) stays in Splits; a
+        // later ordinary spawn extends the tree rather than snapping
+        // back to tabs.
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = with_pref(lazybox_config::NewTerminalLayout::Tabs);
+        stack.set_active_session(Some(sk.clone()));
+
+        spawn(&mut stack, 1, &sk, TerminalKind::Agent("claude".into()));
+        let mut cmds = Vec::new();
+        stack.split_tile(PendingSplit::Vertical, &mut cmds);
+        spawn(&mut stack, 2, &sk, TerminalKind::Shell);
+        assert!(matches!(
+            stack.layout(),
+            lazybox_core::SessionLayout::Splits { .. }
+        ));
+
+        spawn(&mut stack, 3, &sk, TerminalKind::Shell);
+        let leaves = match stack.layout() {
+            lazybox_core::SessionLayout::Splits { tree, .. } => tree.leaves(),
+            other => panic!("expected Splits layout, got {other:?}"),
+        };
+        assert!(
+            leaves.contains(&3),
+            "a spawn into an existing split still joins the tree: {leaves:?}",
+        );
+    }
+
+    #[test]
+    fn toggle_flips_and_takes_effect_on_the_next_spawn() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = with_pref(lazybox_config::NewTerminalLayout::Split);
+        stack.set_active_session(Some(sk.clone()));
+
+        // Flip Split → Tabs before the second spawn.
+        assert_eq!(
+            stack.toggle_terminal_new_layout(),
+            lazybox_config::NewTerminalLayout::Tabs
+        );
+        assert_eq!(
+            stack.terminal_new_layout(),
+            lazybox_config::NewTerminalLayout::Tabs
+        );
+
+        spawn(&mut stack, 1, &sk, TerminalKind::Agent("claude".into()));
+        spawn(&mut stack, 2, &sk, TerminalKind::Shell);
+        assert!(
+            matches!(stack.layout(), lazybox_core::SessionLayout::Tabs { .. }),
+            "post-toggle the second spawn stays a tab: {:?}",
+            stack.layout(),
+        );
+
+        // Flip back Tabs → Split.
+        assert_eq!(
+            stack.toggle_terminal_new_layout(),
+            lazybox_config::NewTerminalLayout::Split
+        );
+    }
+}
+
+#[cfg(test)]
 mod terminal_availability_tests {
     //! Issue #114: the splash / tour / footer advertise a set of
     //! "always available" globals (`?`, `q q`, `Shift-T`, …). In a
@@ -5962,6 +6161,7 @@ mod agent_crash_tests {
         stack.on_event(&Event::TerminalExited {
             terminal_id: TerminalId(1),
             exit_code: Some(1),
+            last_output: None,
         });
 
         let slot = stack
@@ -5969,7 +6169,7 @@ mod agent_crash_tests {
             .get(&TerminalId(1))
             .expect("crashed agent pane must survive");
         assert!(
-            matches!(slot.exited, Some(TerminalExit { code: Some(1) })),
+            matches!(slot.exited, Some(TerminalExit { code: Some(1), .. })),
             "the exit code is recorded so the banner can show it",
         );
     }
@@ -5983,11 +6183,15 @@ mod agent_crash_tests {
         stack.on_event(&Event::TerminalExited {
             terminal_id: TerminalId(1),
             exit_code: None,
+            last_output: None,
         });
 
         assert!(matches!(
-            stack.terminals.get(&TerminalId(1)).map(|s| s.exited),
-            Some(Some(TerminalExit { code: None })),
+            stack
+                .terminals
+                .get(&TerminalId(1))
+                .map(|s| s.exited.clone()),
+            Some(Some(TerminalExit { code: None, .. })),
         ));
     }
 
@@ -5999,6 +6203,7 @@ mod agent_crash_tests {
         stack.on_event(&Event::TerminalExited {
             terminal_id: TerminalId(1),
             exit_code: Some(0),
+            last_output: None,
         });
 
         assert!(
@@ -6029,6 +6234,7 @@ mod agent_crash_tests {
         stack.on_event(&Event::TerminalExited {
             terminal_id: TerminalId(1),
             exit_code: Some(0),
+            last_output: None,
         });
 
         assert!(stack.terminals.get(&TerminalId(1)).is_none());
@@ -6041,6 +6247,7 @@ mod agent_crash_tests {
         stack.on_event(&Event::TerminalExited {
             terminal_id: TerminalId(1),
             exit_code: Some(1),
+            last_output: None,
         });
 
         let mut cmds = Vec::new();
@@ -6070,6 +6277,7 @@ mod agent_crash_tests {
         stack.on_event(&Event::TerminalExited {
             terminal_id: TerminalId(1),
             exit_code: Some(1),
+            last_output: None,
         });
 
         // A printable key that isn't the restart affordance is swallowed
@@ -6090,6 +6298,7 @@ mod agent_crash_tests {
         stack.on_event(&Event::TerminalExited {
             terminal_id: TerminalId(1),
             exit_code: Some(1),
+            last_output: None,
         });
 
         // The restart's fresh terminal lands as a new id — the exited
@@ -6116,6 +6325,7 @@ mod agent_crash_tests {
         stack.on_event(&Event::TerminalExited {
             terminal_id: TerminalId(1),
             exit_code: Some(137),
+            last_output: None,
         });
 
         let backend = TestBackend::new(80, 24);
@@ -6139,12 +6349,84 @@ mod agent_crash_tests {
     }
 
     #[test]
+    fn dead_on_arrival_pane_reads_as_failed_and_shows_the_reason() {
+        // A codex that dies on arrival with code 0 (#368): a freshly
+        // spawned agent that never engaged and exits `code 0` inside the
+        // grace window is dead-on-arrival (#367), so the banner must say
+        // "failed to start" — not "exited", which reads as success — and
+        // the captured error must fill the otherwise-blank pane.
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
+        stack.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(1),
+            exit_code: Some(0),
+            last_output: Some("Error: not logged in\nrun `codex login`".into()),
+        });
+
+        let backend = TestBackend::new(80, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| stack.render(Rect::new(0, 0, 80, 24), f, true))
+            .unwrap();
+        let buf = term.backend().buffer().clone();
+        let screen: String = (0..24)
+            .map(|y| (0..80).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            screen.contains("agent failed to start (code 0)"),
+            "an immediate code-0 exit is surfaced as a failure:\n{screen}",
+        );
+        assert!(
+            screen.contains("not logged in") && screen.contains("codex login"),
+            "the captured output is painted over the blank pane:\n{screen}",
+        );
+    }
+
+    #[test]
+    fn dead_on_arrival_survives_the_preceding_exited_state_event() {
+        // Regression: the real teardown broadcasts `AgentState::Exited`
+        // right before `TerminalExited` (#357/#369). `Exited` must NOT
+        // count as engagement, or `did_work` flips true and the
+        // dead-on-arrival launch reads as a clean exit and auto-closes —
+        // silently reaping the pane the user needs to see and restart.
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
+        stack.on_event(&Event::AgentState {
+            terminal_id: TerminalId(1),
+            session_key: sk.clone(),
+            state: lazybox_ipc::AgentState::Exited { code: Some(0) },
+        });
+        stack.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(1),
+            exit_code: Some(0),
+            last_output: Some("Error: not logged in".into()),
+        });
+
+        let slot = stack
+            .terminals
+            .get(&TerminalId(1))
+            .expect("a dead-on-arrival pane must survive, not auto-close");
+        assert!(
+            matches!(
+                &slot.exited,
+                Some(TerminalExit {
+                    dead_on_arrival: true,
+                    ..
+                })
+            ),
+            "it must still classify as dead-on-arrival despite the Exited pill",
+        );
+    }
+
+    #[test]
     fn a_different_agent_spawn_leaves_the_exited_pane() {
         let sk = SessionKey::new("github:o/r#1");
         let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
         stack.on_event(&Event::TerminalExited {
             terminal_id: TerminalId(1),
             exit_code: Some(1),
+            last_output: None,
         });
 
         // Spawning a *different* agent in the same workspace must not
@@ -6185,6 +6467,7 @@ mod agent_crash_tests {
         stack.on_event(&Event::TerminalExited {
             terminal_id: TerminalId(1),
             exit_code: Some(0),
+            last_output: None,
         });
 
         assert!(
@@ -6209,6 +6492,7 @@ mod agent_crash_tests {
         stack.on_event(&Event::TerminalExited {
             terminal_id: TerminalId(1),
             exit_code: Some(0),
+            last_output: None,
         });
 
         assert!(
@@ -6228,12 +6512,16 @@ mod agent_crash_tests {
         stack.on_event(&Event::TerminalExited {
             terminal_id: TerminalId(1),
             exit_code: Some(0),
+            last_output: None,
         });
 
         assert!(
             matches!(
-                stack.terminals.get(&TerminalId(1)).map(|s| s.exited),
-                Some(Some(TerminalExit { code: Some(0) })),
+                stack
+                    .terminals
+                    .get(&TerminalId(1))
+                    .map(|s| s.exited.clone()),
+                Some(Some(TerminalExit { code: Some(0), .. })),
             ),
             "a dead-on-arrival code-0 exit keeps the pane for a restart",
         );
@@ -6255,6 +6543,7 @@ mod agent_crash_tests {
         stack.on_event(&Event::TerminalExited {
             terminal_id: TerminalId(1),
             exit_code: Some(0),
+            last_output: None,
         });
 
         assert!(

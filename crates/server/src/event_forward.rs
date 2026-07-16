@@ -384,6 +384,7 @@ mod tests {
             .send(Event::TerminalExited {
                 terminal_id: TerminalId(2),
                 exit_code: Some(0),
+                last_output: None,
             })
             .unwrap();
         drop(raw_tx); // let the forwarder finish and close the channel

@@ -563,6 +563,7 @@ impl<T: TerminalAdapter> Model<T> {
         let mut rows = super::terminal_leader::LeaderCmd::menu_rows(
             self.terminals.layout_is_splits(),
             self.terminals.visible_terminal_count(),
+            self.terminals.terminal_new_layout(),
         );
         rows.extend(
             self.sidebar
@@ -628,7 +629,26 @@ impl<T: TerminalAdapter> Model<T> {
             LeaderCmd::SplitHorizontal => self.terminals.split_tile(PendingSplit::Horizontal, cmds),
             LeaderCmd::MoveTile(dir) => self.terminals.move_tile_focus(dir, cmds),
             LeaderCmd::CloseTerminal => self.terminals.close_focused_tile(cmds),
+            LeaderCmd::ToggleNewLayout => self.toggle_terminal_new_layout(),
         }
+    }
+
+    /// `]]t` — flip the new-terminal layout preference live and persist
+    /// it to `ui.terminal_new_layout` so it survives restart. The
+    /// runtime flip lands first (it can't fail); a write error only
+    /// costs persistence, which we surface but don't roll back — the
+    /// user's explicit toggle still holds for this session.
+    fn toggle_terminal_new_layout(&mut self) {
+        let now = self.terminals.toggle_terminal_new_layout();
+        let word = match now {
+            lazybox_config::NewTerminalLayout::Split => "split",
+            lazybox_config::NewTerminalLayout::Tabs => "tabs",
+        };
+        match lazybox_config::Config::save_with(|c| c.ui.terminal_new_layout = now) {
+            Ok(()) => self.flash_info(format!("new terminals open as {word}")),
+            Err(e) => self.flash_info(format!("new terminals open as {word} (couldn't save: {e})")),
+        }
+        self.redraw = true;
     }
 
     /// The focus catalog lookups resolve under, given the real pane
@@ -1390,14 +1410,22 @@ impl<T: TerminalAdapter> Model<T> {
                 if !rect_contains(right_bottom_rect, m.column, m.row) {
                     return;
                 }
-                // Who scrolls depends on which screen the inner program
-                // is on (see `WheelRoute`). Resolved off the tile UNDER
-                // THE CURSOR (#362), so the routing decision, the scroll
-                // target, and any forwarded report all name the same
-                // terminal — in a split, a wheel over the right tile acts
-                // on the right tile even while the left holds focus. In
-                // Tabs mode this is the active terminal, so the common
-                // single-pane case is unchanged.
+                // Scroll the tile UNDER THE CURSOR, not the focused one
+                // (#362) — hover-to-scroll like every tiling terminal.
+                // Hit-test the wheel coordinates against the tile rects
+                // recorded during render; fall back to the focused
+                // terminal when the pointer is over pane chrome (a
+                // divider, the tab strip) so the wheel is never a no-op.
+                let Some(target) = self
+                    .terminals
+                    .terminal_at(m.column, m.row)
+                    .or_else(|| self.terminals.focused_terminal_id())
+                else {
+                    return;
+                };
+                // Who scrolls depends on which screen the target
+                // program is on (see `WheelRoute`). The whole decision
+                // is one lookup so the branches can't disagree.
                 // Once tmux stopped setting `mouse on` (#306),
                 // `is_mouse_tracking` began reflecting the inner app.
                 // A primary-screen wheel is always lazybox's scrollback,
@@ -1405,10 +1433,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // only an alt-screen app that asked for the mouse gets
                 // the wheel forwarded.
                 use crate::components::terminal_stack::WheelRoute;
-                match self
-                    .terminals
-                    .wheel_route_at(right_bottom_rect, m.column, m.row)
-                {
+                match self.terminals.wheel_route_for(target) {
                     WheelRoute::ForwardSgr => {
                         // Damped: every wheel event on this path is a
                         // daemon round trip + inner-program repaint, so
@@ -1417,20 +1442,21 @@ impl<T: TerminalAdapter> Model<T> {
                         if scaled == 0 {
                             return;
                         }
-                        let button = if raw_up {
-                            libghostty_vt::mouse::Button::Four
-                        } else {
-                            libghostty_vt::mouse::Button::Five
-                        };
-                        // Encode + address at the tile under the cursor,
-                        // cell coords translated into that tile's grid.
-                        let encoded = self.terminals.encode_mouse_at(
-                            right_bottom_rect,
-                            m.column,
-                            m.row,
-                            libghostty_vt::mouse::Action::Press,
-                            Some(button),
-                        );
+                        let cell = self.terminals.cell_in_tile(target, m.column, m.row);
+                        let encoded = cell.and_then(|(cell_col, cell_row)| {
+                            let button = if raw_up {
+                                libghostty_vt::mouse::Button::Four
+                            } else {
+                                libghostty_vt::mouse::Button::Five
+                            };
+                            self.terminals.encode_mouse_for(
+                                target,
+                                libghostty_vt::mouse::Action::Press,
+                                Some(button),
+                                cell_col,
+                                cell_row,
+                            )
+                        });
                         if let Some((terminal_id, bytes)) = encoded {
                             // One wheel notch encodes one line for the
                             // inner program, but the damper computed a
@@ -1454,19 +1480,20 @@ impl<T: TerminalAdapter> Model<T> {
                         // xterm alternateScroll: an alt-screen app that
                         // never enabled mouse reporting (less, man, the
                         // git pager, vim without `mouse`) still scrolls on
-                        // arrow keys. Only fire over the grid of the tile
-                        // under the cursor — a wheel on the tab strip /
-                        // chrome is not a scroll target.
-                        let Some(terminal_id) =
-                            self.terminals
-                                .wheel_arrow_target(right_bottom_rect, m.column, m.row)
-                        else {
+                        // arrow keys. Only fire over the grid — a wheel on
+                        // the tab strip / chrome is not a scroll target.
+                        if self
+                            .terminals
+                            .cell_in_tile(target, m.column, m.row)
+                            .is_none()
+                        {
                             return;
-                        };
+                        }
                         let scaled = self.dampen_scroll_step(raw_up);
                         if scaled == 0 {
                             return;
                         }
+                        let terminal_id = target;
                         let arrow: &[u8] = match (raw_up, app_cursor) {
                             (true, false) => b"\x1b[A",
                             (false, false) => b"\x1b[B",
@@ -1493,14 +1520,7 @@ impl<T: TerminalAdapter> Model<T> {
                         } else {
                             LOCAL_WHEEL_STEP
                         };
-                        // Target the tile under the cursor (#362), not
-                        // the focused one.
-                        let _ = self.terminals.scroll_at(
-                            right_bottom_rect,
-                            m.column,
-                            m.row,
-                            crate::components::terminal_stack::ScrollRequest::By(delta),
-                        );
+                        let _ = self.terminals.scroll_terminal(target, delta);
                         self.redraw = true;
                     }
                 }

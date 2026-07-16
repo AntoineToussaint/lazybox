@@ -108,13 +108,13 @@ async fn spawn_shell(client: &mut lazybox_ipc::Client) -> lazybox_ipc::TerminalI
     }
 }
 
-async fn spawn_agent(client: &mut lazybox_ipc::Client) -> lazybox_ipc::TerminalId {
+async fn spawn_agent(client: &mut lazybox_ipc::Client, agent: &str) -> lazybox_ipc::TerminalId {
     client
         .send(Command::Spawn {
             model_alias: None,
-            session_key: "test:ws-agent-exit".into(),
+            session_key: "test:ws-teardown".into(),
             session_id: None,
-            kind: TerminalKind::Agent("claude".into()),
+            kind: TerminalKind::Agent(agent.into()),
             cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
             initial_prompt: None,
             on_main: false,
@@ -209,7 +209,7 @@ async fn exiting_agent_broadcasts_exited_not_stuck_working() {
         let _home = IsolatedConfigHome::new();
         let (config, mock) = ServerConfig::in_memory_with_mock();
         let mut client = subscribed(config.clone()).await;
-        let terminal_id = spawn_agent(&mut client).await;
+        let terminal_id = spawn_agent(&mut client, "claude").await;
         let key = config
             .backend_key_for(terminal_id)
             .await
@@ -288,6 +288,86 @@ async fn exiting_shell_emits_no_agent_state() {
             saw_agent_state.is_none(),
             "a shell exit must not broadcast any AgentState"
         );
+    })
+    .await
+    .expect("test deadline exceeded");
+}
+
+/// Fix #368: an agent exiting on its own must carry the cleaned tail of
+/// its output so the frozen pane can show *why* it died instead of a
+/// blank screen. A shell exiting the same way carries none.
+#[tokio::test]
+async fn agent_exit_captures_last_output_tail() {
+    timeout(TEST_DEADLINE, async {
+        let _home = IsolatedConfigHome::new();
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config.clone()).await;
+        let terminal_id = spawn_agent(&mut client, "codex").await;
+        let key = config
+            .backend_key_for(terminal_id)
+            .await
+            .expect("terminal registered");
+
+        // Codex prints an error and exits right after spawn. The teardown
+        // must ship the cleaned tail so the client's frozen pane can show
+        // *why* instead of a blank screen (#368). The client decides
+        // whether the exit is dead-on-arrival (#367); the daemon's job is
+        // only to capture the readable output.
+        mock.emit(
+            &key,
+            b"\x1b[31mError:\x1b[0m not logged in\r\nrun `codex login`\r\n",
+        )
+        .await;
+        mock.finish(&key, 0).await;
+
+        let exited = wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalExited { terminal_id: t, .. } if *t == terminal_id),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("TerminalExited arrived");
+        let Event::TerminalExited { last_output, .. } = exited else {
+            unreachable!()
+        };
+        let last = last_output.expect("the captured error tail");
+        assert!(
+            last.contains("not logged in") && last.contains("codex login"),
+            "the tail shows the plain error, not escape codes: {last:?}"
+        );
+    })
+    .await
+    .expect("test deadline exceeded");
+}
+
+/// A plain shell exit carries no captured tail — the last-output capture
+/// is for spawned agents only.
+#[tokio::test]
+async fn shell_exit_carries_no_last_output() {
+    timeout(TEST_DEADLINE, async {
+        let _home = IsolatedConfigHome::new();
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config.clone()).await;
+        let terminal_id = spawn_shell(&mut client).await;
+        let key = config
+            .backend_key_for(terminal_id)
+            .await
+            .expect("terminal registered");
+
+        mock.emit(&key, b"some shell output\r\n").await;
+        mock.finish(&key, 0).await;
+
+        let exited = wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalExited { terminal_id: t, .. } if *t == terminal_id),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("TerminalExited arrived");
+        let Event::TerminalExited { last_output, .. } = exited else {
+            unreachable!()
+        };
+        assert!(last_output.is_none(), "shells get no captured tail");
     })
     .await
     .expect("test deadline exceeded");

@@ -36,6 +36,7 @@ use ratatui::Frame;
 use ratatui::prelude::*;
 use ratatui::widgets::*;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 /// Default cell grid size for new terminals before the first
 /// resize-from-render. Sized to match a typical agent default; the
@@ -382,6 +383,23 @@ pub struct TerminalStack {
     /// (not tab index) so it survives the agent-first reordering of
     /// `visible_terminals`.
     last_focused: HashMap<SessionKey, TerminalId>,
+    /// Terminals the user explicitly asked to close (`]]x` →
+    /// `Command::Close`). The returning `TerminalExited` for one of
+    /// these tears the pane down like any terminal; an agent that
+    /// exited on its OWN (crash, killed binary — #356) is instead kept
+    /// as a frozen "exited — restart?" pane. Drained on that event.
+    closing: HashSet<TerminalId>,
+}
+
+/// Records that a terminal's process has exited. Agent terminals keep
+/// their slot when this is set (frozen last screen + a restart banner)
+/// instead of the whole pane vanishing on a crash (#356).
+#[derive(Debug, Clone, Copy)]
+struct TerminalExit {
+    /// Exit code the daemon reported, or `None` when it couldn't — e.g.
+    /// death by signal (the classic outcome when a Homebrew self-upgrade
+    /// swaps the agent binary out mid-run, #355).
+    code: Option<i32>,
 }
 
 /// How long an armed pending split waits for its shell's
@@ -622,6 +640,12 @@ struct TerminalSlot {
     /// instead of continuing the pre-hidden grid, which the dropped
     /// prefix would have desynced.
     pending_truncated: bool,
+    /// Set once this (agent) terminal's process has exited on its own
+    /// rather than by an explicit user close. The slot is retained so
+    /// the frozen last screen stays visible and a restart banner is
+    /// offered — a crashing agent (#356) must not take the workspace
+    /// down with it. `None` for a live terminal.
+    exited: Option<TerminalExit>,
 }
 
 impl TerminalSlot {
@@ -898,6 +922,7 @@ impl TerminalStack {
             pending_resizes: Vec::new(),
             tab_strip_hits: Vec::new(),
             last_focused: HashMap::new(),
+            closing: HashSet::new(),
         }
     }
 
@@ -1823,6 +1848,7 @@ impl TerminalStack {
             displayed: false,
             pending_feed: Vec::new(),
             pending_truncated: false,
+            exited: None,
         }
     }
 
@@ -2037,6 +2063,23 @@ impl TerminalStack {
             }
         }
 
+        // An exited agent pane (#356) is frozen — its PTY is gone, so
+        // typing can't reach a process. Intercept the restart affordance
+        // (`r` / Enter) and swallow every other printable key instead of
+        // pretending to feed a dead terminal. Scrollback (handled above)
+        // still works so the last output stays inspectable, and `]]x` to
+        // close rides the app-level leader, not this path.
+        if let Some(id) = self
+            .focused_terminal_id()
+            .or_else(|| self.active_terminal_id())
+            && self.terminals.get(&id).is_some_and(|s| s.exited.is_some())
+        {
+            if matches!(key.code, KeyCode::Char('r') | KeyCode::Enter) {
+                self.restart_exited(id, cmds);
+            }
+            return PaneOutcome::Consumed;
+        }
+
         // Escape sequence is owned by the app-level dispatcher (see
         // `dispatch_key` in app.rs). It uses a double-Esc latch on
         // `AppState` because that state needs to persist across calls.
@@ -2145,6 +2188,26 @@ impl TerminalStack {
                 on_main,
                 model_label,
             } => {
+                // A restart (#356) or a fresh `w x` after a crash lands
+                // here: supersede any exited pane for the same session +
+                // agent so the new terminal replaces the frozen one
+                // instead of leaving a dead tab beside it (and so the
+                // split/tab auto-layout below doesn't count the corpse).
+                if let TerminalKind::Agent(new_id) = kind {
+                    let superseded: Vec<TerminalId> = self
+                        .terminals
+                        .iter()
+                        .filter(|(_, s)| {
+                            s.exited.is_some()
+                                && &s.session_key == session_key
+                                && matches!(&s.kind, TerminalKind::Agent(a) if a == new_id)
+                        })
+                        .map(|(id, _)| *id)
+                        .collect();
+                    for old in superseded {
+                        self.drop_slot(old);
+                    }
+                }
                 let slot = Self::make_slot(
                     session_key.clone(),
                     kind.clone(),
@@ -2253,46 +2316,29 @@ impl TerminalStack {
                     slot.agent_state = *state;
                 }
             }
-            Event::TerminalExited { terminal_id, .. } => {
-                // Process exited (`exit`, ^D, segfault, kill from
-                // outside) — close the window. Mirrors how every other
-                // terminal emulator behaves: the prompt goes away, the
-                // pane goes with it. Auto-spawn won't re-fire because
-                // it's gated on first selection of the session.
-                self.terminals.remove(terminal_id);
-                // Prune the tile tree so the kill surfaces visually:
-                // a single-leaf split collapses to a Leaf root; an
-                // n-way split loses just the dead branch. Tabs mode
-                // doesn't carry tile state — no work to do there.
-                if let lazybox_core::SessionLayout::Splits { tree, focused } = &mut self.layout {
-                    if let Some(path) = tree.path_to(terminal_id.0) {
-                        match tree.remove_at(&path) {
-                            Ok(new_focus) => {
-                                *focused = new_focus;
-                            }
-                            Err(_) => {
-                                // path was empty (the killed leaf was
-                                // the only tile) → drop back to the
-                                // tabs default so a future spawn opens
-                                // a fresh layout instead of leaving an
-                                // orphan tree.
-                                self.layout = lazybox_core::SessionLayout::Tabs { active: 0 };
-                            }
-                        }
+            Event::TerminalExited {
+                terminal_id,
+                exit_code,
+            } => {
+                let user_closed = self.closing.remove(terminal_id);
+                let is_agent = self
+                    .terminals
+                    .get(terminal_id)
+                    .is_some_and(|s| matches!(s.kind, TerminalKind::Agent(_)));
+                // A shell going away — or any terminal the user closed
+                // with `]]x` — takes its pane with it, like every other
+                // terminal emulator. But an AGENT that exited on its own
+                // (crash, ^D, or its binary swapped out mid-run by a
+                // Homebrew self-upgrade, #355) must NOT silently vanish:
+                // keep the slot frozen on its last screen so the
+                // workspace survives and a restart is offered (#356).
+                if is_agent && !user_closed {
+                    if let Some(slot) = self.terminals.get_mut(terminal_id) {
+                        slot.exited = Some(TerminalExit { code: *exit_code });
                     }
-                    // If the post-collapse tree is just a Leaf, drop
-                    // back to Tabs — keeping a Splits-with-single-leaf
-                    // payload renders fine but means the next spawn
-                    // promotes us right back into Splits, which is
-                    // confusing UX.
-                    if let lazybox_core::SessionLayout::Splits { tree, .. } = &self.layout
-                        && matches!(tree, lazybox_core::TileTree::Leaf { .. })
-                    {
-                        self.layout = lazybox_core::SessionLayout::Tabs { active: 0 };
-                    }
+                } else {
+                    self.drop_slot(*terminal_id);
                 }
-                self.clamp_active_tab();
-                self.auto_collapse_on_emptiness();
             }
             Event::TerminalsRebadged { from, to } => {
                 // The daemon moved every terminal keyed to `from` onto
@@ -2427,21 +2473,34 @@ impl TerminalStack {
             // of which tab is active so a Claude prompt is noticed even
             // while typing in another shell); a dim accent "· working"
             // while it streams. Idle/untracked shows nothing.
-            let (hint, hint_style) = match agent_state {
-                Some(lazybox_ipc::AgentState::InputNeeded) => (
-                    " ! needs input",
-                    Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
-                ),
-                Some(lazybox_ipc::AgentState::Working) => {
-                    (" · working", Style::default().fg(theme.accent))
-                }
-                Some(lazybox_ipc::AgentState::Done) => (
-                    " ✓ done",
+            // An exited agent pane (#356) overrides the live state hint —
+            // a stale "working" on a crashed tab would be actively
+            // misleading.
+            let exited = self.terminals.get(id).and_then(|s| s.exited);
+            let (hint, hint_style) = if exited.is_some() {
+                (
+                    " ✗ exited",
                     Style::default()
-                        .fg(theme.success)
+                        .fg(theme.error)
                         .add_modifier(Modifier::BOLD),
-                ),
-                _ => ("", Style::default()),
+                )
+            } else {
+                match agent_state {
+                    Some(lazybox_ipc::AgentState::InputNeeded) => (
+                        " ! needs input",
+                        Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
+                    ),
+                    Some(lazybox_ipc::AgentState::Working) => {
+                        (" · working", Style::default().fg(theme.accent))
+                    }
+                    Some(lazybox_ipc::AgentState::Done) => (
+                        " ✓ done",
+                        Style::default()
+                            .fg(theme.success)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    _ => ("", Style::default()),
+                }
             };
             if !hint.is_empty() {
                 title_spans.push(Span::styled(hint, hint_style));
@@ -2694,6 +2753,70 @@ impl TerminalStack {
         self.persist_layout(cmds);
     }
 
+    /// Remove a terminal slot from the map and the tile tree,
+    /// collapsing splits and re-clamping the tab strip. Shared by the
+    /// exit teardown, the restart path (#356), and the
+    /// spawn-supersedes-crashed-pane path.
+    fn drop_slot(&mut self, terminal_id: TerminalId) {
+        self.terminals.remove(&terminal_id);
+        // Prune the tile tree so the removal surfaces visually: a
+        // single-leaf split collapses to a Leaf root; an n-way split
+        // loses just the dead branch. Tabs mode doesn't carry tile
+        // state — no work to do there.
+        if let lazybox_core::SessionLayout::Splits { tree, focused } = &mut self.layout {
+            if let Some(path) = tree.path_to(terminal_id.0) {
+                match tree.remove_at(&path) {
+                    Ok(new_focus) => {
+                        *focused = new_focus;
+                    }
+                    Err(_) => {
+                        // path was empty (the removed leaf was the only
+                        // tile) → drop back to the tabs default so a
+                        // future spawn opens a fresh layout instead of
+                        // leaving an orphan tree.
+                        self.layout = lazybox_core::SessionLayout::Tabs { active: 0 };
+                    }
+                }
+            }
+            // If the post-collapse tree is just a Leaf, drop back to
+            // Tabs — keeping a Splits-with-single-leaf payload renders
+            // fine but means the next spawn promotes us right back into
+            // Splits, which is confusing UX.
+            if let lazybox_core::SessionLayout::Splits { tree, .. } = &self.layout
+                && matches!(tree, lazybox_core::TileTree::Leaf { .. })
+            {
+                self.layout = lazybox_core::SessionLayout::Tabs { active: 0 };
+            }
+        }
+        self.clamp_active_tab();
+        self.auto_collapse_on_emptiness();
+    }
+
+    /// Re-spawn the agent behind an exited pane (#356). The daemon
+    /// already swept the dead terminal's state on exit, so its
+    /// singleton guard won't block this — it lands as a fresh
+    /// `TerminalSpawned`, and the arriving spawn supersedes this
+    /// exited slot. Leaving the frozen pane in place until then means a
+    /// spawn that fails daemon-side keeps the restart banner rather than
+    /// dropping to nothing.
+    fn restart_exited(&mut self, terminal_id: TerminalId, cmds: &mut Vec<Command>) {
+        let Some(slot) = self.terminals.get(&terminal_id) else {
+            return;
+        };
+        if slot.exited.is_none() {
+            return;
+        }
+        cmds.push(Command::Spawn {
+            model_alias: None,
+            session_key: slot.session_key.clone(),
+            session_id: None,
+            kind: slot.kind.clone(),
+            cwd: None,
+            initial_prompt: None,
+            on_main: slot.on_main,
+        });
+    }
+
     /// Close the focused terminal (`]]x`). In Splits, collapses the
     /// focused leaf's parent split into the surviving sibling; in Tabs,
     /// closes the active tab's terminal (the event flow prunes the slot
@@ -2702,7 +2825,18 @@ impl TerminalStack {
     pub fn close_focused_tile(&mut self, cmds: &mut Vec<Command>) {
         let lazybox_core::SessionLayout::Splits { tree, focused } = &mut self.layout else {
             if let Some(id) = self.active_terminal_id() {
-                cmds.push(Command::Close { terminal_id: id });
+                if self.terminals.get(&id).is_some_and(|s| s.exited.is_some()) {
+                    // Already dead server-side (#356) — no
+                    // `TerminalExited` will echo to prune it, so drop the
+                    // frozen pane locally.
+                    self.drop_slot(id);
+                } else {
+                    // Tag as a user close so the returning
+                    // `TerminalExited` tears the pane down instead of
+                    // keeping it as an exited agent pane (#356).
+                    self.closing.insert(id);
+                    cmds.push(Command::Close { terminal_id: id });
+                }
             }
             return;
         };
@@ -2731,9 +2865,16 @@ impl TerminalStack {
                 self.active_tab_idx = 0;
             }
             if let Some(id) = target_id {
-                cmds.push(Command::Close {
-                    terminal_id: TerminalId(id),
-                });
+                let tid = TerminalId(id);
+                if self.terminals.get(&tid).is_some_and(|s| s.exited.is_some()) {
+                    // Exited pane (#356): the tree collapse above already
+                    // dropped its tile; remove the map entry too since no
+                    // `TerminalExited` will echo to do it.
+                    self.terminals.remove(&tid);
+                } else {
+                    self.closing.insert(tid);
+                    cmds.push(Command::Close { terminal_id: tid });
+                }
             }
             self.persist_layout(cmds);
         }
@@ -2895,7 +3036,52 @@ impl TerminalStack {
                     bar.offset as usize,
                 );
             }
+            // An exited agent pane overlays a restart banner on its last
+            // row, leaving the frozen screen visible above it (#356).
+            if let Some(exit) = slot.exited {
+                Self::render_exit_banner(frame, grid, exit);
+            }
         }
+    }
+
+    /// Paint the "agent exited — restart?" banner across the bottom row
+    /// of an exited pane's grid (#356). The frozen last screen stays
+    /// visible above it; this row is a filled bar so it reads as an
+    /// alert over whatever output the crash left behind.
+    fn render_exit_banner(frame: &mut Frame, grid: Rect, exit: TerminalExit) {
+        if grid.width == 0 || grid.height == 0 {
+            return;
+        }
+        let theme = crate::theme::current();
+        let status = match exit.code {
+            Some(code) => format!("code {code}"),
+            None => "killed".to_string(),
+        };
+        let text = format!("⚠ agent exited ({status}) — r restart · ]]x close");
+        let width = grid.width as usize;
+        // Pad (or truncate) to the full row so the fill spans it.
+        let display: String = if text.chars().count() > width {
+            text.chars().take(width).collect()
+        } else {
+            let pad = width - text.chars().count();
+            format!("{text}{}", " ".repeat(pad))
+        };
+        let row = Rect {
+            x: grid.x,
+            y: grid.y + grid.height - 1,
+            width: grid.width,
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                display,
+                Style::default()
+                    .bg(theme.fill)
+                    .fg(theme.error)
+                    .add_modifier(Modifier::BOLD),
+            ))),
+            row,
+        );
     }
 
     /// Recursive walk of the tile tree. Each Leaf gets its own rect
@@ -5329,5 +5515,239 @@ mod spawn_projection_tests {
         // The second shell lands → count exceeds baseline → satisfied.
         spawn(&mut stack, 2, &sk, TerminalKind::Shell);
         assert!(stack.spawn_satisfied(&sk, &kind, baseline));
+    }
+}
+
+#[cfg(test)]
+mod agent_crash_tests {
+    //! A spawned agent that exits on its own (crash, killed binary —
+    //! #356) must NOT take its workspace down with it: the pane stays,
+    //! frozen on its last screen, and offers a restart. Only a shell
+    //! exit or an explicit user close (`]]x`) tears the pane down.
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn active_stack(id: u64, sk: &SessionKey, kind: TerminalKind) -> TerminalStack {
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        stack.set_active_session(Some(sk.clone()));
+        stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(id),
+            session_key: sk.clone(),
+            kind,
+            no_permission: false,
+            on_main: false,
+        });
+        stack
+    }
+
+    #[test]
+    fn agent_crash_keeps_pane_and_records_exit() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
+
+        stack.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(1),
+            exit_code: Some(1),
+        });
+
+        let slot = stack
+            .terminals
+            .get(&TerminalId(1))
+            .expect("crashed agent pane must survive");
+        assert!(
+            matches!(slot.exited, Some(TerminalExit { code: Some(1) })),
+            "the exit code is recorded so the banner can show it",
+        );
+    }
+
+    #[test]
+    fn agent_crash_without_exit_code_still_keeps_pane() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
+
+        // Death by signal (the Homebrew-swap case) reports no code.
+        stack.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(1),
+            exit_code: None,
+        });
+
+        assert!(matches!(
+            stack.terminals.get(&TerminalId(1)).map(|s| s.exited),
+            Some(Some(TerminalExit { code: None })),
+        ));
+    }
+
+    #[test]
+    fn shell_exit_removes_pane() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Shell);
+
+        stack.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(1),
+            exit_code: Some(0),
+        });
+
+        assert!(
+            stack.terminals.get(&TerminalId(1)).is_none(),
+            "a shell exiting closes its pane like any terminal",
+        );
+    }
+
+    #[test]
+    fn user_close_removes_agent_pane() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
+
+        // `]]x` → close_focused_tile tags the id, then the daemon's kill
+        // echoes TerminalExited. That must tear the pane down, not leave
+        // an "exited" banner on a terminal the user deliberately closed.
+        let mut cmds = Vec::new();
+        stack.close_focused_tile(&mut cmds);
+        assert!(
+            matches!(
+                cmds.as_slice(),
+                [Command::Close {
+                    terminal_id: TerminalId(1)
+                }]
+            ),
+            "close pushes a daemon-side kill",
+        );
+        stack.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(1),
+            exit_code: Some(0),
+        });
+
+        assert!(stack.terminals.get(&TerminalId(1)).is_none());
+    }
+
+    #[test]
+    fn restart_key_respawns_same_agent() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
+        stack.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(1),
+            exit_code: Some(1),
+        });
+
+        let mut cmds = Vec::new();
+        let outcome = stack.handle_key(
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+            &mut cmds,
+        );
+
+        assert!(matches!(outcome, PaneOutcome::Consumed));
+        match cmds.as_slice() {
+            [
+                Command::Spawn {
+                    session_key, kind, ..
+                },
+            ] => {
+                assert_eq!(session_key, &sk);
+                assert!(matches!(kind, TerminalKind::Agent(a) if a == "codex"));
+            }
+            other => panic!("restart must spawn the same agent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn keys_do_not_reach_a_dead_pty() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
+        stack.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(1),
+            exit_code: Some(1),
+        });
+
+        // A printable key that isn't the restart affordance is swallowed
+        // rather than written into the gone PTY.
+        let mut cmds = Vec::new();
+        let outcome = stack.handle_key(
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+            &mut cmds,
+        );
+        assert!(matches!(outcome, PaneOutcome::Consumed));
+        assert!(cmds.is_empty(), "no Write reaches a dead terminal");
+    }
+
+    #[test]
+    fn restart_spawn_supersedes_exited_pane() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
+        stack.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(1),
+            exit_code: Some(1),
+        });
+
+        // The restart's fresh terminal lands as a new id — the exited
+        // corpse for the same session+agent is dropped, not left as a
+        // dead tab beside the live one.
+        stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(2),
+            session_key: sk.clone(),
+            kind: TerminalKind::Agent("codex".into()),
+            no_permission: false,
+            on_main: false,
+        });
+
+        assert!(stack.terminals.get(&TerminalId(1)).is_none());
+        assert!(stack.terminals.get(&TerminalId(2)).is_some());
+        assert_eq!(stack.visible_terminals(), vec![TerminalId(2)]);
+    }
+
+    #[test]
+    fn exited_pane_renders_a_restart_banner() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
+        stack.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(1),
+            exit_code: Some(137),
+        });
+
+        let backend = TestBackend::new(80, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| stack.render(Rect::new(0, 0, 80, 24), f, true))
+            .unwrap();
+        let buf = term.backend().buffer().clone();
+        let screen: String = (0..24)
+            .map(|y| (0..80).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            screen.contains("agent exited (code 137)"),
+            "banner shows the exit code:\n{screen}",
+        );
+        assert!(
+            screen.contains("restart"),
+            "banner offers a restart:\n{screen}",
+        );
+    }
+
+    #[test]
+    fn a_different_agent_spawn_leaves_the_exited_pane() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
+        stack.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(1),
+            exit_code: Some(1),
+        });
+
+        // Spawning a *different* agent in the same workspace must not
+        // reap the crashed codex pane — its banner is still relevant.
+        stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(2),
+            session_key: sk.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+
+        assert!(stack.terminals.get(&TerminalId(1)).is_some());
+        assert!(stack.terminals.get(&TerminalId(2)).is_some());
     }
 }

@@ -2682,6 +2682,40 @@ pub(crate) async fn teardown_exited_terminal(
     backend_key: &str,
     exit_code: Option<i32>,
 ) {
+    // A spawned session going away used to be silent — a crashing agent
+    // (e.g. its binary swapped out mid-run by a Homebrew self-upgrade,
+    // issue #355) left no trace in the log, so #356 read as "the whole
+    // workspace just vanished". Announce every exit with its status and
+    // owning session/kind so the log makes an abnormal exit obvious.
+    let meta = config.terminal_meta.lock().await.get(&terminal_id).cloned();
+    let (session, kind) = match &meta {
+        Some((session_key, kind)) => (Some(session_key.as_str()), Some(kind)),
+        None => (None, None),
+    };
+    match exit_code {
+        Some(0) => tracing::info!(
+            ?terminal_id,
+            backend_key,
+            session,
+            ?kind,
+            "teardown_exited_terminal: clean exit (code 0)"
+        ),
+        Some(code) => tracing::warn!(
+            ?terminal_id,
+            backend_key,
+            session,
+            ?kind,
+            exit_code = code,
+            "teardown_exited_terminal: terminal exited abnormally"
+        ),
+        None => tracing::warn!(
+            ?terminal_id,
+            backend_key,
+            session,
+            ?kind,
+            "teardown_exited_terminal: terminal exited with no exit status (killed by signal?)"
+        ),
+    }
     let _ = config.bus.send(Event::TerminalExited {
         terminal_id,
         exit_code,

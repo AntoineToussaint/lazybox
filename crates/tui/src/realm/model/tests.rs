@@ -9126,8 +9126,10 @@ mod async_modal_preempt_tests {
 
 #[cfg(test)]
 mod focus_mode_terminal_exit_tests {
-    //! Focus mode must not survive its terminal's death — the user
-    //! would be stranded on a near-fullscreen empty pane.
+    //! Focus mode must not survive an EMPTY stack — the user would be
+    //! stranded on a near-fullscreen blank pane. A crashed AGENT is not
+    //! an empty stack, though: its pane stays frozen with a restart
+    //! affordance (#356), so focus mode must survive it.
     use super::super::*;
     use chrono::Utc;
     use lazybox_core::SessionKey;
@@ -9144,7 +9146,40 @@ mod focus_mode_terminal_exit_tests {
     }
 
     #[test]
-    fn focus_mode_exits_when_last_terminal_dies() {
+    fn focus_mode_exits_when_shell_dies() {
+        let mut m = build_model();
+        let ws = workspace("github:owner/repo#1");
+        let key: SessionKey = SessionKey::from(&ws.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&key));
+        m.sync_panes();
+
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(7),
+            session_key: key.clone(),
+            kind: TerminalKind::Shell,
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+        });
+        assert!(m.terminals.active_terminal_id().is_some());
+        m.focus_mode = true;
+        m.focus = PaneFocus::Terminals;
+
+        m.handle_daemon_event(IpcEvent::TerminalExited {
+            terminal_id: TerminalId(7),
+            exit_code: Some(0),
+        });
+
+        assert!(
+            !m.focus_mode,
+            "a shell exit empties the stack — focus mode over a blank pane must exit"
+        );
+        assert_eq!(m.focus, PaneFocus::Sidebar);
+    }
+
+    #[test]
+    fn focus_mode_survives_agent_crash() {
         let mut m = build_model();
         let ws = workspace("github:owner/repo#1");
         let key: SessionKey = SessionKey::from(&ws.key);
@@ -9172,14 +9207,19 @@ mod focus_mode_terminal_exit_tests {
 
         m.handle_daemon_event(IpcEvent::TerminalExited {
             terminal_id: TerminalId(7),
-            exit_code: Some(0),
+            exit_code: Some(1),
         });
 
+        // The crashed agent keeps its pane (frozen + "restart?"), so the
+        // stack isn't empty and focus mode stays put — the user lands on
+        // the restart affordance instead of being bounced to the sidebar
+        // with the workspace seemingly gone (#356).
         assert!(
-            !m.focus_mode,
-            "focus mode over an empty stack is a blank screen — must exit"
+            m.focus_mode,
+            "a crashed agent leaves a restart pane — focus mode must survive"
         );
-        assert_eq!(m.focus, PaneFocus::Sidebar);
+        assert_eq!(m.focus, PaneFocus::Terminals);
+        assert!(m.terminals.active_terminal_id().is_some());
     }
 
     /// A terminal dying in ANOTHER workspace leaves focus mode alone.

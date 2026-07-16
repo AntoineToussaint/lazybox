@@ -4394,40 +4394,75 @@ mod wheel_routing_tests {
         );
     }
 
-    /// A freshly spawned/re-attached Claude can be on tmux's inner
-    /// alt-screen while tmux paints it onto lazybox's outer PRIMARY
-    /// screen. Before the client accumulates local history its
-    /// scrollbar is `total == len`: local Delta is a no-op. Forward
-    /// the wheel to the mouse-tracking app until local history exists.
+    /// #360 (chronic regression): a brand-new agent — a
+    /// primary-screen Claude that enables mouse tracking for clicks —
+    /// must scroll lazybox's local scrollback on the wheel from the
+    /// very first frame. It never has a pager of its own, so an earlier
+    /// "forward the wheel until local history exists" heuristic scrolled
+    /// nothing on fresh spawns (`total == len` before output
+    /// accumulates → SGR-forwarded into an app that ignores it). The
+    /// route must be `LocalScrollback` regardless of how much history
+    /// exists, and once real history spills in the wheel must move the
+    /// viewport with zero daemon traffic.
     #[test]
-    fn fresh_primary_screen_agent_without_local_history_forwards_wheel() {
+    fn fresh_primary_screen_agent_scrolls_local_scrollback() {
         let (mut m, mut server, bottom) = build_model_with_terminal();
+
+        // A fresh agent that has enabled mouse tracking but produced no
+        // scrolled lines yet: the wheel is still lazybox's, not the
+        // app's — no SGR may leak to the daemon.
         m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(7),
-            // Claude/tmux advertises mouse input, but the outer client
-            // remains on the primary screen and has no scrolled lines.
             bytes: b"\x1b[?1002h\x1b[?1006h".to_vec(),
             seq: 1,
         });
+        assert!(
+            m.terminals.focused_terminal_tracks_mouse(),
+            "the agent enabled mouse tracking",
+        );
         assert_eq!(
             m.terminals.wheel_route(),
-            WheelRoute::ForwardSgr,
-            "a fresh no-history agent must delegate scrolling to its app",
+            WheelRoute::LocalScrollback,
+            "a fresh primary-screen agent owns no pager — the wheel is \
+             lazybox's scrollback, not a forward",
         );
         while server.rx.try_recv().is_ok() {}
-
         m.handle_mouse(wheel_up_at(bottom.x + 6, bottom.y + 8));
+        assert!(
+            server.rx.try_recv().is_err(),
+            "a fresh primary-screen wheel must not forward an SGR report",
+        );
 
-        match server.rx.try_recv() {
-            Ok(lazybox_ipc::Command::Write { terminal_id, bytes }) => {
-                assert_eq!(terminal_id, TerminalId(7));
-                assert!(
-                    bytes.starts_with(b"\x1b[<64;6;6"),
-                    "fresh agent wheel must be SGR-forwarded, got {bytes:?}",
-                );
-            }
-            other => panic!("expected SGR Write for fresh agent, got {other:?}"),
+        // Now the agent spills a screenful-plus of history (still on the
+        // primary screen, still mouse-tracking). The wheel must move the
+        // viewport up into that scrollback, in-process.
+        let mut bytes = Vec::new();
+        for i in 0..200 {
+            bytes.extend_from_slice(format!("line {i}\r\n").as_bytes());
         }
+        m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
+            terminal_id: TerminalId(7),
+            bytes,
+            seq: 2,
+        });
+        assert_eq!(
+            m.terminals.wheel_route(),
+            WheelRoute::LocalScrollback,
+            "history existing or not, a primary-screen wheel stays local",
+        );
+        let bottom_offset = scroll_offset(&m);
+        assert!(bottom_offset > 0, "200 lines must produce scrollback");
+        while server.rx.try_recv().is_ok() {}
+        m.handle_mouse(wheel_up_at(bottom.x + 6, bottom.y + 8));
+        assert_eq!(
+            scroll_offset(&m),
+            bottom_offset - 3,
+            "the wheel must move the fresh agent's viewport into scrollback",
+        );
+        assert!(
+            server.rx.try_recv().is_err(),
+            "the local scroll must not forward an SGR report",
+        );
     }
 
     /// An alt-screen app that never enabled mouse reporting (less, man,

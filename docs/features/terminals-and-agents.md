@@ -368,9 +368,10 @@ leaving, splitting, scrolling, and copying.
 - `Tab` cycles focus only before you've typed in the current visit; after the first keystroke it routes to the PTY (autocomplete).
 - `Ctrl-c` is forwarded as SIGINT.
 - `]]` then `|`/`\` (split vertical), `-` (split horizontal), arrows (move tile focus / cycle tabs), `x` (close the focused terminal). `Ctrl-w` is not a lazybox prefix — it reaches the inner program (readline word-erase).
-- Mouse wheel scrolls local history (3 rows/notch). When a fresh tmux-relayed
-  agent has no local history yet, or an alternate-screen program owns the
-  buffer, lazybox forwards the wheel to that mouse-tracking program instead.
+- Mouse wheel scrolls local history (3 rows/notch) whenever the inner program
+  is on the primary screen — including a brand-new agent, from its first frame.
+  Only an alternate-screen program that enabled mouse tracking (vim, htop, less)
+  gets the wheel forwarded, since it owns the only scrollable buffer.
 - Left-click + drag does pane-scoped selection; release copies via OSC 52 (footer shows `copied N lines`). For host-native selection across the whole screen, press `F8` to flip mouse capture off, drag, then `F8` back.
 - `Shift-PageUp/PageDown` and `Shift-Home/End` move through scrollback.
 
@@ -385,7 +386,7 @@ management and scrollback in `components/terminal_stack.rs`. The escape char is
 - [ ] `Ctrl-c` interrupts the running program.
 - [ ] `]]-` / `]]|` split the terminal stack; `]]x` closes a tile.
 - [ ] Old/recovered sessions with local history scroll in-process.
-- [ ] A freshly spawned tmux agent with no local history receives forwarded wheel events.
+- [ ] A freshly spawned agent scrolls its scrollback in-process (wheel / `Shift-PageUp` / `Shift-Home`) from the first frame — no forward to the app.
 - [ ] Alternate-screen programs with mouse tracking receive wheel events.
 - [ ] Drag-select copies via OSC 52 and the footer confirms the line count.
 - [ ] `F8` toggles mouse capture for host-native selection.

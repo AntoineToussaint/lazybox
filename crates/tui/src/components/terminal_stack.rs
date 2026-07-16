@@ -281,15 +281,16 @@ pub enum ScrollOutcome {
 /// focused-terminal lookup rather than probing several booleans.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WheelRoute {
-    /// Primary screen with actual pane history: scroll the local
-    /// libghostty scrollback in-process (no daemon round trip). Covers
-    /// plain shells and primary-screen apps after they have emitted
-    /// enough line-oriented output to create local history (#321).
+    /// Primary screen: the pane history is lazybox's, so scroll the
+    /// local libghostty scrollback in-process (no daemon round trip).
+    /// Covers plain shells AND primary-screen apps that track the mouse
+    /// only for clicks (Claude Code) — they own no pager, so the wheel
+    /// is always lazybox's, from the first frame of a fresh spawn
+    /// (#321, #360).
     LocalScrollback,
-    /// Mouse-reporting app that owns the only scrollable history:
-    /// either an alt-screen app (vim, htop, less) or a fresh tmux-
-    /// relayed agent whose outer client is primary-screen but has no
-    /// local history yet. Forward SGR so the app scrolls its buffer.
+    /// Alt-screen app that enabled mouse reporting (vim `mouse=a`,
+    /// htop, less `--mouse`): it owns the only scrollable buffer, so
+    /// forward the wheel as an SGR mouse report and let the app scroll.
     ForwardSgr,
     /// Alt-screen app that did NOT enable mouse reporting (less, man,
     /// the git pager, vim without `mouse`): it owns the visible buffer
@@ -1231,25 +1232,18 @@ impl TerminalStack {
             || t.mode(vt::terminal::Mode::ALT_SCREEN_LEGACY)
                 .unwrap_or(false);
         let tracks_mouse = t.is_mouse_tracking().unwrap_or(false);
-        // Primary-screen history normally belongs to lazybox (#321),
-        // but a freshly attached tmux client can have NONE: Claude is
-        // on tmux's inner alt-screen (`history_size=0`) and tmux only
-        // repaints that screen into our outer primary screen. Old
-        // clients may have accumulated local history while new ones
-        // have `total == len`, which made old sessions scroll and new
-        // sessions silently no-op. When no local history exists and
-        // the inner app requested mouse events, forward SGR to let the
-        // app scroll its own transcript. As soon as real local history
-        // exists, retain the instant in-process path.
+        // Primary screen → the pane history is lazybox's, so scroll it
+        // in-process, ALWAYS — even for a Claude Code that tracks the
+        // mouse for clicks, and even before the client has accumulated
+        // any scrollback (#321, #360). Gating this on
+        // `total > len` (as an earlier fix did) made brand-new agents
+        // silently forward the wheel to an app that ignores it: a
+        // primary-screen agent owns no pager, so forwarding scrolls
+        // nothing, while the local viewport starts moving the instant
+        // real history exists. Any `total == len` frame is simply an
+        // empty scrollback, not a reason to hand the wheel away.
         if !on_alt_screen {
-            let has_local_scrollback = t
-                .scrollbar()
-                .is_ok_and(|scrollbar| scrollbar.total > scrollbar.len);
-            return if has_local_scrollback || !tracks_mouse {
-                WheelRoute::LocalScrollback
-            } else {
-                WheelRoute::ForwardSgr
-            };
+            return WheelRoute::LocalScrollback;
         }
         // Alt-screen: the app owns the buffer. If it speaks mouse,
         // forward SGR; otherwise fall back to xterm alternateScroll.
@@ -2040,23 +2034,11 @@ impl TerminalStack {
                     return PaneOutcome::Consumed;
                 }
                 KeyCode::Home => {
-                    if let Some(id) = self.focused_terminal_id()
-                        && let Some(slot) = self.terminals.get_mut(&id)
-                    {
-                        slot.vt
-                            .terminal
-                            .scroll_viewport(vt::terminal::ScrollViewport::Top);
-                    }
+                    self.scroll_to_top();
                     return PaneOutcome::Consumed;
                 }
                 KeyCode::End => {
-                    if let Some(id) = self.focused_terminal_id()
-                        && let Some(slot) = self.terminals.get_mut(&id)
-                    {
-                        slot.vt
-                            .terminal
-                            .scroll_viewport(vt::terminal::ScrollViewport::Bottom);
-                    }
+                    self.scroll_to_bottom();
                     return PaneOutcome::Consumed;
                 }
                 _ => {}
@@ -4794,6 +4776,68 @@ mod footer_scroll_independence {
             bottom,
             "Shift-End returns to the live bottom"
         );
+    }
+
+    /// #360: every keyboard scroll binding must move the viewport on a
+    /// FRESH agent slot — one built straight from `make_slot`, never
+    /// reattached or replayed. The chronic regression only ever bit
+    /// brand-new sessions (reattach replays history and looked fine),
+    /// so the fresh path is pinned across all four bindings:
+    /// Shift-PageUp / Shift-PageDown scroll by a step, Shift-Home /
+    /// Shift-End jump to the extremes.
+    #[test]
+    fn fresh_agent_keyboard_scroll_bindings_move_the_viewport() {
+        let mut stack = agent_stack_with_scrollback();
+
+        fn offset(stack: &TerminalStack) -> u64 {
+            stack
+                .scrollbar_summary()
+                .expect("summary")
+                .split_whitespace()
+                .find_map(|kv| kv.strip_prefix("offset="))
+                .expect("offset field")
+                .parse()
+                .expect("numeric offset")
+        }
+
+        let bottom = offset(&stack);
+        assert!(bottom > 0, "the fresh agent must have scrollback to move");
+
+        let mut cmds = Vec::new();
+        macro_rules! press {
+            ($code:expr) => {
+                stack.handle_key(KeyEvent::new($code, KeyModifiers::SHIFT), &mut cmds)
+            };
+        }
+
+        // Shift-Home pins the viewport to the very top of scrollback.
+        press!(KeyCode::Home);
+        let top = offset(&stack);
+        assert_eq!(top, 0, "Shift-Home jumps to the top of scrollback");
+
+        // Shift-PageDown walks back down toward the live bottom.
+        press!(KeyCode::PageDown);
+        let after_pgdn = offset(&stack);
+        assert!(
+            after_pgdn > top,
+            "Shift-PageDown must move the viewport down (top={top} after={after_pgdn})",
+        );
+
+        // Shift-PageUp walks back up into scrollback.
+        press!(KeyCode::PageUp);
+        assert!(
+            offset(&stack) < after_pgdn,
+            "Shift-PageUp must move the viewport up into scrollback",
+        );
+
+        // Shift-End returns to the live bottom.
+        press!(KeyCode::End);
+        assert_eq!(
+            offset(&stack),
+            bottom,
+            "Shift-End returns to the live bottom"
+        );
+        assert!(cmds.is_empty(), "keyboard scroll is a pure in-process move");
     }
 
     #[test]

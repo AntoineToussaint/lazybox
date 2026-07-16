@@ -638,6 +638,7 @@ pub async fn handle_spawn(
             env.push((k, v));
         }
     }
+    let env = with_agent_spawn_defaults(env, agent_for_env.as_deref());
     let env = with_worktree_cargo_target(env, cwd_path.as_deref());
     tracing::info!(
         program = argv.first().map(String::as_str).unwrap_or("<empty>"),
@@ -2045,6 +2046,26 @@ pub(crate) fn gateway_env_for_agent(
         .gateway_url()
         .map(|u| vec![(provider.base_url_env().to_string(), u.to_string())])
         .unwrap_or_default()
+}
+
+/// Layer the spawning agent's own env defaults ([`Agent::spawn_env`],
+/// e.g. Codex's Homebrew auto-update suppression) onto `env`, shared by
+/// the PTY and structured (`exec`) spawn paths. A key a higher-priority
+/// source (per-repo `env`) already set wins, so these stay defaults.
+/// Non-agent spawns (shells, log tails) pass `None` and get nothing.
+pub(crate) fn with_agent_spawn_defaults(
+    mut env: Vec<(String, String)>,
+    agent: Option<&dyn lazybox_agents::Agent>,
+) -> Vec<(String, String)> {
+    let Some(agent) = agent else {
+        return env;
+    };
+    for (k, v) in agent.spawn_env() {
+        if !env.iter().any(|(ek, _)| ek == &k) {
+            env.push((k, v));
+        }
+    }
+    env
 }
 
 /// Pure-data lookup so tests don't need a real YAML on disk.
@@ -4355,6 +4376,43 @@ mod tests {
     fn cargo_target_dir_is_not_added_without_a_worktree() {
         let out = with_worktree_cargo_target(Vec::new(), None);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn codex_spawn_suppresses_homebrew_auto_update() {
+        let codex = lazybox_agents::agent::builtins::Codex;
+        let out = with_agent_spawn_defaults(Vec::new(), Some(&codex));
+        let map: std::collections::BTreeMap<_, _> = out.into_iter().collect();
+        assert_eq!(
+            map.get("HOMEBREW_NO_AUTO_UPDATE").map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn non_codex_agent_leaves_homebrew_alone() {
+        // Claude / Cursor don't self-update through `brew`, so suppressing
+        // auto-update would only risk staling an unrelated `brew install`.
+        let claude = lazybox_agents::agent::builtins::Claude;
+        assert!(with_agent_spawn_defaults(Vec::new(), Some(&claude)).is_empty());
+    }
+
+    #[test]
+    fn non_agent_spawn_leaves_homebrew_alone() {
+        let out = with_agent_spawn_defaults(Vec::new(), None);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn homebrew_suppression_respects_an_explicit_repo_setting() {
+        let codex = lazybox_agents::agent::builtins::Codex;
+        let env = vec![("HOMEBREW_NO_AUTO_UPDATE".to_string(), "0".to_string())];
+        let out = with_agent_spawn_defaults(env, Some(&codex));
+        let map: std::collections::BTreeMap<_, _> = out.into_iter().collect();
+        assert_eq!(
+            map.get("HOMEBREW_NO_AUTO_UPDATE").map(String::as_str),
+            Some("0")
+        );
     }
 
     /// Regression for #161: after an issue→PR collapse, `rebadge_terminals`

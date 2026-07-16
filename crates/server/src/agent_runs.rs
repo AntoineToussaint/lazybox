@@ -88,9 +88,11 @@ pub async fn handle_start_agent_run(
 
     // Structured runs speak to the same upstream as PTY spawns, so
     // they need the same LLM-gateway base-URL routing
-    // (`agent.llm_gateway_url` → ANTHROPIC_BASE_URL / OPENAI_BASE_URL).
+    // (`agent.llm_gateway_url` → ANTHROPIC_BASE_URL / OPENAI_BASE_URL)
+    // and the same per-agent spawn-env defaults (Codex brew suppression).
     let yaml = lazybox_config::Config::load().unwrap_or_default();
     let env = crate::spawn_handler::gateway_env_for_agent(&yaml, Some(agent_impl.as_ref()));
+    let env = crate::spawn_handler::with_agent_spawn_defaults(env, Some(agent_impl.as_ref()));
 
     let mut stream_config = AgentStreamConfig::new(protocol, program.clone());
     stream_config.cwd = cwd_path;

@@ -120,6 +120,15 @@ pub trait Agent: Send + Sync {
         self.spawn(ctx)
     }
 
+    /// Extra environment variables to seed into this agent's launch, on
+    /// top of the inherited process env, for BOTH the interactive PTY
+    /// spawn and the structured `exec` run. The daemon skips any key a
+    /// higher-priority source (per-repo `env`) already set, so these are
+    /// defaults, not overrides. Default: none.
+    fn spawn_env(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
     /// Prepare the environment so an UNATTENDED launch in `worktree`
     /// can't stall on a one-time interactive consent dialog. Called
     /// before spawning an autonomous session (the `w` / address-comments
@@ -515,6 +524,23 @@ pub mod builtins {
             vec!["codex".into()]
         }
 
+        /// Suppress Homebrew's implicit self-update inside a spawned Codex
+        /// session. Codex's Homebrew build shells out to
+        /// `brew upgrade --cask codex` when the user accepts its on-launch
+        /// update banner, and *any* `brew` invocation first triggers
+        /// Homebrew's self-update (portable-ruby pour, tap refresh,
+        /// "Auto-updated Homebrew!") unless suppressed — a heavy
+        /// network+disk side effect the session never asked for (issue
+        /// #355). `HOMEBREW_NO_AUTO_UPDATE=1` skips that implicit
+        /// `brew update`; the `brew upgrade` an explicit `ctrl+u` runs
+        /// still proceeds. The accepted cost is that brew also won't
+        /// refresh its cached cask index, so an explicit upgrade against a
+        /// long-stale cache can no-op — the price of not auto-updating on
+        /// every fresh session.
+        fn spawn_env(&self) -> Vec<(String, String)> {
+            vec![("HOMEBREW_NO_AUTO_UPDATE".to_string(), "1".to_string())]
+        }
+
         /// Codex Code's three observable states. Delegates to the pure
         /// [`crate::detect::codex_state`] — its live `• Working
         /// (… esc to interrupt)` status line (`Working`), its approval /
@@ -769,6 +795,28 @@ mod tests {
             settings["hooks"]["Stop"][0]["hooks"][0]["command"],
             "lazybox hook-ingest --backend-key lazybox-ws-claude-1-7"
         );
+    }
+
+    #[test]
+    fn codex_seeds_homebrew_auto_update_suppression() {
+        assert_eq!(
+            super::builtins::Codex.spawn_env(),
+            vec![("HOMEBREW_NO_AUTO_UPDATE".to_string(), "1".to_string())]
+        );
+    }
+
+    #[test]
+    fn other_agents_seed_no_spawn_env() {
+        assert!(Claude.spawn_env().is_empty());
+        assert!(super::builtins::Cursor.spawn_env().is_empty());
+        let generic = super::builtins::GenericCli {
+            id: "custom",
+            display_name: "Custom",
+            spawn_cmd: vec!["custom".into()],
+            resume_cmd: None,
+            asking_patterns: vec![],
+        };
+        assert!(generic.spawn_env().is_empty());
     }
 
     #[test]

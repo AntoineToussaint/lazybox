@@ -2048,33 +2048,22 @@ pub(crate) fn gateway_env_for_agent(
         .unwrap_or_default()
 }
 
-/// Layer per-agent spawn-env defaults onto `env`, shared by the PTY and
-/// structured (`codex exec`) spawn paths.
-///
-/// Currently one default, and it's Codex-only: Codex's Homebrew build
-/// shells out to `brew upgrade --cask codex` when the user accepts its
-/// on-launch update banner, and *any* `brew` invocation first triggers
-/// Homebrew's implicit self-update (portable-ruby pour, tap refresh,
-/// "Auto-updated Homebrew!") unless suppressed — a heavy network+disk
-/// side effect the session never asked for (issue #355).
-/// `HOMEBREW_NO_AUTO_UPDATE=1` skips that implicit `brew update`; the
-/// `brew upgrade` codex runs on an explicit `ctrl+u` still proceeds. The
-/// accepted cost is that brew also won't refresh its cached cask index, so
-/// an explicit upgrade against a long-stale cache can no-op — the price of
-/// not auto-updating on every fresh session.
-///
-/// Scoped to Codex on purpose: it's the built-in whose launch path runs
-/// `brew`. Suppressing auto-update for every agent (or in shells the user
-/// opened) would silently change `brew` behavior for unrelated work — a
-/// `brew install` of a formula added upstream since the last refresh would
-/// fail. A per-repo `env` value for the key wins.
+/// Layer the spawning agent's own env defaults ([`Agent::spawn_env`],
+/// e.g. Codex's Homebrew auto-update suppression) onto `env`, shared by
+/// the PTY and structured (`exec`) spawn paths. A key a higher-priority
+/// source (per-repo `env`) already set wins, so these stay defaults.
+/// Non-agent spawns (shells, log tails) pass `None` and get nothing.
 pub(crate) fn with_agent_spawn_defaults(
     mut env: Vec<(String, String)>,
     agent: Option<&dyn lazybox_agents::Agent>,
 ) -> Vec<(String, String)> {
-    let is_codex = agent.is_some_and(|a| a.id() == "codex");
-    if is_codex && !env.iter().any(|(k, _)| k == "HOMEBREW_NO_AUTO_UPDATE") {
-        env.push(("HOMEBREW_NO_AUTO_UPDATE".to_string(), "1".to_string()));
+    let Some(agent) = agent else {
+        return env;
+    };
+    for (k, v) in agent.spawn_env() {
+        if !env.iter().any(|(ek, _)| ek == &k) {
+            env.push((k, v));
+        }
     }
     env
 }

@@ -153,6 +153,20 @@ fn terminal_removal_copy(prompt: &super::RemovalPrompt, verb: &str) -> String {
     }
 }
 
+/// Trim a snippet body for the confirm preview: keep the first 12
+/// lines, marking with an ellipsis when more was dropped, so a long
+/// body can't push the Y/N buttons past the modal.
+fn snippet_body_preview(body: &str) -> String {
+    const MAX_LINES: usize = 12;
+    let lines: Vec<&str> = body.lines().collect();
+    if lines.len() <= MAX_LINES {
+        return body.trim_end().to_string();
+    }
+    let mut out = lines[..MAX_LINES].join("\n");
+    out.push_str("\n…");
+    out
+}
+
 fn format_age_short(unix_secs: Option<u64>) -> String {
     let Some(t) = unix_secs else {
         return "—".into();
@@ -763,6 +777,84 @@ impl<T: TerminalAdapter> Model<T> {
             modal.default_no()
         };
         self.mount_modal(Id::ActionConfirm, modal);
+    }
+
+    /// Mount the confirm-with-preview for a snippet the Ask Lazybox
+    /// help agent proposed (#353). Shows the key, category/description,
+    /// and body; stashes `(key, snippet)` in `pending_snippet_intent`
+    /// for the `Msg::Confirmed(true)` handler to write and hot-reload.
+    /// Enter defaults to Yes for a brand-new key (the user asked for
+    /// it) and to No when it would overwrite an existing snippet.
+    pub(super) fn mount_snippet_confirm(&mut self, key: String, snippet: lazybox_config::Snippet) {
+        use crate::realm::components::confirm::Confirm;
+        if self.modal_stack.last() == Some(&Id::SnippetConfirm) {
+            return;
+        }
+        let replaces = self.snippets.get(&key).is_some();
+        let path = lazybox_config::Snippets::default_global_path();
+        let mut preview = format!(
+            "{} snippet `{key}` in {}?\n\n",
+            if replaces { "Replace" } else { "Add" },
+            path.display()
+        );
+        if !snippet.category.is_empty() {
+            preview.push_str(&format!("category: {}\n", snippet.category));
+        }
+        if !snippet.description.is_empty() {
+            preview.push_str(&format!("description: {}\n", snippet.description));
+        }
+        preview.push('\n');
+        preview.push_str(&snippet_body_preview(&snippet.body));
+        preview.push_str(&format!(
+            "\n\nApplied live — send it with ]]s{key}, no restart."
+        ));
+        self.pending_snippet_intent = Some((key, snippet));
+        let modal = Confirm::new(preview);
+        let modal = if replaces {
+            modal.default_no()
+        } else {
+            modal.default_yes()
+        };
+        self.mount_modal(Id::SnippetConfirm, modal);
+    }
+
+    /// Turn an action the help agent proposed (#353) into a
+    /// confirm-with-preview. Validates the payload at this boundary —
+    /// an empty body or a whitespace-bearing key can't drive a write —
+    /// and only surfaces the confirm while the user is still on the
+    /// help modal that produced it (the run outlives the modal, so a
+    /// confirm popping up long after they closed it would be jarring).
+    pub(super) fn propose_help_action(&mut self, intent: lazybox_tui_core::help::HelpActionIntent) {
+        if self.modal_stack.last() != Some(&Id::HelpAsk) {
+            return;
+        }
+        match intent {
+            lazybox_tui_core::help::HelpActionIntent::AddSnippet {
+                key,
+                category,
+                description,
+                body,
+            } => {
+                let key = key.trim().to_string();
+                if key.is_empty() || key.chars().any(char::is_whitespace) || body.trim().is_empty()
+                {
+                    self.help_convo_mut().notice = Some(
+                        "the assistant proposed a snippet with an invalid key or empty \
+                         body — nothing was written"
+                            .into(),
+                    );
+                    self.redraw = true;
+                    return;
+                }
+                let snippet = lazybox_config::Snippet {
+                    description: description.trim().to_string(),
+                    category: category.trim().to_string(),
+                    body,
+                    origin: Default::default(),
+                };
+                self.mount_snippet_confirm(key, snippet);
+            }
+        }
     }
 
     /// Kick off the in-app worktree inspector. Dispatches the IPC

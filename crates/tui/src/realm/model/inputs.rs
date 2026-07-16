@@ -840,6 +840,11 @@ showing keybinding search only",
             Some(Id::InspectConfirm) => {
                 self.pending_inspect_target = None;
             }
+            Some(Id::SnippetConfirm) => {
+                // Esc = decline the proposed snippet; drop the stash,
+                // change nothing (#353).
+                self.pending_snippet_intent = None;
+            }
             Some(Id::RequestReviewers) => {
                 // Esc cancels; drop the stashed workspace key +
                 // candidate list so a later mount on a *different*
@@ -1001,10 +1006,35 @@ showing keybinding search only",
                     });
                 }
             }
+            Some(Id::SnippetConfirm) => {
+                // Snippet proposed by the Ask Lazybox help agent (#353).
+                // Yes → write it + hot-reload; No / Esc → drop the stash,
+                // nothing changes. Local-only work, no IPC.
+                let pending = self.pending_snippet_intent.take();
+                if yes && let Some((key, snippet)) = pending {
+                    self.apply_snippet_intent(key, snippet);
+                }
+            }
             _ => {}
         }
         self.drain_queued_daemon_prompts();
         cmds
+    }
+
+    /// Write a help-agent-proposed snippet to the global
+    /// `snippets.yaml` and hot-reload the merged catalog so `]]s<key>`
+    /// works immediately — the "no restart" half of #353. On write
+    /// failure nothing is reloaded and the error surfaces in the footer.
+    fn apply_snippet_intent(&mut self, key: String, snippet: lazybox_config::Snippet) {
+        match lazybox_config::Snippets::upsert_global_snippet(&key, &snippet) {
+            Ok(_) => {
+                self.apply_snippets(lazybox_config::Snippets::load_merged(
+                    std::env::current_dir().ok().as_deref(),
+                ));
+                self.flash_info(format!("snippet saved — send it with ]]s{key}"));
+            }
+            Err(e) => self.flash_error(format!("failed to save snippet: {e}")),
+        }
     }
 
     /// Apply a [`crate::setup_flow::RunnerStep`] returned by the

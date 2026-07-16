@@ -38,6 +38,109 @@ pub fn select_help_agent(enabled: &[String], default_agent: Option<&str>) -> Opt
         .find(|candidate| enabled.iter().any(|agent| agent == candidate))
 }
 
+/// The fenced-code info string the help agent uses to emit a proposed
+/// action (#353). Kept strict — only a `lazybox-action` fence is
+/// parsed, so example JSON the agent shows in a plain ```json block
+/// never misfires the confirm.
+pub const ACTION_FENCE: &str = "lazybox-action";
+
+/// A structured action the help agent proposes and lazybox applies
+/// natively after a confirm-with-preview (#353). The set is a strict
+/// allowlist: an intent whose `action` isn't a known variant fails to
+/// deserialize and is ignored, so the agent can never drive an
+/// un-vetted mutation. Phase 1 ships only `add_snippet`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum HelpActionIntent {
+    /// Add (or replace) a snippet in the user's global
+    /// `~/.lazybox/snippets.yaml`. `key` triggers it as `]]s<key>`.
+    AddSnippet {
+        key: String,
+        #[serde(default)]
+        category: String,
+        #[serde(default)]
+        description: String,
+        body: String,
+    },
+}
+
+/// Parse the first `lazybox-action` fenced block out of the help
+/// agent's answer into an allowlisted [`HelpActionIntent`]. Returns
+/// `None` when there's no such block, the block isn't valid JSON, or
+/// its `action` isn't a known variant. The block body is JSON.
+pub fn parse_action_intent(answer: &str) -> Option<HelpActionIntent> {
+    let json = extract_action_block(answer)?;
+    serde_json::from_str::<HelpActionIntent>(&json).ok()
+}
+
+/// Return `answer` with the `lazybox-action` fenced block removed, so
+/// the transcript shows the agent's prose without the raw intent JSON.
+/// Collapses the blank lines the removed block leaves behind. When
+/// there's no such block, returns the input trimmed of trailing
+/// whitespace unchanged.
+pub fn strip_action_block(answer: &str) -> String {
+    let Some((start, end)) = action_block_span(answer) else {
+        return answer.trim_end().to_string();
+    };
+    let mut out = String::with_capacity(answer.len());
+    out.push_str(answer[..start].trim_end());
+    let tail = answer[end..].trim_start_matches(['\n', '\r']);
+    if !tail.trim().is_empty() {
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str(tail.trim_end());
+    }
+    out
+}
+
+/// Byte span `[start, end)` of a `lazybox-action` fenced block within
+/// `answer`, fences included. `start` is the opening fence's first
+/// byte; `end` is one past the closing fence's newline (or the end of
+/// input if it's unterminated).
+fn action_block_span(answer: &str) -> Option<(usize, usize)> {
+    let mut offset = 0;
+    let mut lines = answer.split_inclusive('\n');
+    let mut opened_at: Option<usize> = None;
+    for line in lines.by_ref() {
+        let trimmed = line.trim();
+        if let Some(open) = opened_at {
+            if is_fence(trimmed) {
+                return Some((open, offset + line.len()));
+            }
+        } else if let Some(info) = trimmed.strip_prefix("```")
+            && info.trim() == ACTION_FENCE
+        {
+            opened_at = Some(offset);
+        }
+        offset += line.len();
+    }
+    // Unterminated fence: treat the rest of the input as the block.
+    opened_at.map(|open| (open, answer.len()))
+}
+
+/// The JSON body between a `lazybox-action` fence's delimiters.
+fn extract_action_block(answer: &str) -> Option<String> {
+    let (start, end) = action_block_span(answer)?;
+    let inner = &answer[start..end];
+    // Drop the opening fence line and, if present, the closing one.
+    let body: String = inner
+        .split_inclusive('\n')
+        .skip(1)
+        .filter(|line| !is_fence(line.trim()))
+        .collect();
+    if body.trim().is_empty() {
+        None
+    } else {
+        Some(body)
+    }
+}
+
+/// A line is a closing fence if, trimmed, it's only backticks.
+fn is_fence(trimmed: &str) -> bool {
+    trimmed.len() >= 3 && trimmed.chars().all(|c| c == '`')
+}
+
 /// In-tree docs embedded into the help agent's context. Titles are
 /// section headers in the generated document.
 const DOCS: &[(&str, &str)] = &[
@@ -183,9 +286,29 @@ Rules:\n\
 - A binding only works in its section's scope; the scope is noted on each section header. \
 Global bindings generally do not intercept a focused terminal, so mention terminal scope when relevant.\n\
 - Be brief: a few sentences, and when keys are the answer list them as `` `key` — action `` lines.\n\
-- Do not use tools, do not read or write files, do not run commands. Everything you need is below.\n\
+- Do not use tools, do not read or write files, do not run commands yourself. Everything you need is below. \
+The one way you can change anything is by proposing an action (see \"Performing actions\"); lazybox applies it \
+after the user confirms.\n\
 - If the reference doesn't cover something, say so plainly instead of guessing.\n",
     );
+
+    out.push_str(&format!(
+        "\n# Performing actions\n\n\
+You can propose a small, allowlisted set of changes that lazybox applies natively after showing the user a \
+confirm-with-preview — you never touch the filesystem or shell yourself. When the user asks for one of these, \
+answer in one short sentence, then emit a single fenced code block tagged `{ACTION_FENCE}` containing JSON. \
+Emit at most one block per reply, and only when the user actually asked you to perform the action (not when \
+merely explaining it). If a required field is missing, ask for it instead of guessing.\n\n\
+Supported actions:\n\n\
+- **add_snippet** — save a reusable prompt the user can send to an agent with `]]s<key>`. Fields: `key` \
+(short, no spaces — the trigger), `body` (the prompt text, required), `category` and `description` (optional, \
+for the picker). Example:\n\n\
+```{ACTION_FENCE}\n\
+{{\"action\": \"add_snippet\", \"key\": \"integrate\", \"category\": \"Review\", \"description\": \"Integrate \
+review feedback and commit\", \"body\": \"Address every review comment on this PR, then commit and push.\"}}\n\
+```\n\n\
+See the Snippets doc below for how snippet bodies should read.\n"
+    ));
 
     out.push_str("\n# Key bindings (effective)\n");
     let mut current_section = None;
@@ -379,5 +502,90 @@ fallback shouldn't resurrect it)",
         assert!(ctx.contains("## Doc: Snippets"));
         assert!(ctx.contains("## Doc: README"));
         assert!(ctx.contains("## Doc: Themes"));
+    }
+
+    /// The context teaches the agent the action vocabulary: the
+    /// `add_snippet` verb and the exact fence tag lazybox parses.
+    #[test]
+    fn agent_context_describes_actions() {
+        let ctx = agent_context(&catalog(), ']');
+        assert!(ctx.contains("# Performing actions"));
+        assert!(ctx.contains("add_snippet"));
+        assert!(ctx.contains(&format!("```{ACTION_FENCE}")));
+    }
+
+    /// A well-formed `lazybox-action` block parses into the allowlisted
+    /// intent with every field populated.
+    #[test]
+    fn parses_add_snippet_intent() {
+        let answer = "Sure — I'll add that snippet.\n\n\
+```lazybox-action\n\
+{\"action\":\"add_snippet\",\"key\":\"integrate\",\"category\":\"Review\",\
+\"description\":\"Integrate feedback\",\"body\":\"Do the thing.\"}\n\
+```\n";
+        let intent = parse_action_intent(answer).expect("intent parses");
+        assert_eq!(
+            intent,
+            HelpActionIntent::AddSnippet {
+                key: "integrate".into(),
+                category: "Review".into(),
+                description: "Integrate feedback".into(),
+                body: "Do the thing.".into(),
+            }
+        );
+    }
+
+    /// Optional fields default to empty; only `key` + `body` are
+    /// required.
+    #[test]
+    fn parses_add_snippet_with_only_required_fields() {
+        let answer =
+            "```lazybox-action\n{\"action\":\"add_snippet\",\"key\":\"go\",\"body\":\"Go.\"}\n```";
+        let intent = parse_action_intent(answer).expect("intent parses");
+        assert_eq!(
+            intent,
+            HelpActionIntent::AddSnippet {
+                key: "go".into(),
+                category: String::new(),
+                description: String::new(),
+                body: "Go.".into(),
+            }
+        );
+    }
+
+    /// A plain-prose answer has no intent.
+    #[test]
+    fn no_intent_without_action_fence() {
+        assert!(parse_action_intent("Press `z` to snooze a workspace.").is_none());
+    }
+
+    /// Example JSON the agent shows in an ordinary ```json block must
+    /// NOT fire an action — only the `lazybox-action` fence counts.
+    #[test]
+    fn json_fence_is_not_an_action() {
+        let answer = "Here's the shape:\n```json\n{\"action\":\"add_snippet\",\"key\":\"x\",\"body\":\"y\"}\n```";
+        assert!(parse_action_intent(answer).is_none());
+    }
+
+    /// An unknown `action` is outside the allowlist and yields nothing,
+    /// even inside a valid fence.
+    #[test]
+    fn unknown_action_is_rejected() {
+        let answer = "```lazybox-action\n{\"action\":\"rm_rf\",\"path\":\"/\"}\n```";
+        assert!(parse_action_intent(answer).is_none());
+    }
+
+    /// Stripping removes the raw block but keeps the prose on both
+    /// sides.
+    #[test]
+    fn strip_action_block_keeps_surrounding_prose() {
+        let answer = "I'll add that snippet.\n\n\
+```lazybox-action\n{\"action\":\"add_snippet\",\"key\":\"go\",\"body\":\"Go.\"}\n```\n\n\
+Trigger it with `]]sgo`.";
+        let stripped = strip_action_block(answer);
+        assert!(!stripped.contains("lazybox-action"));
+        assert!(!stripped.contains("add_snippet"));
+        assert!(stripped.contains("I'll add that snippet."));
+        assert!(stripped.contains("Trigger it with `]]sgo`."));
     }
 }

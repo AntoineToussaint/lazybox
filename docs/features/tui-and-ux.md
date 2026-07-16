@@ -106,19 +106,26 @@ every continuation.
 ### How to use it
 Press `?` to open Ask Lazybox. Type to search immediately or press Enter to ask.
 At an empty prompt, press `?` again to switch to the shortcut index; `?` there
-returns to Ask. `Esc` closes either surface.
+returns to Ask. `Esc` closes either surface. Beyond explaining, Ask can *do* a
+small, allowlisted set of things: ask it to "add a snippet …" and it proposes
+the entry as a confirm-with-preview, then — on accept — writes it and reloads
+the catalog live (no restart). Decline and nothing changes.
 
 ### How it works (brief)
 Both surfaces build from the runtime catalog and render effective keys
 (honoring overrides). Conversational answers receive that same catalog plus the
 embedded feature docs as context. Ask uses the configured default agent when it
 is Claude or Codex; otherwise the fallback order is Claude, then Codex. The
-fuzzy search layer remains fully local and works without either CLI.
+fuzzy search layer remains fully local and works without either CLI. Actions are
+a fixed allowlist emitted as a `lazybox-action` block the agent proposes;
+lazybox parses it, confirms with the user, and owns every mutation — the agent
+never touches the filesystem. Today the set is just `add_snippet`.
 
 ### Test checklist
 - [ ] `?` opens Ask Lazybox directly; another `?` toggles the compact index.
 - [ ] Overridden keys show their effective binding.
 - [ ] A Codex-only agent configuration can answer conversational help.
+- [ ] Asking to add a snippet pops a confirm-with-preview; accept writes + hot-reloads it, decline changes nothing.
 - [ ] `Esc` dismisses either surface; the index also closes on non-navigation keys.
 
 ### Known sharp edges

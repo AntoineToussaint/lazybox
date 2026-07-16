@@ -244,6 +244,12 @@ pub enum Id {
     /// persist `setup.default_agent` and update the panes live. Ids
     /// live in `default_agent_choices`.
     DefaultAgentPicker,
+    /// Confirm-with-preview for an `add_snippet` action the Ask Lazybox
+    /// help agent proposed (#353). The pending `(key, Snippet)` lives
+    /// in `pending_snippet_intent`; `Msg::Confirmed(true)` writes it to
+    /// the global snippets file and hot-reloads the picker. Esc / No
+    /// drops the stash and changes nothing.
+    SnippetConfirm,
 }
 
 impl Id {
@@ -791,6 +797,12 @@ pub struct Model<T: TerminalAdapter> {
     /// the selection on "Yes" would kill / merge a different row than
     /// the prompt named.
     pending_action_confirm: Option<(lazybox_tui_core::action::Action, ActionConfirmTarget)>,
+    /// Snippet proposed by the Ask Lazybox help agent's `add_snippet`
+    /// action (#353), paired with its trigger key, queued behind a
+    /// `SnippetConfirm` modal. Set when the agent's answer parses to an
+    /// intent, taken (and written + hot-reloaded if Yes) by the
+    /// `Msg::Confirmed` handler. None when no snippet confirm is up.
+    pending_snippet_intent: Option<(String, lazybox_config::Snippet)>,
     /// Latest inspector report driving the `InspectList` modal. The
     /// first slot in the Choice modal is the "delete all safe"
     /// shortcut, hence the wrapper enum on indices.
@@ -1123,6 +1135,7 @@ impl<T: TerminalAdapter> Model<T> {
                 &std::collections::BTreeMap::new(),
             ),
             pending_action_confirm: None,
+            pending_snippet_intent: None,
             pending_inspect_rows: Vec::new(),
             pending_inspect_target: None,
             pending_new_workspace_project: None,

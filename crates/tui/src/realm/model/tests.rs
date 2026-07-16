@@ -7794,6 +7794,160 @@ mod help_ask_tests {
         );
         assert_eq!(m.help_convo_mut().turns.len(), 1);
     }
+
+    // ── Ask Lazybox actions (#353) ──────────────────────────────────
+
+    /// A finished answer carrying an `add_snippet` block.
+    fn add_snippet_answer(key: &str) -> String {
+        format!(
+            "I'll add that snippet.\n\n```lazybox-action\n\
+{{\"action\":\"add_snippet\",\"key\":\"{key}\",\"category\":\"Review\",\
+\"description\":\"Integrate feedback\",\"body\":\"Address the review and commit.\"}}\n\
+```\n\nSend it with ]]s{key}.",
+        )
+    }
+
+    fn finish_help_turn(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>, answer: String) {
+        m.handle_daemon_event(run_started(1));
+        m.handle_daemon_event(IpcEvent::AgentTurnFinished {
+            run_id: AgentRunId(1),
+            result: Some(answer),
+            session_id: None,
+            error: None,
+        });
+    }
+
+    /// The motivating flow: asking to add a snippet produces a
+    /// confirm-with-preview, stashes the intent, and hides the raw
+    /// action JSON from the transcript.
+    #[test]
+    fn add_snippet_action_proposes_a_confirm_and_strips_the_block() {
+        let mut m = build_model();
+        m.update(Msg::HelpAskOpen);
+        let _ = m.handle_help_asked("add a snippet".into());
+        finish_help_turn(&mut m, add_snippet_answer("integrate"));
+
+        assert_eq!(m.modal_stack.last(), Some(&Id::SnippetConfirm));
+        let (key, snippet) = m.pending_snippet_intent.clone().expect("intent stashed");
+        assert_eq!(key, "integrate");
+        assert_eq!(snippet.category, "Review");
+        assert_eq!(snippet.body, "Address the review and commit.");
+
+        let convo = m.help_convo_mut();
+        assert!(
+            !convo.turns[0].answer.contains("lazybox-action"),
+            "raw action block must not show in the transcript",
+        );
+        assert!(convo.turns[0].answer.contains("I'll add that snippet."));
+        assert!(convo.turns[0].answer.contains("Send it with ]]sintegrate."));
+    }
+
+    /// Declining the confirm drops the stash and writes nothing —
+    /// control returns to the help modal.
+    #[test]
+    fn declining_the_snippet_confirm_changes_nothing() {
+        let mut m = build_model();
+        m.update(Msg::HelpAskOpen);
+        let _ = m.handle_help_asked("add a snippet".into());
+        finish_help_turn(&mut m, add_snippet_answer("integrate"));
+        assert_eq!(m.modal_stack.last(), Some(&Id::SnippetConfirm));
+
+        let before = m.snippets.len();
+        let _ = m.handle_modal_dismissed();
+        assert!(m.pending_snippet_intent.is_none());
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::HelpAsk),
+            "back to Ask Lazybox"
+        );
+        assert_eq!(
+            m.snippets.len(),
+            before,
+            "nothing added to the live catalog"
+        );
+        assert!(m.snippets.get("integrate").is_none());
+    }
+
+    /// Accepting writes the snippet to the global file and hot-reloads
+    /// the catalog so `]]s<key>` works immediately — no restart (#353).
+    #[test]
+    fn confirming_writes_the_snippet_and_hot_reloads() {
+        let home =
+            std::env::temp_dir().join(format!("lazybox-help-snippet-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: no other test in this binary reads or writes
+        // LAZYBOX_HOME, so this single-writer mutation can't race.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        let mut m = build_model();
+        m.update(Msg::HelpAskOpen);
+        let _ = m.handle_help_asked("add a snippet".into());
+        finish_help_turn(&mut m, add_snippet_answer("integrate"));
+        assert_eq!(m.modal_stack.last(), Some(&Id::SnippetConfirm));
+
+        let _ = m.handle_confirmed(true);
+
+        assert!(
+            home.join("snippets.yaml").exists(),
+            "written to the global file"
+        );
+        let s = m
+            .snippets
+            .get("integrate")
+            .expect("hot-reloaded into the live catalog");
+        assert_eq!(s.body, "Address the review and commit.");
+        assert_eq!(m.modal_stack.last(), Some(&Id::HelpAsk), "confirm popped");
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The run outlives the modal — an action that resolves after the
+    /// user closed Ask must not pop a surprise confirm. The block is
+    /// still stripped from the recorded answer.
+    #[test]
+    fn action_is_ignored_when_the_help_modal_is_closed() {
+        let mut m = build_model();
+        let _ = m.handle_help_asked("add a snippet".into());
+        finish_help_turn(&mut m, add_snippet_answer("integrate"));
+
+        assert!(m.pending_snippet_intent.is_none());
+        assert_ne!(m.modal_stack.last(), Some(&Id::SnippetConfirm));
+        assert!(
+            !m.help_convo_mut().turns[0]
+                .answer
+                .contains("lazybox-action"),
+            "block stripped even when not proposed",
+        );
+    }
+
+    /// A malformed intent (whitespace key) is rejected at the boundary:
+    /// no confirm, and a notice explains why nothing happened.
+    #[test]
+    fn invalid_snippet_key_sets_a_notice_and_no_confirm() {
+        let mut m = build_model();
+        m.update(Msg::HelpAskOpen);
+        let _ = m.handle_help_asked("add a snippet".into());
+        finish_help_turn(
+            &mut m,
+            "```lazybox-action\n{\"action\":\"add_snippet\",\"key\":\"has space\",\"body\":\"x\"}\n```"
+                .into(),
+        );
+
+        assert!(m.pending_snippet_intent.is_none());
+        assert_ne!(m.modal_stack.last(), Some(&Id::SnippetConfirm));
+        let convo = m.help_convo_mut();
+        assert!(
+            convo
+                .notice
+                .as_deref()
+                .unwrap_or("")
+                .contains("invalid key"),
+            "notice: {:?}",
+            convo.notice,
+        );
+    }
 }
 
 #[cfg(test)]

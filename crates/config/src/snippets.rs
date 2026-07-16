@@ -783,6 +783,61 @@ impl Snippets {
         }
     }
 
+    /// Upsert one snippet into the global `<lazybox_home>/snippets.yaml`
+    /// and return the path written. Missing file/dir are created; an
+    /// existing `key` is replaced in place, every other entry (and the
+    /// mapping's order) is preserved. The write round-trips through
+    /// `serde_yaml::Value` rather than editing text, so YAML comments in
+    /// the file are not preserved — the trade-off for letting lazybox
+    /// own the mutation safely.
+    ///
+    /// Used by the Ask Lazybox help agent's `add_snippet` action (#353):
+    /// the agent proposes a snippet, the TUI confirms it, and this
+    /// applies it natively before hot-reloading the picker.
+    pub fn upsert_global_snippet(key: &str, snippet: &Snippet) -> Result<PathBuf, SnippetsError> {
+        Self::upsert_snippet_at(&Self::default_global_path(), key, snippet)
+    }
+
+    /// The path-parameterized core of [`Self::upsert_global_snippet`],
+    /// split out so tests exercise the read-modify-write without
+    /// touching the real `LAZYBOX_HOME`.
+    fn upsert_snippet_at(
+        path: &Path,
+        key: &str,
+        snippet: &Snippet,
+    ) -> Result<PathBuf, SnippetsError> {
+        let mut root: serde_yaml::Value = match std::fs::read_to_string(path) {
+            Ok(raw) if !raw.trim().is_empty() => serde_yaml::from_str(&raw)?,
+            _ => serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        };
+        // A file that parsed to a non-mapping (a bare scalar or list) is
+        // not a snippets file we can extend — start fresh rather than
+        // corrupt whatever was there.
+        if !root.is_mapping() {
+            root = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+        }
+        let map = root
+            .as_mapping_mut()
+            .expect("root forced to a mapping above");
+        let snippets_key = serde_yaml::Value::from("snippets");
+        let snippets = map
+            .entry(snippets_key)
+            .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+        if !snippets.is_mapping() {
+            *snippets = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+        }
+        let snippets = snippets
+            .as_mapping_mut()
+            .expect("snippets forced to a mapping above");
+        snippets.insert(serde_yaml::Value::from(key), serde_yaml::to_value(snippet)?);
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, serde_yaml::to_string(&root)?)?;
+        Ok(path.to_path_buf())
+    }
+
     /// Merge two snippet sets. Entries in `overlay` win on key
     /// conflict. Used to stack repo-local on top of global so a
     /// project can override a shared shortcut without touching the
@@ -1193,5 +1248,93 @@ snippets:
         let err = Snippets::load_from(&path, SnippetOrigin::Global)
             .expect_err("malformed YAML should error");
         assert!(matches!(err, SnippetsError::Parse(_)));
+    }
+
+    fn snippet(category: &str, description: &str, body: &str) -> Snippet {
+        Snippet {
+            description: description.to_string(),
+            category: category.to_string(),
+            body: body.to_string(),
+            origin: SnippetOrigin::Unknown,
+        }
+    }
+
+    /// Writing into a directory that doesn't exist yet creates the file
+    /// (and its parent) and the snippet reads back through `load_from`.
+    #[test]
+    fn upsert_creates_missing_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "lazybox-snippets-upsert-create-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("nested").join("snippets.yaml");
+        Snippets::upsert_snippet_at(
+            &path,
+            "integrate",
+            &snippet("Review", "Integrate feedback", "Do the thing"),
+        )
+        .expect("write succeeds");
+
+        let loaded = Snippets::load_from(&path, SnippetOrigin::Global).expect("reloads");
+        let s = loaded.get("integrate").expect("key present");
+        assert_eq!(s.category, "Review");
+        assert_eq!(s.body, "Do the thing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Upserting a new key preserves every existing entry — the write
+    /// is a merge, not a replace.
+    #[test]
+    fn upsert_preserves_existing_entries() {
+        let path = write_tmp(
+            "upsert-preserve",
+            "snippets:\n  rev:\n    description: Review\n    body: review it\n",
+        );
+        Snippets::upsert_snippet_at(
+            &path,
+            "integrate",
+            &snippet("Review", "Integrate", "integrate it"),
+        )
+        .expect("write succeeds");
+
+        let loaded = Snippets::load_from(&path, SnippetOrigin::Global).expect("reloads");
+        assert!(loaded.get("rev").is_some(), "existing snippet must survive");
+        assert_eq!(
+            loaded.get("integrate").expect("new key").body,
+            "integrate it"
+        );
+    }
+
+    /// Upserting an existing key replaces its value in place.
+    #[test]
+    fn upsert_replaces_existing_key() {
+        let path = write_tmp(
+            "upsert-replace",
+            "snippets:\n  rev:\n    description: Old\n    body: old body\n",
+        );
+        Snippets::upsert_snippet_at(&path, "rev", &snippet("Review", "New", "new body"))
+            .expect("write succeeds");
+
+        let loaded = Snippets::load_from(&path, SnippetOrigin::Global).expect("reloads");
+        assert_eq!(loaded.len(), 1, "replace, not append");
+        assert_eq!(loaded.get("rev").expect("rev").body, "new body");
+    }
+
+    /// A file that exists but has no `snippets:` key still gets the new
+    /// entry (and keeps whatever other top-level keys it had).
+    #[test]
+    fn upsert_adds_snippets_key_when_absent() {
+        let path = write_tmp("upsert-no-key", "some_other_top_level: 1\n");
+        Snippets::upsert_snippet_at(&path, "rev", &snippet("", "", "body"))
+            .expect("write succeeds");
+
+        let loaded = Snippets::load_from(&path, SnippetOrigin::Global).expect("reloads");
+        assert!(loaded.get("rev").is_some());
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            raw.contains("some_other_top_level"),
+            "sibling key preserved"
+        );
     }
 }

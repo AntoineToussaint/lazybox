@@ -126,21 +126,34 @@ impl<T: TerminalAdapter> Model<T> {
                 error,
                 ..
             } if Some(*run_id) == self.help_run => {
-                let mut convo = self.help_convo_mut();
-                if let Some(turn) = convo.streaming_turn_mut() {
-                    // The result carries the authoritative final text;
-                    // prefer it over the accumulated deltas so a
-                    // dropped delta can't leave a truncated answer.
-                    if let Some(result) = result.as_deref().filter(|r| !r.trim().is_empty()) {
-                        turn.answer = result.to_string();
+                let mut intent = None;
+                {
+                    let mut convo = self.help_convo_mut();
+                    if let Some(turn) = convo.streaming_turn_mut() {
+                        // The result carries the authoritative final text;
+                        // prefer it over the accumulated deltas so a
+                        // dropped delta can't leave a truncated answer.
+                        if let Some(result) = result.as_deref().filter(|r| !r.trim().is_empty()) {
+                            turn.answer = result.to_string();
+                        }
+                        turn.done = true;
+                        // A finished answer may carry a proposed action
+                        // (#353). Lift it out and strip the raw block so
+                        // the transcript shows only the agent's prose;
+                        // the confirm mounts below, off the lock.
+                        intent = lazybox_tui_core::help::parse_action_intent(&turn.answer);
+                        if intent.is_some() {
+                            turn.answer = lazybox_tui_core::help::strip_action_block(&turn.answer);
+                        }
                     }
-                    turn.done = true;
+                    if let Some(error) = error {
+                        convo.notice = Some(error.clone());
+                    }
                 }
-                if let Some(error) = error {
-                    convo.notice = Some(error.clone());
-                }
-                drop(convo);
                 self.redraw = true;
+                if let Some(intent) = intent {
+                    self.propose_help_action(intent);
+                }
                 true
             }
             IpcEvent::AgentRunFinished { run_id, error, .. } if Some(*run_id) == self.help_run => {

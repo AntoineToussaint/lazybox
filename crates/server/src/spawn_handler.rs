@@ -840,12 +840,12 @@ pub async fn handle_spawn(
             const STATE_BUF_CAP: usize = 32 * 1024;
             let mut state_buf: Vec<u8> = Vec::with_capacity(STATE_BUF_CAP);
             // The terminal's lifecycle state machine. It owns the transition
-            // table (`Done` stickiness, the allowed edges) and the timing
-            // anchors the two hysteresis windows measure against — the flap
-            // damping that keeps a busy/waiting agent from flickering to Idle
-            // when Claude's status line drops for a single chunk. Every PTY
-            // reading commits through it; the current state itself lives in
-            // the shared `agent_states` cache.
+            // table (the allowed edges, `Done` and `InputNeeded` stickiness):
+            // an ambiguous byte-flow reading can never clear a finished `Done`
+            // or a parked `?`, so a busy/waiting agent never flickers to Idle
+            // when Claude's status line drops for a single chunk or a click
+            // triggers a repaint. Every PTY reading commits through it; the
+            // current state itself lives in the shared `agent_states` cache.
             let mut state_machine = lazybox_agents::AgentStateMachine::new();
 
             // Notify the initial-prompt injector exactly once when the
@@ -1022,7 +1022,6 @@ pub async fn handle_spawn(
                     let answered = agent_detect_resets_map.lock().await.remove(&id_for_pump);
                     if answered {
                         state_buf.clear();
-                        state_machine.reset_input_anchor();
                         tracing::debug!(
                             terminal_id = ?id_for_pump,
                             "user answered prompt; clearing agent-state detection buffer",
@@ -2834,10 +2833,11 @@ pub(crate) async fn teardown_exited_terminal(
 /// say is "the agent is doing something".
 ///
 /// The reading is offered as ambiguous (`clear: false`): a byte-flow
-/// `Working` is inferred, not an affirmative status line, so the
-/// InputNeeded-exit hysteresis can hold a live `?` against a brief
-/// repaint burst (a pane resize) while a genuinely resumed stream still
-/// commits `Working` once the window lapses.
+/// `Working` is inferred, not an affirmative status line, so it can never
+/// clear a parked `?` or a finished `Done` (an incidental repaint — a
+/// click, a focus, a pane resize — must not un-ask or un-finish, #374).
+/// A genuinely resumed stream instead commits `Working` off the next
+/// clear quiet-classification, once it comes to rest.
 pub(crate) async fn note_pty_activity(
     agent: Option<&std::sync::Arc<dyn lazybox_agents::Agent>>,
     buf: &mut Vec<u8>,
@@ -2949,44 +2949,61 @@ pub(crate) async fn classify_quiet_screen(
         return;
     }
     let last_chunk_start = detect_window.len().saturating_sub(last_chunk_len);
-    let Some(new_state) = agent.detect_state_chunked(detect_window, last_chunk_start) else {
-        return;
+    let new_state = match agent.detect_state_chunked(detect_window, last_chunk_start) {
+        Some(new_state) => {
+            tracing::trace!(
+                terminal_id = ?id,
+                buf_len = buf.len(),
+                detected = ?new_state,
+                "classify_quiet_screen ran",
+            );
+            if new_state == lazybox_ipc::AgentState::InputNeeded {
+                tracing::debug!(
+                    terminal_id = ?id,
+                    buf_len = buf.len(),
+                    tail_tip = %String::from_utf8_lossy(
+                        &detect_window[detect_window.len().saturating_sub(120)..]
+                    ),
+                    "classify_quiet_screen → InputNeeded",
+                );
+                // Every InputNeeded the PTY detector raises is
+                // structurally a chooser / permission / consent dialog
+                // (freeform asks are deliberately not flagged), so a
+                // bare chooser keystroke is a complete answer. Hook-
+                // raised elicitations overwrite this with `FreeText` in
+                // `handle_ingest_hook`. Recorded before the dedupe
+                // below so a re-rendered prompt refreshes the shape.
+                input_shapes
+                    .lock()
+                    .await
+                    .insert(id, lazybox_agents::PromptShape::Chooser);
+            }
+            new_state
+        }
+        // The resting screen classifies as nothing recognizable — common
+        // for the weaker Codex/Cursor detectors (#225). Surface a bare
+        // `Done`: the state machine settles a quiet `Working` turn to
+        // `Done` with it and ignores it from every other state (a live `?`
+        // stays asking, a never-worked `Idle` stays blank). Without this a
+        // hookless agent whose composer doesn't match spins on `Working`
+        // forever after finishing its turn.
+        None => {
+            tracing::trace!(
+                terminal_id = ?id,
+                buf_len = buf.len(),
+                "classify_quiet_screen: unclassified resting screen → bare Done settle",
+            );
+            lazybox_ipc::AgentState::Done
+        }
     };
-    tracing::trace!(
-        terminal_id = ?id,
-        buf_len = buf.len(),
-        detected = ?new_state,
-        "classify_quiet_screen ran",
-    );
-    if new_state == lazybox_ipc::AgentState::InputNeeded {
-        tracing::debug!(
-            terminal_id = ?id,
-            buf_len = buf.len(),
-            tail_tip = %String::from_utf8_lossy(
-                &detect_window[detect_window.len().saturating_sub(120)..]
-            ),
-            "classify_quiet_screen → InputNeeded",
-        );
-        // Every InputNeeded the PTY detector raises is
-        // structurally a chooser / permission / consent dialog
-        // (freeform asks are deliberately not flagged), so a
-        // bare chooser keystroke is a complete answer. Hook-
-        // raised elicitations overwrite this with `FreeText` in
-        // `handle_ingest_hook`. Recorded before the dedupe
-        // below so a re-rendered prompt refreshes the shape.
-        input_shapes
-            .lock()
-            .await
-            .insert(id, lazybox_agents::PromptShape::Chooser);
-    }
     // `ready_for_prompt` is only probed for an Idle reading — the
     // hooks-primary gate uses it to decide whether a quiet Idle may
     // demote a hook-set `Working`.
     let ready_for_prompt =
         new_state == lazybox_ipc::AgentState::Idle && agent.detect_ready_for_prompt(detect_window);
     // The quiet window itself is the confidence: the screen has been at
-    // rest for seconds, so the classification is authoritative and no
-    // flap-damping hysteresis should hold it.
+    // rest for seconds, so the classification is authoritative (`clear`)
+    // and no ambiguous-exit damping holds it.
     let reading = lazybox_agents::Reading {
         state: new_state,
         clear: true,
@@ -3017,7 +3034,7 @@ pub(crate) async fn classify_quiet_screen(
 async fn commit_pty_reading(
     agent: &std::sync::Arc<dyn lazybox_agents::Agent>,
     detect_window: &[u8],
-    reading: lazybox_agents::Reading,
+    mut reading: lazybox_agents::Reading,
     ready_for_prompt: bool,
     states: &std::sync::Arc<
         tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
@@ -3065,6 +3082,7 @@ async fn commit_pty_reading(
     let last_hook_at = hook_driven.lock().await.get(&id).copied();
     if let Some(last_hook_at) = last_hook_at {
         let current = states.lock().await.get(&id).copied();
+        let since_last_hook = last_hook_at.elapsed();
         if !pty_reading_allowed(
             current,
             reading.state,
@@ -3074,10 +3092,24 @@ async fn commit_pty_reading(
             // (stale hooks + Working demoting a cached `?`)
             // pays for it.
             || agent.working_reading_supersedes_dialog(detect_window),
-            last_hook_at.elapsed(),
+            since_last_hook,
             HOOK_STALENESS,
         ) {
             return;
+        }
+        // A stale-hook terminal demoting a cached `?` to `Working` passed
+        // the gate ONLY on `working_supersedes_dialog` evidence — a working
+        // status line painted after the dialog markers, i.e. proof the
+        // prompt was answered. Mark that reading `clear` so the machine's
+        // `InputNeeded` stickiness (#374) honors the demotion instead of
+        // damping it as an ambiguous byte-flow flap. Hookless / PTY-sourced
+        // `?`s never reach here, so an incidental repaint still can't clear
+        // them.
+        if since_last_hook >= HOOK_STALENESS
+            && current == Some(lazybox_ipc::AgentState::InputNeeded)
+            && reading.state == lazybox_ipc::AgentState::Working
+        {
+            reading.clear = true;
         }
     }
     // Read + decide + insert under ONE lock acquisition. A
@@ -3089,7 +3121,7 @@ async fn commit_pty_reading(
     let (current, committed) = {
         let mut map = states.lock().await;
         let current = map.get(&id).copied();
-        match state_machine.on_reading(current, reading, std::time::Instant::now()) {
+        match state_machine.on_reading(current, reading) {
             lazybox_agents::Outcome::Committed(committed) => {
                 map.insert(id, committed);
                 (current, committed)
@@ -3141,12 +3173,14 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
     }
     // If the user just answered a prompt on an agent terminal that's
     // currently in `InputNeeded` state, optimistically flip it to
-    // `Working` — the agent is about to act on the answer. The
-    // detect_state loop will correct this on the next output chunk
-    // (back to `InputNeeded` if the response turned out to be another
-    // prompt, or to `Idle` once the agent goes quiet); but for the
-    // common case the `?` pill clears immediately instead of lingering
-    // through the 8s hysteresis window.
+    // `Working` — the agent is about to act on the answer. This
+    // submitted-input flip is the authoritative signal that clears the
+    // `?`: a parked prompt emits no output, so the byte-flow readings
+    // that follow are ambiguous and can never leave `InputNeeded` on
+    // their own (an incidental click/redraw repaint must not, #374). The
+    // classifier still corrects this flip on the next quiet boundary
+    // (back to `InputNeeded` if the response was another prompt, or to
+    // `Idle`/`Done` once the agent settles).
     //
     // An answer is either Enter (`\r`/`\n` — `y`/`yes`/`1`/<text> +
     // Enter; bracket-paste markers wrapping claude's submit count too)
@@ -6230,7 +6264,7 @@ mod tests {
     /// Drives the pump's two state paths — [`note_pty_activity`] per PTY
     /// chunk and [`classify_quiet_screen`] for the post-quiet
     /// classification — the way the output pump does: one rolling buffer
-    /// and the hysteresis anchors persist across calls. Collects the
+    /// and the state machine persist across calls. Collects the
     /// `AgentState` the bus emits so a test can assert on the
     /// emitted-on-change *sequence*, which is what the #167/#161 bugs were
     /// about, rather than a single frame's classification.
@@ -6261,30 +6295,45 @@ mod tests {
     }
 
     impl PumpDriver {
-        // `working_hysteresis` is vestigial — the `Working → Idle` edge is
-        // now forbidden outright, so there is no working-exit flap left to
-        // damp — but kept in the signature so the many call sites read
+        // Both hysteresis arguments are vestigial — the `Working → Idle`
+        // edge is forbidden outright (no working-exit flap) and the
+        // `InputNeeded` exit is now sticky against ambiguous readings with
+        // no time bound (#374), so neither state carries a timing window
+        // anymore — but kept in the signature so the many call sites read
         // uniformly. The driver starts booted: these tests exercise the
         // steady-state pump, not the boot gate (that lives in the
         // state-machine unit tests).
-        fn new(input_hysteresis: Duration, _working_hysteresis: Duration) -> Self {
+        fn new(input_hysteresis: Duration, working_hysteresis: Duration) -> Self {
+            let agent = lazybox_agents::registry()
+                .get("claude")
+                .expect("claude agent is a built-in");
+            Self::with_agent(agent, input_hysteresis, working_hysteresis)
+        }
+
+        /// A driver over an explicit agent — used to exercise a detector
+        /// that returns `None` at rest (a pattern-less `GenericCli`), which
+        /// the built-in Claude/Codex detectors never do.
+        fn with_agent(
+            agent: std::sync::Arc<dyn lazybox_agents::Agent>,
+            _input_hysteresis: Duration,
+            _working_hysteresis: Duration,
+        ) -> Self {
             let id = TerminalId(7);
             let session_key: SessionKey = "github-o-r-1".into();
             let (bus, rx) = tokio::sync::broadcast::channel(256);
+            let agent_id = agent.id().to_string();
             let terminal_meta =
                 std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::from([
                     (
                         id,
                         (
                             session_key.clone(),
-                            lazybox_ipc::TerminalKind::Agent("claude".into()),
+                            lazybox_ipc::TerminalKind::Agent(agent_id),
                         ),
                     ),
                 ])));
             Self {
-                agent: lazybox_agents::registry()
-                    .get("claude")
-                    .expect("claude agent is a built-in"),
+                agent,
                 buf: Vec::new(),
                 last_chunk_len: 0,
                 states: std::sync::Arc::new(tokio::sync::Mutex::new(
@@ -6296,8 +6345,7 @@ mod tests {
                 session_key,
                 terminal_meta,
                 state_machine: {
-                    let mut m =
-                        lazybox_agents::AgentStateMachine::with_input_hysteresis(input_hysteresis);
+                    let mut m = lazybox_agents::AgentStateMachine::new();
                     m.mark_booted();
                     m
                 },
@@ -6368,19 +6416,25 @@ mod tests {
             }
             out
         }
+
+        /// The terminal's current cached state (what the sidebar pill reads).
+        async fn state(&self) -> Option<lazybox_ipc::AgentState> {
+            self.states.lock().await.get(&self.id).copied()
+        }
     }
 
-    /// The pump's two-path model (#289) under the one-way-door rule (#357):
-    /// chunks only ever read `Working` (bytes flowing = the agent is doing
-    /// something); the classifier runs at the quiet boundary and decides the
-    /// terminal state. A working agent that settles at a resting composer has
-    /// **finished a turn** — the classifier promotes it to `Done`, never back
-    /// to the never-worked `Idle`. And `Done` then resists ambiguous byte
-    /// flow (a fresh prompt at rest, or the user answering, is what moves it),
-    /// so the resumed-stream chunk after `Done` is held. ZERO hysteresis so
-    /// timing damping can't interfere — this pins the stream the per-fixture
-    /// corpus (`detect_fixtures.rs`) can't, since each of those asserts a
-    /// single frame in isolation.
+    /// The pump's two-path model (#289) under the one-way-door rule (#357)
+    /// and the `InputNeeded`-stickiness rule (#374): chunks only ever read
+    /// `Working` (bytes flowing = the agent is doing something); the
+    /// classifier runs at the quiet boundary and decides the terminal state.
+    /// A working agent that settles at a resting composer has **finished a
+    /// turn** — the classifier promotes it to `Done`, never back to the
+    /// never-worked `Idle`. `Done` then resists ambiguous byte flow, and so
+    /// does a parked `InputNeeded`: an incidental repaint (a click, a focus,
+    /// a redraw) can't clear either. Only a clear quiet-classification — the
+    /// resumed stream painting a live status line — leaves them. ZERO
+    /// hysteresis so no timing window is involved: the stickiness is
+    /// structural, not a damped flap.
     #[tokio::test]
     async fn agent_state_transitions_emit_an_ordered_sequence() {
         use lazybox_ipc::AgentState::{Done, InputNeeded, Working};
@@ -6396,21 +6450,133 @@ mod tests {
         seq.extend(p.feed(working).await); // stray byte flow can't un-finish Done
         seq.extend(p.feed(input).await); // dialog paints → still held against Done
         seq.extend(p.quiet().await); // dialog at rest → InputNeeded
-        seq.extend(p.feed(working).await); // user answered / resumed → Working
+        seq.extend(p.feed(working).await); // resumed byte flow is ambiguous — held off the `?` (#374)
+        seq.extend(p.quiet().await); // resumed stream's live status line at rest → Working
 
         assert_eq!(
             seq,
             vec![Working, Done, InputNeeded, Working],
-            "a settled worker is Done (never Idle), and Done resists byte flow",
+            "a settled worker is Done (never Idle); Done and a parked `?` both \
+             resist byte flow and clear only on a live classification",
         );
+    }
+
+    /// #374: clicking a parked `?` and then clicking away must not clear it.
+    /// A parked prompt emits no output, so the only chunks that reach it are
+    /// the incidental repaints a click / focus / redraw triggers — ambiguous
+    /// byte-flow `Working` readings. None of them may clear the `?`, no matter
+    /// how many arrive. Only a live classification (a resumed stream at rest)
+    /// leaves it. ZERO hysteresis, so this is structural, not a timing window.
+    #[tokio::test]
+    async fn a_repaint_scrape_never_clears_a_parked_prompt() {
+        use lazybox_ipc::AgentState::{InputNeeded, Working};
+        let working = include_bytes!("../../agents/tests/fixtures/working_status_line.bin");
+        let input = include_bytes!("../../agents/tests/fixtures/permission_prompt_fragmented.bin");
+
+        let mut p = PumpDriver::new(Duration::ZERO, Duration::ZERO);
+        assert_eq!(p.feed(input).await, vec![Working]); // dialog paints as byte flow → Working
+        assert_eq!(p.quiet().await, vec![InputNeeded], "dialog at rest → ?");
+
+        // The user clicks the asking session, then clicks away. Each
+        // interaction re-renders the SAME dialog — an incidental byte-flow
+        // repaint, no working status line. Every one is a no-op broadcast;
+        // the `?` stands, however many arrive.
+        for _ in 0..5 {
+            assert!(
+                p.feed(input).await.is_empty(),
+                "a repaint scrape must not re-broadcast a state off a parked `?`",
+            );
+        }
+        assert_eq!(
+            p.state().await,
+            Some(InputNeeded),
+            "navigation never changes whether an agent is asking (#374)",
+        );
+
+        // Only a real resume clears it: the stream paints a live status line
+        // and comes to rest, classifying (clear) as Working. The byte flow
+        // itself is still ambiguous — held until the quiet boundary confirms.
+        assert!(
+            p.feed(working).await.is_empty(),
+            "resumed byte flow is ambiguous — held"
+        );
+        assert_eq!(
+            p.quiet().await,
+            vec![Working],
+            "a live classification resolves the `?`"
+        );
+    }
+
+    /// The user's companion ask: a working agent that comes to rest keeps
+    /// spinning no longer. A genuinely working agent repaints within the
+    /// quiet window, so a quiet one has finished — the quiet classifier
+    /// settles it to `Done` even when the last frame still paints a working
+    /// status line (a wedged `Working` reading).
+    #[tokio::test]
+    async fn a_wedged_working_screen_settles_to_done() {
+        use lazybox_ipc::AgentState::{Done, Working};
+        let working = include_bytes!("../../agents/tests/fixtures/working_status_line.bin");
+
+        let mut p = PumpDriver::new(Duration::ZERO, Duration::ZERO);
+        assert_eq!(p.feed(working).await, vec![Working]);
+        // The stream goes quiet but the frame still shows the working status
+        // line, so the classifier reads a clear `Working` — a wedged turn.
+        assert_eq!(
+            p.quiet().await,
+            vec![Done],
+            "a quiet working agent has finished — settle to Done, don't spin",
+        );
+    }
+
+    /// #225: an agent whose resting screen classifies as nothing at all (a
+    /// pattern-less `GenericCli`, whose detector returns `None`) must still
+    /// settle a finished turn to `Done` instead of spinning forever. The
+    /// quiet timer surfaces a bare `Done` for an unrecognized screen — but it
+    /// only settles a `Working` turn, and never fabricates a finished turn
+    /// from a parked `?`.
+    #[tokio::test]
+    async fn a_quiet_unclassifiable_screen_settles_working_to_done() {
+        use lazybox_ipc::AgentState::{Done, InputNeeded, Working};
+        // A detector-less agent: `detect_state` returns `None` for every
+        // screen (no asking patterns, no status line).
+        let agent: std::sync::Arc<dyn lazybox_agents::Agent> =
+            std::sync::Arc::new(lazybox_agents::agent::builtins::GenericCli {
+                id: "custom",
+                display_name: "Custom",
+                spawn_cmd: vec!["custom".into()],
+                resume_cmd: None,
+                asking_patterns: vec![],
+            });
+        let output = &b"building the widget...\n".repeat(16)[..];
+
+        // A working agent that goes quiet on an unclassifiable screen → Done.
+        let mut p = PumpDriver::with_agent(agent.clone(), Duration::ZERO, Duration::ZERO);
+        assert_eq!(p.feed(output).await, vec![Working]);
+        p.feed(output).await; // still streaming → Working (deduped)
+        assert_eq!(
+            p.quiet().await,
+            vec![Done],
+            "a finished turn settles to Done even when the screen doesn't classify",
+        );
+
+        // But the same unclassifiable quiet screen must NOT clear a parked
+        // `?` — a bare Done carries no evidence the prompt was answered.
+        let mut p = PumpDriver::with_agent(agent, Duration::ZERO, Duration::ZERO);
+        p.states.lock().await.insert(p.id, InputNeeded);
+        p.feed(output).await;
+        assert!(
+            p.quiet().await.is_empty(),
+            "an unclassifiable quiet screen never clears a parked `?`",
+        );
+        assert_eq!(p.state().await, Some(InputNeeded));
     }
 
     /// The #289 headline regression: a session that is visibly streaming
     /// must render the spinner even when a stale prompt marker sits in the
     /// scrollback of the detect window. Pre-fix, the per-chunk classifier
     /// re-detected the marker on every chunk and pinned `?` on a working
-    /// agent. Production hysteresis windows to prove no timing damping is
-    /// involved — the streaming path structurally never classifies.
+    /// agent. The streaming path structurally never classifies — mid-stream
+    /// a chunk only ever reads `Working`.
     #[tokio::test]
     async fn streaming_with_stale_prompt_marker_stays_working() {
         use lazybox_ipc::AgentState::Working;
@@ -6541,9 +6707,9 @@ mod tests {
     }
 
     /// A brief repaint burst (a pane resize) at a parked prompt must not
-    /// flap the `?` off: the byte-flow Working reading is ambiguous, so
-    /// the InputNeeded-exit hysteresis holds it, and the next quiet
-    /// classification re-reads the same dialog.
+    /// flap the `?` off: the byte-flow Working reading is ambiguous, so it
+    /// is held against `InputNeeded` unconditionally (#374), and the next
+    /// quiet classification re-reads the same dialog.
     #[tokio::test]
     async fn repaint_burst_at_a_parked_prompt_is_damped() {
         use lazybox_ipc::AgentState::{InputNeeded, Working};
@@ -6556,7 +6722,7 @@ mod tests {
         assert_eq!(
             p.feed(input).await,
             Vec::<lazybox_ipc::AgentState>::new(),
-            "a repaint within the hysteresis window must not clear the `?`",
+            "a repaint must not clear the `?`",
         );
         assert_eq!(
             p.quiet().await,
@@ -6625,7 +6791,7 @@ mod tests {
         let working = include_bytes!("../../agents/tests/fixtures/working_status_line.bin");
         let mut buf = Vec::new();
         let mut state_machine = {
-            let mut m = lazybox_agents::AgentStateMachine::with_input_hysteresis(Duration::ZERO);
+            let mut m = lazybox_agents::AgentStateMachine::new();
             m.mark_booted();
             m
         };

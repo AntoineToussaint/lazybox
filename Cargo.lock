@@ -1823,6 +1823,7 @@ dependencies = [
  "lazybox-config",
  "lazybox-core",
  "lazybox-gh",
+ "lazybox-git-ops",
  "lazybox-ipc",
  "lazybox-linear",
  "lazybox-server",

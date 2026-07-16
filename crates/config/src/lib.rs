@@ -71,6 +71,12 @@ pub struct Config {
     /// [`AutoFixConfig`]. Off by default.
     #[serde(default)]
     pub auto_fix: AutoFixConfig,
+    /// Roots the `lazybox scan` command walks to discover git repos
+    /// and worktrees you created outside lazybox, for import. Empty
+    /// by default; `scan` also accepts roots as CLI args. See
+    /// [`ScanConfig`].
+    #[serde(default)]
+    pub scan: ScanConfig,
 }
 
 /// `setup:` block — wizard-driven user config. Mirrors
@@ -389,6 +395,36 @@ pub struct WorktreeConfig {
     /// behavior, `feature` yields `feature/issue-42` — and override
     /// per-repo via `repos.<owner/name>.branch_prefix`.
     pub branch_prefix: String,
+}
+
+/// `scan:` block — where `lazybox scan` looks for pre-existing git
+/// checkouts to import. Read by the CLI; roots passed on the command
+/// line take precedence over `roots` here.
+///
+/// ```yaml
+/// scan:
+///   roots:
+///     - ~/code
+///     - ~/work
+///   max_depth: 4
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ScanConfig {
+    /// Directories to walk. A leading `~/` is expanded at scan time.
+    pub roots: Vec<PathBuf>,
+    /// How many directory levels below each root the walk descends
+    /// before giving up — bounds a scan of a deep home directory.
+    pub max_depth: usize,
+}
+
+impl Default for ScanConfig {
+    fn default() -> Self {
+        Self {
+            roots: Vec::new(),
+            max_depth: 4,
+        }
+    }
 }
 
 /// Per-repo overrides keyed by `owner/name` (the same string GitHub's
@@ -1268,6 +1304,30 @@ repos:
     fn missing_repos_section_defaults_to_empty() {
         let cfg: Config = serde_yaml::from_str("{}").expect("parse");
         assert!(cfg.repos.is_empty());
+    }
+
+    /// The `scan:` section is additive: absent → empty roots + the
+    /// depth default; a partial block keeps `max_depth`'s default; a
+    /// full block round-trips.
+    #[test]
+    fn scan_section_defaults_and_round_trips() {
+        let cfg: Config = serde_yaml::from_str("{}").expect("parse");
+        assert!(cfg.scan.roots.is_empty());
+        assert_eq!(cfg.scan.max_depth, 4, "depth default when section absent");
+
+        // Only `roots` set — `max_depth` must still fall back to 4.
+        let cfg: Config = serde_yaml::from_str("scan:\n  roots:\n    - ~/code\n").expect("parse");
+        assert_eq!(cfg.scan.roots, vec![PathBuf::from("~/code")]);
+        assert_eq!(cfg.scan.max_depth, 4, "missing field keeps its default");
+
+        let yaml = "scan:\n  roots:\n    - ~/code\n    - /work\n  max_depth: 2\n";
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(cfg.scan.max_depth, 2);
+        assert_eq!(cfg.scan.roots.len(), 2);
+
+        let written = serde_yaml::to_string(&cfg).expect("serialize");
+        let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
+        assert_eq!(reparsed.scan, cfg.scan, "survives round-trip");
     }
 
     /// Autonomous sessions launch in no-permission mode by default,

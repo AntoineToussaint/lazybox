@@ -75,6 +75,7 @@ fn allowed_graph() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
                 "lazybox-config",
                 "lazybox-core",
                 "lazybox-gh",
+                "lazybox-git-ops",
                 "lazybox-ipc",
                 "lazybox-linear",
                 "lazybox-server",

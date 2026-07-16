@@ -117,6 +117,31 @@ impl WorktreeInspection {
     }
 }
 
+/// A git checkout discovered on disk by [`scan_external_checkouts`] —
+/// a normal clone or a linked `git worktree` living OUTSIDE lazybox's
+/// managed layout, i.e. one lazybox did not create. Read-only: the
+/// scan never mutates anything, and importing a checkout is a separate
+/// step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredCheckout {
+    /// Absolute path to the checkout's working directory.
+    pub path: PathBuf,
+    /// Checked-out branch, or `None` on a detached HEAD.
+    pub branch: Option<String>,
+    /// `true` when this directory is a linked `git worktree` (its
+    /// `.git` is a *file* pointing into another repo's `worktrees/`),
+    /// `false` for a primary checkout or standalone clone.
+    pub is_linked_worktree: bool,
+    /// `origin` remote URL, when the checkout has one.
+    pub remote_url: Option<String>,
+    /// Commit time of `HEAD` — the checkout's "last activity", as
+    /// seconds since the Unix epoch. `None` on an empty repo (no
+    /// commits yet) or when the probe fails.
+    pub last_commit_unix: Option<u64>,
+    /// `git status --porcelain` reported at least one entry.
+    pub has_uncommitted_changes: bool,
+}
+
 /// Internal: one row from `git worktree list --porcelain`. We only
 /// parse the fields that drive orphan detection.
 #[derive(Debug, Default, Clone)]
@@ -274,6 +299,207 @@ impl WorktreeManager {
             delete_local_branch(bare, branch).await;
         }
         Ok(())
+    }
+}
+
+/// Walk `roots` (each up to `max_depth` directory levels deep) and
+/// report every git checkout found — normal clones and linked
+/// `git worktree`s alike — that the user created outside lazybox.
+///
+/// Read-only and daemon-free: a plain filesystem walk plus cheap
+/// read-only `git` probes per checkout, each capped by a short
+/// per-probe timeout so a checkout on a dead network mount can't
+/// wedge the scan. A directory that is itself a git checkout is
+/// reported and NOT descended into — its subdirectories belong to that
+/// repo, not to separate ones — which also keeps the walk bounded on
+/// large trees.
+///
+/// Directory symlinks are followed (so repos reached through a
+/// symlinked parent are still found), with a visited-set guard that
+/// makes symlink cycles terminate. `include_hidden` controls whether
+/// `.`-prefixed directories are descended into: `false` (the default)
+/// skips them — dotdirs are overwhelmingly caches/config and dominate
+/// a home-directory scan — while a root passed explicitly is always
+/// walked regardless. `true` includes them.
+///
+/// `exclude_under` drops any checkout inside lazybox's own managed
+/// base (`repos/`, `worktrees/`) so the scan surfaces only external
+/// work. Results are deduplicated by canonical path and sorted by
+/// path for determinism.
+pub async fn scan_external_checkouts(
+    roots: &[PathBuf],
+    max_depth: usize,
+    include_hidden: bool,
+    exclude_under: &Path,
+) -> Vec<DiscoveredCheckout> {
+    let exclude = canonical_or_self(exclude_under);
+    let mut paths: Vec<PathBuf> = Vec::new();
+    // Canonical paths of directories already walked — shared across
+    // roots so overlapping roots and symlink cycles never re-descend
+    // (nor double-report a checkout).
+    let mut visited: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    for root in roots {
+        collect_checkouts(
+            root,
+            max_depth,
+            include_hidden,
+            &exclude,
+            &mut paths,
+            &mut visited,
+        )
+        .await;
+    }
+
+    let mut out: Vec<DiscoveredCheckout> = Vec::with_capacity(paths.len());
+    for path in paths {
+        out.push(describe_checkout(path).await);
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    out
+}
+
+/// Depth-bounded walk under `dir`, pushing the path of each git
+/// checkout into `found`. Every popped directory is recorded in
+/// `visited` by canonical path and skipped if already there, so a
+/// symlink cycle (or a directory reachable from two roots) terminates
+/// and is reported at most once. A found checkout is not descended
+/// into. `dir` sits at depth 0, so a checkout can be reported at any
+/// depth in `0..=max_depth`.
+async fn collect_checkouts(
+    dir: &Path,
+    max_depth: usize,
+    include_hidden: bool,
+    exclude: &Path,
+    found: &mut Vec<PathBuf>,
+    visited: &mut std::collections::HashSet<PathBuf>,
+) {
+    let mut stack: Vec<(PathBuf, usize)> = vec![(dir.to_path_buf(), 0)];
+    while let Some((path, depth)) = stack.pop() {
+        let canon = canonical_or_self(&path);
+        if canon.starts_with(exclude) {
+            continue;
+        }
+        if !visited.insert(canon) {
+            continue;
+        }
+        if is_git_checkout(&path).await {
+            found.push(path);
+            continue;
+        }
+        if depth >= max_depth {
+            continue;
+        }
+        let Ok(mut entries) = tokio::fs::read_dir(&path).await else {
+            continue;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if !include_hidden && entry.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
+            // Follow directory symlinks: `file_type()` from readdir
+            // never follows, so a symlinked repo dir would otherwise be
+            // invisible. Only pay for the extra `metadata()` stat (which
+            // does follow) on entries that are actually symlinks.
+            let is_dir = match entry.file_type().await {
+                Ok(t) if t.is_dir() => true,
+                Ok(t) if t.is_symlink() => tokio::fs::metadata(entry.path())
+                    .await
+                    .map(|m| m.is_dir())
+                    .unwrap_or(false),
+                _ => false,
+            };
+            if is_dir {
+                stack.push((entry.path(), depth + 1));
+            }
+        }
+    }
+}
+
+/// Whether `path` is the root of a git checkout — has a `.git` entry,
+/// which a standalone repo / primary checkout carries as a directory
+/// and a linked worktree as a file. `symlink_metadata` so a `.git`
+/// symlink still counts.
+async fn is_git_checkout(path: &Path) -> bool {
+    tokio::fs::symlink_metadata(path.join(".git")).await.is_ok()
+}
+
+/// Wall-clock cap for a single read-only scan probe. These are all
+/// local git reads (no network), but a checkout on a stale/dead
+/// network mount could still block indefinitely — and the `scan` CLI
+/// has no daemon-side timeout to fall back on, so it must bound them
+/// itself. Generous: a slow local `git status` on a huge tree still
+/// fits.
+const SCAN_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Run one read-only `git` probe in `path`, capped by
+/// [`SCAN_PROBE_TIMEOUT`]. `None` on spawn failure, non-zero exit,
+/// or timeout — every caller already treats "no answer" as a
+/// defaulted value, so a wedged probe degrades one field instead of
+/// hanging the scan. `kill_on_drop` reaps the timed-out child.
+async fn scan_git(path: &Path, args: &[&str]) -> Option<std::process::Output> {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(path).args(args).kill_on_drop(true);
+    apply_git_env(&mut cmd);
+    match tokio::time::timeout(SCAN_PROBE_TIMEOUT, cmd.output()).await {
+        Ok(Ok(out)) if out.status.success() => Some(out),
+        _ => None,
+    }
+}
+
+/// Gather the read-only facts one discovered checkout carries.
+async fn describe_checkout(path: PathBuf) -> DiscoveredCheckout {
+    let is_linked_worktree = tokio::fs::metadata(path.join(".git"))
+        .await
+        .map(|m| m.is_file())
+        .unwrap_or(false);
+    let (branch, remote_url, last_commit_unix, has_uncommitted_changes) = tokio::join!(
+        checkout_branch(&path),
+        checkout_remote_url(&path),
+        checkout_last_commit_unix(&path),
+        checkout_dirty(&path),
+    );
+    DiscoveredCheckout {
+        path,
+        branch,
+        is_linked_worktree,
+        remote_url,
+        last_commit_unix,
+        has_uncommitted_changes,
+    }
+}
+
+/// The checkout's current branch. `None` on a detached HEAD.
+async fn checkout_branch(path: &Path) -> Option<String> {
+    let out = scan_git(path, &["symbolic-ref", "--quiet", "--short", "HEAD"]).await?;
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!name.is_empty()).then_some(name)
+}
+
+/// The `origin` remote URL, when the checkout has one configured.
+async fn checkout_remote_url(path: &Path) -> Option<String> {
+    let out = scan_git(path, &["remote", "get-url", "origin"]).await?;
+    let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!url.is_empty()).then_some(url)
+}
+
+/// Committer time of `HEAD`, in seconds since the Unix epoch. `None`
+/// on an empty repo (no commits) or any git failure.
+async fn checkout_last_commit_unix(path: &Path) -> Option<u64> {
+    let out = scan_git(path, &["log", "-1", "--format=%ct"]).await?;
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<u64>()
+        .ok()
+}
+
+/// Whether `git status --porcelain` reports any entry. A scan-local
+/// twin of [`uncommitted`] that carries the probe timeout; the
+/// inspector's own `uncommitted` runs under `WorktreeManager`'s
+/// timeouts and is left untouched.
+async fn checkout_dirty(path: &Path) -> bool {
+    match scan_git(path, &["status", "--porcelain"]).await {
+        Some(out) => !out.stdout.is_empty(),
+        None => false,
     }
 }
 

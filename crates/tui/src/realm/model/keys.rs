@@ -64,25 +64,63 @@ impl<T: TerminalAdapter> Model<T> {
         // cancels, which is the which-key convention. Which entry a
         // key completes is read straight from the catalog — no
         // hardcoded group table.
-        if let Some(prefix) = self.leader.take() {
+        if let Some(prefix) = self.leader.pending().copied() {
             self.redraw = true;
-            let action = self.resolve_focus_for_keys().and_then(|rfocus| {
-                key_event_to_stroke(realm_key_to_crossterm(&key))
-                    .and_then(|stroke| find_action_for_seq(&prefix, &stroke, rfocus, &self.catalog))
-                    .and_then(action_from_entry)
+            let rfocus = self.resolve_focus_for_keys();
+            let stroke = key_event_to_stroke(realm_key_to_crossterm(&key));
+            // Direct-letter fast path (#126, #102), unchanged and always
+            // first: a second key that names an in-group continuation
+            // fires it straight away, so a bound `j`/`k`/arrow never gets
+            // hijacked by the navigation below.
+            let direct = rfocus.zip(stroke).and_then(|(rf, s)| {
+                find_action_for_seq(&prefix, &s, rf, &self.catalog).and_then(action_from_entry)
             });
-            if let Some(action) = action {
+            if direct.is_none() {
+                // Not a direct hit — arrow / `j` / `k` move a highlight
+                // through the popup and keep the leader armed; `Enter`
+                // fires the highlighted continuation (#343). Arrows are
+                // additive; `j`/`k` only reach here because the guard
+                // above found no in-group binding for them.
+                if let Some(delta) = popup_nav_delta(&key) {
+                    if let Some(rf) = rfocus {
+                        let len = seq_continuations(&prefix, rf, &self.catalog).len();
+                        if len > 0 {
+                            self.leader_highlight =
+                                Some(advance_highlight(self.leader_highlight, delta, len));
+                        }
+                    }
+                    return;
+                }
+                if key.code == Key::Enter
+                    && let Some(idx) = self.leader_highlight
+                    && let Some(rf) = rfocus
+                    && let Some(action) = seq_continuations(&prefix, rf, &self.catalog)
+                        .get(idx)
+                        .and_then(|(_, entry)| action_from_entry(entry))
+                {
+                    self.leader.take();
+                    self.leader_highlight = None;
+                    self.q_latch.disarm();
+                    let cmds = self.dispatch_action(&action);
+                    self.flush_dispatched_cmds(cmds);
+                    self.sync_panes();
+                    return;
+                }
+            }
+            // Resolve the chord: consume the leader and clear the
+            // highlight. A direct in-group hit fires; `Esc` is the
+            // explicit cancel; any other key cancels but falls through to
+            // normal dispatch so the keystroke isn't silently swallowed
+            // (#165) — a mistyped `g x` still runs `x`'s own action.
+            self.leader.take();
+            self.leader_highlight = None;
+            if let Some(action) = direct {
                 self.q_latch.disarm();
                 let cmds = self.dispatch_action(&action);
                 self.flush_dispatched_cmds(cmds);
                 self.sync_panes();
                 return;
             }
-            // The key matched no in-group action. `Esc` is the explicit
-            // cancel and stops here; any other key cancels the chord but
-            // falls through to normal dispatch so the keystroke isn't
-            // silently swallowed (issue #165) — e.g. a mistyped `g x`
-            // still runs `x`'s own action instead of vanishing.
             if key.code == Key::Esc {
                 return;
             }
@@ -111,37 +149,48 @@ impl<T: TerminalAdapter> Model<T> {
         // command menu (rather than binding every snippet key straight
         // to the leader) means nothing shadows a snippet and the exit is
         // a plain mnemonic, not a triple-tap.
-        if std::mem::take(&mut self.terminal_leader_armed) {
+        if self.terminal_leader_armed {
             self.redraw = true;
             use super::terminal_leader::LeaderCmd;
-            use crate::components::terminal_stack::PendingSplit;
-            // Which key means which command lives in ONE place
-            // (`terminal_leader::LeaderCmd`), shared with the which-key
-            // popup's row list so dispatch and display can't drift. A
-            // `None` key is not a leader command — cancel back to the
-            // terminal (the key is consumed, not forwarded, matching
-            // the tmux-prefix "unbound key does nothing" convention).
+            // `j` / `k` move a highlight through the popup and keep the
+            // leader armed; `Enter` fires the highlighted command (#343).
+            // Arrows stay bound to tile / tab movement (#286), so only
+            // the letter keys navigate here — neither names a leader
+            // command, so this never shadows one.
+            if let Some(delta) = popup_letter_nav_delta(&key) {
+                self.move_terminal_leader_highlight(delta);
+                return;
+            }
+            if key.code == Key::Enter {
+                self.terminal_leader_armed = false;
+                let cmd = self
+                    .terminal_leader_highlight
+                    .take()
+                    .and_then(|idx| {
+                        self.terminal_leader_menu_rows()
+                            .get(idx)
+                            .and_then(|(k, _)| single_menu_char(k))
+                    })
+                    .and_then(|c| LeaderCmd::from_key(Key::Char(c), KeyModifiers::empty()));
+                if let Some(cmd) = cmd {
+                    let mut cmds = Vec::new();
+                    self.run_terminal_leader_cmd(cmd, &mut cmds);
+                    self.flush_dispatched_cmds(cmds);
+                }
+                return;
+            }
+            // Direct-key path: which key means which command lives in ONE
+            // place (`terminal_leader::LeaderCmd`), shared with the
+            // which-key popup's row list so dispatch and display can't
+            // drift. A `None` key is not a leader command — cancel back
+            // to the terminal (the key is consumed, not forwarded,
+            // matching the tmux-prefix "unbound key does nothing"
+            // convention).
+            self.terminal_leader_armed = false;
+            self.terminal_leader_highlight = None;
             let mut cmds = Vec::new();
-            match LeaderCmd::from_key(key.code, key.modifiers) {
-                Some(LeaderCmd::JumpAgent(n)) => self.jump_to_agent_workspace(n),
-                Some(LeaderCmd::Snippets) => self.mount_snippet_picker(String::new()),
-                Some(LeaderCmd::ToggleFocusMode) => self.toggle_focus_mode(),
-                Some(LeaderCmd::ExitToSidebar) => self.leave_terminal_to_sidebar(),
-                Some(LeaderCmd::JumpPicker) => self.mount_jump_picker(),
-                Some(LeaderCmd::SplitVertical) => {
-                    self.terminals.split_tile(PendingSplit::Vertical, &mut cmds);
-                }
-                Some(LeaderCmd::SplitHorizontal) => {
-                    self.terminals
-                        .split_tile(PendingSplit::Horizontal, &mut cmds);
-                }
-                Some(LeaderCmd::MoveTile(dir)) => {
-                    self.terminals.move_tile_focus(dir, &mut cmds);
-                }
-                Some(LeaderCmd::CloseTerminal) => {
-                    self.terminals.close_focused_tile(&mut cmds);
-                }
-                None => {}
+            if let Some(cmd) = LeaderCmd::from_key(key.code, key.modifiers) {
+                self.run_terminal_leader_cmd(cmd, &mut cmds);
             }
             self.flush_dispatched_cmds(cmds);
             return;
@@ -341,6 +390,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // rather than leaving on an idle tick, so browsing never
                 // races the exit.
                 self.terminal_leader_armed = true;
+                self.terminal_leader_highlight = None;
                 self.redraw = true;
                 return;
             }
@@ -412,6 +462,7 @@ impl<T: TerminalAdapter> Model<T> {
             if opens_leader {
                 self.q_latch.disarm();
                 self.leader.arm(stroke);
+                self.leader_highlight = None;
                 self.redraw = true;
                 return;
             }
@@ -503,6 +554,83 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// The `]]` leader popup's rows in display order: the fixed command
+    /// menu (tailored to the current tile / tab layout) followed by the
+    /// agent-jump roster (`]]<digit>` → workspace name). The single
+    /// source of truth for BOTH the popup renderer and highlight
+    /// navigation, so the two can't drift (#343).
+    pub(super) fn terminal_leader_menu_rows(&self) -> Vec<(String, String)> {
+        let mut rows = super::terminal_leader::LeaderCmd::menu_rows(
+            self.terminals.layout_is_splits(),
+            self.terminals.visible_terminal_count(),
+        );
+        rows.extend(
+            self.sidebar
+                .agent_workspace_keys()
+                .into_iter()
+                .take(9)
+                .enumerate()
+                .filter_map(|(i, k)| {
+                    self.sidebar
+                        .workspace_by_key(&k)
+                        .map(|w| ((i + 1).to_string(), w.name.clone()))
+                }),
+        );
+        rows
+    }
+
+    /// Move the `]]` leader highlight by `delta`, wrapping. Only rows
+    /// with a single-char key are landing spots — the `←↓↑→` tile-move
+    /// aggregate has no single `Enter`-fireable key, so it's skipped —
+    /// and navigation is bounded to the rows the popup actually shows
+    /// (the tail collapses into "+N more"), so the highlight is always
+    /// visible (#343).
+    fn move_terminal_leader_highlight(&mut self, delta: i32) {
+        let rows = self.terminal_leader_menu_rows();
+        let visible = rows
+            .len()
+            .min(crate::realm::components::which_key::LEADER_MAX_ROWS);
+        let selectable: Vec<usize> = (0..visible)
+            .filter(|&i| single_menu_char(&rows[i].0).is_some())
+            .collect();
+        if selectable.is_empty() {
+            return;
+        }
+        let pos = self
+            .terminal_leader_highlight
+            .and_then(|h| selectable.iter().position(|&i| i == h));
+        let next = match pos {
+            None if delta > 0 => 0,
+            None => selectable.len() - 1,
+            Some(p) => (p as i32 + delta).rem_euclid(selectable.len() as i32) as usize,
+        };
+        self.terminal_leader_highlight = Some(selectable[next]);
+        self.redraw = true;
+    }
+
+    /// Run a resolved `]]` leader command. Shared by the direct-key
+    /// path and the `Enter`-fires-the-highlight path (#343) so both
+    /// dispatch identically.
+    fn run_terminal_leader_cmd(
+        &mut self,
+        cmd: super::terminal_leader::LeaderCmd,
+        cmds: &mut Vec<IpcCommand>,
+    ) {
+        use super::terminal_leader::LeaderCmd;
+        use crate::components::terminal_stack::PendingSplit;
+        match cmd {
+            LeaderCmd::JumpAgent(n) => self.jump_to_agent_workspace(n),
+            LeaderCmd::Snippets => self.mount_snippet_picker(String::new()),
+            LeaderCmd::ToggleFocusMode => self.toggle_focus_mode(),
+            LeaderCmd::ExitToSidebar => self.leave_terminal_to_sidebar(),
+            LeaderCmd::JumpPicker => self.mount_jump_picker(),
+            LeaderCmd::SplitVertical => self.terminals.split_tile(PendingSplit::Vertical, cmds),
+            LeaderCmd::SplitHorizontal => self.terminals.split_tile(PendingSplit::Horizontal, cmds),
+            LeaderCmd::MoveTile(dir) => self.terminals.move_tile_focus(dir, cmds),
+            LeaderCmd::CloseTerminal => self.terminals.close_focused_tile(cmds),
+        }
+    }
+
     /// The focus catalog lookups resolve under, given the real pane
     /// focus. An empty terminal pane has no PTY to feed, so its keys
     /// resolve as if the sidebar were focused; a live terminal never
@@ -530,6 +658,19 @@ impl<T: TerminalAdapter> Model<T> {
         self.leader.pending().copied()
     }
 
+    /// The highlighted row in the armed catalog leader popup, or `None`
+    /// for the direct-letter default. Test/inspection hook for the
+    /// arrow / `j` / `k` navigation (#343).
+    pub fn leader_highlight(&self) -> Option<usize> {
+        self.leader_highlight
+    }
+
+    /// The highlighted row in the armed `]]` leader popup, or `None` for
+    /// the direct-key default. Test/inspection hook (#343).
+    pub fn terminal_leader_highlight(&self) -> Option<usize> {
+        self.terminal_leader_highlight
+    }
+
     /// Read-only accessor — which pane currently has focus. Used by
     /// tests + (in future) the bottom hint bar.
     pub fn focus(&self) -> PaneFocus {
@@ -555,7 +696,9 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
         }
         self.leader.disarm();
+        self.leader_highlight = None;
         self.terminal_leader_armed = false;
+        self.terminal_leader_highlight = None;
     }
 
     /// Sidebar / right / activity split percentages — exposed so tests
@@ -1356,6 +1499,50 @@ impl<T: TerminalAdapter> Model<T> {
             _ => {}
         }
     }
+}
+
+/// Highlight-navigation delta for a which-key popup: `Up`/`k` → −1,
+/// `Down`/`j` → +1. Arrows plus the letters; see [`popup_letter_nav_delta`]
+/// for the letters-only variant the `]]` leader uses (its arrows are
+/// bound to tile movement). Callers only treat `j`/`k` as navigation
+/// after ruling out an in-group binding for the same key (#343).
+fn popup_nav_delta(key: &RealmKey) -> Option<i32> {
+    match key.code {
+        Key::Up => Some(-1),
+        Key::Down => Some(1),
+        _ => popup_letter_nav_delta(key),
+    }
+}
+
+/// `j`/`k`-only highlight delta (`k` → −1, `j` → +1). Used where the
+/// arrow keys already carry another meaning (the `]]` leader's tile /
+/// tab movement, #286) so only the letters can navigate the popup.
+fn popup_letter_nav_delta(key: &RealmKey) -> Option<i32> {
+    match key.code {
+        Key::Char('k') if key.modifiers.is_empty() => Some(-1),
+        Key::Char('j') if key.modifiers.is_empty() => Some(1),
+        _ => None,
+    }
+}
+
+/// Move a popup highlight by `delta`, wrapping within `len` rows. From
+/// no highlight a downward step lands on the first row and an upward
+/// step on the last. `len` must be non-zero.
+fn advance_highlight(current: Option<usize>, delta: i32, len: usize) -> usize {
+    match current {
+        None if delta > 0 => 0,
+        None => len - 1,
+        Some(i) => (i as i32 + delta).rem_euclid(len as i32) as usize,
+    }
+}
+
+/// The sole character of a single-char menu key, or `None` for a
+/// multi-char display aggregate (e.g. the `←↓↑→` tile-move row) that
+/// has no single dispatching key and so can't be `Enter`-fired (#343).
+fn single_menu_char(key: &str) -> Option<char> {
+    let mut chars = key.chars();
+    let c = chars.next()?;
+    chars.next().is_none().then_some(c)
 }
 
 /// Reconstruct a runtime `Action` from a resolved catalog entry,

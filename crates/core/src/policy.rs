@@ -25,7 +25,7 @@
 //!
 //! - **native auto-merge > client merge-on-green.** When GitHub's native
 //!   auto-merge is already enabled on a PR, lazybox's client-side
-//!   merge-on-green stands down (see [`crate::intent`]'s
+//!   merge-on-green stands down (see `lazybox_tui_core::intent`'s
 //!   `should_auto_merge`) — GitHub will land it, so a second client-side
 //!   merge is redundant and racy.
 //! - **auto-fix per-session [`PolicyArm`]** resolves as

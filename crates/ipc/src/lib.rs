@@ -668,8 +668,8 @@ pub enum Command {
         session_key: SessionKey,
         enabled: bool,
     },
-    /// Set the per-session auto-fix arm for one [`AutoFixKind`] on the
-    /// workspace (issue #363). `Arm` overrides a label opt-out, `Disarm`
+    /// Set the per-session auto-fix arm for one [`lazybox_core::AutoFixKind`]
+    /// on the workspace (issue #363). `Arm` overrides a label opt-out, `Disarm`
     /// forces auto-fix off for this workspace, `Default` follows the
     /// global config. The daemon persists it on the `Workspace`
     /// (like `SetAutoMergeOnGreen`) and re-broadcasts; the auto-fix

@@ -216,7 +216,8 @@ Remote & services:
   lazybox --connect <socket>  attach a TUI to a running daemon
   lazybox slack init          set up the optional Slack mirror
   lazybox slack doctor        validate an existing Slack setup
-  lazybox scan [ROOTS...]     list git repos/worktrees under ROOTS (or scan.roots)
+  lazybox scan [ROOTS...]     list git repos/worktrees under ROOTS (or scan.roots;
+                              --depth N to bound the walk, --hidden for dotdirs)
 
 Advanced:
   lazybox --fresh             wipe ~/.lazybox/v2/state.db and re-run setup (destructive)
@@ -887,7 +888,19 @@ fn load_user_editors() -> Vec<lazybox_tui::editors::UserEditorEntry> {
 /// already redirected fd 2 into the log file.
 async fn scan_subcommand(args: &[String]) -> anyhow::Result<()> {
     let mut args = args.to_vec();
-    let depth_override = take_value(&mut args, "--depth").and_then(|s| s.parse::<usize>().ok());
+    // A bad `--depth` is a mistake, not a reason to silently fall back
+    // to the default — tell the user and stop.
+    let depth_override = match take_value(&mut args, "--depth") {
+        Some(s) => match s.parse::<usize>() {
+            Ok(n) => Some(n),
+            Err(_) => {
+                println!("--depth expects a non-negative integer, got {s:?}.");
+                std::process::exit(2);
+            }
+        },
+        None => None,
+    };
+    let include_hidden = take_flag(&mut args, "--hidden");
     // Everything left that isn't a flag is a root to scan.
     let cli_roots: Vec<PathBuf> = args
         .iter()
@@ -912,12 +925,20 @@ async fn scan_subcommand(args: &[String]) -> anyhow::Result<()> {
         std::process::exit(2);
     }
     let roots: Vec<PathBuf> = roots.iter().map(|p| scan_expand_tilde(p)).collect();
+    // A root that doesn't exist yields nothing silently — call it out so
+    // a typo doesn't read as "no repos here".
+    for root in &roots {
+        if !root.exists() {
+            println!("warning: scan root does not exist: {}", root.display());
+        }
+    }
     let max_depth = depth_override.unwrap_or(config.scan.max_depth);
     // Skip anything under lazybox's own managed base — those aren't
     // "external" checkouts and the sidebar already tracks them.
     let exclude = lazybox_core::paths::state_root();
 
-    let found = lazybox_git_ops::scan_external_checkouts(&roots, max_depth, &exclude).await;
+    let found =
+        lazybox_git_ops::scan_external_checkouts(&roots, max_depth, include_hidden, &exclude).await;
     print_scan_results(&roots, &found);
     Ok(())
 }

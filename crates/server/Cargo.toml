@@ -14,7 +14,6 @@ lazybox-store      = { workspace = true }
 lazybox-config     = { workspace = true }
 lazybox-gh         = { workspace = true }
 lazybox-git-ops    = { workspace = true }
-lazybox-tui-term   = { workspace = true }
 lazybox-ipc       = { workspace = true }
 lazybox-agents    = { workspace = true }
 lazybox-linear       = { workspace = true }
@@ -26,7 +25,6 @@ serde            = { workspace = true }
 serde_json       = { workspace = true }
 thiserror        = { workspace = true }
 tracing          = { workspace = true }
-tracing-subscriber = { workspace = true }
 chrono           = { workspace = true }
 portable-pty     = { workspace = true }
 parking_lot      = { workspace = true }

@@ -35,13 +35,14 @@ fn workspace_root() -> PathBuf {
 ///   speaks `WorkspaceKey`/`ProjectKey`), superseding CLAUDE.md's
 ///   original "core libraries never depend on each other" for this
 ///   one edge. core ↔ auth ↔ store must otherwise stay disjoint.
-/// - Provider crates (`gh`, `linear`, `slack`) stay at core + auth.
+/// - Provider crates (`gh`, `linear`, `slack`) stay within core + auth;
+///   Slack currently needs only auth.
 fn allowed_graph() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
     fn set(deps: &[&'static str]) -> BTreeSet<&'static str> {
         deps.iter().copied().collect()
     }
     BTreeMap::from([
-        ("lazybox-agents", set(&["lazybox-core", "lazybox-ipc"])),
+        ("lazybox-agents", set(&["lazybox-ipc"])),
         ("lazybox-auth", set(&[])),
         ("lazybox-config", set(&["lazybox-core"])),
         ("lazybox-core", set(&[])),
@@ -62,16 +63,14 @@ fn allowed_graph() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
                 "lazybox-linear",
                 "lazybox-slack",
                 "lazybox-store",
-                "lazybox-tui-term",
             ]),
         ),
-        ("lazybox-slack", set(&["lazybox-auth", "lazybox-core"])),
+        ("lazybox-slack", set(&["lazybox-auth"])),
         ("lazybox-store", set(&["lazybox-core"])),
         (
             "lazybox-tui",
             set(&[
                 "lazybox-agents",
-                "lazybox-auth",
                 "lazybox-config",
                 "lazybox-core",
                 "lazybox-gh",
@@ -85,15 +84,7 @@ fn allowed_graph() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
                 "lazybox-tui-term",
             ]),
         ),
-        (
-            "lazybox-tui-core",
-            set(&[
-                "lazybox-auth",
-                "lazybox-core",
-                "lazybox-ipc",
-                "lazybox-store",
-            ]),
-        ),
+        ("lazybox-tui-core", set(&["lazybox-core", "lazybox-ipc"])),
         ("lazybox-tui-term", set(&[])),
         // Vendored libghostty crates: no lazybox-* references allowed.
         ("libghostty-vt", set(&[])),

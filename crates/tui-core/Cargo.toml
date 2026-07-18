@@ -24,8 +24,6 @@ path = "src/lib.rs"
 
 [dependencies]
 lazybox-core  = { workspace = true }
-lazybox-auth  = { workspace = true }
-lazybox-store = { workspace = true }
 lazybox-ipc   = { workspace = true }
 
 tokio      = { workspace = true }
@@ -33,7 +31,6 @@ chrono     = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 tracing   = { workspace = true }
-thiserror = { workspace = true }
 libc      = "0.2"
 which     = "8"
 unicode-width = "0.2"

@@ -46,7 +46,6 @@ harness = false
 
 [dependencies]
 lazybox-core       = { workspace = true }
-lazybox-auth       = { workspace = true }
 lazybox-config     = { workspace = true }
 lazybox-git-ops    = { workspace = true }
 lazybox-store      = { workspace = true }
@@ -63,20 +62,16 @@ lazybox-server  = { path = "../server" }
 
 tokio            = { workspace = true }
 anyhow           = { workspace = true }
-thiserror        = { workspace = true }
 tracing          = { workspace = true }
 tracing-subscriber = { workspace = true }
 crossterm        = { workspace = true }
 ratatui          = { workspace = true }
 chrono           = { workspace = true }
-serde            = { workspace = true }
 serde_json       = { workspace = true }
 serde_yaml       = { workspace = true }
-futures-util     = "0.3"
 tempfile         = "3"
 which            = "8"
 uuid             = { version = "1", features = ["v4"] }
-libc             = "0.2"
 rpassword        = "7.5.4"
 
 [lints]

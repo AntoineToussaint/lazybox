@@ -10,7 +10,6 @@ publish.workspace = true
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-serde = { workspace = true }
 
 [lints]
 workspace = true

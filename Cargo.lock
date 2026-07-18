@@ -1637,9 +1637,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 name = "lazybox-agents"
 version = "0.1.7"
 dependencies = [
- "lazybox-core",
  "lazybox-ipc",
- "serde",
  "serde_json",
  "tracing",
 ]
@@ -1648,7 +1646,6 @@ dependencies = [
 name = "lazybox-auth"
 version = "0.1.7"
 dependencies = [
- "serde",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -1661,7 +1658,6 @@ dependencies = [
  "humantime-serde",
  "lazybox-core",
  "serde",
- "serde_json",
  "serde_yaml",
  "thiserror 2.0.18",
  "tracing",
@@ -1764,7 +1760,6 @@ dependencies = [
  "lazybox-linear",
  "lazybox-slack",
  "lazybox-store",
- "lazybox-tui-term",
  "libc",
  "libghostty-vt",
  "parking_lot",
@@ -1775,7 +1770,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 
@@ -1785,7 +1779,6 @@ version = "0.1.7"
 dependencies = [
  "futures",
  "lazybox-auth",
- "lazybox-core",
  "reqwest",
  "serde",
  "serde_json",
@@ -1806,7 +1799,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
- "tracing",
 ]
 
 [[package]]
@@ -1817,10 +1809,8 @@ dependencies = [
  "chrono",
  "criterion",
  "crossterm",
- "futures-util",
  "insta",
  "lazybox-agents",
- "lazybox-auth",
  "lazybox-config",
  "lazybox-core",
  "lazybox-gh",
@@ -1832,15 +1822,12 @@ dependencies = [
  "lazybox-store",
  "lazybox-tui-core",
  "lazybox-tui-term",
- "libc",
  "libghostty-vt",
  "ratatui",
  "rpassword",
- "serde",
  "serde_json",
  "serde_yaml",
  "tempfile",
- "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1854,15 +1841,12 @@ name = "lazybox-tui-core"
 version = "0.1.7"
 dependencies = [
  "chrono",
- "lazybox-auth",
  "lazybox-core",
  "lazybox-ipc",
- "lazybox-store",
  "libc",
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.18",
  "tokio",
  "tracing",
  "unicode-width",
@@ -1904,7 +1888,6 @@ dependencies = [
  "bindgen",
  "cc",
  "heck",
- "libc",
 ]
 
 [[package]]

@@ -2566,6 +2566,15 @@ pub(crate) async fn await_inflight_spawns(config: &ServerConfig, workspace_key: 
 /// Returns whether any session record was actually rewritten. No-op
 /// when every session already lives at the right place (most polls).
 pub async fn migrate_session_paths_if_needed(workspace: &mut Workspace) -> bool {
+    let root = worktree_root();
+    migrate_session_paths_if_needed_under(workspace, &root).await
+}
+
+/// Explicit-root form of [`migrate_session_paths_if_needed`]. Keeping the
+/// filesystem namespace as an argument makes migration tests hermetic and
+/// ensures one root snapshot is used for the entire reconciliation pass even
+/// if process configuration changes concurrently.
+pub async fn migrate_session_paths_if_needed_under(workspace: &mut Workspace, root: &Path) -> bool {
     let mut moved_any = false;
     // Sort sessions by created_at so the index assignment matches
     // what `worktree_path_for_session` expects (first = no suffix,
@@ -2574,7 +2583,7 @@ pub async fn migrate_session_paths_if_needed(workspace: &mut Workspace) -> bool 
     order.sort_by_key(|&i| workspace.sessions[i].created_at);
 
     for (slot, sess_idx) in order.into_iter().enumerate() {
-        let expected = worktree_path_for_session(workspace, slot);
+        let expected = worktree_path_for_session_under(workspace, slot, root);
         let actual = workspace.sessions[sess_idx].worktree_path.clone();
         if actual == expected {
             continue;
@@ -2646,11 +2655,21 @@ pub fn worktree_root() -> PathBuf {
 /// directory and cross-contaminate. A repo-less, project-less workspace
 /// has no scope and keeps the flat `<root>/<slug>` path.
 pub fn worktree_path_for_session(workspace: &Workspace, index: usize) -> PathBuf {
+    worktree_path_for_session_under(workspace, index, &worktree_root())
+}
+
+/// Explicit-root form of [`worktree_path_for_session`]. `root` is the
+/// directory that contains repo/project scopes, normally
+/// [`worktree_root`].
+pub fn worktree_path_for_session_under(
+    workspace: &Workspace,
+    index: usize,
+    root: &Path,
+) -> PathBuf {
     let mut name = workspace.worktree_slug();
     if index > 0 {
         name.push_str(&format!("-{}", index + 1));
     }
-    let root = worktree_root();
     match workspace.worktree_scope() {
         Some(scope) => root.join(scope).join(name),
         None => root.join(name),

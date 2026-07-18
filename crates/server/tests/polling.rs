@@ -594,6 +594,7 @@ async fn mark_workspace_read_no_op_when_workspace_missing() {
 #[tokio::test]
 async fn migrate_path_only_when_dir_missing() {
     use lazybox_core::WorkspaceSession;
+    let root = tempfile::tempdir().unwrap();
     let task = make_task("o/r#11");
     let mut ws = lazybox_core::Workspace::from_task(task, Utc::now());
     let session = WorkspaceSession::new(
@@ -604,10 +605,13 @@ async fn migrate_path_only_when_dir_missing() {
     );
     ws.add_session(session);
 
-    let moved = lazybox_server::spawn_handler::migrate_session_paths_if_needed(&mut ws).await;
+    let moved =
+        lazybox_server::spawn_handler::migrate_session_paths_if_needed_under(&mut ws, root.path())
+            .await;
     assert!(moved, "stale path detected → migrated record");
 
-    let expected = lazybox_server::spawn_handler::worktree_path_for_session(&ws, 0);
+    let expected =
+        lazybox_server::spawn_handler::worktree_path_for_session_under(&ws, 0, root.path());
     assert_eq!(
         ws.sessions[0].worktree_path, expected,
         "session path now matches the slug-derived path"
@@ -616,9 +620,11 @@ async fn migrate_path_only_when_dir_missing() {
 #[tokio::test]
 async fn migrate_no_op_when_path_already_matches() {
     use lazybox_core::WorkspaceSession;
+    let root = tempfile::tempdir().unwrap();
     let task = make_task("o/r#22");
     let mut ws = lazybox_core::Workspace::from_task(task, Utc::now());
-    let expected = lazybox_server::spawn_handler::worktree_path_for_session(&ws, 0);
+    let expected =
+        lazybox_server::spawn_handler::worktree_path_for_session_under(&ws, 0, root.path());
     let session = WorkspaceSession::new(
         ws.key.clone(),
         lazybox_core::SessionKind::Shell,
@@ -627,7 +633,9 @@ async fn migrate_no_op_when_path_already_matches() {
     );
     ws.add_session(session);
 
-    let moved = lazybox_server::spawn_handler::migrate_session_paths_if_needed(&mut ws).await;
+    let moved =
+        lazybox_server::spawn_handler::migrate_session_paths_if_needed_under(&mut ws, root.path())
+            .await;
     assert!(!moved, "path already matches → migration is a no-op");
     assert_eq!(ws.sessions[0].worktree_path, expected);
 }
@@ -653,6 +661,7 @@ async fn migrate_picks_up_pr_title_rename() {
     // When the old folder DOES exist on disk the worktree is reused in
     // place instead — see `migrate_reuses_live_worktree_in_place_on_slug_change`.
     use lazybox_core::WorkspaceSession;
+    let root = tempfile::tempdir().unwrap();
     // Build the workspace with the ORIGINAL title.
     let mut task = make_task("o/r#7413");
     task.title = "Initial draft".into();
@@ -663,7 +672,7 @@ async fn migrate_picks_up_pr_title_rename() {
         // Use a path that DOES match the original slug so we can
         // assert it changes after the rename — same fallback the
         // production spawn handler uses.
-        lazybox_server::spawn_handler::worktree_path_for_session(&ws, 0),
+        lazybox_server::spawn_handler::worktree_path_for_session_under(&ws, 0, root.path()),
         Utc::now(),
     );
     let original_slug = ws.worktree_slug();
@@ -685,10 +694,13 @@ async fn migrate_picks_up_pr_title_rename() {
     );
     assert!(renamed_slug.starts_with("PR-7413-"));
 
-    let moved = lazybox_server::spawn_handler::migrate_session_paths_if_needed(&mut ws).await;
+    let moved =
+        lazybox_server::spawn_handler::migrate_session_paths_if_needed_under(&mut ws, root.path())
+            .await;
     assert!(moved, "rename must trigger migration");
 
-    let expected = lazybox_server::spawn_handler::worktree_path_for_session(&ws, 0);
+    let expected =
+        lazybox_server::spawn_handler::worktree_path_for_session_under(&ws, 0, root.path());
     assert!(
         expected.ends_with(&renamed_slug),
         "expected path uses the renamed slug",

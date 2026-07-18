@@ -51,7 +51,7 @@ runs:
       # it across runs avoids re-fetching ~45MB per job; on a hit
       # bootstrap.sh sees the binary and skips straight to PATH export.
       # Keyed on `.zig-version` so a version bump invalidates the cache.
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: |
           ~/.cache/lazybox/zig

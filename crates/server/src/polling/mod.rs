@@ -2444,7 +2444,7 @@ pub async fn rescope_with_state(
                 // the workspace from re-creation when the upstream
                 // item comes back into scope (truncated query, scope
                 // re-add, reopened PR).
-                delete_workspace_internal(config, &key, /*archive=*/ false).await;
+                let _ = delete_workspace_internal(config, &key, /*archive=*/ false).await;
                 state.prompted_out_of_scope.remove(r.key.as_str());
             }
             Some(count) => {
@@ -3569,8 +3569,7 @@ pub async fn reprompt_unresolved_removals(config: &ServerConfig) {
     if auto {
         return;
     }
-    reprompt_unresolved_removals_with(config, &lazybox_git_ops::WorktreeManager::default_base())
-        .await;
+    reprompt_unresolved_removals_with(config, &config.worktree_manager()).await;
 }
 
 /// Test seam for [`reprompt_unresolved_removals`] — explicit manager
@@ -4514,37 +4513,64 @@ pub fn load_archived_set(config: &ServerConfig) -> std::collections::HashSet<Str
         .unwrap_or_default()
 }
 
-/// Add `key` to the persisted archived set. Idempotent.
-pub fn archive_workspace_key(config: &ServerConfig, key: &str) {
+/// Add `key` to the persisted archived set. Idempotent. Returns false when
+/// persistence fails so a destructive caller can keep the workspace instead
+/// of deleting it now and letting the next restart resurrect it.
+#[must_use]
+pub fn archive_workspace_key(config: &ServerConfig, key: &str) -> bool {
+    let _update_guard = config.archive_updates.lock();
     let mut set = load_archived_set(config);
     if !set.insert(key.to_string()) {
-        return;
+        return true;
     }
     let vec: Vec<&String> = set.iter().collect();
-    if let Ok(json) = serde_json::to_string(&vec)
-        && let Err(e) = config.store.set_kv(lazybox_core::KV_KEY_ARCHIVED, &json)
-    {
+    let Ok(json) = serde_json::to_string(&vec) else {
+        tracing::error!("archive_workspace_key: serialize failed");
+        return false;
+    };
+    if let Err(e) = config.store.set_kv(lazybox_core::KV_KEY_ARCHIVED, &json) {
         tracing::warn!("archive_workspace_key: set_kv failed: {e}");
+        return false;
     }
+    true
 }
 
-/// Remove `key` from the persisted archived set so the next poll
-/// can re-create the workspace. Today there's no UI for this; kept
-/// public for a future "Settings → Restore Archive" flow.
-pub fn unarchive_workspace_key(config: &ServerConfig, key: &str) {
+/// Remove `key` from the persisted archived set so the next poll can
+/// re-create the workspace. Clears the matching in-process spawn tombstone
+/// only after persistence succeeds; otherwise an unarchived-but-still-deleted
+/// workspace could race back into existence during this daemon run.
+#[must_use]
+pub fn unarchive_workspace_key(config: &ServerConfig, key: &str) -> bool {
+    let _update_guard = config.archive_updates.lock();
     let mut set = load_archived_set(config);
     if !set.remove(key) {
-        return;
+        config.deleted_workspaces.lock().remove(key);
+        return true;
     }
     let vec: Vec<&String> = set.iter().collect();
-    if let Ok(json) = serde_json::to_string(&vec)
-        && let Err(e) = config.store.set_kv(lazybox_core::KV_KEY_ARCHIVED, &json)
-    {
+    let Ok(json) = serde_json::to_string(&vec) else {
+        tracing::error!("unarchive_workspace_key: serialize failed");
+        return false;
+    };
+    if let Err(e) = config.store.set_kv(lazybox_core::KV_KEY_ARCHIVED, &json) {
         tracing::warn!("unarchive_workspace_key: set_kv failed: {e}");
+        return false;
     }
+    config.deleted_workspaces.lock().remove(key);
+    true
 }
 
-pub async fn delete_workspace(config: &ServerConfig, key: &WorkspaceKey) {
+#[must_use]
+pub async fn delete_workspace(config: &ServerConfig, key: &WorkspaceKey) -> bool {
+    // Own the delete-vs-spawn serialization here so every destructive caller
+    // (single workspace, merged cleanup, project cascade) gets it. Keeping
+    // this only in one command-dispatch arm let other callers race a late
+    // spawn that recreated the terminal/worktree after deletion.
+    config
+        .deleted_workspaces
+        .lock()
+        .insert(key.as_str().to_string());
+    crate::spawn_handler::await_inflight_spawns(config, key.as_str()).await;
     delete_workspace_internal(config, key, /*archive=*/ true).await
 }
 
@@ -4555,15 +4581,12 @@ pub async fn delete_workspace(config: &ServerConfig, key: &WorkspaceKey) {
 /// set for upstream/transient reasons (truncated query, scope edit, a
 /// PR that closed and later reopens), and the archive guard in
 /// `upsert` would permanently block it from ever being re-created.
-async fn delete_workspace_internal(config: &ServerConfig, key: &WorkspaceKey, archive: bool) {
+async fn delete_workspace_internal(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    archive: bool,
+) -> bool {
     let key_str = key.as_str();
-    // Record the archive so the next poll's upsert skips re-creating
-    // this row. Without this, the user pressed `x x`, the row
-    // disappeared briefly, then the next 60s tick re-added it from
-    // the upstream task — extremely confusing.
-    if archive {
-        archive_workspace_key(config, key_str);
-    }
 
     // Find every terminal whose session_key matches via
     // terminal_meta — the authoritative wire-side mapping. Earlier
@@ -4594,31 +4617,60 @@ async fn delete_workspace_internal(config: &ServerConfig, key: &WorkspaceKey, ar
         for (tid, backend_key) in to_kill {
             if let Err(e) = config.backend.kill(&backend_key).await {
                 tracing::warn!("kill {backend_key}: {e}");
+                let _ = config.bus.send(Event::provider_error_retryable(
+                    "terminal",
+                    format!(
+                        "could not stop terminal {backend_key}; workspace {key} was not deleted: {e}"
+                    ),
+                ));
+                // Preserve the workspace and every live mapping so the user
+                // can retry. The backend contract deliberately keeps a slot
+                // after a transport/timeout failure; deleting our metadata
+                // here would orphan an agent we failed to stop.
+                config.deleted_workspaces.lock().remove(key_str);
+                return false;
             }
-            // Clean every auxiliary map too. The pump task will
-            // ALSO clean these when wait_exit returns, but that
-            // happens on a tokio task with no upper bound on
-            // latency. Doing it here closes the window where
-            // rescope (or another subsystem) would see an entry
-            // for a workspace we just deleted.
-            config.terminals.lock().await.remove(&tid);
-            config.terminal_meta.lock().await.remove(&tid);
-            config.terminal_sessions.lock().await.remove(&tid);
-            config.agent_states.lock().await.remove(&tid);
-            // Mirror the daemon-pump's exit broadcast so any
-            // still-connected clients see the tab disappear.
-            let _ = config.bus.send(Event::TerminalExited {
-                terminal_id: tid,
-                exit_code: None,
-                last_output: None,
-            });
+            // One lifecycle owner handles every map, persisted terminal key,
+            // AgentState::Exited, and TerminalExited. The output pump may
+            // observe the child first or later; the owner's atomic claim
+            // makes both orders idempotent and leaves backend release to the
+            // pump that observed the real exit.
+            crate::spawn_handler::detach_killed_terminal(config, tid, &backend_key).await;
         }
+    }
+
+    // Record the archive only after every requested terminal kill succeeded.
+    // Otherwise a transient backend failure both keeps the workspace alive
+    // and blocks the next poll from repairing/re-presenting it.
+    if archive && !archive_workspace_key(config, key_str) {
+        let _ = config.bus.send(Event::provider_error_retryable(
+            "store",
+            format!("could not archive workspace {key}; it was not deleted"),
+        ));
+        config.deleted_workspaces.lock().remove(key_str);
+        return false;
     }
 
     if let Err(e) = config.store.delete_workspace(key) {
         tracing::warn!("delete_workspace failed: {e}");
+        let rollback_ok = !archive || unarchive_workspace_key(config, key_str);
+        if !rollback_ok {
+            tracing::error!(
+                workspace = %key,
+                "delete_workspace rollback: could not remove archive tombstone",
+            );
+        }
+        let _ = config.bus.send(Event::provider_error_retryable(
+            "store",
+            format!("could not delete workspace {key}: {e}"),
+        ));
+        if rollback_ok {
+            config.deleted_workspaces.lock().remove(key_str);
+        }
+        return false;
     }
     let _ = config.bus.send(Event::WorkspaceRemoved(key.clone()));
+    true
 }
 
 /// Delete a Project: cascade through every workspace whose
@@ -4649,10 +4701,34 @@ pub async fn delete_project(config: &ServerConfig, project_key: &lazybox_core::P
     let mut child_keys: Vec<WorkspaceKey> = Vec::new();
     for record in records {
         let Some(json) = record.workspace_json else {
-            continue;
+            tracing::error!(
+                workspace = %record.key,
+                project_key = %project_key,
+                "delete_project: workspace record has no payload — refusing unsafe cascade",
+            );
+            let _ = config.bus.send(Event::provider_error_permanent(
+                "store",
+                format!(
+                    "could not safely delete project {project_key}: workspace {} is unreadable",
+                    record.key
+                ),
+            ));
+            return;
         };
         let Ok(ws) = serde_json::from_str::<Workspace>(&json) else {
-            continue;
+            tracing::error!(
+                workspace = %record.key,
+                project_key = %project_key,
+                "delete_project: corrupt workspace payload — refusing unsafe cascade",
+            );
+            let _ = config.bus.send(Event::provider_error_permanent(
+                "store",
+                format!(
+                    "could not safely delete project {project_key}: workspace {} is corrupt",
+                    record.key
+                ),
+            ));
+            return;
         };
         if ws.project_key.as_ref() == Some(project_key) {
             child_keys.push(ws.key);
@@ -4665,11 +4741,23 @@ pub async fn delete_project(config: &ServerConfig, project_key: &lazybox_core::P
         "delete_project: cascading workspace deletes"
     );
     for key in &child_keys {
-        delete_workspace(config, key).await;
+        if !delete_workspace(config, key).await {
+            tracing::warn!(
+                project_key = %project_key,
+                workspace = %key,
+                "delete_project: child deletion failed — preserving project for retry",
+            );
+            return;
+        }
     }
 
     if let Err(e) = config.store.delete_project(project_key) {
         tracing::warn!("delete_project store: {e}");
+        let _ = config.bus.send(Event::provider_error_retryable(
+            "store",
+            format!("could not delete project {project_key}: {e}"),
+        ));
+        return;
     }
     let _ = config.bus.send(Event::ProjectRemoved(project_key.clone()));
     tracing::info!(project_key = %project_key, "delete_project: done");

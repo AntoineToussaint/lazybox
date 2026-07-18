@@ -41,6 +41,10 @@ struct MockInner {
     /// tests hold a spawn "mid-provision" to exercise the in-flight
     /// spawn races (duplicate collapse, Kill serialization).
     spawn_delay: Mutex<Option<std::time::Duration>>,
+    /// Per-key kill failure injected by lifecycle tests. Real backends keep
+    /// their slot on a transport/timeout failure so callers can retry; the
+    /// mock must be able to exercise that contract too.
+    kill_errors: Mutex<HashMap<String, String>>,
     /// Keys `release()` was called for, in call order. The mock keeps
     /// the session data around for post-mortem assertions (writes,
     /// argv), so release only records — tests use `released_keys()` to
@@ -171,6 +175,15 @@ impl MockBackend {
         *self.inner.spawn_delay.lock().await = Some(delay);
     }
 
+    /// Make `kill(key)` fail without closing or removing the session.
+    pub async fn fail_kill(&self, key: &str, message: impl Into<String>) {
+        self.inner
+            .kill_errors
+            .lock()
+            .await
+            .insert(key.to_string(), message.into());
+    }
+
     /// Make `snapshot(key)` hang forever — used to test that the
     /// daemon's per-session snapshot timeout keeps the IPC channel
     /// flowing even when a backend gets stuck.
@@ -289,6 +302,9 @@ impl SessionBackend for MockBackend {
         key: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
         Box::pin(async move {
+            if let Some(message) = self.inner.kill_errors.lock().await.get(key).cloned() {
+                return Err(BackendError::Other(message));
+            }
             // Idempotent: missing key is fine.
             let mut map = self.inner.sessions.lock().await;
             if let Some(session) = map.get_mut(key)
@@ -521,6 +537,22 @@ mod tests {
             b.kill(&k).await.unwrap();
             // Missing key also fine.
             b.kill("nope").await.unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn injected_kill_failure_keeps_session_retryable() {
+        run(async {
+            let b = MockBackend::new();
+            let k = b.spawn(&argv("x"), None, &[], "t").await.unwrap();
+            b.fail_kill(&k, "transport timed out").await;
+
+            assert!(b.kill(&k).await.is_err());
+            assert!(
+                b.list().await.unwrap().contains(&k),
+                "a failed kill must preserve the backend slot for retry"
+            );
         })
         .await;
     }

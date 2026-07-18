@@ -74,20 +74,28 @@ owner.
 
 ### A no-op can never be silent
 
-`scroll` always returns a typed `ScrollOutcome`:
+`scroll` reads the scrollbar both before and after every request that
+should move and always returns a typed `ScrollOutcome`:
 
-- `Moved { offset, total, len }` — the viewport moved (or was already
-  where asked, for a `By(0)` query).
+- `Moved { from, offset, total, len }` — the viewport demonstrably
+  moved; `from != offset` is guaranteed by the owner.
 - `NoScrollback { alternate }` — `total <= len`: there is nothing to
   scroll into. `alternate` flags an alt-screen program that owns its own
   buffer (its scrollback is intentionally empty).
+- `AtBoundary { boundary, ... }` — the viewport was already at the top
+  or live bottom requested.
+- `Noop` — an explicit `By(0)` request.
+- `Stalled { request, ... }` — scrollback exists, the viewport is away
+  from the requested boundary, but the post-request offset did not
+  change. This is the typed regression signal for a broken VT scroll.
+- `StateUnavailable` — libghostty could not provide a scrollbar state.
 - `NoTerminal` — no terminal resolved.
 
 This is why "no history yet" is no longer indistinguishable from "the
 Delta path broke" — the recurring confusion behind #306/#321/#360. The
-harness asserts that whenever scrollback exists, the outcome is `Moved`
-(`scroll_never_silently_noops_when_scrollback_exists`), and that an empty
-terminal reports a reason rather than a fake move.
+harness asserts each `Moved` outcome's `from` and `offset` against the
+actual viewport, separately pins boundary/no-op outcomes, and unit-tests
+that an unchanged mid-buffer transition is `Stalled`, never a fake move.
 
 ## Per-tile targeting (#362)
 
@@ -148,10 +156,12 @@ real entry points:
 - Split tiles — scrolling a non-focused tile leaves the focused one put
   (#362); the keyboard scrolls the focused tile.
 - Alt-screen vs. normal screen.
-- No silent no-op: `Moved` whenever scrollback exists; a typed reason
-  when it doesn't.
-- The single-owner source guard (brace-matches the owner's body, so it
-  survives reformatting and a legitimately-added verb).
+- No silent no-op: actual before/after offsets for movement, typed
+  boundary/empty/no-op reasons, and a `Stalled` result for an unexpected
+  unchanged offset.
+- The single-owner source guard scans every Rust file in the TUI crate
+  (and brace-matches the owner's body), so a raw viewport mutation added
+  in another module fails the harness.
 
 The full end-to-end wheel routing for #362 (which tile a real
 `handle_mouse` scrolls, including the SGR/arrow forward) is covered in

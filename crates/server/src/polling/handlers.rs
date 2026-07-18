@@ -742,7 +742,7 @@ pub async fn handle_clean_worktrees(config: &ServerConfig) {
     };
     let live_keys = live_workspace_keys(config).await;
 
-    let mgr = lazybox_git_ops::WorktreeManager::default_base();
+    let mgr = config.worktree_manager();
     let mut removed: usize = 0;
     let mut skipped: usize = 0;
 
@@ -878,7 +878,7 @@ fn to_dto(row: lazybox_git_ops::WorktreeInspection) -> lazybox_ipc::WorktreeInsp
 /// Read-only — pair with [`handle_delete_orphaned_worktree`] for
 /// destructive follow-up.
 pub async fn handle_inspect_worktrees(config: &ServerConfig) {
-    inspect_worktrees_with(config, &lazybox_git_ops::WorktreeManager::default_base()).await
+    inspect_worktrees_with(config, &config.worktree_manager()).await
 }
 
 /// Test seam for [`handle_inspect_worktrees`]. Production callers
@@ -911,13 +911,7 @@ pub async fn handle_delete_orphaned_worktree(
     path: std::path::PathBuf,
     force: bool,
 ) {
-    delete_orphaned_worktree_with(
-        config,
-        &lazybox_git_ops::WorktreeManager::default_base(),
-        path,
-        force,
-    )
-    .await
+    delete_orphaned_worktree_with(config, &config.worktree_manager(), path, force).await
 }
 
 /// Test seam for [`handle_delete_orphaned_worktree`]. Same contract,
@@ -990,7 +984,7 @@ pub async fn on_terminal_transition(
     key: &WorkspaceKey,
     cleanup: super::TerminalCleanup,
 ) {
-    let mgr = lazybox_git_ops::WorktreeManager::default_base();
+    let mgr = config.worktree_manager();
     let auto = lazybox_config::Config::load()
         .map(|c| c.worktree.auto_cleanup_merged)
         .unwrap_or(false);
@@ -1091,12 +1085,7 @@ pub(crate) async fn prompt_merged_pr_removal_with(
 /// force-delete the now-idle worktree directories — the deletion
 /// `delete_workspace` (used by `x x`) deliberately skips.
 pub async fn remove_merged_workspace(config: &ServerConfig, key: &WorkspaceKey) {
-    remove_merged_workspace_with(
-        config,
-        &lazybox_git_ops::WorktreeManager::default_base(),
-        key,
-    )
-    .await
+    remove_merged_workspace_with(config, &config.worktree_manager(), key).await
 }
 
 /// Test seam for [`remove_merged_workspace`] — explicit manager so
@@ -1113,18 +1102,23 @@ pub(crate) async fn remove_merged_workspace_with(
         .map(|w| workspace_worktree_paths(&w))
         .unwrap_or_default();
 
-    // The prompt is answered — drop its reprompt bookkeeping so the
-    // memory doesn't accumulate keys for rows that no longer exist.
+    // Kills backing terminals, removes the row, and records the archive
+    // so the next poll doesn't resurrect the merged workspace.
+    if !super::delete_workspace(config, key).await {
+        // The lifecycle/store path already emitted a precise error. Keep the
+        // worktrees and removal-prompt memory intact so the user can retry.
+        return;
+    }
+
+    // The row is actually gone — now drop its reprompt bookkeeping. On a
+    // failed prerequisite it must remain so the level-triggered prompt can
+    // offer the destructive action again.
     config
         .removal_prompts
         .lock()
         .await
         .prompted
         .remove(key.as_str());
-
-    // Kills backing terminals, removes the row, and records the archive
-    // so the next poll doesn't resurrect the merged workspace.
-    super::delete_workspace(config, key).await;
 
     if session_paths.is_empty() {
         return;
@@ -1339,12 +1333,7 @@ pub(super) async fn reap_safe_workspace_worktrees(
     config: &ServerConfig,
     workspace: &lazybox_core::Workspace,
 ) {
-    reap_safe_workspace_worktrees_with(
-        config,
-        &lazybox_git_ops::WorktreeManager::default_base(),
-        workspace,
-    )
-    .await
+    reap_safe_workspace_worktrees_with(config, &config.worktree_manager(), workspace).await
 }
 
 /// Test seam for [`reap_safe_workspace_worktrees`] — explicit manager
@@ -1569,6 +1558,10 @@ mod inspect_tests {
     async fn run(cwd: &Path, args: &[&str]) {
         let out = tokio::process::Command::new("git")
             .current_dir(cwd)
+            .arg("-c")
+            .arg("commit.gpgsign=false")
+            .arg("-c")
+            .arg("tag.gpgsign=false")
             .args(args)
             .output()
             .await

@@ -51,6 +51,51 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use tokio::sync::{Mutex, broadcast};
 
+/// Filesystem root used by daemon-owned git worktrees.
+///
+/// Production configs point at the persistent state root. Test configs get a
+/// unique scratch root that is removed with the last config clone, keeping
+/// tests away from the developer's real `~/.lazybox` clone cache.
+#[derive(Debug)]
+struct WorktreeRoot {
+    path: PathBuf,
+    cleanup_on_drop: bool,
+}
+
+impl WorktreeRoot {
+    fn persistent(path: PathBuf) -> Self {
+        Self {
+            path,
+            cleanup_on_drop: false,
+        }
+    }
+
+    fn scratch() -> Self {
+        Self {
+            path: std::env::temp_dir().join(format!(
+                "lazybox-server-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            )),
+            cleanup_on_drop: true,
+        }
+    }
+}
+
+impl Drop for WorktreeRoot {
+    fn drop(&mut self) {
+        if self.cleanup_on_drop
+            && let Err(error) = std::fs::remove_dir_all(&self.path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                path = %self.path.display(),
+                "failed to remove scratch worktree root: {error}"
+            );
+        }
+    }
+}
+
 /// Where lazybox keeps its persistent state. Thin alias over
 /// [`lazybox_core::paths::state_db`] so callers don't have to import
 /// the paths module just for this one helper. Override via the
@@ -227,6 +272,9 @@ pub struct ServerConfig {
     /// the server delegates spawn/write/resize/kill/subscribe.
     /// Default is `RawPtyBackend`; `TmuxBackend` adds persistence.
     pub backend: Arc<dyn SessionBackend>,
+    /// Root for every daemon-owned bare clone and worktree. Private so
+    /// production code cannot bypass [`ServerConfig::worktree_manager`].
+    worktree_root: Arc<WorktreeRoot>,
     /// Wire-side `TerminalId` ↔ backend session key. The server
     /// allocates numeric ids for the IPC stream; the backend uses its
     /// own stable string keys (e.g. tmux session names). This map
@@ -404,12 +452,17 @@ pub struct ServerConfig {
     /// waiting out a mid-flight provision) re-check promptly instead
     /// of busy-polling.
     pub inflight_spawn_changed: Arc<tokio::sync::Notify>,
-    /// Workspace keys deleted in this process (`Kill` /
-    /// `RemoveMergedWorkspace`). Consulted by the spawn path when a
-    /// workspace row is missing so a deleted-mid-spawn error can tell
-    /// the user what happened. Unknown workspaces also abort: a spawn
-    /// must never silently inherit the daemon's cwd.
+    /// Workspace keys whose deletion began in this process (single delete,
+    /// merged cleanup, or project cascade). Consulted both when a workspace
+    /// row is missing and immediately after `backend.spawn`, so a provision
+    /// that outlives the bounded delete wait is killed before registration.
+    /// Failed deletes and successful unarchives remove their tombstone.
     pub deleted_workspaces: Arc<parking_lot::Mutex<HashSet<String>>>,
+    /// Serializes the archive set's read-modify-write cycle across different
+    /// workspace keys. The store exposes scalar KV operations, not an atomic
+    /// set insert; without this lock two concurrent deletes can each load the
+    /// old set and overwrite the other's tombstone.
+    pub archive_updates: Arc<parking_lot::Mutex<()>>,
     /// Shape of the last `InputNeeded` decision per terminal — whether
     /// a bare chooser keystroke (`1`-`9`, y/n, Esc) is a complete
     /// answer. Written by the PTY detector (its structural triggers
@@ -457,7 +510,11 @@ impl ServerConfig {
                 Arc::new(RawPtyBackend::new())
             }
         };
-        Ok(Self::with_store_and_backend(store, backend))
+        Ok(Self::with_store_backend_and_root(
+            store,
+            backend,
+            WorktreeRoot::persistent(lazybox_core::paths::state_root()),
+        ))
     }
 
     /// Build a config with an explicit store and the deterministic
@@ -473,12 +530,21 @@ impl ServerConfig {
     /// a stub backend, and by the binary wiring once backend
     /// detection (tmux vs raw-pty) lands.
     pub fn with_store_and_backend(store: Arc<dyn Store>, backend: Arc<dyn SessionBackend>) -> Self {
+        Self::with_store_backend_and_root(store, backend, WorktreeRoot::scratch())
+    }
+
+    fn with_store_backend_and_root(
+        store: Arc<dyn Store>,
+        backend: Arc<dyn SessionBackend>,
+        worktree_root: WorktreeRoot,
+    ) -> Self {
         let (bus, _) = broadcast::channel(BUS_CAPACITY);
         Self {
             agents: Registry::default_builtins(),
             store,
             bus,
             backend,
+            worktree_root: Arc::new(worktree_root),
             terminals: Arc::new(Mutex::new(HashMap::new())),
             terminal_sessions: Arc::new(Mutex::new(HashMap::new())),
             agent_states: Arc::new(Mutex::new(HashMap::new())),
@@ -503,10 +569,17 @@ impl ServerConfig {
             inflight_spawns: Arc::new(parking_lot::Mutex::new(HashSet::new())),
             inflight_spawn_changed: Arc::new(tokio::sync::Notify::new()),
             deleted_workspaces: Arc::new(parking_lot::Mutex::new(HashSet::new())),
+            archive_updates: Arc::new(parking_lot::Mutex::new(())),
             input_needed_shapes: Arc::new(Mutex::new(HashMap::new())),
             event_metrics: Arc::new(metrics::EventMetrics::default()),
             workspace_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Manager rooted in this daemon's configured filesystem namespace.
+    /// All production worktree paths and all test seams must originate here.
+    pub(crate) fn worktree_manager(&self) -> lazybox_git_ops::WorktreeManager {
+        lazybox_git_ops::WorktreeManager::new(self.worktree_root.path.clone())
     }
 
     /// Serialize a workspace's load-modify-save cycle. Every mutation
@@ -1161,30 +1234,15 @@ pub async fn dispatch_command(
             polling::set_auto_fix_policy(config, &key, kind, arm).await;
         }
         lazybox_ipc::Command::Kill { session_key } => {
-            // Serialized against any in-flight Spawn on the same workspace:
-            // the tombstone makes a spawn that hasn't loaded its workspace
-            // row yet abort instead of re-creating the worktree + a
-            // terminal right after deletion.
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
-            config
-                .deleted_workspaces
-                .lock()
-                .insert(key.as_str().to_string());
-            spawn_handler::await_inflight_spawns(config, key.as_str()).await;
-            polling::delete_workspace(config, &key).await;
+            let _ = polling::delete_workspace(config, &key).await;
         }
         lazybox_ipc::Command::KeepMergedWorkspace { session_key } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
             polling::keep_merged_workspace(config, &key).await;
         }
         lazybox_ipc::Command::RemoveMergedWorkspace { session_key } => {
-            // Same worktree-teardown (and same spawn-race) exposure as Kill.
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
-            config
-                .deleted_workspaces
-                .lock()
-                .insert(key.as_str().to_string());
-            spawn_handler::await_inflight_spawns(config, key.as_str()).await;
             polling::remove_merged_workspace(config, &key).await;
         }
         lazybox_ipc::Command::DeleteProject { project_key } => {

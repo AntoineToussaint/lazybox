@@ -18,6 +18,10 @@ use tempfile::TempDir;
 fn git_cmd(cwd: &Path, args: &[&str]) -> Command {
     let mut cmd = Command::new("git");
     cmd.current_dir(cwd)
+        .arg("-c")
+        .arg("commit.gpgsign=false")
+        .arg("-c")
+        .arg("tag.gpgsign=false")
         .args(args)
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")

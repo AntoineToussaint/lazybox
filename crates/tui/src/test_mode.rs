@@ -158,34 +158,43 @@ fn seed_one_session(store: &dyn Store, worktree: &Path) -> anyhow::Result<()> {
 }
 
 fn run_git_init(path: &Path) -> anyhow::Result<()> {
-    let status = Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(path)
-        .status()
-        .map_err(|e| anyhow::anyhow!("git init: {e}"))?;
-    if !status.success() {
-        anyhow::bail!("git init failed at {}", path.display());
-    }
+    let run = |args: &[&str]| -> anyhow::Result<()> {
+        let output = Command::new("git")
+            .args([
+                "-c",
+                "user.email=test@lazybox",
+                "-c",
+                "user.name=lazybox test",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "tag.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(path)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
+            .output()
+            .map_err(|e| anyhow::anyhow!("git {}: {e}", args.join(" ")))?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "git {} failed at {}: {}",
+                args.join(" "),
+                path.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(())
+    };
+    run(&["init", "-q"])?;
     // A first commit so the worktree isn't in the awkward "no HEAD"
     // state where some shell prompts get noisy.
     let readme = path.join("README.md");
     std::fs::write(&readme, "# lazybox test repo\n")?;
-    let _ = Command::new("git")
-        .args(["add", "."])
-        .current_dir(path)
-        .status();
-    let _ = Command::new("git")
-        .args([
-            "-c",
-            "user.email=test@lazybox",
-            "-c",
-            "user.name=lazybox test",
-            "commit",
-            "-qm",
-            "init",
-        ])
-        .current_dir(path)
-        .status();
+    run(&["add", "."])?;
+    run(&["commit", "-qm", "init"])?;
     Ok(())
 }
 

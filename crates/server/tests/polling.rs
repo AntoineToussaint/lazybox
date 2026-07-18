@@ -23,9 +23,10 @@ use lazybox_core::{
     TaskState,
 };
 use lazybox_ipc::{Command, Event, channel};
+use lazybox_server::backend::{MockBackend, SessionBackend};
 use lazybox_server::polling::{self, FetchMode, TaskSource};
 use lazybox_server::{Server, ServerConfig};
-use lazybox_store::WorkspaceRecord;
+use lazybox_store::{MemoryStore, WorkspaceRecord};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -2094,7 +2095,7 @@ async fn delete_workspace_kills_terminals_via_terminal_meta() {
         .await
         .insert(TerminalId(42), lazybox_ipc::AgentState::Working);
 
-    polling::delete_workspace(&config, &workspace_key).await;
+    assert!(polling::delete_workspace(&config, &workspace_key).await);
 
     assert!(
         config.terminals.lock().await.get(&TerminalId(42)).is_none(),
@@ -2130,6 +2131,73 @@ async fn delete_workspace_kills_terminals_via_terminal_meta() {
     assert!(
         config.store.list_workspaces().unwrap().is_empty(),
         "workspace deleted from store"
+    );
+}
+
+#[tokio::test]
+async fn failed_terminal_kill_preserves_workspace_and_retryable_mappings() {
+    use lazybox_core::{SessionKey, WorkspaceKey};
+    use lazybox_ipc::{TerminalId, TerminalKind};
+
+    let backend = MockBackend::new();
+    let config =
+        ServerConfig::with_store_and_backend(Arc::new(MemoryStore::new()), backend.as_backend());
+    let task = make_task("o/r#kill-fails");
+    polling::upsert(&config, task.clone()).await;
+    let workspace_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
+    let session_key = SessionKey::from(workspace_key.as_str());
+    let terminal_id = TerminalId(77);
+    let backend_key = backend
+        .spawn(&["codex".into()], None, &[], "kill-fails")
+        .await
+        .unwrap();
+    config
+        .terminals
+        .lock()
+        .await
+        .insert(terminal_id, backend_key.clone());
+    config.terminal_meta.lock().await.insert(
+        terminal_id,
+        (session_key, TerminalKind::Agent("codex".into())),
+    );
+    backend
+        .fail_kill(&backend_key, "backend transport timed out")
+        .await;
+    let mut bus = config.bus.subscribe();
+
+    assert!(!polling::delete_workspace(&config, &workspace_key).await);
+
+    assert!(
+        config
+            .store
+            .get_workspace(&workspace_key)
+            .unwrap()
+            .is_some(),
+        "a workspace must stay visible when its live process could not be stopped"
+    );
+    assert_eq!(
+        config.terminals.lock().await.get(&terminal_id),
+        Some(&backend_key),
+        "the retryable terminal mapping must not be orphaned"
+    );
+    assert!(
+        !polling::load_archived_set(&config).contains(workspace_key.as_str()),
+        "a failed delete must not poison future upserts via the archive set"
+    );
+    assert!(
+        !config
+            .deleted_workspaces
+            .lock()
+            .contains(workspace_key.as_str()),
+        "a failed delete must clear the in-process spawn tombstone too"
+    );
+    assert!(
+        std::iter::from_fn(|| bus.try_recv().ok()).any(|event| matches!(
+            event,
+            Event::ProviderError { message, .. }
+                if message.contains("was not deleted")
+        )),
+        "the user must get a visible retryable error instead of a silent partial delete"
     );
 }
 // ── Issue → PR collapsing (closingIssuesReferences) ─────────────────
@@ -2791,12 +2859,35 @@ async fn user_delete_archives_and_blocks_resurrection() {
     polling::upsert(&config, make_task("o/r#1")).await;
     let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_task("o/r#1")));
 
-    polling::delete_workspace(&config, &key).await;
+    assert!(polling::delete_workspace(&config, &key).await);
     polling::upsert(&config, make_task("o/r#1")).await;
 
     assert!(
         config.store.get_workspace(&key).unwrap().is_none(),
         "user-dismissed workspace must stay gone across polls",
+    );
+}
+
+#[tokio::test]
+async fn unarchive_clears_persisted_and_live_spawn_tombstones() {
+    use lazybox_core::WorkspaceKey;
+
+    let config = ServerConfig::in_memory();
+    let task = make_task("o/r#restore");
+    polling::upsert(&config, task.clone()).await;
+    let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
+    assert!(polling::delete_workspace(&config, &key).await);
+    assert!(polling::load_archived_set(&config).contains(key.as_str()));
+    assert!(config.deleted_workspaces.lock().contains(key.as_str()));
+
+    assert!(polling::unarchive_workspace_key(&config, key.as_str()));
+    assert!(!polling::load_archived_set(&config).contains(key.as_str()));
+    assert!(!config.deleted_workspaces.lock().contains(key.as_str()));
+
+    polling::upsert(&config, task).await;
+    assert!(
+        config.store.get_workspace(&key).unwrap().is_some(),
+        "an unarchived workspace must be able to return and spawn again"
     );
 }
 
@@ -3508,6 +3599,120 @@ async fn delete_project_cascades_through_workspaces() {
     assert!(
         !removed_workspaces.contains(other.key.as_str()),
         "the orphan workspace must not have been removed",
+    );
+}
+
+#[tokio::test]
+async fn delete_project_preserves_parent_when_a_child_cannot_stop() {
+    use lazybox_core::{Project, ProjectKey, SessionKey, WorkspaceKey};
+    use lazybox_ipc::{TerminalId, TerminalKind};
+
+    let backend = MockBackend::new();
+    let config =
+        ServerConfig::with_store_and_backend(Arc::new(MemoryStore::new()), backend.as_backend());
+    let project_key = ProjectKey::github("acme", "widget");
+    let project = Project::new(project_key.clone(), "acme/widget", Utc::now());
+    config
+        .store
+        .save_project(&lazybox_store::ProjectRecord {
+            key: project_key.as_str().into(),
+            created_at: project.created_at,
+            project_json: Some(serde_json::to_string(&project).unwrap()),
+        })
+        .unwrap();
+    let mut workspace = lazybox_core::Workspace::from_task(make_task("acme/widget#9"), Utc::now());
+    workspace.project_key = Some(project_key.clone());
+    let workspace_key = WorkspaceKey::new(workspace.key.as_str());
+    config
+        .store
+        .save_workspace(&WorkspaceRecord {
+            key: workspace_key.as_str().into(),
+            created_at: workspace.created_at,
+            workspace_json: Some(serde_json::to_string(&workspace).unwrap()),
+        })
+        .unwrap();
+
+    let terminal_id = TerminalId(79);
+    let backend_key = backend
+        .spawn(&["codex".into()], None, &[], "project-kill-fails")
+        .await
+        .unwrap();
+    config
+        .terminals
+        .lock()
+        .await
+        .insert(terminal_id, backend_key.clone());
+    config.terminal_meta.lock().await.insert(
+        terminal_id,
+        (
+            SessionKey::from(workspace_key.as_str()),
+            TerminalKind::Agent("codex".into()),
+        ),
+    );
+    backend.fail_kill(&backend_key, "tmux timed out").await;
+
+    polling::delete_project(&config, &project_key).await;
+
+    assert!(
+        config
+            .store
+            .get_workspace(&workspace_key)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        config
+            .store
+            .list_projects()
+            .unwrap()
+            .iter()
+            .any(|record| record.key == project_key.as_str()),
+        "the parent must remain while a child deletion is retryable"
+    );
+}
+
+#[tokio::test]
+async fn delete_project_refuses_to_skip_a_corrupt_workspace_record() {
+    use lazybox_core::{Project, ProjectKey};
+
+    let config = ServerConfig::in_memory();
+    let project_key = ProjectKey::local("corrupt-cascade");
+    let project = Project::new(project_key.clone(), "corrupt cascade", Utc::now());
+    config
+        .store
+        .save_project(&lazybox_store::ProjectRecord {
+            key: project_key.as_str().into(),
+            created_at: project.created_at,
+            project_json: Some(serde_json::to_string(&project).unwrap()),
+        })
+        .unwrap();
+    config
+        .store
+        .save_workspace(&WorkspaceRecord {
+            key: "corrupt-child".into(),
+            created_at: Utc::now(),
+            workspace_json: Some("{ definitely not valid json".into()),
+        })
+        .unwrap();
+    let mut bus = config.bus.subscribe();
+
+    polling::delete_project(&config, &project_key).await;
+
+    assert!(
+        config
+            .store
+            .list_projects()
+            .unwrap()
+            .iter()
+            .any(|record| record.key == project_key.as_str()),
+        "unknown child ownership must preserve the parent instead of orphaning data"
+    );
+    assert!(
+        std::iter::from_fn(|| bus.try_recv().ok()).any(|event| matches!(
+            event,
+            Event::ProviderError { message, .. } if message.contains("corrupt")
+        )),
+        "the unsafe cascade refusal must be visible to the user"
     );
 }
 
@@ -4287,7 +4492,11 @@ async fn tick_dispatches_auto_spawn_action_after_upsert() {
     // Build a synthetic task + matching auto-spawn action. The
     // session key MUST match `workspace_key_for(task)` because
     // `handle_spawn` uses it to find / create the workspace.
-    let task = make_task("o/r#101");
+    let mut task = make_task("o/r#101");
+    // This test owns provider-action dispatch, not remote cloning. A
+    // repo-less task provisions a standalone git session inside the
+    // config's scratch worktree root and keeps the fixture offline.
+    task.repo = None;
     let session_key = lazybox_core::SessionKey::new(lazybox_core::workspace_key_for(&task));
     let action = polling::ProviderAction::AutoSpawnAgent {
         session_key: session_key.clone(),
@@ -4374,7 +4583,8 @@ async fn tick_dispatches_auto_fix_action_spawns_agent() {
     let (config, mock) = ServerConfig::in_memory_with_mock();
     let mut bus_rx = config.bus.subscribe();
 
-    let task = make_task("o/r#202");
+    let mut task = make_task("o/r#202");
+    task.repo = None;
     let session_key = lazybox_core::SessionKey::new(lazybox_core::workspace_key_for(&task));
     let action = polling::ProviderAction::AutoFixPr {
         session_key: session_key.clone(),
@@ -4501,7 +4711,8 @@ async fn auto_fix_arm_overrides_label_opt_out() {
     let (config, _mock) = ServerConfig::in_memory_with_mock();
     let mut bus_rx = config.bus.subscribe();
 
-    let task = make_task("o/r#606");
+    let mut task = make_task("o/r#606");
+    task.repo = None;
     let session_key = lazybox_core::SessionKey::new(lazybox_core::workspace_key_for(&task));
     seed_workspace_with_policy(
         &config,
@@ -4605,7 +4816,8 @@ async fn auto_fix_skips_and_burns_no_attempt_while_agent_already_running() {
     // the attempt counter — otherwise a slow agent silently exhausts
     // the budget + spams duplicate "I'm fixing this" comments.
     let (config, _mock) = ServerConfig::in_memory_with_mock();
-    let task = make_task("o/r#404");
+    let mut task = make_task("o/r#404");
+    task.repo = None;
     let session_key = lazybox_core::SessionKey::new(lazybox_core::workspace_key_for(&task));
     let make_action = || polling::ProviderAction::AutoFixPr {
         session_key: session_key.clone(),

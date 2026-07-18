@@ -63,6 +63,37 @@ static NEXT_TERMINAL_ID: AtomicU64 = AtomicU64::new(1);
 /// silently reuse a surviving session's id.
 const TERMINAL_ID_HIGH_WATER_KEY: &str = "terminal-id-high-water";
 
+/// Every persisted value owned by one backend terminal. Keeping the key
+/// namespace and cleanup inventory in one type prevents a restart feature
+/// from adding a new `terminal-*` row that teardown never deletes (the draft
+/// leak exposed by issue #373).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalPersistedField {
+    Metadata,
+    NoPermission,
+    UserMessage,
+    Draft,
+}
+
+impl TerminalPersistedField {
+    const ALL: [Self; 4] = [
+        Self::Metadata,
+        Self::NoPermission,
+        Self::UserMessage,
+        Self::Draft,
+    ];
+
+    fn key(self, backend_key: &str) -> String {
+        let prefix = match self {
+            Self::Metadata => "terminal",
+            Self::NoPermission => "terminal-noperm",
+            Self::UserMessage => "terminal-msg",
+            Self::Draft => "terminal-draft",
+        };
+        format!("{prefix}:{backend_key}")
+    }
+}
+
 /// Serializes the seed → allocate → persist sequence of
 /// [`alloc_terminal_id`]. Without it two concurrent spawns could
 /// interleave as: A allocates 5, B allocates 6, B persists 6, A
@@ -285,37 +316,10 @@ fn write_hook_settings(
     }
 }
 
-/// The terminal's current owning session, read from the authoritative
-/// `terminal_meta` map rather than a value captured when its output
-/// pump spawned. `rebadge_terminals` (issue→PR collapse, manual adopt)
-/// moves a live terminal's meta entry onto the new workspace; resolving
-/// the key live here is what keeps the moved agent's `AgentState`
-/// transitions flowing to the PR session instead of the now-deleted
-/// issue one — otherwise the agent (even one parked on a prompt) shows
-/// no badge on the PR and reads as lost (#161). Falls back to the
-/// `captured` key only when the terminal is already gone from the map
-/// (mid-teardown), where the event is moot anyway.
-async fn live_session_key(
-    terminal_meta: &std::sync::Arc<
-        tokio::sync::Mutex<
-            std::collections::HashMap<TerminalId, (SessionKey, lazybox_ipc::TerminalKind)>,
-        >,
-    >,
-    id: TerminalId,
-    captured: &SessionKey,
-) -> SessionKey {
-    terminal_meta
-        .lock()
-        .await
-        .get(&id)
-        .map(|(sk, _)| sk.clone())
-        .unwrap_or_else(|| captured.clone())
-}
-
 /// Which emitter produced an `Event::AgentState`. Logged on every
-/// broadcast so the PTY detector, the optimistic flip, and hook ingest
-/// interleave as one greppable stream on a single terminal — the view
-/// the #167/#161 stale-key confusion needed but never had.
+/// broadcast so the PTY detector, optimistic flip, hook ingest, and exit
+/// teardown interleave as one greppable stream on a single terminal — the
+/// view the #167/#161 stale-key confusion needed but never had.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StateSource {
     /// The output pump's PTY screen-scrape detector.
@@ -329,46 +333,121 @@ enum StateSource {
     Exit,
 }
 
-/// The single place an `Event::AgentState` is born — the output pump, the
-/// optimistic flip, and hook ingest all route their broadcast here.
+/// Result of offering a direct (hook / input / exit) transition. The
+/// candidate remains visible on a rejected or duplicate transition because
+/// hook ingest still uses its prompt shape even when the state pill did not
+/// change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DirectStateTransition {
+    previous: Option<lazybox_ipc::AgentState>,
+    candidate: Option<lazybox_ipc::AgentState>,
+    committed: bool,
+}
+
+/// The single state-ownership boundary for an agent terminal.
 ///
-/// Resolving the owning session LIVE from `terminal_meta` (via
-/// [`live_session_key`], never the `captured` key) is the #161/#167
-/// invariant: a terminal rebadged onto a PR (issue→PR collapse) keeps
-/// broadcasting under the PR session rather than the deleted issue one.
-/// Centralising it means that invariant — and the captured-key fallback,
-/// which only applies once the terminal is gone from the map
-/// (mid-teardown), where the event is moot — is reasoned about once
-/// instead of re-implemented at each emitter with subtly different miss
-/// policies. `source` tags the structured log so the three paths read as
-/// one ordered stream.
-async fn broadcast_agent_state(
+/// It co-holds `terminal_meta → agent_states` in the documented canonical
+/// order, folds one candidate under the state lock, updates the cache, and
+/// broadcasts before releasing either lock. Cache order and bus order are
+/// therefore identical: a concurrent late hook can never be delivered after
+/// a committed `Exited`, and an issue→PR rebadge cannot race between live-key
+/// resolution and the event send (#161/#167/#357).
+///
+/// `fold` returns its caller-specific result and the state to commit. Both
+/// the direct-transition wrapper and PTY-reading path route through here;
+/// this is the only production `Event::AgentState` send site.
+async fn fold_and_broadcast_agent_state<R>(
     terminal_meta: &std::sync::Arc<
         tokio::sync::Mutex<
             std::collections::HashMap<TerminalId, (SessionKey, lazybox_ipc::TerminalKind)>,
         >,
     >,
+    states: &std::sync::Arc<
+        tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
+    >,
     bus: &tokio::sync::broadcast::Sender<Event>,
     id: TerminalId,
     captured: &SessionKey,
-    previous: Option<lazybox_ipc::AgentState>,
-    state: lazybox_ipc::AgentState,
     source: StateSource,
-) {
-    let session_key = live_session_key(terminal_meta, id, captured).await;
-    tracing::info!(
-        terminal_id = ?id,
-        %session_key,
-        ?source,
-        previous = ?previous,
-        state = ?state,
-        "agent state transition → broadcasting Event::AgentState",
-    );
-    let _ = bus.send(Event::AgentState {
-        session_key,
-        terminal_id: id,
-        state,
-    });
+    fold: impl FnOnce(Option<lazybox_ipc::AgentState>, bool) -> (R, Option<lazybox_ipc::AgentState>),
+) -> R {
+    let meta = terminal_meta.lock().await;
+    let live_session = meta.get(&id).map(|(sk, _)| sk.clone());
+    let session_key = live_session.clone().unwrap_or_else(|| captured.clone());
+    let terminal_live = live_session.is_some();
+    let mut states = states.lock().await;
+    let previous = states.get(&id).copied();
+    let (result, committed) = fold(previous, terminal_live);
+    if let Some(state) = committed {
+        states.insert(id, state);
+        tracing::info!(
+            terminal_id = ?id,
+            %session_key,
+            ?source,
+            previous = ?previous,
+            state = ?state,
+            "agent state transition → cache + Event::AgentState",
+        );
+        let _ = bus.send(Event::AgentState {
+            session_key,
+            terminal_id: id,
+            state,
+        });
+    }
+    result
+}
+
+/// Offer a direct state candidate through the structural transition table,
+/// then atomically cache and broadcast it through
+/// [`fold_and_broadcast_agent_state`]. `candidate_for` runs under the state
+/// lock so current-state-dependent hook mappings and optimistic flips are
+/// compare-and-set operations rather than stale read/modify/write pairs.
+async fn transition_and_broadcast_agent_state(
+    terminal_meta: &std::sync::Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<TerminalId, (SessionKey, lazybox_ipc::TerminalKind)>,
+        >,
+    >,
+    states: &std::sync::Arc<
+        tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
+    >,
+    bus: &tokio::sync::broadcast::Sender<Event>,
+    id: TerminalId,
+    captured: &SessionKey,
+    source: StateSource,
+    candidate_for: impl FnOnce(Option<lazybox_ipc::AgentState>) -> Option<lazybox_ipc::AgentState>,
+) -> DirectStateTransition {
+    fold_and_broadcast_agent_state(
+        terminal_meta,
+        states,
+        bus,
+        id,
+        captured,
+        source,
+        |previous, terminal_live| {
+            let candidate = candidate_for(previous);
+            // `Exit` is allowed to use the captured key during teardown;
+            // every other source must still be attached to live metadata.
+            // This is the ingress gate that prevents a delayed hook/PTY
+            // reading from recreating state after terminal teardown.
+            let committed = (terminal_live || source == StateSource::Exit)
+                .then(|| {
+                    candidate.and_then(|candidate| {
+                        lazybox_agents::AgentStateMachine::transition(previous, candidate)
+                    })
+                })
+                .flatten();
+            (
+                DirectStateTransition {
+                    previous,
+                    candidate,
+                    committed: committed.is_some(),
+                },
+                committed,
+            )
+        },
+    )
+    .await
 }
 
 /// Spawn a terminal inside a session and broadcast
@@ -669,6 +748,16 @@ pub async fn handle_spawn(
         elapsed_ms = t0.elapsed().as_millis(),
         "handle_spawn: backend.spawn ok",
     );
+    // A user deletion waits for in-flight spawns, but that wait is bounded:
+    // provisioning can wedge in git/backend IO. Re-check the shared
+    // tombstone at the last point before this process becomes a live terminal
+    // so a spawn finishing after the bound cannot recreate the workspace.
+    if cancel_spawn_for_deleted_workspace(config, &session_key, &backend_key).await {
+        if let Some(path) = hook_settings {
+            let _ = std::fs::remove_file(path);
+        }
+        return;
+    }
     // Phase 2 of 2: now the backend key exists, atomically rewrite the
     // settings file with the real correlated hook command.
     if hook_settings.is_some()
@@ -1238,6 +1327,47 @@ pub async fn handle_spawn(
     }
 }
 
+/// Kill a backend process that finished spawning after its workspace entered
+/// deletion. Returns true when the caller must abort terminal registration.
+/// The pre-registration location is load-bearing: after this returns true no
+/// terminal map, persistence row, output pump, or `TerminalSpawned` event has
+/// been created, so teardown has nothing partial to reconcile.
+async fn cancel_spawn_for_deleted_workspace(
+    config: &ServerConfig,
+    session_key: &SessionKey,
+    backend_key: &str,
+) -> bool {
+    if !config
+        .deleted_workspaces
+        .lock()
+        .contains(session_key.as_str())
+    {
+        return false;
+    }
+
+    tracing::warn!(
+        workspace = session_key.as_str(),
+        backend_key,
+        "spawn completed after workspace deletion began — terminating before registration",
+    );
+    if let Err(error) = config.backend.kill(backend_key).await {
+        tracing::error!(
+            workspace = session_key.as_str(),
+            backend_key,
+            %error,
+            "late spawn cancellation failed; backend may require manual cleanup",
+        );
+        let _ = config.bus.send(Event::provider_error_permanent(
+            "spawn",
+            format!(
+                "workspace {} was deleted, but its late terminal {backend_key} could not be stopped: {error}",
+                session_key.as_str()
+            ),
+        ));
+    }
+    true
+}
+
 /// Which rung of the inject ladder released the spawn-time paste.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InjectTrigger {
@@ -1700,7 +1830,7 @@ async fn provision_worktree(
             });
         })
     };
-    let mgr = lazybox_git_ops::WorktreeManager::default_base().with_progress(sink);
+    let mgr = config.worktree_manager().with_progress(sink);
     let cfg = lazybox_config::Config::load().unwrap_or_default();
 
     // The upstream `owner/repo` to clone, when the workspace has one. A
@@ -2798,13 +2928,65 @@ fn strip_ansi(input: &str) -> String {
 /// later inserted for a recovered terminal (agent_states,
 /// hook_driven_terminals, input_needed_shapes, prompt_submit_signals)
 /// outlived it, and its `terminal:*`/`terminal-noperm:*`/
-/// `terminal-msg:*` kv rows accumulated in state.db forever.
+/// `terminal-msg:*`/`terminal-draft:*` kv rows accumulated in state.db
+/// forever.
 pub(crate) async fn teardown_exited_terminal(
     config: &ServerConfig,
     terminal_id: TerminalId,
     backend_key: &str,
     exit_code: Option<i32>,
 ) {
+    finish_terminal(config, terminal_id, backend_key, exit_code, true).await;
+}
+
+/// Complete the user-driven kill path through the same lifecycle owner as a
+/// self-exit. The output pump still owns backend `release` once it observes
+/// the actual child exit; if it wins the teardown race first, this call is an
+/// idempotent no-op.
+pub(crate) async fn detach_killed_terminal(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    backend_key: &str,
+) {
+    finish_terminal(config, terminal_id, backend_key, None, false).await;
+}
+
+async fn finish_terminal(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    backend_key: &str,
+    exit_code: Option<i32>,
+    release_backend: bool,
+) {
+    // Atomically claim the wire terminal. Forced workspace deletion and the
+    // output pump can race to finish the same child; only the winner emits
+    // lifecycle events and sweeps bookkeeping. The output-pump loser still
+    // releases the backend slot after observing the real exit.
+    let registered_key = config.terminals.lock().await.remove(&terminal_id);
+    match registered_key.as_deref() {
+        Some(key) if key == backend_key => {}
+        Some(other) => {
+            tracing::error!(
+                ?terminal_id,
+                expected = backend_key,
+                registered = other,
+                "terminal teardown key mismatch — refusing to sweep the wrong terminal",
+            );
+            config
+                .terminals
+                .lock()
+                .await
+                .insert(terminal_id, other.to_string());
+            return;
+        }
+        None => {
+            if release_backend {
+                config.backend.release(backend_key).await;
+            }
+            return;
+        }
+    }
+
     // A spawned session going away used to be silent — a crashing agent
     // (e.g. its binary swapped out mid-run by a Homebrew self-upgrade,
     // issue #355) left no trace in the log, so #356 read as "the whole
@@ -2866,17 +3048,19 @@ pub(crate) async fn teardown_exited_terminal(
     // to the terminal `Exited` state, not linger as a false "working" spinner
     // (#356/#357). Broadcast it before the maps are swept — `agent_states`
     // still holds the prior value and `terminal_meta` still resolves the live
-    // session key. Only agent terminals carry a state pill; shells don't.
+    // session key. The atomic owner commits `Exited` into the cache before it
+    // broadcasts, so a racing late hook/PTY reading sees the absorbing state
+    // and cannot resurrect the process. Only agent terminals carry a state
+    // pill; shells don't.
     if let Some((session_key, TerminalKind::Agent(_))) = meta {
-        let previous = config.agent_states.lock().await.get(&terminal_id).copied();
-        broadcast_agent_state(
+        transition_and_broadcast_agent_state(
             &config.terminal_meta,
+            &config.agent_states,
             &config.bus,
             terminal_id,
             &session_key,
-            previous,
-            lazybox_ipc::AgentState::Exited { code: exit_code },
             StateSource::Exit,
+            |_| Some(lazybox_ipc::AgentState::Exited { code: exit_code }),
         )
         .await;
     }
@@ -2885,16 +3069,14 @@ pub(crate) async fn teardown_exited_terminal(
         exit_code,
         last_output,
     });
-    // INTENTIONAL non-canonical sequence: terminals first (so
-    // `snapshot_terminals` stops seeing this id immediately) and
-    // terminal_meta LAST among the meta-bearing maps (so any snapshot
-    // that still saw it in terminals can resolve the meta lookup).
-    // Safe because no two locks are co-held — each
+    // `terminals` was removed by the atomic claim above, so snapshots stop
+    // seeing this id before any auxiliary map disappears. Keep terminal_meta
+    // until the state event is sent, then close that ingress gate before
+    // dropping the absorbing Exited tombstone. Safe because no two locks are
+    // co-held here — each
     // `.lock().await.remove(...)` releases at end-of-statement.
     // `crate::TERMINAL_MAP_LOCK_ORDER` applies to co-holding sites only.
-    config.terminals.lock().await.remove(&terminal_id);
     config.terminal_sessions.lock().await.remove(&terminal_id);
-    config.agent_states.lock().await.remove(&terminal_id);
     config.agent_detect_resets.lock().await.remove(&terminal_id);
     config
         .hook_driven_terminals
@@ -2907,7 +3089,12 @@ pub(crate) async fn teardown_exited_terminal(
         .await
         .remove(&terminal_id);
     config.input_needed_shapes.lock().await.remove(&terminal_id);
+    // Close the state owner's live-terminal ingress gate before dropping the
+    // absorbing Exited tombstone. Reversing these two removals creates a
+    // window where a delayed hook sees `(meta: live, state: None)` and
+    // resurrects the terminal from its first reading.
     config.terminal_meta.lock().await.remove(&terminal_id);
+    config.agent_states.lock().await.remove(&terminal_id);
     config
         .no_permission_terminals
         .lock()
@@ -2915,19 +3102,20 @@ pub(crate) async fn teardown_exited_terminal(
         .remove(&terminal_id);
     config.on_main_terminals.lock().await.remove(&terminal_id);
     config.terminal_models.lock().await.remove(&terminal_id);
-    let _ = config.store.delete_kv(&format!("terminal:{backend_key}"));
-    let _ = config
-        .store
-        .delete_kv(&format!("terminal-noperm:{backend_key}"));
-    let _ = config
-        .store
-        .delete_kv(&format!("terminal-msg:{backend_key}"));
+    for field in TerminalPersistedField::ALL {
+        let key = field.key(backend_key);
+        if let Err(error) = config.store.delete_kv(&key) {
+            tracing::warn!(?terminal_id, %key, %error, "terminal teardown: kv cleanup failed");
+        }
+    }
     // Release the backend's per-session slot (PTY fds, writer thread,
     // replay ring). The exit has been observed by the time we're here,
     // so this is a pure handle drop — for a self-exited session it's
     // the ONLY release path: `kill` never ran, and before this call
     // existed the slot lived in the backend map forever.
-    config.backend.release(backend_key).await;
+    if release_backend {
+        config.backend.release(backend_key).await;
+    }
     // Drop the per-session hook settings file we generated at spawn.
     // Best-effort — a leftover file is harmless (it's overwritten by
     // the next spawn that reuses the id, which can't happen anyway
@@ -3139,11 +3327,11 @@ pub(crate) async fn classify_quiet_screen(
 
 /// Shared tail of both PTY state paths (`note_pty_activity`,
 /// `classify_quiet_screen`): the hooks-primary gate, the state-machine
-/// fold under a single `agent_states` compare-and-set, and — on a real
-/// change — the emit via [`broadcast_agent_state`]. Lifted out of the
-/// output pump's spawn closure so the emitted-on-change sequence is
-/// unit-testable (the #167/#161 bugs were about the transition stream,
-/// not single-frame classification).
+/// fold under the shared state-ownership boundary, and — on a real change —
+/// the ordered cache update + emit. Lifted out of the output pump's spawn
+/// closure so the emitted-on-change sequence is unit-testable (the
+/// #167/#161 bugs were about the transition stream, not single-frame
+/// classification).
 async fn commit_pty_reading(
     agent: &std::sync::Arc<dyn lazybox_agents::Agent>,
     detect_window: &[u8],
@@ -3225,55 +3413,43 @@ async fn commit_pty_reading(
             reading.clear = true;
         }
     }
-    // Read + decide + insert under ONE lock acquisition. A
-    // separate read-then-insert let a concurrent writer (hook
-    // ingest, the optimistic Enter flip) land between the two
-    // and be silently clobbered by a stale decision. The machine
-    // owns the transition table (`Done` stickiness) and the flap
-    // damping.
-    let (current, committed) = {
-        let mut map = states.lock().await;
-        let current = map.get(&id).copied();
-        match state_machine.on_reading(current, reading) {
-            lazybox_agents::Outcome::Committed(committed) => {
-                map.insert(id, committed);
-                (current, committed)
-            }
-            // Keep the flap-damping visible at debug — a stuck / missing `?`
-            // pill is bisected from this line. `current → new_state` names
-            // the damped edge. (Elevated from the steady-state cases below,
-            // which the same log would flood at 100+ chunks/sec.)
-            lazybox_agents::Outcome::Damped => {
-                drop(map);
-                tracing::debug!(
-                    terminal_id = ?id,
-                    ?current,
-                    new_state = ?reading.state,
-                    "state hysteresis: damped ambiguous flap",
-                );
-                return;
-            }
-            // A per-chunk dedupe (steady state) or a structurally held edge
-            // (`Done` stickiness) — silent, as before.
-            lazybox_agents::Outcome::Unchanged | lazybox_agents::Outcome::Rejected => return,
-        }
-    };
-    // The broadcast itself — live-key resolution, the structured
-    // log, and the `bus.send` — lives in `broadcast_agent_state`
-    // so the pump, the optimistic flip, and hook ingest all emit
-    // `AgentState` through one path. That keeps the #161/#167
-    // "re-read the owning key from `terminal_meta`, never the
-    // captured one" invariant in a single place instead of three.
-    broadcast_agent_state(
+    // Decide, insert, and broadcast under the same canonical lock boundary.
+    // A separate cache insert followed by an unlocked broadcast allowed a
+    // concurrent hook/exit to commit second but publish first, presenting the
+    // client with a state older than the cache.
+    let outcome = fold_and_broadcast_agent_state(
         terminal_meta,
+        states,
         bus,
         id,
         session_key,
-        current,
-        committed,
         StateSource::Pty,
+        |current, terminal_live| {
+            if !terminal_live {
+                return (lazybox_agents::Outcome::Rejected, None);
+            }
+            let outcome = state_machine.on_reading(current, reading);
+            let committed = match outcome {
+                lazybox_agents::Outcome::Committed(state) => Some(state),
+                _ => None,
+            };
+            (outcome, committed)
+        },
     )
     .await;
+    match outcome {
+        // Keep flap-damping visible at debug — a stuck / missing `?` pill is
+        // bisected from this line. (Steady-state and structural rejections
+        // stay silent to avoid flooding at 100+ chunks/sec.)
+        lazybox_agents::Outcome::Damped => tracing::debug!(
+            terminal_id = ?id,
+            new_state = ?reading.state,
+            "state hysteresis: damped ambiguous flap",
+        ),
+        lazybox_agents::Outcome::Committed(_)
+        | lazybox_agents::Outcome::Unchanged
+        | lazybox_agents::Outcome::Rejected => {}
+    }
 }
 
 pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes: &[u8]) {
@@ -3365,20 +3541,19 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
     // flip behind the same choke point as the detection paths (it always
     // commits here, since both `InputNeeded → Working` and `Done → Working`
     // are legal, state-changing edges).
-    let prev = {
-        let mut map = config.agent_states.lock().await;
-        let prev = map.get(&terminal_id).copied();
-        if !flippable(prev) {
-            return;
-        }
-        let Some(committed) =
-            lazybox_agents::AgentStateMachine::transition(prev, lazybox_ipc::AgentState::Working)
-        else {
-            return;
-        };
-        map.insert(terminal_id, committed);
-        prev
-    };
+    let transition = transition_and_broadcast_agent_state(
+        &config.terminal_meta,
+        &config.agent_states,
+        &config.bus,
+        terminal_id,
+        &session_key,
+        StateSource::Flip,
+        |current| flippable(current).then_some(lazybox_ipc::AgentState::Working),
+    )
+    .await;
+    if !transition.committed {
+        return;
+    }
     // Tell the output pump to drop its detection buffer on the next
     // chunk. Without this the just-answered prompt's markers linger in
     // the rolling window and re-fire InputNeeded on the very next
@@ -3387,16 +3562,6 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
     // prompt. (The regression behind issue #101: "the ? won't go away
     // after I answer.")
     config.agent_detect_resets.lock().await.insert(terminal_id);
-    broadcast_agent_state(
-        &config.terminal_meta,
-        &config.bus,
-        terminal_id,
-        &session_key,
-        prev,
-        lazybox_ipc::AgentState::Working,
-        StateSource::Flip,
-    )
-    .await;
 }
 
 /// How long the inject path waits for an active permission gate /
@@ -3956,19 +4121,18 @@ pub async fn handle_ingest_hook(
     // machine's transition table commits it (or rejects it — e.g. a
     // `SessionStart`/`SessionEnd` idle hook must not clear a `Done` the
     // preceding `Stop` just set, #80).
-    let (prev, new_state, changed) = {
-        let mut states = config.agent_states.lock().await;
-        let prev = states.get(&terminal_id).copied();
-        let Some(new_state) = lazybox_agents::hook::hook_to_state(&hook, prev) else {
-            return;
-        };
-        match lazybox_agents::AgentStateMachine::transition(prev, new_state) {
-            Some(committed) => {
-                states.insert(terminal_id, committed);
-                (prev, new_state, true)
-            }
-            None => (prev, new_state, false),
-        }
+    let transition = transition_and_broadcast_agent_state(
+        &config.terminal_meta,
+        &config.agent_states,
+        &config.bus,
+        terminal_id,
+        &session_key,
+        StateSource::Hook,
+        |current| lazybox_agents::hook::hook_to_state(&hook, current),
+    )
+    .await;
+    let Some(new_state) = transition.candidate else {
+        return;
     };
     // Record the prompt's shape — whether a bare chooser keystroke is a
     // complete answer — for `handle_write`'s optimistic flip. Done even
@@ -3981,29 +4145,19 @@ pub async fn handle_ingest_hook(
             lazybox_agents::hook::notification_prompt_shape(hook.notification.as_deref()),
         );
     }
-    if !changed {
+    if !transition.committed {
         return;
     }
     // Hook-specific line (carries the originating `hook.kind`); the
-    // source-tagged broadcast line is emitted by `broadcast_agent_state`.
+    // source-tagged cache+broadcast line is emitted by the state owner.
     tracing::info!(
         ?terminal_id,
         %session_key,
-        previous = ?prev,
+        previous = ?transition.previous,
         state = ?new_state,
         hook = ?hook.kind,
         "hook → AgentState transition",
     );
-    broadcast_agent_state(
-        &config.terminal_meta,
-        &config.bus,
-        terminal_id,
-        &session_key,
-        prev,
-        new_state,
-        StateSource::Hook,
-    )
-    .await;
 }
 
 /// Bind already-running backend sessions to fresh wire TerminalIds.
@@ -4159,7 +4313,7 @@ pub(crate) async fn persist_terminal_meta(
     // otherwise pin a runtime worker. Same for the sibling helpers
     // below.
     let store = config.store.clone();
-    let kv_key = format!("terminal:{backend_key}");
+    let kv_key = TerminalPersistedField::Metadata.key(backend_key);
     match tokio::task::spawn_blocking(move || store.set_kv(&kv_key, &payload)).await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => tracing::warn!("persist terminal_meta: store write failed: {e}"),
@@ -4174,7 +4328,7 @@ async fn load_terminal_meta(
     backend_key: &str,
 ) -> Option<(SessionKey, TerminalKind)> {
     let store = config.store.clone();
-    let kv_key = format!("terminal:{backend_key}");
+    let kv_key = TerminalPersistedField::Metadata.key(backend_key);
     let raw = tokio::task::spawn_blocking(move || store.get_kv(&kv_key))
         .await
         .ok()?
@@ -4195,7 +4349,7 @@ async fn persist_no_permission(config: &ServerConfig, backend_key: &str, skip_pe
         return;
     }
     let store = config.store.clone();
-    let kv_key = format!("terminal-noperm:{backend_key}");
+    let kv_key = TerminalPersistedField::NoPermission.key(backend_key);
     match tokio::task::spawn_blocking(move || store.set_kv(&kv_key, "1")).await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
@@ -4209,7 +4363,7 @@ async fn persist_no_permission(config: &ServerConfig, backend_key: &str, skip_pe
 /// was launched in no-permission mode.
 async fn load_no_permission(config: &ServerConfig, backend_key: &str) -> bool {
     let store = config.store.clone();
-    let kv_key = format!("terminal-noperm:{backend_key}");
+    let kv_key = TerminalPersistedField::NoPermission.key(backend_key);
     tokio::task::spawn_blocking(move || store.get_kv(&kv_key))
         .await
         .ok()
@@ -4234,7 +4388,7 @@ pub async fn handle_record_user_message(
         return;
     };
     let store = config.store.clone();
-    let kv_key = format!("terminal-msg:{backend_key}");
+    let kv_key = TerminalPersistedField::UserMessage.key(&backend_key);
     let message = message.to_string();
     match tokio::task::spawn_blocking(move || store.set_kv(&kv_key, &message)).await {
         Ok(Ok(())) => {}
@@ -4248,7 +4402,7 @@ pub async fn handle_record_user_message(
 /// sync-rusqlite offload (issue #34's spawn_blocking convention).
 async fn load_user_message(config: &ServerConfig, backend_key: &str) -> Option<String> {
     let store = config.store.clone();
-    let kv_key = format!("terminal-msg:{backend_key}");
+    let kv_key = TerminalPersistedField::UserMessage.key(backend_key);
     tokio::task::spawn_blocking(move || store.get_kv(&kv_key))
         .await
         .ok()?
@@ -4273,7 +4427,7 @@ pub async fn handle_record_composing_buffer(
         return;
     };
     let store = config.store.clone();
-    let kv_key = format!("terminal-draft:{backend_key}");
+    let kv_key = TerminalPersistedField::Draft.key(&backend_key);
     let buffer = buffer.to_string();
     let write = tokio::task::spawn_blocking(move || {
         if buffer.is_empty() {
@@ -4294,7 +4448,7 @@ pub async fn handle_record_composing_buffer(
 /// `None` when the terminal has no pending draft.
 async fn load_composing_buffer(config: &ServerConfig, backend_key: &str) -> Option<String> {
     let store = config.store.clone();
-    let kv_key = format!("terminal-draft:{backend_key}");
+    let kv_key = TerminalPersistedField::Draft.key(backend_key);
     tokio::task::spawn_blocking(move || store.get_kv(&kv_key))
         .await
         .ok()?
@@ -4492,6 +4646,26 @@ fn kind_id(kind: &TerminalKind) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn terminal_persistence_inventory_has_unique_cleanup_keys() {
+        let keys: std::collections::HashSet<_> = TerminalPersistedField::ALL
+            .into_iter()
+            .map(|field| field.key("backend"))
+            .collect();
+        assert_eq!(keys.len(), TerminalPersistedField::ALL.len());
+        assert_eq!(
+            keys,
+            [
+                "terminal:backend".to_string(),
+                "terminal-noperm:backend".to_string(),
+                "terminal-msg:backend".to_string(),
+                "terminal-draft:backend".to_string(),
+            ]
+            .into(),
+            "every persisted terminal field must live in the teardown inventory",
+        );
+    }
+
     /// Per-repo env lookup returns the expected pairs and is
     /// case-sensitive on the repo key.
     #[test]
@@ -4659,15 +4833,16 @@ mod tests {
     /// session. The output pump must broadcast its `AgentState` under the
     /// CURRENT (PR) key, not the issue key it captured at spawn — else a
     /// moved agent (e.g. one waiting on a prompt) emits state for the
-    /// deleted issue workspace and looks lost. `live_session_key` is the
-    /// resolution the pump uses; it must prefer the map over the captured
-    /// fallback.
+    /// deleted issue workspace and looks lost. The state owner must prefer
+    /// the map over the captured fallback.
     #[tokio::test]
-    async fn live_session_key_follows_a_rebadged_terminal_onto_the_pr() {
+    async fn state_owner_follows_a_rebadged_terminal_onto_the_pr() {
         let id = TerminalId(7);
         let issue_key: SessionKey = "github-o-r-161".into(); // captured at spawn
         let pr_key: SessionKey = "github-o-r-164".into(); // where rebadge moved it
         let meta = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        let states = input_resolved_states();
+        let (bus, mut rx) = tokio::sync::broadcast::channel(4);
         meta.lock().await.insert(
             id,
             (
@@ -4676,9 +4851,22 @@ mod tests {
             ),
         );
 
-        let resolved = live_session_key(&meta, id, &issue_key).await;
+        let transition = transition_and_broadcast_agent_state(
+            &meta,
+            &states,
+            &bus,
+            id,
+            &issue_key,
+            StateSource::Hook,
+            |_| Some(lazybox_ipc::AgentState::Working),
+        )
+        .await;
+        assert!(transition.committed);
+        let Event::AgentState { session_key, .. } = rx.recv().await.expect("state event") else {
+            panic!("expected AgentState")
+        };
         assert_eq!(
-            resolved, pr_key,
+            session_key, pr_key,
             "a rebadged terminal must broadcast state under the PR session, not the captured issue key",
         );
     }
@@ -4687,15 +4875,113 @@ mod tests {
     /// gone from `terminal_meta` (mid-teardown) — a still-mapped terminal
     /// never falls back, so a stale capture can't leak through.
     #[tokio::test]
-    async fn live_session_key_falls_back_to_captured_when_terminal_swept() {
+    async fn state_owner_falls_back_to_captured_when_terminal_swept() {
         let id = TerminalId(7);
         let captured: SessionKey = "github-o-r-161".into();
         let meta = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        let states = input_resolved_states();
+        let (bus, mut rx) = tokio::sync::broadcast::channel(4);
 
-        let resolved = live_session_key(&meta, id, &captured).await;
+        transition_and_broadcast_agent_state(
+            &meta,
+            &states,
+            &bus,
+            id,
+            &captured,
+            StateSource::Exit,
+            |_| Some(lazybox_ipc::AgentState::Exited { code: Some(0) }),
+        )
+        .await;
+        let Event::AgentState { session_key, .. } = rx.recv().await.expect("state event") else {
+            panic!("expected AgentState")
+        };
         assert_eq!(
-            resolved, captured,
+            session_key, captured,
             "missing meta entry falls back to the captured key"
+        );
+    }
+
+    #[tokio::test]
+    async fn state_owner_rejects_non_exit_signal_after_metadata_is_swept() {
+        let id = TerminalId(7);
+        let captured: SessionKey = "github-o-r-161".into();
+        let meta = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        let states = input_resolved_states();
+        let (bus, mut rx) = tokio::sync::broadcast::channel(4);
+
+        let late = transition_and_broadcast_agent_state(
+            &meta,
+            &states,
+            &bus,
+            id,
+            &captured,
+            StateSource::Hook,
+            |_| Some(lazybox_ipc::AgentState::Working),
+        )
+        .await;
+
+        assert!(!late.committed);
+        assert!(states.lock().await.is_empty());
+        assert!(
+            rx.try_recv().is_err(),
+            "a hook for a swept terminal must not recreate or broadcast state"
+        );
+    }
+
+    #[tokio::test]
+    async fn state_owner_commits_exit_and_rejects_late_resurrection() {
+        use lazybox_ipc::AgentState;
+
+        let id = TerminalId(8);
+        let key: SessionKey = "github-o-r-357".into();
+        let meta = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        let states = input_resolved_states();
+        let (bus, mut rx) = tokio::sync::broadcast::channel(4);
+        meta.lock().await.insert(
+            id,
+            (
+                key.clone(),
+                lazybox_ipc::TerminalKind::Agent("codex".into()),
+            ),
+        );
+        states.lock().await.insert(id, AgentState::Working);
+
+        let exited = transition_and_broadcast_agent_state(
+            &meta,
+            &states,
+            &bus,
+            id,
+            &key,
+            StateSource::Exit,
+            |_| Some(AgentState::Exited { code: Some(9) }),
+        )
+        .await;
+        assert!(exited.committed);
+        let late = transition_and_broadcast_agent_state(
+            &meta,
+            &states,
+            &bus,
+            id,
+            &key,
+            StateSource::Hook,
+            |_| Some(AgentState::Working),
+        )
+        .await;
+        assert!(!late.committed, "a late hook must not resurrect Exited");
+        assert_eq!(
+            states.lock().await.get(&id),
+            Some(&AgentState::Exited { code: Some(9) })
+        );
+        assert!(matches!(
+            rx.recv().await,
+            Ok(Event::AgentState {
+                state: AgentState::Exited { code: Some(9) },
+                ..
+            })
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "the rejected late Working state must not be broadcast"
         );
     }
 
@@ -5017,6 +5303,37 @@ mod tests {
         )
         .await
         .expect("no in-flight spawn → no wait");
+    }
+
+    #[tokio::test]
+    async fn late_spawn_is_killed_before_registration_when_delete_timed_out() {
+        let (config, _mock) = ServerConfig::in_memory_with_mock();
+        let workspace: SessionKey = "test:late-spawn".into();
+        let backend_key = config
+            .backend
+            .spawn(&["codex".into()], None, &[], "late-spawn")
+            .await
+            .unwrap();
+
+        assert!(
+            !cancel_spawn_for_deleted_workspace(&config, &workspace, &backend_key).await,
+            "a live workspace must not cancel its spawn"
+        );
+        config
+            .deleted_workspaces
+            .lock()
+            .insert(workspace.as_str().to_string());
+        assert!(
+            cancel_spawn_for_deleted_workspace(&config, &workspace, &backend_key).await,
+            "the post-provision tombstone check must abort late registration"
+        );
+        assert_eq!(
+            config.backend.wait_exit(&backend_key).await,
+            Some(-1),
+            "the unregistered backend process must be terminated, not orphaned"
+        );
+        assert!(config.terminals.lock().await.is_empty());
+        assert!(config.terminal_meta.lock().await.is_empty());
     }
 
     /// Concurrent injections must not clobber each other's submit
@@ -7052,8 +7369,8 @@ mod tests {
     /// is rebadged onto a PR mid-flight, ALL THREE emitters — the PTY pump,
     /// the optimistic flip in `handle_write`, and hook ingest — must
     /// broadcast under the NEW (PR) key, not the issue key captured at
-    /// spawn. The unify refactor routes all three through
-    /// `broadcast_agent_state`, so this is the one invariant to pin.
+    /// spawn. The unified state owner routes all three through the same
+    /// atomic cache+broadcast boundary, so this is the invariant to pin.
     #[tokio::test]
     async fn all_three_emitters_broadcast_under_the_rebadged_key() {
         use lazybox_ipc::AgentState;

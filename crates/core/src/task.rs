@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// A unique identifier for a task, scoped by source.
 /// e.g. ("github", "owner/repo#123") or ("linear", "ENG-456")
@@ -46,14 +46,13 @@ pub enum TaskState {
 /// the sidebar renders the name with the color as foreground. Color
 /// is best-effort: empty string means "no color known."
 ///
-/// Serde compatibility: deserializes from either a bare string (old
-/// wire format) or `{name, color}`. Pre-color persisted state keeps
-/// working — color defaults to empty until the next poll repopulates
-/// it from the provider. The `#[serde(from = "LabelRepr")]` attribute
-/// keeps the shim small; `LabelRepr` is the on-wire shape and
-/// `From<LabelRepr>` does the normalization.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(from = "LabelRepr")]
+/// Serde compatibility: human-readable formats deserialize from either a
+/// bare string (old persisted JSON) or `{name, color}`. Binary formats use
+/// the fixed current struct shape: serde's untagged-enum visitor requires
+/// `deserialize_any`, which bincode deliberately does not support. Keeping
+/// the two paths explicit prevents a JSON migration shim from breaking the
+/// daemon/client socket protocol.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize)]
 pub struct Label {
     pub name: String,
     #[serde(default)]
@@ -99,6 +98,32 @@ impl From<LabelRepr> for Label {
             },
             LabelRepr::Struct { name, color } => Self { name, color },
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for Label {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            return LabelRepr::deserialize(deserializer).map(Into::into);
+        }
+
+        // This helper intentionally mirrors Label's serialized field order.
+        // Bincode is sequence-based and cannot drive the untagged legacy
+        // visitor above; protocol-version negotiation protects this fixed
+        // binary shape from mixed-version peers.
+        #[derive(Deserialize)]
+        struct BinaryLabel {
+            name: String,
+            color: String,
+        }
+
+        BinaryLabel::deserialize(deserializer).map(|wire| Self {
+            name: wire.name,
+            color: wire.color,
+        })
     }
 }
 
@@ -777,5 +802,17 @@ mod status_tag_tests {
         let json = r#"[{"name":"bug"}]"#;
         let labels: Vec<Label> = serde_json::from_str(json).unwrap();
         assert_eq!(labels, vec![Label::new("bug")]);
+    }
+
+    #[test]
+    fn label_round_trips_through_non_self_describing_bincode() {
+        let label = Label::with_color("bug", "d73a4a");
+        let config = bincode::config::legacy();
+        let encoded = bincode::serde::encode_to_vec(&label, config).unwrap();
+        let (decoded, consumed): (Label, usize) =
+            bincode::serde::decode_from_slice(&encoded, config).unwrap();
+
+        assert_eq!(decoded, label);
+        assert_eq!(consumed, encoded.len());
     }
 }

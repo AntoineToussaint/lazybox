@@ -2179,12 +2179,25 @@ async fn collapse_into_pr_carries_live_terminal_to_the_pr() {
 
         // Issue #50 and PR #51 (which closes #50). Seed both before
         // serving so the collapse handler can resolve the claiming PR.
-        let issue = lazybox_core::Workspace::from_task(
+        let mut issue = lazybox_core::Workspace::from_task(
             collapse_task("o/r#50", "https://github.com/o/r/issues/50", vec![]),
             chrono::Utc::now(),
         );
         let issue_task_id = issue.primary_task().unwrap().id.clone();
         let issue_key = issue.key.clone();
+        // This test owns the collapse/rebadge contract, not worktree
+        // provisioning. Seed an existing local session so it never
+        // clones the fake `o/r` remote or depends on network latency,
+        // credentials, and the developer's global git configuration.
+        let worktree = tempfile::tempdir().unwrap();
+        issue.add_session(lazybox_core::WorkspaceSession::new(
+            issue_key.clone(),
+            lazybox_core::SessionKind::Agent {
+                agent_id: "claude".into(),
+            },
+            worktree.path().to_path_buf(),
+            chrono::Utc::now(),
+        ));
         let pr = lazybox_core::Workspace::from_task(
             collapse_task(
                 "o/r#51",
@@ -2232,8 +2245,8 @@ async fn collapse_into_pr_carries_live_terminal_to_the_pr() {
         };
         let backend_key = mock.list().await.unwrap().into_iter().next().unwrap();
 
-        // Sanity: the spawn persisted a session record onto the issue
-        // workspace before we collapse.
+        // Sanity: spawning reused the persisted session rather than
+        // manufacturing a second one before the collapse.
         let issue_before: lazybox_core::Workspace = serde_json::from_str(
             &config
                 .store
@@ -2247,7 +2260,7 @@ async fn collapse_into_pr_carries_live_terminal_to_the_pr() {
         assert_eq!(
             issue_before.sessions.len(),
             1,
-            "spawn must persist the session on the issue workspace",
+            "spawn must reuse the issue workspace's persisted session",
         );
 
         // Join the issue into the PR.

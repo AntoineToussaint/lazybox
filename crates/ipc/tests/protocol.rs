@@ -8,8 +8,9 @@
 
 use lazybox_ipc::{
     AgentApprovalDecision, AgentInputMessage, AgentQuestionAnswer, AgentRunId, AgentRuntimeMode,
-    AgentState, AgentUsage, Command, Event, PrincipalId, ProviderCredentialInput,
-    ProviderCredentialMetadata, TerminalId, TerminalKind, TerminalSnapshot,
+    AgentState, AgentUsage, Command, Event, HookEvent, HookEventKind, PrincipalId,
+    ProviderCredentialInput, ProviderCredentialMetadata, RemovableTerminalState, SpawnFallback,
+    TerminalId, TerminalKind, TerminalSnapshot, WorktreeStep, WorktreeStepStatus,
 };
 use tokio::io::duplex;
 
@@ -50,6 +51,14 @@ fn sample_workspace() -> lazybox_core::Workspace {
         closes_issues: vec![],
     };
     lazybox_core::Workspace::from_task(task, chrono::Utc::now())
+}
+
+fn sample_project() -> lazybox_core::Project {
+    lazybox_core::Project::new(
+        lazybox_core::ProjectKey::github("o", "r"),
+        "o/r",
+        chrono::Utc::now(),
+    )
 }
 
 fn all_commands() -> Vec<Command> {
@@ -168,11 +177,75 @@ fn all_commands() -> Vec<Command> {
         Command::ListProviderCredentials {
             principal_id: principal_id.clone(),
         },
+        Command::RecordUserMessage {
+            terminal_id: TerminalId(7),
+            message: "fix the flaky test".into(),
+        },
+        Command::InjectPrompt {
+            terminal_id: TerminalId(7),
+            prompt: "review this diff".into(),
+            fallback_spawn: Some(SpawnFallback {
+                session_key: key.clone(),
+                session_id: None,
+                kind: TerminalKind::Agent("codex".into()),
+                cwd: Some("/tmp/worktree".into()),
+                model_alias: Some("L".into()),
+            }),
+            submit: false,
+        },
+        Command::RecordComposingBuffer {
+            terminal_id: TerminalId(7),
+            buffer: "half typed".into(),
+        },
+        Command::IngestHook {
+            terminal_id: TerminalId(7),
+            hook: HookEvent {
+                kind: HookEventKind::PermissionRequest,
+                session_id: Some("agent-session".into()),
+                cwd: Some("/tmp/worktree".into()),
+                tool_name: Some("Bash".into()),
+                notification: Some("permission_prompt".into()),
+            },
+            backend_key: Some("tmux-key".into()),
+        },
         Command::Kill {
             session_key: key.clone(),
         },
+        Command::RemoveMergedWorkspace {
+            session_key: key.clone(),
+        },
+        Command::DeleteProject {
+            project_key: lazybox_core::ProjectKey::github("o", "r"),
+        },
+        Command::CollapseIntoPr {
+            issue_workspace_key: key.clone(),
+        },
         Command::MarkRead {
             session_key: key.clone(),
+        },
+        Command::FocusWorkspace {
+            session_key: key.clone(),
+        },
+        Command::MarkActivityRead {
+            session_key: key.clone(),
+            index: 2,
+        },
+        Command::UnmarkActivityRead {
+            session_key: key.clone(),
+            index: 2,
+        },
+        Command::CreateWorkspace {
+            name: "audit-wire".into(),
+            project_key: lazybox_core::ProjectKey::github("o", "r"),
+            spawn_agent: Some("codex".into()),
+        },
+        Command::CreateProject {
+            name: "local project".into(),
+        },
+        Command::SetSessionLayout {
+            session_key: key.clone(),
+            session_id_raw: "00000000-0000-0000-0000-000000000001".into(),
+            layout_json: r#"{"mode":"tabs"}"#.into(),
         },
         Command::Snooze {
             session_key: key.clone(),
@@ -180,6 +253,53 @@ fn all_commands() -> Vec<Command> {
         },
         Command::Unsnooze {
             session_key: key.clone(),
+        },
+        Command::SetAutoMergeOnGreen {
+            session_key: key.clone(),
+            enabled: true,
+        },
+        Command::SetAutoFixPolicy {
+            session_key: key.clone(),
+            kind: lazybox_core::AutoFixKind::CiFailure,
+            arm: lazybox_core::PolicyArm::Arm,
+        },
+        Command::PostReply {
+            session_key: key.clone(),
+            body: "ship it".into(),
+        },
+        Command::ConfirmMerge {
+            issue_workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
+            pr_workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            accept: true,
+        },
+        Command::AdoptSessions {
+            source_workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
+            target_workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+        },
+        Command::MergePr {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+        },
+        Command::CloseIssue {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
+        },
+        Command::RequestReviewers {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            logins: vec!["octocat".into()],
+        },
+        Command::AddAssignees {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            logins: vec!["octocat".into()],
+        },
+        Command::SetAssignees {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            logins: vec![],
+        },
+        Command::SetLabels {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            names: vec!["bug".into()],
+        },
+        Command::FetchRepoLabels {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
         },
         Command::Refresh,
         Command::CleanWorktrees,
@@ -192,6 +312,10 @@ fn all_commands() -> Vec<Command> {
             path: std::path::PathBuf::from("/tmp/wt-dirty"),
             force: true,
         },
+        Command::FetchPrDetails {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+        },
+        Command::KeepMergedWorkspace { session_key: key },
         Command::Shutdown,
     ]
 }
@@ -220,18 +344,76 @@ fn all_events() -> Vec<Event> {
                 on_main: true,
                 model_label: Some("Opus".into()),
                 last_user_message: Some("fix the flaky test".into()),
-                composing_buffer: None,
+                composing_buffer: Some("half typed prompt".into()),
             }],
             projects: vec![],
         },
+        Event::ViewerIdentities {
+            logins: vec![("github".into(), "octocat".into())],
+        },
         Event::WorkspaceUpserted(Box::new(sample_workspace())),
         Event::WorkspaceRemoved(lazybox_core::WorkspaceKey::new(key.as_str())),
+        Event::ProjectUpserted(Box::new(sample_project())),
+        Event::ProjectRemoved(lazybox_core::ProjectKey::github("o", "r")),
+        Event::WorkspaceOutOfScope {
+            workspace_key: lazybox_core::WorkspaceKey::new(key.as_str()),
+            label: "o/r#1".into(),
+            title: Some("wire audit".into()),
+            active_terminal_count: 2,
+        },
+        Event::WorkspaceMergePending {
+            issue_workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
+            pr_workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            issue_label: "o/r#1".into(),
+            pr_label: "o/r#2".into(),
+            active_terminal_count: 1,
+        },
+        Event::WorkspaceMerged {
+            issue_workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
+            pr_workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            issue_label: "o/r#1".into(),
+            pr_label: "o/r#2".into(),
+        },
+        Event::PrMerged {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            pr_label: "o/r#2".into(),
+        },
+        Event::PrMergeFailed {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            pr_label: "o/r#2".into(),
+            reason: "required review".into(),
+        },
+        Event::IssueClosed {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
+            issue_label: "o/r#1".into(),
+        },
+        Event::IssueCloseFailed {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
+            issue_label: "o/r#1".into(),
+            reason: "permission denied".into(),
+        },
+        Event::MergedPrRemovable {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            label: "o/r#2".into(),
+            terminal_state: RemovableTerminalState::Merged,
+            active_terminal_count: 1,
+            has_local_work: true,
+        },
+        Event::RepoLabels {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            labels: vec![lazybox_core::Label::with_color("bug", "d73a4a")],
+        },
         Event::SessionCreated(Box::new(lazybox_core::WorkspaceSession::new(
             lazybox_core::WorkspaceKey::new(key.as_str()),
             lazybox_core::SessionKind::Shell,
             std::path::PathBuf::from("/tmp/wt"),
             chrono::Utc::now(),
         ))),
+        Event::WorktreeProgress {
+            session_key: key.clone(),
+            step: WorktreeStep::Fetch,
+            status: WorktreeStepStatus::Warned("using cached base".into()),
+        },
         Event::SessionEnded {
             workspace_key: lazybox_core::WorkspaceKey::new(key.as_str()),
             session_id: lazybox_core::SessionId::new(),
@@ -249,6 +431,11 @@ fn all_events() -> Vec<Event> {
             bytes: b"ANSI: \x1b[31mred\x1b[0m".to_vec(),
             seq: 1,
         },
+        Event::TerminalResync {
+            terminal_id: TerminalId(2),
+            replay: b"full replay".to_vec(),
+            seq: 9,
+        },
         Event::TerminalExited {
             terminal_id: TerminalId(2),
             exit_code: Some(0),
@@ -259,10 +446,37 @@ fn all_events() -> Vec<Event> {
             exit_code: None,
             last_output: Some("boom: could not start".into()),
         },
+        Event::TerminalFocusRequested {
+            terminal_id: TerminalId(2),
+        },
+        Event::TerminalsRebadged {
+            from: "github:o/r#1".into(),
+            to: "github:o/r#2".into(),
+        },
         Event::AgentState {
             session_key: key.clone(),
             terminal_id: TerminalId(2),
             state: AgentState::InputNeeded,
+        },
+        Event::AgentState {
+            session_key: key.clone(),
+            terminal_id: TerminalId(2),
+            state: AgentState::Working,
+        },
+        Event::AgentState {
+            session_key: key.clone(),
+            terminal_id: TerminalId(2),
+            state: AgentState::Idle,
+        },
+        Event::AgentState {
+            session_key: key.clone(),
+            terminal_id: TerminalId(2),
+            state: AgentState::Done,
+        },
+        Event::AgentState {
+            session_key: key.clone(),
+            terminal_id: TerminalId(2),
+            state: AgentState::Exited { code: Some(9) },
         },
         Event::AgentRunStarted {
             run_id: AgentRunId(9),
@@ -371,6 +585,14 @@ fn all_events() -> Vec<Event> {
             detail: String::new(),
             kind: String::new(),
         },
+        Event::PollCompleted {
+            source: "github".into(),
+            count: 3,
+        },
+        Event::PollProgress {
+            source: "github".into(),
+            message: "fetching reviews".into(),
+        },
         Event::Notification {
             title: "hi".into(),
             body: "body".into(),
@@ -407,6 +629,138 @@ fn all_events() -> Vec<Event> {
             error: Some("has uncommitted changes".into()),
         },
     ]
+}
+
+/// Exhaustive discriminant projection. Adding a wire variant makes this test
+/// module fail to compile until the variant is named here; the coverage test
+/// below then fails until `all_commands` also carries a round-trip sample.
+fn command_tag(command: &Command) -> &'static str {
+    match command {
+        Command::Subscribe => "Subscribe",
+        Command::CreateSession { .. } => "CreateSession",
+        Command::Spawn { .. } => "Spawn",
+        Command::Write { .. } => "Write",
+        Command::RecordUserMessage { .. } => "RecordUserMessage",
+        Command::InjectPrompt { .. } => "InjectPrompt",
+        Command::RecordComposingBuffer { .. } => "RecordComposingBuffer",
+        Command::Resize { .. } => "Resize",
+        Command::Close { .. } => "Close",
+        Command::IngestHook { .. } => "IngestHook",
+        Command::Kill { .. } => "Kill",
+        Command::RemoveMergedWorkspace { .. } => "RemoveMergedWorkspace",
+        Command::DeleteProject { .. } => "DeleteProject",
+        Command::CollapseIntoPr { .. } => "CollapseIntoPr",
+        Command::MarkRead { .. } => "MarkRead",
+        Command::FocusWorkspace { .. } => "FocusWorkspace",
+        Command::MarkActivityRead { .. } => "MarkActivityRead",
+        Command::UnmarkActivityRead { .. } => "UnmarkActivityRead",
+        Command::CreateWorkspace { .. } => "CreateWorkspace",
+        Command::CreateProject { .. } => "CreateProject",
+        Command::SetSessionLayout { .. } => "SetSessionLayout",
+        Command::Snooze { .. } => "Snooze",
+        Command::Unsnooze { .. } => "Unsnooze",
+        Command::SetAutoMergeOnGreen { .. } => "SetAutoMergeOnGreen",
+        Command::SetAutoFixPolicy { .. } => "SetAutoFixPolicy",
+        Command::PostReply { .. } => "PostReply",
+        Command::Refresh => "Refresh",
+        Command::Shutdown => "Shutdown",
+        Command::ConfirmMerge { .. } => "ConfirmMerge",
+        Command::AdoptSessions { .. } => "AdoptSessions",
+        Command::MergePr { .. } => "MergePr",
+        Command::CloseIssue { .. } => "CloseIssue",
+        Command::RequestReviewers { .. } => "RequestReviewers",
+        Command::AddAssignees { .. } => "AddAssignees",
+        Command::SetAssignees { .. } => "SetAssignees",
+        Command::SetLabels { .. } => "SetLabels",
+        Command::FetchRepoLabels { .. } => "FetchRepoLabels",
+        Command::CleanWorktrees => "CleanWorktrees",
+        Command::InspectWorktrees => "InspectWorktrees",
+        Command::DeleteOrphanedWorktree { .. } => "DeleteOrphanedWorktree",
+        Command::FetchPrDetails { .. } => "FetchPrDetails",
+        Command::StartAgentRun { .. } => "StartAgentRun",
+        Command::SendAgentInput { .. } => "SendAgentInput",
+        Command::InterruptAgentRun { .. } => "InterruptAgentRun",
+        Command::DecideAgentApproval { .. } => "DecideAgentApproval",
+        Command::AnswerAgentQuestion { .. } => "AnswerAgentQuestion",
+        Command::UpsertProviderCredential { .. } => "UpsertProviderCredential",
+        Command::RemoveProviderCredential { .. } => "RemoveProviderCredential",
+        Command::ListProviderCredentials { .. } => "ListProviderCredentials",
+        Command::KeepMergedWorkspace { .. } => "KeepMergedWorkspace",
+    }
+}
+
+/// Event-side companion to [`command_tag`]. Keep both exhaustive: bincode
+/// accepts a locally-consistent encoder/decoder even when a new variant was
+/// never exercised, which made the former "every variant" test a false
+/// contract.
+fn event_tag(event: &Event) -> &'static str {
+    match event {
+        Event::Snapshot { .. } => "Snapshot",
+        Event::ViewerIdentities { .. } => "ViewerIdentities",
+        Event::WorkspaceUpserted(_) => "WorkspaceUpserted",
+        Event::WorkspaceRemoved(_) => "WorkspaceRemoved",
+        Event::ProjectUpserted(_) => "ProjectUpserted",
+        Event::ProjectRemoved(_) => "ProjectRemoved",
+        Event::WorkspaceOutOfScope { .. } => "WorkspaceOutOfScope",
+        Event::WorkspaceMergePending { .. } => "WorkspaceMergePending",
+        Event::WorkspaceMerged { .. } => "WorkspaceMerged",
+        Event::PrMerged { .. } => "PrMerged",
+        Event::PrMergeFailed { .. } => "PrMergeFailed",
+        Event::IssueClosed { .. } => "IssueClosed",
+        Event::IssueCloseFailed { .. } => "IssueCloseFailed",
+        Event::MergedPrRemovable { .. } => "MergedPrRemovable",
+        Event::RepoLabels { .. } => "RepoLabels",
+        Event::SessionCreated(_) => "SessionCreated",
+        Event::WorktreeProgress { .. } => "WorktreeProgress",
+        Event::SessionEnded { .. } => "SessionEnded",
+        Event::TerminalSpawned { .. } => "TerminalSpawned",
+        Event::TerminalOutput { .. } => "TerminalOutput",
+        Event::TerminalResync { .. } => "TerminalResync",
+        Event::TerminalExited { .. } => "TerminalExited",
+        Event::TerminalFocusRequested { .. } => "TerminalFocusRequested",
+        Event::TerminalsRebadged { .. } => "TerminalsRebadged",
+        Event::AgentState { .. } => "AgentState",
+        Event::ProviderError { .. } => "ProviderError",
+        Event::PollCompleted { .. } => "PollCompleted",
+        Event::PollProgress { .. } => "PollProgress",
+        Event::Notification { .. } => "Notification",
+        Event::CleanWorktreesCompleted { .. } => "CleanWorktreesCompleted",
+        Event::WorktreesInspected { .. } => "WorktreesInspected",
+        Event::OrphanedWorktreeDeleted { .. } => "OrphanedWorktreeDeleted",
+        Event::AgentRunStarted { .. } => "AgentRunStarted",
+        Event::AgentRawJson { .. } => "AgentRawJson",
+        Event::AgentDebug { .. } => "AgentDebug",
+        Event::AgentAssistantTextDelta { .. } => "AgentAssistantTextDelta",
+        Event::AgentToolCallStarted { .. } => "AgentToolCallStarted",
+        Event::AgentToolCallDelta { .. } => "AgentToolCallDelta",
+        Event::AgentToolCallFinished { .. } => "AgentToolCallFinished",
+        Event::AgentPermissionRequest { .. } => "AgentPermissionRequest",
+        Event::AgentUserQuestion { .. } => "AgentUserQuestion",
+        Event::AgentUsage { .. } => "AgentUsage",
+        Event::AgentTurnFinished { .. } => "AgentTurnFinished",
+        Event::AgentRunFinished { .. } => "AgentRunFinished",
+        Event::ProviderCredentialUpdated { .. } => "ProviderCredentialUpdated",
+        Event::ProviderCredentialRemoved { .. } => "ProviderCredentialRemoved",
+        Event::ProviderCredentialsListed { .. } => "ProviderCredentialsListed",
+    }
+}
+
+#[test]
+fn round_trip_corpus_covers_every_wire_variant() {
+    let command_tags: std::collections::BTreeSet<_> =
+        all_commands().iter().map(command_tag).collect();
+    let event_tags: std::collections::BTreeSet<_> = all_events().iter().map(event_tag).collect();
+
+    assert_eq!(
+        (lazybox_ipc::PROTOCOL_VERSION, command_tags.len()),
+        (8, 50),
+        "Command gained/lost a variant: update the exhaustive tag, add a sample, and bump PROTOCOL_VERSION",
+    );
+    assert_eq!(
+        (lazybox_ipc::PROTOCOL_VERSION, event_tags.len()),
+        (8, 47),
+        "Event gained/lost a variant: update the exhaustive tag, add a sample, and bump PROTOCOL_VERSION",
+    );
 }
 
 /// Round-trip every Command through bincode. Any new variant added to

@@ -31,11 +31,13 @@ on:
     paths:
       - "demo/**"
       - "crates/**"
+      - ".github/workflows/demo.yml"
   push:
     branches: [main]
     paths:
       - "demo/**"
       - "crates/**"
+      - ".github/workflows/demo.yml"
   workflow_dispatch:
 
 permissions:

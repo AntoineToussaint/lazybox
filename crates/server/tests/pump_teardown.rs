@@ -451,8 +451,8 @@ async fn seq_gap_resyncs_from_replay_ring() {
 /// must tear down exactly like a freshly spawned one: hook-era map
 /// entries (agent_states, hook_driven_terminals, input_needed_shapes,
 /// prompt_submit_signals) removed, the persisted `terminal:*` /
-/// `terminal-noperm:*` / `terminal-msg:*` kv rows deleted, and the
-/// backend slot released.
+/// `terminal-noperm:*` / `terminal-msg:*` / `terminal-draft:*` kv rows
+/// deleted, and the backend slot released.
 #[tokio::test]
 async fn recovered_session_teardown_matches_main_pump() {
     timeout(TEST_DEADLINE, async {
@@ -477,6 +477,10 @@ async fn recovered_session_teardown_matches_main_pump() {
         config
             .store
             .set_kv(&format!("terminal-msg:{key}"), "resume the rebase")
+            .unwrap();
+        config
+            .store
+            .set_kv(&format!("terminal-draft:{key}"), "half typed prompt")
             .unwrap();
 
         let mut bus_rx = config.bus.subscribe();
@@ -570,6 +574,13 @@ async fn recovered_session_teardown_matches_main_pump() {
         );
         assert_eq!(
             config.store.get_kv(&format!("terminal-msg:{key}")).unwrap(),
+            None
+        );
+        assert_eq!(
+            config
+                .store
+                .get_kv(&format!("terminal-draft:{key}"))
+                .unwrap(),
             None
         );
         // And the backend slot is released, same as the main pump.

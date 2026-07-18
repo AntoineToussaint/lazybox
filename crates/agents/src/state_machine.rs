@@ -17,7 +17,7 @@
 //! - `Done` — finished a turn ("done").
 //! - `Exited` — the process ended (clean or crash); terminal.
 //!
-//! ## The load-bearing rule: `Working` is a one-way door
+//! ## The load-bearing rules: one-way work and an absorbing exit
 //!
 //! Once an agent is `Working` the only legal exits are `Done`,
 //! `InputNeeded`, and `Exited` — **never `Idle`**. A working agent that
@@ -29,6 +29,7 @@
 //! ```text
 //! Working ─╳→ Idle        (a settled worker is Done, not un-worked)
 //! Done    ─╳→ Idle        (Done is sticky until real progress)
+//! Exited  ─╳→ *           (the process is gone; late signals are stale)
 //! ```
 //!
 //! Two consequences fall out of the one-way door:
@@ -87,28 +88,31 @@ pub struct Reading {
 /// Whether the machine permits a move from `from` to a *different* state
 /// `to`. The lifecycle is near-complete — an agent can go busy, ask, or
 /// exit from almost anywhere, because detection legitimately observes all
-/// of those edges — with exactly two forbidden edges, both landing on the
-/// never-worked `Idle`:
+/// of those edges — except for the two edges landing on the never-worked
+/// `Idle` and every edge leaving the terminal `Exited` state:
 ///
 /// ```text
 /// Working ─╳→ Idle
 /// Done    ─╳→ Idle
+/// Exited  ─╳→ *
 /// ```
 ///
 /// `Idle` means "spawned, hasn't worked yet." An agent that has been
 /// `Working` (or finished, `Done`) can never truthfully be back there: a
 /// settled worker is `Done`, and `Done` stays put until the agent makes
 /// real progress (`Working`) or is asked for input (`InputNeeded`). Every
-/// other edge — including any state → `Exited` (the process can die at any
-/// moment) — is allowed.
+/// other edge — including any live state → `Exited` (the process can die at
+/// any moment) — is allowed. Once the PTY is gone, delayed screen readings or
+/// hooks cannot resurrect it; a new process receives a new terminal id.
 ///
 /// Only meaningful for `from != to`; a self-loop is not a transition (see
 /// [`AgentStateMachine::transition`]).
 pub(crate) fn transition_allowed(from: AgentState, to: AgentState) -> bool {
-    !matches!(
-        (from, to),
-        (AgentState::Done, AgentState::Idle) | (AgentState::Working, AgentState::Idle)
-    )
+    !matches!(from, AgentState::Exited { .. })
+        && !matches!(
+            (from, to),
+            (AgentState::Done, AgentState::Idle) | (AgentState::Working, AgentState::Idle)
+        )
 }
 
 /// The result of folding a [`Reading`] into the machine via
@@ -124,8 +128,9 @@ pub enum Outcome {
     /// steady-state case: a streaming agent re-reads `Working` every chunk.
     Unchanged,
     /// A structurally forbidden edge held the state (`Working → Idle`, a
-    /// `Done → Idle` settle, or a `Done` reading offered from a state that
-    /// never worked — none of which carry evidence of a finished turn).
+    /// `Done → Idle` settle, any late signal after `Exited`, or a `Done`
+    /// reading offered from a state that never worked — none of which carry
+    /// evidence of a valid successor).
     Rejected,
     /// An ambiguous reading was held: a boot-time `Working` before the
     /// agent booted, a byte-flow `Working` that may not clear `Done`, or a
@@ -313,19 +318,17 @@ mod tests {
     const ALL: [AgentState; 5] = [Working, InputNeeded, Idle, Done, EXITED];
 
     #[test]
-    fn only_settling_back_to_idle_is_forbidden() {
+    fn transition_table_enforces_idle_and_exit_invariants() {
         for from in ALL {
             for to in ALL {
                 if from == to {
                     continue;
                 }
                 let allowed = transition_allowed(from, to);
-                let is_forbidden = matches!((from, to), (Done, Idle) | (Working, Idle));
+                let is_forbidden = matches!((from, to), (Done, Idle) | (Working, Idle))
+                    || matches!(from, AgentState::Exited { .. });
                 if is_forbidden {
-                    assert!(
-                        !allowed,
-                        "{from:?} → Idle must be forbidden (never un-worked)"
-                    );
+                    assert!(!allowed, "{from:?} → {to:?} must be forbidden");
                 } else {
                     assert!(allowed, "{from:?} → {to:?} must be allowed");
                 }
@@ -335,7 +338,8 @@ mod tests {
 
     #[test]
     fn any_state_can_exit() {
-        // The process can die at any moment — every state reaches `Exited`.
+        // The process can die at any moment — every live state reaches
+        // `Exited`.
         for from in [Working, InputNeeded, Idle, Done] {
             assert_eq!(
                 AgentStateMachine::transition(Some(from), EXITED),
@@ -343,6 +347,28 @@ mod tests {
                 "{from:?} → Exited must commit",
             );
         }
+    }
+
+    #[test]
+    fn exited_is_absorbing_even_when_a_late_signal_differs() {
+        for late in [Working, InputNeeded, Idle, Done] {
+            assert_eq!(
+                AgentStateMachine::transition(Some(EXITED), late),
+                None,
+                "late {late:?} must not resurrect an exited terminal",
+            );
+            let mut m = machine();
+            assert_eq!(
+                m.on_reading(Some(EXITED), clear(late)),
+                Outcome::Rejected,
+                "late clear {late:?} reading must be rejected",
+            );
+        }
+        // A second teardown cannot rewrite the process's terminal result.
+        assert_eq!(
+            AgentStateMachine::transition(Some(EXITED), AgentState::Exited { code: Some(9) }),
+            None,
+        );
     }
 
     #[test]

@@ -41,7 +41,7 @@ pub const PROTOCOL_MAGIC: [u8; 4] = *b"LZBX";
 /// order, so adding, removing, or reordering a variant or field makes
 /// an old peer silently misread every subsequent frame. The handshake
 /// turns that garbage into a clear "restart the daemon" error.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// This binary's build identity: the workspace version plus the git
 /// short SHA captured at compile time (`build.rs`). Two binaries built
@@ -49,7 +49,7 @@ pub const PROTOCOL_VERSION: u32 = 7;
 /// client differ.
 ///
 /// `PROTOCOL_VERSION` only changes when the wire format does, so two
-/// builds dozens of commits apart can both be protocol v5 and connect
+/// builds dozens of commits apart can share one protocol version and connect
 /// cleanly while behaving differently. The handshake exchanges this
 /// string so the client can surface a "restart the daemon" banner on a
 /// build skew the protocol version can't see.
@@ -422,9 +422,10 @@ pub struct WorktreeInspectionDto {
     pub is_safe_to_delete: bool,
 }
 
-/// serde `default` for a `bool` field that must default to `true`
-/// (a field absent from an older peer's serialized command should read
-/// as `true`, not `false`).
+/// serde `default` for a JSON `bool` field that must default to `true`.
+/// Bincode is not self-describing and cannot apply this to an older, shorter
+/// command; socket peers with that shape are rejected by
+/// [`PROTOCOL_VERSION`] negotiation.
 fn default_true() -> bool {
     true
 }

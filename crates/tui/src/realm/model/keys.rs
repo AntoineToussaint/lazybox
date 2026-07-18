@@ -1550,7 +1550,7 @@ impl<T: TerminalAdapter> Model<T> {
                         } else {
                             LOCAL_WHEEL_STEP
                         };
-                        let _ = self.terminals.scroll_terminal(target, delta);
+                        let _outcome = self.terminals.scroll_terminal(target, delta);
                         self.redraw = true;
                     }
                 }

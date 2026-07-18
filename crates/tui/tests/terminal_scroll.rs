@@ -26,7 +26,7 @@ use lazybox_core::{SessionKey, SessionLayout, TileTree};
 use lazybox_ipc::{Event, TerminalId, TerminalKind, TerminalSnapshot};
 use lazybox_tui::PaneId;
 use lazybox_tui::components::TerminalStack;
-use lazybox_tui::components::terminal_stack::{ScrollOutcome, WheelRoute};
+use lazybox_tui::components::terminal_stack::{ScrollBoundary, ScrollOutcome, WheelRoute};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
@@ -70,6 +70,29 @@ fn offset(stack: &TerminalStack) -> u64 {
         .expect("numeric offset")
 }
 
+/// Assert that a typed successful outcome describes the exact observed
+/// viewport transition. This is intentionally stronger than matching
+/// `Moved`: the old implementation returned `Moved` whenever scrollback
+/// existed, even when libghostty's offset had not changed.
+fn assert_moved_from(stack: &TerminalStack, before: u64, outcome: ScrollOutcome) -> u64 {
+    match outcome {
+        ScrollOutcome::Moved { from, offset, .. } => {
+            assert_eq!(
+                from, before,
+                "outcome must carry the real pre-scroll offset"
+            );
+            assert_ne!(offset, from, "Moved must represent an actual transition");
+            assert_eq!(
+                offset,
+                self::offset(stack),
+                "outcome must carry the real post-scroll offset",
+            );
+            offset
+        }
+        other => panic!("scroll should have moved from {before}, got {other:?}"),
+    }
+}
+
 /// A fresh-spawned agent driven entirely through the daemon event path —
 /// `TerminalSpawned` then `TerminalOutput`, never a reattach/replay. This
 /// is the case the chronic regression always bit.
@@ -111,6 +134,7 @@ fn reattached_agent() -> TerminalStack {
             on_main: false,
             model_label: None,
             last_user_message: None,
+            composing_buffer: None,
         }],
     });
     stack.set_active_session(Some(sk("s")));
@@ -139,14 +163,8 @@ fn fresh_agent_wheel_moves_the_viewport() {
     // The wheel path scrolls the tile it resolves; over a single agent
     // that's this terminal. `scroll_active` is the same viewport move.
     let out = stack.scroll_active(-3);
-    assert!(
-        matches!(out, ScrollOutcome::Moved { .. }),
-        "fresh-spawn wheel must move the viewport, got {out:?}",
-    );
-    assert!(
-        offset(&stack) < bottom,
-        "the wheel scrolled up into history"
-    );
+    let after = assert_moved_from(&stack, bottom, out);
+    assert!(after < bottom, "the wheel scrolled up into history");
 }
 
 #[test]
@@ -191,11 +209,7 @@ fn reattached_agent_wheel_moves_the_viewport() {
     assert!(bottom > 0, "replay must reconstruct scrollback");
 
     let out = stack.scroll_active(-3);
-    assert!(
-        matches!(out, ScrollOutcome::Moved { .. }),
-        "reattached wheel must move the viewport, got {out:?}",
-    );
-    assert!(offset(&stack) < bottom);
+    assert!(assert_moved_from(&stack, bottom, out) < bottom);
 }
 
 #[test]
@@ -273,10 +287,13 @@ fn scrolling_a_non_focused_tile_leaves_the_focused_one_put() {
     );
 
     let out = stack.scroll_terminal(right_id, -5);
-    assert!(
-        matches!(out, ScrollOutcome::Moved { .. }),
-        "scrolling the right tile moves it: {out:?}",
-    );
+    match out {
+        ScrollOutcome::Moved { from, offset, .. } => assert!(
+            offset < from,
+            "scrolling the right tile must reduce its offset: {from} -> {offset}",
+        ),
+        other => panic!("scrolling the right tile must move it, got {other:?}"),
+    }
     assert_eq!(
         offset(&stack),
         left_before,
@@ -340,20 +357,63 @@ fn alternate_screen_reports_no_local_scrollback() {
 #[test]
 fn scroll_never_silently_noops_when_scrollback_exists() {
     // Across every surface, once scrollback exists a scroll must report
-    // `Moved`. A silent nothing — the recurring symptom — is impossible
-    // because the outcome is always typed and, here, asserted to move.
+    // the exact before/after transition. Merely returning `Moved` is not
+    // sufficient: that false-positive implementation is the regression
+    // this test exists to prevent.
     for mut stack in [fresh_agent(), reattached_agent()] {
-        assert!(
-            matches!(stack.scroll_active(-5), ScrollOutcome::Moved { .. }),
-            "wheel/keyboard scroll silently failed to move",
-        );
-        assert!(stack.scroll_to_top().is_some(), "Shift-Home reports state");
+        let bottom = offset(&stack);
+        let first = stack.scroll_active(-5);
+        let after_first = assert_moved_from(&stack, bottom, first);
+        let to_top = stack.scroll_to_top();
+        assert_moved_from(&stack, after_first, to_top);
         assert_eq!(offset(&stack), 0, "Shift-Home reached the top");
-        assert!(
-            stack.scroll_to_bottom().is_some(),
-            "Shift-End reports state"
-        );
+        let to_bottom = stack.scroll_to_bottom();
+        assert_moved_from(&stack, 0, to_bottom);
+        assert_eq!(offset(&stack), bottom, "Shift-End reached the live bottom");
     }
+}
+
+#[test]
+fn expected_noops_are_typed_and_never_claim_movement() {
+    let mut stack = fresh_agent();
+    let bottom = offset(&stack);
+
+    assert_eq!(stack.scroll_active(0), ScrollOutcome::Noop);
+    assert!(matches!(
+        stack.scroll_active(3),
+        ScrollOutcome::AtBoundary {
+            boundary: ScrollBoundary::Bottom,
+            offset,
+            ..
+        } if offset == bottom
+    ));
+    assert!(matches!(
+        stack.scroll_to_bottom(),
+        ScrollOutcome::AtBoundary {
+            boundary: ScrollBoundary::Bottom,
+            offset,
+            ..
+        } if offset == bottom
+    ));
+
+    let to_top = stack.scroll_to_top();
+    assert_moved_from(&stack, bottom, to_top);
+    assert!(matches!(
+        stack.scroll_active(-3),
+        ScrollOutcome::AtBoundary {
+            boundary: ScrollBoundary::Top,
+            offset: 0,
+            ..
+        }
+    ));
+    assert!(matches!(
+        stack.scroll_to_top(),
+        ScrollOutcome::AtBoundary {
+            boundary: ScrollBoundary::Top,
+            offset: 0,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -390,11 +450,11 @@ fn scroll_viewport_has_a_single_owner() {
     // match the owner function's body and assert EVERY `scroll_viewport`
     // call in the file lands inside it. A new verb the owner adds is fine;
     // a call added anywhere else fails.
-    let src = std::fs::read_to_string(concat!(
+    let owner_path = std::path::PathBuf::from(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/components/terminal_stack.rs"
-    ))
-    .expect("read terminal_stack.rs");
+    ));
+    let src = std::fs::read_to_string(&owner_path).expect("read terminal_stack.rs");
 
     let owner = "fn scroll(&mut self, request: ScrollRequest)";
     let owner_at = src.find(owner).expect("the scroll owner still exists");
@@ -416,20 +476,51 @@ fn scroll_viewport_has_a_single_owner() {
         }
     }
     assert!(body_close > body_open, "owner body brace-match failed");
-
-    let calls: Vec<usize> = src
-        .match_indices(".scroll_viewport(")
-        .map(|(i, _)| i)
-        .collect();
+    let owner_body = &src[body_open..=body_close];
     assert!(
-        !calls.is_empty(),
+        owner_body.contains("classify_scroll_transition(request, before, after)"),
+        "the scroll owner must classify the observed before/after offsets",
+    );
+
+    fn collect_rust_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("read source directory") {
+            let path = entry.expect("read source entry").path();
+            if path.is_dir() {
+                collect_rust_sources(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    // Search the whole TUI source tree, not just the current owner's
+    // file. Otherwise a raw mutation added to a different module would
+    // bypass the supposed crate-wide single-owner guarantee.
+    let mut paths = Vec::new();
+    collect_rust_sources(
+        &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut paths,
+    );
+    let mut call_count = 0usize;
+    for path in paths {
+        let candidate = std::fs::read_to_string(&path).expect("read Rust source");
+        for (idx, _) in candidate.match_indices(".scroll_viewport(") {
+            call_count += 1;
+            assert_eq!(
+                path,
+                owner_path,
+                "a `scroll_viewport` call escaped the owner into {}",
+                path.display(),
+            );
+            assert!(
+                idx > body_open && idx < body_close,
+                "a `scroll_viewport` call escaped the scroll owner (byte {idx}, owner \
+                 body {body_open}..{body_close}) — route it through `TerminalVt::scroll`",
+            );
+        }
+    }
+    assert!(
+        call_count > 0,
         "no scroll_viewport calls found — did the owner or its call syntax change?",
     );
-    for idx in calls {
-        assert!(
-            idx > body_open && idx < body_close,
-            "a `scroll_viewport` call escaped the scroll owner (byte {idx}, owner \
-             body {body_open}..{body_close}) — route it through `TerminalVt::scroll`",
-        );
-    }
 }

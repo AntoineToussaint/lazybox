@@ -1,11 +1,12 @@
-# Build + test on every PR / main push. Catches regressions before
-# they hit a release tag.
+# Build + test every PR, merge-queue composition, and main push. Catches
+# regressions before they hit main when the repository requires this workflow
+# through a merge queue; the main-push run is the recovery alarm, not the
+# first integration check.
 #
-# The "branch must be up-to-date with main" merge gate is OFF, so a
-# PR can merge without re-running CI against the latest main. To
-# compensate, CI runs a broader set of checks here: build/test/clippy
-# (matrix), fmt, rustdoc with -D warnings, cargo-deny, typos, and
-# cargo-machete (soft-fail).
+# Test breadth cannot compensate for a stale PR base: two independently-green
+# PRs may still fail when composed. Keep `merge_group` enabled here and require
+# CI on the repository's merge queue (or require branches be up to date) so
+# GitHub tests the exact candidate tree before advancing main.
 #
 # Jobs that compile workspace code share `.github/actions/rust-build-env`
 # (Zig + C toolchain + Rust stable + cache) so the install step
@@ -15,6 +16,7 @@ name: CI
 
 on:
   pull_request:
+  merge_group:
   push:
     branches: [main]
 
@@ -83,6 +85,9 @@ jobs:
       - name: Install web dependencies
         working-directory: web
         run: npm ci
+      - name: Audit deployable web dependencies
+        working-directory: web
+        run: npm audit --omit=dev --audit-level=moderate
       - name: Type-check and build site
         working-directory: web
         run: |

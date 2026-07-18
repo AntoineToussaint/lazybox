@@ -255,11 +255,24 @@ fn collapse_injected_path(msg: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// Outcome of a scroll attempt on the focused terminal. Used by the
-/// orchestrator's mouse-wheel handler to surface why a scroll might
-/// have looked like nothing happened — without this, "no scrollback
-/// content yet" was indistinguishable from a broken Delta path.
-#[derive(Debug, Clone, Copy)]
+/// Which end of the terminal scrollback prevented a viewport move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollBoundary {
+    /// The oldest available scrollback row.
+    Top,
+    /// The live terminal viewport.
+    Bottom,
+}
+
+/// Outcome of a terminal viewport scroll.
+///
+/// Success is based on the observed before/after scrollbar offsets,
+/// never merely on scrollback being present. Expected no-ops (an empty
+/// scrollback, a zero delta, or an already-reached boundary) are typed
+/// separately from [`Self::Stalled`], which means libghostty accepted a
+/// request that should have moved but its offset stayed put.
+#[must_use = "a terminal scroll outcome must be observed so a stalled viewport cannot fail silently"]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrollOutcome {
     /// No focused terminal (Tabs mode with no active tab, or an
     /// empty session).
@@ -270,8 +283,34 @@ pub enum ScrollOutcome {
     /// alternate screen (claude/vim/less) — by design those have no
     /// scrollback, so it's the *program's* responsibility to paginate.
     NoScrollback { alternate: bool },
-    /// Scroll succeeded. Carries the post-state for the footer notice.
-    Moved { offset: u64, total: u64, len: u64 },
+    /// The request deliberately asked for no movement (`By(0)`).
+    Noop,
+    /// The viewport was already at the requested edge.
+    AtBoundary {
+        boundary: ScrollBoundary,
+        offset: u64,
+        total: u64,
+        len: u64,
+    },
+    /// The VT scrollbar could not be read before or after the request.
+    StateUnavailable,
+    /// Scrollback existed and the viewport was not at a boundary, but
+    /// libghostty's offset did not change. This is the typed regression
+    /// signal for the formerly silent Delta-scroll failure.
+    Stalled {
+        request: ScrollRequest,
+        offset: u64,
+        total: u64,
+        len: u64,
+    },
+    /// Scroll succeeded. Carries both offsets so callers and tests can
+    /// verify the reported transition against the viewport state.
+    Moved {
+        from: u64,
+        offset: u64,
+        total: u64,
+        len: u64,
+    },
 }
 
 /// A viewport scroll request — the entire vocabulary the scroll owner
@@ -291,6 +330,30 @@ pub enum ScrollRequest {
     Top,
     /// Jump the viewport to the live bottom.
     Bottom,
+}
+
+/// Classify the observed state transition after a request that passed
+/// the empty-scrollback and boundary preflight checks.
+fn classify_scroll_transition(
+    request: ScrollRequest,
+    before: vt::terminal::Scrollbar,
+    after: vt::terminal::Scrollbar,
+) -> ScrollOutcome {
+    if after.offset == before.offset {
+        ScrollOutcome::Stalled {
+            request,
+            offset: after.offset,
+            total: after.total,
+            len: after.len,
+        }
+    } else {
+        ScrollOutcome::Moved {
+            from: before.offset,
+            offset: after.offset,
+            total: after.total,
+            len: after.len,
+        }
+    }
 }
 
 /// How a mouse-wheel tick over the focused terminal should be handled.
@@ -955,14 +1018,44 @@ impl TerminalVt {
     /// That single choke point is the #42/#371 encapsulation: one owner
     /// of scroll state, and it cannot fail quietly.
     fn scroll(&mut self, request: ScrollRequest) -> ScrollOutcome {
+        if matches!(request, ScrollRequest::By(0)) {
+            return ScrollOutcome::Noop;
+        }
         let alternate = matches!(
             self.terminal.active_screen().ok(),
             Some(vt::screen::Screen::Alternate)
         );
+        let Ok(before) = self.terminal.scrollbar() else {
+            tracing::error!(?request, "terminal scroll state unavailable before request");
+            return ScrollOutcome::StateUnavailable;
+        };
+
+        if before.total <= before.len {
+            return ScrollOutcome::NoScrollback { alternate };
+        }
+
+        let max_offset = before.total.saturating_sub(before.len);
+        let boundary = match request {
+            ScrollRequest::By(delta) if delta < 0 && before.offset == 0 => {
+                Some(ScrollBoundary::Top)
+            }
+            ScrollRequest::By(delta) if delta > 0 && before.offset >= max_offset => {
+                Some(ScrollBoundary::Bottom)
+            }
+            ScrollRequest::Top if before.offset == 0 => Some(ScrollBoundary::Top),
+            ScrollRequest::Bottom if before.offset >= max_offset => Some(ScrollBoundary::Bottom),
+            _ => None,
+        };
+        if let Some(boundary) = boundary {
+            return ScrollOutcome::AtBoundary {
+                boundary,
+                offset: before.offset,
+                total: before.total,
+                len: before.len,
+            };
+        }
+
         match request {
-            // A zero delta is a no-op move — fall through to report the
-            // current scrollbar without touching the pin.
-            ScrollRequest::By(0) => {}
             ScrollRequest::By(delta) => self
                 .terminal
                 .scroll_viewport(vt::terminal::ScrollViewport::Delta(delta)),
@@ -973,15 +1066,24 @@ impl TerminalVt {
                 .terminal
                 .scroll_viewport(vt::terminal::ScrollViewport::Bottom),
         }
-        match self.terminal.scrollbar().ok() {
-            Some(s) if s.total <= s.len => ScrollOutcome::NoScrollback { alternate },
-            Some(s) => ScrollOutcome::Moved {
-                offset: s.offset,
-                total: s.total,
-                len: s.len,
-            },
-            None => ScrollOutcome::NoTerminal,
+        let Ok(after) = self.terminal.scrollbar() else {
+            tracing::error!(?request, "terminal scroll state unavailable after request");
+            return ScrollOutcome::StateUnavailable;
+        };
+        let outcome = classify_scroll_transition(request, before, after);
+        if let ScrollOutcome::Stalled {
+            offset, total, len, ..
+        } = outcome
+        {
+            tracing::error!(
+                ?request,
+                offset,
+                total,
+                len,
+                "terminal viewport scroll stalled",
+            );
         }
+        outcome
     }
 
     fn ensure_size(&mut self, cols: u16, rows: u16) {
@@ -1487,25 +1589,28 @@ impl TerminalStack {
         ))
     }
 
-    /// Jump the focused terminal's viewport to the top of its
-    /// scrollback. (Delta and Top/Bottom are equally reliable
-    /// against libghostty-vt — `scroll_repro.rs` pins both; a
-    /// scroll that looks like a no-op means there is no scrollback
-    /// to move into, which `scroll_active` reports as
-    /// `ScrollOutcome::NoScrollback`.) Returns the scrollbar state
-    /// for the diagnostic notice.
-    pub fn scroll_to_top(&mut self) -> Option<String> {
-        let id = self.focused_terminal_id()?;
-        let slot = self.terminals.get_mut(&id)?;
-        slot.vt.scroll(ScrollRequest::Top);
-        self.scrollbar_summary()
+    /// Jump the focused terminal's viewport to the top of scrollback.
+    /// Returns the same typed transition as delta scrolling.
+    pub fn scroll_to_top(&mut self) -> ScrollOutcome {
+        let Some(id) = self.focused_terminal_id() else {
+            return ScrollOutcome::NoTerminal;
+        };
+        match self.terminals.get_mut(&id) {
+            Some(slot) => slot.vt.scroll(ScrollRequest::Top),
+            None => ScrollOutcome::NoTerminal,
+        }
     }
 
-    pub fn scroll_to_bottom(&mut self) -> Option<String> {
-        let id = self.focused_terminal_id()?;
-        let slot = self.terminals.get_mut(&id)?;
-        slot.vt.scroll(ScrollRequest::Bottom);
-        self.scrollbar_summary()
+    /// Jump the focused terminal's viewport to the live bottom.
+    /// Returns the same typed transition as delta scrolling.
+    pub fn scroll_to_bottom(&mut self) -> ScrollOutcome {
+        let Some(id) = self.focused_terminal_id() else {
+            return ScrollOutcome::NoTerminal;
+        };
+        match self.terminals.get_mut(&id) {
+            Some(slot) => slot.vt.scroll(ScrollRequest::Bottom),
+            None => ScrollOutcome::NoTerminal,
+        }
     }
 
     /// Did the user click on a terminal-tab label? Returns the tab
@@ -1868,11 +1973,8 @@ impl TerminalStack {
     /// mouse-wheel handler to move the scrollback of the tile under the
     /// cursor (#362) rather than the focused one; `scroll_active` is the
     /// focused-terminal wrapper used by keyboard scroll. A zero delta is
-    /// treated as a no-op query rather than a move.
+    /// reported as [`ScrollOutcome::Noop`].
     pub fn scroll_terminal(&mut self, id: TerminalId, delta: isize) -> ScrollOutcome {
-        if delta == 0 {
-            return ScrollOutcome::NoTerminal;
-        }
         match self.terminals.get_mut(&id) {
             Some(slot) => slot.vt.scroll(ScrollRequest::By(delta)),
             None => ScrollOutcome::NoTerminal,
@@ -2228,19 +2330,19 @@ impl TerminalStack {
         if key.modifiers.contains(KeyModifiers::SHIFT) {
             match key.code {
                 KeyCode::PageUp => {
-                    self.scroll_active(-STEP);
+                    let _outcome = self.scroll_active(-STEP);
                     return PaneOutcome::Consumed;
                 }
                 KeyCode::PageDown => {
-                    self.scroll_active(STEP);
+                    let _outcome = self.scroll_active(STEP);
                     return PaneOutcome::Consumed;
                 }
                 KeyCode::Home => {
-                    self.scroll_to_top();
+                    let _outcome = self.scroll_to_top();
                     return PaneOutcome::Consumed;
                 }
                 KeyCode::End => {
-                    self.scroll_to_bottom();
+                    let _outcome = self.scroll_to_bottom();
                     return PaneOutcome::Consumed;
                 }
                 _ => {}
@@ -3990,6 +4092,45 @@ fn split_line_col(s: &str) -> (&str, Option<u32>, Option<u32>) {
 }
 
 #[cfg(test)]
+mod scroll_outcome_tests {
+    use super::*;
+
+    fn bar(offset: u64) -> vt::terminal::Scrollbar {
+        vt::terminal::Scrollbar {
+            total: 100,
+            offset,
+            len: 20,
+        }
+    }
+
+    #[test]
+    fn unchanged_mid_buffer_transition_is_stalled_not_moved() {
+        assert_eq!(
+            classify_scroll_transition(ScrollRequest::By(-3), bar(40), bar(40)),
+            ScrollOutcome::Stalled {
+                request: ScrollRequest::By(-3),
+                offset: 40,
+                total: 100,
+                len: 20,
+            },
+        );
+    }
+
+    #[test]
+    fn changed_transition_carries_both_observed_offsets() {
+        assert_eq!(
+            classify_scroll_transition(ScrollRequest::By(-3), bar(40), bar(37)),
+            ScrollOutcome::Moved {
+                from: 40,
+                offset: 37,
+                total: 100,
+                len: 20,
+            },
+        );
+    }
+}
+
+#[cfg(test)]
 mod find_url_at_byte_tests {
     use super::find_url_at_byte;
 
@@ -5046,7 +5187,7 @@ mod footer_scroll_independence {
         let at_bottom = render_rows(&mut stack);
         // Scroll well up into scrollback, then back down to the live
         // bottom — same two rows both times.
-        stack.scroll_active(-12);
+        let _outcome = stack.scroll_active(-12);
         let at_top = render_rows(&mut stack);
 
         let margin = (H - 2) as usize; // blank row lazybox holds back
@@ -5574,7 +5715,7 @@ mod hover_scroll_tests {
         // Route the wheel exactly as the handler does: resolve the tile
         // under the cursor, then scroll it.
         let target = stack.terminal_at(col, row).unwrap();
-        stack.scroll_terminal(target, -3);
+        let _outcome = stack.scroll_terminal(target, -3);
 
         assert_eq!(
             offset(&stack, TerminalId(1)),
@@ -5615,7 +5756,7 @@ mod hover_scroll_tests {
         let left_before = offset(&stack, TerminalId(1));
         let right_before = offset(&stack, TerminalId(2));
         let target = stack.terminal_at(col, row).unwrap();
-        stack.scroll_terminal(target, -3);
+        let _outcome = stack.scroll_terminal(target, -3);
 
         assert_eq!(offset(&stack, TerminalId(2)), right_before - 3);
         assert_eq!(offset(&stack, TerminalId(1)), left_before);

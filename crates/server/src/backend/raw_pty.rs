@@ -261,7 +261,9 @@ impl SessionBackend for RawPtyBackend {
     fn snapshot<'a>(
         &'a self,
         key: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<(Vec<u8>, u64), BackendError>> + Send + 'a>> {
+    ) -> Pin<
+        Box<dyn Future<Output = Result<crate::backend::ReplaySnapshot, BackendError>> + Send + 'a>,
+    > {
         Box::pin(async move {
             let pty = {
                 let map = self.sessions.lock().await;
@@ -294,6 +296,7 @@ impl SessionBackend for RawPtyBackend {
             // next delivered chunk and resyncs from the replay ring.
             let mut sub = pty.subscribe().await;
             let replay = std::mem::take(&mut sub.replay);
+            let replay_complete = sub.replay_complete;
             let last_seq = sub.last_seq;
             let (tx, rx) = tokio::sync::mpsc::channel::<OutputChunk>(
                 crate::backend::SUBSCRIPTION_CHANNEL_CAPACITY,
@@ -341,6 +344,7 @@ impl SessionBackend for RawPtyBackend {
             });
             Ok(Subscription {
                 replay,
+                replay_complete,
                 last_seq,
                 live: rx,
             })

@@ -447,6 +447,88 @@ async fn seq_gap_resyncs_from_replay_ring() {
     .expect("test deadline exceeded");
 }
 
+/// A transient backend snapshot error is not an empty successful resync.
+/// The pump keeps its old high-water mark, suppresses the torn stream,
+/// and retries from a later chunk until an authoritative replay exists.
+#[tokio::test]
+async fn seq_gap_snapshot_failure_preserves_state_and_retries() {
+    timeout(TEST_DEADLINE, async {
+        let _home = IsolatedConfigHome::new();
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config.clone()).await;
+        let terminal_id = spawn_shell(&mut client).await;
+        let key = config
+            .backend_key_for(terminal_id)
+            .await
+            .expect("terminal registered");
+
+        mock.emit(&key, b"A").await;
+        wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalOutput { seq: 1, .. }),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("first chunk forwarded");
+
+        mock.fail_next_snapshots(&key, 1).await;
+        mock.emit_dropped(&key, b"B").await;
+        mock.emit(&key, b"C").await;
+        wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalResyncUnavailable { terminal_id: t } if *t == terminal_id),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("failure is explicit without resetting the grid");
+        let false_recovery = wait_for(
+            &mut client,
+            |e| {
+                matches!(
+                    e,
+                    Event::TerminalResync { terminal_id: t, .. }
+                        | Event::TerminalOutput { terminal_id: t, seq: 3, .. }
+                        if *t == terminal_id
+                )
+            },
+            Duration::from_millis(150),
+        )
+        .await;
+        assert!(
+            false_recovery.is_none(),
+            "failed snapshot must emit neither an empty reset nor torn output: {false_recovery:?}"
+        );
+
+        mock.emit(&key, b"D").await;
+        let recovered = wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalResync { terminal_id: t, .. } if *t == terminal_id),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("later output retries recovery");
+        assert!(matches!(
+            recovered,
+            Event::TerminalResync { replay, seq: 4, .. } if replay == b"ABCD"
+        ));
+
+        mock.emit(&key, b"E").await;
+        let next = wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalOutput { terminal_id: t, seq: 5, .. } if *t == terminal_id),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("stream resumes only after successful recovery");
+        assert!(matches!(
+            next,
+            Event::TerminalOutput { bytes, first_seq: 5, seq: 5, .. } if bytes == b"E"
+        ));
+    })
+    .await
+    .expect("test deadline exceeded");
+}
+
 /// Fix: recover_sessions' simplified pump leaked. A recovered terminal
 /// must tear down exactly like a freshly spawned one: hook-era map
 /// entries (agent_states, hook_driven_terminals, input_needed_shapes,

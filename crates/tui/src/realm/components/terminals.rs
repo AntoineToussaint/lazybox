@@ -141,6 +141,11 @@ impl Terminals {
         self.inner.on_event(evt);
     }
 
+    /// Client-observed terminal gaps that need a daemon replay request.
+    pub fn drain_pending_resync_requests(&mut self) -> Vec<(TerminalId, u64)> {
+        self.inner.drain_pending_resync_requests()
+    }
+
     /// Direct render entry point.
     pub fn view_in(&mut self, area: Rect, frame: &mut Frame) {
         self.inner.render(area, frame, self.focused);

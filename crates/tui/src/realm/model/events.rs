@@ -251,6 +251,13 @@ impl<T: TerminalAdapter> Model<T> {
         if let IpcEvent::TerminalOutput { terminal_id, .. } = &event {
             let visible = self.terminals.is_terminal_visible(*terminal_id);
             self.terminals.on_daemon_event(&event);
+            let resync_requests = self.terminals.drain_pending_resync_requests();
+            for (terminal_id, required_seq) in resync_requests {
+                self.send_cmd(IpcCommand::RequestTerminalResync {
+                    terminal_id,
+                    required_seq,
+                });
+            }
             if visible {
                 self.redraw = true;
             }
@@ -304,6 +311,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::TerminalSpawned { .. }
                 | IpcEvent::TerminalOutput { .. }
                 | IpcEvent::TerminalResync { .. }
+                | IpcEvent::TerminalResyncUnavailable { .. }
                 | IpcEvent::TerminalExited { .. }
                 | IpcEvent::TerminalFocusRequested { .. }
                 | IpcEvent::TerminalsRebadged { .. }
@@ -706,6 +714,19 @@ impl<T: TerminalAdapter> Model<T> {
         }
         self.right.on_daemon_event(&event);
         self.terminals.on_daemon_event(&event);
+        let resync_requests = self.terminals.drain_pending_resync_requests();
+        for (terminal_id, required_seq) in resync_requests {
+            self.send_cmd(IpcCommand::RequestTerminalResync {
+                terminal_id,
+                required_seq,
+            });
+        }
+        if matches!(&event, IpcEvent::TerminalResyncUnavailable { .. }) {
+            self.flash(
+                "terminal output paused — authoritative replay unavailable; retrying",
+                crate::realm::components::footer::NoticeSeverity::Retryable,
+            );
+        }
         if let Some(p) = self.status.polling.as_mut() {
             p.feed_daemon_event(&event);
         }
@@ -754,6 +775,7 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::TerminalSpawned { .. }
             | IpcEvent::TerminalOutput { .. }
             | IpcEvent::TerminalResync { .. }
+            | IpcEvent::TerminalResyncUnavailable { .. }
             | IpcEvent::TerminalExited { .. }
             | IpcEvent::TerminalFocusRequested { .. }
             | IpcEvent::TerminalsRebadged { .. }
@@ -909,6 +931,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::TerminalSpawned { .. }
                 | IpcEvent::TerminalOutput { .. }
                 | IpcEvent::TerminalResync { .. }
+                | IpcEvent::TerminalResyncUnavailable { .. }
                 | IpcEvent::TerminalExited { .. }
                 | IpcEvent::TerminalFocusRequested { .. }
                 | IpcEvent::TerminalsRebadged { .. }

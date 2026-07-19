@@ -932,6 +932,66 @@ async fn snapshot_replay_includes_buffered_pty_output_for_late_subscribers() {
     .await
     .expect("deadline");
 }
+
+/// A client that independently detects a sequence gap can request an
+/// authoritative replay. Success must cover the requested sequence;
+/// transient failure is explicit and never encoded as an empty reset.
+#[tokio::test]
+async fn client_requested_terminal_resync_is_covered_or_explicitly_unavailable() {
+    timeout(TEST_DEADLINE, async {
+        let _home = IsolatedConfigHome::new();
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config.clone()).await;
+        let terminal_id = spawn_and_wait(&mut client, TerminalKind::Shell).await;
+        let key = config
+            .backend_key_for(terminal_id)
+            .await
+            .expect("backend key");
+        mock.emit(&key, b"screen").await;
+        wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalOutput { terminal_id: id, seq: 1, .. } if *id == terminal_id),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("live output");
+
+        client
+            .send(Command::RequestTerminalResync {
+                terminal_id,
+                required_seq: 1,
+            })
+            .expect("request resync");
+        let recovered = wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalResync { terminal_id: id, .. } if *id == terminal_id),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("covered replay");
+        assert!(matches!(
+            recovered,
+            Event::TerminalResync { replay, seq: 1, .. } if replay == b"screen"
+        ));
+
+        mock.fail_next_snapshots(&key, 1).await;
+        client
+            .send(Command::RequestTerminalResync {
+                terminal_id,
+                required_seq: 2,
+            })
+            .expect("request unavailable resync");
+        wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalResyncUnavailable { terminal_id: id } if *id == terminal_id),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("snapshot failure is explicit");
+    })
+    .await
+    .expect("test deadline exceeded");
+}
 /// Recovery scenario: a backend has a session running (simulating
 /// "lazybox crashed"), then a fresh `ServerConfig` is built around the
 /// same backend (simulating "lazybox restarted"). `recover_sessions`

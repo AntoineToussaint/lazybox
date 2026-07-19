@@ -802,7 +802,9 @@ impl SessionBackend for TmuxBackend {
     fn snapshot<'a>(
         &'a self,
         key: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<(Vec<u8>, u64), BackendError>> + Send + 'a>> {
+    ) -> Pin<
+        Box<dyn Future<Output = Result<crate::backend::ReplaySnapshot, BackendError>> + Send + 'a>,
+    > {
         Box::pin(async move {
             // Only return a snapshot if a client is already bound — we
             // don't want a snapshot probe to lazily spin up a tmux
@@ -876,6 +878,7 @@ impl SessionBackend for TmuxBackend {
 
             let mut sub = pty.subscribe().await;
             let replay = std::mem::take(&mut sub.replay);
+            let replay_complete = sub.replay_complete;
             let last_seq = sub.last_seq;
             // Bounded bridge: a stalled subscriber drops chunks via
             // `try_send` instead of growing an unbounded backlog. The
@@ -935,6 +938,7 @@ impl SessionBackend for TmuxBackend {
 
             Ok(Subscription {
                 replay,
+                replay_complete,
                 last_seq,
                 live: rx,
             })

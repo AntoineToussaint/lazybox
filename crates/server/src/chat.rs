@@ -831,8 +831,8 @@ async fn recent_terminal_text(server: &ServerConfig, terminal_id: TerminalId) ->
             None => return String::new(),
         }
     };
-    let (mut raw, _seq) = match server.backend.snapshot(&backend_key).await {
-        Ok(v) => v,
+    let mut raw = match server.backend.snapshot(&backend_key).await {
+        Ok(v) => v.replay,
         Err(e) => {
             tracing::debug!(?terminal_id, "chat: backend.snapshot failed: {e:?}");
             return String::new();

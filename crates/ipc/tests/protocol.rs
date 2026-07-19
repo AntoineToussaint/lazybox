@@ -109,6 +109,10 @@ fn all_commands() -> Vec<Command> {
             cols: 120,
             rows: 40,
         },
+        Command::RequestTerminalResync {
+            terminal_id: TerminalId(7),
+            required_seq: 42,
+        },
         Command::Close {
             terminal_id: TerminalId(7),
         },
@@ -340,6 +344,7 @@ fn all_events() -> Vec<Event> {
                 kind: TerminalKind::Agent("claude".into()),
                 replay: b"replay-bytes".to_vec(),
                 last_seq: 42,
+                replay_available: true,
                 no_permission: true,
                 on_main: true,
                 model_label: Some("Opus".into()),
@@ -429,12 +434,16 @@ fn all_events() -> Vec<Event> {
         Event::TerminalOutput {
             terminal_id: TerminalId(2),
             bytes: b"ANSI: \x1b[31mred\x1b[0m".to_vec(),
+            first_seq: 1,
             seq: 1,
         },
         Event::TerminalResync {
             terminal_id: TerminalId(2),
             replay: b"full replay".to_vec(),
             seq: 9,
+        },
+        Event::TerminalResyncUnavailable {
+            terminal_id: TerminalId(2),
         },
         Event::TerminalExited {
             terminal_id: TerminalId(2),
@@ -644,6 +653,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::InjectPrompt { .. } => "InjectPrompt",
         Command::RecordComposingBuffer { .. } => "RecordComposingBuffer",
         Command::Resize { .. } => "Resize",
+        Command::RequestTerminalResync { .. } => "RequestTerminalResync",
         Command::Close { .. } => "Close",
         Command::IngestHook { .. } => "IngestHook",
         Command::Kill { .. } => "Kill",
@@ -716,6 +726,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::TerminalSpawned { .. } => "TerminalSpawned",
         Event::TerminalOutput { .. } => "TerminalOutput",
         Event::TerminalResync { .. } => "TerminalResync",
+        Event::TerminalResyncUnavailable { .. } => "TerminalResyncUnavailable",
         Event::TerminalExited { .. } => "TerminalExited",
         Event::TerminalFocusRequested { .. } => "TerminalFocusRequested",
         Event::TerminalsRebadged { .. } => "TerminalsRebadged",
@@ -753,12 +764,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         (lazybox_ipc::PROTOCOL_VERSION, command_tags.len()),
-        (8, 50),
+        (9, 51),
         "Command gained/lost a variant: update the exhaustive tag, add a sample, and bump PROTOCOL_VERSION",
     );
     assert_eq!(
         (lazybox_ipc::PROTOCOL_VERSION, event_tags.len()),
-        (8, 47),
+        (9, 48),
         "Event gained/lost a variant: update the exhaustive tag, add a sample, and bump PROTOCOL_VERSION",
     );
 }
@@ -907,13 +918,21 @@ async fn socket_binary_terminal_output_round_trip() {
     let msg = Event::TerminalOutput {
         terminal_id: TerminalId(1),
         bytes: nasty.clone(),
+        first_seq: 99,
         seq: 99,
     };
     write_frame(&mut a, &msg).await.expect("write");
     drop(a);
     let got: Option<Event> = read_frame(&mut b).await.expect("read");
-    if let Some(Event::TerminalOutput { bytes, seq, .. }) = got {
+    if let Some(Event::TerminalOutput {
+        bytes,
+        first_seq,
+        seq,
+        ..
+    }) = got
+    {
         assert_eq!(bytes, nasty);
+        assert_eq!(first_seq, 99);
         assert_eq!(seq, 99);
     } else {
         panic!("expected TerminalOutput, got {got:?}");

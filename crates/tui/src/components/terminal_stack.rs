@@ -58,8 +58,9 @@ pub const RECENT_OUTPUT_CAP: usize = 4 * 1024;
 /// on screen. Off-screen terminals defer the (expensive) VT parse and
 /// just stash bytes here; the parser is fed lazily on the first render
 /// after the terminal becomes visible. This bounds the *between-render*
-/// backlog of a chatty hidden agent — when it overflows we keep the
-/// most-recent tail and reset+refeed the parser on display. It is
+/// backlog of a chatty hidden agent — when the next append would exceed
+/// it, we feed the complete ordered batch into the parser and start a
+/// fresh deferred batch. It is
 /// deliberately independent of (and smaller than) the daemon's
 /// `REPLAY_RING_BYTES`: a `Snapshot`'s recovery replay is stashed into
 /// this buffer *uncapped* (it seeds a brand-new slot, is already
@@ -453,6 +454,9 @@ pub struct TerminalStack {
     /// App turns them into `Command::Resize` and ships them at the
     /// next loop tick. Drained on every `drain_pending_resizes`.
     pending_resizes: Vec<(TerminalId, u16, u16)>,
+    /// Client-observed output gaps waiting for the model to request an
+    /// authoritative daemon replay. `(terminal_id, required_seq)`.
+    pending_resync_requests: Vec<(TerminalId, u64)>,
     /// Click targets for the tab strip, populated each render. Each
     /// entry is `(tab_idx, (start_col, end_col_exclusive), row)`.
     /// `handle_tab_click(col, row)` scans this on mouse-down to map
@@ -691,6 +695,14 @@ struct TerminalSlot {
     session_key: SessionKey,
     kind: TerminalKind,
     last_seq: u64,
+    /// True after a sequence gap or an unavailable recovery snapshot.
+    /// While set, live output is ignored so a torn byte stream cannot
+    /// mutate the last coherent grid. Only an authoritative resync clears
+    /// the debt.
+    desynced: bool,
+    /// One resync request is already queued/sent for the current gap.
+    /// An unavailable response clears it so later output can retry.
+    resync_request_pending: bool,
     /// libghostty-vt parser. Each client owns its own — the daemon
     /// streams raw bytes; this is what turns them into a cell grid.
     /// `Box`ed so moving `TerminalSlot` doesn't move the inner FFI
@@ -752,12 +764,6 @@ struct TerminalSlot {
     /// deferred replay into `vt` on the first render after it becomes
     /// visible. Bounded by [`PENDING_FEED_CAP`].
     pending_feed: Vec<u8>,
-    /// Set when `pending_feed` overflowed [`PENDING_FEED_CAP`] and the
-    /// oldest bytes were dropped. The deferred replay then resets the
-    /// parser and re-feeds only the retained tail (resync semantics)
-    /// instead of continuing the pre-hidden grid, which the dropped
-    /// prefix would have desynced.
-    pending_truncated: bool,
     /// Set once this (agent) terminal's process has exited on its own
     /// rather than by an explicit user close. The slot is retained so
     /// the frozen last screen stays visible and a restart banner is
@@ -805,21 +811,12 @@ impl TerminalSlot {
 
     /// Replay any bytes buffered while this terminal was hidden into
     /// the VT parser, then clear the buffer. A no-op when nothing was
-    /// buffered. If the buffer overflowed while hidden we reset the
-    /// parser first and feed only the retained tail — feeding a
-    /// truncated stream onto the stale pre-hidden grid would render
-    /// garbage, so this mirrors the resync path's reset+refeed. On a
-    /// reset failure the bytes are left in place to retry next frame
-    /// rather than being dropped.
+    /// buffered. The buffer is never truncated: `append_output` flushes
+    /// complete batches into the existing parser at the cap, preserving
+    /// byte-stream continuity while bounding deferred memory.
     fn flush_pending(&mut self) {
         if self.pending_feed.is_empty() {
             return;
-        }
-        if self.pending_truncated {
-            if !self.vt.reset() {
-                return;
-            }
-            self.pending_truncated = false;
         }
         self.vt.feed(&self.pending_feed);
         self.pending_feed.clear();
@@ -976,6 +973,9 @@ struct TerminalVt {
     /// redraws (see `GhosttyTerminal` docs / #239), so the widget
     /// walks every cell every frame.
     shadow: Option<ratatui::buffer::Buffer>,
+    /// Deterministic fault injection for the resync retry contract.
+    #[cfg(test)]
+    fail_next_reset: bool,
     _not_send: std::marker::PhantomData<*mut ()>,
 }
 
@@ -998,6 +998,8 @@ impl TerminalVt {
             cols: DEFAULT_COLS,
             rows: DEFAULT_ROWS,
             shadow: None,
+            #[cfg(test)]
+            fail_next_reset: false,
             _not_send: std::marker::PhantomData,
         }))
     }
@@ -1105,6 +1107,10 @@ impl TerminalVt {
     /// transient allocator hiccup degrades to a stale grid rather than
     /// a blank one.
     fn reset(&mut self) -> bool {
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_next_reset) {
+            return false;
+        }
         let (cols, rows) = (self.cols, self.rows);
         let Some(mut fresh) = TerminalVt::new() else {
             return false;
@@ -1128,6 +1134,7 @@ impl TerminalStack {
             pending_split: None,
             synced_layout: None,
             pending_resizes: Vec::new(),
+            pending_resync_requests: Vec::new(),
             tab_strip_hits: Vec::new(),
             tile_hits: Vec::new(),
             last_focused: HashMap::new(),
@@ -1171,6 +1178,11 @@ impl TerminalStack {
     /// surfacing as "the terminal looks frozen."
     pub fn drain_pending_resizes(&mut self) -> Vec<(TerminalId, u16, u16)> {
         std::mem::take(&mut self.pending_resizes)
+    }
+
+    /// Drain sequence-gap recovery requests for the model's IPC client.
+    pub fn drain_pending_resync_requests(&mut self) -> Vec<(TerminalId, u64)> {
+        std::mem::take(&mut self.pending_resync_requests)
     }
 
     /// Apply a session's persisted layout. Called by the App when the
@@ -2019,7 +2031,7 @@ impl TerminalStack {
         }
     }
 
-    fn append_output(&mut self, id: TerminalId, bytes: &[u8], seq: u64) {
+    fn append_output(&mut self, id: TerminalId, bytes: &[u8], first_seq: u64, seq: u64) {
         // The focused terminal feeds eagerly even when it hasn't been
         // rendered yet (collapsed pane, or before the first frame): the
         // `&self` mouse/alt-screen readers query its live parser state
@@ -2030,6 +2042,30 @@ impl TerminalStack {
         let Some(slot) = self.terminals.get_mut(&id) else {
             return;
         };
+        if seq <= slot.last_seq {
+            return;
+        }
+        if slot.desynced {
+            if !slot.resync_request_pending {
+                slot.resync_request_pending = true;
+                self.pending_resync_requests.push((id, seq));
+            }
+            return;
+        }
+        if first_seq != slot.last_seq.saturating_add(1) || first_seq > seq {
+            slot.desynced = true;
+            slot.resync_request_pending = true;
+            self.pending_resync_requests.push((id, seq));
+            slot.osc52_carry.clear();
+            tracing::warn!(
+                terminal_id = ?id,
+                last_seq = slot.last_seq,
+                first_seq,
+                seq,
+                "terminal output sequence gap; preserving last coherent grid until resync"
+            );
+            return;
+        }
         // OSC 52 passthrough — if the inner program (Claude,
         // tmux, vim) wrote `ESC ] 52 ; c ; <base64> BEL` to ask
         // the terminal to put text on the clipboard, forward the
@@ -2047,11 +2083,16 @@ impl TerminalStack {
         if slot.displayed || eager {
             slot.vt.feed(bytes);
         } else {
-            slot.pending_feed.extend_from_slice(bytes);
-            if slot.pending_feed.len() > PENDING_FEED_CAP {
-                let excess = slot.pending_feed.len() - PENDING_FEED_CAP;
-                slot.pending_feed.drain(..excess);
-                slot.pending_truncated = true;
+            // Never drop the prefix and reset+feed an arbitrary tail: it
+            // may begin inside UTF-8/CSI state. Periodically parse a whole
+            // ordered batch instead, keeping deferred memory bounded.
+            if slot.pending_feed.len().saturating_add(bytes.len()) > PENDING_FEED_CAP {
+                slot.flush_pending();
+            }
+            if bytes.len() > PENDING_FEED_CAP {
+                slot.vt.feed(bytes);
+            } else {
+                slot.pending_feed.extend_from_slice(bytes);
             }
         }
         slot.recent.extend_from_slice(bytes);
@@ -2076,7 +2117,23 @@ impl TerminalStack {
         let Some(slot) = self.terminals.get_mut(&id) else {
             return;
         };
+        if seq < slot.last_seq || (!slot.desynced && seq == slot.last_seq) {
+            if slot.desynced {
+                slot.resync_request_pending = false;
+            }
+            return;
+        }
         if !slot.vt.reset() {
+            // The replay was authoritative, but the local parser could
+            // not adopt it. Keep the last coherent grid and immediately
+            // request another replay; leaving the old request latch set
+            // would deadlock recovery because no unavailable response is
+            // coming to release it.
+            slot.desynced = true;
+            if !slot.resync_request_pending {
+                slot.resync_request_pending = true;
+                self.pending_resync_requests.push((id, seq));
+            }
             return;
         }
         slot.vt.feed(replay);
@@ -2086,11 +2143,12 @@ impl TerminalStack {
         // The ring replay is authoritative; any bytes buffered while
         // hidden are now stale and already covered by it.
         slot.pending_feed.clear();
-        slot.pending_truncated = false;
         slot.recent.clear();
         let tail_start = replay.len().saturating_sub(RECENT_OUTPUT_CAP);
         slot.recent.extend_from_slice(&replay[tail_start..]);
         slot.last_seq = seq;
+        slot.desynced = false;
+        slot.resync_request_pending = false;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2109,6 +2167,8 @@ impl TerminalStack {
             session_key,
             kind,
             last_seq,
+            desynced: false,
+            resync_request_pending: false,
             vt,
             recent: Vec::new(),
             osc52_carry: Vec::new(),
@@ -2121,7 +2181,6 @@ impl TerminalStack {
             model_label,
             displayed: false,
             pending_feed: Vec::new(),
-            pending_truncated: false,
             exited: None,
             spawned_at: std::time::Instant::now(),
             did_work: false,
@@ -2435,8 +2494,29 @@ impl TerminalStack {
     pub fn on_event(&mut self, event: &Event) {
         match event {
             Event::Snapshot { terminals, .. } => {
-                self.terminals.clear();
+                let mut previous = std::mem::take(&mut self.terminals);
                 for snap in terminals {
+                    if !snap.replay_available
+                        && let Some(mut slot) = previous.remove(&snap.terminal_id)
+                    {
+                        // A lag-recovery snapshot may fail for one backend.
+                        // Preserve the user's last coherent screen, refresh
+                        // identity/badges, and stop applying output until a
+                        // later authoritative resync succeeds.
+                        slot.session_key = snap.session_key.clone();
+                        slot.kind = snap.kind.clone();
+                        slot.no_permission = snap.no_permission;
+                        slot.on_main = snap.on_main;
+                        slot.model_label = snap.model_label.clone();
+                        slot.last_user_message = snap.last_user_message.clone();
+                        slot.composing = snap.composing_buffer.clone().unwrap_or_default();
+                        slot.desynced = true;
+                        slot.resync_request_pending = true;
+                        self.pending_resync_requests
+                            .push((snap.terminal_id, slot.last_seq.max(snap.last_seq)));
+                        self.terminals.insert(snap.terminal_id, slot);
+                        continue;
+                    }
                     let mut slot = Self::make_slot(
                         snap.session_key.clone(),
                         snap.kind.clone(),
@@ -2447,6 +2527,16 @@ impl TerminalStack {
                         snap.last_user_message.clone(),
                         snap.composing_buffer.clone().unwrap_or_default(),
                     );
+                    slot.desynced = !snap.replay_available;
+                    slot.resync_request_pending = !snap.replay_available;
+                    if !snap.replay_available {
+                        // Total snapshot budgeting and transient backend
+                        // failures omit whole replays. Ask for this one
+                        // terminal immediately so a quiet pane cannot stay
+                        // blank forever waiting for live output.
+                        self.pending_resync_requests
+                            .push((snap.terminal_id, snap.last_seq));
+                    }
                     // Defer the daemon-ring replay instead of parsing
                     // it here: a reconnect / broadcast-lag snapshot
                     // carries EVERY terminal's full ring (potentially
@@ -2467,7 +2557,9 @@ impl TerminalStack {
                     // would silently drop scrollback the old eager path
                     // preserved. A later live overflow while hidden
                     // still trims to the cap tail via `append_output`.
-                    slot.pending_feed = snap.replay.clone();
+                    if snap.replay_available {
+                        slot.pending_feed = snap.replay.clone();
+                    }
                     self.terminals.insert(snap.terminal_id, slot);
                 }
                 self.clamp_active_tab();
@@ -2589,9 +2681,10 @@ impl TerminalStack {
             Event::TerminalOutput {
                 terminal_id,
                 bytes,
+                first_seq,
                 seq,
             } => {
-                self.append_output(*terminal_id, bytes, *seq);
+                self.append_output(*terminal_id, bytes, *first_seq, *seq);
             }
             Event::TerminalResync {
                 terminal_id,
@@ -2599,6 +2692,12 @@ impl TerminalStack {
                 seq,
             } => {
                 self.resync_terminal(*terminal_id, replay, *seq);
+            }
+            Event::TerminalResyncUnavailable { terminal_id } => {
+                if let Some(slot) = self.terminals.get_mut(terminal_id) {
+                    slot.desynced = true;
+                    slot.resync_request_pending = false;
+                }
             }
             Event::TerminalFocusRequested { terminal_id } => {
                 // Daemon-driven focus from the singleton guard.
@@ -4833,6 +4932,7 @@ mod resync_tests {
         clean.on_event(&Event::TerminalOutput {
             terminal_id: TerminalId(1),
             bytes: full.to_vec(),
+            first_seq: 1,
             seq: 9,
         });
         let want0 = row(&mut clean, ROW0);
@@ -4847,6 +4947,7 @@ mod resync_tests {
         desynced.on_event(&Event::TerminalOutput {
             terminal_id: TerminalId(1),
             bytes: b"line0\r\n\x1b[".to_vec(),
+            first_seq: 1,
             seq: 3,
         });
         assert_ne!(row(&mut desynced, ROW1), want1, "precondition: desynced");
@@ -4876,6 +4977,156 @@ mod resync_tests {
             seq: 5,
         });
         assert!(!stack.terminals.contains_key(&TerminalId(99)));
+    }
+
+    #[test]
+    fn client_sequence_gap_quarantines_output_until_authoritative_resync() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = shell_stack(id, &sk);
+        stack.on_event(&Event::TerminalOutput {
+            terminal_id: id,
+            bytes: b"stable".to_vec(),
+            first_seq: 1,
+            seq: 1,
+        });
+
+        // Chunk 2 vanished somewhere below the daemon's normal recovery
+        // machinery. Defense in depth: neither chunk 3 nor later output
+        // may mutate the coherent prefix.
+        stack.on_event(&Event::TerminalOutput {
+            terminal_id: id,
+            bytes: b"-torn".to_vec(),
+            first_seq: 3,
+            seq: 3,
+        });
+        stack.on_event(&Event::TerminalOutput {
+            terminal_id: id,
+            bytes: b"-still-torn".to_vec(),
+            first_seq: 4,
+            seq: 4,
+        });
+        let slot = &stack.terminals[&id];
+        assert!(slot.desynced);
+        assert_eq!(slot.last_seq, 1);
+        assert_eq!(slot.recent, b"stable");
+        assert_eq!(stack.drain_pending_resync_requests(), vec![(id, 3)]);
+
+        stack.on_event(&Event::TerminalResync {
+            terminal_id: id,
+            replay: b"recovered".to_vec(),
+            seq: 4,
+        });
+        let slot = &stack.terminals[&id];
+        assert!(!slot.desynced);
+        assert_eq!(slot.last_seq, 4);
+        assert_eq!(slot.recent, b"recovered");
+
+        stack.on_event(&Event::TerminalOutput {
+            terminal_id: id,
+            bytes: b"!".to_vec(),
+            first_seq: 5,
+            seq: 5,
+        });
+        assert_eq!(stack.terminals[&id].recent, b"recovered!");
+    }
+
+    #[test]
+    fn unavailable_recovery_snapshot_preserves_existing_grid_and_sequence() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = shell_stack(id, &sk);
+        stack.on_event(&Event::TerminalOutput {
+            terminal_id: id,
+            bytes: b"known-good".to_vec(),
+            first_seq: 1,
+            seq: 1,
+        });
+
+        stack.on_event(&Event::Snapshot {
+            workspaces: Vec::new(),
+            projects: Vec::new(),
+            terminals: vec![lazybox_ipc::TerminalSnapshot {
+                terminal_id: id,
+                session_key: sk,
+                kind: TerminalKind::Shell,
+                replay: Vec::new(),
+                last_seq: 0,
+                replay_available: false,
+                no_permission: false,
+                on_main: false,
+                model_label: None,
+                last_user_message: None,
+                composing_buffer: None,
+            }],
+        });
+        let slot = &stack.terminals[&id];
+        assert!(slot.desynced);
+        assert_eq!(slot.last_seq, 1, "failed snapshot cannot lower coverage");
+        assert_eq!(slot.recent, b"known-good", "screen state is preserved");
+        assert_eq!(stack.drain_pending_resync_requests(), vec![(id, 1)]);
+
+        stack.on_event(&Event::TerminalOutput {
+            terminal_id: id,
+            bytes: b"ignored".to_vec(),
+            first_seq: 2,
+            seq: 2,
+        });
+        assert_eq!(stack.terminals[&id].recent, b"known-good");
+        assert!(
+            stack.drain_pending_resync_requests().is_empty(),
+            "the reconnect repair already owns this recovery episode"
+        );
+    }
+
+    #[test]
+    fn local_vt_reset_failure_releases_latch_and_retries_immediately() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = shell_stack(id, &sk);
+        stack.on_event(&Event::TerminalOutput {
+            terminal_id: id,
+            bytes: b"stable".to_vec(),
+            first_seq: 1,
+            seq: 1,
+        });
+        stack
+            .terminals
+            .get_mut(&id)
+            .expect("slot")
+            .vt
+            .fail_next_reset = true;
+
+        stack.on_event(&Event::TerminalResync {
+            terminal_id: id,
+            replay: b"authoritative".to_vec(),
+            seq: 4,
+        });
+
+        let slot = &stack.terminals[&id];
+        assert!(slot.desynced);
+        assert_eq!(slot.last_seq, 1, "failed local reset cannot claim coverage");
+        assert_eq!(slot.recent, b"stable", "last coherent grid is preserved");
+        assert_eq!(stack.drain_pending_resync_requests(), vec![(id, 4)]);
+    }
+
+    #[test]
+    fn stale_resync_cannot_roll_back_a_coherent_terminal() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = shell_stack(id, &sk);
+        stack.on_event(&Event::TerminalOutput {
+            terminal_id: id,
+            bytes: b"new".to_vec(),
+            first_seq: 1,
+            seq: 1,
+        });
+        stack.on_event(&Event::TerminalResync {
+            terminal_id: id,
+            replay: b"old".to_vec(),
+            seq: 1,
+        });
+        assert_eq!(stack.terminals[&id].recent, b"new");
     }
 }
 
@@ -4934,6 +5185,7 @@ mod hidden_feed_tests {
         stack.on_event(&Event::TerminalOutput {
             terminal_id: id,
             bytes: bytes.to_vec(),
+            first_seq: seq,
             seq,
         });
     }
@@ -4978,11 +5230,11 @@ mod hidden_feed_tests {
         assert_eq!(row0(&mut stack), "hello");
     }
 
-    /// A buffer that overflows `PENDING_FEED_CAP` while hidden keeps only
-    /// the most-recent tail and resets+refeeds the parser on display, so
-    /// the visible grid still reflects the latest output.
+    /// A hidden buffer crossing `PENDING_FEED_CAP` flushes its complete
+    /// ordered prefix into the existing parser instead of dropping bytes
+    /// and resetting from an arbitrary tail.
     #[test]
-    fn overflowing_hidden_buffer_replays_tail() {
+    fn overflowing_hidden_buffer_preserves_stream_in_bounded_batches() {
         let sk_a = SessionKey::new("a");
         let sk_b = SessionKey::new("b");
         let mut stack = TerminalStack::new(PaneId::new(0));
@@ -4997,18 +5249,14 @@ mod hidden_feed_tests {
         feed(&mut stack, TerminalId(2), &filler, 1);
         feed(&mut stack, TerminalId(2), b"\r\nlast line", 2);
         let slot = &stack.terminals[&TerminalId(2)];
-        assert!(
-            slot.pending_truncated,
-            "overflow must set the truncation flag"
-        );
         assert!(slot.pending_feed.len() <= PENDING_FEED_CAP);
+        assert_eq!(slot.pending_feed, b"\r\nlast line");
 
         stack.set_active_session(Some(sk_b));
         let rows = screen_rows(&mut stack);
         let slot = &stack.terminals[&TerminalId(2)];
         assert!(slot.pending_feed.is_empty());
-        assert!(!slot.pending_truncated);
-        // The tail survived the truncation and rendered (reset+refeed).
+        // Both the flushed prefix and later batch were fed in order.
         assert!(
             rows.iter().any(|r| r.contains("last line")),
             "expected the post-truncation tail on screen, got {rows:?}"
@@ -5032,6 +5280,7 @@ mod hidden_feed_tests {
             kind: TerminalKind::Shell,
             replay: replay.to_vec(),
             last_seq: 1,
+            replay_available: true,
             no_permission: false,
             on_main: false,
             model_label: None,
@@ -6337,6 +6586,7 @@ mod terminal_availability_tests {
                 kind: TerminalKind::Agent("claude".into()),
                 replay: Vec::new(),
                 last_seq: 0,
+                replay_available: true,
                 no_permission: false,
                 on_main: false,
                 model_label: None,

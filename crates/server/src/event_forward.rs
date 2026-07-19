@@ -42,9 +42,9 @@ use std::time::Duration;
 use tokio::sync::mpsc::error::TrySendError;
 
 /// Cap on how long a single backend ring snapshot may take while
-/// building a resync. A wedged PTY must not stall the forwarder; we'd
-/// rather ship an empty replay (blank grid, self-heals on next output)
-/// than hang. Matches the spawn handler's per-session snapshot budget.
+/// building a resync. A wedged PTY must not stall the forwarder. Failure
+/// leaves the terminal in resync debt; it never fabricates an empty
+/// authoritative reset.
 const RESYNC_SNAPSHOT_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Drain the raw event stream into the bounded client channel, applying
@@ -116,6 +116,14 @@ struct ForwardState {
     /// for O(1) dedupe.
     resync_queue: VecDeque<TerminalId>,
     resync_set: HashSet<TerminalId>,
+    /// Highest dropped sequence each terminal's next authoritative replay
+    /// must cover. Kept across failed snapshot attempts; the next output
+    /// retries recovery instead of resuming a torn stream.
+    resync_debt: HashMap<TerminalId, u64>,
+    /// Terminals for which this recovery episode already surfaced an
+    /// unavailable notice. Prevents a chatty terminal from spamming one
+    /// lossless notice per retry.
+    resync_unavailable_announced: HashSet<TerminalId>,
     /// Highest per-terminal `seq` already delivered to the client inside
     /// a replay — either a `TerminalResync` (channel-overflow recovery)
     /// or a `Snapshot` (broadcast-lag recovery). The replay already
@@ -143,6 +151,8 @@ impl ForwardState {
             pending: VecDeque::new(),
             resync_queue: VecDeque::new(),
             resync_set: HashSet::new(),
+            resync_debt: HashMap::new(),
+            resync_unavailable_announced: HashSet::new(),
             covered_seq: HashMap::new(),
             metrics,
         }
@@ -171,10 +181,12 @@ impl ForwardState {
         !self.pending.is_empty() || !self.resync_queue.is_empty()
     }
 
-    fn schedule_resync(&mut self, terminal_id: TerminalId) {
+    fn schedule_resync(&mut self, terminal_id: TerminalId, required_seq: u64) {
         // Every call here corresponds to one dropped output chunk; the
         // resync itself is coalesced (one per terminal per episode).
         let dropped_total = self.metrics.record_output_dropped();
+        let debt = self.resync_debt.entry(terminal_id).or_insert(0);
+        *debt = (*debt).max(required_seq);
         if self.resync_set.insert(terminal_id) {
             self.resync_queue.push_back(terminal_id);
             let resync_total = self.metrics.record_resync();
@@ -191,6 +203,8 @@ impl ForwardState {
         if self.resync_set.remove(terminal_id) {
             self.resync_queue.retain(|t| t != terminal_id);
         }
+        self.resync_debt.remove(terminal_id);
+        self.resync_unavailable_announced.remove(terminal_id);
     }
 
     /// Route one raw event toward the client. Returns `Break` when the
@@ -211,20 +225,25 @@ impl ForwardState {
                 // (not a lossy drop: no resync owed).
                 ControlFlow::Continue(())
             }
-            Event::TerminalOutput { terminal_id, .. } => {
+            Event::TerminalOutput {
+                terminal_id, seq, ..
+            } => {
                 // Ordering rule: if anything is already buffered, or
                 // this terminal is mid-resync, we cannot forward live
                 // output without reordering it ahead of the queue — so
                 // drop it and (re)schedule the resync, which carries
                 // the up-to-date ring anyway.
-                if self.has_buffered() || self.resync_set.contains(&terminal_id) {
-                    self.schedule_resync(terminal_id);
+                if self.has_buffered()
+                    || self.resync_set.contains(&terminal_id)
+                    || self.resync_debt.contains_key(&terminal_id)
+                {
+                    self.schedule_resync(terminal_id, seq);
                     return ControlFlow::Continue(());
                 }
                 match client_tx.try_send(evt) {
                     Ok(()) => ControlFlow::Continue(()),
                     Err(TrySendError::Full(_)) => {
-                        self.schedule_resync(terminal_id);
+                        self.schedule_resync(terminal_id, seq);
                         ControlFlow::Continue(())
                     }
                     Err(TrySendError::Closed(_)) => ControlFlow::Break(()),
@@ -239,8 +258,21 @@ impl ForwardState {
                 // double-fed.
                 if let Event::Snapshot { terminals, .. } = &other {
                     for t in terminals {
-                        self.mark_covered(t.terminal_id, t.last_seq);
+                        if t.replay_available {
+                            self.mark_covered(t.terminal_id, t.last_seq);
+                            self.drop_resync(&t.terminal_id);
+                        }
                     }
+                }
+                // Pump-initiated and client-requested resyncs also carry
+                // authoritative coverage. Record it here so any older raw
+                // output already in this connection's queue is suppressed.
+                if let Event::TerminalResync {
+                    terminal_id, seq, ..
+                } = &other
+                {
+                    self.mark_covered(*terminal_id, *seq);
+                    self.drop_resync(terminal_id);
                 }
                 // A terminal that exits no longer needs a resync.
                 if let Event::TerminalExited { terminal_id, .. } = &other {
@@ -281,39 +313,67 @@ impl ForwardState {
         }
         if let Some(terminal_id) = self.resync_queue.pop_front() {
             self.resync_set.remove(&terminal_id);
-            let (replay, seq) = resync_replay(config, terminal_id).await;
-            // The replay carries every chunk through `seq`; record the
-            // floor so in-flight chunks the forwarder hasn't consumed yet
-            // (the ring can run a few chunks ahead of raw input) are
-            // dropped as duplicates rather than re-fed after the resync.
-            self.mark_covered(terminal_id, seq);
-            permit.send(Event::TerminalResync {
-                terminal_id,
-                replay,
-                seq,
-            });
+            let required_seq = self.resync_debt.get(&terminal_id).copied().unwrap_or(0);
+            if let Some(snapshot) = resync_replay(config, terminal_id, required_seq).await {
+                // The replay carries every chunk through `last_seq`; record
+                // the floor so in-flight chunks already inside it are not
+                // re-fed after the reset.
+                self.mark_covered(terminal_id, snapshot.last_seq);
+                self.resync_debt.remove(&terminal_id);
+                self.resync_unavailable_announced.remove(&terminal_id);
+                permit.send(Event::TerminalResync {
+                    terminal_id,
+                    replay: snapshot.replay,
+                    seq: snapshot.last_seq,
+                });
+            } else if self.resync_unavailable_announced.insert(terminal_id) {
+                permit.send(Event::TerminalResyncUnavailable { terminal_id });
+            }
+            // On repeated failure the permit is simply released.
+            // `resync_debt` remains, and the next output retries.
         }
     }
 }
 
-/// Fetch the daemon-side replay ring + last seq for `terminal_id`.
-/// Empty replay when the terminal is gone or the snapshot wedged — the
-/// consumer just resets to a blank grid, which self-heals on the next
-/// live chunk.
-async fn resync_replay(config: &ServerConfig, terminal_id: TerminalId) -> (Vec<u8>, u64) {
+/// Fetch an authoritative daemon-side replay covering `required_seq`.
+/// Returns `None` on absence, failure, timeout, truncation, or a stale
+/// snapshot. Callers must preserve their last known screen and retry.
+async fn resync_replay(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    required_seq: u64,
+) -> Option<crate::backend::ReplaySnapshot> {
     let key = config.terminals.lock().await.get(&terminal_id).cloned();
     let Some(key) = key else {
-        return (Vec::new(), 0);
+        return None;
     };
     match tokio::time::timeout(RESYNC_SNAPSHOT_TIMEOUT, config.backend.snapshot(&key)).await {
-        Ok(Ok(snapshot)) => snapshot,
+        Ok(Ok(snapshot)) if !snapshot.complete => {
+            tracing::warn!(
+                ?terminal_id,
+                required_seq,
+                snapshot_seq = snapshot.last_seq,
+                "resync replay prefix was truncated; preserving client state"
+            );
+            None
+        }
+        Ok(Ok(snapshot)) if snapshot.last_seq < required_seq => {
+            tracing::warn!(
+                ?terminal_id,
+                required_seq,
+                snapshot_seq = snapshot.last_seq,
+                "resync snapshot is stale; preserving client state"
+            );
+            None
+        }
+        Ok(Ok(snapshot)) => Some(snapshot),
         Ok(Err(e)) => {
             tracing::warn!(?terminal_id, "resync snapshot failed: {e}");
-            (Vec::new(), 0)
+            None
         }
         Err(_) => {
             tracing::warn!(?terminal_id, "resync snapshot timed out");
-            (Vec::new(), 0)
+            None
         }
     }
 }
@@ -355,9 +415,15 @@ mod tests {
             .spawn(&[], None, &[], "t")
             .await
             .expect("spawn");
-        // Seed the ring with the full screen the resync should replay.
-        let ring = b"FULL-SCREEN-RING".to_vec();
-        mock.emit(&key, &ring).await;
+        // Seed the backend ring with the same 20 sequenced chunks the
+        // raw forwarder receives below. A valid resync must cover the
+        // highest dropped sequence; stale snapshots are rejected.
+        let mut ring = Vec::new();
+        for seq in 1..=20 {
+            let bytes = format!("chunk{seq}").into_bytes();
+            ring.extend_from_slice(&bytes);
+            mock.emit(&key, bytes).await;
+        }
         let tid = TerminalId(1);
         config.terminals.lock().await.insert(tid, key.clone());
 
@@ -375,6 +441,7 @@ mod tests {
                 .send(Event::TerminalOutput {
                     terminal_id: tid,
                     bytes: format!("chunk{seq}").into_bytes(),
+                    first_seq: seq,
                     seq,
                 })
                 .unwrap();
@@ -412,7 +479,7 @@ mod tests {
             .collect();
         assert_eq!(resyncs.len(), 1, "expected exactly one resync: {got:?}");
         assert_eq!(resyncs[0].0, ring);
-        assert_eq!(resyncs[0].1, 1); // mock seq after one emit
+        assert_eq!(resyncs[0].1, 20);
         // We dropped output: fewer than 20 TerminalOutput got through.
         let outputs = got
             .iter()
@@ -452,7 +519,7 @@ mod tests {
         let mut state = ForwardState::new(config.event_metrics.clone());
         // A dropped chunk schedules the resync; materializing it records
         // the floor (the ring's last_seq = 1).
-        state.schedule_resync(tid);
+        state.schedule_resync(tid, 1);
         let (tx, mut rx) = mpsc::channel(8);
         let permit = tx.reserve().await.unwrap();
         state.deliver_one(permit, &config).await;
@@ -467,6 +534,7 @@ mod tests {
             Event::TerminalOutput {
                 terminal_id: tid,
                 bytes: vec![b'x'],
+                first_seq: 1,
                 seq: 1,
             },
         );
@@ -477,6 +545,7 @@ mod tests {
             Event::TerminalOutput {
                 terminal_id: tid,
                 bytes: vec![b'y'],
+                first_seq: 2,
                 seq: 2,
             },
         );
@@ -490,6 +559,53 @@ mod tests {
             }
         }
         assert_eq!(seqs, vec![2], "only the post-resync chunk survives");
+    }
+
+    /// Snapshot failure must not become an empty authoritative reset or
+    /// clear the resync debt. The next output is dropped, retries the
+    /// snapshot, and only a complete replay covering that output is sent.
+    #[tokio::test]
+    async fn failed_resync_preserves_debt_and_retries_without_empty_reset() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let key = config
+            .backend
+            .spawn(&[], None, &[], "t")
+            .await
+            .expect("spawn");
+        mock.emit(&key, b"A").await;
+        mock.fail_next_snapshots(&key, 1).await;
+        let tid = TerminalId(1);
+        config.terminals.lock().await.insert(tid, key.clone());
+
+        let mut state = ForwardState::new(config.event_metrics.clone());
+        let (tx, mut rx) = mpsc::channel(8);
+        state.schedule_resync(tid, 1);
+        let permit = tx.reserve().await.expect("permit");
+        state.deliver_one(permit, &config).await;
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Event::TerminalResyncUnavailable { terminal_id }) if terminal_id == tid
+        ));
+        assert_eq!(state.resync_debt.get(&tid), Some(&1));
+
+        mock.emit(&key, b"B").await;
+        let _ = state.route(
+            &tx,
+            Event::TerminalOutput {
+                terminal_id: tid,
+                bytes: b"B".to_vec(),
+                first_seq: 2,
+                seq: 2,
+            },
+        );
+        assert!(rx.try_recv().is_err(), "torn output must stay suppressed");
+        let permit = tx.reserve().await.expect("retry permit");
+        state.deliver_one(permit, &config).await;
+        assert!(matches!(
+            rx.recv().await,
+            Some(Event::TerminalResync { replay, seq: 2, .. }) if replay == b"AB"
+        ));
+        assert!(!state.resync_debt.contains_key(&tid));
     }
 
     /// A broadcast-lag recovery `Snapshot` covers each terminal through
@@ -512,6 +628,7 @@ mod tests {
                 kind: TerminalKind::Shell,
                 replay: b"REPLAY".to_vec(),
                 last_seq: 5,
+                replay_available: true,
                 no_permission: false,
                 on_main: false,
                 model_label: None,
@@ -530,6 +647,7 @@ mod tests {
                 Event::TerminalOutput {
                     terminal_id: tid,
                     bytes: vec![b'z'],
+                    first_seq: seq,
                     seq,
                 },
             );
@@ -577,6 +695,7 @@ mod tests {
                 .send(Event::TerminalOutput {
                     terminal_id: TerminalId(1),
                     bytes: vec![b'x'],
+                    first_seq: seq,
                     seq,
                 })
                 .unwrap();

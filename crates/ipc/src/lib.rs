@@ -41,7 +41,7 @@ pub const PROTOCOL_MAGIC: [u8; 4] = *b"LZBX";
 /// order, so adding, removing, or reordering a variant or field makes
 /// an old peer silently misread every subsequent frame. The handshake
 /// turns that garbage into a clear "restart the daemon" error.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// This binary's build identity: the workspace version plus the git
 /// short SHA captured at compile time (`build.rs`). Two binaries built
@@ -540,6 +540,15 @@ pub enum Command {
         terminal_id: TerminalId,
         cols: u16,
         rows: u16,
+    },
+    /// Defense-in-depth recovery request from a client that observed a
+    /// terminal sequence gap below the daemon's normal drop/resync path.
+    /// The daemon replies with `TerminalResync` only when an authoritative
+    /// replay covers `required_seq`; otherwise it replies
+    /// `TerminalResyncUnavailable` and the client retries on later output.
+    RequestTerminalResync {
+        terminal_id: TerminalId,
+        required_seq: u64,
     },
     Close {
         terminal_id: TerminalId,
@@ -1151,7 +1160,13 @@ pub enum Event {
     TerminalOutput {
         terminal_id: TerminalId,
         bytes: Vec<u8>,
-        /// Monotonic per-terminal sequence for gap detection.
+        /// First monotonic per-terminal chunk sequence represented by
+        /// `bytes`. Normally equal to `seq`; the TUI drain may coalesce a
+        /// contiguous run and preserve this lower bound.
+        first_seq: u64,
+        /// Last monotonic per-terminal chunk sequence represented by
+        /// `bytes`. Together with `first_seq`, lets the consumer detect
+        /// gaps even after adjacent chunks are coalesced.
         seq: u64,
     },
     /// Re-establish a terminal's grid from the daemon-side replay ring
@@ -1170,6 +1185,13 @@ pub enum Event {
         terminal_id: TerminalId,
         replay: Vec<u8>,
         seq: u64,
+    },
+    /// Recovery could not currently produce a complete replay covering
+    /// the observed gap. The consumer must preserve its last coherent
+    /// grid, discard live output, and retry later—never clear the parser
+    /// or treat this as sequence coverage.
+    TerminalResyncUnavailable {
+        terminal_id: TerminalId,
     },
     TerminalExited {
         terminal_id: TerminalId,
@@ -1474,6 +1496,12 @@ pub struct TerminalSnapshot {
     /// this into its libghostty-vt to reconstruct the screen.
     pub replay: Vec<u8>,
     pub last_seq: u64,
+    /// Whether `replay` is a complete stream from a clean terminal
+    /// baseline and can authoritatively initialize/reset a VT parser.
+    /// False on backend failure/timeout or after the bounded raw replay
+    /// ring has overwritten its prefix.
+    #[serde(default)]
+    pub replay_available: bool,
     /// Launched in no-permission / bypass mode. Lets a reconnecting
     /// client re-render the "no-perms" indicator without waiting for
     /// a fresh `TerminalSpawned`.

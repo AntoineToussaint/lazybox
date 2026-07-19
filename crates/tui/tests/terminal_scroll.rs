@@ -111,6 +111,7 @@ fn fresh_agent() -> TerminalStack {
     stack.on_event(&Event::TerminalOutput {
         terminal_id: TerminalId(1),
         bytes: scrollback_payload(),
+        first_seq: 1,
         seq: 1,
     });
     render(&mut stack);
@@ -130,6 +131,7 @@ fn reattached_agent() -> TerminalStack {
             kind: TerminalKind::Agent("claude".into()),
             replay: scrollback_payload(),
             last_seq: 1,
+            replay_available: true,
             no_permission: false,
             on_main: false,
             model_label: None,
@@ -257,6 +259,7 @@ fn split_stack() -> TerminalStack {
         stack.on_event(&Event::TerminalOutput {
             terminal_id: TerminalId(id),
             bytes: scrollback_payload(),
+            first_seq: 1,
             seq: 1,
         });
     }
@@ -337,6 +340,7 @@ fn alternate_screen_reports_no_local_scrollback() {
     stack.on_event(&Event::TerminalOutput {
         terminal_id: TerminalId(1),
         bytes: b"\x1b[?1049h\x1b[?1006h\x1b[?1002hhello".to_vec(),
+        first_seq: 1,
         seq: 1,
     });
     render(&mut stack);

@@ -26,6 +26,7 @@
 
 use crate::ServerConfig;
 use chrono::Utc;
+use futures::{StreamExt, stream};
 use lazybox_agents::SpawnCtx;
 use lazybox_core::{
     SessionId, SessionKey, SessionKind, Task, Workspace, WorkspaceKey, WorkspaceSession as Session,
@@ -49,6 +50,18 @@ use std::time::Duration;
 /// ring mutex is being held by a hung pump and we'd rather degrade
 /// (empty replay for that one terminal) than freeze the daemon.
 const SNAPSHOT_PER_SESSION_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Bound concurrent terminal snapshot assembly. Sequential 500ms deadlines
+/// made N wedged sessions block Subscribe for N×500ms; unlimited fan-out
+/// would instead stampede the blocking store pool on large installations.
+const SNAPSHOT_CONCURRENCY: usize = 16;
+
+/// Defense-in-depth deadline around backend input/resize operations. Raw PTY
+/// writes already bound their internal enqueue, but the backend trait permits
+/// other implementations and resize previously had no deadline at all. These
+/// calls run on per-terminal workers; the timeout keeps a broken terminal's
+/// lane retryable instead of wedging it forever.
+const TERMINAL_IO_TIMEOUT: Duration = Duration::from_millis(750);
 
 /// Monotonic terminal-id allocator. Module-local so ids are unique
 /// across the process even if the terminals map is wiped (tests, or
@@ -3043,6 +3056,12 @@ async fn finish_terminal(
     exit_code: Option<i32>,
     release_backend: bool,
 ) {
+    // Background draft/user-message persistence is independent from the PTY
+    // input lane. Serialize its final write with the entire teardown claim +
+    // kv sweep: persistence that won first completes before our deletes;
+    // persistence that lost re-checks the removed terminal mapping and skips.
+    // Either ordering ends with no orphan rows.
+    let _persistence_guard = config.lock_terminal_persistence(backend_key).await;
     // Atomically claim the wire terminal. Forced workspace deletion and the
     // output pump can race to finish the same child; only the winner emits
     // lifecycle events and sweeps bookkeeping. The output-pump loser still
@@ -3062,12 +3081,14 @@ async fn finish_terminal(
                 .lock()
                 .await
                 .insert(terminal_id, other.to_string());
+            config.forget_terminal_persistence_lock(backend_key);
             return;
         }
         None => {
             if release_backend {
                 config.backend.release(backend_key).await;
             }
+            config.forget_terminal_persistence_lock(backend_key);
             return;
         }
     }
@@ -3207,6 +3228,7 @@ async fn finish_terminal(
     // since ids are monotonic) but cleaning up keeps the runtime dir
     // tidy. Reconstructed from the id, no bookkeeping needed.
     let _ = std::fs::remove_file(hook_settings_path(terminal_id));
+    config.forget_terminal_persistence_lock(backend_key);
 }
 
 /// Ingest one PTY output chunk for a terminal: append it to the rolling
@@ -3538,12 +3560,49 @@ async fn commit_pty_reading(
 }
 
 pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes: &[u8]) {
+    handle_write_batch(config, terminal_id, &[bytes.to_vec()]).await;
+}
+
+/// Deliver adjacent client writes in one backend call while retaining their
+/// logical boundaries for prompt-answer detection. Concatenating bytes and
+/// then checking `len() == 1` would hide a queued bare chooser answer.
+pub(crate) async fn handle_write_batch(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    writes: &[Vec<u8>],
+) {
+    let total: usize = writes.iter().map(Vec::len).sum();
+    let mut joined = Vec::with_capacity(total);
+    for bytes in writes {
+        joined.extend_from_slice(bytes);
+    }
     let Some(key) = config.backend_key_for(terminal_id).await else {
         tracing::trace!("write to unknown terminal {terminal_id:?}");
         return;
     };
-    if let Err(e) = config.backend.write(&key, bytes).await {
-        tracing::warn!("backend write {key}: {e}");
+    match tokio::time::timeout(TERMINAL_IO_TIMEOUT, config.backend.write(&key, &joined)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!("backend write {key}: {error}");
+            let _ = config.bus.send(Event::provider_error_retryable(
+                "terminal-write",
+                "terminal input could not be delivered; retry after checking the session",
+            ));
+            return;
+        }
+        Err(_) => {
+            tracing::warn!(
+                terminal_id = ?terminal_id,
+                key = %key,
+                timeout_ms = TERMINAL_IO_TIMEOUT.as_millis() as u64,
+                "backend write timed out; input was not acknowledged"
+            );
+            let _ = config.bus.send(Event::provider_error_retryable(
+                "terminal-write",
+                "terminal input timed out and was not acknowledged; retry after checking the session",
+            ));
+            return;
+        }
     }
     // If the user just answered a prompt on an agent terminal that's
     // currently in `InputNeeded` state, optimistically flip it to
@@ -3562,8 +3621,12 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
     // digit, y/n, or Esc (dismiss) with no Enter at all. Without the
     // bare-key arm, answering a chooser with `1` left the stale
     // markers pinning `InputNeeded` until fresh output evicted them.
-    let pressed_enter = bytes.contains(&b'\r') || bytes.contains(&b'\n');
-    let answered_chooser = bytes.len() == 1 && matches!(bytes[0], b'1'..=b'9' | b'y' | b'n' | 0x1b);
+    let pressed_enter = writes
+        .iter()
+        .any(|bytes| bytes.contains(&b'\r') || bytes.contains(&b'\n'));
+    let answered_chooser = writes
+        .iter()
+        .any(|bytes| bytes.len() == 1 && matches!(bytes[0], b'1'..=b'9' | b'y' | b'n' | 0x1b));
     if !pressed_enter && !answered_chooser {
         return;
     }
@@ -4088,21 +4151,34 @@ pub async fn handle_resize(config: &ServerConfig, terminal_id: TerminalId, cols:
     let Some(key) = config.backend_key_for(terminal_id).await else {
         return;
     };
-    if let Err(e) = config.backend.resize(&key, cols, rows).await {
-        tracing::warn!("backend resize {key}: {e}");
+    match tokio::time::timeout(TERMINAL_IO_TIMEOUT, config.backend.resize(&key, cols, rows)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!("backend resize {key}: {error}"),
+        Err(_) => tracing::warn!(
+            terminal_id = ?terminal_id,
+            key = %key,
+            cols,
+            rows,
+            timeout_ms = TERMINAL_IO_TIMEOUT.as_millis() as u64,
+            "backend resize timed out"
+        ),
     }
 }
 
-/// Stop the session via the backend. The pump task drains the
-/// remaining output chunks (if any), sees the stream close, and emits
-/// `Event::TerminalExited` itself.
-pub async fn handle_close(config: &ServerConfig, terminal_id: TerminalId) {
+/// Request backend termination. Returns true once the backend accepted the
+/// kill (including its idempotent already-gone case), false when the live
+/// terminal should keep accepting input so the user can retry. The pump task
+/// drains remaining output, observes the stream close, and owns the eventual
+/// `Event::TerminalExited`.
+pub async fn handle_close(config: &ServerConfig, terminal_id: TerminalId) -> bool {
     let Some(key) = config.backend_key_for(terminal_id).await else {
-        return;
+        return true;
     };
     if let Err(e) = config.backend.kill(&key).await {
         tracing::warn!("backend kill {key}: {e}");
+        return false;
     }
+    true
 }
 
 /// Handle a `Command::IngestHook`: a structured lifecycle hook fired by
@@ -4491,6 +4567,15 @@ pub async fn handle_record_user_message(
         tracing::trace!("record user message for unknown terminal {terminal_id:?}");
         return;
     };
+    let _guard = config.lock_terminal_persistence(&backend_key).await;
+    if config.backend_key_for(terminal_id).await.as_deref() != Some(backend_key.as_str()) {
+        tracing::debug!(
+            ?terminal_id,
+            %backend_key,
+            "skip user-message persistence after terminal teardown"
+        );
+        return;
+    }
     let store = config.store.clone();
     let kv_key = TerminalPersistedField::UserMessage.key(&backend_key);
     let message = message.to_string();
@@ -4530,6 +4615,15 @@ pub async fn handle_record_composing_buffer(
         tracing::trace!("record composing buffer for unknown terminal {terminal_id:?}");
         return;
     };
+    let _guard = config.lock_terminal_persistence(&backend_key).await;
+    if config.backend_key_for(terminal_id).await.as_deref() != Some(backend_key.as_str()) {
+        tracing::debug!(
+            ?terminal_id,
+            %backend_key,
+            "skip draft persistence after terminal teardown"
+        );
+        return;
+    }
     let store = config.store.clone();
     let kv_key = TerminalPersistedField::Draft.key(&backend_key);
     let buffer = buffer.to_string();
@@ -4599,30 +4693,30 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
     let on_main = config.on_main_terminals.lock().await.clone();
     let terminal_models = config.terminal_models.lock().await.clone();
 
-    let mut out = Vec::with_capacity(entries.len());
-    for (id, key, session_key, kind) in entries {
-        // Reconnecting `--connect` clients need the ring buffer so
-        // their libghostty-vt can reconstruct the screen — without
-        // it they see a blank terminal until the next chunk arrives.
-        // Failure here is non-fatal: the snapshot is best-effort,
-        // missing replay just degrades to the legacy behavior.
-        //
-        // The `timeout` is the load-bearing safety net: see
-        // `SNAPSHOT_PER_SESSION_TIMEOUT`. Without it, one wedged tmux
-        // pump can stall the daemon's Subscribe handler indefinitely,
-        // and `tokio::select!` cannot poll the next command until this
-        // arm returns. Stalling here = the entire IPC channel freezes.
-        let snapshot =
-            match tokio::time::timeout(SNAPSHOT_PER_SESSION_TIMEOUT, config.backend.snapshot(&key))
-                .await
-            {
+    // Assemble independent terminals concurrently. `buffered` preserves the
+    // stable map-entry order while capping fan-out; one wedged session now
+    // consumes one slot for 500ms instead of serially multiplying the entire
+    // Subscribe latency. The replay and its two persisted recap fields are
+    // also independent and start together inside each slot.
+    let no_permission = &no_permission;
+    let on_main = &on_main;
+    let terminal_models = &terminal_models;
+    stream::iter(entries)
+        .map(|(id, key, session_key, kind)| async move {
+            let snapshot_fut =
+                tokio::time::timeout(SNAPSHOT_PER_SESSION_TIMEOUT, config.backend.snapshot(&key));
+            let user_message_fut = load_user_message(config, &key);
+            let composing_fut = load_composing_buffer(config, &key);
+            let (snapshot, last_user_message, composing_buffer) =
+                tokio::join!(snapshot_fut, user_message_fut, composing_fut);
+            let snapshot = match snapshot {
                 Ok(Ok(snap)) => snap,
-                Ok(Err(e)) => {
+                Ok(Err(error)) => {
                     tracing::warn!(
                         terminal_id = ?id,
                         key = %key,
-                        error = %e,
-                        "snapshot_terminals: backend.snapshot failed — replay will be empty"
+                        %error,
+                        "snapshot_terminals: backend.snapshot failed — replay unavailable"
                     );
                     crate::backend::ReplaySnapshot {
                         replay: Vec::new(),
@@ -4635,8 +4729,7 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
                         terminal_id = ?id,
                         key = %key,
                         timeout_ms = SNAPSHOT_PER_SESSION_TIMEOUT.as_millis() as u64,
-                        "snapshot_terminals: backend.snapshot timed out (wedged session?) \
-                         — replay will be empty, daemon not blocked"
+                        "snapshot_terminals: backend.snapshot timed out — replay unavailable"
                     );
                     crate::backend::ReplaySnapshot {
                         replay: Vec::new(),
@@ -4645,25 +4738,27 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
                     }
                 }
             };
-        out.push(TerminalSnapshot {
-            no_permission: no_permission.contains(&id),
-            on_main: on_main.contains(&id),
-            model_label: terminal_models.get(&id).cloned(),
-            last_user_message: load_user_message(config, &key).await,
-            composing_buffer: load_composing_buffer(config, &key).await,
-            terminal_id: id,
-            session_key,
-            kind,
-            replay: if snapshot.complete {
-                snapshot.replay
-            } else {
-                Vec::new()
-            },
-            last_seq: snapshot.last_seq,
-            replay_available: snapshot.complete,
-        });
-    }
-    out
+            TerminalSnapshot {
+                no_permission: no_permission.contains(&id),
+                on_main: on_main.contains(&id),
+                model_label: terminal_models.get(&id).cloned(),
+                last_user_message,
+                composing_buffer,
+                terminal_id: id,
+                session_key,
+                kind,
+                replay: if snapshot.complete {
+                    snapshot.replay
+                } else {
+                    Vec::new()
+                },
+                last_seq: snapshot.last_seq,
+                replay_available: snapshot.complete,
+            }
+        })
+        .buffered(SNAPSHOT_CONCURRENCY)
+        .collect()
+        .await
 }
 
 /// Serve a client-observed sequence gap without trusting a partial or
@@ -4811,6 +4906,46 @@ fn kind_id(kind: &TerminalKind) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::SessionBackend;
+
+    #[tokio::test]
+    async fn coalesced_writes_preserve_bare_chooser_answer_boundaries() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "chooser-batch")
+            .await
+            .expect("spawn");
+        let terminal_id = TerminalId(700);
+        let session_key = SessionKey::new("chooser");
+        config
+            .terminals
+            .lock()
+            .await
+            .insert(terminal_id, backend_key.clone());
+        config.terminal_meta.lock().await.insert(
+            terminal_id,
+            (session_key, TerminalKind::Agent("codex".into())),
+        );
+        config
+            .agent_states
+            .lock()
+            .await
+            .insert(terminal_id, lazybox_ipc::AgentState::InputNeeded);
+        config
+            .input_needed_shapes
+            .lock()
+            .await
+            .insert(terminal_id, lazybox_agents::PromptShape::Chooser);
+
+        handle_write_batch(&config, terminal_id, &[b"1".to_vec(), b"next".to_vec()]).await;
+
+        assert_eq!(mock.writes_for(&backend_key).await, vec![b"1next".to_vec()]);
+        assert_eq!(
+            config.agent_state_for(terminal_id).await,
+            Some(lazybox_ipc::AgentState::Working),
+            "the first logical write remains a one-key chooser answer"
+        );
+    }
 
     #[test]
     fn terminal_persistence_inventory_has_unique_cleanup_keys() {
@@ -7559,8 +7694,16 @@ mod tests {
         let issue_key: SessionKey = "github-o-r-161".into(); // captured at spawn
         let pr_key: SessionKey = "github-o-r-164".into(); // rebadge target
 
-        let (config, _mock) = ServerConfig::in_memory_with_mock();
-        config.terminals.lock().await.insert(id, "mock-key".into());
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "rebadged")
+            .await
+            .expect("spawn live backend session");
+        config
+            .terminals
+            .lock()
+            .await
+            .insert(id, backend_key.clone());
         // The workspace-move owner moved the live meta entry onto the PR.
         config.terminal_meta.lock().await.insert(
             id,
@@ -7624,7 +7767,7 @@ mod tests {
         handle_ingest_hook(
             &config,
             id,
-            Some("mock-key".into()),
+            Some(backend_key),
             hook_event(lazybox_ipc::HookEventKind::PreToolUse),
         )
         .await;

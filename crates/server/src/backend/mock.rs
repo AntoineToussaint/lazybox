@@ -41,6 +41,11 @@ struct MockInner {
     /// an error. Lets retry-contract tests fail once without sleeping
     /// through the timeout path.
     snapshot_failures: Mutex<HashMap<String, usize>>,
+    /// Fault/delay injection for terminal command-lane isolation tests.
+    wedged_write_keys: Mutex<std::collections::HashSet<String>>,
+    wedged_resize_keys: Mutex<std::collections::HashSet<String>>,
+    write_delays: Mutex<HashMap<String, std::time::Duration>>,
+    write_attempts: Mutex<Vec<String>>,
     /// Artificial delay applied at the start of every `spawn()`. Lets
     /// tests hold a spawn "mid-provision" to exercise the in-flight
     /// spawn races (duplicate collapse, Kill serialization).
@@ -140,6 +145,12 @@ impl MockBackend {
         map.get(key).map(|s| s.writes.clone()).unwrap_or_default()
     }
 
+    /// Backend keys whose write future was entered, including calls that are
+    /// currently delayed or wedged before recording bytes.
+    pub async fn write_attempts(&self) -> Vec<String> {
+        self.inner.write_attempts.lock().await.clone()
+    }
+
     /// Resize calls captured for this session, oldest first.
     pub async fn resizes_for(&self, key: &str) -> Vec<(u16, u16)> {
         let map = self.inner.sessions.lock().await;
@@ -206,6 +217,31 @@ impl MockBackend {
             .lock()
             .await
             .insert(key.into(), count);
+    }
+
+    /// Make writes for `key` never resolve. The server-side deadline and
+    /// per-terminal worker isolation must keep other terminals responsive.
+    pub async fn wedge_write(&self, key: &str) {
+        self.inner.wedged_write_keys.lock().await.insert(key.into());
+    }
+
+    /// Make resizes for `key` never resolve.
+    pub async fn wedge_resize(&self, key: &str) {
+        self.inner
+            .wedged_resize_keys
+            .lock()
+            .await
+            .insert(key.into());
+    }
+
+    /// Delay writes for one key so tests can deterministically accumulate a
+    /// burst and assert the command lane coalesces it without reordering.
+    pub async fn set_write_delay(&self, key: &str, delay: std::time::Duration) {
+        self.inner
+            .write_delays
+            .lock()
+            .await
+            .insert(key.into(), delay);
     }
 
     /// Simulate the real backends' bounded-bridge drop: the chunk lands
@@ -285,6 +321,15 @@ impl SessionBackend for MockBackend {
         bytes: &'a [u8],
     ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
         Box::pin(async move {
+            self.inner.write_attempts.lock().await.push(key.into());
+            let wedged = self.inner.wedged_write_keys.lock().await.contains(key);
+            if wedged {
+                std::future::pending::<()>().await;
+            }
+            let delay = self.inner.write_delays.lock().await.get(key).copied();
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
+            }
             let mut map = self.inner.sessions.lock().await;
             let session = map
                 .get_mut(key)
@@ -301,6 +346,10 @@ impl SessionBackend for MockBackend {
         rows: u16,
     ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
         Box::pin(async move {
+            let wedged = self.inner.wedged_resize_keys.lock().await.contains(key);
+            if wedged {
+                std::future::pending::<()>().await;
+            }
             let mut map = self.inner.sessions.lock().await;
             let session = map
                 .get_mut(key)

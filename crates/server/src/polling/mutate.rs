@@ -9,9 +9,9 @@
 //! clobbered the fresh data.
 //!
 //! `fetch_and_apply` captures the race-safe shape in one place:
-//! load → run the IO with the initial snapshot → re-load just before
-//! the transform → commit. Callers can't accidentally forget the
-//! re-load step.
+//! load → run the IO with the initial snapshot → acquire the workspace
+//! lock → re-load → transform → commit. Callers can't accidentally forget
+//! either the fresh load or its serialization boundary.
 //!
 //! `apply_and_commit` covers the IO-free case (clean_worktrees walks
 //! the workspace list locally) so even that path uses the same
@@ -41,14 +41,13 @@ impl MutationOutcome {
     }
 }
 
-/// Load `key`, apply `transform`, commit. The whole sequence is
-/// synchronous so there's no IO window where a concurrent write
-/// could race. For mutations that need to run network IO before
-/// touching the workspace, see [`fetch_and_apply`].
+/// Lock `key`, load its current row, apply `transform`, and commit. Locking is
+/// owned by the primitive rather than its callers, so adding a mutation site
+/// cannot accidentally revive the lost-update race.
 ///
 /// Returns [`MutationOutcome::Missing`] when the workspace isn't
 /// in the store; the caller can surface a "not found" error.
-pub fn apply_and_commit<F>(
+pub async fn apply_and_commit<F>(
     config: &ServerConfig,
     key: &WorkspaceKey,
     transform: F,
@@ -56,6 +55,7 @@ pub fn apply_and_commit<F>(
 where
     F: FnOnce(&mut Workspace),
 {
+    let _workspace_guard = config.lock_workspace(key.as_str()).await;
     let Some(mut ws) = load_workspace(config, key) else {
         return MutationOutcome::Missing;
     };
@@ -78,8 +78,9 @@ where
 /// because a 1-2s GraphQL fetch wrote back a stale snapshot over
 /// the poll's fresher state).
 ///
-/// `fetch` is allowed to fail — its error type bubbles unchanged.
-/// `transform` runs only on `Ok`, only after a successful re-load.
+/// `fetch` is allowed to fail — its error type bubbles unchanged. Network IO
+/// runs without a workspace lock; after it returns, this primitive acquires
+/// the lock and owns the fresh load→transform→commit sequence.
 ///
 /// Returns:
 /// - `Ok(Applied)` — fetch + transform + commit ran end-to-end.
@@ -101,6 +102,7 @@ where
         return Ok(MutationOutcome::Missing);
     };
     let payload = fetch(initial).await?;
+    let _workspace_guard = config.lock_workspace(key.as_str()).await;
     let Some(mut fresh) = load_workspace(config, key) else {
         return Ok(MutationOutcome::Missing);
     };
@@ -141,7 +143,8 @@ mod tests {
 
         let outcome = apply_and_commit(&config, &key, |ws| {
             ws.snoozed_until = Some(Utc::now() + chrono::Duration::hours(1));
-        });
+        })
+        .await;
 
         assert_eq!(outcome, MutationOutcome::Applied);
         let stored = load_workspace(&config, &key).unwrap();
@@ -155,7 +158,7 @@ mod tests {
     async fn apply_and_commit_returns_missing_when_workspace_absent() {
         let config = ServerConfig::in_memory();
         let key = WorkspaceKey::new("github:o/r#nope");
-        let outcome = apply_and_commit(&config, &key, |_| panic!("transform should not run"));
+        let outcome = apply_and_commit(&config, &key, |_| panic!("transform should not run")).await;
         assert_eq!(outcome, MutationOutcome::Missing);
     }
 

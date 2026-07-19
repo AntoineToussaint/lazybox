@@ -2430,15 +2430,31 @@ pub async fn rescope_with_state(
                     workspace_key = %r.key,
                     "rescope: removing out-of-scope workspace"
                 );
+                // Serialize the final safety check and delete with every
+                // spawn/mutation. The tick's earlier snapshots may be stale:
+                // a session or terminal created since then must turn this
+                // into a preserve, never be silently reaped.
+                let _workspace_guard = config.lock_workspace(key.as_str()).await;
+                let Some(fresh_workspace) = load_workspace(config, &key) else {
+                    state.prompted_out_of_scope.remove(r.key.as_str());
+                    continue;
+                };
+                if !fresh_workspace.sessions.is_empty()
+                    || handlers::count_live_terminals(config, &key).await > 0
+                {
+                    tracing::info!(
+                        workspace_key = %r.key,
+                        "rescope: workspace gained a session during sweep — preserving"
+                    );
+                    continue;
+                }
                 // Reap the workspace's worktrees BEFORE the row goes
                 // away — once it's deleted, `collect_tracked_sessions`
                 // can never find the paths again and the dirs leak
                 // forever. Only worktrees the inspector deems safe
                 // (clean tree, pushed, no live terminal) are removed;
                 // dirty ones are left on disk for manual recovery.
-                if let Some(ws) = stored_ws.as_ref() {
-                    handlers::reap_safe_workspace_worktrees(config, ws).await;
-                }
+                handlers::reap_safe_workspace_worktrees(config, &fresh_workspace).await;
                 // `archive: false` — rescope is a system decision, not
                 // user intent. Archiving here would permanently block
                 // the workspace from re-creation when the upstream
@@ -3073,7 +3089,7 @@ async fn upsert_into_workspace_key(config: &ServerConfig, key: &WorkspaceKey, ta
     // until after the commit; released before the terminal-transition
     // tail, which prompts/cleans through its own paths and must not
     // nest under this guard.
-    let ws_guard = config.lock_workspace(key.as_str()).await;
+    let ws_guards = lock_workspace_with_closing_issues(config, key, Some(&task)).await;
     // 0. TERMINAL-STATE DETECTION: cheap pre-check (no IO) gates the
     //    store read — only a PR observed Merged or an issue observed
     //    Closed can trigger cleanup. We snapshot the previous state
@@ -3133,13 +3149,11 @@ async fn upsert_into_workspace_key(config: &ServerConfig, key: &WorkspaceKey, ta
     let (workspace, pending_merges) = prepare_upsert(config, key, task).await;
 
     // 2. COMMIT: migrate worktree dirs to the (possibly new) PR slug,
-    //    persist + broadcast the final state, then retire any absorbed
-    //    issue rows. `commit_merge` owns the exact I1–I6 ordering —
-    //    crucially the issue rows are deleted only AFTER this commit
-    //    lands, so a cancellation (the 15s per-task upsert timeout)
-    //    can't strand the moved sessions in neither stored workspace.
-    commit_merge(config, workspace, pending_merges).await;
-    drop(ws_guard);
+    //    atomically persist the PR, terminal rebadges, and absorbed-issue
+    //    deletes, then publish the complete I1–I6 event tail. The blocking
+    //    owner retains every lock and projection even if the polling task is
+    //    cancelled by its per-task timeout.
+    commit_merge(config, workspace, pending_merges, ws_guards).await;
 
     // 3. TERMINAL: the PR merged or the issue closed → either reap its
     //    safe-to-delete worktrees silently (when
@@ -3306,6 +3320,11 @@ pub(super) enum CommitError {
         key: String,
         source: serde_json::Error,
     },
+    #[error("serialize terminal metadata {backend_key}: {source}")]
+    SerializeTerminalMetadata {
+        backend_key: String,
+        source: serde_json::Error,
+    },
     #[error("workspace key mismatch: commit key {expected}, payload key {actual}")]
     KeyMismatch { expected: String, actual: String },
     #[error(transparent)]
@@ -3326,17 +3345,23 @@ pub(super) fn report_commit_error(
     ));
 }
 
-/// Persist one or more workspace rows and optional deletions as one atomic
-/// store transaction, then publish the corresponding upserts. The bus is a
-/// projection of durable state: no event is emitted until `apply_batch`
-/// succeeds, so a client can never observe a commit that will vanish on the
-/// next restart.
-fn commit_workspace_batch(
+struct CommittedWorkspaceBatch {
+    outcome: CommitOutcome,
+    project_events: Vec<lazybox_core::Project>,
+    workspace_events: Vec<Workspace>,
+}
+
+/// Persist one or more workspace rows, optional deletions, and related KV
+/// mutations as one transaction. Event publication is deliberately separate:
+/// cross-workspace session moves must update their in-memory terminal routing
+/// after durability succeeds but before clients see the workspace upsert.
+fn persist_workspace_batch(
     config: &ServerConfig,
     upserts: Vec<(WorkspaceKey, Workspace)>,
     deletes: Vec<WorkspaceKey>,
-) -> Result<CommitOutcome, CommitError> {
-    let mut mutations = Vec::new();
+    extra_mutations: Vec<StoreMutation>,
+) -> Result<CommittedWorkspaceBatch, CommitError> {
+    let mut mutations = extra_mutations;
     let mut workspace_events = Vec::new();
     let mut project_events = Vec::new();
     let mut planned_projects = std::collections::HashSet::new();
@@ -3384,19 +3409,46 @@ fn commit_workspace_batch(
 
     mutations.extend(deletes.into_iter().map(StoreMutation::DeleteWorkspace));
     if mutations.is_empty() {
-        return Ok(CommitOutcome::Unchanged);
+        return Ok(CommittedWorkspaceBatch {
+            outcome: CommitOutcome::Unchanged,
+            project_events,
+            workspace_events,
+        });
     }
 
     config.store.apply_batch(&mutations)?;
-    for project in project_events {
+    Ok(CommittedWorkspaceBatch {
+        outcome: CommitOutcome::Changed,
+        project_events,
+        workspace_events,
+    })
+}
+
+fn publish_workspace_batch(config: &ServerConfig, committed: CommittedWorkspaceBatch) {
+    for project in committed.project_events {
         let _ = config.bus.send(Event::ProjectUpserted(Box::new(project)));
     }
-    for workspace in workspace_events {
+    for workspace in committed.workspace_events {
         let _ = config
             .bus
             .send(Event::WorkspaceUpserted(Box::new(workspace)));
     }
-    Ok(CommitOutcome::Changed)
+}
+
+/// Persist one or more workspace rows and optional deletions as one atomic
+/// store transaction, then publish the corresponding upserts. The bus is a
+/// projection of durable state: no event is emitted until `apply_batch`
+/// succeeds, so a client can never observe a commit that will vanish on the
+/// next restart.
+fn commit_workspace_batch(
+    config: &ServerConfig,
+    upserts: Vec<(WorkspaceKey, Workspace)>,
+    deletes: Vec<WorkspaceKey>,
+) -> Result<CommitOutcome, CommitError> {
+    let committed = persist_workspace_batch(config, upserts, deletes, Vec::new())?;
+    let outcome = committed.outcome;
+    publish_workspace_batch(config, committed);
+    Ok(outcome)
 }
 
 pub(super) fn commit_upsert(
@@ -3448,15 +3500,119 @@ pub(super) async fn commit_upsert_offloaded_reported(
     }
 }
 
-async fn commit_workspace_batch_offloaded(
+struct TerminalRebadgePlan {
+    from: lazybox_core::SessionKey,
+    to: lazybox_core::SessionKey,
+    terminal_ids: Vec<lazybox_ipc::TerminalId>,
+}
+
+fn prepare_terminal_rebadges(
+    terminals: &std::collections::HashMap<lazybox_ipc::TerminalId, String>,
+    terminal_meta: &std::collections::HashMap<
+        lazybox_ipc::TerminalId,
+        (lazybox_core::SessionKey, lazybox_ipc::TerminalKind),
+    >,
+    moves: Vec<(lazybox_core::SessionKey, lazybox_core::SessionKey)>,
+) -> Result<(Vec<StoreMutation>, Vec<TerminalRebadgePlan>), CommitError> {
+    let mut mutations = Vec::new();
+    let mut plans = Vec::new();
+    for (from, to) in moves {
+        let mut terminal_ids = Vec::new();
+        for (terminal_id, (session_key, kind)) in terminal_meta {
+            if *session_key != from {
+                continue;
+            }
+            let Some(backend_key) = terminals.get(terminal_id) else {
+                // Teardown claims `terminals` first. A metadata-only entry is
+                // already exiting and must not be resurrected durably here.
+                continue;
+            };
+            let (key, value) =
+                crate::spawn_handler::encode_terminal_meta_record(backend_key, &to, kind).map_err(
+                    |source| CommitError::SerializeTerminalMetadata {
+                        backend_key: backend_key.clone(),
+                        source,
+                    },
+                )?;
+            mutations.push(StoreMutation::SetKv { key, value });
+            terminal_ids.push(*terminal_id);
+        }
+        if !terminal_ids.is_empty() {
+            plans.push(TerminalRebadgePlan {
+                from,
+                to,
+                terminal_ids,
+            });
+        }
+    }
+    Ok((mutations, plans))
+}
+
+/// Commit workspace rows and terminal ownership as one durable operation.
+/// The terminal maps are co-held in canonical order so spawn/teardown cannot
+/// cross the transaction boundary with a half-registered terminal. In-memory
+/// routing and bus events change only after the store batch succeeds.
+///
+/// The blocking owner performs the transaction, map update, and entire event
+/// tail. Dropping the async caller detaches that owner instead of cancelling it
+/// between a successful SQLite commit and its in-memory/client projections.
+async fn commit_workspace_move(
     config: &ServerConfig,
     upserts: Vec<(WorkspaceKey, Workspace)>,
     deletes: Vec<WorkspaceKey>,
+    terminal_moves: Vec<(lazybox_core::SessionKey, lazybox_core::SessionKey)>,
+    post_commit_events: Vec<Event>,
+    workspace_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
 ) -> Result<CommitOutcome, CommitError> {
+    let terminal_guards = if terminal_moves.is_empty() {
+        None
+    } else {
+        let terminals = config.terminals.clone().lock_owned().await;
+        let terminal_meta = config.terminal_meta.clone().lock_owned().await;
+        Some((terminals, terminal_meta))
+    };
     let config_owned = config.clone();
-    tokio::task::spawn_blocking(move || commit_workspace_batch(&config_owned, upserts, deletes))
-        .await
-        .map_err(|error| CommitError::Task(error.to_string()))?
+    tokio::task::spawn_blocking(move || {
+        let mut terminal_guards = terminal_guards;
+        let (terminal_mutations, rebadge_plans) = match terminal_guards.as_ref() {
+            Some((terminals, terminal_meta)) => {
+                prepare_terminal_rebadges(terminals, terminal_meta, terminal_moves)?
+            }
+            None => (Vec::new(), Vec::new()),
+        };
+        let committed =
+            persist_workspace_batch(&config_owned, upserts, deletes, terminal_mutations)?;
+        let outcome = committed.outcome;
+
+        if let Some((_, terminal_meta)) = terminal_guards.as_mut() {
+            for plan in rebadge_plans {
+                let mut changed = false;
+                for terminal_id in plan.terminal_ids {
+                    if let Some((session_key, _)) = terminal_meta.get_mut(&terminal_id)
+                        && *session_key == plan.from
+                    {
+                        *session_key = plan.to.clone();
+                        changed = true;
+                    }
+                }
+                if changed {
+                    let _ = config_owned.bus.send(Event::TerminalsRebadged {
+                        from: plan.from,
+                        to: plan.to,
+                    });
+                }
+            }
+        }
+        drop(terminal_guards);
+        publish_workspace_batch(&config_owned, committed);
+        for event in post_commit_events {
+            let _ = config_owned.bus.send(event);
+        }
+        drop(workspace_guards);
+        Ok(outcome)
+    })
+    .await
+    .map_err(|error| CommitError::Task(error.to_string()))?
 }
 
 /// [`load_workspace`] on `spawn_blocking` — same offload rationale as
@@ -3706,7 +3862,7 @@ pub(crate) const REMOVAL_REPROMPT_AFTER: std::time::Duration = std::time::Durati
 /// An issue workspace absorbed into a PR during
 /// [`merge_closing_issue_workspaces`], whose store row must be deleted in
 /// the same transaction that saves the absorbed PR. The matching removal
-/// events are deferred to [`finalize_issue_merges`] until that transaction
+/// events are queued into the same commit owner after that transaction
 /// succeeds, so clients never project a partially committed collapse.
 struct PendingIssueMerge {
     issue_key: WorkspaceKey,
@@ -3735,6 +3891,61 @@ fn issue_id_from_branch(pr: &Task) -> Option<lazybox_core::TaskId> {
     })
 }
 
+/// Workspace rows a PR may absorb, including the lazybox branch-name
+/// fallback. Kept in one helper so lock planning and the merge pass cannot
+/// drift into recognizing different source rows.
+fn closing_issue_workspace_keys(pr: &Task) -> Vec<WorkspaceKey> {
+    let mut ids = pr.closes_issues.clone();
+    if let Some(id) = issue_id_from_branch(pr) {
+        ids.push(id);
+    }
+    let mut keys: Vec<_> = ids
+        .into_iter()
+        .map(|id| issue_id_to_workspace_key(&id))
+        .collect();
+    keys.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    keys.dedup();
+    keys
+}
+
+/// Acquire the destination PR and every source issue lock in canonical
+/// order. The destination is re-read after acquisition; if a concurrent
+/// details write added a closing ref between planning and locking, drop the
+/// guards and retry with the expanded set before touching any source row.
+async fn lock_workspace_with_closing_issues(
+    config: &ServerConfig,
+    workspace_key: &WorkspaceKey,
+    incoming_pr: Option<&Task>,
+) -> Vec<tokio::sync::OwnedMutexGuard<()>> {
+    let mut keys = std::collections::BTreeSet::from([workspace_key.as_str().to_string()]);
+    if let Some(pr) = incoming_pr.filter(|task| task.is_pr()) {
+        keys.extend(
+            closing_issue_workspace_keys(pr)
+                .into_iter()
+                .map(|key| key.as_str().to_string()),
+        );
+    }
+
+    loop {
+        let guards = config.lock_workspaces(keys.iter().cloned()).await;
+        let mut required = keys.clone();
+        if let Some(workspace) = load_workspace(config, workspace_key)
+            && let Some(pr) = workspace.pr.as_ref()
+        {
+            required.extend(
+                closing_issue_workspace_keys(pr)
+                    .into_iter()
+                    .map(|key| key.as_str().to_string()),
+            );
+        }
+        if required == keys {
+            return guards;
+        }
+        drop(guards);
+        keys = required;
+    }
+}
+
 async fn merge_closing_issue_workspaces(
     config: &ServerConfig,
     workspace: &mut Workspace,
@@ -3743,15 +3954,8 @@ async fn merge_closing_issue_workspaces(
     let Some(pr) = workspace.pr.as_ref() else {
         return pending;
     };
-    let mut closed_ids: Vec<lazybox_core::TaskId> = pr.closes_issues.clone();
-    // Branch-name fallback: a `lazybox/issue-N` head branch claims
-    // issue #N even before the closing refs are known.
-    if let Some(id) = issue_id_from_branch(pr)
-        && !closed_ids.contains(&id)
-    {
-        closed_ids.push(id);
-    }
-    if closed_ids.is_empty() {
+    let issue_keys = closing_issue_workspace_keys(pr);
+    if issue_keys.is_empty() {
         tracing::trace!(
             workspace = %workspace.key,
             "merge: PR has no closes_issues — nothing to fold"
@@ -3760,18 +3964,11 @@ async fn merge_closing_issue_workspaces(
     }
     tracing::debug!(
         workspace = %workspace.key,
-        candidates = ?closed_ids.iter().map(|t| &t.key).collect::<Vec<_>>(),
+        candidates = ?issue_keys.iter().map(WorkspaceKey::as_str).collect::<Vec<_>>(),
         "merge: scanning closes_issues for collapse candidates"
     );
 
-    // `closes_issues` unions GraphQL refs with body-text parses, so
-    // duplicate ids aren't necessarily adjacent — `Vec::dedup` alone
-    // would let a non-adjacent repeat fold the same issue twice.
-    let mut seen = std::collections::HashSet::new();
-    closed_ids.retain(|id| seen.insert(id.clone()));
-
-    for issue_id in closed_ids {
-        let issue_key = issue_id_to_workspace_key(&issue_id);
+    for issue_key in issue_keys {
         if issue_key == workspace.key {
             // Self-link — nothing to merge.
             continue;
@@ -3845,10 +4042,10 @@ async fn merge_closing_issue_workspaces(
         // No live terminal — safe to merge silently. Sessions (and
         // their dead-but-recoverable records) move onto the PR here;
         // `commit_merge` saves the PR and deletes the issue row in one
-        // transaction, then `finalize_issue_merges` publishes removal.
+        // transaction, then its commit owner publishes removal.
         let issue_label = workspace_label_for(&issue_ws, &issue_key);
         let pr_label = workspace_label_for(workspace, &workspace.key);
-        absorb_issue_workspace(config, workspace, issue_ws).await;
+        absorb_issue_workspace(workspace, issue_ws);
         pending.push(PendingIssueMerge {
             issue_key: issue_key.clone(),
             issue_label,
@@ -3864,40 +4061,37 @@ async fn merge_closing_issue_workspaces(
     pending
 }
 
-/// Publish the issue-removal events after the atomic store batch committed
-/// the absorbed PR and deleted every issue row. No storage occurs here: the
-/// caller must not invoke this function after a failed batch.
-fn finalize_issue_merges(
-    config: &ServerConfig,
-    pr_key: &WorkspaceKey,
-    pending: Vec<PendingIssueMerge>,
-) {
+/// Build the issue-removal event tail for the atomic move owner. Keeping these
+/// events inside that owner means caller cancellation cannot strand connected
+/// clients between the durable delete and its removal/merge projections.
+fn issue_merge_events(pr_key: &WorkspaceKey, pending: Vec<PendingIssueMerge>) -> Vec<Event> {
+    let mut events = Vec::with_capacity(pending.len() * 2);
     for merge in pending {
-        let _ = config
-            .bus
-            .send(Event::WorkspaceRemoved(merge.issue_key.clone()));
-        let _ = config.bus.send(Event::WorkspaceMerged {
+        events.push(Event::WorkspaceRemoved(merge.issue_key.clone()));
+        events.push(Event::WorkspaceMerged {
             issue_workspace_key: merge.issue_key,
             pr_workspace_key: pr_key.clone(),
             issue_label: merge.issue_label,
             pr_label: merge.pr_label,
         });
     }
+    events
 }
 
 /// Single owner of the issue→PR collapse tail — the one place the
 /// I1–I6 event ordering is sequenced, so it's a property of one
 /// function instead of a convention replicated across call sites.
 ///
-/// Callers absorb their issue workspace(s) into `pr_ws` FIRST (moving
-/// sessions and rebadging terminals, which already emits
-/// `TerminalsRebadged` — I1), then hand the absorbed PR plus the list
-/// of issues to retire here. This function owns the rest:
+/// Callers absorb their issue workspace(s) into `pr_ws` in memory first, then
+/// hand the absorbed PR plus the list of issues to retire here. This function
+/// owns every durable and observable side effect:
 ///   1. migrate worktree paths to the (possibly new) PR slug,
-///   2. atomically save the PR and delete every absorbed issue, then
-///      broadcast `WorkspaceUpserted{pr}` carrying the moved sessions (I2),
-///   3. `finalize_issue_merges` — broadcast `WorkspaceRemoved` followed by
-///      `WorkspaceMerged` per issue (I3/I6).
+///   2. atomically rebadge terminal metadata, save the PR, and delete every
+///      absorbed issue,
+///   3. update live terminal routing and broadcast `TerminalsRebadged` (I1),
+///      then `WorkspaceUpserted{pr}` carrying the moved sessions (I2),
+///   4. broadcast `WorkspaceRemoved` followed by `WorkspaceMerged` per issue
+///      (I3/I6).
 ///
 /// The PR save and issue deletes are one store transaction. There is no crash
 /// window in which the moved sessions exist in neither row, and no removal
@@ -3905,25 +4099,40 @@ fn finalize_issue_merges(
 ///
 /// `pending` may be empty: the normal (non-merge) upsert path routes
 /// every commit through here too, in which case this is just the
-/// migrate + commit with a no-op finalize.
+/// migrate + commit path with no terminal or removal event tail.
 async fn commit_merge(
     config: &ServerConfig,
     mut pr_ws: Workspace,
     pending: Vec<PendingIssueMerge>,
+    workspace_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
 ) {
     crate::spawn_handler::migrate_session_paths_if_needed(&mut pr_ws).await;
     let pr_key = pr_ws.key.clone();
     let deletes = pending
         .iter()
         .map(|merge| merge.issue_key.clone())
+        .collect::<Vec<_>>();
+    let pr_session_key: lazybox_core::SessionKey = (&pr_key).into();
+    let terminal_moves = pending
+        .iter()
+        .map(|merge| {
+            let issue_session_key: lazybox_core::SessionKey = (&merge.issue_key).into();
+            (issue_session_key, pr_session_key.clone())
+        })
         .collect();
-    if let Err(error) =
-        commit_workspace_batch_offloaded(config, vec![(pr_key.clone(), pr_ws)], deletes).await
+    let post_commit_events = issue_merge_events(&pr_key, pending);
+    if let Err(error) = commit_workspace_move(
+        config,
+        vec![(pr_key.clone(), pr_ws)],
+        deletes,
+        terminal_moves,
+        post_commit_events,
+        workspace_guards,
+    )
+    .await
     {
         report_commit_error(config, "merge issue workspace into PR", &error);
-        return;
     }
-    finalize_issue_merges(config, &pr_key, pending);
 }
 
 /// Re-run the issue-collapse pass for a stored PR workspace and
@@ -3935,9 +4144,10 @@ async fn commit_merge(
 /// commit path didn't re-run the merge — the issue workspace stalled
 /// standalone until the next full PR poll.
 pub(super) async fn collapse_closing_issues_for(config: &ServerConfig, key: &WorkspaceKey) {
-    // Same lost-update guard as `upsert_into_workspace_key`: this is
-    // a load→modify→commit spanning awaits on the PR workspace's row.
-    let _ws_guard = config.lock_workspace(key.as_str()).await;
+    // Lock the PR and every issue it may absorb. The planner revalidates the
+    // PR after acquisition, so a racing details write cannot introduce an
+    // unlocked source row.
+    let workspace_guards = lock_workspace_with_closing_issues(config, key, None).await;
     let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
         return;
     };
@@ -3947,7 +4157,7 @@ pub(super) async fn collapse_closing_issues_for(config: &ServerConfig, key: &Wor
         // fired instead) — skip the redundant commit + broadcast.
         return;
     }
-    commit_merge(config, workspace, pending).await;
+    commit_merge(config, workspace, pending, workspace_guards).await;
 }
 
 /// The TUI replied to a `WorkspaceMergePending` prompt. Accept → run
@@ -3977,6 +4187,15 @@ pub async fn handle_confirm_merge(
         return;
     }
 
+    // The move is one two-row load→modify→commit operation. Sorting inside
+    // `lock_workspaces` makes opposing concurrent moves deadlock-safe.
+    let workspace_guards = config
+        .lock_workspaces([
+            issue_workspace_key.as_str().to_string(),
+            pr_workspace_key.as_str().to_string(),
+        ])
+        .await;
+
     let Some(mut pr_ws) = load_workspace(config, &pr_workspace_key) else {
         tracing::warn!(
             pr_workspace = %pr_workspace_key,
@@ -4005,7 +4224,7 @@ pub async fn handle_confirm_merge(
     let issue_label = workspace_label_for(&issue_ws, &issue_workspace_key);
     let pr_label = workspace_label_for(&pr_ws, &pr_workspace_key);
 
-    absorb_issue_workspace(config, &mut pr_ws, issue_ws).await;
+    absorb_issue_workspace(&mut pr_ws, issue_ws);
 
     // Hand off to the single merge owner: it migrates paths, commits
     // the PR (now carrying the moved sessions) BEFORE deleting the issue
@@ -4019,6 +4238,7 @@ pub async fn handle_confirm_merge(
             issue_label,
             pr_label,
         }],
+        workspace_guards,
     )
     .await;
 }
@@ -4082,7 +4302,7 @@ pub async fn handle_collapse_into_pr(config: &ServerConfig, issue_workspace_key:
 
 /// Manual "adopt": move every session out of `source_key`'s
 /// workspace and into `target_key`'s, rebadging terminals so
-/// wire-side traffic follows them durably (see `rebadge_terminals`).
+/// wire-side traffic follows them durably (see `commit_workspace_move`).
 /// Unlike the issue→PR merge, we do NOT delete the source workspace
 /// — the user may still want it as a tracking row (or remove it
 /// explicitly via `x x`).
@@ -4096,6 +4316,12 @@ pub async fn handle_adopt_sessions(
     if source_key == target_key {
         return;
     }
+    let workspace_guards = config
+        .lock_workspaces([
+            source_key.as_str().to_string(),
+            target_key.as_str().to_string(),
+        ])
+        .await;
     let Some(mut source_ws) = load_workspace(config, &source_key) else {
         tracing::warn!(
             source_workspace = %source_key,
@@ -4125,8 +4351,6 @@ pub async fn handle_adopt_sessions(
         session.workspace_key = target_key.clone();
         target_ws.add_session(session);
     }
-    rebadge_terminals(config, &source_session_key, &target_session_key).await;
-
     crate::spawn_handler::migrate_session_paths_if_needed(&mut target_ws).await;
 
     tracing::info!(
@@ -4138,28 +4362,27 @@ pub async fn handle_adopt_sessions(
 
     let source_key_owned = source_ws.key.clone();
     let target_key_owned = target_ws.key.clone();
-    if let Err(error) = commit_workspace_batch(
+    if let Err(error) = commit_workspace_move(
         config,
         vec![(source_key_owned, source_ws), (target_key_owned, target_ws)],
         Vec::new(),
-    ) {
+        vec![(source_session_key, target_session_key)],
+        Vec::new(),
+        workspace_guards,
+    )
+    .await
+    {
         report_commit_error(config, "adopt sessions across workspaces", &error);
     }
 }
 
-/// Move `issue_ws`'s sessions, gh/linear-issue tasks, and any
-/// terminal_meta entries onto `pr_workspace`. Caller is responsible
+/// Move `issue_ws`'s sessions and linked tasks onto `pr_workspace`.
+/// Terminal metadata is planned and committed later by `commit_merge`, in
+/// the same transaction as these workspace rows. Caller is responsible
 /// for deleting the issue workspace from the store and broadcasting
 /// the `WorkspaceRemoved` / `WorkspaceUpserted` / `WorkspaceMerged`
 /// events around the call.
-async fn absorb_issue_workspace(
-    config: &ServerConfig,
-    pr_workspace: &mut Workspace,
-    issue_ws: Workspace,
-) {
-    let issue_session_key: lazybox_core::SessionKey = (&issue_ws.key).into();
-    let pr_session_key: lazybox_core::SessionKey = (&pr_workspace.key).into();
-
+fn absorb_issue_workspace(pr_workspace: &mut Workspace, issue_ws: Workspace) {
     for mut session in issue_ws.sessions {
         session.workspace_key = pr_workspace.key.clone();
         pr_workspace.add_session(session);
@@ -4170,56 +4393,6 @@ async fn absorb_issue_workspace(
     for issue_task in &issue_ws.linear_issues {
         pr_workspace.attach_task(issue_task.clone());
     }
-
-    rebadge_terminals(config, &issue_session_key, &pr_session_key).await;
-}
-
-/// Repoint every terminal currently keyed to `from` so it belongs to
-/// `to` — both the in-memory `terminal_meta` map AND the persisted
-/// `terminal:{backend_key}` record `recover_sessions` reads at startup.
-///
-/// The persisted record is the easy one to forget: rebadging only the
-/// in-memory map leaves a live PTY attached to its new workspace until
-/// the next daemon restart, at which point `recover_sessions` reattaches
-/// it under the OLD session_key. After an issue→PR collapse that old
-/// workspace is gone, so the session is orphaned — the "session lost on
-/// merge" bug. Updating both keeps the handoff durable across restarts.
-async fn rebadge_terminals(
-    config: &ServerConfig,
-    from: &lazybox_core::SessionKey,
-    to: &lazybox_core::SessionKey,
-) {
-    let rebadged: Vec<(lazybox_ipc::TerminalId, lazybox_ipc::TerminalKind)> = {
-        let mut meta = config.terminal_meta.lock().await;
-        meta.iter_mut()
-            .filter(|(_, entry)| entry.0 == *from)
-            .map(|(tid, entry)| {
-                entry.0 = to.clone();
-                (*tid, entry.1.clone())
-            })
-            .collect()
-    };
-    if rebadged.is_empty() {
-        return;
-    }
-    let backend_keys: Vec<(String, lazybox_ipc::TerminalKind)> = {
-        let terminals = config.terminals.lock().await;
-        rebadged
-            .into_iter()
-            .filter_map(|(tid, kind)| terminals.get(&tid).map(|bk| (bk.clone(), kind)))
-            .collect()
-    };
-    for (backend_key, kind) in &backend_keys {
-        crate::spawn_handler::persist_terminal_meta(config, backend_key, to, kind).await;
-    }
-    // Tell live TUI clients to re-point their terminal slots. This must
-    // reach them before the `WorkspaceRemoved` that follows an issue→PR
-    // collapse — otherwise the terminal stack drops the moved slots
-    // (they still carry `from`'s key) and the session disappears.
-    let _ = config.bus.send(Event::TerminalsRebadged {
-        from: from.clone(),
-        to: to.clone(),
-    });
 }
 
 /// Synthesize the workspace key an issue TaskId would have produced
@@ -4636,6 +4809,7 @@ pub async fn delete_workspace(config: &ServerConfig, key: &WorkspaceKey) -> bool
         .lock()
         .insert(key.as_str().to_string());
     crate::spawn_handler::await_inflight_spawns(config, key.as_str()).await;
+    let _workspace_guard = config.lock_workspace(key.as_str()).await;
     delete_workspace_internal(config, key, /*archive=*/ true).await
 }
 
@@ -5081,6 +5255,72 @@ mod workspace_lock_tests {
         assert!(
             stored.last_viewed_at.is_some(),
             "the tick's commit must not revert a concurrent mark-read"
+        );
+    }
+
+    /// Lazy PR details used to bypass the workspace lock. Parking its fresh
+    /// load while a mark-read committed reproduced a last-writer-wins loss:
+    /// the details commit saved its pre-mark copy over the user's action.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pr_details_cannot_revert_concurrent_mark_read() {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let store = Arc::new(GateStore {
+            inner: MemoryStore::new(),
+            armed: AtomicBool::new(false),
+            entered_tx: parking_lot::Mutex::new(Some(entered_tx)),
+            release_rx: parking_lot::Mutex::new(Some(release_rx)),
+        });
+        let config = ServerConfig::with_store(store.clone());
+        let workspace = Workspace::from_task(open_pr_task(), Utc::now());
+        let key = workspace.key.clone();
+        store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: key.as_str().to_string(),
+                created_at: workspace.created_at,
+                workspace_json: Some(serde_json::to_string(&workspace).expect("serialize")),
+            })
+            .expect("seed");
+
+        let details = lazybox_gh::PrDetails {
+            activities: Vec::new(),
+            closes_issues: Vec::new(),
+            checks: Vec::new(),
+            ci: lazybox_core::CiStatus::Success,
+            review: lazybox_core::ReviewStatus::Approved,
+            role: TaskRole::Author,
+            needs_reply: false,
+            last_commenter: None,
+        };
+        store.armed.store(true, Ordering::SeqCst);
+        let details_config = config.clone();
+        let details_key = key.clone();
+        let details_task = tokio::spawn(async move {
+            handlers::apply_pr_details(&details_config, &details_key, details).await;
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("details apply must reach its workspace load");
+
+        let mark_config = config.clone();
+        let mark_key = key.clone();
+        let mark_task = tokio::spawn(async move {
+            mark_workspace_read(&mark_config, &mark_key).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        release_tx.send(()).expect("release details apply");
+        details_task.await.expect("details task");
+        mark_task.await.expect("mark task");
+
+        let stored = load_workspace(&config, &key).expect("workspace persisted");
+        assert!(
+            stored.last_viewed_at.is_some(),
+            "details commit must preserve the concurrent mark-read"
+        );
+        assert_eq!(
+            stored.pr.as_ref().expect("PR").ci,
+            lazybox_core::CiStatus::Success,
+            "the details update itself must also persist"
         );
     }
 }

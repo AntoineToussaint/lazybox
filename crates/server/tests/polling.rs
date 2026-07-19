@@ -26,12 +26,63 @@ use lazybox_ipc::{Command, Event, channel};
 use lazybox_server::backend::{MockBackend, SessionBackend};
 use lazybox_server::polling::{self, FetchMode, TaskSource};
 use lazybox_server::{Server, ServerConfig};
-use lazybox_store::{MemoryStore, WorkspaceRecord};
+use lazybox_store::{MemoryStore, Store, StoreError, StoreMutation, WorkspaceRecord};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+
+/// Fault-injection backend: every ordinary operation delegates to the
+/// production-faithful MemoryStore, while the next atomic batch can be made
+/// to fail before applying anything. This pins the daemon's commit contract:
+/// failed durability must never leak as a successful bus projection.
+struct FailingBatchStore {
+    inner: MemoryStore,
+    fail_next: std::sync::atomic::AtomicBool,
+}
+
+impl FailingBatchStore {
+    fn new() -> Self {
+        Self {
+            inner: MemoryStore::new(),
+            fail_next: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn fail_next_batch(&self) {
+        self.fail_next.store(true, Ordering::SeqCst);
+    }
+}
+
+impl Store for FailingBatchStore {
+    fn apply_batch(&self, mutations: &[StoreMutation]) -> Result<(), StoreError> {
+        if self.fail_next.swap(false, Ordering::SeqCst) {
+            return Err(StoreError::Backend("injected batch failure".into()));
+        }
+        self.inner.apply_batch(mutations)
+    }
+
+    fn get_kv(&self, key: &str) -> Result<Option<String>, StoreError> {
+        self.inner.get_kv(key)
+    }
+
+    fn set_kv(&self, key: &str, value: &str) -> Result<(), StoreError> {
+        self.inner.set_kv(key, value)
+    }
+
+    fn delete_kv(&self, key: &str) -> Result<(), StoreError> {
+        self.inner.delete_kv(key)
+    }
+
+    fn list_workspaces(&self) -> Result<Vec<WorkspaceRecord>, StoreError> {
+        self.inner.list_workspaces()
+    }
+
+    fn list_projects(&self) -> Result<Vec<lazybox_store::ProjectRecord>, StoreError> {
+        self.inner.list_projects()
+    }
+}
 
 /// Wait for the next `WorkspaceUpserted` event, ignoring any
 /// `ProjectUpserted` (registered the first time polling sees a new
@@ -2671,6 +2722,85 @@ async fn silent_merge_commits_pr_before_deleting_issue_row() {
 }
 
 #[tokio::test]
+async fn failed_workspace_batch_publishes_no_phantom_upsert() {
+    let store = Arc::new(FailingBatchStore::new());
+    let config = ServerConfig::with_store(store.clone());
+    let mut bus = config.bus.subscribe();
+    let task = make_issue_task("o/r#901");
+    let key = lazybox_core::WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
+
+    store.fail_next_batch();
+    polling::upsert(&config, task).await;
+
+    assert!(
+        config.store.get_workspace(&key).unwrap().is_none(),
+        "the failed batch must leave no durable workspace"
+    );
+    let events: Vec<_> = std::iter::from_fn(|| bus.try_recv().ok()).collect();
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            Event::WorkspaceUpserted(_) | Event::ProjectUpserted(_)
+        )),
+        "failed durability must not publish successful state: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::ProviderError { .. })),
+        "the failure must be visible to clients"
+    );
+}
+
+#[tokio::test]
+async fn failed_issue_merge_batch_preserves_source_and_emits_no_removal() {
+    let store = Arc::new(FailingBatchStore::new());
+    let config = ServerConfig::with_store(store.clone());
+    let (issue_key, session_id) = seed_issue_with_session(&config, "o/r#902").await;
+    let mut bus = config.bus.subscribe();
+
+    store.fail_next_batch();
+    polling::upsert(&config, make_pr_closing("o/r#903", &["o/r#902"])).await;
+
+    let issue_record = config
+        .store
+        .get_workspace(&issue_key)
+        .unwrap()
+        .expect("failed merge must preserve the source issue row");
+    let issue: lazybox_core::Workspace =
+        serde_json::from_str(&issue_record.workspace_json.unwrap()).unwrap();
+    assert!(
+        issue
+            .sessions
+            .iter()
+            .any(|session| session.id == session_id),
+        "the source row must retain its session after rollback"
+    );
+
+    let pr_key = lazybox_core::WorkspaceKey::new(lazybox_core::workspace_key_for(
+        &make_pr_closing("o/r#903", &["o/r#902"]),
+    ));
+    assert!(
+        config.store.get_workspace(&pr_key).unwrap().is_none(),
+        "the destination PR must not be partially written"
+    );
+    let events: Vec<_> = std::iter::from_fn(|| bus.try_recv().ok()).collect();
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            Event::WorkspaceRemoved(key) if *key == issue_key
+        )),
+        "rollback must not publish source removal: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::WorkspaceMerged { .. })),
+        "rollback must not publish a completed merge"
+    );
+}
+
+#[tokio::test]
 async fn merge_emits_rebadge_then_upsert_then_remove_then_merged() {
     // Daemon-side pin for the full issue→PR merge event ordering (I1,
     // I2, I6). The TUI tests assert the CONSUMPTION end (slots follow,
@@ -3050,6 +3180,42 @@ async fn adopt_sessions_moves_sessions_between_workspaces() {
         .expect("session must have moved to target");
     assert_eq!(moved.workspace_key, target_key);
 }
+
+#[tokio::test]
+async fn failed_adopt_batch_cannot_duplicate_or_lose_sessions() {
+    use lazybox_core::WorkspaceKey;
+
+    let store = Arc::new(FailingBatchStore::new());
+    let config = ServerConfig::with_store(store.clone());
+    let (source_key, session_id) = seed_issue_with_session(&config, "o/r#904").await;
+    polling::upsert(&config, make_task("o/r#905")).await;
+    let target_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_task("o/r#905")));
+
+    store.fail_next_batch();
+    polling::handle_adopt_sessions(&config, source_key.clone(), target_key.clone()).await;
+
+    let load = |key: &WorkspaceKey| -> lazybox_core::Workspace {
+        let record = config.store.get_workspace(key).unwrap().unwrap();
+        serde_json::from_str(&record.workspace_json.unwrap()).unwrap()
+    };
+    let source = load(&source_key);
+    let target = load(&target_key);
+    assert!(
+        source
+            .sessions
+            .iter()
+            .any(|session| session.id == session_id),
+        "a rolled-back adopt must keep the session in its source"
+    );
+    assert!(
+        target
+            .sessions
+            .iter()
+            .all(|session| session.id != session_id),
+        "a rolled-back adopt must not duplicate the session into its target"
+    );
+}
+
 #[tokio::test]
 async fn adopt_sessions_into_self_is_a_noop() {
     let config = ServerConfig::in_memory();

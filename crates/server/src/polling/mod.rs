@@ -48,7 +48,7 @@ use lazybox_core::{AutoFixKind, ProviderConfig, Task, Workspace, WorkspaceKey};
 use lazybox_gh::GhClient;
 use lazybox_ipc::Event;
 use lazybox_linear::LinearClient;
-use lazybox_store::WorkspaceRecord;
+use lazybox_store::{StoreError, StoreMutation, WorkspaceRecord};
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
@@ -3288,78 +3288,123 @@ async fn prepare_upsert(
     (workspace, pending_merges)
 }
 
-/// Side-effect-only commit: serialize + persist + broadcast.
-/// Pulled out so the failure modes are isolated — a store-write
-/// error doesn't suppress the bus broadcast, and a bus-send error
-/// doesn't take down the daemon.
-///
-/// Also ensures the Project this workspace belongs to is registered.
-/// `Workspace::from_task` populates `project_key` from the task's
-/// repo string; we use that here to upsert a Project record so the
-/// sidebar can render a header for it even before the user explicitly
-/// creates the project. Idempotent — re-broadcasting an existing
-/// record on every workspace upsert costs a bus send but keeps the
-/// data model consistent with no extra bookkeeping.
-pub(super) fn commit_upsert(config: &ServerConfig, key: &WorkspaceKey, workspace: Workspace) {
-    ensure_project_for_workspace(config, &workspace);
-    // Serialization failure here means the workspace exists in memory
-    // but won't survive a restart — and the silent `.ok()` previously
-    // stored `None`, so the next process would read back an empty
-    // record without any indication something went wrong. Log loudly
-    // so a broken Serialize impl shows up in /tmp/lazybox.log instead
-    // of mysterious post-restart data loss.
-    let json = match serde_json::to_string(&workspace) {
-        Ok(s) => Some(s),
-        Err(e) => {
-            tracing::error!(
-                workspace_key = %key.as_str(),
-                "commit_upsert: serde_json::to_string(workspace) failed: {e} \
-                 — record will persist with NULL json (will read back empty)",
-            );
-            None
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CommitOutcome {
+    Changed,
+    Unchanged,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum CommitError {
+    #[error("serialize workspace {key}: {source}")]
+    SerializeWorkspace {
+        key: String,
+        source: serde_json::Error,
+    },
+    #[error("serialize project {key}: {source}")]
+    SerializeProject {
+        key: String,
+        source: serde_json::Error,
+    },
+    #[error("workspace key mismatch: commit key {expected}, payload key {actual}")]
+    KeyMismatch { expected: String, actual: String },
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error("workspace commit task failed: {0}")]
+    Task(String),
+}
+
+pub(super) fn report_commit_error(
+    config: &ServerConfig,
+    context: &'static str,
+    error: &CommitError,
+) {
+    tracing::error!(context, error = %error, "durable workspace commit failed");
+    let _ = config.bus.send(Event::provider_error_retryable(
+        "store",
+        format!("{context}: {error}"),
+    ));
+}
+
+/// Persist one or more workspace rows and optional deletions as one atomic
+/// store transaction, then publish the corresponding upserts. The bus is a
+/// projection of durable state: no event is emitted until `apply_batch`
+/// succeeds, so a client can never observe a commit that will vanish on the
+/// next restart.
+fn commit_workspace_batch(
+    config: &ServerConfig,
+    upserts: Vec<(WorkspaceKey, Workspace)>,
+    deletes: Vec<WorkspaceKey>,
+) -> Result<CommitOutcome, CommitError> {
+    let mut mutations = Vec::new();
+    let mut workspace_events = Vec::new();
+    let mut project_events = Vec::new();
+    let mut planned_projects = std::collections::HashSet::new();
+
+    for (key, workspace) in upserts {
+        if workspace.key != key {
+            return Err(CommitError::KeyMismatch {
+                expected: key.as_str().to_string(),
+                actual: workspace.key.as_str().to_string(),
+            });
         }
-    };
-    // No-change short-circuit: the steady-state poll re-commits every
-    // workspace every tick even when the upstream task is byte-for-byte
-    // identical. Comparing against the stored serialization skips both
-    // the SQLite write and the `WorkspaceUpserted` broadcast (every
-    // connected client re-renders on that event) when nothing changed.
-    // Byte equality only — any real change (task fields, read state,
-    // sessions) produces different JSON and flows through normally.
-    if let Some(new_json) = json.as_deref() {
+
+        if let Some((project, record)) = project_record_for_workspace(config, &workspace)?
+            && planned_projects.insert(record.key.clone())
+        {
+            mutations.push(StoreMutation::SaveProject(record));
+            project_events.push(project);
+        }
+
+        let json = serde_json::to_string(&workspace).map_err(|source| {
+            CommitError::SerializeWorkspace {
+                key: key.as_str().to_string(),
+                source,
+            }
+        })?;
         let unchanged = config
             .store
-            .get_workspace(key)
-            .ok()
-            .flatten()
-            .and_then(|r| r.workspace_json)
-            .is_some_and(|prev| prev == new_json);
+            .get_workspace(&key)?
+            .and_then(|record| record.workspace_json)
+            .is_some_and(|previous| previous == json);
         if unchanged {
             tracing::trace!(
                 workspace_key = %key.as_str(),
-                "commit_upsert: unchanged — skipping write + broadcast"
+                "commit_upsert: unchanged — skipping workspace write + broadcast"
             );
-            return;
+        } else {
+            mutations.push(StoreMutation::SaveWorkspace(WorkspaceRecord {
+                key: key.as_str().to_string(),
+                created_at: workspace.created_at,
+                workspace_json: Some(json),
+            }));
+            workspace_events.push(workspace);
         }
     }
-    let record = WorkspaceRecord {
-        key: key.as_str().to_string(),
-        created_at: workspace.created_at,
-        workspace_json: json,
-    };
-    if let Err(e) = config.store.save_workspace(&record) {
-        // Bumped to error: a store write failure means the
-        // workspace we just broadcast won't survive a restart.
-        // Caller side can't currently see this, but at least the
-        // log is loud.
-        tracing::error!(
-            workspace_key = %record.key,
-            "save_workspace failed: {e}"
-        );
+
+    mutations.extend(deletes.into_iter().map(StoreMutation::DeleteWorkspace));
+    if mutations.is_empty() {
+        return Ok(CommitOutcome::Unchanged);
     }
-    let _ = config
-        .bus
-        .send(Event::WorkspaceUpserted(Box::new(workspace)));
+
+    config.store.apply_batch(&mutations)?;
+    for project in project_events {
+        let _ = config.bus.send(Event::ProjectUpserted(Box::new(project)));
+    }
+    for workspace in workspace_events {
+        let _ = config
+            .bus
+            .send(Event::WorkspaceUpserted(Box::new(workspace)));
+    }
+    Ok(CommitOutcome::Changed)
+}
+
+pub(super) fn commit_upsert(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    workspace: Workspace,
+) -> Result<CommitOutcome, CommitError> {
+    commit_workspace_batch(config, vec![(key.clone(), workspace)], Vec::new())
 }
 
 /// [`commit_upsert`] with the store round-trip moved onto
@@ -3373,18 +3418,45 @@ pub(super) async fn commit_upsert_offloaded(
     config: &ServerConfig,
     key: &WorkspaceKey,
     workspace: Workspace,
-) {
+) -> Result<CommitOutcome, CommitError> {
     let config_owned = config.clone();
     let key_owned = key.clone();
-    if let Err(e) =
-        tokio::task::spawn_blocking(move || commit_upsert(&config_owned, &key_owned, workspace))
-            .await
-    {
-        tracing::error!(
-            workspace_key = %key.as_str(),
-            "commit_upsert blocking task failed: {e}"
-        );
+    tokio::task::spawn_blocking(move || commit_upsert(&config_owned, &key_owned, workspace))
+        .await
+        .map_err(|error| CommitError::Task(error.to_string()))?
+}
+
+pub(super) fn commit_upsert_reported(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    workspace: Workspace,
+    context: &'static str,
+) {
+    if let Err(error) = commit_upsert(config, key, workspace) {
+        report_commit_error(config, context, &error);
     }
+}
+
+pub(super) async fn commit_upsert_offloaded_reported(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    workspace: Workspace,
+    context: &'static str,
+) {
+    if let Err(error) = commit_upsert_offloaded(config, key, workspace).await {
+        report_commit_error(config, context, &error);
+    }
+}
+
+async fn commit_workspace_batch_offloaded(
+    config: &ServerConfig,
+    upserts: Vec<(WorkspaceKey, Workspace)>,
+    deletes: Vec<WorkspaceKey>,
+) -> Result<CommitOutcome, CommitError> {
+    let config_owned = config.clone();
+    tokio::task::spawn_blocking(move || commit_workspace_batch(&config_owned, upserts, deletes))
+        .await
+        .map_err(|error| CommitError::Task(error.to_string()))?
 }
 
 /// [`load_workspace`] on `spawn_blocking` — same offload rationale as
@@ -3402,17 +3474,6 @@ pub(super) async fn load_workspace_offloaded(
         .flatten()
 }
 
-/// Ensure a Project record exists for the workspace's parent project,
-/// upserting + broadcasting on first sight. Driven from `commit_upsert`,
-/// so every workspace that flows through polling auto-registers its
-/// containing project. Idempotent — calling repeatedly with the same
-/// workspace re-saves and re-broadcasts the same Project record (cheap).
-///
-/// `Workspace::project_key` is populated by `Workspace::from_task` via
-/// `lazybox_core::project_key_for_task`. When it's `None` (back-compat
-/// reads of pre-Project records, or a workspace with no upstream task),
-/// we skip — Stage 1 doesn't try to back-fill projects for orphan
-/// workspaces.
 /// The user's effective GitHub scope ids from config.yaml: the wizard
 /// selection (`setup.scopes`) unioned with any `providers.github.filters`
 /// org/repo entries — the same set the poller narrows on (see the merge
@@ -3440,17 +3501,22 @@ fn github_slug_from_config_scopes(key: &lazybox_core::ProjectKey) -> Option<Stri
     key.github_slug_from_scopes(scopes.iter().map(String::as_str))
 }
 
-fn ensure_project_for_workspace(config: &ServerConfig, workspace: &Workspace) {
+/// Prepare the missing parent Project, if any, so it can be committed in the
+/// same atomic batch as the workspace that references it.
+fn project_record_for_workspace(
+    config: &ServerConfig,
+    workspace: &Workspace,
+) -> Result<Option<(lazybox_core::Project, lazybox_store::ProjectRecord)>, CommitError> {
     let Some(project_key) = workspace.project_key.clone() else {
-        return;
+        return Ok(None);
     };
     // Skip the write + broadcast if we've already registered this
     // project. Keeps bus traffic to one event per project per process
     // — without this, every workspace upsert would re-fire the project
     // event and consumers that drain "one event per upsert" would
     // desync (mark_workspace_read in particular).
-    if matches!(config.store.get_project(&project_key), Ok(Some(_))) {
-        return;
+    if config.store.get_project(&project_key)?.is_some() {
+        return Ok(None);
     }
     // Display name for the project. Prefer the workspace's
     // `primary_task().repo` (the "owner/repo" string) when present —
@@ -3465,28 +3531,16 @@ fn ensure_project_for_workspace(config: &ServerConfig, workspace: &Workspace) {
         .or_else(|| github_slug_from_config_scopes(&project_key))
         .unwrap_or_else(|| project_key.display_name());
     let project = lazybox_core::Project::new(project_key.clone(), name, Utc::now());
-    let json = match serde_json::to_string(&project) {
-        Ok(s) => Some(s),
-        Err(e) => {
-            tracing::error!(
-                project_key = %project_key,
-                "ensure_project: serde_json::to_string(project) failed: {e}",
-            );
-            None
-        }
-    };
+    let json = serde_json::to_string(&project).map_err(|source| CommitError::SerializeProject {
+        key: project_key.as_str().to_string(),
+        source,
+    })?;
     let record = lazybox_store::ProjectRecord {
         key: project_key.as_str().to_string(),
         created_at: project.created_at,
-        project_json: json,
+        project_json: Some(json),
     };
-    if let Err(e) = config.store.save_project(&record) {
-        tracing::error!(
-            project_key = %record.key,
-            "save_project failed: {e}",
-        );
-    }
-    let _ = config.bus.send(Event::ProjectUpserted(Box::new(project)));
+    Ok(Some((project, record)))
 }
 
 /// Heuristic for "is this Task the PR side of a PR/issue pair?".
@@ -3650,11 +3704,10 @@ const MERGE_REPROMPT_AFTER: std::time::Duration = std::time::Duration::from_secs
 pub(crate) const REMOVAL_REPROMPT_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// An issue workspace absorbed into a PR during
-/// [`merge_closing_issue_workspaces`], whose store row must still be
-/// deleted. Deletion is deferred to [`finalize_issue_merges`] — AFTER
-/// the PR's own commit — so a crash or timeout between the absorb and
-/// the commit can't leave the moved sessions in neither stored
-/// workspace.
+/// [`merge_closing_issue_workspaces`], whose store row must be deleted in
+/// the same transaction that saves the absorbed PR. The matching removal
+/// events are deferred to [`finalize_issue_merges`] until that transaction
+/// succeeds, so clients never project a partially committed collapse.
 struct PendingIssueMerge {
     issue_key: WorkspaceKey,
     issue_label: String,
@@ -3791,9 +3844,8 @@ async fn merge_closing_issue_workspaces(
 
         // No live terminal — safe to merge silently. Sessions (and
         // their dead-but-recoverable records) move onto the PR here;
-        // the issue's store row is deleted by `finalize_issue_merges`
-        // only after the PR commit lands, so a cancellation between
-        // the two never strands the moved sessions row-less.
+        // `commit_merge` saves the PR and deletes the issue row in one
+        // transaction, then `finalize_issue_merges` publishes removal.
         let issue_label = workspace_label_for(&issue_ws, &issue_key);
         let pr_label = workspace_label_for(workspace, &workspace.key);
         absorb_issue_workspace(config, workspace, issue_ws).await;
@@ -3812,26 +3864,15 @@ async fn merge_closing_issue_workspaces(
     pending
 }
 
-/// Second half of the silent issue→PR merge: drop the absorbed issue
-/// rows + broadcast the removal/merge notices. MUST run after
-/// `commit_upsert` persisted the PR (now carrying the moved sessions)
-/// — the auto path used to delete first, and a cancellation (e.g. the
-/// 15s per-task upsert timeout) between the delete and the commit
-/// left the sessions in neither stored workspace. Commit-then-delete
-/// keeps them recoverable under the PR key throughout the window,
-/// matching what `handle_confirm_merge` always did.
+/// Publish the issue-removal events after the atomic store batch committed
+/// the absorbed PR and deleted every issue row. No storage occurs here: the
+/// caller must not invoke this function after a failed batch.
 fn finalize_issue_merges(
     config: &ServerConfig,
     pr_key: &WorkspaceKey,
     pending: Vec<PendingIssueMerge>,
 ) {
     for merge in pending {
-        if let Err(e) = config.store.delete_workspace(&merge.issue_key) {
-            tracing::warn!(
-                issue_workspace = %merge.issue_key,
-                "delete_workspace during PR merge failed: {e}"
-            );
-        }
         let _ = config
             .bus
             .send(Event::WorkspaceRemoved(merge.issue_key.clone()));
@@ -3853,14 +3894,14 @@ fn finalize_issue_merges(
 /// `TerminalsRebadged` — I1), then hand the absorbed PR plus the list
 /// of issues to retire here. This function owns the rest:
 ///   1. migrate worktree paths to the (possibly new) PR slug,
-///   2. `commit_upsert` — persist + broadcast `WorkspaceUpserted{pr}`
-///      carrying the moved sessions (I2),
-///   3. `finalize_issue_merges` — delete each issue row only AFTER the
-///      commit (I3), then broadcast `WorkspaceRemoved` followed by
-///      `WorkspaceMerged` per issue (I6).
+///   2. atomically save the PR and delete every absorbed issue, then
+///      broadcast `WorkspaceUpserted{pr}` carrying the moved sessions (I2),
+///   3. `finalize_issue_merges` — broadcast `WorkspaceRemoved` followed by
+///      `WorkspaceMerged` per issue (I3/I6).
 ///
-/// Commit-before-delete keeps the moved sessions recoverable under the
-/// PR key across a crash in the window — see `finalize_issue_merges`.
+/// The PR save and issue deletes are one store transaction. There is no crash
+/// window in which the moved sessions exist in neither row, and no removal
+/// event is emitted if the transaction fails.
 ///
 /// `pending` may be empty: the normal (non-merge) upsert path routes
 /// every commit through here too, in which case this is just the
@@ -3872,7 +3913,16 @@ async fn commit_merge(
 ) {
     crate::spawn_handler::migrate_session_paths_if_needed(&mut pr_ws).await;
     let pr_key = pr_ws.key.clone();
-    commit_upsert_offloaded(config, &pr_key, pr_ws).await;
+    let deletes = pending
+        .iter()
+        .map(|merge| merge.issue_key.clone())
+        .collect();
+    if let Err(error) =
+        commit_workspace_batch_offloaded(config, vec![(pr_key.clone(), pr_ws)], deletes).await
+    {
+        report_commit_error(config, "merge issue workspace into PR", &error);
+        return;
+    }
     finalize_issue_merges(config, &pr_key, pending);
 }
 
@@ -4088,8 +4138,13 @@ pub async fn handle_adopt_sessions(
 
     let source_key_owned = source_ws.key.clone();
     let target_key_owned = target_ws.key.clone();
-    commit_upsert(config, &source_key_owned, source_ws);
-    commit_upsert(config, &target_key_owned, target_ws);
+    if let Err(error) = commit_workspace_batch(
+        config,
+        vec![(source_key_owned, source_ws), (target_key_owned, target_ws)],
+        Vec::new(),
+    ) {
+        report_commit_error(config, "adopt sessions across workspaces", &error);
+    }
 }
 
 /// Move `issue_ws`'s sessions, gh/linear-issue tasks, and any
@@ -4337,7 +4392,7 @@ pub fn create_empty_workspace(
     }
     workspace.project_key = Some(project_key);
     workspace.local = true;
-    commit_upsert(config, &key, workspace);
+    commit_upsert_reported(config, &key, workspace, "create empty workspace");
     key
 }
 
@@ -4370,28 +4425,35 @@ pub fn create_local_project(config: &ServerConfig, name: &str) -> lazybox_core::
             .as_deref()
             .and_then(|j| serde_json::from_str::<lazybox_core::Project>(j).ok())
             .unwrap_or_else(|| lazybox_core::Project::new(key.clone(), &display_name, Utc::now())),
-        _ => lazybox_core::Project::new(key.clone(), &display_name, Utc::now()),
+        Ok(None) => lazybox_core::Project::new(key.clone(), &display_name, Utc::now()),
+        Err(error) => {
+            let error = CommitError::Store(error);
+            report_commit_error(config, "load local project", &error);
+            return key;
+        }
     };
     let json = match serde_json::to_string(&project) {
-        Ok(s) => Some(s),
+        Ok(s) => s,
         Err(e) => {
             tracing::error!(
                 project_key = %key,
                 "create_local_project: serde_json::to_string(project) failed: {e}",
             );
-            None
+            return key;
         }
     };
     let record = lazybox_store::ProjectRecord {
         key: key.as_str().to_string(),
         created_at: project.created_at,
-        project_json: json,
+        project_json: Some(json),
     };
-    if let Err(e) = config.store.save_project(&record) {
-        tracing::error!(
-            project_key = %record.key,
-            "save_project failed: {e}",
-        );
+    if let Err(error) = config
+        .store
+        .apply_batch(&[StoreMutation::SaveProject(record)])
+    {
+        let error = CommitError::Store(error);
+        report_commit_error(config, "create local project", &error);
+        return key;
     }
     let _ = config.bus.send(Event::ProjectUpserted(Box::new(project)));
     key
@@ -4428,7 +4490,10 @@ pub fn migrate_legacy_sandbox(config: &ServerConfig) {
     let project_key = create_local_project(config, "Sandbox");
     workspace.project_key = Some(project_key);
     let ws_key = workspace.key.clone();
-    commit_upsert(config, &ws_key, workspace);
+    if let Err(error) = commit_upsert(config, &ws_key, workspace) {
+        report_commit_error(config, "migrate legacy sandbox", &error);
+        return;
+    }
     tracing::info!(
         "migrate_legacy_sandbox: moved `sandbox` workspace under `local-sandbox` project"
     );
@@ -4447,7 +4512,7 @@ pub async fn set_snooze(
         return;
     };
     workspace.snoozed_until = until;
-    commit_upsert_offloaded(config, key, workspace).await;
+    commit_upsert_offloaded_reported(config, key, workspace, "set workspace snooze").await;
 }
 
 /// Persist the workspace's "auto-merge on green" arm. Mirrors
@@ -4460,7 +4525,7 @@ pub async fn set_auto_merge_on_green(config: &ServerConfig, key: &WorkspaceKey, 
         return;
     };
     workspace.auto_merge_on_green = enabled;
-    commit_upsert_offloaded(config, key, workspace).await;
+    commit_upsert_offloaded_reported(config, key, workspace, "set auto-merge preference").await;
 }
 
 /// Persist the workspace's per-session auto-fix arm for one
@@ -4479,7 +4544,7 @@ pub async fn set_auto_fix_policy(
         return;
     };
     workspace.policies.set(kind, arm);
-    commit_upsert_offloaded(config, key, workspace).await;
+    commit_upsert_offloaded_reported(config, key, workspace, "set auto-fix policy").await;
 }
 
 /// Delete a workspace + all its sessions from the store. Broadcasts
@@ -4784,7 +4849,7 @@ pub async fn set_session_layout(
         return;
     };
     session.layout = layout;
-    commit_upsert_offloaded(config, key, workspace).await;
+    commit_upsert_offloaded_reported(config, key, workspace, "set session layout").await;
 }
 
 /// Apply a partial-mark to one activity row. Used by the TUI's
@@ -4819,7 +4884,7 @@ async fn apply_activity_mark(config: &ServerConfig, key: &WorkspaceKey, index: u
     } else {
         workspace.unmark_activity_read(index);
     }
-    commit_upsert_offloaded(config, key, workspace).await;
+    commit_upsert_offloaded_reported(config, key, workspace, "mark workspace activity").await;
 }
 
 /// Apply the user's "mark every activity item read" gesture to a
@@ -4842,14 +4907,14 @@ pub async fn mark_workspace_read(config: &ServerConfig, key: &WorkspaceKey) {
     };
     workspace.mark_read_all();
     workspace.last_viewed_at = Some(Utc::now());
-    commit_upsert_offloaded(config, key, workspace).await;
+    commit_upsert_offloaded_reported(config, key, workspace, "mark workspace read").await;
 }
 
 #[cfg(test)]
 mod workspace_lock_tests {
     use super::*;
     use lazybox_core::{TaskId, TaskRole, TaskState};
-    use lazybox_store::{MemoryStore, Store, StoreError};
+    use lazybox_store::{MemoryStore, Store, StoreError, StoreMutation};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -4865,6 +4930,10 @@ mod workspace_lock_tests {
     }
 
     impl Store for GateStore {
+        fn apply_batch(&self, mutations: &[StoreMutation]) -> Result<(), StoreError> {
+            self.inner.apply_batch(mutations)
+        }
+
         fn get_kv(&self, key: &str) -> Result<Option<String>, StoreError> {
             // Read FIRST, then park: the racing tick must walk away
             // holding the PRE-mark copy (the load already happened)

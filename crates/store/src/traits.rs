@@ -7,6 +7,8 @@ pub enum StoreError {
     Backend(String),
     #[error("not found: {0}")]
     NotFound(String),
+    #[error("unsupported store operation: {0}")]
+    Unsupported(&'static str),
 }
 
 /// Recover the record's real `created_at` from its serialized JSON
@@ -48,6 +50,22 @@ pub struct ProjectRecord {
     pub project_json: Option<String>,
 }
 
+/// One durable mutation in an atomic [`Store::apply_batch`] call.
+///
+/// The daemon uses batches for domain operations that span more than one
+/// record (issue → PR collapse, session adoption, and workspace + project
+/// creation). A backend must apply every mutation or none of them; returning
+/// `Ok(())` after a partial write violates the trait contract.
+#[derive(Debug, Clone)]
+pub enum StoreMutation {
+    SetKv { key: String, value: String },
+    DeleteKv { key: String },
+    SaveWorkspace(WorkspaceRecord),
+    DeleteWorkspace(WorkspaceKey),
+    SaveProject(ProjectRecord),
+    DeleteProject(ProjectKey),
+}
+
 /// Abstract storage trait. Implement for SQLite, Postgres, file, etc.
 ///
 /// The kv methods (`get_kv` / `set_kv` / `delete_kv`) are for
@@ -55,6 +73,16 @@ pub struct ProjectRecord {
 /// future workspace settings. Default impls behave as a never-stored
 /// kv (None / Ok) so simple stores don't need to implement them.
 pub trait Store: Send + Sync {
+    /// Apply a group of mutations atomically.
+    ///
+    /// Backends that cannot provide an all-or-nothing transaction must return
+    /// [`StoreError::Unsupported`], never emulate a batch with sequential
+    /// writes. The default keeps partial/test backends honest until they add a
+    /// real implementation.
+    fn apply_batch(&self, _mutations: &[StoreMutation]) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("atomic mutation batch"))
+    }
+
     /// Read a string value previously set with `set_kv`. Returns
     /// `Ok(None)` for both "never set" and the default impl, so
     /// callers should treat None as "use defaults".

@@ -15,7 +15,9 @@
 
 use chrono::{DateTime, Utc};
 use lazybox_core::{ProjectKey, WorkspaceKey};
-use lazybox_store::{MemoryStore, ProjectRecord, SqliteStore, Store, WorkspaceRecord};
+use lazybox_store::{
+    MemoryStore, ProjectRecord, SqliteStore, Store, StoreMutation, WorkspaceRecord,
+};
 
 /// Unique on-disk db path per test, cleaned up on drop. Hand-rolled
 /// (std::env::temp_dir + counter) to match the sqlite unit tests —
@@ -229,6 +231,50 @@ fn project_contract(store: &dyn Store) {
         .unwrap();
 }
 
+// ── atomic batches ──────────────────────────────────────────────────
+
+fn batch_contract(store: &dyn Store) {
+    let created = fixed_time();
+    let workspace_key = WorkspaceKey::new("batch-ws");
+    let project_key = ProjectKey::local("batch-project");
+
+    store
+        .apply_batch(&[
+            StoreMutation::SetKv {
+                key: "batch:marker".into(),
+                value: "present".into(),
+            },
+            StoreMutation::SaveWorkspace(workspace_record(
+                workspace_key.as_str(),
+                created,
+                "batch",
+            )),
+            StoreMutation::SaveProject(project_record(project_key.as_str(), created, "batch")),
+        ])
+        .unwrap();
+
+    assert_eq!(
+        store.get_kv("batch:marker").unwrap().as_deref(),
+        Some("present")
+    );
+    assert!(store.get_workspace(&workspace_key).unwrap().is_some());
+    assert!(store.get_project(&project_key).unwrap().is_some());
+
+    store
+        .apply_batch(&[
+            StoreMutation::DeleteKv {
+                key: "batch:marker".into(),
+            },
+            StoreMutation::DeleteWorkspace(workspace_key.clone()),
+            StoreMutation::DeleteProject(project_key.clone()),
+        ])
+        .unwrap();
+
+    assert!(store.get_kv("batch:marker").unwrap().is_none());
+    assert!(store.get_workspace(&workspace_key).unwrap().is_none());
+    assert!(store.get_project(&project_key).unwrap().is_none());
+}
+
 /// The whole suite against one backend. Sections run in a fixed order
 /// on one store instance so cross-namespace isolation (kv vs
 /// workspace vs project prefixes) is exercised too.
@@ -236,6 +282,7 @@ fn run_conformance(store: &dyn Store) {
     kv_contract(store);
     workspace_contract(store);
     project_contract(store);
+    batch_contract(store);
 }
 
 #[test]

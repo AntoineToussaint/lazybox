@@ -19,18 +19,20 @@
 
 use lazybox_core::{Workspace, WorkspaceKey};
 
-use super::{commit_upsert, load_workspace};
+use super::{commit_upsert, load_workspace, report_commit_error};
 use crate::ServerConfig;
 
 /// Outcome of a workspace mutation. `Applied` means the workspace
-/// was found, the closure ran, and the store + bus saw the result.
+/// was found, the closure ran, and the durable commit succeeded.
 /// `Missing` means the workspace vanished mid-mutation — typically
 /// because the user pressed `x x` while we were in the
-/// middle of an IO call.
+/// middle of an IO call. `Failed` means the transformed state was not
+/// committed or broadcast; a retryable store error is emitted separately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MutationOutcome {
     Applied,
     Missing,
+    Failed,
 }
 
 impl MutationOutcome {
@@ -58,8 +60,13 @@ where
         return MutationOutcome::Missing;
     };
     transform(&mut ws);
-    commit_upsert(config, key, ws);
-    MutationOutcome::Applied
+    match commit_upsert(config, key, ws) {
+        Ok(_) => MutationOutcome::Applied,
+        Err(error) => {
+            report_commit_error(config, "apply workspace mutation", &error);
+            MutationOutcome::Failed
+        }
+    }
 }
 
 /// Two-phase mutation: an async `fetch` that takes the initial
@@ -98,8 +105,13 @@ where
         return Ok(MutationOutcome::Missing);
     };
     transform(&mut fresh, payload);
-    commit_upsert(config, key, fresh);
-    Ok(MutationOutcome::Applied)
+    Ok(match commit_upsert(config, key, fresh) {
+        Ok(_) => MutationOutcome::Applied,
+        Err(error) => {
+            report_commit_error(config, "apply fetched workspace mutation", &error);
+            MutationOutcome::Failed
+        }
+    })
 }
 
 #[cfg(test)]
@@ -166,7 +178,7 @@ mod tests {
                 // writing a fresher copy with a new field set.
                 let mut fresher = initial.clone();
                 fresher.snoozed_until = Some(Utc::now() + chrono::Duration::hours(2));
-                commit_upsert(&config_for_writer, &key_for_writer, fresher);
+                commit_upsert(&config_for_writer, &key_for_writer, fresher).unwrap();
                 Ok(42_i32)
             },
             |ws, payload| {

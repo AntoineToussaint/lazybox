@@ -9,7 +9,7 @@
 //! helpers (`commit_upsert`, `load_workspace`) leak across via
 //! `pub(super)`.
 
-use super::{TickState, apply_and_commit, commit_upsert, load_workspace};
+use super::{TickState, apply_and_commit, commit_upsert_reported, load_workspace};
 use crate::ServerConfig;
 use lazybox_core::{CiStatus, ReviewStatus, Workspace, WorkspaceKey};
 use lazybox_gh::GhClient;
@@ -794,7 +794,7 @@ pub async fn handle_clean_worktrees(config: &ServerConfig) {
             wrote = true;
         }
         if wrote {
-            commit_upsert(config, &workspace_key, workspace);
+            commit_upsert_reported(config, &workspace_key, workspace, "clean stopped worktrees");
         }
     }
 
@@ -1306,7 +1306,7 @@ pub(crate) async fn cleanup_merged_worktrees_with(
     }
 
     if wrote {
-        commit_upsert(config, key, workspace);
+        commit_upsert_reported(config, key, workspace, "clean merged worktrees");
     }
     if removed > 0 {
         let noun = if removed == 1 {

@@ -229,6 +229,13 @@ pub const BUS_CAPACITY: usize = 1024;
 /// `inline_budget_violations` metric and logs the offending command.
 pub const INLINE_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// Maximum concurrent slow command handlers owned by one client connection.
+/// The two long-lived terminal routers are counted separately. When this cap
+/// is reached, new detached mutations are rejected before spawning a task.
+pub const MAX_CONNECTION_MUTATIONS: usize = 32;
+
+const CONNECTION_ROUTER_TASKS: usize = 2;
+
 /// Canonical lock-acquisition order for the per-terminal maps when
 /// **co-holding** two or more. AB/BA deadlock requires two paths to
 /// each hold one lock while waiting for the other; the order below
@@ -369,6 +376,10 @@ pub struct ServerConfig {
     /// by the registering inject task; the pump also sweeps on
     /// `TerminalExited`.
     pub prompt_submit_signals: Arc<Mutex<HashMap<TerminalId, Arc<tokio::sync::Notify>>>>,
+    /// At most one readiness-gated prompt injection may wait per terminal.
+    /// A synchronous mutex lets the spawned waiter's RAII guard release the
+    /// reservation on every return/cancellation path.
+    pub pending_prompt_injections: Arc<parking_lot::Mutex<std::collections::HashSet<TerminalId>>>,
     /// Factory for a structured agent run's underlying process I/O.
     /// Defaults to spawning a real subprocess; tests swap in an
     /// in-memory fake so they never launch an agent CLI or a shell.
@@ -569,6 +580,7 @@ impl ServerConfig {
             agent_detect_resets: Arc::new(Mutex::new(HashSet::new())),
             hook_driven_terminals: Arc::new(Mutex::new(HashMap::new())),
             prompt_submit_signals: Arc::new(Mutex::new(HashMap::new())),
+            pending_prompt_injections: Arc::new(parking_lot::Mutex::new(HashSet::new())),
             agent_stream_spawner: Arc::new(agent_stream::ProcessAgentStreamSpawner),
             agent_runs: Arc::new(Mutex::new(HashMap::new())),
             next_agent_run_id: Arc::new(AtomicU64::new(1)),
@@ -769,15 +781,15 @@ impl Server {
     pub async fn serve(&self, mut conn: Connection) -> Result<(), ServerError> {
         // Bridge the raw event stream to the client's bounded channel
         // through the drop-and-resync forwarder, when the transport
-        // wired one up (in-process + socket clients do; the JSON API
-        // gateway reads the raw stream directly and leaves this `None`).
+        // wired one up (all production transports do; `None` is reserved for
+        // explicitly finite internal harnesses).
         // The serve loop below keeps writing raw events to `conn.tx`
         // exactly as before — it never blocks on the client, so the
         // command path (keystroke `Write`s) stays responsive no matter
         // how far behind the consumer falls.
-        if let Some(forward) = conn.take_forward() {
-            tokio::spawn(event_forward::forward_events(forward, self.config.clone()));
-        }
+        let forward_task = conn.take_forward().map(|forward| {
+            tokio::spawn(event_forward::forward_events(forward, self.config.clone()))
+        });
         let mut bus_rx = self.config.bus.subscribe();
         // Detached mutation handlers (Spawn, Kill, InjectPrompt, the
         // GraphQL writers, worktree teardowns, …) land here instead of
@@ -790,22 +802,49 @@ impl Server {
         // detached task per command: dedicated routers preserve FIFO order,
         // isolate terminals, coalesce bursts, and keep SQLite drafts off the
         // PTY input lane.
-        let (terminal_io_tx, terminal_io_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (terminal_persist_tx, terminal_persist_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (terminal_io_tx, terminal_io_rx) =
+            tokio::sync::mpsc::channel(terminal_commands::ROUTER_CAPACITY);
+        let (terminal_persist_tx, terminal_persist_rx) =
+            tokio::sync::mpsc::channel(terminal_commands::ROUTER_CAPACITY);
         let io_config = self.config.clone();
+        let io_event_tx = conn.tx.clone();
         mutations.spawn(async move {
-            terminal_commands::run_io_router(io_config, terminal_io_rx).await;
+            terminal_commands::run_io_router(io_config, io_event_tx, terminal_io_rx).await;
         });
         let persistence_config = self.config.clone();
+        let persistence_event_tx = conn.tx.clone();
         mutations.spawn(async move {
-            terminal_commands::run_persistence_router(persistence_config, terminal_persist_rx)
-                .await;
+            terminal_commands::run_persistence_router(
+                persistence_config,
+                persistence_event_tx,
+                terminal_persist_rx,
+            )
+            .await;
         });
+        // Subscribe is a connection-establishment command, not a general
+        // snapshot endpoint. Re-running its full store/terminal snapshot can
+        // manufacture an arbitrarily large structured-event backlog; live
+        // recovery uses the bus-lag snapshot and RequestTerminalResync paths.
+        let mut subscribed = false;
         loop {
             while mutations.try_join_next().is_some() {}
             tokio::select! {
+                _ = conn.tx.closed() => {
+                    tracing::warn!("client event forwarder closed — ending connection");
+                    break;
+                }
                 cmd = conn.rx.recv() => {
                     let Some(cmd) = cmd else { break };
+                    if matches!(&cmd, lazybox_ipc::Command::Subscribe) {
+                        if subscribed {
+                            let _ = conn.tx.send(Event::CommandRejected {
+                                command: "Subscribe".into(),
+                                message: "this connection is already subscribed".into(),
+                            });
+                            continue;
+                        }
+                        subscribed = true;
+                    }
                     // Per-command name at INFO so a stalled IPC channel is
                     // visible at a glance — historically we'd see `daemon
                     // ← Subscribe` and then nothing, with no way to tell
@@ -923,21 +962,46 @@ impl Server {
                             }
                         }
                         CommandLane::TerminalIo => {
-                            if let Err(error) = terminal_io_tx.send(cmd) {
-                                tracing::warn!(command = ?error.0, "terminal I/O router closed");
+                            if let Err(error) = terminal_io_tx.try_send(cmd) {
+                                let command = error.into_inner();
+                                tracing::warn!(?command, "terminal I/O router rejected command");
+                                terminal_commands::reject_command(
+                                    &conn.tx,
+                                    &command,
+                                    "terminal I/O router is full or unavailable",
+                                );
                             }
                         }
                         CommandLane::TerminalPersistence => {
-                            if let Err(error) = terminal_persist_tx.send(cmd) {
-                                tracing::warn!(command = ?error.0, "terminal persistence router closed");
+                            if let Err(error) = terminal_persist_tx.try_send(cmd) {
+                                let command = error.into_inner();
+                                tracing::warn!(?command, "terminal persistence router rejected command");
+                                terminal_commands::reject_command(
+                                    &conn.tx,
+                                    &command,
+                                    "terminal persistence router is full or unavailable",
+                                );
                             }
                         }
                         CommandLane::Detached => {
-                            let cfg = self.config.clone();
-                            let tx = conn.tx.clone();
-                            mutations.spawn(async move {
-                                dispatch_command(&cfg, &tx, cmd).await;
-                            });
+                            if detached_mutation_capacity(&mutations) {
+                                let cfg = self.config.clone();
+                                let tx = conn.tx.clone();
+                                mutations.spawn(async move {
+                                    dispatch_command(&cfg, &tx, cmd).await;
+                                });
+                            } else {
+                                tracing::warn!(
+                                    max = MAX_CONNECTION_MUTATIONS,
+                                    command = label,
+                                    "connection mutation limit reached — rejecting command"
+                                );
+                                terminal_commands::reject_command(
+                                    &conn.tx,
+                                    &cmd,
+                                    "too many commands are still in progress",
+                                );
+                            }
                         }
                     }
                 }
@@ -1032,6 +1096,14 @@ impl Server {
                 );
             }
         }
+        if let Some(forward_task) = forward_task {
+            // A healthy forwarder normally ends when its client receiver
+            // closes. On explicit Shutdown that receiver may still be alive,
+            // so abort and join the connection-owned task instead of leaving
+            // it detached behind `serve`.
+            forward_task.abort();
+            let _ = forward_task.await;
+        }
         Ok(())
     }
 }
@@ -1075,6 +1147,33 @@ fn command_lane(cmd: &lazybox_ipc::Command) -> CommandLane {
     }
 }
 
+fn detached_mutation_capacity(mutations: &tokio::task::JoinSet<()>) -> bool {
+    mutations.len().saturating_sub(CONNECTION_ROUTER_TASKS) < MAX_CONNECTION_MUTATIONS
+}
+
+#[cfg(test)]
+mod mutation_admission_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn pending_connection_mutations_have_a_hard_task_cap() {
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..(CONNECTION_ROUTER_TASKS + MAX_CONNECTION_MUTATIONS - 1) {
+            tasks.spawn(std::future::pending::<()>());
+        }
+        assert!(detached_mutation_capacity(&tasks));
+
+        tasks.spawn(std::future::pending::<()>());
+        assert!(!detached_mutation_capacity(&tasks));
+        assert_eq!(
+            tasks.len(),
+            CONNECTION_ROUTER_TASKS + MAX_CONNECTION_MUTATIONS
+        );
+
+        tasks.shutdown().await;
+    }
+}
+
 /// Run one command to completion. The serve loop calls this two ways
 /// (see [`command_lane`]): INLINE for the fast, order-sensitive lane, or
 /// on the `mutations` JoinSet for the detached lane. The body is
@@ -1089,7 +1188,7 @@ fn command_lane(cmd: &lazybox_ipc::Command) -> CommandLane {
 #[doc(hidden)]
 pub async fn dispatch_command(
     config: &ServerConfig,
-    tx: &tokio::sync::mpsc::UnboundedSender<Event>,
+    tx: &lazybox_ipc::EventSender,
     cmd: lazybox_ipc::Command,
 ) {
     match cmd {

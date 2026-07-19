@@ -472,10 +472,10 @@ pub fn run_loop_with_model<T: TerminalAdapter>(mut model: Model<T>) -> anyhow::R
 
 /// Hard cap on how many daemon events one loop iteration may process
 /// before it MUST fall through to the keyboard read. The daemon emits
-/// one `TerminalOutput` event per PTY chunk into an *unbounded*
-/// channel, so a chatty agent (Claude Code streaming) can push events
-/// faster than we drain them. An unbounded `while let Ok(..)` drain
-/// then never sees `Empty`, the loop never reaches the input read, and
+/// one `TerminalOutput` event per PTY chunk and a chatty agent (Claude
+/// Code streaming) can keep the bounded channel continuously non-empty.
+/// An unbounded `while let Ok(..)` drain then never sees `Empty`, the loop
+/// never reaches the input read, and
 /// the user "can't type in the agent" until the burst ends. Bounding
 /// the drain makes that input starvation impossible BY DESIGN: every
 /// iteration services the keyboard within ~one frame no matter how

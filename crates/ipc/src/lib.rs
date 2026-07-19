@@ -20,12 +20,20 @@
 use lazybox_core::SessionKey;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub mod channel;
 pub mod socket;
 pub mod transport;
 
 pub const MAX_FRAME_BYTES: u32 = 64 * 1024 * 1024;
+
+/// Socket command frames have a much smaller legitimate shape than snapshot
+/// events. A distinct ingress ceiling prevents one peer from filling bounded
+/// command queues with dozens of 64 MiB payloads. 256 KiB still leaves ample
+/// room for a large composed prompt while bounding every retained command.
+pub const MAX_COMMAND_FRAME_BYTES: u32 = 256 * 1024;
 
 /// Magic prefix of the 8-byte connection preamble each side sends
 /// before any frames (`PROTOCOL_MAGIC ++ PROTOCOL_VERSION as u32 LE`).
@@ -41,7 +49,7 @@ pub const PROTOCOL_MAGIC: [u8; 4] = *b"LZBX";
 /// order, so adding, removing, or reordering a variant or field makes
 /// an old peer silently misread every subsequent frame. The handshake
 /// turns that garbage into a clear "restart the daemon" error.
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// This binary's build identity: the workspace version plus the git
 /// short SHA captured at compile time (`build.rs`). Two binaries built
@@ -1395,6 +1403,13 @@ pub enum Event {
         terminal_id: TerminalId,
         message: String,
     },
+    /// A daemon queue reached its explicit admission limit before accepting
+    /// this command. The command was not executed; retry is safe after the
+    /// named subsystem catches up.
+    CommandRejected {
+        command: String,
+        message: String,
+    },
 }
 
 /// Severity classification for `Event::ProviderError`. The TUI uses
@@ -1557,7 +1572,104 @@ use tokio::sync::mpsc;
 /// (`MAX_EVENTS_PER_TICK` = 256) so ordinary single-frame bursts ride
 /// through without ever tripping the drop path — overflow only kicks in
 /// when the consumer is genuinely, sustainedly behind.
-pub const EVENT_CHANNEL_CAPACITY: usize = 2048;
+pub const EVENT_CHANNEL_CAPACITY: usize = 512;
+
+/// Hard ceiling on each connection's daemon-side staging queue before the
+/// drop/resync forwarder. This queue exists so the serve loop never blocks on
+/// a slow client; making it bounded means a client that also stops consuming
+/// structured/lifecycle events is disconnected instead of growing daemon
+/// memory forever.
+pub const RAW_EVENT_CHANNEL_CAPACITY: usize = 1024;
+
+/// Commands buffered on either side of an IPC connection. A full queue
+/// back-pressures socket reads and makes synchronous client sends fail loudly;
+/// it never allocates an unbounded command backlog behind a wedged peer.
+pub const COMMAND_CHANNEL_CAPACITY: usize = 32;
+
+/// Shared overload signal between [`EventSender`] and [`EventForward`].
+pub struct EventIngressHealth {
+    overloaded: AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl EventIngressHealth {
+    fn new() -> Self {
+        Self {
+            overloaded: AtomicBool::new(false),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    pub fn is_overloaded(&self) -> bool {
+        self.overloaded.load(Ordering::Acquire)
+    }
+
+    pub async fn overloaded(&self) {
+        if self.is_overloaded() {
+            return;
+        }
+        self.notify.notified().await;
+    }
+
+    fn trip(&self) {
+        if !self.overloaded.swap(true, Ordering::AcqRel) {
+            // One forwarder waits on this signal. `notify_one` stores a
+            // permit when it wins the tiny check→wait race; `notify_waiters`
+            // would lose that notification and strand an overloaded stream.
+            self.notify.notify_one();
+        }
+    }
+}
+
+/// Non-blocking, bounded event admission owned by one daemon connection.
+/// A full raw queue trips the connection overload signal; the forwarder then
+/// closes the client rather than silently losing a lifecycle event.
+#[derive(Clone)]
+pub enum EventSender {
+    Bounded {
+        tx: mpsc::Sender<Event>,
+        health: Arc<EventIngressHealth>,
+    },
+    /// Explicit compatibility path for short-lived internal consumers that
+    /// prove their own finite production bound. Network and TUI transports
+    /// never construct this variant.
+    Unbounded(mpsc::UnboundedSender<Event>),
+}
+
+impl EventSender {
+    // The error returns the rejected Event so callers can classify/recover it.
+    // Boxing would allocate on the overload path and complicate every sender;
+    // successful admission remains the overwhelmingly hot path.
+    #[allow(clippy::result_large_err)]
+    pub fn send(&self, event: Event) -> Result<(), mpsc::error::TrySendError<Event>> {
+        match self {
+            Self::Bounded { tx, health } => match tx.try_send(event) {
+                Ok(()) => Ok(()),
+                Err(error @ mpsc::error::TrySendError::Full(_)) => {
+                    health.trip();
+                    Err(error)
+                }
+                Err(error @ mpsc::error::TrySendError::Closed(_)) => Err(error),
+            },
+            Self::Unbounded(tx) => tx
+                .send(event)
+                .map_err(|error| mpsc::error::TrySendError::Closed(error.0)),
+        }
+    }
+
+    /// Wrap an existing unbounded sender for a finite, non-transport bridge.
+    /// Prefer [`event_forward_channel`] for every long-lived connection.
+    pub fn from_unbounded(tx: mpsc::UnboundedSender<Event>) -> Self {
+        Self::Unbounded(tx)
+    }
+
+    pub async fn closed(&self) {
+        match self {
+            Self::Bounded { tx, .. } => tx.closed().await,
+            Self::Unbounded(tx) => tx.closed().await,
+        }
+    }
+}
 
 /// The plumbing a per-connection event forwarder owns: it drains
 /// `raw_rx` (everything the serve loop emits for this client) and
@@ -1567,13 +1679,33 @@ pub const EVENT_CHANNEL_CAPACITY: usize = 2048;
 /// handed to the server's `serve`, which spawns the forwarder with the
 /// daemon config it needs to fetch ring replays.
 pub struct EventForward {
-    /// Raw, unbounded stream the serve loop writes to (`Connection::tx`).
-    /// Drained promptly by the forwarder so it never accumulates.
-    pub raw_rx: mpsc::UnboundedReceiver<Event>,
+    /// Bounded staging stream the serve loop writes to (`Connection::tx`).
+    pub raw_rx: mpsc::Receiver<Event>,
     /// Bounded sink the client reads from (`Client::rx`, possibly via a
     /// socket). The forwarder's `try_send`/`reserve` against this is
     /// what enforces the memory ceiling.
     pub client_tx: mpsc::Sender<Event>,
+    /// Trips when raw admission overflows. The forwarder must disconnect the
+    /// client because the rejected event may be non-recoverable lifecycle
+    /// state and continuing would manufacture a silently inconsistent view.
+    pub health: Arc<EventIngressHealth>,
+}
+
+/// Wire one bounded raw event ingress to a client-facing event channel.
+pub fn event_forward_channel(client_tx: mpsc::Sender<Event>) -> (EventSender, EventForward) {
+    let (tx, raw_rx) = mpsc::channel(RAW_EVENT_CHANNEL_CAPACITY);
+    let health = Arc::new(EventIngressHealth::new());
+    (
+        EventSender::Bounded {
+            tx,
+            health: health.clone(),
+        },
+        EventForward {
+            raw_rx,
+            client_tx,
+            health,
+        },
+    )
 }
 
 /// A live connection to the daemon. Owned by the TUI.
@@ -1583,27 +1715,50 @@ pub struct EventForward {
 /// daemons hand back a `Client` whose internals read and write frames
 /// over a socket. The TUI doesn't see the difference.
 pub struct Client {
-    tx: mpsc::UnboundedSender<Command>,
+    tx: ClientCommandSender,
     /// Inbound daemon events. Bounded — see [`EVENT_CHANNEL_CAPACITY`].
     /// Pub so the realm orchestrator can `try_recv` non-blocking from a
     /// sync main loop. (Old async loop uses `Client::recv` instead.)
     pub rx: mpsc::Receiver<Event>,
 }
 
+enum ClientCommandSender {
+    Unbounded(mpsc::UnboundedSender<Command>),
+    Bounded(mpsc::Sender<Command>),
+}
+
 impl Client {
-    /// Build a `Client` from a pair of pre-wired channels. Used by both
-    /// transports — `channel::pair` for in-process, `socket::connect`
-    /// for remote.
+    /// Compatibility constructor for finite test/internal producers that own
+    /// an existing unbounded command channel. Real transports use bounded
+    /// admission via [`Self::from_bounded_channels`].
     pub fn from_channels(tx: mpsc::UnboundedSender<Command>, rx: mpsc::Receiver<Event>) -> Self {
-        Self { tx, rx }
+        Self {
+            tx: ClientCommandSender::Unbounded(tx),
+            rx,
+        }
+    }
+
+    /// Build a client whose synchronous sends use bounded admission. Every
+    /// production transport uses this so a peer that stops reading cannot
+    /// make the local process retain commands without limit.
+    pub fn from_bounded_channels(tx: mpsc::Sender<Command>, rx: mpsc::Receiver<Event>) -> Self {
+        Self {
+            tx: ClientCommandSender::Bounded(tx),
+            rx,
+        }
     }
 
     // The Err variant carries a full Command (144 bytes); boxing
     // just to placate clippy would burden every successful send for
     // a path that only fires when the daemon has shut down.
     #[allow(clippy::result_large_err)]
-    pub fn send(&self, cmd: Command) -> Result<(), mpsc::error::SendError<Command>> {
-        self.tx.send(cmd)
+    pub fn send(&self, cmd: Command) -> Result<(), mpsc::error::TrySendError<Command>> {
+        match &self.tx {
+            ClientCommandSender::Unbounded(tx) => tx
+                .send(cmd)
+                .map_err(|error| mpsc::error::TrySendError::Closed(error.0)),
+            ClientCommandSender::Bounded(tx) => tx.try_send(cmd),
+        }
     }
 
     pub async fn recv(&mut self) -> Option<Event> {
@@ -1614,33 +1769,63 @@ impl Client {
 /// The server-side of a connection. One per connected client.
 ///
 /// A daemon's main loop holds many `Connection`s. Events the daemon
-/// wants to send go on `tx` (an **unbounded** raw stream); `rx`
-/// receives commands from that specific client. The serve loop never
-/// blocks on `tx`.
+/// wants to send go on `tx` (bounded, non-blocking admission); `rx` receives
+/// commands from that specific client. The serve loop never blocks on `tx`.
 ///
 /// When `forward` is `Some`, the raw `tx` stream does not reach the
 /// client directly — a forwarder (spawned by the server) drains it into
 /// a bounded client channel, applying drop-and-resync to high-volume
-/// `TerminalOutput`. Transports that want the memory ceiling
-/// ([`channel::pair`], [`socket`]) set it; the JSON API gateway leaves
-/// it `None` and reads the raw stream itself.
+/// `TerminalOutput`. Every production transport ([`channel::pair`],
+/// [`socket`], and the JSON gateway) sets it. `None` remains only for
+/// explicitly finite internal harnesses built with
+/// [`Connection::from_channels`].
 pub struct Connection {
-    pub tx: mpsc::UnboundedSender<Event>,
-    pub rx: mpsc::UnboundedReceiver<Command>,
+    pub tx: EventSender,
+    pub rx: CommandReceiver,
     forward: Option<EventForward>,
 }
 
+pub enum CommandReceiver {
+    Unbounded(mpsc::UnboundedReceiver<Command>),
+    Bounded(mpsc::Receiver<Command>),
+}
+
+impl CommandReceiver {
+    pub async fn recv(&mut self) -> Option<Command> {
+        match self {
+            Self::Unbounded(rx) => rx.recv().await,
+            Self::Bounded(rx) => rx.recv().await,
+        }
+    }
+
+    pub fn try_recv(&mut self) -> Result<Command, mpsc::error::TryRecvError> {
+        match self {
+            Self::Unbounded(rx) => rx.try_recv(),
+            Self::Bounded(rx) => rx.try_recv(),
+        }
+    }
+}
+
+impl From<mpsc::UnboundedReceiver<Command>> for CommandReceiver {
+    fn from(rx: mpsc::UnboundedReceiver<Command>) -> Self {
+        Self::Unbounded(rx)
+    }
+}
+
+impl From<mpsc::Receiver<Command>> for CommandReceiver {
+    fn from(rx: mpsc::Receiver<Command>) -> Self {
+        Self::Bounded(rx)
+    }
+}
+
 impl Connection {
-    /// Build a `Connection` with no forwarder: the raw `tx` stream is
-    /// the client stream. Used by the JSON API gateway, whose consumer
-    /// reads the unbounded receiver directly.
-    pub fn from_channels(
-        tx: mpsc::UnboundedSender<Event>,
-        rx: mpsc::UnboundedReceiver<Command>,
-    ) -> Self {
+    /// Build a `Connection` with no forwarder. Reserved for finite internal
+    /// dispatch harnesses whose event sender owns its own production bound;
+    /// every long-lived transport uses [`Self::with_forward`].
+    pub fn from_channels(tx: EventSender, rx: impl Into<CommandReceiver>) -> Self {
         Self {
             tx,
-            rx,
+            rx: rx.into(),
             forward: None,
         }
     }
@@ -1649,13 +1834,13 @@ impl Connection {
     /// client through `forward`. The server spawns the forwarder from
     /// `take_forward`.
     pub fn with_forward(
-        tx: mpsc::UnboundedSender<Event>,
-        rx: mpsc::UnboundedReceiver<Command>,
+        tx: EventSender,
+        rx: impl Into<CommandReceiver>,
         forward: EventForward,
     ) -> Self {
         Self {
             tx,
-            rx,
+            rx: rx.into(),
             forward: Some(forward),
         }
     }
@@ -1664,5 +1849,79 @@ impl Connection {
     /// at the start of `serve` and spawns the drop-and-resync task.
     pub fn take_forward(&mut self) -> Option<EventForward> {
         self.forward.take()
+    }
+}
+
+#[cfg(test)]
+mod transport_admission_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn notice(index: usize) -> Event {
+        Event::Notification {
+            title: "bounded".into(),
+            body: index.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_event_ingress_has_a_hard_cap_and_trips_health() {
+        let (client_tx, _client_rx) = mpsc::channel(1);
+        let (sender, forward) = event_forward_channel(client_tx);
+        for index in 0..RAW_EVENT_CHANNEL_CAPACITY {
+            sender.send(notice(index)).expect("within raw capacity");
+        }
+        assert!(matches!(
+            sender.send(notice(RAW_EVENT_CHANNEL_CAPACITY)),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
+        assert!(forward.health.is_overloaded());
+        tokio::time::timeout(Duration::from_millis(10), forward.health.overloaded())
+            .await
+            .expect("overload signal remains observable");
+
+        drop(forward);
+        tokio::time::timeout(Duration::from_millis(10), sender.closed())
+            .await
+            .expect("sender observes dropped ingress");
+    }
+
+    #[test]
+    fn bounded_client_commands_fail_loudly_at_capacity() {
+        let (command_tx, _command_rx) = mpsc::channel(1);
+        let (_event_tx, event_rx) = mpsc::channel(1);
+        let client = Client::from_bounded_channels(command_tx, event_rx);
+
+        client.send(Command::Subscribe).expect("first command");
+        assert!(matches!(
+            client.send(Command::Refresh),
+            Err(mpsc::error::TrySendError::Full(Command::Refresh))
+        ));
+    }
+
+    #[tokio::test]
+    async fn command_receiver_preserves_both_transport_shapes() {
+        let (unbounded_tx, unbounded_rx) = mpsc::unbounded_channel();
+        let mut unbounded = CommandReceiver::from(unbounded_rx);
+        unbounded_tx.send(Command::Subscribe).expect("open");
+        assert!(matches!(unbounded.recv().await, Some(Command::Subscribe)));
+
+        let (bounded_tx, bounded_rx) = mpsc::channel(1);
+        let mut bounded = CommandReceiver::from(bounded_rx);
+        bounded_tx.try_send(Command::Refresh).expect("capacity");
+        assert!(matches!(bounded.try_recv(), Ok(Command::Refresh)));
+    }
+
+    #[tokio::test]
+    async fn explicit_unbounded_event_sender_reports_receiver_close() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sender = EventSender::from_unbounded(tx);
+        sender.send(notice(1)).expect("open");
+        assert!(matches!(rx.recv().await, Some(Event::Notification { .. })));
+        drop(rx);
+        assert!(matches!(
+            sender.send(notice(2)),
+            Err(mpsc::error::TrySendError::Closed(_))
+        ));
     }
 }

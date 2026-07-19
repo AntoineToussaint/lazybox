@@ -16,7 +16,7 @@
 //!   are debounce-coalesced to the latest value.
 
 use crate::{ServerConfig, spawn_handler};
-use lazybox_ipc::{Command, TerminalId};
+use lazybox_ipc::{Command, Event, EventSender, TerminalId};
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -25,6 +25,15 @@ use tokio::sync::mpsc;
 /// still delivered atomically; this cap only stops an arbitrary number of
 /// small queued keypresses from becoming one giant allocation.
 const WRITE_BATCH_BYTES: usize = 256 * 1024;
+
+/// Per-connection staging before commands are partitioned by terminal.
+/// Admission is non-blocking so a saturated terminal subsystem cannot stall
+/// event-bus forwarding on the serve loop.
+pub(crate) const ROUTER_CAPACITY: usize = 64;
+
+/// Commands retained behind one slow/wedged terminal. Once full, new work is
+/// rejected explicitly and the client can retry; memory use stays constant.
+const LANE_CAPACITY: usize = 32;
 
 /// Small enough to persist an idle draft nearly immediately, large enough to
 /// collapse ordinary typing bursts instead of issuing one SQLite transaction
@@ -38,8 +47,12 @@ const LANE_IDLE_RECHECK: Duration = Duration::from_secs(60);
 /// Route connection-ordered terminal I/O into independent per-terminal FIFO
 /// workers. The outer channel is drained without backend awaits, so one
 /// wedged terminal cannot block another terminal or the connection event bus.
-pub(crate) async fn run_io_router(config: ServerConfig, mut rx: mpsc::UnboundedReceiver<Command>) {
-    let mut lanes: HashMap<TerminalId, mpsc::UnboundedSender<Command>> = HashMap::new();
+pub(crate) async fn run_io_router(
+    config: ServerConfig,
+    event_tx: EventSender,
+    mut rx: mpsc::Receiver<Command>,
+) {
+    let mut lanes: HashMap<TerminalId, mpsc::Sender<Command>> = HashMap::new();
     let mut workers = tokio::task::JoinSet::new();
 
     while let Some(command) = rx.recv().await {
@@ -54,33 +67,53 @@ pub(crate) async fn run_io_router(config: ServerConfig, mut rx: mpsc::UnboundedR
                 continue;
             }
         };
+        let fallback_can_recover = matches!(
+            &command,
+            Command::InjectPrompt {
+                fallback_spawn: Some(_),
+                ..
+            }
+        );
+        if !fallback_can_recover && config.backend_key_for(terminal_id).await.is_none() {
+            // Never allocate a 60-second worker for arbitrary stale/hostile
+            // terminal ids. Prompt injection with a fallback is the one
+            // exception: its documented contract can legitimately spawn a
+            // replacement after the target exited.
+            continue;
+        }
 
         let send_error = {
             let sender = lanes.entry(terminal_id).or_insert_with(|| {
-                let (tx, lane_rx) = mpsc::unbounded_channel();
+                let (tx, lane_rx) = mpsc::channel(LANE_CAPACITY);
                 let lane_config = config.clone();
                 workers.spawn(async move {
                     run_io_lane(lane_config, terminal_id, lane_rx).await;
                 });
                 tx
             });
-            sender.send(command).err()
+            sender.try_send(command).err()
         };
         if let Some(error) = send_error {
-            let command = error.0;
+            let command = match error {
+                mpsc::error::TrySendError::Full(command) => {
+                    reject_command(&event_tx, &command, "terminal I/O lane is full");
+                    continue;
+                }
+                mpsc::error::TrySendError::Closed(command) => command,
+            };
             tracing::warn!(
                 ?terminal_id,
                 ?command,
                 "terminal I/O lane closed; restarting it"
             );
             lanes.remove(&terminal_id);
-            let (tx, lane_rx) = mpsc::unbounded_channel();
+            let (tx, lane_rx) = mpsc::channel(LANE_CAPACITY);
             let lane_config = config.clone();
             workers.spawn(async move {
                 run_io_lane(lane_config, terminal_id, lane_rx).await;
             });
-            if let Err(error) = tx.send(command) {
-                tracing::error!(?terminal_id, command = ?error.0, "replacement I/O lane closed");
+            if let Err(error) = tx.try_send(command) {
+                tracing::error!(?terminal_id, command = ?error.into_inner(), "replacement I/O lane closed");
             } else {
                 lanes.insert(terminal_id, tx);
             }
@@ -98,7 +131,7 @@ pub(crate) async fn run_io_router(config: ServerConfig, mut rx: mpsc::UnboundedR
 async fn run_io_lane(
     config: ServerConfig,
     terminal_id: TerminalId,
-    mut rx: mpsc::UnboundedReceiver<Command>,
+    mut rx: mpsc::Receiver<Command>,
 ) {
     let mut carry = None;
     loop {
@@ -200,9 +233,10 @@ async fn run_io_lane(
 /// allowing unrelated terminals to persist concurrently.
 pub(crate) async fn run_persistence_router(
     config: ServerConfig,
-    mut rx: mpsc::UnboundedReceiver<Command>,
+    event_tx: EventSender,
+    mut rx: mpsc::Receiver<Command>,
 ) {
-    let mut lanes: HashMap<TerminalId, mpsc::UnboundedSender<Command>> = HashMap::new();
+    let mut lanes: HashMap<TerminalId, mpsc::Sender<Command>> = HashMap::new();
     let mut workers = tokio::task::JoinSet::new();
 
     while let Some(command) = rx.recv().await {
@@ -218,35 +252,44 @@ pub(crate) async fn run_persistence_router(
                 continue;
             }
         };
+        if config.backend_key_for(terminal_id).await.is_none() {
+            continue;
+        }
 
         let send_error = {
             let sender = lanes.entry(terminal_id).or_insert_with(|| {
-                let (tx, lane_rx) = mpsc::unbounded_channel();
+                let (tx, lane_rx) = mpsc::channel(LANE_CAPACITY);
                 let lane_config = config.clone();
                 workers.spawn(async move {
                     run_persistence_lane(lane_config, terminal_id, lane_rx).await;
                 });
                 tx
             });
-            sender.send(command).err()
+            sender.try_send(command).err()
         };
         if let Some(error) = send_error {
-            let command = error.0;
+            let command = match error {
+                mpsc::error::TrySendError::Full(command) => {
+                    reject_command(&event_tx, &command, "terminal persistence lane is full");
+                    continue;
+                }
+                mpsc::error::TrySendError::Closed(command) => command,
+            };
             tracing::warn!(
                 ?terminal_id,
                 ?command,
                 "terminal persistence lane closed; restarting it"
             );
             lanes.remove(&terminal_id);
-            let (tx, lane_rx) = mpsc::unbounded_channel();
+            let (tx, lane_rx) = mpsc::channel(LANE_CAPACITY);
             let lane_config = config.clone();
             workers.spawn(async move {
                 run_persistence_lane(lane_config, terminal_id, lane_rx).await;
             });
-            if let Err(error) = tx.send(command) {
+            if let Err(error) = tx.try_send(command) {
                 tracing::error!(
                     ?terminal_id,
-                    command = ?error.0,
+                    command = ?error.into_inner(),
                     "replacement persistence lane closed"
                 );
             } else {
@@ -274,7 +317,7 @@ fn reap_completed_workers(workers: &mut tokio::task::JoinSet<()>, lane: &str) {
 async fn run_persistence_lane(
     config: ServerConfig,
     terminal_id: TerminalId,
-    mut rx: mpsc::UnboundedReceiver<Command>,
+    mut rx: mpsc::Receiver<Command>,
 ) {
     let mut carry = None;
     loop {
@@ -321,5 +364,74 @@ async fn run_persistence_lane(
                 );
             }
         }
+    }
+}
+
+pub(crate) fn reject_command(event_tx: &EventSender, command: &Command, reason: &str) {
+    let name = match command {
+        Command::Write { .. } => "Write",
+        Command::Resize { .. } => "Resize",
+        Command::Close { .. } => "Close",
+        Command::InjectPrompt { .. } => "InjectPrompt",
+        Command::RecordUserMessage { .. } => "RecordUserMessage",
+        Command::RecordComposingBuffer { .. } => "RecordComposingBuffer",
+        _ => "TerminalCommand",
+    };
+    let _ = event_tx.send(Event::CommandRejected {
+        command: name.into(),
+        message: format!("{reason}; wait for the terminal to catch up and retry"),
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::SessionBackend;
+
+    #[tokio::test]
+    async fn wedged_terminal_lane_rejects_overload_instead_of_growing() {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let (config, mock) = ServerConfig::in_memory_with_mock();
+            let terminal_id = TerminalId(881);
+            let key = mock
+                .spawn(&[], None, &[], "bounded-lane")
+                .await
+                .expect("spawn");
+            config
+                .terminals
+                .lock()
+                .await
+                .insert(terminal_id, key.clone());
+            mock.wedge_write(&key).await;
+
+            let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+            let event_tx = EventSender::from_unbounded(event_tx);
+            let (command_tx, command_rx) = mpsc::channel(ROUTER_CAPACITY);
+            let router = tokio::spawn(run_io_router(config, event_tx, command_rx));
+
+            for _ in 0..(LANE_CAPACITY * 2) {
+                command_tx
+                    .send(Command::Write {
+                        terminal_id,
+                        bytes: vec![b'x'],
+                    })
+                    .await
+                    .expect("router open");
+            }
+
+            loop {
+                if matches!(
+                    event_rx.recv().await,
+                    Some(Event::CommandRejected { command, message })
+                        if command == "Write" && message.contains("lane is full")
+                ) {
+                    break;
+                }
+            }
+            router.abort();
+            let _ = router.await;
+        })
+        .await
+        .expect("test deadline exceeded");
     }
 }

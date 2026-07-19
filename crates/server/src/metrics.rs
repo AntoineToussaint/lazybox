@@ -15,8 +15,9 @@
 //! These process-wide atomics accumulate the totals so the loss shows up
 //! as a climbing counter — in the existing warn lines (now stamped with
 //! the running totals) and on the `/v1/metrics` JSON endpoint. Note the
-//! command/keystroke path is deliberately absent: it rides an unbounded
-//! channel and has no drop site, so "dropped input" is structurally 0.
+//! command/keystroke path is deliberately absent: bounded admission rejects
+//! overload explicitly (`CommandRejected` / a retryable client notice) rather
+//! than silently dropping input, so it is not an event-pipeline loss counter.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

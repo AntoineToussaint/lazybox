@@ -27,11 +27,11 @@
 //! - **Every other (lifecycle / structured) event is lossless.** It's
 //!   buffered in order and delivered as capacity allows, never dropped.
 //!
-//! The forwarder always drains its raw input promptly (output is
-//! dropped in O(1), lossless events move to a small in-order queue), so
-//! the unbounded raw channel never accumulates. The hard ceiling is the
-//! bounded client channel; the only thing that can grow is the
-//! low-volume lossless queue.
+//! Both the raw ingress and lossless backlog are bounded. A client that stops
+//! consuming long enough to exhaust either structured-event cap is
+//! disconnected: continuing after dropping a lifecycle event would create a
+//! silently corrupt client view, while buffering forever would make one stale
+//! client an unbounded daemon-memory sink.
 
 use crate::ServerConfig;
 use crate::metrics::EventMetrics;
@@ -47,12 +47,18 @@ use tokio::sync::mpsc::error::TrySendError;
 /// authoritative reset.
 const RESYNC_SNAPSHOT_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// Structured events are not reconstructible one by one. Retain a generous
+/// bounded backlog, then fail the connection closed rather than drop them or
+/// grow memory without limit.
+const MAX_PENDING_STRUCTURED_EVENTS: usize = 1024;
+
 /// Drain the raw event stream into the bounded client channel, applying
 /// drop-and-resync to `TerminalOutput`. Runs until either end closes.
 pub async fn forward_events(forward: EventForward, config: ServerConfig) {
     let EventForward {
         mut raw_rx,
         client_tx,
+        health,
     } = forward;
     let mut state = ForwardState::new(config.event_metrics.clone());
     // The raw stream can close while lossless events / a pending resync
@@ -68,13 +74,25 @@ pub async fn forward_events(forward: EventForward, config: ServerConfig) {
             }
             // Nothing buffered and the channel can't be the bottleneck,
             // so just wait for the next raw event and route it.
-            match raw_rx.recv().await {
-                Some(evt) => {
-                    if state.route(&client_tx, evt).is_break() {
-                        break;
+            tokio::select! {
+                biased;
+                _ = health.overloaded() => {
+                    tracing::warn!(
+                        capacity = lazybox_ipc::RAW_EVENT_CHANNEL_CAPACITY,
+                        "event ingress overflowed — disconnecting slow client"
+                    );
+                    break;
+                }
+                raw = raw_rx.recv() => {
+                    match raw {
+                        Some(evt) => {
+                            if state.route(&client_tx, evt).is_break() {
+                                break;
+                            }
+                        }
+                        None => input_open = false,
                     }
                 }
-                None => input_open = false,
             }
         } else {
             // Something is queued behind a full channel. Race the next
@@ -83,6 +101,13 @@ pub async fn forward_events(forward: EventForward, config: ServerConfig) {
             // buffered lifecycle events / pending resync.
             tokio::select! {
                 biased;
+                _ = health.overloaded() => {
+                    tracing::warn!(
+                        capacity = lazybox_ipc::RAW_EVENT_CHANNEL_CAPACITY,
+                        "event ingress overflowed — disconnecting slow client"
+                    );
+                    break;
+                }
                 permit = client_tx.reserve(), if state.has_buffered() => {
                     match permit {
                         Ok(permit) => state.deliver_one(permit, &config).await,
@@ -292,8 +317,16 @@ impl ForwardState {
                         Err(TrySendError::Closed(_)) => ControlFlow::Break(()),
                     }
                 } else {
-                    self.pending.push_back(other);
-                    ControlFlow::Continue(())
+                    if self.pending.len() >= MAX_PENDING_STRUCTURED_EVENTS {
+                        tracing::warn!(
+                            capacity = MAX_PENDING_STRUCTURED_EVENTS,
+                            "structured event backlog exhausted — disconnecting slow client"
+                        );
+                        ControlFlow::Break(())
+                    } else {
+                        self.pending.push_back(other);
+                        ControlFlow::Continue(())
+                    }
                 }
             }
         }
@@ -403,6 +436,69 @@ mod tests {
         out
     }
 
+    #[test]
+    fn structured_backlog_disconnects_at_its_declared_cap() {
+        let metrics = ServerConfig::in_memory().event_metrics;
+        let mut state = ForwardState::new(metrics);
+        let (tx, _rx) = mpsc::channel(1);
+        tx.try_send(Event::Notification {
+            title: "occupy client slot".into(),
+            body: String::new(),
+        })
+        .expect("client capacity");
+
+        for index in 0..MAX_PENDING_STRUCTURED_EVENTS {
+            assert!(matches!(
+                state.route(
+                    &tx,
+                    Event::Notification {
+                        title: "queued".into(),
+                        body: index.to_string(),
+                    },
+                ),
+                ControlFlow::Continue(())
+            ));
+        }
+        assert_eq!(state.pending.len(), MAX_PENDING_STRUCTURED_EVENTS);
+        assert!(matches!(
+            state.route(
+                &tx,
+                Event::Notification {
+                    title: "must disconnect".into(),
+                    body: String::new(),
+                },
+            ),
+            ControlFlow::Break(())
+        ));
+    }
+
+    #[tokio::test]
+    async fn raw_ingress_overload_terminates_the_forwarder() {
+        let config = ServerConfig::in_memory();
+        let (client_tx, mut client_rx) = mpsc::channel(1);
+        let (raw_tx, forward) = lazybox_ipc::event_forward_channel(client_tx);
+        for index in 0..lazybox_ipc::RAW_EVENT_CHANNEL_CAPACITY {
+            raw_tx
+                .send(Event::Notification {
+                    title: "raw".into(),
+                    body: index.to_string(),
+                })
+                .expect("raw capacity");
+        }
+        assert!(matches!(
+            raw_tx.send(Event::Notification {
+                title: "overflow".into(),
+                body: String::new(),
+            }),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+        ));
+
+        tokio::time::timeout(Duration::from_secs(1), forward_events(forward, config))
+            .await
+            .expect("overloaded forwarder exits");
+        assert!(client_rx.recv().await.is_none());
+    }
+
     /// A flood that overruns the bounded client channel drops
     /// `TerminalOutput` and recovers with exactly one `TerminalResync`
     /// carrying the daemon ring — and the interleaved lifecycle event
@@ -428,12 +524,9 @@ mod tests {
         config.terminals.lock().await.insert(tid, key.clone());
 
         // Tiny channel so a short flood forces overflow.
-        let (raw_tx, raw_rx) = mpsc::unbounded_channel();
         let (client_tx, client_rx) = mpsc::channel(2);
-        let task = tokio::spawn(forward_events(
-            EventForward { raw_rx, client_tx },
-            config.clone(),
-        ));
+        let (raw_tx, forward) = lazybox_ipc::event_forward_channel(client_tx);
+        let task = tokio::spawn(forward_events(forward, config.clone()));
 
         // 20 chunks into a depth-2 channel → most get dropped.
         for seq in 1..=20 {
@@ -672,12 +765,9 @@ mod tests {
     #[tokio::test]
     async fn no_overflow_forwards_everything_losslessly() {
         let (config, _mock) = ServerConfig::in_memory_with_mock();
-        let (raw_tx, raw_rx) = mpsc::unbounded_channel();
         let (client_tx, mut client_rx) = mpsc::channel(64);
-        let task = tokio::spawn(forward_events(
-            EventForward { raw_rx, client_tx },
-            config.clone(),
-        ));
+        let (raw_tx, forward) = lazybox_ipc::event_forward_channel(client_tx);
+        let task = tokio::spawn(forward_events(forward, config.clone()));
 
         let sk = SessionKey::new("s");
         raw_tx

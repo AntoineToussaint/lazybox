@@ -10,7 +10,14 @@ use crate::{Server, ServerConfig};
 use lazybox_ipc::{socket, transport};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::Notify;
+use std::time::Duration;
+use tokio::sync::{Notify, Semaphore};
+
+/// Default cap on concurrently handshaking/served daemon socket clients.
+/// Normal use has one TUI plus a few short-lived hook helpers; this leaves
+/// ample headroom while preventing a connection storm from spawning tasks
+/// and per-connection queues without limit.
+pub const DEFAULT_MAX_SOCKET_CONNECTIONS: usize = 32;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SocketServiceError {
@@ -32,6 +39,8 @@ pub struct SocketService {
     shutdown: Arc<Notify>,
     /// Server config used to serve each new connection.
     config_factory: Box<dyn Fn() -> ServerConfig + Send + Sync>,
+    max_connections: usize,
+    handshake_timeout: Duration,
 }
 
 impl SocketService {
@@ -48,7 +57,23 @@ impl SocketService {
             pid_file,
             shutdown: Arc::new(Notify::new()),
             config_factory: Box::new(config_factory),
+            max_connections: DEFAULT_MAX_SOCKET_CONNECTIONS,
+            handshake_timeout: socket::HANDSHAKE_TIMEOUT,
         }
+    }
+
+    /// Override the connection cap (primarily for constrained deployments and
+    /// deterministic admission tests). Zero still permits one connection.
+    pub fn with_max_connections(mut self, max_connections: usize) -> Self {
+        self.max_connections = max_connections.max(1);
+        self
+    }
+
+    /// Override how long an accepted client may occupy a connection slot
+    /// without completing the protocol handshake. Zero is clamped to 1ms.
+    pub fn with_handshake_timeout(mut self, timeout: Duration) -> Self {
+        self.handshake_timeout = timeout.max(Duration::from_millis(1));
+        self
     }
 
     /// Handle to trigger a graceful shutdown from elsewhere in the
@@ -102,7 +127,14 @@ impl SocketService {
         tracing::info!("lazybox-server listening on {}", self.socket.display());
 
         let shutdown = self.shutdown.clone();
+        let connection_slots = Arc::new(Semaphore::new(self.max_connections));
+        let mut connections = tokio::task::JoinSet::new();
         loop {
+            while let Some(result) = connections.try_join_next() {
+                if let Err(error) = result {
+                    tracing::warn!("socket connection task failed: {error}");
+                }
+            }
             tokio::select! {
                 biased;
                 _ = shutdown.notified() => {
@@ -117,24 +149,50 @@ impl SocketService {
                             continue;
                         }
                     };
+                    let permit = match connection_slots.clone().try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            tracing::warn!(
+                                max_connections = self.max_connections,
+                                "socket connection limit reached — rejecting client"
+                            );
+                            continue;
+                        }
+                    };
                     let config = (self.config_factory)();
-                    tokio::spawn(async move {
+                    let handshake_timeout = self.handshake_timeout;
+                    connections.spawn(async move {
+                        let _permit = permit;
                         // Handshake before the frame loop: a client from
                         // a different build (or a non-lazybox peer) is
                         // turned away here instead of feeding bincode
                         // garbage into `Server::serve`.
-                        match socket::server_handshake(&mut rd, &mut wr).await {
-                            Ok(peer) if !peer.build_matches() => tracing::warn!(
+                        let peer = match tokio::time::timeout(
+                            handshake_timeout,
+                            socket::server_handshake(&mut rd, &mut wr),
+                        )
+                        .await
+                        {
+                            Ok(Ok(peer)) => peer,
+                            Ok(Err(error)) => {
+                                tracing::warn!("rejecting connection: {error}");
+                                return;
+                            }
+                            Err(_) => {
+                                tracing::warn!(
+                                    ?handshake_timeout,
+                                    "rejecting connection: protocol handshake timed out"
+                                );
+                                return;
+                            }
+                        };
+                        if !peer.build_matches() {
+                            tracing::warn!(
                                 "client build {} differs from daemon build {} — \
                                  restart whichever is stale",
                                 peer.build,
                                 lazybox_ipc::BUILD_VERSION
-                            ),
-                            Ok(_) => {}
-                            Err(e) => {
-                                tracing::warn!("rejecting connection: {e}");
-                                return;
-                            }
+                            );
                         }
                         let server = socket::serve(rd, wr);
                         let daemon = Server::new(config);
@@ -145,6 +203,11 @@ impl SocketService {
                 }
             }
         }
+
+        // The service owns every accepted connection task. Explicit daemon
+        // shutdown cancels and joins them instead of leaving detached socket
+        // readers/writers alive past listener cleanup.
+        connections.shutdown().await;
 
         // Cleanup: drop the socket file + pid file so next `start`
         // doesn't mistake us for still-running.

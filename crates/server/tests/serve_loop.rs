@@ -11,6 +11,21 @@ use lazybox_server::backend::SessionBackend;
 use lazybox_server::{Server, ServerConfig};
 use std::time::Duration;
 
+async fn send_with_backpressure(client: &lazybox_ipc::Client, mut command: Command) {
+    loop {
+        match client.send(command) {
+            Ok(()) => return,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(returned)) => {
+                command = returned;
+                tokio::task::yield_now().await;
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                panic!("daemon command channel closed while applying backpressure")
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn subscribe_yields_snapshot() {
     let (mut client, server) = channel::pair();
@@ -38,6 +53,28 @@ async fn subscribe_yields_snapshot() {
         }
         other => panic!("expected Snapshot, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn subscribe_is_admitted_only_once_per_connection() {
+    let (mut client, server) = channel::pair();
+    tokio::spawn(async move {
+        Server::new(ServerConfig::in_memory())
+            .serve(server)
+            .await
+            .unwrap();
+    });
+
+    client.send(Command::Subscribe).expect("first subscribe");
+    assert!(matches!(client.recv().await, Some(Event::Snapshot { .. })));
+    client
+        .send(Command::Subscribe)
+        .expect("duplicate reaches daemon");
+    assert!(matches!(
+        client.recv().await,
+        Some(Event::CommandRejected { command, message })
+            if command == "Subscribe" && message.contains("already subscribed")
+    ));
 }
 #[tokio::test]
 async fn shutdown_closes_loop_cleanly() {
@@ -472,9 +509,9 @@ async fn every_command_runs_without_wedging_the_serve_loop() {
     let handle = tokio::spawn(async move { Server::new(config).serve(server).await.unwrap() });
 
     for cmd in all_non_shutdown_commands() {
-        client.send(cmd).unwrap();
+        send_with_backpressure(&client, cmd).await;
     }
-    client.send(Command::Shutdown).unwrap();
+    send_with_backpressure(&client, Command::Shutdown).await;
     drop(client);
 
     tokio::time::timeout(Duration::from_secs(20), handle)
@@ -678,7 +715,7 @@ async fn terminal_write_bursts_are_coalesced_without_reordering_bytes() {
     .expect("first write entered backend");
 
     let mut expected = b"0".to_vec();
-    for i in 1..=100u8 {
+    for i in 1..=24u8 {
         let byte = b'a' + (i % 26);
         expected.push(byte);
         client
@@ -706,7 +743,7 @@ async fn terminal_write_bursts_are_coalesced_without_reordering_bytes() {
         expected,
         "byte order and content are exact"
     );
-    assert_eq!(writes.len(), 2, "100 queued keys collapse into one batch");
+    assert_eq!(writes.len(), 2, "24 queued keys collapse into one batch");
 
     client.send(Command::Shutdown).expect("shutdown");
     tokio::time::timeout(Duration::from_secs(2), handle)
@@ -756,7 +793,7 @@ async fn terminal_resize_storm_collapses_to_latest_before_next_write() {
     .await
     .expect("first write entered backend");
 
-    for step in 1..=50u16 {
+    for step in 1..=24u16 {
         client
             .send(Command::Resize {
                 terminal_id: TerminalId(52),
@@ -784,7 +821,7 @@ async fn terminal_resize_storm_collapses_to_latest_before_next_write() {
     .expect("resize and trailing write delivered");
     assert_eq!(
         mock.resizes_for(&key).await,
-        vec![(130, 70)],
+        vec![(104, 44)],
         "only the newest consecutive geometry reaches the backend"
     );
 
@@ -926,7 +963,7 @@ async fn composing_burst_persists_the_latest_ordered_revision() {
         async move { Server::new(config).serve(server).await }
     });
 
-    for revision in 1..=100 {
+    for revision in 1..=24 {
         client
             .send(Command::RecordComposingBuffer {
                 terminal_id: TerminalId(61),
@@ -947,7 +984,7 @@ async fn composing_burst_persists_the_latest_ordered_revision() {
             .get_kv(&format!("terminal-draft:{key}"))
             .expect("store read")
             .as_deref(),
-        Some("draft-100")
+        Some("draft-24")
     );
 }
 

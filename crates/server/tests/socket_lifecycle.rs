@@ -3,7 +3,7 @@
 //! the Subscribe → Snapshot contract works end-to-end — just like
 //! the in-process `channel::pair` path, but over a real Unix socket.
 
-use lazybox_ipc::{Command, Event, socket};
+use lazybox_ipc::{Command, Event, socket, transport};
 use lazybox_server::ServerConfig;
 use lazybox_server::backend::SessionBackend;
 use lazybox_server::lifecycle;
@@ -60,6 +60,83 @@ async fn socket_subscribe_yields_snapshot() {
 
     shutdown.notify_one();
     let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+}
+
+#[tokio::test]
+async fn socket_service_caps_connections_and_releases_admission_on_drop() {
+    let base = TempDir::new().unwrap();
+    let (sock, pid) = runtime_paths(&base);
+    let service =
+        SocketService::new(sock.clone(), pid, ServerConfig::in_memory).with_max_connections(1);
+    let shutdown = service.shutdown_handle();
+    let handle = tokio::spawn(async move {
+        service.run().await.expect("service");
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while !sock.exists() {
+        assert!(tokio::time::Instant::now() < deadline, "socket never bound");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let (first, _) = socket::connect(&sock).await.expect("first connection");
+    let second = tokio::time::timeout(Duration::from_secs(1), socket::connect(&sock))
+        .await
+        .expect("rejection is prompt");
+    assert!(second.is_err(), "connection above the cap must be rejected");
+
+    drop(first);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let third = loop {
+        match socket::connect(&sock).await {
+            Ok(connection) => break connection,
+            Err(_) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(error) => panic!("released slot was not reusable: {error}"),
+        }
+    };
+    drop(third);
+
+    shutdown.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("service shutdown")
+        .expect("service task");
+}
+
+#[tokio::test]
+async fn silent_handshake_cannot_hold_the_last_connection_slot() {
+    let base = TempDir::new().unwrap();
+    let (sock, pid) = runtime_paths(&base);
+    let service = SocketService::new(sock.clone(), pid, ServerConfig::in_memory)
+        .with_max_connections(1)
+        .with_handshake_timeout(Duration::from_millis(40));
+    let shutdown = service.shutdown_handle();
+    let handle = tokio::spawn(async move {
+        service.run().await.expect("service");
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while !sock.exists() {
+        assert!(tokio::time::Instant::now() < deadline, "socket never bound");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Occupy the only slot without sending even the fixed preamble.
+    let idle_peer = transport::connect(&sock).await.expect("raw connection");
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let live = tokio::time::timeout(Duration::from_secs(1), socket::connect(&sock))
+        .await
+        .expect("released slot accepts promptly")
+        .expect("valid client connects after idle handshake eviction");
+    drop(live);
+    drop(idle_peer);
+
+    shutdown.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("service shutdown")
+        .expect("service task");
 }
 #[tokio::test]
 async fn socket_service_creates_pid_file() {

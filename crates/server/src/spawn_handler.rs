@@ -4014,6 +4014,35 @@ async fn wait_until_input_resolved(
     matches!(tokio::time::timeout(deadline, wait).await, Ok(true))
 }
 
+/// Owns the single in-flight readiness-gated prompt injection for a terminal.
+///
+/// The guard is moved into the background task so every completion path —
+/// success, rejection, terminal exit, timeout, or task cancellation — releases
+/// the reservation synchronously in `Drop`.
+struct PendingInjectionGuard {
+    terminal_id: TerminalId,
+    pending: std::sync::Arc<parking_lot::Mutex<std::collections::HashSet<TerminalId>>>,
+}
+
+impl PendingInjectionGuard {
+    fn claim(config: &ServerConfig, terminal_id: TerminalId) -> Option<Self> {
+        let pending = config.pending_prompt_injections.clone();
+        if !pending.lock().insert(terminal_id) {
+            return None;
+        }
+        Some(Self {
+            terminal_id,
+            pending,
+        })
+    }
+}
+
+impl Drop for PendingInjectionGuard {
+    fn drop(&mut self) {
+        self.pending.lock().remove(&self.terminal_id);
+    }
+}
+
 /// Inject a prompt into an existing agent terminal. Same paste +
 /// submit split as the spawn-time initial_prompt path, just
 /// targeted at a live terminal instead of a fresh one. Quietly
@@ -4099,6 +4128,19 @@ pub async fn handle_inject_prompt(
     // settle gate that guards it.
     let submit = if submit { agent.inject_submit() } else { None };
 
+    // An InputNeeded gate may hold the waiter below for 30 seconds. Without a
+    // per-terminal reservation every repeated `w` press spawned another
+    // waiter, and all of them pasted once the gate cleared. Reject duplicates
+    // explicitly instead of growing background work and duplicating input.
+    let Some(pending_injection) = PendingInjectionGuard::claim(config, terminal_id) else {
+        let _ = config.bus.send(Event::TerminalInputRejected {
+            terminal_id,
+            message: "a prompt injection is already waiting for this agent — answer its prompt before retrying"
+                .into(),
+        });
+        return;
+    };
+
     // Readiness gate (issue #32). If the agent is parked on a
     // permission gate / chooser / Y-N prompt, that dialog owns input —
     // it expects `y`/`n`/`1`/`2`, not a pasted prompt. Writing the
@@ -4125,6 +4167,7 @@ pub async fn handle_inject_prompt(
     // the Write that answers the permission/chooser gate.
     let (registered_tx, registered_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
+        let _pending_injection = pending_injection;
         let deadline = tokio::time::Instant::now() + INJECT_INPUT_DEADLINE;
         let mut events = events;
         let mut blocked = blocked;
@@ -4837,7 +4880,7 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
 /// the daemon's normal pump/forwarder recovery machinery.
 pub async fn handle_terminal_resync_request(
     config: &ServerConfig,
-    tx: &tokio::sync::mpsc::UnboundedSender<Event>,
+    tx: &lazybox_ipc::EventSender,
     terminal_id: TerminalId,
     required_seq: u64,
 ) {
@@ -5512,6 +5555,72 @@ mod tests {
             !wait_until_input_resolved(rx, id, &input_resolved_states(), Duration::from_secs(1))
                 .await
         );
+    }
+
+    #[tokio::test]
+    async fn duplicate_blocked_prompt_injection_is_rejected_and_never_queued() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "blocked-injection")
+            .await
+            .expect("spawn mock terminal");
+        let id = TerminalId(711);
+        config
+            .terminals
+            .lock()
+            .await
+            .insert(id, backend_key.clone());
+        config.terminal_meta.lock().await.insert(
+            id,
+            (
+                SessionKey::new("blocked-injection"),
+                TerminalKind::Agent("claude".into()),
+            ),
+        );
+        config
+            .agent_states
+            .lock()
+            .await
+            .insert(id, lazybox_ipc::AgentState::InputNeeded);
+
+        // The first call returns once its background waiter is registered;
+        // it must not hold the per-terminal command lane for the keystroke
+        // that answers this prompt.
+        handle_inject_prompt(&config, id, "first", None, false).await;
+        assert_eq!(config.pending_prompt_injections.lock().len(), 1);
+
+        let mut events = config.bus.subscribe();
+        handle_inject_prompt(&config, id, "duplicate", None, false).await;
+        assert!(matches!(
+            events.try_recv().expect("duplicate rejection"),
+            Event::TerminalInputRejected {
+                terminal_id,
+                message,
+            } if terminal_id == id && message.contains("already waiting")
+        ));
+        assert_eq!(config.pending_prompt_injections.lock().len(), 1);
+        assert!(
+            mock.writes_for(&backend_key).await.is_empty(),
+            "neither prompt may be written into the live input gate"
+        );
+
+        // Terminal exit cancels the sole waiter and releases its reservation;
+        // no 30-second deadline task is leaked after teardown.
+        config
+            .bus
+            .send(Event::TerminalExited {
+                terminal_id: id,
+                exit_code: Some(0),
+                last_output: None,
+            })
+            .expect("exit event");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !config.pending_prompt_injections.lock().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("injection reservation released after terminal exit");
     }
 
     /// PTY readings on a hook-driven terminal: fresh hooks own

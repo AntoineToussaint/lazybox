@@ -574,6 +574,10 @@ pub struct Model<T: TerminalAdapter> {
     /// notice. Without this, a dead daemon meant every keypress
     /// "succeeded" silently while nothing happened (#zombie-UI).
     cmd_send_failed: std::cell::Cell<bool>,
+    /// A bounded remote-command queue refused one command because the socket
+    /// writer is behind. Unlike a closed channel this is retryable and must
+    /// not falsely brand the daemon disconnected.
+    cmd_send_overloaded: std::cell::Cell<bool>,
     /// One-shot latch for the "daemon disconnected" Permanent notice —
     /// the disconnect is detected repeatedly (every failed send, every
     /// wake on the closed event channel), but the banner should be
@@ -1135,6 +1139,7 @@ impl<T: TerminalAdapter> Model<T> {
             pending_refresh_ack: false,
             sync_error_source: None,
             cmd_send_failed: std::cell::Cell::new(false),
+            cmd_send_overloaded: std::cell::Cell::new(false),
             daemon_disconnect_notified: false,
             mouse_capture_on: true,
             terminal_selection: None,
@@ -2100,7 +2105,14 @@ impl<T: TerminalAdapter> Model<T> {
             // the next `tick_daemon_health` raises the disconnect
             // banner. A `Cell` because this method is `&self` and is
             // called from borrow-heavy paths that can't take `&mut`.
-            self.cmd_send_failed.set(true);
+            match e {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                    self.cmd_send_overloaded.set(true);
+                }
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                    self.cmd_send_failed.set(true);
+                }
+            }
         }
     }
 
@@ -2126,6 +2138,12 @@ impl<T: TerminalAdapter> Model<T> {
     /// tick section (and unit tests) so a dead channel surfaces within
     /// one frame of the first failed send instead of never.
     pub(crate) fn tick_daemon_health(&mut self) {
+        if self.cmd_send_overloaded.take() {
+            self.flash(
+                "⚠ command was not accepted — daemon connection is congested; wait and retry",
+                crate::realm::components::footer::NoticeSeverity::Retryable,
+            );
+        }
         if self.cmd_send_failed.take() {
             self.note_daemon_disconnected();
         }

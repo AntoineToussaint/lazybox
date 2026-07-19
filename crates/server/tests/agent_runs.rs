@@ -1,6 +1,10 @@
 use lazybox_agents::{Agent, SpawnCtx, StructuredAgentProtocol};
 use lazybox_ipc::{AgentInputMessage, AgentRunId, AgentRuntimeMode, Command, Event, channel};
 use lazybox_server::ServerError;
+use lazybox_server::agent_runs::{
+    AGENT_INPUT_CHANNEL_CAPACITY, AgentRunHandle, handle_interrupt_agent_run,
+    handle_send_agent_input,
+};
 use lazybox_server::agent_stream::{AgentStreamConfig, AgentStreamIo, AgentStreamSpawner};
 use lazybox_server::{Server, ServerConfig};
 use std::future::Future;
@@ -10,6 +14,53 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 struct FakeStreamAgent;
+
+#[tokio::test]
+async fn structured_agent_input_backlog_is_bounded_and_retryable() {
+    let config = ServerConfig::in_memory();
+    let run_id = AgentRunId(991);
+    let (input_tx, _input_rx) = tokio::sync::mpsc::channel(AGENT_INPUT_CHANNEL_CAPACITY);
+    for index in 0..AGENT_INPUT_CHANNEL_CAPACITY {
+        input_tx
+            .try_send(AgentInputMessage {
+                text: Some(format!("queued-{index}")),
+                json: None,
+            })
+            .expect("declared queue capacity");
+    }
+    let task = tokio::spawn(std::future::pending::<()>());
+    config
+        .agent_runs
+        .lock()
+        .await
+        .insert(run_id, AgentRunHandle { input_tx, task });
+    let mut events = config.bus.subscribe();
+
+    handle_send_agent_input(
+        &config,
+        run_id,
+        AgentInputMessage {
+            text: Some("must-not-grow-memory".into()),
+            json: None,
+        },
+    )
+    .await;
+
+    assert!(matches!(
+        events.try_recv().expect("overload event"),
+        Event::ProviderError {
+            source,
+            kind,
+            message,
+            ..
+        } if source == "agent_run:input"
+            && kind == "retryable"
+            && message.contains("queue is full")
+            && message.contains("retry")
+    ));
+    handle_interrupt_agent_run(&config, run_id).await;
+    assert!(config.agent_runs.lock().await.is_empty());
+}
 
 impl Agent for FakeStreamAgent {
     fn id(&self) -> &'static str {

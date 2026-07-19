@@ -594,16 +594,41 @@ impl ServerConfig {
     /// Per-key (not one global lock) because a tick's
     /// prepare→commit for one workspace can await the network of
     /// store scans; a global lock would queue the user's mark-read on
-    /// an unrelated workspace behind it. Deadlock-safe by convention:
-    /// callers hold at most ONE workspace guard at a time (multi-key
-    /// surgery like adopt/confirm-merge stays unlocked — see the
-    /// comments at those sites).
+    /// an unrelated workspace behind it. Operations spanning multiple
+    /// workspaces must use [`ServerConfig::lock_workspaces`], which sorts
+    /// and deduplicates keys before acquisition.
     pub async fn lock_workspace(&self, key: &str) -> tokio::sync::OwnedMutexGuard<()> {
-        let entry = {
+        let entry = self.workspace_lock_entry(key);
+        entry.lock_owned().await
+    }
+
+    fn workspace_lock_entry(&self, key: &str) -> Arc<Mutex<()>> {
+        {
             let mut map = self.workspace_locks.lock();
             map.entry(key.to_string()).or_default().clone()
-        };
-        entry.lock_owned().await
+        }
+    }
+
+    /// Serialize a load→modify→commit that spans multiple workspace rows.
+    /// Keys are sorted and deduplicated before locking, giving every caller
+    /// one canonical acquisition order and preventing AB/BA deadlocks.
+    /// Callers must not already hold an individual workspace guard.
+    pub(crate) async fn lock_workspaces<I>(&self, keys: I) -> Vec<tokio::sync::OwnedMutexGuard<()>>
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let mut keys: Vec<String> = keys.into_iter().collect();
+        keys.sort_unstable();
+        keys.dedup();
+        let entries: Vec<_> = keys
+            .iter()
+            .map(|key| self.workspace_lock_entry(key))
+            .collect();
+        let mut guards = Vec::with_capacity(entries.len());
+        for entry in entries {
+            guards.push(entry.lock_owned().await);
+        }
+        guards
     }
 
     /// Convenience: in-memory store + `MockBackend`. Never touches

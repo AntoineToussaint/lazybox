@@ -627,6 +627,40 @@ pub async fn handle_spawn(
         elapsed_ms = t0.elapsed().as_millis(),
         "handle_spawn: session/worktree resolved",
     );
+    // From this final revalidation through terminal registration, serialize
+    // with every workspace move/delete. Provisioning stays outside the lock,
+    // but a merge that won during that slow phase makes this fresh load fail
+    // (or no longer contain the selected session) instead of letting a stale
+    // terminal register under a deleted source workspace.
+    let workspace_registration_guard = if cwd.is_none() {
+        let workspace_key = WorkspaceKey::new(session_key.as_str());
+        let guard = config.lock_workspace(workspace_key.as_str()).await;
+        let workspace = match load_workspace(config, &workspace_key) {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                let _ = config.bus.send(Event::provider_error_permanent(
+                    "spawn:workspace",
+                    format!("spawn target changed while provisioning: {error}"),
+                ));
+                return;
+            }
+        };
+        let requires_persisted_session = !landed_on_main
+            && !workspace_key.as_str().starts_with("sandbox-")
+            && owning_session.is_some();
+        if requires_persisted_session
+            && !owning_session.is_some_and(|id| workspace.find_session(id).is_some())
+        {
+            let _ = config.bus.send(Event::provider_error_permanent(
+                "spawn:session",
+                "spawn target session moved while provisioning; retry from its current workspace",
+            ));
+            return;
+        }
+        Some(guard)
+    } else {
+        None
+    };
     // Allocate the terminal id up front — the per-session hook settings
     // file path is derived from it, and that path must be in the argv
     // before the backend spawns. (The auxiliary/primary map inserts
@@ -771,30 +805,9 @@ pub async fn handle_spawn(
         );
     }
 
-    // `terminal_id` was allocated above (before argv) so the hook
-    // settings file could embed it. Insert the auxiliary maps BEFORE the
-    // primary `terminals` map.
-    // `snapshot_terminals` iterates `terminals` and looks up meta;
-    // doing terminals-last means a snapshot during the gap sees no
-    // entry for this id (consistent miss) instead of an entry with
-    // a bogus default session_key (inconsistent hit). The
-    // `TerminalSpawned` broadcast below tells clients about the
-    // newly-complete terminal once both inserts have landed.
-    // INTENTIONAL non-canonical order here: terminal_meta first,
-    // terminal_sessions next, terminals LAST. This is safe (no two
-    // locks co-held — each `.lock().await.insert(...)` releases at
-    // end-of-statement) and the order is deliberate for a *reader*
-    // race, not a writer-writer one: a snapshot that scans `terminals`
-    // is guaranteed to find a matching `terminal_meta` entry, because
-    // the meta lock is inserted into BEFORE the terminals lock. The
-    // canonical order in `crate::TERMINAL_MAP_LOCK_ORDER` applies to
-    // CO-HOLDING; sequential acquire-and-drop can use any order, and
-    // here the snapshot invariant pins this one.
-    config
-        .terminal_meta
-        .lock()
-        .await
-        .insert(terminal_id, (session_key.clone(), kind.clone()));
+    // `terminal_id` was allocated above (before argv) so the hook settings
+    // file could embed it. Populate auxiliary maps before publishing the
+    // primary terminal registration.
     if let Some(sid) = owning_session {
         config
             .terminal_sessions
@@ -819,17 +832,25 @@ pub async fn handle_spawn(
             .await
             .insert(terminal_id, label.clone());
     }
-    config
-        .terminals
-        .lock()
-        .await
-        .insert(terminal_id, backend_key.clone());
-    // Persist the (backend_key → session_key, kind) pairing so the
-    // next lazybox start can reattach surviving tmux sessions to their
-    // owning workspace. Without this, `recover_sessions` reattaches
-    // raw PTYs but doesn't know which workspace they belong to —
-    // sidebar badges go blank, even though the agent is still alive.
-    persist_terminal_meta(config, &backend_key, &session_key, &kind).await;
+    // Publish the primary id→backend and id→workspace mappings atomically
+    // under the canonical terminal-map lock order. A workspace rebadge also
+    // co-holds this pair while committing its durable metadata; without this
+    // paired insertion a spawn could slip a half-registered terminal through
+    // the rebadge and leave it attached to a workspace whose sessions moved.
+    // Keep both guards through initial persistence too: otherwise a rebadge
+    // could commit the new workspace between registration and this spawn's
+    // delayed metadata write, then the old spawn payload would resurrect the
+    // source ownership in the restart record.
+    {
+        let mut terminals = config.terminals.lock().await;
+        let mut terminal_meta = config.terminal_meta.lock().await;
+        terminal_meta.insert(terminal_id, (session_key.clone(), kind.clone()));
+        terminals.insert(terminal_id, backend_key.clone());
+        persist_terminal_meta(config, &backend_key, &session_key, &kind).await;
+    }
+    drop(workspace_registration_guard);
+    // The persisted backend_key → session ownership pairing lets the next
+    // lazybox start reattach surviving tmux sessions to their workspace.
     persist_no_permission(config, &backend_key, skip_permissions).await;
 
     // Pump backend output → bus. Also runs agent-state detection
@@ -1494,7 +1515,7 @@ async fn resolve_or_create_session(
     // a stale key or store failure could otherwise launch an agent in
     // whichever repository happened to start the daemon. The tombstone
     // only improves the error for the delete-vs-spawn race.
-    let mut workspace = match load_workspace(config, &workspace_key) {
+    let workspace = match load_workspace(config, &workspace_key) {
         Ok(w) => w,
         Err(error) => {
             if config
@@ -1600,6 +1621,15 @@ async fn resolve_or_create_session(
         ensure_dir_exists(&path).await;
     }
 
+    // Provisioning above intentionally runs without the workspace lock. Once
+    // it finishes, serialize the fresh load→session insert→commit so a
+    // concurrent issue→PR move cannot delete the source and then have this
+    // stale spawn recreate it from its pre-provision snapshot.
+    let _workspace_guard = config.lock_workspace(workspace_key.as_str()).await;
+    let mut workspace = load_workspace(config, &workspace_key)?;
+    if let Some(session) = workspace.default_session() {
+        return Ok((session.worktree_path.clone(), session.id, false));
+    }
     let session = Session::new(
         workspace_key.clone(),
         kind_for_session,
@@ -2710,6 +2740,7 @@ pub async fn handle_create_session(
     label: Option<String>,
 ) {
     let workspace_key = WorkspaceKey::new(session_key.as_str());
+    let _workspace_guard = config.lock_workspace(workspace_key.as_str()).await;
     let mut workspace = match load_workspace(config, &workspace_key) {
         Ok(w) => w,
         Err(e) => {
@@ -4207,20 +4238,16 @@ pub async fn recover_sessions(config: &ServerConfig) {
             .unwrap_or_else(|| (SessionKey::from(""), TerminalKind::Shell));
         let no_permission = load_no_permission(config, &key).await;
         let terminal_id = alloc_terminal_id(&*config.store);
-        config
-            .terminals
-            .lock()
-            .await
-            .insert(terminal_id, key.clone());
-        // Populate terminal_meta so snapshot_terminals + the sidebar's
-        // badge map see this PTY as belonging to its real workspace.
-        // Without this the recovered terminal shows up as orphan and
-        // nothing in the UI suggests it exists.
-        config
-            .terminal_meta
-            .lock()
-            .await
-            .insert(terminal_id, (session_key.clone(), kind.clone()));
+        // Recover the primary maps as one visible registration, under the
+        // same canonical lock pair as a fresh spawn. This prevents snapshot
+        // or workspace-rebadge readers from observing a backend id without
+        // its durable workspace owner (or vice versa).
+        {
+            let mut terminals = config.terminals.lock().await;
+            let mut terminal_meta = config.terminal_meta.lock().await;
+            terminal_meta.insert(terminal_id, (session_key.clone(), kind.clone()));
+            terminals.insert(terminal_id, key.clone());
+        }
         if no_permission {
             config
                 .no_permission_terminals
@@ -4320,8 +4347,8 @@ pub(crate) async fn persist_terminal_meta(
     session_key: &SessionKey,
     kind: &TerminalKind,
 ) {
-    let payload = match serde_json::to_string(&(session_key.as_str(), kind)) {
-        Ok(s) => s,
+    let (kv_key, payload) = match encode_terminal_meta_record(backend_key, session_key, kind) {
+        Ok(record) => record,
         Err(e) => {
             tracing::warn!("persist terminal_meta: encode failed: {e}");
             return;
@@ -4332,12 +4359,23 @@ pub(crate) async fn persist_terminal_meta(
     // otherwise pin a runtime worker. Same for the sibling helpers
     // below.
     let store = config.store.clone();
-    let kv_key = TerminalPersistedField::Metadata.key(backend_key);
     match tokio::task::spawn_blocking(move || store.set_kv(&kv_key, &payload)).await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => tracing::warn!("persist terminal_meta: store write failed: {e}"),
         Err(e) => tracing::warn!("persist terminal_meta: store task failed: {e}"),
     }
+}
+
+/// Encode the durable metadata row for one live terminal. Workspace moves use
+/// this to place terminal rebadges in the same `Store::apply_batch`
+/// transaction as their source/destination workspace updates.
+pub(crate) fn encode_terminal_meta_record(
+    backend_key: &str,
+    session_key: &SessionKey,
+    kind: &TerminalKind,
+) -> Result<(String, String), serde_json::Error> {
+    let payload = serde_json::to_string(&(session_key.as_str(), kind))?;
+    Ok((TerminalPersistedField::Metadata.key(backend_key), payload))
 }
 
 /// Inverse of `persist_terminal_meta`. Returns None when nothing was
@@ -4685,6 +4723,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn encoded_terminal_metadata_matches_recovery_schema() {
+        let session_key = SessionKey::from("github-acme-widget-42");
+        let kind = TerminalKind::Agent("codex".into());
+        let (key, payload) =
+            encode_terminal_meta_record("backend-42", &session_key, &kind).unwrap();
+        assert_eq!(key, "terminal:backend-42");
+        let decoded: (String, TerminalKind) = serde_json::from_str(&payload).unwrap();
+        assert_eq!(decoded.0, session_key.as_str());
+        assert!(matches!(decoded.1, TerminalKind::Agent(id) if id == "codex"));
+    }
+
     /// Per-repo env lookup returns the expected pairs and is
     /// case-sensitive on the repo key.
     #[test]
@@ -4847,7 +4897,7 @@ mod tests {
         );
     }
 
-    /// Regression for #161: after an issue→PR collapse, `rebadge_terminals`
+    /// Regression for #161: after an issue→PR collapse, the atomic move owner
     /// repoints the live terminal's `terminal_meta` entry onto the PR
     /// session. The output pump must broadcast its `AgentState` under the
     /// CURRENT (PR) key, not the issue key it captured at spawn — else a
@@ -7399,7 +7449,7 @@ mod tests {
 
         let (config, _mock) = ServerConfig::in_memory_with_mock();
         config.terminals.lock().await.insert(id, "mock-key".into());
-        // rebadge_terminals moved the live meta entry onto the PR.
+        // The workspace-move owner moved the live meta entry onto the PR.
         config.terminal_meta.lock().await.insert(
             id,
             (

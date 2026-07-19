@@ -653,6 +653,8 @@ pub async fn apply_pr_details(
     details: lazybox_gh::PrDetails,
 ) {
     let mut closes_backfilled = false;
+    // The mutation primitive owns the workspace lock for its complete fresh
+    // load→transform→commit sequence.
     let outcome = apply_and_commit(config, workspace_key, |ws| {
         let had_closes = ws
             .pr
@@ -665,8 +667,11 @@ pub async fn apply_pr_details(
             .as_ref()
             .is_some_and(|pr| !pr.closes_issues.is_empty());
         closes_backfilled = !had_closes && has_closes;
-    });
+    })
+    .await;
     if outcome.is_applied() && closes_backfilled {
+        // The primitive's single-key guard is dropped on return before the
+        // collapse takes the PR plus every source issue lock.
         super::collapse_closing_issues_for(config, workspace_key).await;
     }
 }

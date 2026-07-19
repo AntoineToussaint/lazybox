@@ -84,6 +84,50 @@ impl Store for FailingBatchStore {
     }
 }
 
+/// Parks one atomic batch after the blocking owner has started. Tests can
+/// cancel the async caller at that exact boundary and verify the detached
+/// owner still finishes durability plus every in-memory/event projection.
+struct GatedBatchStore {
+    inner: MemoryStore,
+    armed: std::sync::atomic::AtomicBool,
+    entered_tx: parking_lot::Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    release_rx: parking_lot::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+}
+
+impl Store for GatedBatchStore {
+    fn apply_batch(&self, mutations: &[StoreMutation]) -> Result<(), StoreError> {
+        if self.armed.swap(false, Ordering::SeqCst) {
+            if let Some(tx) = self.entered_tx.lock().take() {
+                let _ = tx.send(());
+            }
+            if let Some(rx) = self.release_rx.lock().take() {
+                let _ = rx.recv_timeout(Duration::from_secs(10));
+            }
+        }
+        self.inner.apply_batch(mutations)
+    }
+
+    fn get_kv(&self, key: &str) -> Result<Option<String>, StoreError> {
+        self.inner.get_kv(key)
+    }
+
+    fn set_kv(&self, key: &str, value: &str) -> Result<(), StoreError> {
+        self.inner.set_kv(key, value)
+    }
+
+    fn delete_kv(&self, key: &str) -> Result<(), StoreError> {
+        self.inner.delete_kv(key)
+    }
+
+    fn list_workspaces(&self) -> Result<Vec<WorkspaceRecord>, StoreError> {
+        self.inner.list_workspaces()
+    }
+
+    fn list_projects(&self) -> Result<Vec<lazybox_store::ProjectRecord>, StoreError> {
+        self.inner.list_projects()
+    }
+}
+
 /// Wait for the next `WorkspaceUpserted` event, ignoring any
 /// `ProjectUpserted` (registered the first time polling sees a new
 /// repo). Tests that drain "one event per workspace upsert" can use
@@ -2396,23 +2440,17 @@ async fn seed_issue_with_session(
     (issue_key, session_id)
 }
 
-/// Register a live terminal (in `terminal_meta`, the authoritative
-/// liveness map) bound to the given workspace key. The merge safety
-/// gate keys off live terminals, not session records — a session
-/// whose PTY died long ago must not stall the auto-transfer.
+/// Register a production-shaped live terminal bound to the given workspace
+/// key. The merge safety gate keys off `terminal_meta`, not session records,
+/// while the paired `terminals` and persisted metadata rows let accepted
+/// merges exercise the complete durable rebadge path.
 async fn attach_live_terminal(
     config: &ServerConfig,
     key: &lazybox_core::WorkspaceKey,
     terminal_id: u64,
 ) {
-    use lazybox_core::SessionKey;
-    use lazybox_ipc::{TerminalId, TerminalKind};
-    let session_key: SessionKey = key.into();
-    config
-        .terminal_meta
-        .lock()
-        .await
-        .insert(TerminalId(terminal_id), (session_key, TerminalKind::Shell));
+    let backend_key = format!("lazybox-live-test-{terminal_id}");
+    attach_live_terminal_persisted(config, key, terminal_id, &backend_key).await;
 }
 
 #[tokio::test]
@@ -2754,13 +2792,22 @@ async fn failed_workspace_batch_publishes_no_phantom_upsert() {
 
 #[tokio::test]
 async fn failed_issue_merge_batch_preserves_source_and_emits_no_removal() {
+    use lazybox_core::SessionKey;
+    use lazybox_ipc::TerminalId;
+
     let store = Arc::new(FailingBatchStore::new());
     let config = ServerConfig::with_store(store.clone());
     let (issue_key, session_id) = seed_issue_with_session(&config, "o/r#902").await;
+    let backend_key = "failed-merge-terminal";
+    attach_live_terminal_persisted(&config, &issue_key, 902, backend_key).await;
+    let issue_session_key: SessionKey = (&issue_key).into();
+    let pr_task = make_pr_closing("o/r#903", &["o/r#902"]);
+    polling::upsert(&config, pr_task.clone()).await;
+    let pr_key = lazybox_core::WorkspaceKey::new(lazybox_core::workspace_key_for(&pr_task));
     let mut bus = config.bus.subscribe();
 
     store.fail_next_batch();
-    polling::upsert(&config, make_pr_closing("o/r#903", &["o/r#902"])).await;
+    polling::handle_confirm_merge(&config, issue_key.clone(), pr_key.clone(), true).await;
 
     let issue_record = config
         .store
@@ -2777,12 +2824,35 @@ async fn failed_issue_merge_batch_preserves_source_and_emits_no_removal() {
         "the source row must retain its session after rollback"
     );
 
-    let pr_key = lazybox_core::WorkspaceKey::new(lazybox_core::workspace_key_for(
-        &make_pr_closing("o/r#903", &["o/r#902"]),
-    ));
+    let pr_record = config.store.get_workspace(&pr_key).unwrap().unwrap();
+    let pr: lazybox_core::Workspace =
+        serde_json::from_str(&pr_record.workspace_json.unwrap()).unwrap();
     assert!(
-        config.store.get_workspace(&pr_key).unwrap().is_none(),
-        "the destination PR must not be partially written"
+        pr.sessions.iter().all(|session| session.id != session_id),
+        "the destination PR must not receive a partially committed session"
+    );
+    assert_eq!(
+        config
+            .terminal_meta
+            .lock()
+            .await
+            .get(&TerminalId(902))
+            .expect("live terminal retained")
+            .0,
+        issue_session_key,
+        "failed durability must not change in-memory terminal ownership"
+    );
+    let raw = config
+        .store
+        .get_kv(&format!("terminal:{backend_key}"))
+        .unwrap()
+        .expect("persisted terminal metadata retained");
+    let (persisted_key, _): (String, lazybox_ipc::TerminalKind) =
+        serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        persisted_key,
+        issue_session_key.as_str(),
+        "failed durability must not change restart-time terminal ownership"
     );
     let events: Vec<_> = std::iter::from_fn(|| bus.try_recv().ok()).collect();
     assert!(
@@ -2797,6 +2867,19 @@ async fn failed_issue_merge_batch_preserves_source_and_emits_no_removal() {
             .iter()
             .any(|event| matches!(event, Event::WorkspaceMerged { .. })),
         "rollback must not publish a completed merge"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::TerminalsRebadged { .. })),
+        "rollback must not publish a terminal rebadge"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            Event::WorkspaceUpserted(workspace) if workspace.key == pr_key
+        )),
+        "rollback must not publish a destination upsert"
     );
 }
 
@@ -3183,13 +3266,18 @@ async fn adopt_sessions_moves_sessions_between_workspaces() {
 
 #[tokio::test]
 async fn failed_adopt_batch_cannot_duplicate_or_lose_sessions() {
-    use lazybox_core::WorkspaceKey;
+    use lazybox_core::{SessionKey, WorkspaceKey};
+    use lazybox_ipc::TerminalId;
 
     let store = Arc::new(FailingBatchStore::new());
     let config = ServerConfig::with_store(store.clone());
     let (source_key, session_id) = seed_issue_with_session(&config, "o/r#904").await;
     polling::upsert(&config, make_task("o/r#905")).await;
     let target_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_task("o/r#905")));
+    let backend_key = "failed-adopt-terminal";
+    attach_live_terminal_persisted(&config, &source_key, 904, backend_key).await;
+    let source_session_key: SessionKey = (&source_key).into();
+    let mut bus = config.bus.subscribe();
 
     store.fail_next_batch();
     polling::handle_adopt_sessions(&config, source_key.clone(), target_key.clone()).await;
@@ -3214,6 +3302,193 @@ async fn failed_adopt_batch_cannot_duplicate_or_lose_sessions() {
             .all(|session| session.id != session_id),
         "a rolled-back adopt must not duplicate the session into its target"
     );
+    assert_eq!(
+        config
+            .terminal_meta
+            .lock()
+            .await
+            .get(&TerminalId(904))
+            .expect("live terminal retained")
+            .0,
+        source_session_key,
+        "a rolled-back adopt must not change in-memory terminal ownership"
+    );
+    let raw = config
+        .store
+        .get_kv(&format!("terminal:{backend_key}"))
+        .unwrap()
+        .expect("persisted terminal metadata retained");
+    let (persisted_key, _): (String, lazybox_ipc::TerminalKind) =
+        serde_json::from_str(&raw).unwrap();
+    assert_eq!(persisted_key, source_session_key.as_str());
+    let events: Vec<_> = std::iter::from_fn(|| bus.try_recv().ok()).collect();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::TerminalsRebadged { .. })),
+        "a rolled-back adopt must publish no terminal rebadge"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelled_adopt_still_finishes_the_started_commit_and_projection() {
+    use lazybox_core::{SessionKey, WorkspaceKey};
+    use lazybox_ipc::TerminalId;
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let store = Arc::new(GatedBatchStore {
+        inner: MemoryStore::new(),
+        armed: std::sync::atomic::AtomicBool::new(false),
+        entered_tx: parking_lot::Mutex::new(Some(entered_tx)),
+        release_rx: parking_lot::Mutex::new(Some(release_rx)),
+    });
+    let config = ServerConfig::with_store(store.clone());
+    let (source_key, session_id) = seed_issue_with_session(&config, "o/r#908").await;
+    polling::upsert(&config, make_task("o/r#909")).await;
+    let target_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_task("o/r#909")));
+    let backend_key = "cancelled-adopt-terminal";
+    attach_live_terminal_persisted(&config, &source_key, 908, backend_key).await;
+    let target_session_key: SessionKey = (&target_key).into();
+    let mut bus = config.bus.subscribe();
+
+    store.armed.store(true, Ordering::SeqCst);
+    let adopt_config = config.clone();
+    let source = source_key.clone();
+    let target = target_key.clone();
+    let adopt = tokio::spawn(async move {
+        polling::handle_adopt_sessions(&adopt_config, source, target).await;
+    });
+    entered_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("adopt transaction owner must start");
+    adopt.abort();
+    release_tx.send(()).expect("release committed batch");
+    let _ = adopt.await;
+
+    let mut saw_rebadge = false;
+    let mut saw_target = false;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !(saw_rebadge && saw_target) {
+            match bus.recv().await.expect("commit owner event") {
+                Event::TerminalsRebadged { to, .. } if to == target_session_key => {
+                    saw_rebadge = true;
+                }
+                Event::WorkspaceUpserted(workspace) if workspace.key == target_key => {
+                    saw_target = true;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("detached commit owner must finish its event projection");
+
+    let load = |key: &WorkspaceKey| -> lazybox_core::Workspace {
+        let record = config.store.get_workspace(key).unwrap().unwrap();
+        serde_json::from_str(&record.workspace_json.unwrap()).unwrap()
+    };
+    assert!(
+        load(&source_key)
+            .sessions
+            .iter()
+            .all(|session| session.id != session_id)
+    );
+    assert!(
+        load(&target_key)
+            .sessions
+            .iter()
+            .any(|session| session.id == session_id)
+    );
+    assert_eq!(
+        config
+            .terminal_meta
+            .lock()
+            .await
+            .get(&TerminalId(908))
+            .expect("terminal retained")
+            .0,
+        target_session_key
+    );
+    let raw = config
+        .store
+        .get_kv(&format!("terminal:{backend_key}"))
+        .unwrap()
+        .expect("terminal metadata persisted");
+    let (persisted_key, _): (String, lazybox_ipc::TerminalKind) =
+        serde_json::from_str(&raw).unwrap();
+    assert_eq!(persisted_key, target_session_key.as_str());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn spawn_losing_to_merge_cannot_recreate_the_deleted_source() {
+    use lazybox_core::{SessionKey, WorkspaceKey};
+    use lazybox_ipc::TerminalKind;
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let store = Arc::new(GatedBatchStore {
+        inner: MemoryStore::new(),
+        armed: std::sync::atomic::AtomicBool::new(false),
+        entered_tx: parking_lot::Mutex::new(Some(entered_tx)),
+        release_rx: parking_lot::Mutex::new(Some(release_rx)),
+    });
+    let backend = MockBackend::new();
+    let config = ServerConfig::with_store_and_backend(store.clone(), Arc::new(backend.clone()));
+    let (issue_key, session_id) = seed_issue_with_session(&config, "o/r#910").await;
+    std::fs::create_dir_all("/tmp/lazybox-test").unwrap();
+    let pr_task = make_task("o/r#911");
+    polling::upsert(&config, pr_task.clone()).await;
+    let pr_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&pr_task));
+
+    store.armed.store(true, Ordering::SeqCst);
+    let merge_config = config.clone();
+    let merge_issue = issue_key.clone();
+    let merge_pr = pr_key.clone();
+    let merge = tokio::spawn(async move {
+        polling::handle_confirm_merge(&merge_config, merge_issue, merge_pr, true).await;
+    });
+    entered_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("merge transaction owner must start");
+
+    let spawn_config = config.clone();
+    let source_session_key: SessionKey = (&issue_key).into();
+    let spawn = tokio::spawn(async move {
+        lazybox_server::spawn_handler::handle_spawn(
+            &spawn_config,
+            source_session_key,
+            Some(session_id),
+            TerminalKind::Shell,
+            None,
+            None,
+            false,
+            false,
+            None,
+        )
+        .await;
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    release_tx.send(()).expect("release merge batch");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        merge.await.expect("merge task");
+        spawn.await.expect("spawn task");
+    })
+    .await
+    .expect("merge and losing spawn must both terminate");
+
+    assert!(
+        config.store.get_workspace(&issue_key).unwrap().is_none(),
+        "the losing spawn must not recreate the deleted issue workspace"
+    );
+    assert!(
+        config.terminals.lock().await.is_empty(),
+        "the losing spawn must register no terminal under the stale source"
+    );
+    assert!(
+        backend.list().await.unwrap().is_empty(),
+        "the losing spawn must abort before starting a backend process"
+    );
 }
 
 #[tokio::test]
@@ -3236,6 +3511,47 @@ async fn adopt_sessions_into_self_is_a_noop() {
         "self-adopt must leave the session in place",
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn opposing_adoptions_use_one_lock_order_without_loss_or_deadlock() {
+    let config = ServerConfig::in_memory();
+    let (left_key, left_session) = seed_issue_with_session(&config, "o/r#906").await;
+    let (right_key, right_session) = seed_issue_with_session(&config, "o/r#907").await;
+
+    let left_to_right_config = config.clone();
+    let left = left_key.clone();
+    let right = right_key.clone();
+    let left_to_right = tokio::spawn(async move {
+        polling::handle_adopt_sessions(&left_to_right_config, left, right).await;
+    });
+    let right_to_left_config = config.clone();
+    let left = left_key.clone();
+    let right = right_key.clone();
+    let right_to_left = tokio::spawn(async move {
+        polling::handle_adopt_sessions(&right_to_left_config, right, left).await;
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        left_to_right.await.expect("left-to-right adopt task");
+        right_to_left.await.expect("right-to-left adopt task");
+    })
+    .await
+    .expect("opposing multi-key operations must not deadlock");
+
+    let mut ids = Vec::new();
+    for key in [&left_key, &right_key] {
+        let record = config.store.get_workspace(key).unwrap().unwrap();
+        let workspace: lazybox_core::Workspace =
+            serde_json::from_str(&record.workspace_json.unwrap()).unwrap();
+        ids.extend(workspace.sessions.into_iter().map(|session| session.id));
+    }
+    let ids: std::collections::HashSet<_> = ids.into_iter().collect();
+    let expected = std::collections::HashSet::from([left_session, right_session]);
+    assert_eq!(
+        ids, expected,
+        "serialized opposing moves must preserve each session exactly once"
+    );
+}
+
 #[tokio::test]
 async fn adopt_sessions_rewrites_terminal_meta() {
     // Regression for #7: adopting sessions must repoint the live
@@ -3419,17 +3735,13 @@ async fn merge_rewrites_terminal_meta_so_terminals_dont_orphan() {
     // reconnecting TUI clients see a terminal pointing to a
     // workspace that no longer exists.
     use lazybox_core::{SessionKey, WorkspaceKey};
-    use lazybox_ipc::{TerminalId, TerminalKind};
+    use lazybox_ipc::TerminalId;
 
     let config = ServerConfig::in_memory();
     polling::upsert(&config, make_issue_task("o/r#71")).await;
 
     let issue_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_issue_task("o/r#71")));
-    let issue_session_key: SessionKey = (&issue_key).into();
-    config.terminal_meta.lock().await.insert(
-        TerminalId(7),
-        (issue_session_key.clone(), TerminalKind::Shell),
-    );
+    attach_live_terminal_persisted(&config, &issue_key, 7, "merge-meta-terminal").await;
 
     polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
 
@@ -4141,7 +4453,7 @@ async fn combining_multiple_issues_with_live_sessions_rebadges_every_terminal() 
     // records `recover_sessions` reads at startup. A live terminal
     // stalls the silent auto-merge behind a per-issue confirm prompt;
     // the user accepting each one drives `handle_confirm_merge`. This is
-    // the path that exercises `rebadge_terminals` with more than one
+    // the path that exercises the atomic terminal-rebadge owner with more than one
     // terminal per issue — the case PR #90 never covered.
     use lazybox_core::{SessionKey, WorkspaceKey};
     use lazybox_ipc::{TerminalId, TerminalKind};

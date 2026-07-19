@@ -6,7 +6,7 @@ contain explicitly documented compatibility changes.
 
 ## [Unreleased]
 
-## [0.1.7] - 2026-07-15
+## [0.1.7] - 2026-07-19
 
 ### Added
 
@@ -22,6 +22,11 @@ contain explicitly documented compatibility changes.
 - An accessible custom 404 page and resilient no-JavaScript homepage content.
 - Ask Lazybox as the primary `?` surface, with live effective-keymap search,
   conversational workflow help, and searchable terminal-leader commands.
+- `lazybox scan` for discovering and adopting externally created checkouts.
+- A unified policies menu for per-PR and per-issue automation controls, plus a
+  configurable tabs-first layout for newly opened terminals.
+- Explicit terminal `Exited` state so clean exits, crashes, and agents that
+  fail during startup remain distinguishable.
 
 ### Changed
 
@@ -41,6 +46,10 @@ contain explicitly documented compatibility changes.
 - The shortcut system now follows five named menus (`w` work, `a` agent, `b`
   main branch, `g` GitHub, `x` workspace), with a compact secondary index and
   `g r` as the mnemonic reviewer chord (replacing `g v`).
+- Terminal scrolling, replay recovery, and input now pass through one owner
+  with sequenced resynchronization and isolated ordered command lanes.
+- IPC protocol version 11 adds bounded admission and explicit lifecycle
+  contracts; daemon and client must be upgraded together.
 
 ### Fixed
 
@@ -58,6 +67,21 @@ contain explicitly documented compatibility changes.
   chords, including when the terminal escape character is remapped.
 - Homepage contrast, accessible navigation names, reduced-motion behavior,
   video fallback loading, and no-JavaScript rendering.
+- Mouse-wheel input now scrolls the terminal tile under the pointer, including
+  local scrollback on the primary screen, without fighting the focused tile.
+- Terminal output survives detach/reconnect gaps without stale cursors,
+  duplicate bytes, lost tails, or unbounded replay loops.
+- Agent crashes and immediate startup failures remain visible, while cleanly
+  exited agent terminals close automatically without deleting the workspace.
+- The last agent prompt survives restart, `InputNeeded` remains sticky across
+  ambiguous scrapes, long Ask Lazybox input wraps, and which-key menus support
+  arrow and `j`/`k` navigation.
+- Workspace persistence is atomic and truthful, workspace/terminal moves are
+  serialized, and failed commits can no longer leave memory and SQLite out of
+  sync.
+- IPC connections, background tasks, terminal writes, and command queues now
+  have explicit capacity and shutdown bounds instead of growing or hanging
+  indefinitely under load.
 
 [Unreleased]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.7...HEAD
 [0.1.7]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.6...v0.1.7

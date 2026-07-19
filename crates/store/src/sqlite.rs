@@ -2,7 +2,7 @@ use parking_lot::Mutex;
 use rusqlite::Connection;
 use std::path::Path;
 
-use crate::traits::{Store, StoreError};
+use crate::traits::{Store, StoreError, StoreMutation};
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
@@ -74,6 +74,60 @@ impl SqliteStore {
 }
 
 impl Store for SqliteStore {
+    fn apply_batch(&self, mutations: &[StoreMutation]) -> Result<(), StoreError> {
+        let mut conn = self.conn();
+        let tx = conn
+            .transaction()
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        for mutation in mutations {
+            match mutation {
+                StoreMutation::SetKv { key, value } => {
+                    tx.execute(
+                        "INSERT INTO kv (key, value) VALUES (?1, ?2)
+                         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        (key, value),
+                    )
+                    .map_err(|e| StoreError::Backend(e.to_string()))?;
+                }
+                StoreMutation::DeleteKv { key } => {
+                    tx.execute("DELETE FROM kv WHERE key = ?1", [key])
+                        .map_err(|e| StoreError::Backend(e.to_string()))?;
+                }
+                StoreMutation::SaveWorkspace(record) => {
+                    let key = format!("workspace:{}", record.key);
+                    let value = record.workspace_json.clone().unwrap_or_default();
+                    tx.execute(
+                        "INSERT INTO kv (key, value) VALUES (?1, ?2)
+                         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        (&key, &value),
+                    )
+                    .map_err(|e| StoreError::Backend(e.to_string()))?;
+                }
+                StoreMutation::DeleteWorkspace(key) => {
+                    let key = format!("workspace:{}", key.as_str());
+                    tx.execute("DELETE FROM kv WHERE key = ?1", [&key])
+                        .map_err(|e| StoreError::Backend(e.to_string()))?;
+                }
+                StoreMutation::SaveProject(record) => {
+                    let key = format!("project:{}", record.key);
+                    let value = record.project_json.clone().unwrap_or_default();
+                    tx.execute(
+                        "INSERT INTO kv (key, value) VALUES (?1, ?2)
+                         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        (&key, &value),
+                    )
+                    .map_err(|e| StoreError::Backend(e.to_string()))?;
+                }
+                StoreMutation::DeleteProject(key) => {
+                    let key = format!("project:{}", key.as_str());
+                    tx.execute("DELETE FROM kv WHERE key = ?1", [&key])
+                        .map_err(|e| StoreError::Backend(e.to_string()))?;
+                }
+            }
+        }
+        tx.commit().map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
     fn get_kv(&self, key: &str) -> Result<Option<String>, StoreError> {
         let conn = self.conn();
         let mut stmt = conn
@@ -272,5 +326,42 @@ mod tests {
         let rows = store.list_workspaces().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].created_at, created_at);
+    }
+
+    /// A backend error after an earlier mutation must roll the whole batch
+    /// back. The trigger injects a deterministic failure on the second row;
+    /// observing the first row afterwards would prove partial persistence.
+    #[test]
+    fn atomic_batch_rolls_back_every_prior_mutation_on_failure() {
+        let store = SqliteStore::in_memory().unwrap();
+        store
+            .conn()
+            .execute_batch(
+                "CREATE TRIGGER reject_batch_boom
+                 BEFORE INSERT ON kv
+                 WHEN NEW.key = 'batch:boom'
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected batch failure');
+                 END;",
+            )
+            .unwrap();
+
+        let result = store.apply_batch(&[
+            StoreMutation::SetKv {
+                key: "batch:first".into(),
+                value: "must-roll-back".into(),
+            },
+            StoreMutation::SetKv {
+                key: "batch:boom".into(),
+                value: "rejected".into(),
+            },
+        ]);
+
+        assert!(result.is_err(), "the trigger must reject the batch");
+        assert_eq!(
+            store.get_kv("batch:first").unwrap(),
+            None,
+            "the first mutation must roll back with the rejected second one"
+        );
     }
 }

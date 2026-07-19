@@ -1,6 +1,6 @@
 //! In-memory Store implementation for tests.
 
-use crate::{Store, StoreError};
+use crate::{Store, StoreError, StoreMutation};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -28,6 +28,39 @@ impl Default for MemoryStore {
 }
 
 impl Store for MemoryStore {
+    fn apply_batch(&self, mutations: &[StoreMutation]) -> Result<(), StoreError> {
+        let mut kv = self.kv_lock();
+        for mutation in mutations {
+            match mutation {
+                StoreMutation::SetKv { key, value } => {
+                    kv.insert(key.clone(), value.clone());
+                }
+                StoreMutation::DeleteKv { key } => {
+                    kv.remove(key);
+                }
+                StoreMutation::SaveWorkspace(record) => {
+                    kv.insert(
+                        format!("workspace:{}", record.key),
+                        record.workspace_json.clone().unwrap_or_default(),
+                    );
+                }
+                StoreMutation::DeleteWorkspace(key) => {
+                    kv.remove(&format!("workspace:{}", key.as_str()));
+                }
+                StoreMutation::SaveProject(record) => {
+                    kv.insert(
+                        format!("project:{}", record.key),
+                        record.project_json.clone().unwrap_or_default(),
+                    );
+                }
+                StoreMutation::DeleteProject(key) => {
+                    kv.remove(&format!("project:{}", key.as_str()));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn get_kv(&self, key: &str) -> Result<Option<String>, StoreError> {
         Ok(self.kv_lock().get(key).cloned())
     }

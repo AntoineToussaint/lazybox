@@ -37,6 +37,10 @@ struct MockInner {
     /// Keys whose `snapshot()` should hang forever. Used by tests
     /// asserting the daemon's snapshot-timeout safety net works.
     wedged_snapshot_keys: Mutex<std::collections::HashSet<String>>,
+    /// Per-key count of upcoming `snapshot()` calls that should return
+    /// an error. Lets retry-contract tests fail once without sleeping
+    /// through the timeout path.
+    snapshot_failures: Mutex<HashMap<String, usize>>,
     /// Artificial delay applied at the start of every `spawn()`. Lets
     /// tests hold a spawn "mid-provision" to exercise the in-flight
     /// spawn races (duplicate collapse, Kill serialization).
@@ -193,6 +197,15 @@ impl MockBackend {
             .lock()
             .await
             .insert(key.into());
+    }
+
+    /// Fail the next `count` snapshots for `key`, then resume normally.
+    pub async fn fail_next_snapshots(&self, key: &str, count: usize) {
+        self.inner
+            .snapshot_failures
+            .lock()
+            .await
+            .insert(key.into(), count);
     }
 
     /// Simulate the real backends' bounded-bridge drop: the chunk lands
@@ -357,6 +370,7 @@ impl SessionBackend for MockBackend {
             }
             Ok(Subscription {
                 replay,
+                replay_complete: true,
                 last_seq,
                 live: rx,
             })
@@ -366,18 +380,33 @@ impl SessionBackend for MockBackend {
     fn snapshot<'a>(
         &'a self,
         key: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<(Vec<u8>, u64), BackendError>> + Send + 'a>> {
+    ) -> Pin<
+        Box<dyn Future<Output = Result<crate::backend::ReplaySnapshot, BackendError>> + Send + 'a>,
+    > {
         Box::pin(async move {
             // `wedge_snapshot(key)` makes this future never resolve —
             // simulating a wedged tmux pump holding the ring mutex.
             if self.inner.wedged_snapshot_keys.lock().await.contains(key) {
                 std::future::pending::<()>().await;
             }
+            {
+                let mut failures = self.inner.snapshot_failures.lock().await;
+                if let Some(remaining) = failures.get_mut(key)
+                    && *remaining > 0
+                {
+                    *remaining -= 1;
+                    return Err(BackendError::Other("injected snapshot failure".into()));
+                }
+            }
             let map = self.inner.sessions.lock().await;
             let session = map
                 .get(key)
                 .ok_or_else(|| BackendError::NotFound(key.into()))?;
-            Ok((session.replay.clone(), session.last_seq))
+            Ok(crate::backend::ReplaySnapshot {
+                replay: session.replay.clone(),
+                last_seq: session.last_seq,
+                complete: true,
+            })
         })
     }
 

@@ -2015,6 +2015,7 @@ mod input_starvation_tests {
             tx.try_send(Event::TerminalOutput {
                 terminal_id: TerminalId(1),
                 bytes: b"streaming output chunk\n".to_vec(),
+                first_seq: seq as u64,
                 seq: seq as u64,
             })
             .expect("bounded channel must have room for the flood");
@@ -2132,6 +2133,7 @@ mod wake_tests {
         Event::TerminalOutput {
             terminal_id: TerminalId(1),
             bytes: b"echo".to_vec(),
+            first_seq: seq,
             seq,
         }
     }
@@ -2303,12 +2305,14 @@ mod coalesce_tests {
     //! a chatty agent. The merge must be byte-for-byte faithful and
     //! must NOT reorder across terminals or non-output events.
     use super::super::helpers::coalesce_adjacent_output;
+    use super::super::*;
     use lazybox_ipc::{Event, TerminalId};
 
     fn out(id: u64, bytes: &[u8], seq: u64) -> Event {
         Event::TerminalOutput {
             terminal_id: TerminalId(id),
             bytes: bytes.to_vec(),
+            first_seq: seq,
             seq,
         }
     }
@@ -2324,14 +2328,110 @@ mod coalesce_tests {
             Event::TerminalOutput {
                 terminal_id,
                 bytes,
+                first_seq,
                 seq,
             } => {
                 assert_eq!(*terminal_id, TerminalId(1));
                 assert_eq!(bytes, b"hello world");
+                assert_eq!(*first_seq, 10, "merged event keeps its first seq");
                 assert_eq!(*seq, 12, "merged event carries the last chunk's seq");
             }
             other => panic!("expected one TerminalOutput, got {other:?}"),
         }
+    }
+
+    /// Coalescing must not erase the only evidence of a missing chunk.
+    /// Keeping non-contiguous ranges separate lets TerminalStack reject
+    /// the second range and wait for an authoritative resync.
+    #[test]
+    fn sequence_gap_ends_a_same_terminal_run() {
+        let merged = coalesce_adjacent_output(vec![out(1, b"one", 1), out(1, b"three", 3)]);
+        assert_eq!(merged.len(), 2);
+        assert!(matches!(
+            &merged[0],
+            Event::TerminalOutput {
+                first_seq: 1,
+                seq: 1,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &merged[1],
+            Event::TerminalOutput {
+                first_seq: 3,
+                seq: 3,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn client_gap_dispatches_one_daemon_resync_request() {
+        let (client, mut server) = lazybox_ipc::channel::pair();
+        let mut model = Model::new_for_test(client, tuirealm::ratatui::layout::Size::new(120, 40))
+            .expect("model");
+        while server.rx.try_recv().is_ok() {} // initial Subscribe
+        let session_key = lazybox_core::SessionKey::new("s");
+        model
+            .terminals
+            .set_active_session(Some(session_key.clone()));
+        model.terminals.on_daemon_event(&Event::TerminalSpawned {
+            terminal_id: TerminalId(1),
+            session_key,
+            kind: lazybox_ipc::TerminalKind::Shell,
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+        });
+
+        model.handle_daemon_event(out(1, b"one", 1));
+        model.handle_daemon_event(out(1, b"three", 3));
+        assert!(matches!(
+            server.rx.try_recv(),
+            Ok(IpcCommand::RequestTerminalResync {
+                terminal_id: TerminalId(1),
+                required_seq: 3,
+            })
+        ));
+        assert!(
+            server.rx.try_recv().is_err(),
+            "one request per recovery episode"
+        );
+    }
+
+    #[test]
+    fn unavailable_snapshot_immediately_requests_terminal_repair() {
+        let (client, mut server) = lazybox_ipc::channel::pair();
+        let mut model = Model::new_for_test(client, tuirealm::ratatui::layout::Size::new(120, 40))
+            .expect("model");
+        while server.rx.try_recv().is_ok() {} // initial Subscribe
+
+        model.handle_daemon_event(Event::Snapshot {
+            workspaces: Vec::new(),
+            projects: Vec::new(),
+            terminals: vec![lazybox_ipc::TerminalSnapshot {
+                terminal_id: TerminalId(9),
+                session_key: lazybox_core::SessionKey::new("quiet"),
+                kind: lazybox_ipc::TerminalKind::Shell,
+                replay: Vec::new(),
+                last_seq: 17,
+                replay_available: false,
+                no_permission: false,
+                on_main: false,
+                model_label: None,
+                last_user_message: None,
+                composing_buffer: None,
+            }],
+        });
+
+        assert!(matches!(
+            server.rx.try_recv(),
+            Ok(IpcCommand::RequestTerminalResync {
+                terminal_id: TerminalId(9),
+                required_seq: 17,
+            })
+        ));
+        assert!(server.rx.try_recv().is_err(), "exactly one repair request");
     }
 
     /// Output for a different terminal ends the run — no cross-terminal
@@ -4237,6 +4337,7 @@ mod daemon_event_fastpath_tests {
         m.handle_daemon_event(IpcEvent::TerminalOutput {
             terminal_id: TerminalId(99),
             bytes: b"background noise".to_vec(),
+            first_seq: 1,
             seq: 1,
         });
         assert!(
@@ -4263,6 +4364,7 @@ mod daemon_event_fastpath_tests {
         m.handle_daemon_event(IpcEvent::TerminalOutput {
             terminal_id: TerminalId(7),
             bytes: b"$ ls\n".to_vec(),
+            first_seq: 1,
             seq: 1,
         });
         assert!(m.redraw, "visible-terminal output must trigger a redraw");
@@ -4462,6 +4564,7 @@ mod wheel_routing_tests {
         m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(7),
             bytes: b"\x1b[?1049h\x1b[?1002h\x1b[?1006h".to_vec(),
+            first_seq: 1,
             seq: 1,
         });
         assert_eq!(
@@ -4506,6 +4609,7 @@ mod wheel_routing_tests {
         m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(7),
             bytes: b"\x1b[?1049h\x1b[?1002h\x1b[?1006h".to_vec(),
+            first_seq: 1,
             seq: 1,
         });
         assert_eq!(m.terminals.wheel_route(), WheelRoute::ForwardSgr);
@@ -4547,6 +4651,7 @@ mod wheel_routing_tests {
         m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(7),
             bytes,
+            first_seq: 1,
             seq: 1,
         });
 
@@ -4587,6 +4692,7 @@ mod wheel_routing_tests {
         m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(7),
             bytes,
+            first_seq: 1,
             seq: 1,
         });
         assert!(
@@ -4641,6 +4747,7 @@ mod wheel_routing_tests {
         m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(7),
             bytes: b"\x1b[?1002h\x1b[?1006h".to_vec(),
+            first_seq: 1,
             seq: 1,
         });
         assert!(
@@ -4670,6 +4777,7 @@ mod wheel_routing_tests {
         m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(7),
             bytes,
+            first_seq: 2,
             seq: 2,
         });
         assert_eq!(
@@ -4702,6 +4810,7 @@ mod wheel_routing_tests {
         m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(7),
             bytes: b"\x1b[?1049h".to_vec(), // alt-screen, no mouse tracking
+            first_seq: 1,
             seq: 1,
         });
         assert_eq!(
@@ -4733,6 +4842,7 @@ mod wheel_routing_tests {
         m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(7),
             bytes: b"\x1b[?1049h\x1b[?1h".to_vec(), // alt-screen + DECCKM
+            first_seq: 1,
             seq: 1,
         });
         assert_eq!(
@@ -4760,6 +4870,7 @@ mod wheel_routing_tests {
         m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(7),
             bytes: b"\x1b[?1049h".to_vec(),
+            first_seq: 1,
             seq: 1,
         });
         assert_eq!(
@@ -4971,6 +5082,7 @@ mod leader_tile_tests {
             m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
                 terminal_id: TerminalId(id),
                 bytes,
+                first_seq: 1,
                 seq: 1,
             });
         }
@@ -5044,6 +5156,7 @@ mod leader_tile_tests {
         m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(2),
             bytes: b"\x1b[?1049h\x1b[?1002h\x1b[?1006h".to_vec(),
+            first_seq: 1,
             seq: 1,
         });
 
@@ -5225,6 +5338,7 @@ mod leader_tile_tests {
                 kind: TerminalKind::Agent("claude".into()),
                 replay: Vec::new(),
                 last_seq: 0,
+                replay_available: true,
                 no_permission: false,
                 on_main: false,
                 model_label: None,
@@ -6599,6 +6713,7 @@ mod focus_mode_tests {
             m.handle_daemon_event(IpcEvent::TerminalOutput {
                 terminal_id: TerminalId(1),
                 bytes: b"codex spinner churn...\r\n".to_vec(),
+                first_seq: seq,
                 seq,
             });
             m.tick_terminal_leader();
@@ -7087,6 +7202,7 @@ mod worktree_progress_recovery_tests {
             kind: TerminalKind::Agent("claude".into()),
             replay: Vec::new(),
             last_seq: 0,
+            replay_available: true,
             no_permission: false,
             on_main: false,
             last_user_message: None,

@@ -551,7 +551,7 @@ pub(super) fn drain_daemon_events<T: TerminalAdapter>(
 
 /// Merge runs of consecutive `TerminalOutput` events that target the
 /// same terminal into one event carrying the concatenated bytes and
-/// the last chunk's `seq`. Order is otherwise preserved exactly — only
+/// the run's first/last sequence range. Order is otherwise preserved — only
 /// *adjacent* same-terminal output is merged, so an interleaved event
 /// for another terminal (or any non-output event) ends the run. Pure;
 /// unit-tested in `coalesce_tests`.
@@ -562,16 +562,20 @@ pub(super) fn coalesce_adjacent_output(events: Vec<IpcEvent>) -> Vec<IpcEvent> {
             IpcEvent::TerminalOutput {
                 terminal_id,
                 bytes,
+                first_seq,
                 seq,
             } => {
                 if let Some(IpcEvent::TerminalOutput {
                     terminal_id: prev_id,
                     bytes: prev_bytes,
+                    first_seq: _,
                     seq: prev_seq,
                 }) = out.last_mut()
                     && *prev_id == terminal_id
+                    && prev_seq.saturating_add(1) == first_seq
                 {
-                    // Same terminal as the tail run — extend it.
+                    // Same terminal and contiguous with the tail run —
+                    // extend it while preserving the run's first seq.
                     prev_bytes.extend_from_slice(&bytes);
                     *prev_seq = seq;
                     continue;
@@ -579,6 +583,7 @@ pub(super) fn coalesce_adjacent_output(events: Vec<IpcEvent>) -> Vec<IpcEvent> {
                 out.push(IpcEvent::TerminalOutput {
                     terminal_id,
                     bytes,
+                    first_seq,
                     seq,
                 });
             }

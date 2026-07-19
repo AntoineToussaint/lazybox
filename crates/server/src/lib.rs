@@ -757,6 +757,9 @@ impl Server {
                             "RecordComposingBuffer"
                         }
                         lazybox_ipc::Command::Resize { .. } => "Resize",
+                        lazybox_ipc::Command::RequestTerminalResync { .. } => {
+                            "RequestTerminalResync"
+                        }
                         lazybox_ipc::Command::InjectPrompt { .. } => "InjectPrompt",
                         lazybox_ipc::Command::MarkRead { .. } => "MarkRead",
                         lazybox_ipc::Command::FocusWorkspace { .. } => "FocusWorkspace",
@@ -1112,6 +1115,13 @@ pub async fn dispatch_command(
             buffer,
         } => {
             spawn_handler::handle_record_composing_buffer(config, terminal_id, &buffer).await;
+        }
+        lazybox_ipc::Command::RequestTerminalResync {
+            terminal_id,
+            required_seq,
+        } => {
+            spawn_handler::handle_terminal_resync_request(config, tx, terminal_id, required_seq)
+                .await;
         }
         lazybox_ipc::Command::Resize {
             terminal_id,
@@ -1472,16 +1482,24 @@ fn load_workspaces(store: &dyn Store) -> LoadOutcome<lazybox_core::Workspace> {
 /// bincode overhead riding in the same frame.
 const SNAPSHOT_REPLAY_BUDGET: usize = (lazybox_ipc::MAX_FRAME_BYTES as usize) / 2;
 
-/// Trim per-terminal replay buffers so their total stays within
-/// [`SNAPSHOT_REPLAY_BUDGET`]. Water-fill allocation: terminals under
-/// their fair share keep everything; oversized ones split the
-/// leftover budget evenly. Trimming drops the OLDEST bytes and keeps
-/// the tail — the tail is what the client's VT reset needs to
-/// reconstruct the current screen (the ring buffer already starts at
-/// an arbitrary byte offset once it has wrapped, so a mid-sequence
-/// cut is nothing new for the parser).
+/// Keep whole authoritative replay buffers within
+/// [`SNAPSHOT_REPLAY_BUDGET`]. A replay is atomic: slicing its prefix can
+/// begin inside UTF-8/CSI state and cannot rebuild a fresh VT parser. We
+/// therefore retain as many complete replays as fit (smallest first) and
+/// mark the rest unavailable; a live client preserves its last coherent
+/// grid instead of accepting a corrupt partial reset.
 fn budget_snapshot_replay(terminals: &mut [lazybox_ipc::TerminalSnapshot]) {
-    let total: usize = terminals.iter().map(|t| t.replay.len()).sum();
+    // Enforce the representation invariant even when the available
+    // replays are under budget: unavailable must never carry a byte tail
+    // a consumer could accidentally feed into a fresh parser.
+    for terminal in terminals.iter_mut().filter(|t| !t.replay_available) {
+        terminal.replay.clear();
+    }
+    let total: usize = terminals
+        .iter()
+        .filter(|t| t.replay_available)
+        .map(|t| t.replay.len())
+        .sum();
     if total <= SNAPSHOT_REPLAY_BUDGET {
         return;
     }
@@ -1489,23 +1507,25 @@ fn budget_snapshot_replay(terminals: &mut [lazybox_ipc::TerminalSnapshot]) {
         terminals = terminals.len(),
         total_replay_bytes = total,
         budget = SNAPSHOT_REPLAY_BUDGET,
-        "snapshot replay exceeds budget — trimming oldest bytes per terminal"
+        "snapshot replay exceeds budget — omitting whole replays"
     );
-    // Smallest-first so under-share terminals release their unused
-    // share to the bigger ones before those are cut.
+    // Smallest-first maximizes the number of terminals that receive a
+    // usable baseline. Ties retain stable terminal order.
     let mut order: Vec<usize> = (0..terminals.len()).collect();
     order.sort_by_key(|&i| terminals[i].replay.len());
-    let mut remaining = SNAPSHOT_REPLAY_BUDGET;
-    let mut left = order.len();
+    let mut used = 0usize;
     for idx in order {
-        let share = remaining / left;
-        let replay = &mut terminals[idx].replay;
-        if replay.len() > share {
-            let cut = replay.len() - share;
-            replay.drain(..cut); // keep the tail
+        if !terminals[idx].replay_available {
+            terminals[idx].replay.clear();
+            continue;
         }
-        remaining -= replay.len();
-        left -= 1;
+        let len = terminals[idx].replay.len();
+        if used.saturating_add(len) <= SNAPSHOT_REPLAY_BUDGET {
+            used += len;
+        } else {
+            terminals[idx].replay.clear();
+            terminals[idx].replay_available = false;
+        }
     }
 }
 
@@ -1599,6 +1619,7 @@ mod snapshot_budget_tests {
                 .map(|b| (b % 251) as u8)
                 .collect(),
             last_seq: 42,
+            replay_available: true,
             no_permission: false,
             on_main: false,
             model_label: None,
@@ -1645,21 +1666,21 @@ mod snapshot_budget_tests {
         );
     }
 
-    /// Trimming must drop the OLDEST bytes: the tail is what the
-    /// client's VT reset needs to redraw the current screen.
+    /// Budgeting must never turn a full replay into a byte tail and still
+    /// call it authoritative. Each terminal is either whole or explicitly
+    /// unavailable.
     #[test]
-    fn budget_trims_from_the_front_and_keeps_the_tail() {
+    fn budget_keeps_or_omits_each_replay_atomically() {
         let mut terminals: Vec<lazybox_ipc::TerminalSnapshot> =
             (0..40).map(full_ring_snapshot).collect();
-        let tail: Vec<u8> = terminals[0].replay[terminals[0].replay.len() - 64..].to_vec();
 
         budget_snapshot_replay(&mut terminals);
 
         for t in &terminals {
-            assert!(!t.replay.is_empty(), "every terminal keeps some replay");
             assert!(
-                t.replay.ends_with(&tail),
-                "replay must end with the original tail bytes"
+                (t.replay_available && t.replay.len() == pty::REPLAY_RING_BYTES)
+                    || (!t.replay_available && t.replay.is_empty()),
+                "replay must remain whole or be explicitly unavailable"
             );
         }
     }
@@ -1673,5 +1694,15 @@ mod snapshot_budget_tests {
         budget_snapshot_replay(&mut terminals);
         let after: Vec<usize> = terminals.iter().map(|t| t.replay.len()).collect();
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn budget_clears_unavailable_tail_even_when_under_budget() {
+        let mut terminal = full_ring_snapshot(1);
+        terminal.replay = b"arbitrary-tail".to_vec();
+        terminal.replay_available = false;
+        budget_snapshot_replay(std::slice::from_mut(&mut terminal));
+        assert!(terminal.replay.is_empty());
+        assert!(!terminal.replay_available);
     }
 }

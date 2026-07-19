@@ -57,6 +57,20 @@ pub struct OutputChunk {
     pub bytes: Vec<u8>,
 }
 
+/// A point-in-time replay of a session's output stream.
+///
+/// `complete` is the load-bearing part of the contract: only a replay
+/// containing every byte from a clean terminal baseline may be used to
+/// reset a client's VT parser. A bounded raw-byte ring becomes incomplete
+/// once it overwrites its prefix; treating that tail as authoritative can
+/// begin inside UTF-8 / CSI state and renders a corrupt grid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplaySnapshot {
+    pub replay: Vec<u8>,
+    pub last_seq: u64,
+    pub complete: bool,
+}
+
 /// Capacity of a `Subscription`'s live channel. Bounded so a stalled
 /// consumer puts a hard ceiling on daemon-side buffering: producers
 /// `try_send` and drop chunks on overflow (the `seq` gap + resync
@@ -72,6 +86,9 @@ pub struct Subscription {
     /// waiting for new output. Empty if the backend doesn't support
     /// replay (e.g. simple tmux without `capture-pane`).
     pub replay: Vec<u8>,
+    /// Whether `replay` starts at a clean terminal baseline and can
+    /// therefore rebuild a parser from scratch.
+    pub replay_complete: bool,
     /// `seq` value at the moment of subscription; chunks arriving on
     /// `live` start at `seq > last_seq`.
     pub last_seq: u64,
@@ -162,7 +179,7 @@ pub trait SessionBackend: Send + Sync + 'static {
         key: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<Subscription, BackendError>> + Send + 'a>>;
 
-    /// Cheap ring snapshot + last_seq for `key`. Used by `Subscribe`
+    /// Cheap replay snapshot for `key`. Used by `Subscribe`
     /// to seed reconnecting `--connect` clients without spawning a
     /// pump task per snapshot call (`subscribe` allocates a broadcast
     /// receiver + pump). Default impl errors so backends opt in
@@ -170,7 +187,7 @@ pub trait SessionBackend: Send + Sync + 'static {
     fn snapshot<'a>(
         &'a self,
         key: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<(Vec<u8>, u64), BackendError>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<ReplaySnapshot, BackendError>> + Send + 'a>> {
         let key = key.to_string();
         Box::pin(async move {
             Err(BackendError::NotFound(format!(

@@ -229,6 +229,14 @@ impl ReplayRing {
     pub fn is_empty(&self) -> bool {
         self.buf.is_empty()
     }
+
+    /// True while the ring still contains the entire byte stream from
+    /// the terminal's clean starting state. Once any prefix is evicted,
+    /// the retained tail is useful for diagnostics/exit summaries but is
+    /// not safe as an authoritative VT reset.
+    pub fn is_complete(&self) -> bool {
+        self.total_written == self.buf.len() as u64
+    }
 }
 
 /// A subscription to a `DaemonPty`'s output. Includes the replay so
@@ -236,6 +244,7 @@ impl ReplayRing {
 /// everything after.
 pub struct Subscription {
     pub replay: Vec<u8>,
+    pub replay_complete: bool,
     pub last_seq: u64,
     pub live: broadcast::Receiver<OutputChunk>,
 }
@@ -497,10 +506,11 @@ impl DaemonPty {
     /// the consumer drops live chunks with `seq <= last_seq`.
     pub async fn subscribe(&self) -> Subscription {
         let live = self.output_tx.subscribe();
-        let (replay, last_seq) = self.snapshot_only().await;
+        let snapshot = self.snapshot_only().await;
         Subscription {
-            replay,
-            last_seq,
+            replay: snapshot.replay,
+            replay_complete: snapshot.complete,
+            last_seq: snapshot.last_seq,
             live,
         }
     }
@@ -509,9 +519,13 @@ impl DaemonPty {
     /// Used by `Subscribe` snapshot path so reconnecting `--connect`
     /// clients can reconstruct their terminals without leaking a
     /// drainless broadcast receiver + pump task per snapshot call.
-    pub async fn snapshot_only(&self) -> (Vec<u8>, u64) {
+    pub async fn snapshot_only(&self) -> crate::backend::ReplaySnapshot {
         let ring = self.ring.lock().await;
-        (ring.snapshot(), self.last_seq.load(Ordering::SeqCst))
+        crate::backend::ReplaySnapshot {
+            replay: ring.snapshot(),
+            last_seq: self.last_seq.load(Ordering::SeqCst),
+            complete: ring.is_complete(),
+        }
     }
 
     /// Queue bytes for the writer thread. Returns promptly in every
@@ -676,6 +690,7 @@ mod ring_tests {
         r.push(b" world");
         assert_eq!(r.snapshot(), b"hello world");
         assert_eq!(r.total_written, 11);
+        assert!(r.is_complete());
     }
 
     #[test]
@@ -694,6 +709,10 @@ mod ring_tests {
         // Incoming burst larger than capacity — only the last 5 bytes kept.
         assert_eq!(r.snapshot(), b"bcdef");
         assert_eq!(r.total_written, 6);
+        assert!(
+            !r.is_complete(),
+            "a byte tail cannot be used as an authoritative VT baseline"
+        );
     }
 
     #[test]

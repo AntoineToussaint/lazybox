@@ -1948,6 +1948,7 @@ fn snapshot_terminal_backstops_worktree_progress_dismissal() {
             kind: TerminalKind::Agent("claude".into()),
             replay: Vec::new(),
             last_seq: 0,
+            replay_available: true,
             no_permission: false,
             on_main: false,
             last_user_message: None,

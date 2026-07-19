@@ -1021,11 +1021,20 @@ pub async fn handle_spawn(
                 if agent_for_pump.is_some() {
                     quiet_deadline = Some(tokio::time::Instant::now() + PTY_QUIET_CLASSIFY_AFTER);
                 }
-                let _ = bus.send(Event::TerminalOutput {
-                    terminal_id: id_for_pump,
-                    bytes: sub.replay.clone(),
-                    seq: sub.last_seq,
-                });
+                if sub.replay_complete {
+                    let _ = bus.send(Event::TerminalOutput {
+                        terminal_id: id_for_pump,
+                        bytes: sub.replay.clone(),
+                        first_seq: 1,
+                        seq: sub.last_seq,
+                    });
+                } else {
+                    tracing::warn!(
+                        terminal_id = ?id_for_pump,
+                        seq = sub.last_seq,
+                        "initial replay prefix was truncated; not publishing a false baseline"
+                    );
+                }
                 // Permit-storing, like the live first-output path below — a
                 // replay that lands before the inject task registers its
                 // waiter must not be lost.
@@ -1046,6 +1055,7 @@ pub async fn handle_spawn(
             // per forwarded chunk (or to the ring's seq after a gap
             // resync).
             let mut last_seq = sub.last_seq;
+            let mut resync_unavailable_announced = false;
             loop {
                 tokio::select! {
                     // Biased, chunk arm first: pending output is always
@@ -1066,7 +1076,7 @@ pub async fn handle_spawn(
                 if chunk.seq <= last_seq {
                     continue;
                 }
-                if chunk.seq > last_seq + 1 {
+                if chunk.seq > last_seq.saturating_add(1) {
                     // A chunk was dropped between the backend's reader
                     // and this pump (bounded bridge overflow or broadcast
                     // lag). The byte stream now has a hole — forwarding
@@ -1079,14 +1089,27 @@ pub async fn handle_spawn(
                     // with the replay (`TerminalResync`), and the
                     // state-detection buffer is rebuilt from the same
                     // bytes so it can't scrape the torn stream either.
-                    let (replay, resync_seq) =
+                    let Some(snapshot) =
                         resync_replay_after_gap(&*backend, &key_for_pump, chunk.seq, last_seq)
-                            .await;
+                            .await
+                    else {
+                        // Preserve the last coherent detector/client state.
+                        // Do not advance `last_seq`; the next delivered
+                        // chunk exposes the same debt and retries.
+                        if !resync_unavailable_announced {
+                            let _ = bus.send(Event::TerminalResyncUnavailable {
+                                terminal_id: id_for_pump,
+                            });
+                            resync_unavailable_announced = true;
+                        }
+                        continue;
+                    };
+                    resync_unavailable_announced = false;
                     state_buf.clear();
                     note_pty_activity(
                         agent_for_pump.as_ref(),
                         &mut state_buf,
-                        &replay,
+                        &snapshot.replay,
                         &agent_states_map,
                         &bus,
                         id_for_pump,
@@ -1096,7 +1119,7 @@ pub async fn handle_spawn(
                         &hook_driven_map,
                     )
                     .await;
-                    last_chunk_len = replay.len();
+                    last_chunk_len = snapshot.replay.len();
                     if agent_for_pump.is_some() {
                         quiet_deadline =
                             Some(tokio::time::Instant::now() + PTY_QUIET_CLASSIFY_AFTER);
@@ -1104,10 +1127,10 @@ pub async fn handle_spawn(
                     check_ready(&state_buf, &mut signaled_ready, &ready_signal_for_pump);
                     let _ = bus.send(Event::TerminalResync {
                         terminal_id: id_for_pump,
-                        replay,
-                        seq: resync_seq,
+                        replay: snapshot.replay,
+                        seq: snapshot.last_seq,
                     });
-                    last_seq = resync_seq;
+                    last_seq = snapshot.last_seq;
                     continue;
                 }
                 last_seq = chunk.seq;
@@ -1172,6 +1195,7 @@ pub async fn handle_spawn(
                 let _ = bus.send(Event::TerminalOutput {
                     terminal_id: id_for_pump,
                     bytes: chunk.bytes,
+                    first_seq: chunk.seq,
                     seq: chunk.seq,
                 });
                     }
@@ -2843,20 +2867,16 @@ fn detect_window(buf: &[u8]) -> &[u8] {
 /// gap (a chunk dropped on the backend's bounded bridge or a lagged
 /// broadcast). The reader thread pushes to the ring BEFORE
 /// broadcasting, so a snapshot taken after observing `gap_chunk_seq`
-/// covers every dropped chunk and the observed one. Degrades like the
-/// forwarder's resync path: on snapshot failure/timeout the replay is
-/// empty and clients reset to a blank grid that self-heals on the next
-/// output.
-///
-/// Returns `(replay, covered_seq)`; the caller emits
-/// `Event::TerminalResync` with them and resumes its stream from
-/// `covered_seq`.
+/// covers every dropped chunk and the observed one. Failure, timeout,
+/// truncation, and stale snapshots are explicit: the caller preserves
+/// its last coherent state, drops the torn chunk, and retries on the next
+/// output instead of fabricating an empty reset or coverage it never saw.
 async fn resync_replay_after_gap(
     backend: &dyn crate::backend::SessionBackend,
     key: &str,
     gap_chunk_seq: u64,
     last_seq: u64,
-) -> (Vec<u8>, u64) {
+) -> Option<crate::backend::ReplaySnapshot> {
     tracing::warn!(
         key,
         last_seq,
@@ -2864,16 +2884,31 @@ async fn resync_replay_after_gap(
         "output seq gap — chunk(s) dropped upstream; resyncing from replay ring"
     );
     match tokio::time::timeout(SNAPSHOT_PER_SESSION_TIMEOUT, backend.snapshot(key)).await {
-        // The ring can only be AT or AHEAD of the observed chunk; max()
-        // guards the degenerate mock/test orderings.
-        Ok(Ok((replay, seq))) => (replay, seq.max(gap_chunk_seq)),
+        Ok(Ok(snapshot)) if !snapshot.complete => {
+            tracing::warn!(
+                key,
+                snapshot_seq = snapshot.last_seq,
+                "gap resync replay prefix was truncated; retrying on later output"
+            );
+            None
+        }
+        Ok(Ok(snapshot)) if snapshot.last_seq < gap_chunk_seq => {
+            tracing::warn!(
+                key,
+                chunk_seq = gap_chunk_seq,
+                snapshot_seq = snapshot.last_seq,
+                "gap resync snapshot did not cover the observed chunk; retrying"
+            );
+            None
+        }
+        Ok(Ok(snapshot)) => Some(snapshot),
         Ok(Err(e)) => {
             tracing::warn!(key, "gap resync snapshot failed: {e}");
-            (Vec::new(), gap_chunk_seq)
+            None
         }
         Err(_) => {
             tracing::warn!(key, "gap resync snapshot timed out");
-            (Vec::new(), gap_chunk_seq)
+            None
         }
     }
 }
@@ -3063,7 +3098,7 @@ async fn finish_terminal(
         )
         .await
         {
-            Ok(Ok((bytes, _seq))) => last_output_tail(&bytes),
+            Ok(Ok(snapshot)) => last_output_tail(&snapshot.replay),
             _ => None,
         }
     } else {
@@ -4278,44 +4313,56 @@ pub async fn recover_sessions(config: &ServerConfig) {
         tokio::spawn(async move {
             let exit_code = match backend.subscribe(&key_for_pump).await {
                 Ok(mut sub) => {
-                    if !sub.replay.is_empty() {
+                    if !sub.replay.is_empty() && sub.replay_complete {
                         let _ = bus.send(Event::TerminalOutput {
                             terminal_id,
                             bytes: sub.replay.clone(),
+                            first_seq: 1,
                             seq: sub.last_seq,
                         });
                     }
                     let mut last_seq = sub.last_seq;
+                    let mut resync_unavailable_announced = false;
                     while let Some(chunk) = sub.live.recv().await {
                         // Drop live chunks already covered by the replay
                         // (see `DaemonPty::subscribe`).
                         if chunk.seq <= last_seq {
                             continue;
                         }
-                        if chunk.seq > last_seq + 1 {
+                        if chunk.seq > last_seq.saturating_add(1) {
                             // Same seq-gap recovery as the main pump: a
                             // chunk was dropped upstream, so replace the
                             // torn stream with the ring instead of
                             // desyncing every client's VT parser.
-                            let (replay, resync_seq) = resync_replay_after_gap(
+                            let Some(snapshot) = resync_replay_after_gap(
                                 &*backend,
                                 &key_for_pump,
                                 chunk.seq,
                                 last_seq,
                             )
-                            .await;
+                            .await
+                            else {
+                                if !resync_unavailable_announced {
+                                    let _ =
+                                        bus.send(Event::TerminalResyncUnavailable { terminal_id });
+                                    resync_unavailable_announced = true;
+                                }
+                                continue;
+                            };
+                            resync_unavailable_announced = false;
                             let _ = bus.send(Event::TerminalResync {
                                 terminal_id,
-                                replay,
-                                seq: resync_seq,
+                                replay: snapshot.replay,
+                                seq: snapshot.last_seq,
                             });
-                            last_seq = resync_seq;
+                            last_seq = snapshot.last_seq;
                             continue;
                         }
                         last_seq = chunk.seq;
                         let _ = bus.send(Event::TerminalOutput {
                             terminal_id,
                             bytes: chunk.bytes,
+                            first_seq: chunk.seq,
                             seq: chunk.seq,
                         });
                     }
@@ -4565,7 +4612,7 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
         // pump can stall the daemon's Subscribe handler indefinitely,
         // and `tokio::select!` cannot poll the next command until this
         // arm returns. Stalling here = the entire IPC channel freezes.
-        let (replay, last_seq) =
+        let snapshot =
             match tokio::time::timeout(SNAPSHOT_PER_SESSION_TIMEOUT, config.backend.snapshot(&key))
                 .await
             {
@@ -4577,7 +4624,11 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
                         error = %e,
                         "snapshot_terminals: backend.snapshot failed — replay will be empty"
                     );
-                    (Vec::new(), 0)
+                    crate::backend::ReplaySnapshot {
+                        replay: Vec::new(),
+                        last_seq: 0,
+                        complete: false,
+                    }
                 }
                 Err(_) => {
                     tracing::warn!(
@@ -4587,7 +4638,11 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
                         "snapshot_terminals: backend.snapshot timed out (wedged session?) \
                          — replay will be empty, daemon not blocked"
                     );
-                    (Vec::new(), 0)
+                    crate::backend::ReplaySnapshot {
+                        replay: Vec::new(),
+                        last_seq: 0,
+                        complete: false,
+                    }
                 }
             };
         out.push(TerminalSnapshot {
@@ -4599,11 +4654,65 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
             terminal_id: id,
             session_key,
             kind,
-            replay,
-            last_seq,
+            replay: if snapshot.complete {
+                snapshot.replay
+            } else {
+                Vec::new()
+            },
+            last_seq: snapshot.last_seq,
+            replay_available: snapshot.complete,
         });
     }
     out
+}
+
+/// Serve a client-observed sequence gap without trusting a partial or
+/// stale backend replay. This path is defense in depth for drops below
+/// the daemon's normal pump/forwarder recovery machinery.
+pub async fn handle_terminal_resync_request(
+    config: &ServerConfig,
+    tx: &tokio::sync::mpsc::UnboundedSender<Event>,
+    terminal_id: TerminalId,
+    required_seq: u64,
+) {
+    let key = config.terminals.lock().await.get(&terminal_id).cloned();
+    let Some(key) = key else {
+        let _ = tx.send(Event::TerminalResyncUnavailable { terminal_id });
+        return;
+    };
+    let snapshot =
+        tokio::time::timeout(SNAPSHOT_PER_SESSION_TIMEOUT, config.backend.snapshot(&key)).await;
+    match snapshot {
+        Ok(Ok(snapshot)) if snapshot.complete && snapshot.last_seq >= required_seq => {
+            let _ = tx.send(Event::TerminalResync {
+                terminal_id,
+                replay: snapshot.replay,
+                seq: snapshot.last_seq,
+            });
+        }
+        Ok(Ok(snapshot)) => {
+            tracing::warn!(
+                ?terminal_id,
+                required_seq,
+                snapshot_seq = snapshot.last_seq,
+                complete = snapshot.complete,
+                "client-requested terminal resync unavailable"
+            );
+            let _ = tx.send(Event::TerminalResyncUnavailable { terminal_id });
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(?terminal_id, required_seq, %error, "client-requested resync failed");
+            let _ = tx.send(Event::TerminalResyncUnavailable { terminal_id });
+        }
+        Err(_) => {
+            tracing::warn!(
+                ?terminal_id,
+                required_seq,
+                "client-requested resync timed out"
+            );
+            let _ = tx.send(Event::TerminalResyncUnavailable { terminal_id });
+        }
+    }
 }
 
 /// Walk every persisted workspace's `sessions` and spawn any whose
@@ -5925,6 +6034,7 @@ mod tests {
                 let _ = bus.send(Event::TerminalOutput {
                     terminal_id: id,
                     bytes: b"paint".to_vec(),
+                    first_seq: seq,
                     seq,
                 });
                 tokio::time::sleep(Duration::from_millis(40)).await;
@@ -5956,6 +6066,7 @@ mod tests {
                 let _ = bus.send(Event::TerminalOutput {
                     terminal_id: TerminalId(99),
                     bytes: b"noise".to_vec(),
+                    first_seq: seq,
                     seq,
                 });
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -5989,6 +6100,7 @@ mod tests {
                 let _ = bus.send(Event::TerminalOutput {
                     terminal_id: id,
                     bytes: b"spin".to_vec(),
+                    first_seq: seq,
                     seq,
                 });
                 tokio::time::sleep(Duration::from_millis(10)).await;

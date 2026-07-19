@@ -40,6 +40,7 @@ pub mod pty;
 pub mod slack;
 pub mod socket_service;
 pub mod spawn_handler;
+mod terminal_commands;
 
 use crate::backend::{RawPtyBackend, SessionBackend, TmuxBackend};
 use lazybox_agents::Registry;
@@ -321,6 +322,11 @@ pub struct ServerConfig {
     /// client re-renders the tier badge. Cleaned on `TerminalExited`
     /// alongside the other per-terminal maps.
     pub terminal_models: Arc<Mutex<HashMap<TerminalId, String>>>,
+    /// Per-backend-key serialization between prompt-state persistence and
+    /// terminal teardown. Draft/user-message writes run on a background lane;
+    /// without this boundary a delayed write could finish after teardown's
+    /// deletes and resurrect orphaned `terminal-draft:*` rows.
+    terminal_persistence_locks: Arc<parking_lot::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     /// Terminals whose agent-state detection buffer should be dropped
     /// on the pump's next output chunk. Set by `handle_write` when the
     /// user submits an answer to an `InputNeeded` prompt (Enter while
@@ -552,6 +558,7 @@ impl ServerConfig {
             no_permission_terminals: Arc::new(Mutex::new(HashSet::new())),
             on_main_terminals: Arc::new(Mutex::new(HashSet::new())),
             terminal_models: Arc::new(Mutex::new(HashMap::new())),
+            terminal_persistence_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             agent_detect_resets: Arc::new(Mutex::new(HashSet::new())),
             hook_driven_terminals: Arc::new(Mutex::new(HashMap::new())),
             prompt_submit_signals: Arc::new(Mutex::new(HashMap::new())),
@@ -690,6 +697,27 @@ impl ServerConfig {
     pub async fn agent_state_for(&self, id: TerminalId) -> Option<lazybox_ipc::AgentState> {
         self.agent_states.lock().await.get(&id).copied()
     }
+
+    /// Serialize durable prompt state with teardown for one backend session.
+    /// Callers re-check terminal liveness after acquiring: teardown may have
+    /// won the lock and removed the wire mapping while they waited.
+    pub(crate) async fn lock_terminal_persistence(
+        &self,
+        backend_key: &str,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        let entry = {
+            let mut locks = self.terminal_persistence_locks.lock();
+            locks.entry(backend_key.to_string()).or_default().clone()
+        };
+        entry.lock_owned().await
+    }
+
+    /// Drop the registry entry after teardown. Existing guards/waiters keep
+    /// their `Arc`; future stale writers create a fresh lock, re-check the now
+    /// absent terminal mapping, and skip without resurrecting state.
+    pub(crate) fn forget_terminal_persistence_lock(&self, backend_key: &str) {
+        self.terminal_persistence_locks.lock().remove(backend_key);
+    }
 }
 
 pub struct Server {
@@ -732,6 +760,21 @@ impl Server {
         // Completed entries are reaped at the top of each loop turn so
         // the set doesn't accumulate results unboundedly.
         let mut mutations = tokio::task::JoinSet::new();
+        // Order-sensitive terminal work runs off-loop, but never as one
+        // detached task per command: dedicated routers preserve FIFO order,
+        // isolate terminals, coalesce bursts, and keep SQLite drafts off the
+        // PTY input lane.
+        let (terminal_io_tx, terminal_io_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (terminal_persist_tx, terminal_persist_rx) = tokio::sync::mpsc::unbounded_channel();
+        let io_config = self.config.clone();
+        mutations.spawn(async move {
+            terminal_commands::run_io_router(io_config, terminal_io_rx).await;
+        });
+        let persistence_config = self.config.clone();
+        mutations.spawn(async move {
+            terminal_commands::run_persistence_router(persistence_config, terminal_persist_rx)
+                .await;
+        });
         loop {
             while mutations.try_join_next().is_some() {}
             tokio::select! {
@@ -814,8 +857,9 @@ impl Server {
                     //   * `Shutdown` is loop control (handled below).
                     //   * the INLINE lane is a small allow-list of
                     //     provably-fast, order-sensitive handlers
-                    //     (keystroke `Write`, `Resize`,
-                    //     `RecordUserMessage`, `Subscribe`).
+                    //     (`Subscribe` only).
+                    //   * terminal I/O/persistence use dedicated ordered
+                    //     background lanes (never the serve-loop task).
                     //   * EVERYTHING else — and any command added later,
                     //     which falls through to `_ => Detached` — runs on
                     //     the `mutations` JoinSet, so it physically cannot
@@ -850,6 +894,16 @@ impl Server {
                                     ms = elapsed.as_millis(),
                                     "daemon → handled inline"
                                 );
+                            }
+                        }
+                        CommandLane::TerminalIo => {
+                            if let Err(error) = terminal_io_tx.send(cmd) {
+                                tracing::warn!(command = ?error.0, "terminal I/O router closed");
+                            }
+                        }
+                        CommandLane::TerminalPersistence => {
+                            if let Err(error) = terminal_persist_tx.send(cmd) {
+                                tracing::warn!(command = ?error.0, "terminal persistence router closed");
                             }
                         }
                         CommandLane::Detached => {
@@ -934,6 +988,8 @@ impl Server {
                 }
             }
         }
+        drop(terminal_io_tx);
+        drop(terminal_persist_tx);
         // Drain detached mutation tasks before returning — `Shutdown =>
         // break` used to abandon an in-flight Kill / Spawn / inject
         // mid-write. Bounded: a wedged clone or git op must not hold
@@ -959,6 +1015,11 @@ enum CommandLane {
     /// Runs on the serve-loop task itself. Reserved for provably-fast,
     /// order-sensitive handlers; held to [`INLINE_BUDGET`] by a watchdog.
     Inline,
+    /// Per-terminal FIFO input/resize lane. Runs outside the serve loop.
+    TerminalIo,
+    /// Per-terminal FIFO durable prompt-state lane. Runs outside the serve
+    /// loop and independently from PTY input.
+    TerminalPersistence,
     /// Runs on the serve loop's `mutations` JoinSet so it can never hold
     /// the `select!`, no matter how slow the handler gets.
     Detached,
@@ -975,11 +1036,13 @@ enum CommandLane {
 fn command_lane(cmd: &lazybox_ipc::Command) -> CommandLane {
     use lazybox_ipc::Command;
     match cmd {
-        Command::Write { .. }
-        | Command::Resize { .. }
-        | Command::RecordUserMessage { .. }
-        | Command::RecordComposingBuffer { .. }
-        | Command::Subscribe => CommandLane::Inline,
+        Command::Write { .. } | Command::Resize { .. } | Command::Close { .. } => {
+            CommandLane::TerminalIo
+        }
+        Command::RecordUserMessage { .. } | Command::RecordComposingBuffer { .. } => {
+            CommandLane::TerminalPersistence
+        }
+        Command::Subscribe => CommandLane::Inline,
         _ => CommandLane::Detached,
     }
 }

@@ -671,3 +671,68 @@ async fn recovered_session_teardown_matches_main_pump() {
     .await
     .expect("test deadline exceeded");
 }
+
+/// Draft persistence runs on a background debounce lane. If the child exits
+/// while a revision is queued, that delayed write must not recreate the
+/// `terminal-draft:*` row after lifecycle teardown deleted it.
+#[tokio::test]
+async fn queued_draft_cannot_resurrect_metadata_after_terminal_exit() {
+    timeout(TEST_DEADLINE, async {
+        let _home = IsolatedConfigHome::new();
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let (mut client, server) = channel::pair();
+        let serve = tokio::spawn({
+            let config = config.clone();
+            async move { Server::new(config).serve(server).await }
+        });
+        client.send(Command::Subscribe).expect("subscribe");
+        let _ = client.recv().await.expect("snapshot");
+        let terminal_id = spawn_shell(&mut client).await;
+        let key = config
+            .backend_key_for(terminal_id)
+            .await
+            .expect("terminal registered");
+
+        client
+            .send(Command::RecordComposingBuffer {
+                terminal_id,
+                buffer: "must not come back".into(),
+            })
+            .expect("queue draft");
+        // Let the serve loop route the revision into its 25ms debounce, then
+        // make the output pump claim teardown before it persists.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        mock.finish(&key, 0).await;
+        wait_for(
+            &mut client,
+            |event| {
+                matches!(
+                    event,
+                    Event::TerminalExited { terminal_id: id, .. } if *id == terminal_id
+                )
+            },
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("terminal exit");
+
+        // Shutdown drains both routers, proving the queued revision has
+        // either run or been rejected before the final store assertion.
+        client.send(Command::Shutdown).expect("shutdown");
+        timeout(Duration::from_secs(2), serve)
+            .await
+            .expect("serve shutdown")
+            .expect("serve join")
+            .expect("serve result");
+        assert_eq!(
+            config
+                .store
+                .get_kv(&format!("terminal-draft:{key}"))
+                .expect("store read"),
+            None,
+            "late persistence must not resurrect a dead terminal's draft"
+        );
+    })
+    .await
+    .expect("test deadline exceeded");
+}

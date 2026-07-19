@@ -7,6 +7,7 @@ use lazybox_ipc::{
     Command, Event, HookEvent, HookEventKind, PrincipalId, ProviderCredentialInput, TerminalId,
     TerminalKind, channel,
 };
+use lazybox_server::backend::SessionBackend;
 use lazybox_server::{Server, ServerConfig};
 use std::time::Duration;
 
@@ -555,5 +556,397 @@ async fn a_stalled_handler_does_not_block_poll_forwarding() {
     assert!(
         elapsed < Duration::from_millis(1500),
         "poll forwarding was delayed {elapsed:?} by the stalled handler",
+    );
+}
+
+/// A PTY write is order-sensitive, but it is not "provably fast": a broken
+/// backend can await forever. The terminal command router must isolate that
+/// terminal while the serve loop continues forwarding bus events and another
+/// terminal's input proceeds independently.
+#[tokio::test]
+async fn a_wedged_terminal_write_does_not_block_the_bus_or_other_terminals() {
+    let (config, mock) = ServerConfig::in_memory_with_mock();
+    let key_a = mock.spawn(&[], None, &[], "a").await.expect("spawn a");
+    let key_b = mock.spawn(&[], None, &[], "b").await.expect("spawn b");
+    config.terminals.lock().await.extend([
+        (TerminalId(41), key_a.clone()),
+        (TerminalId(42), key_b.clone()),
+    ]);
+    mock.wedge_write(&key_a).await;
+
+    let bus = config.bus.clone();
+    let (mut client, server) = channel::pair();
+    let handle = tokio::spawn({
+        let config = config.clone();
+        async move { Server::new(config).serve(server).await }
+    });
+    client.send(Command::Subscribe).expect("subscribe");
+    let _ = tokio::time::timeout(Duration::from_secs(2), client.recv())
+        .await
+        .expect("snapshot deadline")
+        .expect("snapshot");
+
+    client
+        .send(Command::Write {
+            terminal_id: TerminalId(41),
+            bytes: b"wedged".to_vec(),
+        })
+        .expect("write a");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if mock.write_attempts().await.contains(&key_a) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("wedged write entered backend");
+
+    client
+        .send(Command::Write {
+            terminal_id: TerminalId(42),
+            bytes: b"responsive".to_vec(),
+        })
+        .expect("write b");
+    bus.send(Event::PollCompleted {
+        source: "github".into(),
+        count: 7,
+    })
+    .expect("bus subscriber");
+
+    tokio::time::timeout(Duration::from_millis(400), async {
+        loop {
+            if mock.writes_for(&key_b).await == vec![b"responsive".to_vec()] {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("terminal B write must bypass wedged terminal A");
+    let event = tokio::time::timeout(Duration::from_millis(400), async {
+        loop {
+            if let Some(event) = client.recv().await
+                && matches!(event, Event::PollCompleted { count: 7, .. })
+            {
+                break event;
+            }
+        }
+    })
+    .await
+    .expect("bus event must bypass wedged terminal write");
+    assert!(matches!(event, Event::PollCompleted { count: 7, .. }));
+
+    handle.abort();
+}
+
+/// A delayed backend call gives the client time to queue a key burst. The
+/// worker must preserve every byte in order while collapsing that burst into
+/// a bounded number of backend writes.
+#[tokio::test]
+async fn terminal_write_bursts_are_coalesced_without_reordering_bytes() {
+    let (config, mock) = ServerConfig::in_memory_with_mock();
+    let key = mock.spawn(&[], None, &[], "burst").await.expect("spawn");
+    config
+        .terminals
+        .lock()
+        .await
+        .insert(TerminalId(51), key.clone());
+    mock.set_write_delay(&key, Duration::from_millis(75)).await;
+
+    let (client, server) = channel::pair();
+    let handle = tokio::spawn({
+        let config = config.clone();
+        async move { Server::new(config).serve(server).await }
+    });
+    client
+        .send(Command::Write {
+            terminal_id: TerminalId(51),
+            bytes: b"0".to_vec(),
+        })
+        .expect("first write");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if mock.write_attempts().await.contains(&key) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first write entered backend");
+
+    let mut expected = b"0".to_vec();
+    for i in 1..=100u8 {
+        let byte = b'a' + (i % 26);
+        expected.push(byte);
+        client
+            .send(Command::Write {
+                terminal_id: TerminalId(51),
+                bytes: vec![byte],
+            })
+            .expect("queued write");
+    }
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let writes = mock.writes_for(&key).await;
+            if writes.iter().map(Vec::len).sum::<usize>() == expected.len() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("burst delivered");
+    let writes = mock.writes_for(&key).await;
+    assert_eq!(
+        writes.concat(),
+        expected,
+        "byte order and content are exact"
+    );
+    assert_eq!(writes.len(), 2, "100 queued keys collapse into one batch");
+
+    client.send(Command::Shutdown).expect("shutdown");
+    tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("serve shutdown")
+        .expect("join")
+        .expect("serve result");
+}
+
+/// Resize notifications describe the latest geometry; intermediate drag
+/// positions are obsolete once a newer resize is queued. The terminal lane
+/// must collapse a storm without moving it across a Write ordering barrier.
+#[tokio::test]
+async fn terminal_resize_storm_collapses_to_latest_before_next_write() {
+    let (config, mock) = ServerConfig::in_memory_with_mock();
+    let key = mock
+        .spawn(&[], None, &[], "resize-storm")
+        .await
+        .expect("spawn");
+    config
+        .terminals
+        .lock()
+        .await
+        .insert(TerminalId(52), key.clone());
+    // Hold the worker in its first command while the resize storm queues.
+    mock.set_write_delay(&key, Duration::from_millis(75)).await;
+
+    let (client, server) = channel::pair();
+    let handle = tokio::spawn({
+        let config = config.clone();
+        async move { Server::new(config).serve(server).await }
+    });
+    client
+        .send(Command::Write {
+            terminal_id: TerminalId(52),
+            bytes: b"before".to_vec(),
+        })
+        .expect("first write");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if mock.write_attempts().await.contains(&key) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first write entered backend");
+
+    for step in 1..=50u16 {
+        client
+            .send(Command::Resize {
+                terminal_id: TerminalId(52),
+                cols: 80 + step,
+                rows: 20 + step,
+            })
+            .expect("queued resize");
+    }
+    client
+        .send(Command::Write {
+            terminal_id: TerminalId(52),
+            bytes: b"after".to_vec(),
+        })
+        .expect("ordering barrier");
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if mock.writes_for(&key).await.concat() == b"beforeafter" {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("resize and trailing write delivered");
+    assert_eq!(
+        mock.resizes_for(&key).await,
+        vec![(130, 70)],
+        "only the newest consecutive geometry reaches the backend"
+    );
+
+    client.send(Command::Shutdown).expect("shutdown");
+    tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("serve shutdown")
+        .expect("join")
+        .expect("serve result");
+}
+
+/// Resize can wedge just like Write (a stalled tmux control client is enough).
+/// Its per-terminal deadline and worker isolation must leave other terminals
+/// responsive instead of freezing all input behind the resize.
+#[tokio::test]
+async fn a_wedged_terminal_resize_does_not_block_other_terminals() {
+    let (config, mock) = ServerConfig::in_memory_with_mock();
+    let key_a = mock
+        .spawn(&[], None, &[], "resize-a")
+        .await
+        .expect("spawn a");
+    let key_b = mock
+        .spawn(&[], None, &[], "resize-b")
+        .await
+        .expect("spawn b");
+    config.terminals.lock().await.extend([
+        (TerminalId(53), key_a.clone()),
+        (TerminalId(54), key_b.clone()),
+    ]);
+    mock.wedge_resize(&key_a).await;
+
+    let (client, server) = channel::pair();
+    let handle = tokio::spawn({
+        let config = config.clone();
+        async move { Server::new(config).serve(server).await }
+    });
+    client
+        .send(Command::Resize {
+            terminal_id: TerminalId(53),
+            cols: 120,
+            rows: 40,
+        })
+        .expect("wedged resize");
+    // Give the first terminal's worker a chance to enter the backend.
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    client
+        .send(Command::Write {
+            terminal_id: TerminalId(54),
+            bytes: b"still-responsive".to_vec(),
+        })
+        .expect("write b");
+
+    tokio::time::timeout(Duration::from_millis(400), async {
+        loop {
+            if mock.writes_for(&key_b).await == vec![b"still-responsive".to_vec()] {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("terminal B must bypass terminal A's wedged resize");
+
+    client.send(Command::Shutdown).expect("shutdown");
+    tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("serve shutdown")
+        .expect("join")
+        .expect("serve result");
+}
+
+/// A rejected Close is not terminal: the backend session still exists and
+/// the user must be able to keep typing (and retry Close) on the same lane.
+#[tokio::test]
+async fn failed_terminal_close_keeps_the_io_lane_alive() {
+    let (config, mock) = ServerConfig::in_memory_with_mock();
+    let key = mock
+        .spawn(&[], None, &[], "close-failure")
+        .await
+        .expect("spawn");
+    config
+        .terminals
+        .lock()
+        .await
+        .insert(TerminalId(55), key.clone());
+    mock.fail_kill(&key, "backend transport timed out").await;
+
+    let (client, server) = channel::pair();
+    let handle = tokio::spawn({
+        let config = config.clone();
+        async move { Server::new(config).serve(server).await }
+    });
+    client
+        .send(Command::Close {
+            terminal_id: TerminalId(55),
+        })
+        .expect("close");
+    client
+        .send(Command::Write {
+            terminal_id: TerminalId(55),
+            bytes: b"after-failed-close".to_vec(),
+        })
+        .expect("write after failed close");
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if mock.writes_for(&key).await == vec![b"after-failed-close".to_vec()] {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("failed Close must not retire the terminal's I/O worker");
+
+    client.send(Command::Shutdown).expect("shutdown");
+    tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("serve shutdown")
+        .expect("join")
+        .expect("serve result");
+}
+
+/// Draft persistence has its own ordered lane and debounce. A typing burst
+/// therefore commits the latest revision, not one SQLite transaction per
+/// character or an older task that happened to finish last.
+#[tokio::test]
+async fn composing_burst_persists_the_latest_ordered_revision() {
+    let (config, mock) = ServerConfig::in_memory_with_mock();
+    let key = mock.spawn(&[], None, &[], "draft").await.expect("spawn");
+    config
+        .terminals
+        .lock()
+        .await
+        .insert(TerminalId(61), key.clone());
+    let (client, server) = channel::pair();
+    let handle = tokio::spawn({
+        let config = config.clone();
+        async move { Server::new(config).serve(server).await }
+    });
+
+    for revision in 1..=100 {
+        client
+            .send(Command::RecordComposingBuffer {
+                terminal_id: TerminalId(61),
+                buffer: format!("draft-{revision}"),
+            })
+            .expect("draft revision");
+    }
+    client.send(Command::Shutdown).expect("shutdown");
+    tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("serve shutdown")
+        .expect("join")
+        .expect("serve result");
+
+    assert_eq!(
+        config
+            .store
+            .get_kv(&format!("terminal-draft:{key}"))
+            .expect("store read")
+            .as_deref(),
+        Some("draft-100")
     );
 }

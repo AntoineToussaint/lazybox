@@ -1441,6 +1441,7 @@ async fn wedged_session_does_not_block_subscribe_or_subsequent_spawn() {
             terminals[0].replay.is_empty(),
             "wedged session degraded to empty replay, not a real one"
         );
+        assert!(!terminals[0].replay_available);
 
         // The real bug symptom: subsequent Spawn never reaches the
         // daemon. Issue one and confirm the daemon processes it end
@@ -1466,6 +1467,44 @@ async fn wedged_session_does_not_block_subscribe_or_subsequent_spawn() {
             spawned.is_some(),
             "post-wedge Spawn must reach the daemon and emit TerminalSpawned"
         );
+    })
+    .await
+    .expect("deadline");
+}
+
+/// Per-session deadlines must run concurrently. Four wedged terminals should
+/// cost roughly one 500ms deadline, not four serialized deadlines that freeze
+/// the Subscribe lane for two seconds.
+#[tokio::test]
+async fn wedged_terminal_snapshots_are_acquired_with_bounded_concurrency() {
+    timeout(TEST_DEADLINE, async {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut producer = subscribed(config.clone()).await;
+        for _ in 0..4 {
+            let _ = spawn_and_wait(&mut producer, TerminalKind::Shell).await;
+        }
+        let keys = mock.list().await.expect("list sessions");
+        assert_eq!(keys.len(), 4);
+        for key in &keys {
+            mock.wedge_snapshot(key).await;
+        }
+
+        let mut consumer = run_daemon(config).await;
+        let started = tokio::time::Instant::now();
+        consumer.send(Command::Subscribe).expect("subscribe");
+        let event = timeout(Duration::from_millis(1_500), consumer.recv())
+            .await
+            .expect("four wedged snapshots serialized instead of running concurrently")
+            .expect("connection open");
+        assert!(
+            started.elapsed() < Duration::from_millis(1_500),
+            "snapshot assembly exceeded the bounded-concurrency deadline"
+        );
+        let Event::Snapshot { terminals, .. } = event else {
+            panic!("expected Snapshot, got {event:?}");
+        };
+        assert_eq!(terminals.len(), 4);
+        assert!(terminals.iter().all(|terminal| !terminal.replay_available));
     })
     .await
     .expect("deadline");

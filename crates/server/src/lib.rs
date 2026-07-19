@@ -595,7 +595,7 @@ impl ServerConfig {
     /// prepare→commit for one workspace can await the network of
     /// store scans; a global lock would queue the user's mark-read on
     /// an unrelated workspace behind it. Operations spanning multiple
-    /// workspaces must use [`ServerConfig::lock_workspaces`], which sorts
+    /// workspaces must use the internal `lock_workspaces` helper, which sorts
     /// and deduplicates keys before acquisition.
     pub async fn lock_workspace(&self, key: &str) -> tokio::sync::OwnedMutexGuard<()> {
         let entry = self.workspace_lock_entry(key);

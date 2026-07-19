@@ -9,11 +9,13 @@
 
 use crate::transport;
 use crate::{
-    BUILD_VERSION, Client, Command, Connection, EVENT_CHANNEL_CAPACITY, Event, EventForward,
-    MAX_FRAME_BYTES, PROTOCOL_MAGIC, PROTOCOL_VERSION,
+    BUILD_VERSION, COMMAND_CHANNEL_CAPACITY, Client, Command, Connection, EVENT_CHANNEL_CAPACITY,
+    Event, MAX_COMMAND_FRAME_BYTES, MAX_FRAME_BYTES, PROTOCOL_MAGIC, PROTOCOL_VERSION,
+    event_forward_channel,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::path::Path;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 
@@ -21,7 +23,7 @@ use tokio::sync::mpsc;
 pub enum FrameError {
     #[error("I/O: {0}")]
     Io(#[from] std::io::Error),
-    #[error("frame too large ({0} bytes); max is {MAX_FRAME_BYTES}")]
+    #[error("frame too large ({0} bytes); exceeds this channel's limit")]
     TooLarge(u32),
     #[error("encode: {0}")]
     Encode(#[from] bincode::error::EncodeError),
@@ -81,6 +83,10 @@ impl PeerInfo {
 /// Cap on the exchanged build-version string (it's a semver + short SHA,
 /// well under this). Bounds the allocation a malformed peer can request.
 const MAX_BUILD_BYTES: usize = 256;
+
+/// Maximum time either side should let a connected peer occupy resources
+/// without completing the fixed-size protocol/build handshake.
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Write this side's 8-byte preamble: magic + version (u32 LE).
 async fn write_preamble<W>(w: &mut W) -> std::io::Result<()>
@@ -193,6 +199,23 @@ where
     read_build(rd).await
 }
 
+async fn client_handshake_with_timeout<R, W>(
+    rd: &mut R,
+    wr: &mut W,
+    timeout: Duration,
+) -> std::io::Result<PeerInfo>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    tokio::time::timeout(timeout, client_handshake(rd, wr))
+        .await
+        .map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "protocol handshake timed out")
+        })?
+        .map_err(|error| std::io::Error::other(error.to_string()))
+}
+
 /// Encode one message as a length-prefixed wire frame:
 /// `[u32 BE length][bincode payload]`. Shared by the single-frame
 /// writer and the batching event writer so the framing (and the
@@ -233,6 +256,14 @@ where
     R: AsyncRead + Unpin,
     T: DeserializeOwned,
 {
+    read_frame_limited(r, MAX_FRAME_BYTES).await
+}
+
+async fn read_frame_limited<R, T>(r: &mut R, max_frame_bytes: u32) -> Result<Option<T>, FrameError>
+where
+    R: AsyncRead + Unpin,
+    T: DeserializeOwned,
+{
     let mut len_buf = [0u8; 4];
     match r.read_exact(&mut len_buf).await {
         Ok(_) => {}
@@ -240,7 +271,7 @@ where
         Err(e) => return Err(e.into()),
     }
     let len = u32::from_be_bytes(len_buf);
-    if len > MAX_FRAME_BYTES {
+    if len > max_frame_bytes {
         return Err(FrameError::TooLarge(len));
     }
     let mut buf = vec![0u8; len as usize];
@@ -265,10 +296,8 @@ pub async fn connect(path: &Path) -> std::io::Result<(Client, PeerInfo)> {
     let (mut rd, mut wr) = transport::connect(path)
         .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    let peer = client_handshake(&mut rd, &mut wr)
-        .await
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();
+    let peer = client_handshake_with_timeout(&mut rd, &mut wr, HANDSHAKE_TIMEOUT).await?;
+    let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(COMMAND_CHANNEL_CAPACITY);
     // Events are read into a BOUNDED channel: when the TUI falls behind
     // and `Client::rx` fills, `reader_loop_bounded` blocks on the send,
     // which stops draining the socket and back-pressures all the way to
@@ -277,18 +306,18 @@ pub async fn connect(path: &Path) -> std::io::Result<(Client, PeerInfo)> {
     let (evt_tx, evt_rx) = mpsc::channel::<Event>(EVENT_CHANNEL_CAPACITY);
 
     // Writer task: drain Commands from TUI, frame them onto the socket.
-    tokio::spawn(writer_loop(wr, cmd_rx));
+    tokio::spawn(writer_loop_bounded(wr, cmd_rx));
     // Reader task: parse framed Events from the socket, push to TUI.
-    tokio::spawn(reader_loop_bounded(rd, evt_tx));
+    tokio::spawn(reader_loop_bounded(rd, evt_tx, MAX_FRAME_BYTES));
 
-    Ok((Client::from_channels(cmd_tx, evt_rx), peer))
+    Ok((Client::from_bounded_channels(cmd_tx, evt_rx), peer))
 }
 
 /// Connection-side: wrap an accepted socket as a `Connection` handle.
 ///
 /// Mirrors [`channel::pair`](crate::channel::pair): the serve loop
-/// writes raw events to an unbounded `tx`; the server-spawned forwarder
-/// bridges them into a **bounded** channel that the `writer_loop`
+/// writes raw events to a bounded non-blocking `tx`; the server-spawned
+/// forwarder bridges them into a **bounded** channel that the `writer_loop`
 /// frames onto the socket. A full bounded channel back-pressures the
 /// forwarder (which then drops + re-syncs `TerminalOutput`), so the
 /// daemon's send side can't grow without bound when a remote client
@@ -298,25 +327,12 @@ where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();
-    let (raw_tx, raw_rx) = mpsc::unbounded_channel::<Event>();
+    let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(COMMAND_CHANNEL_CAPACITY);
     let (client_tx, client_rx) = mpsc::channel::<Event>(EVENT_CHANNEL_CAPACITY);
-    tokio::spawn(reader_loop(rd, cmd_tx));
+    let (raw_tx, forward) = event_forward_channel(client_tx);
+    tokio::spawn(reader_loop_bounded(rd, cmd_tx, MAX_COMMAND_FRAME_BYTES));
     tokio::spawn(writer_loop_bounded(wr, client_rx));
-    Connection::with_forward(raw_tx, cmd_rx, EventForward { raw_rx, client_tx })
-}
-
-async fn writer_loop<W, M>(mut w: W, mut rx: mpsc::UnboundedReceiver<M>)
-where
-    W: AsyncWrite + Unpin,
-    M: Serialize,
-{
-    while let Some(msg) = rx.recv().await {
-        if let Err(e) = write_frame(&mut w, &msg).await {
-            tracing::warn!("writer: {e}");
-            break;
-        }
-    }
+    Connection::with_forward(raw_tx, cmd_rx, forward)
 }
 
 /// Upper bounds for one batched event write in
@@ -391,37 +407,16 @@ where
     w.flush().await
 }
 
-async fn reader_loop<R, M>(mut r: R, tx: mpsc::UnboundedSender<M>)
-where
-    R: AsyncRead + Unpin,
-    M: DeserializeOwned,
-{
-    loop {
-        match read_frame::<_, M>(&mut r).await {
-            Ok(Some(msg)) => {
-                if tx.send(msg).is_err() {
-                    break;
-                }
-            }
-            Ok(None) => break, // clean EOF
-            Err(e) => {
-                tracing::warn!("reader: {e}");
-                break;
-            }
-        }
-    }
-}
-
 /// Bounded-channel reader. Like [`reader_loop`] but `.send().await`s on
 /// a bounded `Sender`, so a full channel stalls socket reads and
 /// back-pressures the peer instead of buffering frames without bound.
-async fn reader_loop_bounded<R, M>(mut r: R, tx: mpsc::Sender<M>)
+async fn reader_loop_bounded<R, M>(mut r: R, tx: mpsc::Sender<M>, max_frame_bytes: u32)
 where
     R: AsyncRead + Unpin,
     M: DeserializeOwned,
 {
     loop {
-        match read_frame::<_, M>(&mut r).await {
+        match read_frame_limited::<_, M>(&mut r, max_frame_bytes).await {
             Ok(Some(msg)) => {
                 if tx.send(msg).await.is_err() {
                     break;
@@ -444,6 +439,16 @@ mod batching_tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll};
+
+    #[tokio::test]
+    async fn client_handshake_times_out_when_peer_stays_silent() {
+        let (client, _silent_peer) = tokio::io::duplex(64);
+        let (mut rd, mut wr) = tokio::io::split(client);
+        let error = client_handshake_with_timeout(&mut rd, &mut wr, Duration::from_millis(10))
+            .await
+            .expect_err("silent peer must not hold the client forever");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    }
 
     /// AsyncWrite wrapper counting `poll_flush` completions, so the
     /// tests can assert the greedy drain really coalesces N queued
@@ -483,6 +488,59 @@ mod batching_tests {
             terminal_id: TerminalId(i),
             bytes: vec![b'x'; 8],
         }
+    }
+
+    #[tokio::test]
+    async fn bounded_reader_stops_draining_when_command_admission_is_full() {
+        let (mut peer, daemon) = tokio::io::duplex(4096);
+        let (tx, mut rx) = mpsc::channel::<Command>(2);
+        let reader = tokio::spawn(reader_loop_bounded(daemon, tx, MAX_COMMAND_FRAME_BYTES));
+
+        for index in 0..3 {
+            write_frame(&mut peer, &cmd(index))
+                .await
+                .expect("wire write");
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while rx.len() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("reader fills bounded admission");
+        assert_eq!(rx.len(), 2, "the third decoded command waits at send");
+
+        assert!(matches!(rx.recv().await, Some(Command::Write { .. })));
+        let third = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while rx.len() < 2 {
+                tokio::task::yield_now().await;
+            }
+            rx.recv().await
+        })
+        .await
+        .expect("capacity release resumes socket read");
+        assert!(matches!(third, Some(Command::Write { .. })));
+
+        drop(peer);
+        drop(rx);
+        reader.await.expect("reader task");
+    }
+
+    #[tokio::test]
+    async fn command_reader_rejects_frames_above_the_command_specific_cap() {
+        let (mut peer, daemon) = tokio::io::duplex(64);
+        let (tx, mut rx) = mpsc::channel::<Command>(1);
+        let reader = tokio::spawn(reader_loop_bounded(daemon, tx, MAX_COMMAND_FRAME_BYTES));
+        peer.write_all(&(MAX_COMMAND_FRAME_BYTES + 1).to_be_bytes())
+            .await
+            .expect("length prefix");
+        peer.flush().await.expect("flush");
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), reader)
+            .await
+            .expect("oversized frame rejected promptly")
+            .expect("reader task");
+        assert!(rx.recv().await.is_none());
     }
 
     /// Pre-queued messages must arrive intact and in order through the

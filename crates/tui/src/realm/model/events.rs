@@ -338,7 +338,8 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::ProviderCredentialUpdated { .. }
                 | IpcEvent::ProviderCredentialRemoved { .. }
                 | IpcEvent::ProviderCredentialsListed { .. }
-                | IpcEvent::TerminalInputRejected { .. } => {}
+                | IpcEvent::TerminalInputRejected { .. }
+                | IpcEvent::CommandRejected { .. } => {}
             }
         }
         // Agent-state pings repeat at the detector's cadence while an
@@ -801,7 +802,8 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::ProviderCredentialUpdated { .. }
             | IpcEvent::ProviderCredentialRemoved { .. }
             | IpcEvent::ProviderCredentialsListed { .. }
-            | IpcEvent::TerminalInputRejected { .. } => {}
+            | IpcEvent::TerminalInputRejected { .. }
+            | IpcEvent::CommandRejected { .. } => {}
         }
         // Background-poll indicator. Lights up whenever the daemon
         // emits PollProgress (any cycle, initial or not); clears on
@@ -957,7 +959,8 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::ProviderCredentialUpdated { .. }
                 | IpcEvent::ProviderCredentialRemoved { .. }
                 | IpcEvent::ProviderCredentialsListed { .. }
-                | IpcEvent::TerminalInputRejected { .. } => {}
+                | IpcEvent::TerminalInputRejected { .. }
+                | IpcEvent::CommandRejected { .. } => {}
             }
         }
         // CleanWorktrees finished — replace the "cleaning…" notice
@@ -982,6 +985,12 @@ impl<T: TerminalAdapter> Model<T> {
         if let IpcEvent::TerminalInputRejected { message, .. } = &event {
             self.flash(
                 format!("⚠ terminal input not delivered — {message}"),
+                crate::realm::components::footer::NoticeSeverity::Retryable,
+            );
+        }
+        if let IpcEvent::CommandRejected { command, message } = &event {
+            self.flash(
+                format!("⚠ {command} was not accepted — {message}"),
                 crate::realm::components::footer::NoticeSeverity::Retryable,
             );
         }

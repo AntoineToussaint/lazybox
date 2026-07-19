@@ -26,9 +26,15 @@ use tokio::sync::mpsc;
 
 /// Server-side handle for a running structured agent process.
 pub struct AgentRunHandle {
-    pub input_tx: mpsc::UnboundedSender<AgentInputMessage>,
-    pub abort: tokio::task::AbortHandle,
+    pub input_tx: mpsc::Sender<AgentInputMessage>,
+    pub task: tokio::task::JoinHandle<()>,
 }
+
+/// Per-run follow-up backlog. Structured agents process turns serially; a
+/// client that submits faster than the child can finish must receive overload
+/// errors instead of retaining arbitrary prompts for the lifetime of the
+/// daemon.
+pub const AGENT_INPUT_CHANNEL_CAPACITY: usize = 64;
 
 pub async fn handle_start_agent_run(
     config: &ServerConfig,
@@ -115,19 +121,17 @@ pub async fn handle_start_agent_run(
     };
 
     let run_id = AgentRunId(config.next_agent_run_id.fetch_add(1, Ordering::Relaxed));
-    let (input_tx, input_rx) = mpsc::unbounded_channel();
+    let (input_tx, input_rx) = mpsc::channel(AGENT_INPUT_CHANNEL_CAPACITY);
 
     let bus = config.bus.clone();
     let runs = config.agent_runs.clone();
     let spawner = config.agent_stream_spawner.clone();
     let session_key_for_task = session_key.clone();
     let agent_for_event = agent.clone();
-    // Gate the spawned task on a oneshot so it can't reach the
-    // post-completion `runs.remove(&run_id)` before the outer code
-    // has inserted the handle. Without the gate, a child process
-    // that exits immediately (bad argv, missing binary) could let
-    // `drive_agent_stream` return before the insert lands, leaving
-    // a stale orphan handle in the map.
+    // Gate the spawned task on a oneshot so it can't run before the outer code
+    // has inserted the handle, published AgentRunStarted, and queued initial
+    // input. Without the gate, an immediately exiting child could both leave
+    // a stale orphan handle and publish Finished before Started.
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
     let task = tokio::spawn(async move {
         let _ = ready_rx.await;
@@ -157,17 +161,13 @@ pub async fn handle_start_agent_run(
             });
         }
     });
-    let abort = task.abort_handle();
-
     config.agent_runs.lock().await.insert(
         run_id,
         AgentRunHandle {
             input_tx: input_tx.clone(),
-            abort,
+            task,
         },
     );
-    let _ = ready_tx.send(());
-
     let _ = config.bus.send(Event::AgentRunStarted {
         run_id,
         session_key: session_key_for_task,
@@ -176,9 +176,19 @@ pub async fn handle_start_agent_run(
         mode,
     });
 
-    if let Some(input) = initial_input {
-        let _ = input_tx.send(input);
+    if let Some(input) = initial_input
+        && let Err(error) = input_tx.try_send(input)
+    {
+        let _ = config.bus.send(Event::provider_error_retryable(
+            "agent_run:input",
+            format!("initial agent input was not accepted: {error}"),
+        ));
     }
+    // Release only after the complete run-start contract is externally
+    // visible and its initial input is queued. On a multi-thread runtime the
+    // child task can run the instant this signal is sent; releasing earlier
+    // allowed an immediate-EOF child to publish Finished before Started.
+    let _ = ready_tx.send(());
 }
 
 pub async fn handle_send_agent_input(
@@ -186,19 +196,34 @@ pub async fn handle_send_agent_input(
     run_id: AgentRunId,
     message: AgentInputMessage,
 ) {
-    let runs = config.agent_runs.lock().await;
-    let Some(run) = runs.get(&run_id) else {
-        let _ = config.bus.send(Event::provider_error_permanent(
-            "agent_run",
-            format!("unknown agent run {:?}", run_id),
-        ));
-        return;
+    let input_tx = {
+        let runs = config.agent_runs.lock().await;
+        let Some(run) = runs.get(&run_id) else {
+            let _ = config.bus.send(Event::provider_error_permanent(
+                "agent_run",
+                format!("unknown agent run {:?}", run_id),
+            ));
+            return;
+        };
+        run.input_tx.clone()
     };
-    if run.input_tx.send(message).is_err() {
-        let _ = config.bus.send(Event::provider_error_permanent(
-            "agent_run",
-            format!("agent run {:?} input channel is closed", run_id),
-        ));
+    match input_tx.try_send(message) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            let _ = config.bus.send(Event::provider_error_retryable(
+                "agent_run:input",
+                format!(
+                    "agent run {:?} input queue is full; wait for the current turn and retry",
+                    run_id
+                ),
+            ));
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            let _ = config.bus.send(Event::provider_error_permanent(
+                "agent_run",
+                format!("agent run {:?} input channel is closed", run_id),
+            ));
+        }
     }
 }
 
@@ -206,7 +231,8 @@ pub async fn handle_interrupt_agent_run(config: &ServerConfig, run_id: AgentRunI
     let Some(run) = config.agent_runs.lock().await.remove(&run_id) else {
         return;
     };
-    run.abort.abort();
+    run.task.abort();
+    let _ = run.task.await;
     let _ = config.bus.send(Event::AgentRunFinished {
         run_id,
         exit_code: None,
@@ -303,7 +329,7 @@ async fn drive_agent_stream(
     io: AgentStreamIo,
     config: AgentStreamConfig,
     spawner: Arc<dyn AgentStreamSpawner>,
-    input_rx: mpsc::UnboundedReceiver<AgentInputMessage>,
+    input_rx: mpsc::Receiver<AgentInputMessage>,
     bus: tokio::sync::broadcast::Sender<Event>,
 ) -> DriveOutcome {
     match protocol {
@@ -321,7 +347,7 @@ async fn drive_persistent_stream(
     run_id: AgentRunId,
     protocol: StructuredAgentProtocol,
     io: AgentStreamIo,
-    mut input_rx: mpsc::UnboundedReceiver<AgentInputMessage>,
+    mut input_rx: mpsc::Receiver<AgentInputMessage>,
     bus: tokio::sync::broadcast::Sender<Event>,
 ) -> DriveOutcome {
     let AgentStreamIo {
@@ -388,7 +414,7 @@ async fn drive_codex_exec(
     first_io: AgentStreamIo,
     base_config: AgentStreamConfig,
     spawner: Arc<dyn AgentStreamSpawner>,
-    mut input_rx: mpsc::UnboundedReceiver<AgentInputMessage>,
+    mut input_rx: mpsc::Receiver<AgentInputMessage>,
     bus: tokio::sync::broadcast::Sender<Event>,
 ) -> DriveOutcome {
     let protocol = StructuredAgentProtocol::CodexExecJson;

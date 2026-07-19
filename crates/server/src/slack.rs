@@ -296,7 +296,7 @@ async fn run(
 ///
 /// Events whose handling performs Slack HTTP (`TerminalSpawned`
 /// channel creation + header post, `AgentState` notifications) run
-/// on detached tasks so a slow `slack.com` round-trip can't stall
+/// on owned tasks so a slow `slack.com` round-trip can't stall
 /// the select loop into broadcast lag. Trade-off, accepted and
 /// deliberate: status-style posts may reorder relative to each
 /// other, and a notification racing its own terminal's spawn may be
@@ -304,6 +304,24 @@ async fn run(
 /// rescan plus the next notification self-heal both cases. Cheap
 /// state-only bookkeeping (`TerminalOutput`, `TerminalExited`) stays
 /// inline to preserve its ordering.
+///
+/// HTTP work is capped. At saturation the driver waits for one owned task to
+/// finish before spawning another; broadcast lag recovery is preferable to
+/// either exceeding the declared concurrency ceiling or growing a task pile.
+const MAX_SLACK_HTTP_TASKS: usize = 32;
+
+fn slack_http_capacity(tasks: &tokio::task::JoinSet<()>) -> bool {
+    tasks.len() < MAX_SLACK_HTTP_TASKS
+}
+
+async fn await_slack_http_capacity(tasks: &mut tokio::task::JoinSet<()>) {
+    if !slack_http_capacity(tasks)
+        && let Some(Err(error)) = tasks.join_next().await
+    {
+        tracing::warn!("slack HTTP task failed: {error}");
+    }
+}
+
 async fn drive(
     provider: Arc<dyn ChatProvider>,
     config: ServerConfig,
@@ -313,7 +331,13 @@ async fn drive(
     bot_user_id: &str,
 ) {
     use lazybox_ipc::Event;
+    let mut http_tasks = tokio::task::JoinSet::new();
     loop {
+        while let Some(result) = http_tasks.try_join_next() {
+            if let Err(error) = result {
+                tracing::warn!("slack HTTP task failed: {error}");
+            }
+        }
         tokio::select! {
             biased;
             evt = bus_rx.recv() => {
@@ -323,7 +347,15 @@ async fn drive(
                         let provider = provider.clone();
                         let config = config.clone();
                         let state = state.clone();
-                        tokio::spawn(async move {
+                        if !slack_http_capacity(&http_tasks) {
+                            tracing::warn!(
+                                max = MAX_SLACK_HTTP_TASKS,
+                                "slack HTTP task limit reached — applying bus backpressure"
+                            );
+                            await_slack_http_capacity(&mut http_tasks).await;
+                        }
+                        debug_assert!(slack_http_capacity(&http_tasks));
+                        http_tasks.spawn(async move {
                             chat::handle_bus_event(&*provider, &config, &state, e).await;
                         });
                     }
@@ -350,6 +382,7 @@ async fn drive(
             }
         }
     }
+    http_tasks.shutdown().await;
 }
 
 /// Normalize Slack's wire-level inbound shape into the chat layer's
@@ -442,6 +475,32 @@ mod tests {
         )
         .await
         .expect("drive should return promptly once the bus closes");
+    }
+
+    #[tokio::test]
+    async fn slack_http_tasks_have_a_hard_concurrency_cap() {
+        let mut tasks = tokio::task::JoinSet::new();
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release_one = release.clone();
+        tasks.spawn(async move { release_one.notified().await });
+        for _ in 1..MAX_SLACK_HTTP_TASKS {
+            assert!(slack_http_capacity(&tasks));
+            tasks.spawn(std::future::pending::<()>());
+        }
+        assert!(!slack_http_capacity(&tasks));
+        assert_eq!(tasks.len(), MAX_SLACK_HTTP_TASKS);
+
+        release.notify_one();
+        await_slack_http_capacity(&mut tasks).await;
+        assert!(slack_http_capacity(&tasks));
+        assert_eq!(tasks.len(), MAX_SLACK_HTTP_TASKS - 1);
+
+        // The driver only spawns after the awaited slot exists, so active HTTP
+        // work returns to — but can never exceed — the declared cap.
+        tasks.spawn(std::future::pending::<()>());
+        assert!(!slack_http_capacity(&tasks));
+        assert_eq!(tasks.len(), MAX_SLACK_HTTP_TASKS);
+        tasks.shutdown().await;
     }
 
     #[test]

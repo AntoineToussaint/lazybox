@@ -1,13 +1,15 @@
 use crate::ServerConfig;
 use chrono::{DateTime, Utc};
 use lazybox_auth::Credential;
-use lazybox_ipc::{Event, PrincipalId, ProviderCredentialInput, ProviderCredentialMetadata};
+use lazybox_ipc::{
+    Event, EventSender, PrincipalId, ProviderCredentialInput, ProviderCredentialMetadata,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::Mutex;
 
 pub type CredentialStoreFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, CredentialStoreError>> + Send + 'a>>;
@@ -204,7 +206,7 @@ impl CredentialStore for MemoryCredentialStore {
 
 pub async fn handle_upsert_provider_credential(
     config: &ServerConfig,
-    tx: &mpsc::UnboundedSender<Event>,
+    tx: &EventSender,
     principal_id: PrincipalId,
     input: ProviderCredentialInput,
 ) {
@@ -234,7 +236,7 @@ pub async fn handle_upsert_provider_credential(
 
 pub async fn handle_remove_provider_credential(
     config: &ServerConfig,
-    tx: &mpsc::UnboundedSender<Event>,
+    tx: &EventSender,
     principal_id: PrincipalId,
     provider_id: String,
 ) {
@@ -257,7 +259,7 @@ pub async fn handle_remove_provider_credential(
 
 pub async fn handle_list_provider_credentials(
     config: &ServerConfig,
-    tx: &mpsc::UnboundedSender<Event>,
+    tx: &EventSender,
     principal_id: PrincipalId,
 ) {
     match config
@@ -288,11 +290,7 @@ fn into_core_metadata(metadata: StoredCredentialMetadata) -> ProviderCredentialM
     }
 }
 
-fn send_auth_error(
-    tx: &mpsc::UnboundedSender<Event>,
-    provider_id: &str,
-    error: CredentialStoreError,
-) {
+fn send_auth_error(tx: &EventSender, provider_id: &str, error: CredentialStoreError) {
     let _ = tx.send(Event::provider_error(
         &format!("auth:{provider_id}"),
         error.to_string(),

@@ -1973,9 +1973,9 @@ snippets:
 mod input_starvation_tests {
     //! Regression: a chatty agent must NEVER block the keyboard.
     //!
-    //! The daemon emits one `TerminalOutput` per PTY chunk into an
-    //! *unbounded* channel. The run loop used to drain it with an
-    //! unbounded `while let Ok(..)`, so under sustained agent output
+    //! The daemon emits one `TerminalOutput` per PTY chunk and can keep
+    //! the bounded inbound channel continuously non-empty. The run loop used
+    //! to drain it with an unbounded `while let Ok(..)`, so under sustained agent output
     //! `try_recv` never returned `Empty`, the loop never reached the
     //! keyboard read, and the user "couldn't type in the agent" until
     //! the burst ended. `drain_daemon_events` now caps the work per
@@ -2022,6 +2022,15 @@ mod input_starvation_tests {
         }
     }
 
+    fn flood_size() -> usize {
+        let flooded = (MAX_EVENTS_PER_TICK * 4).min(EVENT_CHANNEL_CAPACITY - 1);
+        assert!(
+            flooded > MAX_EVENTS_PER_TICK,
+            "inbound capacity must retain more than one drain tick"
+        );
+        flooded
+    }
+
     /// A single drain processes AT MOST one tick's worth of events and
     /// reports a backlog, leaving the rest queued — proof the loop
     /// falls through to the keyboard read instead of spinning on
@@ -2033,8 +2042,7 @@ mod input_starvation_tests {
         // Keep the flood under the bounded channel's capacity so the
         // test exercises the per-tick *drain* cap, not the channel's
         // overflow path (that's covered by the forwarder's own tests).
-        let flooded = MAX_EVENTS_PER_TICK * 4;
-        assert!(flooded < EVENT_CHANNEL_CAPACITY);
+        let flooded = flood_size();
         flood(&evt_tx, flooded);
 
         // One iteration's drain: must report a backlog (more queued)…
@@ -2056,7 +2064,7 @@ mod input_starvation_tests {
     fn repeated_drains_eventually_empty_the_channel() {
         let (mut m, evt_tx, _cmd_rx) = model_with_event_sender();
 
-        let flooded = MAX_EVENTS_PER_TICK * 4;
+        let flooded = flood_size();
         flood(&evt_tx, flooded);
 
         // Bound the loop generously above the minimum needed (4) so a
@@ -8155,6 +8163,24 @@ mod flash_log_tests {
             "the full failure remains recoverable after the footer fades"
         );
     }
+
+    #[test]
+    fn rejected_command_is_retryable_and_never_a_sync_failure() {
+        use crate::realm::components::footer::NoticeSeverity;
+        use lazybox_ipc::Event as IpcEvent;
+
+        let (mut m, _server) = model();
+        m.status.polling = None;
+        m.handle_daemon_event(IpcEvent::CommandRejected {
+            command: "Write".into(),
+            message: "terminal I/O lane is full; retry".into(),
+        });
+
+        let notice = m.status.notice.as_ref().expect("retryable notice");
+        assert_eq!(notice.severity, NoticeSeverity::Retryable);
+        assert!(notice.message.contains("Write was not accepted"));
+        assert_eq!(m.status.sync.recent().count(), 0);
+    }
 }
 
 #[cfg(test)]
@@ -9218,6 +9244,25 @@ mod daemon_disconnect_tests {
     use crate::realm::components::footer::NoticeSeverity;
     use lazybox_ipc::channel;
     use tuirealm::ratatui::layout::Size;
+
+    #[test]
+    fn full_remote_command_queue_is_retryable_not_disconnected() {
+        let (command_tx, _command_rx) = tokio::sync::mpsc::channel(1);
+        command_tx
+            .try_send(IpcCommand::Subscribe)
+            .expect("occupy bounded command slot");
+        let (_event_tx, event_rx) = tokio::sync::mpsc::channel(1);
+        let client = lazybox_ipc::Client::from_bounded_channels(command_tx, event_rx);
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+
+        m.send_cmd(IpcCommand::Refresh);
+        m.tick_daemon_health();
+
+        let notice = m.status.notice.as_ref().expect("congestion notice");
+        assert_eq!(notice.severity, NoticeSeverity::Retryable);
+        assert!(notice.message.contains("not accepted"));
+        assert!(!m.daemon_disconnect_notified);
+    }
 
     #[test]
     fn failed_send_raises_disconnect_banner_on_next_tick() {

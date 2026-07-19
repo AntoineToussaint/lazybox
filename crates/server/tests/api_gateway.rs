@@ -432,6 +432,7 @@ async fn subscribe_surfaces_unreadable_records_after_the_snapshot() {
         })
         .unwrap();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let tx = lazybox_ipc::EventSender::from_unbounded(tx);
 
     dispatch_command(&config, &tx, Command::Subscribe).await;
 
@@ -471,6 +472,41 @@ async fn stream_route_accepts_ndjson_commands_and_streams_events() {
         .expect("stream yields a frame")
         .expect("body frame")
         .expect("frame ok");
+    let data = frame.into_data().expect("data frame");
+    let server_frame: JsonServerFrame = serde_json::from_slice(data.trim_ascii()).unwrap();
+    assert!(matches!(
+        server_frame,
+        JsonServerFrame::Event(Event::Snapshot { .. })
+    ));
+}
+
+#[tokio::test]
+async fn oversized_stream_frame_preserves_complete_lines_before_the_bad_line() {
+    let mut payload = serde_json::to_vec(&JsonClientFrame::Command(Command::Subscribe)).unwrap();
+    payload.push(b'\n');
+    payload.extend(std::iter::repeat_n(b'x', 1024 * 1024 + 1));
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/stream")
+        .body(Full::new(Bytes::from(payload)))
+        .unwrap();
+
+    let response = api_gateway::handle_request(
+        ServerConfig::in_memory(),
+        GatewayOptions::default(),
+        request,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Admission is line-scoped, not HTTP-frame-scoped: the complete
+    // Subscribe line ahead of the oversized unterminated line still runs.
+    let mut body = response.into_body();
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(2), body.frame())
+        .await
+        .expect("snapshot is not discarded with the later bad line")
+        .expect("snapshot frame")
+        .expect("frame body");
     let data = frame.into_data().expect("data frame");
     let server_frame: JsonServerFrame = serde_json::from_slice(data.trim_ascii()).unwrap();
     assert!(matches!(

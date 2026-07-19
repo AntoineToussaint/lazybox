@@ -637,6 +637,10 @@ fn all_events() -> Vec<Event> {
             ok: false,
             error: Some("has uncommitted changes".into()),
         },
+        Event::TerminalInputRejected {
+            terminal_id: TerminalId(12),
+            message: "write timed out".into(),
+        },
     ]
 }
 
@@ -753,6 +757,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::ProviderCredentialUpdated { .. } => "ProviderCredentialUpdated",
         Event::ProviderCredentialRemoved { .. } => "ProviderCredentialRemoved",
         Event::ProviderCredentialsListed { .. } => "ProviderCredentialsListed",
+        Event::TerminalInputRejected { .. } => "TerminalInputRejected",
     }
 }
 
@@ -764,12 +769,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         (lazybox_ipc::PROTOCOL_VERSION, command_tags.len()),
-        (9, 51),
+        (10, 51),
         "Command gained/lost a variant: update the exhaustive tag, add a sample, and bump PROTOCOL_VERSION",
     );
     assert_eq!(
         (lazybox_ipc::PROTOCOL_VERSION, event_tags.len()),
-        (9, 48),
+        (10, 49),
         "Event gained/lost a variant: update the exhaustive tag, add a sample, and bump PROTOCOL_VERSION",
     );
 }

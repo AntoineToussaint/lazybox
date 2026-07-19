@@ -21,7 +21,7 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 /// In-memory backend. Cheap to clone (it's just an `Arc<Mutex<...>>`).
@@ -46,6 +46,8 @@ struct MockInner {
     wedged_resize_keys: Mutex<std::collections::HashSet<String>>,
     write_delays: Mutex<HashMap<String, std::time::Duration>>,
     write_attempts: Mutex<Vec<String>>,
+    active_writes: AtomicUsize,
+    max_concurrent_writes: AtomicUsize,
     /// Artificial delay applied at the start of every `spawn()`. Lets
     /// tests hold a spawn "mid-provision" to exercise the in-flight
     /// spawn races (duplicate collapse, Kill serialization).
@@ -83,6 +85,16 @@ struct MockSession {
     exit_code: Option<i32>,
     /// Waiters parked in `wait_exit()`.
     exit_waiters: Vec<oneshot::Sender<Option<i32>>>,
+}
+
+struct ActiveWriteCall {
+    inner: Arc<MockInner>,
+}
+
+impl Drop for ActiveWriteCall {
+    fn drop(&mut self) {
+        self.inner.active_writes.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl MockBackend {
@@ -149,6 +161,13 @@ impl MockBackend {
     /// currently delayed or wedged before recording bytes.
     pub async fn write_attempts(&self) -> Vec<String> {
         self.inner.write_attempts.lock().await.clone()
+    }
+
+    /// Highest number of backend write futures active at once. The daemon's
+    /// global terminal interaction contract should keep this at one even when
+    /// multiple clients target the same terminal.
+    pub fn max_concurrent_writes(&self) -> usize {
+        self.inner.max_concurrent_writes.load(Ordering::SeqCst)
     }
 
     /// Resize calls captured for this session, oldest first.
@@ -322,6 +341,13 @@ impl SessionBackend for MockBackend {
     ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
         Box::pin(async move {
             self.inner.write_attempts.lock().await.push(key.into());
+            let active = self.inner.active_writes.fetch_add(1, Ordering::SeqCst) + 1;
+            self.inner
+                .max_concurrent_writes
+                .fetch_max(active, Ordering::SeqCst);
+            let _active_call = ActiveWriteCall {
+                inner: self.inner.clone(),
+            };
             let wedged = self.inner.wedged_write_keys.lock().await.contains(key);
             if wedged {
                 std::future::pending::<()>().await;

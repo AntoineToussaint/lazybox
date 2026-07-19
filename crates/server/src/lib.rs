@@ -41,6 +41,7 @@ pub mod slack;
 pub mod socket_service;
 pub mod spawn_handler;
 mod terminal_commands;
+mod terminal_io;
 
 use crate::backend::{RawPtyBackend, SessionBackend, TmuxBackend};
 use lazybox_agents::Registry;
@@ -327,6 +328,11 @@ pub struct ServerConfig {
     /// without this boundary a delayed write could finish after teardown's
     /// deletes and resurrect orphaned `terminal-draft:*` rows.
     terminal_persistence_locks: Arc<parking_lot::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// Global per-backend interaction lock shared by every connection and
+    /// producer (keyboard input, prompt injection, chat, submit retry). The
+    /// per-connection command lanes cannot by themselves prevent concurrent
+    /// writes from different owners corrupting a PTY byte stream.
+    terminal_io_locks: Arc<parking_lot::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     /// Terminals whose agent-state detection buffer should be dropped
     /// on the pump's next output chunk. Set by `handle_write` when the
     /// user submits an answer to an `InputNeeded` prompt (Enter while
@@ -559,6 +565,7 @@ impl ServerConfig {
             on_main_terminals: Arc::new(Mutex::new(HashSet::new())),
             terminal_models: Arc::new(Mutex::new(HashMap::new())),
             terminal_persistence_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            terminal_io_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             agent_detect_resets: Arc::new(Mutex::new(HashSet::new())),
             hook_driven_terminals: Arc::new(Mutex::new(HashMap::new())),
             prompt_submit_signals: Arc::new(Mutex::new(HashMap::new())),
@@ -717,6 +724,25 @@ impl ServerConfig {
     /// absent terminal mapping, and skip without resurrecting state.
     pub(crate) fn forget_terminal_persistence_lock(&self, backend_key: &str) {
         self.terminal_persistence_locks.lock().remove(backend_key);
+    }
+
+    /// Serialize every backend interaction for one terminal across all client
+    /// connections and non-command producers.
+    pub(crate) async fn lock_terminal_io(
+        &self,
+        backend_key: &str,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        let entry = {
+            let mut locks = self.terminal_io_locks.lock();
+            locks.entry(backend_key.to_string()).or_default().clone()
+        };
+        entry.lock_owned().await
+    }
+
+    /// Retire the registry entry after terminal teardown. Existing waiters
+    /// keep the old `Arc`, re-check liveness, and reject stale work.
+    pub(crate) fn forget_terminal_io_lock(&self, backend_key: &str) {
+        self.terminal_io_locks.lock().remove(backend_key);
     }
 }
 
@@ -1015,7 +1041,8 @@ enum CommandLane {
     /// Runs on the serve-loop task itself. Reserved for provably-fast,
     /// order-sensitive handlers; held to [`INLINE_BUDGET`] by a watchdog.
     Inline,
-    /// Per-terminal FIFO input/resize lane. Runs outside the serve loop.
+    /// Per-terminal FIFO input/resize/close/injection lane. Runs outside the
+    /// serve loop.
     TerminalIo,
     /// Per-terminal FIFO durable prompt-state lane. Runs outside the serve
     /// loop and independently from PTY input.
@@ -1036,9 +1063,10 @@ enum CommandLane {
 fn command_lane(cmd: &lazybox_ipc::Command) -> CommandLane {
     use lazybox_ipc::Command;
     match cmd {
-        Command::Write { .. } | Command::Resize { .. } | Command::Close { .. } => {
-            CommandLane::TerminalIo
-        }
+        Command::Write { .. }
+        | Command::Resize { .. }
+        | Command::Close { .. }
+        | Command::InjectPrompt { .. } => CommandLane::TerminalIo,
         Command::RecordUserMessage { .. } | Command::RecordComposingBuffer { .. } => {
             CommandLane::TerminalPersistence
         }

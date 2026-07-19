@@ -41,7 +41,7 @@ pub const PROTOCOL_MAGIC: [u8; 4] = *b"LZBX";
 /// order, so adding, removing, or reordering a variant or field makes
 /// an old peer silently misread every subsequent frame. The handshake
 /// turns that garbage into a clear "restart the daemon" error.
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// This binary's build identity: the workspace version plus the git
 /// short SHA captured at compile time (`build.rs`). Two binaries built
@@ -1386,6 +1386,14 @@ pub enum Event {
     ProviderCredentialsListed {
         principal_id: PrincipalId,
         credentials: Vec<ProviderCredentialMetadata>,
+    },
+    /// Terminal-local input failed or was deliberately rejected before the
+    /// daemon could prove delivery. This is not a provider/sync failure:
+    /// clients surface it as a retryable terminal notice without poisoning
+    /// provider polling state or sync history.
+    TerminalInputRejected {
+        terminal_id: TerminalId,
+        message: String,
     },
 }
 

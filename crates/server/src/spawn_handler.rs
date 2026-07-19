@@ -24,7 +24,7 @@
 //!    `Event::TerminalExited`, drop the map entry.
 //! 5. Broadcast `Event::TerminalSpawned` to every subscriber.
 
-use crate::ServerConfig;
+use crate::{ServerConfig, terminal_io};
 use chrono::Utc;
 use futures::{StreamExt, stream};
 use lazybox_agents::SpawnCtx;
@@ -55,13 +55,6 @@ const SNAPSHOT_PER_SESSION_TIMEOUT: Duration = Duration::from_millis(500);
 /// made N wedged sessions block Subscribe for N×500ms; unlimited fan-out
 /// would instead stampede the blocking store pool on large installations.
 const SNAPSHOT_CONCURRENCY: usize = 16;
-
-/// Defense-in-depth deadline around backend input/resize operations. Raw PTY
-/// writes already bound their internal enqueue, but the backend trait permits
-/// other implementations and resize previously had no deadline at all. These
-/// calls run on per-terminal workers; the timeout keeps a broken terminal's
-/// lane retryable instead of wedging it forever.
-const TERMINAL_IO_TIMEOUT: Duration = Duration::from_millis(750);
 
 /// Monotonic terminal-id allocator. Module-local so ids are unique
 /// across the process even if the terminals map is wiped (tests, or
@@ -1256,7 +1249,6 @@ pub async fn handle_spawn(
         let agent = agent.clone();
         let paste = agent.inject_prompt(&prompt);
         let submit = agent.inject_submit();
-        let backend = config.backend.clone();
         let backend_key = backend_key.clone();
         let id = terminal_id;
         let first_output = first_output_signal_for_inject;
@@ -1326,9 +1318,9 @@ pub async fn handle_spawn(
                     terminal_id = ?id,
                     "initial_prompt: terminal exited before the agent became ready — work prompt not delivered"
                 );
-                let _ = config_for_inject.bus.send(Event::Notification {
-                    title: "Work prompt not delivered".into(),
-                    body: "agent never became ready — press w again to retry".into(),
+                let _ = config_for_inject.bus.send(Event::TerminalInputRejected {
+                    terminal_id: id,
+                    message: "agent never became ready — press w again to retry".into(),
                 });
                 return;
             }
@@ -1339,18 +1331,35 @@ pub async fn handle_spawn(
                 elapsed_ms = t0_for_inject.elapsed().as_millis(),
                 "initial_prompt: inject window cleared — writing paste to backend",
             );
+            let Some(interaction) =
+                terminal_io::acquire_live(&config_for_inject, id, &backend_key).await
+            else {
+                tracing::warn!(
+                    terminal_id = ?id,
+                    "initial_prompt: terminal exited before the prompt interaction began"
+                );
+                let _ = config_for_inject.bus.send(Event::TerminalInputRejected {
+                    terminal_id: id,
+                    message: "agent terminal closed before the work prompt landed — press w again to retry"
+                        .into(),
+                });
+                return;
+            };
             // Subscribed before the paste write so the output chunks
             // the paste triggers are observable by the settle gate.
             let output_events = submit.is_some().then(|| config_for_inject.bus.subscribe());
-            if let Err(e) = backend.write(&backend_key, &paste).await {
+            if let Err(e) =
+                terminal_io::write_locked(&config_for_inject, &backend_key, &paste).await
+            {
                 tracing::warn!(
                     terminal_id = ?id,
-                    "initial_prompt: backend.write(paste) failed: {e}"
+                    "initial_prompt: paste failed: {e}"
                 );
-                let _ = config_for_inject.bus.send(Event::Notification {
-                    title: "Work prompt not delivered".into(),
-                    body: "agent terminal closed before the prompt landed — press w again to retry"
-                        .into(),
+                let _ = config_for_inject.bus.send(Event::TerminalInputRejected {
+                    terminal_id: id,
+                    message: format!(
+                        "work prompt was not delivered ({e}) — press w again to retry"
+                    ),
                 });
                 return;
             }
@@ -1365,16 +1374,28 @@ pub async fn handle_spawn(
                 await_paste_settled(&mut output_events, id, PASTE_QUIET_WINDOW, PASTE_SETTLE_CAP)
                     .await;
                 let confirm = prepare_submit_confirmation(&config_for_inject, id).await;
-                if let Err(e) = backend.write(&backend_key, &submit_bytes).await {
+                if let Err(e) =
+                    terminal_io::write_locked(&config_for_inject, &backend_key, &submit_bytes).await
+                {
                     tracing::warn!(
                         terminal_id = ?id,
-                        "initial_prompt: backend.write(submit) failed: {e}"
+                        "initial_prompt: submit failed: {e}"
                     );
+                    let _ = config_for_inject.bus.send(Event::TerminalInputRejected {
+                        terminal_id: id,
+                        message: format!(
+                            "work prompt was pasted but could not be submitted ({e}) — open the terminal and press Enter"
+                        ),
+                    });
                     return;
                 }
+                // The paste + submit transaction is complete. Confirmation
+                // waits must not monopolize the terminal while the agent
+                // works; any later retry reacquires the same global lock.
+                drop(interaction);
                 confirm_prompt_submission(
                     confirm,
-                    &*backend,
+                    &config_for_inject,
                     &backend_key,
                     &submit_bytes,
                     SUBMIT_CONFIRM_DEADLINE,
@@ -3056,6 +3077,13 @@ async fn finish_terminal(
     exit_code: Option<i32>,
     release_backend: bool,
 ) {
+    // Join the same interaction boundary as writes, resizes, injections, and
+    // kills before removing the live mapping. Otherwise an already-started
+    // delayed write can complete after `TerminalExited` and mutate a backend
+    // session the daemon has declared detached. Once the mapping is removed,
+    // queued interaction waiters acquire this guard in turn, fail their
+    // liveness re-check, and leave without touching the backend.
+    let _io_guard = config.lock_terminal_io(backend_key).await;
     // Background draft/user-message persistence is independent from the PTY
     // input lane. Serialize its final write with the entire teardown claim +
     // kv sweep: persistence that won first completes before our deletes;
@@ -3082,6 +3110,7 @@ async fn finish_terminal(
                 .await
                 .insert(terminal_id, other.to_string());
             config.forget_terminal_persistence_lock(backend_key);
+            config.forget_terminal_io_lock(backend_key);
             return;
         }
         None => {
@@ -3089,6 +3118,7 @@ async fn finish_terminal(
                 config.backend.release(backend_key).await;
             }
             config.forget_terminal_persistence_lock(backend_key);
+            config.forget_terminal_io_lock(backend_key);
             return;
         }
     }
@@ -3229,6 +3259,7 @@ async fn finish_terminal(
     // tidy. Reconstructed from the id, no bookkeeping needed.
     let _ = std::fs::remove_file(hook_settings_path(terminal_id));
     config.forget_terminal_persistence_lock(backend_key);
+    config.forget_terminal_io_lock(backend_key);
 }
 
 /// Ingest one PTY output chunk for a terminal: append it to the rolling
@@ -3580,27 +3611,17 @@ pub(crate) async fn handle_write_batch(
         tracing::trace!("write to unknown terminal {terminal_id:?}");
         return;
     };
-    match tokio::time::timeout(TERMINAL_IO_TIMEOUT, config.backend.write(&key, &joined)).await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
-            tracing::warn!("backend write {key}: {error}");
-            let _ = config.bus.send(Event::provider_error_retryable(
-                "terminal-write",
-                "terminal input could not be delivered; retry after checking the session",
-            ));
-            return;
-        }
-        Err(_) => {
-            tracing::warn!(
-                terminal_id = ?terminal_id,
-                key = %key,
-                timeout_ms = TERMINAL_IO_TIMEOUT.as_millis() as u64,
-                "backend write timed out; input was not acknowledged"
-            );
-            let _ = config.bus.send(Event::provider_error_retryable(
-                "terminal-write",
-                "terminal input timed out and was not acknowledged; retry after checking the session",
-            ));
+    match terminal_io::write_live(config, terminal_id, &key, &joined).await {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => {
+            tracing::warn!(?terminal_id, %key, %error, "terminal input was not delivered");
+            let _ = config.bus.send(Event::TerminalInputRejected {
+                terminal_id,
+                message: format!(
+                    "input was not delivered ({error}); retry after checking the session"
+                ),
+            });
             return;
         }
     }
@@ -3799,7 +3820,7 @@ async fn prepare_submit_confirmation(
 /// parked prompt can't silently strand the agent.
 async fn confirm_prompt_submission(
     mut confirm: SubmitConfirmation,
-    backend: &dyn crate::backend::SessionBackend,
+    config: &ServerConfig,
     backend_key: &str,
     submit_bytes: &[u8],
     deadline: Duration,
@@ -3827,15 +3848,26 @@ async fn confirm_prompt_submission(
              prompt likely parked in the composer; resending Enter \
              ({resends}/{SUBMIT_RESEND_LIMIT})",
         );
-        if let Err(e) = backend.write(backend_key, submit_bytes).await {
-            // The terminal is gone (or going) — nothing left to
-            // confirm, and the loud give-up below would misreport a
-            // parked prompt.
-            tracing::warn!(
-                terminal_id = ?confirm.terminal_id,
-                "submit resend: backend.write failed: {e}"
-            );
-            break true;
+        match terminal_io::write_live(config, confirm.terminal_id, backend_key, submit_bytes).await
+        {
+            Ok(true) => {}
+            Ok(false) => break true,
+            Err(e) => {
+                // The live mapping survived but the retry itself was
+                // rejected. Keep that visible even though this confirmation
+                // loop can no longer make progress.
+                tracing::warn!(
+                    terminal_id = ?confirm.terminal_id,
+                    "submit resend failed: {e}"
+                );
+                let _ = confirm.bus.send(Event::TerminalInputRejected {
+                    terminal_id: confirm.terminal_id,
+                    message: format!(
+                        "the injected prompt's submit retry failed ({e}) — open the terminal and press Enter"
+                    ),
+                });
+                break true;
+            }
         }
     };
     // Remove the registration only if it's still OURS. A second
@@ -3860,11 +3892,12 @@ async fn confirm_prompt_submission(
         "prompt submit never confirmed after {SUBMIT_RESEND_LIMIT} Enter resends — \
          giving up; the prompt is likely parked in the composer",
     );
-    let _ = confirm.bus.send(Event::provider_error_retryable(
-        "inject_prompt",
-        "the injected prompt looks parked unsubmitted in the agent's composer — \
-         open the terminal and press Enter to start it",
-    ));
+    let _ = confirm.bus.send(Event::TerminalInputRejected {
+        terminal_id: confirm.terminal_id,
+        message: "the injected prompt looks parked unsubmitted in the agent's composer — \
+                  open the terminal and press Enter to start it"
+            .into(),
+    });
 }
 
 /// Block until `terminal_id`'s output has been quiet for `quiet`, or
@@ -4080,15 +4113,25 @@ pub async fn handle_inject_prompt(
     let events = config.bus.subscribe();
     let blocked =
         config.agent_state_for(terminal_id).await == Some(lazybox_ipc::AgentState::InputNeeded);
-    let backend = config.backend.clone();
     let states = config.agent_states.clone();
     let bus = config.bus.clone();
     let id = terminal_id;
     let config_for_confirm = config.clone();
+    // The per-terminal command lane may advance only after this task has
+    // established its ordering position. An immediately-ready injection
+    // acknowledges after taking the global interaction lock, so a following
+    // Write cannot overtake it. A blocked injection acknowledges after its
+    // readiness waiter is registered, deliberately leaving the lane free for
+    // the Write that answers the permission/chooser gate.
+    let (registered_tx, registered_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         let deadline = tokio::time::Instant::now() + INJECT_INPUT_DEADLINE;
         let mut events = events;
         let mut blocked = blocked;
+        let mut registered_tx = Some(registered_tx);
+        if blocked && let Some(tx) = registered_tx.take() {
+            let _ = tx.send(());
+        }
         while blocked {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero()
@@ -4100,11 +4143,12 @@ pub async fn handle_inject_prompt(
                 );
                 // The drop must be visible, not just a log line — the
                 // user pressed `w` and their prompt evaporated.
-                let _ = bus.send(Event::provider_error_retryable(
-                    "inject_prompt",
-                    "the agent stayed on a permission prompt, so the injected work \
-                     context was dropped — answer the prompt and press w again",
-                ));
+                let _ = bus.send(Event::TerminalInputRejected {
+                    terminal_id: id,
+                    message: "the agent stayed on a permission prompt, so the injected work \
+                              context was dropped — answer the prompt and press w again"
+                        .into(),
+                });
                 return;
             }
             // The release may be the optimistic InputNeeded → Working
@@ -4120,9 +4164,30 @@ pub async fn handle_inject_prompt(
         }
         // Subscribed before the paste write so the output chunks the
         // paste triggers are observable by the settle gate.
+        let Some(interaction) =
+            terminal_io::acquire_live(&config_for_confirm, id, &backend_key).await
+        else {
+            if let Some(tx) = registered_tx.take() {
+                let _ = tx.send(());
+            }
+            tracing::debug!(
+                ?id,
+                "inject_prompt: terminal exited before interaction began"
+            );
+            return;
+        };
+        if let Some(tx) = registered_tx.take() {
+            let _ = tx.send(());
+        }
         let output_events = submit.is_some().then(|| bus.subscribe());
-        if let Err(e) = backend.write(&backend_key, &paste).await {
-            tracing::warn!("inject_prompt: backend.write(paste) failed: {e}");
+        if let Err(e) = terminal_io::write_locked(&config_for_confirm, &backend_key, &paste).await {
+            tracing::warn!("inject_prompt: paste failed: {e}");
+            let _ = bus.send(Event::TerminalInputRejected {
+                terminal_id: id,
+                message: format!(
+                    "injected prompt was not delivered ({e}) — press w again to retry"
+                ),
+            });
             return;
         }
         // Gate the submit keystroke on the paste's repaint going quiet
@@ -4131,13 +4196,22 @@ pub async fn handle_inject_prompt(
         if let (Some(submit_bytes), Some(mut output_events)) = (submit, output_events) {
             await_paste_settled(&mut output_events, id, PASTE_QUIET_WINDOW, PASTE_SETTLE_CAP).await;
             let confirm = prepare_submit_confirmation(&config_for_confirm, id).await;
-            if let Err(e) = backend.write(&backend_key, &submit_bytes).await {
-                tracing::warn!("inject_prompt: backend.write(submit) failed: {e}");
+            if let Err(e) =
+                terminal_io::write_locked(&config_for_confirm, &backend_key, &submit_bytes).await
+            {
+                tracing::warn!("inject_prompt: submit failed: {e}");
+                let _ = bus.send(Event::TerminalInputRejected {
+                    terminal_id: id,
+                    message: format!(
+                        "prompt was pasted but could not be submitted ({e}) — open the terminal and press Enter"
+                    ),
+                });
                 return;
             }
+            drop(interaction);
             confirm_prompt_submission(
                 confirm,
-                &*backend,
+                &config_for_confirm,
                 &backend_key,
                 &submit_bytes,
                 SUBMIT_CONFIRM_DEADLINE,
@@ -4145,23 +4219,17 @@ pub async fn handle_inject_prompt(
             .await;
         }
     });
+    // A dropped sender means the task ended before it could establish either
+    // position; there is no ordering work left for the lane to wait on.
+    let _ = registered_rx.await;
 }
 
 pub async fn handle_resize(config: &ServerConfig, terminal_id: TerminalId, cols: u16, rows: u16) {
     let Some(key) = config.backend_key_for(terminal_id).await else {
         return;
     };
-    match tokio::time::timeout(TERMINAL_IO_TIMEOUT, config.backend.resize(&key, cols, rows)).await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => tracing::warn!("backend resize {key}: {error}"),
-        Err(_) => tracing::warn!(
-            terminal_id = ?terminal_id,
-            key = %key,
-            cols,
-            rows,
-            timeout_ms = TERMINAL_IO_TIMEOUT.as_millis() as u64,
-            "backend resize timed out"
-        ),
+    if let Err(error) = terminal_io::resize_live(config, terminal_id, &key, cols, rows).await {
+        tracing::warn!(?terminal_id, %key, cols, rows, %error, "backend resize failed");
     }
 }
 
@@ -4172,6 +4240,9 @@ pub async fn handle_resize(config: &ServerConfig, terminal_id: TerminalId, cols:
 /// `Event::TerminalExited`.
 pub async fn handle_close(config: &ServerConfig, terminal_id: TerminalId) -> bool {
     let Some(key) = config.backend_key_for(terminal_id).await else {
+        return true;
+    };
+    let Some(_guard) = terminal_io::acquire_live(config, terminal_id, &key).await else {
         return true;
     };
     if let Err(e) = config.backend.kill(&key).await {
@@ -4947,6 +5018,87 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn failed_terminal_write_emits_terminal_error_not_provider_error() {
+        let (config, _mock) = ServerConfig::in_memory_with_mock();
+        let terminal_id = TerminalId(701);
+        config
+            .terminals
+            .lock()
+            .await
+            .insert(terminal_id, "missing-backend-session".into());
+        let mut events = config.bus.subscribe();
+
+        handle_write(&config, terminal_id, b"not delivered").await;
+
+        let event = events.try_recv().expect("delivery failure event");
+        assert!(matches!(
+            event,
+            Event::TerminalInputRejected {
+                terminal_id: id,
+                message,
+            } if id == terminal_id && message.contains("not delivered")
+        ));
+    }
+
+    #[tokio::test]
+    async fn teardown_waits_for_an_inflight_terminal_write() {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let (config, mock) = ServerConfig::in_memory_with_mock();
+            let terminal_id = TerminalId(702);
+            let backend_key = mock
+                .spawn(&[], None, &[], "teardown-write-race")
+                .await
+                .expect("spawn mock terminal");
+            config
+                .terminals
+                .lock()
+                .await
+                .insert(terminal_id, backend_key.clone());
+            mock.set_write_delay(&backend_key, Duration::from_millis(150))
+                .await;
+
+            let write_config = config.clone();
+            let write = tokio::spawn(async move {
+                handle_write(&write_config, terminal_id, b"accepted-before-exit").await;
+            });
+            loop {
+                if !mock.write_attempts().await.is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+
+            let teardown_config = config.clone();
+            let teardown_key = backend_key.clone();
+            let teardown = tokio::spawn(async move {
+                teardown_exited_terminal(&teardown_config, terminal_id, &teardown_key, Some(0))
+                    .await;
+            });
+            tokio::time::sleep(Duration::from_millis(25)).await;
+
+            assert!(
+                !teardown.is_finished(),
+                "teardown must join the interaction lock before detaching the terminal"
+            );
+            assert_eq!(
+                config.backend_key_for(terminal_id).await.as_deref(),
+                Some(backend_key.as_str()),
+                "the live mapping stays valid until the accepted write completes"
+            );
+
+            write.await.expect("write task");
+            teardown.await.expect("teardown task");
+            assert!(config.backend_key_for(terminal_id).await.is_none());
+            assert_eq!(
+                mock.writes_for(&backend_key).await,
+                vec![b"accepted-before-exit".to_vec()]
+            );
+        })
+        .await
+        .expect("test deadline exceeded");
+    }
+
     #[test]
     fn terminal_persistence_inventory_has_unique_cleanup_keys() {
         let keys: std::collections::HashSet<_> = TerminalPersistedField::ALL
@@ -5664,6 +5816,7 @@ mod tests {
             .await
             .unwrap();
         let id = TerminalId(4245);
+        config.terminals.lock().await.insert(id, key.clone());
 
         let first = prepare_submit_confirmation(&config, id).await;
         // A second injection registers its own signal, replacing the
@@ -5672,14 +5825,7 @@ mod tests {
 
         // The first exhausts its retries (no evidence) — but must NOT
         // remove the second's registration.
-        confirm_prompt_submission(
-            first,
-            &*config.backend,
-            &key,
-            b"\r",
-            Duration::from_millis(10),
-        )
-        .await;
+        confirm_prompt_submission(first, &config, &key, b"\r", Duration::from_millis(10)).await;
         assert!(
             config.prompt_submit_signals.lock().await.contains_key(&id),
             "first confirmation must not remove the second's signal"
@@ -5697,14 +5843,7 @@ mod tests {
             .get(&id)
             .unwrap()
             .notify_one();
-        confirm_prompt_submission(
-            second,
-            &*config.backend,
-            &key,
-            b"\r",
-            Duration::from_millis(10),
-        )
-        .await;
+        confirm_prompt_submission(second, &config, &key, b"\r", Duration::from_millis(10)).await;
         assert_eq!(
             mock.writes_for(&key).await.len(),
             resends,
@@ -5909,17 +6048,11 @@ mod tests {
             .await
             .unwrap();
         let id = TerminalId(4242);
+        config.terminals.lock().await.insert(id, key.clone());
 
         let confirm = prepare_submit_confirmation(&config, id).await;
         let mut bus_rx = config.bus.subscribe();
-        confirm_prompt_submission(
-            confirm,
-            &*config.backend,
-            &key,
-            b"\r",
-            Duration::from_millis(10),
-        )
-        .await;
+        confirm_prompt_submission(confirm, &config, &key, b"\r", Duration::from_millis(10)).await;
 
         assert_eq!(
             mock.writes_for(&key).await,
@@ -5932,7 +6065,7 @@ mod tests {
         );
         let mut gave_up_loudly = false;
         while let Ok(ev) = bus_rx.try_recv() {
-            if matches!(ev, Event::ProviderError { .. }) {
+            if matches!(ev, Event::TerminalInputRejected { .. }) {
                 gave_up_loudly = true;
             }
         }
@@ -5940,6 +6073,27 @@ mod tests {
             gave_up_loudly,
             "exhausting the resends must surface a user-visible error"
         );
+    }
+
+    #[tokio::test]
+    async fn rejected_submit_retry_emits_typed_terminal_failure() {
+        let config = ServerConfig::in_memory_with_mock().0;
+        let id = TerminalId(4248);
+        let key = "missing-submit-backend".to_string();
+        config.terminals.lock().await.insert(id, key.clone());
+        let confirm = prepare_submit_confirmation(&config, id).await;
+        let mut events = config.bus.subscribe();
+
+        confirm_prompt_submission(confirm, &config, &key, b"\r", Duration::from_millis(1)).await;
+
+        assert!(matches!(
+            events.try_recv().expect("typed terminal failure"),
+            Event::TerminalInputRejected {
+                terminal_id,
+                message,
+            } if terminal_id == id && message.contains("submit retry failed")
+        ));
+        assert!(config.prompt_submit_signals.lock().await.is_empty());
     }
 
     /// A `UserPromptSubmit` hook (via the registered signal) is proof
@@ -5953,6 +6107,7 @@ mod tests {
             .await
             .unwrap();
         let id = TerminalId(4243);
+        config.terminals.lock().await.insert(id, key.clone());
 
         let confirm = prepare_submit_confirmation(&config, id).await;
         // What handle_ingest_hook does when UserPromptSubmit lands.
@@ -5965,14 +6120,7 @@ mod tests {
             .get(&id)
             .unwrap()
             .notify_one();
-        confirm_prompt_submission(
-            confirm,
-            &*config.backend,
-            &key,
-            b"\r",
-            Duration::from_millis(100),
-        )
-        .await;
+        confirm_prompt_submission(confirm, &config, &key, b"\r", Duration::from_millis(100)).await;
 
         assert!(
             mock.writes_for(&key).await.is_empty(),
@@ -5994,6 +6142,7 @@ mod tests {
             .await
             .unwrap();
         let id = TerminalId(4244);
+        config.terminals.lock().await.insert(id, key.clone());
 
         let confirm = prepare_submit_confirmation(&config, id).await;
         // The receiver was subscribed in prepare_submit_confirmation,
@@ -6006,14 +6155,7 @@ mod tests {
                 state: lazybox_ipc::AgentState::Working,
             })
             .unwrap();
-        confirm_prompt_submission(
-            confirm,
-            &*config.backend,
-            &key,
-            b"\r",
-            Duration::from_millis(100),
-        )
-        .await;
+        confirm_prompt_submission(confirm, &config, &key, b"\r", Duration::from_millis(100)).await;
 
         assert!(
             mock.writes_for(&key).await.is_empty(),
@@ -6033,6 +6175,7 @@ mod tests {
             .await
             .unwrap();
         let id = TerminalId(4246);
+        config.terminals.lock().await.insert(id, key.clone());
 
         let confirm = prepare_submit_confirmation(&config, id).await;
         let mut bus_rx = config.bus.subscribe();
@@ -6049,14 +6192,7 @@ mod tests {
                 signal.notify_one();
             }
         });
-        confirm_prompt_submission(
-            confirm,
-            &*config.backend,
-            &key,
-            b"\r",
-            Duration::from_millis(50),
-        )
-        .await;
+        confirm_prompt_submission(confirm, &config, &key, b"\r", Duration::from_millis(50)).await;
 
         assert_eq!(
             mock.writes_for(&key).await,
@@ -6065,7 +6201,7 @@ mod tests {
         );
         while let Ok(ev) = bus_rx.try_recv() {
             assert!(
-                !matches!(ev, Event::ProviderError { .. }),
+                !matches!(ev, Event::TerminalInputRejected { .. }),
                 "a confirmed submit must not give up loudly"
             );
         }
@@ -6102,6 +6238,7 @@ mod tests {
             .await
             .unwrap();
         let id = TerminalId(4247);
+        config.terminals.lock().await.insert(id, key.clone());
         let confirm = prepare_submit_confirmation(&config, id).await;
 
         // Pump stand-in: the resent Enter takes, the screen flips from
@@ -6121,14 +6258,7 @@ mod tests {
             })
             .unwrap();
         });
-        confirm_prompt_submission(
-            confirm,
-            &*config.backend,
-            &key,
-            b"\r",
-            Duration::from_millis(50),
-        )
-        .await;
+        confirm_prompt_submission(confirm, &config, &key, b"\r", Duration::from_millis(50)).await;
 
         assert_eq!(
             mock.writes_for(&key).await,

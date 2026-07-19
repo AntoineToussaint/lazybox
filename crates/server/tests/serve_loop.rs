@@ -950,3 +950,216 @@ async fn composing_burst_persists_the_latest_ordered_revision() {
         Some("draft-100")
     );
 }
+
+/// Each socket/in-process client owns its own FIFO router, but the backend PTY
+/// is process-global. Two clients writing the same terminal must therefore
+/// share one interaction lock instead of entering the backend concurrently.
+#[tokio::test]
+async fn multiple_clients_never_write_one_terminal_concurrently() {
+    let (config, mock) = ServerConfig::in_memory_with_mock();
+    let key = mock
+        .spawn(&[], None, &[], "multi-client")
+        .await
+        .expect("spawn");
+    config
+        .terminals
+        .lock()
+        .await
+        .insert(TerminalId(71), key.clone());
+    mock.set_write_delay(&key, Duration::from_millis(100)).await;
+
+    let (client_a, server_a) = channel::pair();
+    let (client_b, server_b) = channel::pair();
+    let serve_a = tokio::spawn({
+        let config = config.clone();
+        async move { Server::new(config).serve(server_a).await }
+    });
+    let serve_b = tokio::spawn({
+        let config = config.clone();
+        async move { Server::new(config).serve(server_b).await }
+    });
+    client_a
+        .send(Command::Write {
+            terminal_id: TerminalId(71),
+            bytes: b"client-a".to_vec(),
+        })
+        .expect("write a");
+    client_b
+        .send(Command::Write {
+            terminal_id: TerminalId(71),
+            bytes: b"client-b".to_vec(),
+        })
+        .expect("write b");
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if mock.writes_for(&key).await.len() == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("both writes delivered");
+    assert_eq!(
+        mock.max_concurrent_writes(),
+        1,
+        "independent client routers must serialize at the shared backend"
+    );
+
+    client_a.send(Command::Shutdown).expect("shutdown a");
+    client_b.send(Command::Shutdown).expect("shutdown b");
+    for serve in [serve_a, serve_b] {
+        tokio::time::timeout(Duration::from_secs(2), serve)
+            .await
+            .expect("serve shutdown")
+            .expect("join")
+            .expect("serve result");
+    }
+}
+
+/// InjectPrompt used to run as a detached mutation and could overtake a Write
+/// that appeared before it on the same connection. Registering injection from
+/// the terminal lane makes the earlier bytes a hard ordering barrier.
+#[tokio::test]
+async fn prompt_injection_cannot_overtake_prior_terminal_input() {
+    let (config, mock) = ServerConfig::in_memory_with_mock();
+    let key = mock
+        .spawn(&[], None, &[], "inject-order")
+        .await
+        .expect("spawn");
+    let terminal_id = TerminalId(72);
+    config
+        .terminals
+        .lock()
+        .await
+        .insert(terminal_id, key.clone());
+    config.terminal_meta.lock().await.insert(
+        terminal_id,
+        (
+            lazybox_core::SessionKey::new("inject-order"),
+            TerminalKind::Agent("claude".into()),
+        ),
+    );
+    mock.set_write_delay(&key, Duration::from_millis(75)).await;
+
+    let (client, server) = channel::pair();
+    let serve = tokio::spawn({
+        let config = config.clone();
+        async move { Server::new(config).serve(server).await }
+    });
+    client
+        .send(Command::Write {
+            terminal_id,
+            bytes: b"prior-input".to_vec(),
+        })
+        .expect("prior input");
+    client
+        .send(Command::InjectPrompt {
+            terminal_id,
+            prompt: "injected work".into(),
+            fallback_spawn: None,
+            submit: false,
+        })
+        .expect("inject");
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if mock.writes_for(&key).await.len() == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("input and injection delivered");
+    let writes = mock.writes_for(&key).await;
+    assert_eq!(writes[0], b"prior-input");
+    assert!(
+        String::from_utf8_lossy(&writes[1]).contains("injected work"),
+        "second write is the injected prompt"
+    );
+
+    client.send(Command::Shutdown).expect("shutdown");
+    tokio::time::timeout(Duration::from_secs(2), serve)
+        .await
+        .expect("serve shutdown")
+        .expect("join")
+        .expect("serve result");
+}
+
+/// Paste and submit are one terminal interaction. A keyboard Write arriving
+/// during the settle window must wait until Enter has submitted the injected
+/// prompt, otherwise the user bytes become part of that prompt.
+#[tokio::test]
+async fn injected_paste_and_submit_are_atomic_against_user_input() {
+    let (config, mock) = ServerConfig::in_memory_with_mock();
+    let key = mock
+        .spawn(&[], None, &[], "inject-atomic")
+        .await
+        .expect("spawn");
+    let terminal_id = TerminalId(73);
+    let session_key = lazybox_core::SessionKey::new("inject-atomic");
+    config
+        .terminals
+        .lock()
+        .await
+        .insert(terminal_id, key.clone());
+    config.terminal_meta.lock().await.insert(
+        terminal_id,
+        (session_key.clone(), TerminalKind::Agent("claude".into())),
+    );
+    mock.set_write_delay(&key, Duration::from_millis(75)).await;
+
+    let (client, server) = channel::pair();
+    let serve = tokio::spawn({
+        let config = config.clone();
+        async move { Server::new(config).serve(server).await }
+    });
+    client
+        .send(Command::InjectPrompt {
+            terminal_id,
+            prompt: "atomic injected work".into(),
+            fallback_spawn: None,
+            submit: true,
+        })
+        .expect("inject");
+    // Queue user input immediately. The injection command's registration
+    // handshake—not test timing—must establish paste/submit ownership before
+    // the lane advances to this Write.
+    client
+        .send(Command::Write {
+            terminal_id,
+            bytes: b"interloper".to_vec(),
+        })
+        .expect("input during settle");
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if mock.writes_for(&key).await.len() >= 3 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("submit and queued input delivered");
+    let writes = mock.writes_for(&key).await;
+    assert!(String::from_utf8_lossy(&writes[0]).contains("atomic injected work"));
+    assert_eq!(writes[1], b"\r", "submit stays adjacent to its paste");
+    assert_eq!(writes[2], b"interloper", "user input follows submit");
+
+    // Release the confirmation waiter so it cannot emit a later retry into
+    // another test runtime after this assertion completes.
+    let _ = config.bus.send(Event::AgentState {
+        session_key,
+        terminal_id,
+        state: lazybox_ipc::AgentState::Working,
+    });
+    client.send(Command::Shutdown).expect("shutdown");
+    tokio::time::timeout(Duration::from_secs(2), serve)
+        .await
+        .expect("serve shutdown")
+        .expect("join")
+        .expect("serve result");
+}

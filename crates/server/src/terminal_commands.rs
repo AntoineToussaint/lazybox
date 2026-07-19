@@ -6,8 +6,11 @@
 //! command order, so bytes and draft revisions could be silently reordered.
 //!
 //! Two routers solve both constraints:
-//! - I/O (`Write` / `Resize`) gets one FIFO worker per terminal. Adjacent
-//!   writes are concatenated and resize storms collapse to the latest size.
+//! - I/O (`Write` / `Resize` / `Close` / `InjectPrompt`) gets one FIFO worker
+//!   per terminal. Adjacent writes are concatenated and resize storms collapse
+//!   to the latest size. Injection registers its readiness waiter only after
+//!   earlier input has completed, then releases the lane so prompt answers can
+//!   still pass while that waiter is pending.
 //! - persisted prompt state gets a separate FIFO worker per terminal, so a
 //!   slow SQLite draft write never stalls PTY input. Adjacent draft revisions
 //!   are debounce-coalesced to the latest value.
@@ -44,7 +47,8 @@ pub(crate) async fn run_io_router(config: ServerConfig, mut rx: mpsc::UnboundedR
         let terminal_id = match &command {
             Command::Write { terminal_id, .. }
             | Command::Resize { terminal_id, .. }
-            | Command::Close { terminal_id } => *terminal_id,
+            | Command::Close { terminal_id }
+            | Command::InjectPrompt { terminal_id, .. } => *terminal_id,
             other => {
                 tracing::error!(?other, "non-I/O command reached terminal I/O router");
                 continue;
@@ -162,6 +166,27 @@ async fn run_io_lane(
                 if spawn_handler::handle_close(&config, terminal_id).await {
                     break;
                 }
+            }
+            Command::InjectPrompt {
+                prompt,
+                fallback_spawn,
+                submit,
+                ..
+            } => {
+                // `handle_inject_prompt` returns after one of two explicit
+                // ordering handshakes: an immediately-ready injection owns
+                // the shared terminal lock, or a blocked injection has
+                // registered its readiness waiter. The latter must release
+                // this lane because the user's InputNeeded answer is a later
+                // Write on the same lane.
+                spawn_handler::handle_inject_prompt(
+                    &config,
+                    terminal_id,
+                    &prompt,
+                    fallback_spawn,
+                    submit,
+                )
+                .await;
             }
             other => {
                 tracing::error!(?terminal_id, ?other, "invalid command in terminal I/O lane");

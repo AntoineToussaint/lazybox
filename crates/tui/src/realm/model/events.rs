@@ -337,7 +337,8 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::AgentRunFinished { .. }
                 | IpcEvent::ProviderCredentialUpdated { .. }
                 | IpcEvent::ProviderCredentialRemoved { .. }
-                | IpcEvent::ProviderCredentialsListed { .. } => {}
+                | IpcEvent::ProviderCredentialsListed { .. }
+                | IpcEvent::TerminalInputRejected { .. } => {}
             }
         }
         // Agent-state pings repeat at the detector's cadence while an
@@ -799,7 +800,8 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::AgentRunFinished { .. }
             | IpcEvent::ProviderCredentialUpdated { .. }
             | IpcEvent::ProviderCredentialRemoved { .. }
-            | IpcEvent::ProviderCredentialsListed { .. } => {}
+            | IpcEvent::ProviderCredentialsListed { .. }
+            | IpcEvent::TerminalInputRejected { .. } => {}
         }
         // Background-poll indicator. Lights up whenever the daemon
         // emits PollProgress (any cycle, initial or not); clears on
@@ -954,7 +956,8 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::AgentRunFinished { .. }
                 | IpcEvent::ProviderCredentialUpdated { .. }
                 | IpcEvent::ProviderCredentialRemoved { .. }
-                | IpcEvent::ProviderCredentialsListed { .. } => {}
+                | IpcEvent::ProviderCredentialsListed { .. }
+                | IpcEvent::TerminalInputRejected { .. } => {}
             }
         }
         // CleanWorktrees finished — replace the "cleaning…" notice
@@ -972,6 +975,15 @@ impl<T: TerminalAdapter> Model<T> {
         // banner path isn't wired for daemon-originated notices.
         if let IpcEvent::Notification { body, .. } = &event {
             self.flash_hint(body.clone());
+        }
+        // Terminal delivery failures are retryable user-input errors, not
+        // provider polling failures. Keep them out of the sync log/modal and
+        // surface the exact recovery action in the footer/messages history.
+        if let IpcEvent::TerminalInputRejected { message, .. } = &event {
+            self.flash(
+                format!("⚠ terminal input not delivered — {message}"),
+                crate::realm::components::footer::NoticeSeverity::Retryable,
+            );
         }
         // Worktree inspector replied. Swap the placeholder for the
         // real list. `mount_inspect_list` is idempotent — calling it

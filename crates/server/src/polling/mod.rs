@@ -4854,6 +4854,13 @@ async fn delete_workspace_internal(
             to_kill.len()
         );
         for (tid, backend_key) in to_kill {
+            let Some(interaction) =
+                crate::terminal_io::acquire_live(config, tid, &backend_key).await
+            else {
+                // The output pump won teardown after `to_kill` was
+                // snapshotted. There is no live session left to signal.
+                continue;
+            };
             if let Err(e) = config.backend.kill(&backend_key).await {
                 tracing::warn!("kill {backend_key}: {e}");
                 let _ = config.bus.send(Event::provider_error_retryable(
@@ -4869,6 +4876,7 @@ async fn delete_workspace_internal(
                 config.deleted_workspaces.lock().remove(key_str);
                 return false;
             }
+            drop(interaction);
             // One lifecycle owner handles every map, persisted terminal key,
             // AgentState::Exited, and TerminalExited. The output pump may
             // observe the child first or later; the owner's atomic claim

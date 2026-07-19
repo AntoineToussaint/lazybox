@@ -8126,6 +8126,35 @@ mod flash_log_tests {
         assert!(m.status.notice.is_some(), "the sticky banner still shows");
         assert_eq!(m.sync_error_source.as_deref(), Some("github"));
     }
+
+    #[test]
+    fn rejected_terminal_input_is_retryable_and_never_a_sync_failure() {
+        use crate::realm::components::footer::NoticeSeverity;
+        use lazybox_ipc::{Event as IpcEvent, TerminalId};
+
+        let (mut m, _server) = model();
+        m.status.polling = None;
+        m.handle_daemon_event(IpcEvent::TerminalInputRejected {
+            terminal_id: TerminalId(9),
+            message: "write timed out; retry".into(),
+        });
+
+        let notice = m.status.notice.as_ref().expect("retryable notice");
+        assert_eq!(notice.severity, NoticeSeverity::Retryable);
+        assert!(notice.message.contains("write timed out"));
+        assert_eq!(
+            m.status.sync.recent().count(),
+            0,
+            "terminal delivery must not poison provider sync history"
+        );
+        assert!(
+            m.status
+                .messages
+                .recent()
+                .any(|entry| entry.message.contains("write timed out")),
+            "the full failure remains recoverable after the footer fades"
+        );
+    }
 }
 
 #[cfg(test)]

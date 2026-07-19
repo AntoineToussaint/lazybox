@@ -520,20 +520,24 @@ pub async fn handle_inbound(
         let terminals = server.terminals.lock().await;
         terminals.get(&terminal_id).cloned()
     };
-    if let Some(key) = backend_key
-        && let Err(e) = server.backend.write(&key, &bytes).await
-    {
-        tracing::warn!(
-            provider = provider.id(),
-            ?terminal_id,
-            "chat: backend.write failed: {e:?}"
-        );
-    } else {
-        tracing::info!(
-            provider = provider.id(),
-            ?terminal_id,
-            "chat: routed inbound message to agent"
-        );
+    if let Some(key) = backend_key {
+        match crate::terminal_io::write_live(server, terminal_id, &key, &bytes).await {
+            Ok(true) => tracing::info!(
+                provider = provider.id(),
+                ?terminal_id,
+                "chat: routed inbound message to agent"
+            ),
+            Ok(false) => tracing::debug!(
+                provider = provider.id(),
+                ?terminal_id,
+                "chat: target terminal exited before delivery"
+            ),
+            Err(e) => tracing::warn!(
+                provider = provider.id(),
+                ?terminal_id,
+                "chat: terminal write failed: {e}"
+            ),
+        }
     }
 }
 

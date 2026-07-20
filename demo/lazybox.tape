@@ -7,8 +7,8 @@
 #   cargo build -p lazybox-tui            # produces target/debug/lazybox
 #   PATH="$PWD/target/debug:$PATH" vhs demo/lazybox.tape
 #
-# Requires `vhs` (brew install vhs) and a `lazybox` binary on PATH. CI re-renders
-# this on UI changes and snapshot-tests demo/lazybox.ascii (see .github/workflows/demo.yml).
+# Requires `vhs` (brew install vhs) and a `lazybox` binary on PATH.
+# Rendering is intentionally local/manual; CI uses deterministic TUI snapshots.
 #
 # Deterministic render: FontSize / Width / Height / Theme are pinned so the
 # output only changes when the tape or the UI changes — never from host drift.

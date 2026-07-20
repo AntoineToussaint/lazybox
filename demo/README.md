@@ -4,14 +4,15 @@ The lazybox demo is **code, not a hand-recorded screencast**. The source
 of truth is two [VHS](https://github.com/charmbracelet/vhs) scripts that
 launch a real `lazybox --test` session, type a scripted sequence of keys,
 and render the result. That makes the demo reproducible, reviewable as a
-diff, and guarded against drift by CI.
+diff, and cheap to regenerate locally without putting multimedia tooling
+in CI.
 
-- [`lazybox.tape`](lazybox.tape) — the pretty README demo. Opens the inbox,
+- [`lazybox.tape`](lazybox.tape) — the reproducible local demo. Opens the inbox,
   enters a workspace, spawns a shell, and runs a couple of git commands.
-- [`golden.tape`](golden.tape) — the CI snapshot. Opens the `?` help
-  overlay only, which is static lazybox chrome (no live shell). CI diffs
-  just the keybinding table extracted from that render — the byte-stable,
-  machine-independent part — against the committed `golden.ascii`.
+- [`golden.tape`](golden.tape) — a manual visual reference. Opens the `?`
+  help overlay only, which is static lazybox chrome (no live shell).
+  `golden.ascii` keeps the byte-stable, machine-independent keybinding table
+  extracted from that render.
 
 For the parts the sandbox tape can't show — live GitHub events, a real
 agent working via `w`, the Slack-from-your-phone loop — see
@@ -22,19 +23,19 @@ human-recorded screencast.
 
 | File           | From          | Purpose                                                              |
 | -------------- | ------------- | -------------------------------------------------------------------- |
-| `lazybox.gif`    | `lazybox.tape`  | The animated demo embedded inline in the top-level `README.md`.      |
-| `lazybox.mp4`    | `lazybox.tape`  | Seekable video (nicer for docs/social where a player exists).        |
-| `lazybox.png`    | `lazybox.tape`  | Static frame used as the README's `prefers-reduced-motion` fallback. |
-| `golden.ascii` | `golden.tape` | Keybinding table extracted from the render — the CI golden (see below). |
+| `lazybox.gif`    | `lazybox.tape`  | Locally generated animated demo for review or reuse.                 |
+| `lazybox.mp4`    | `lazybox.tape`  | Locally generated seekable video for review or reuse.                |
+| `lazybox.png`    | `lazybox.tape`  | Optional static frame from a local render.                           |
+| `golden.ascii` | `golden.tape` | Manually extracted keybinding-table reference (see below).           |
 
-`golden.ascii` is committed and acts as the golden snapshot. It holds
+`golden.ascii` is committed as a manually updated visual reference. It holds
 **only** the keybinding table, not VHS's full text capture: that capture is
 the terminal scrollback at end-of-tape, whose repaint count and blank
 padding vary with render timing and across machines, so diffing it whole is
 flaky. The table content is byte-stable, so it changes only when the UI or
-a keybinding does. The `lazybox.*` assets are committed too, but they are
-**not** diffed in CI: `lazybox.tape` spawns a shell, whose prompt carries a
-random tempdir suffix, the wall clock, and the OS username, so its text
+a keybinding does. The `lazybox.*` assets are committed too, but are not
+automatically regenerated: `lazybox.tape` spawns a shell, whose prompt carries
+a random tempdir suffix, the wall clock, and the OS username, so its text
 capture changes on every render and can't be a golden.
 
 ## Regenerating locally
@@ -55,7 +56,7 @@ capture changes on every render and can't be a golden.
    PATH="$PWD/target/debug:$PATH" vhs demo/golden.tape
    PATH="$PWD/target/debug:$PATH" vhs demo/lazybox.tape
    # golden.tape writes the full scrollback; reduce it to just the table
-   # (the same awk CI uses) so the committed golden stays machine-independent:
+   # so the committed golden stays machine-independent:
    awk '/  Tab .* cycle panes/{c=1;b=""} c{b=b $0 ORS} c&&/exit to sidebar/{last=b;c=0} END{printf "%s",last}' \
      demo/golden.ascii > demo/golden.ascii.tmp && mv demo/golden.ascii.tmp demo/golden.ascii
    ```
@@ -87,26 +88,20 @@ Because geometry, font, and theme are pinned, `golden.tape` plus the same
 `lazybox` binary renders the same keybinding table every time. (The
 scrollback *around* the table — how many full-screen repaints VHS captured
 and the blank padding between them — still varies with timing and across
-machines, which is exactly why CI compares only the extracted table, not
-the whole capture.)
+machines, which is why the manual reference keeps only the extracted table,
+not the whole capture.)
 
-## Golden snapshot test
+## Manual golden reference
 
-CI re-renders `golden.tape` on every PR that touches `demo/**` or
-`crates/**`, extracts the keybinding table from the render, and diffs it
-against the committed `demo/golden.ascii`. If the TUI or a keybinding
-changed but the recorded demo wasn't regenerated, the table diverges from
-the committed one and CI fails. The fix is exactly the
-[regenerate-and-commit](#regenerating-locally) flow above. The pretty GIF
-is re-rendered in the same job as a smoke test (it must still boot
-`lazybox --test`), but it is not diffed.
-
-CI does not auto-commit regenerated assets — maintainers regenerate and
-commit locally so the binary GIF stays reviewable in the PR.
+Demo rendering is intentionally not part of CI. The multimedia/browser stack
+is slow and fragile, while the TUI's deterministic ratatui/insta tests already
+guard visual structure and the generated keymap tests guard shortcut drift.
+Maintainers regenerate these artifacts locally when a release or documentation
+change needs fresh media, then review and commit the binary diff explicitly.
 
 ## Accessibility
 
-The GIF and how it's referenced are kept friendly to motion-sensitive
+The published hero media and how it's referenced are kept friendly to motion-sensitive
 and screen-reader users:
 
 - **Short loop.** The tape is a brief, looping sequence — long enough to
@@ -116,5 +111,5 @@ and screen-reader users:
 - **Descriptive alt text.** The `README.md` embed uses descriptive alt
   text so the demo is meaningful without playback.
 - **Reduced-motion fallback.** For `prefers-reduced-motion`, the README
-  pairs the GIF with `lazybox.png`, a static frame, so readers who opt out
+  pairs the video with `hero.png`, a static poster, so readers who opt out
   of motion still see what lazybox looks like.

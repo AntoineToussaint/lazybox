@@ -1336,7 +1336,15 @@ impl<T: TerminalAdapter> Model<T> {
         if self.worktree_progress_dismissed.as_ref() == Some(&session_key) {
             if let lazybox_ipc::WorktreeStepStatus::Failed(err) = &status {
                 self.worktree_progress_dismissed = None;
-                self.flash_error(format!("✗ worktree setup failed — {err}"));
+                // The daemon confirming this client's own Esc-cancel
+                // arrives as a `Failed` (so every client's checklist
+                // stops), but it isn't an error to the user who asked
+                // for it — frame it as a plain confirmation.
+                if err == lazybox_ipc::SPAWN_CANCELLED_NOTE {
+                    self.flash_info(lazybox_ipc::SPAWN_CANCELLED_NOTE);
+                } else {
+                    self.flash_error(format!("✗ worktree setup failed — {err}"));
+                }
             }
             return;
         }

@@ -419,6 +419,11 @@ fn all_events() -> Vec<Event> {
             step: WorktreeStep::Fetch,
             status: WorktreeStepStatus::Warned("using cached base".into()),
         },
+        Event::WorktreeProgress {
+            session_key: key.clone(),
+            step: WorktreeStep::Clone,
+            status: WorktreeStepStatus::Progress("Receiving objects: 42% (1200/2900)".into()),
+        },
         Event::SessionEnded {
             workspace_key: lazybox_core::WorkspaceKey::new(key.as_str()),
             session_id: lazybox_core::SessionId::new(),
@@ -774,12 +779,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         (lazybox_ipc::PROTOCOL_VERSION, command_tags.len()),
-        (11, 51),
+        (12, 51),
         "Command gained/lost a variant: update the exhaustive tag, add a sample, and bump PROTOCOL_VERSION",
     );
     assert_eq!(
         (lazybox_ipc::PROTOCOL_VERSION, event_tags.len()),
-        (11, 50),
+        (12, 50),
         "Event gained/lost a variant: update the exhaustive tag, add a sample, and bump PROTOCOL_VERSION",
     );
 }

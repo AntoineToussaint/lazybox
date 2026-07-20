@@ -1,7 +1,7 @@
 //! `WorktreeProgress` — spinner + step checklist shown while a first
 //! `w`/`c`/`s` on a fresh workspace provisions its worktree (refresh the
 //! base ref / `git worktree add` / mounts / scripts, plus a one-time
-//! `git clone --bare` the very first time a repo is used).
+//! blobless bare clone the very first time a repo is used).
 //!
 //! lazybox clones a repo's bare mirror exactly once and then does a
 //! `git worktree add` per workspace — it never re-clones. So the first
@@ -120,11 +120,16 @@ pub enum StepState {
 pub struct WorktreeProgressState {
     pub session_key: SessionKey,
     /// A genuine cold clone is running. Set when a `Clone` step arrives,
-    /// which the daemon only emits on a real first-time `git clone
-    /// --bare` (a cached bare clone is reused silently). Upgrades the
-    /// first row's label from "Preparing worktree" to the one-time clone
-    /// message — the warm path never claims to be cloning.
+    /// which the daemon only emits on a real first-time bare clone (a
+    /// cached bare clone is reused silently). Upgrades the first row's
+    /// label from "Preparing worktree" to the one-time clone message —
+    /// the warm path never claims to be cloning.
     cold_clone: bool,
+    /// Latest transfer-progress line from the in-flight clone
+    /// (`Receiving objects: 42% …`), rendered as a dim detail line
+    /// under the clone row while it's active — so a multi-hundred-MB
+    /// transfer shows bytes/percent instead of an opaque spinner.
+    clone_progress: Option<String>,
     /// Daemon truth: the highest stage reached (`0..=READY`).
     target: u8,
     /// Displayed frontier: the stage currently shown as `Active`
@@ -151,6 +156,7 @@ impl WorktreeProgressState {
         Self {
             session_key,
             cold_clone: false,
+            clone_progress: None,
             target: 0,
             shown: 0,
             shown_since: Instant::now(),
@@ -200,6 +206,13 @@ impl WorktreeProgressState {
             // surfaces it and holds for acknowledgement, but let the
             // checklist keep advancing — provisioning did succeed.
             (_, WorktreeStepStatus::Warned(msg)) => self.warning = Some(msg),
+            (WorktreeStep::Clone, WorktreeStepStatus::Progress(line)) => {
+                self.cold_clone = true;
+                self.clone_progress = Some(line);
+            }
+            // No other step streams progress today; tolerate rather
+            // than misfile a future one.
+            (_, WorktreeStepStatus::Progress(_)) => {}
             (WorktreeStep::Clone, _) => self.cold_clone = true,
             (WorktreeStep::Fetch, _) => {}
             (WorktreeStep::WorktreeAdd, _) => self.advance_to(Row::WorktreeAdd),
@@ -290,6 +303,7 @@ impl WorktreeProgressState {
 /// self-advancing spinner index.
 pub struct WorktreeProgress {
     steps: [(&'static str, StepState); STEP_COUNT as usize],
+    clone_progress: Option<String>,
     error: Option<String>,
     warning: Option<String>,
     spinner_idx: usize,
@@ -299,6 +313,7 @@ impl WorktreeProgress {
     pub fn from_state(state: &WorktreeProgressState) -> Self {
         Self {
             steps: state.steps(),
+            clone_progress: state.clone_progress.clone(),
             error: state.error.clone(),
             warning: state.warning.clone(),
             spinner_idx: 0,
@@ -313,7 +328,7 @@ impl Component for WorktreeProgress {
 
         let mut lines: Vec<Line> = Vec::new();
         lines.push(Line::raw(""));
-        for (label, state) in &self.steps {
+        for (i, (label, state)) in self.steps.iter().enumerate() {
             let (glyph, glyph_style) = match state {
                 StepState::Pending => ("○".to_string(), Style::default().fg(theme.text_dim)),
                 StepState::Active => (
@@ -334,6 +349,17 @@ impl Component for WorktreeProgress {
                 Span::styled(format!("  {glyph}  "), glyph_style),
                 Span::styled((*label).to_string(), label_style),
             ]));
+            // Live transfer detail under the clone row while it spins —
+            // bytes/percent for the one genuinely long step.
+            if i == Row::Prepare as usize
+                && *state == StepState::Active
+                && let Some(progress) = &self.clone_progress
+            {
+                lines.push(Line::from(Span::styled(
+                    format!("     {progress}"),
+                    Style::default().fg(theme.text_dim),
+                )));
+            }
         }
         lines.push(Line::raw(""));
         if let Some(err) = &self.error {
@@ -471,6 +497,41 @@ mod tests {
         // Later steps still pending → hollow bullet.
         assert!(out.contains('○'), "{out}");
         assert!(out.contains("Esc cancel"), "{out}");
+    }
+
+    /// A live clone-transfer line renders as a detail under the active
+    /// clone row (issue #405: a multi-hundred-MB clone must show
+    /// bytes/percent, not an opaque spinner) — and disappears once the
+    /// checklist moves past the clone.
+    #[test]
+    fn clone_progress_detail_shows_while_cloning_then_clears() {
+        let mut st = state();
+        st.apply(WorktreeStep::Clone, WorktreeStepStatus::Started);
+        st.apply(
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Progress(
+                "Receiving objects: 42% (1200/2900), 12.00 MiB | 1.20 MiB/s".into(),
+            ),
+        );
+        let out = render(&mut WorktreeProgress::from_state(&st), 70, 12);
+        assert!(out.contains("Cloning repository (one-time)"), "{out}");
+        assert!(out.contains("Receiving objects: 42%"), "{out}");
+        // A later line replaces, not appends.
+        st.apply(
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Progress("Receiving objects: 90% (2610/2900)".into()),
+        );
+        let out = render(&mut WorktreeProgress::from_state(&st), 70, 12);
+        assert!(out.contains("Receiving objects: 90%"), "{out}");
+        assert!(!out.contains("42%"), "{out}");
+        // Once the worktree add starts and the display advances, the
+        // clone row is Done and the transfer detail goes with it.
+        st.apply(WorktreeStep::WorktreeAdd, WorktreeStepStatus::Started);
+        let t0 = Instant::now();
+        st.shown_since = t0;
+        assert!(st.tick(t0 + MIN_STEP_DWELL));
+        let out = render(&mut WorktreeProgress::from_state(&st), 70, 12);
+        assert!(!out.contains("Receiving objects"), "{out}");
     }
 
     /// The warm path (a bare clone already exists, so only `git worktree

@@ -1002,29 +1002,43 @@ pub async fn handle_spawn(
             // (`Notify` permits stack). The inject task only needs to
             // know "we reached ready at least once."
             let mut signaled_ready = false;
-            let check_ready =
-                |state_buf: &Vec<u8>, signaled: &mut bool, signal: &tokio::sync::Notify| {
-                    if *signaled {
-                        return;
-                    }
-                    let Some(agent) = agent_for_pump.as_ref() else {
-                        return;
-                    };
-                    // Same DETECT_WINDOW the pump's state detector uses —
-                    // covers the visible-screen tail without scanning
-                    // long-stale boot output.
-                    const DETECT_WINDOW: usize = 16 * 1024;
-                    let tail = &state_buf[state_buf.len().saturating_sub(DETECT_WINDOW)..];
-                    if agent.detect_ready_for_prompt(tail) {
-                        // `notify_one` STORES a permit when no waiter is
-                        // registered yet; `notify_waiters` is edge-triggered
-                        // and a ready signal fired before the inject task
-                        // started waiting was lost forever, riding the
-                        // inject path to its hard deadline.
-                        signal.notify_one();
-                        *signaled = true;
-                    }
+            let check_ready = |state_buf: &Vec<u8>,
+                               last_chunk_len: usize,
+                               signaled: &mut bool,
+                               signal: &tokio::sync::Notify| {
+                if *signaled {
+                    return;
+                }
+                let Some(agent) = agent_for_pump.as_ref() else {
+                    return;
                 };
+                // Same DETECT_WINDOW the pump's state detector uses —
+                // covers the visible-screen tail without scanning
+                // long-stale boot output.
+                const DETECT_WINDOW: usize = 16 * 1024;
+                let tail = &state_buf[state_buf.len().saturating_sub(DETECT_WINDOW)..];
+                // Chunk-boundary hint within the tail slice: repaint-heavy
+                // agents (Codex) judge readiness from the latest frame
+                // rather than the append-only history (issue #425).
+                let chunk_start = tail.len().saturating_sub(last_chunk_len);
+                if agent.detect_ready_for_prompt_chunked(tail, chunk_start) {
+                    // Time-to-ready is the first (and normally dominant)
+                    // stage of the spawn→inject pipeline — log it so a slow
+                    // inject can be attributed (issue #425).
+                    tracing::info!(
+                        terminal_id = ?id_for_pump,
+                        elapsed_ms = t0_for_pump.elapsed().as_millis(),
+                        "agent composer ready for prompt",
+                    );
+                    // `notify_one` STORES a permit when no waiter is
+                    // registered yet; `notify_waiters` is edge-triggered
+                    // and a ready signal fired before the inject task
+                    // started waiting was lost forever, riding the
+                    // inject path to its hard deadline.
+                    signal.notify_one();
+                    *signaled = true;
+                }
+            };
             // Quiet-classification timer (#289). Re-armed on every chunk;
             // when it fires — PTY_QUIET_CLASSIFY_AFTER with no output —
             // the resting screen is classified. While chunks flow, the
@@ -1088,7 +1102,12 @@ pub async fn handle_spawn(
                 // waiter must not be lost.
                 first_output_signal_for_pump.notify_one();
                 signaled_first_output = true;
-                check_ready(&state_buf, &mut signaled_ready, &ready_signal_for_pump);
+                check_ready(
+                    &state_buf,
+                    last_chunk_len,
+                    &mut signaled_ready,
+                    &ready_signal_for_pump,
+                );
                 // The composer being drawn is the "agent has booted" signal
                 // the state machine needs to stop holding byte-flow `Working`
                 // as boot chrome — crucial for the autonomous flow, whose
@@ -1179,7 +1198,12 @@ pub async fn handle_spawn(
                             watchdog_anchor = tokio::time::Instant::now();
                         }
                     }
-                    check_ready(&state_buf, &mut signaled_ready, &ready_signal_for_pump);
+                    check_ready(
+                        &state_buf,
+                        last_chunk_len,
+                        &mut signaled_ready,
+                        &ready_signal_for_pump,
+                    );
                     let _ = bus.send(Event::TerminalResync {
                         terminal_id: id_for_pump,
                         replay: snapshot.replay,
@@ -1250,7 +1274,12 @@ pub async fn handle_spawn(
                         "handle_spawn: first PTY output",
                     );
                 }
-                check_ready(&state_buf, &mut signaled_ready, &ready_signal_for_pump);
+                check_ready(
+                    &state_buf,
+                    last_chunk_len,
+                    &mut signaled_ready,
+                    &ready_signal_for_pump,
+                );
                 if signaled_ready {
                     state_machine.mark_booted();
                 }
@@ -1388,23 +1417,56 @@ pub async fn handle_spawn(
             // and the user has no signal it happened. So instead of dropping
             // (the old `GATE_CAP` path) or pasting blindly, keep the prompt
             // pending and deliver it the moment the agent genuinely reaches
-            // ready, bounded only by terminal liveness. The bare-deadline
+            // ready, bounded by terminal liveness AND `PENDING_READY_CAP` —
+            // a flaky readiness detector must not silently turn the inject
+            // into an unbounded wait (issue #425). The bare-deadline
             // blind paste is kept for detector-less agents (`requires_ready`
             // false), whose `ready` signal never fires — losing the prompt
             // to a cold-start hang is worse there than a best-effort paste.
-            if trigger == InjectTrigger::Deadline
-                && requires_ready
-                && !await_pending_ready(id, &ready_signal, &config_for_inject.terminals).await
-            {
-                tracing::warn!(
-                    terminal_id = ?id,
-                    "initial_prompt: terminal exited before the agent became ready — work prompt not delivered"
-                );
-                let _ = config_for_inject.bus.send(Event::TerminalInputRejected {
-                    terminal_id: id,
-                    message: "agent never became ready — press w again to retry".into(),
-                });
-                return;
+            if trigger == InjectTrigger::Deadline && requires_ready {
+                let pending_t0 = std::time::Instant::now();
+                match await_pending_ready(
+                    id,
+                    &ready_signal,
+                    &config_for_inject.terminals,
+                    PENDING_READY_CAP,
+                )
+                .await
+                {
+                    PendingReady::Ready => {
+                        tracing::info!(
+                            terminal_id = ?id,
+                            waited_ms = pending_t0.elapsed().as_millis(),
+                            "initial_prompt: agent reached ready past the hard deadline",
+                        );
+                    }
+                    PendingReady::TerminalGone => {
+                        tracing::warn!(
+                            terminal_id = ?id,
+                            "initial_prompt: terminal exited before the agent became ready — work prompt not delivered"
+                        );
+                        let _ = config_for_inject.bus.send(Event::TerminalInputRejected {
+                            terminal_id: id,
+                            message: "agent never became ready — press w again to retry".into(),
+                        });
+                        return;
+                    }
+                    PendingReady::Capped => {
+                        tracing::warn!(
+                            terminal_id = ?id,
+                            waited_ms = pending_t0.elapsed().as_millis(),
+                            "initial_prompt: agent never reported ready within the bounded wait — work prompt not delivered"
+                        );
+                        let _ = config_for_inject.bus.send(Event::TerminalInputRejected {
+                            terminal_id: id,
+                            message: format!(
+                                "agent did not become ready within {}s — press w again to retry",
+                                (HARD_DEADLINE + PENDING_READY_CAP).as_secs()
+                            ),
+                        });
+                        return;
+                    }
+                }
             }
             tracing::info!(
                 terminal_id = ?id,
@@ -1557,32 +1619,58 @@ async fn await_inject_window(
     }
 }
 
+/// Upper bound on the post-deadline pending-ready park. Combined with the
+/// inject `HARD_DEADLINE` this is the total worst-case wait before a
+/// spawn-time prompt fails loudly instead of parking forever behind a
+/// readiness detector that never fires against a repainting TUI
+/// (issue #425).
+const PENDING_READY_CAP: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How a parked spawn-time prompt's pending-ready wait resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingReady {
+    /// The pump's composer-ready signal fired — deliver the prompt now.
+    Ready,
+    /// The terminal exited (or never finished booting) — nothing left to
+    /// deliver to; the caller surfaces the failure.
+    TerminalGone,
+    /// The bounded wait elapsed with no ready signal — fail loudly rather
+    /// than park the prompt indefinitely.
+    Capped,
+}
+
 /// Park a pending spawn-time prompt until the agent is genuinely ready to
 /// receive it, instead of dropping it or pasting blindly past the inject
-/// deadline. Returns `true` once `ready` fires (deliver the prompt now),
-/// `false` once the terminal has gone away (nothing left to deliver to —
-/// the caller surfaces the failure).
+/// deadline.
 ///
 /// `ready` is the pump's one-shot composer-drawn signal; it fires when the
 /// agent leaves any boot-time gate (folder-trust / login / bypass chooser)
 /// AND its input box is drawn, so waiting on it subsumes the old
 /// gate-polling loop. The 1s poll re-checks terminal liveness so a terminal
-/// that exits (or never finishes booting) ends the wait rather than leaking
-/// the task — the pump removes its `terminals` entry on exit.
+/// that exits ends the wait rather than leaking the task — the pump removes
+/// its `terminals` entry on exit. `cap` bounds the total wait: a readiness
+/// detector that never fires must not silently become an unbounded park.
 async fn await_pending_ready(
     id: TerminalId,
     ready: &tokio::sync::Notify,
     terminals: &tokio::sync::Mutex<std::collections::HashMap<TerminalId, String>>,
-) -> bool {
+    cap: std::time::Duration,
+) -> PendingReady {
+    let cap_at = tokio::time::Instant::now() + cap;
     loop {
         if !terminals.lock().await.contains_key(&id) {
-            return false;
+            return PendingReady::TerminalGone;
         }
-        if tokio::time::timeout(std::time::Duration::from_secs(1), ready.notified())
-            .await
-            .is_ok()
-        {
-            return true;
+        let now = tokio::time::Instant::now();
+        if now >= cap_at {
+            return PendingReady::Capped;
+        }
+        let poll = std::cmp::min(
+            std::time::Duration::from_secs(1),
+            cap_at.duration_since(now),
+        );
+        if tokio::time::timeout(poll, ready.notified()).await.is_ok() {
+            return PendingReady::Ready;
         }
     }
 }
@@ -4078,6 +4166,7 @@ async fn write_prompt_sequence(
     encoded: lazybox_agents::EncodedPrompt,
     interaction: tokio::sync::OwnedMutexGuard<()>,
 ) -> Result<(), PromptWriteError> {
+    let echo_probes = encoded.echo_probes().to_vec();
     let (initial_write, submit_write) = encoded.into_writes();
     // Subscribe BEFORE the first write so its repaint chunks cannot race the
     // settle gate. Line-oriented prompts submit inline and skip this receiver.
@@ -4087,13 +4176,21 @@ async fn write_prompt_sequence(
         .map_err(PromptWriteError::Initial)?;
 
     if let (Some(submit_bytes), Some(mut output_events)) = (submit_write, output_events) {
-        await_paste_settled(
+        let settle_t0 = std::time::Instant::now();
+        let settle = await_paste_settled(
             &mut output_events,
             terminal_id,
+            &echo_probes,
             PASTE_QUIET_WINDOW,
             PASTE_SETTLE_CAP,
         )
         .await;
+        tracing::info!(
+            terminal_id = ?terminal_id,
+            trigger = ?settle,
+            settle_ms = settle_t0.elapsed().as_millis(),
+            "prompt paste settled — sending submit keystroke",
+        );
         let confirm = prepare_submit_confirmation(config, terminal_id).await;
         terminal_io::write_locked(config, backend_key, &submit_bytes)
             .await
@@ -4246,27 +4343,74 @@ async fn confirm_prompt_submission(
     });
 }
 
-/// Block until `terminal_id`'s output has been quiet for `quiet`, or
-/// `cap` elapses — whichever comes first. Called between the paste
-/// write and the submit keystroke so Enter is gated on evidence the
-/// paste batch settled (the repaint it triggers has finished) instead
-/// of a fixed sleep. `events` must be subscribed BEFORE the paste
-/// write so the chunks it produces are observable here.
+/// Which evidence released the paste-settle gate — logged so a slow
+/// paste→Enter hop can be attributed (issue #425).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PasteSettle {
+    /// The composer echoed the pasted text (or its collapsed-paste
+    /// placeholder) — the paste is processed; Enter is safe immediately.
+    Echo,
+    /// Output went quiet for the full quiet window.
+    Quiet,
+    /// The cap elapsed on a terminal that never went quiet and never
+    /// showed the echo; the confirm loop's resends own recovery.
+    Cap,
+}
+
+/// Bound on the raw post-paste bytes retained for echo matching. The echo
+/// repaint lands within the first frames after the paste, so this only
+/// guards against a pathological output flood during the settle window.
+const PASTE_ECHO_SCAN_CAP: usize = 128 * 1024;
+
+/// Block between the paste write and the submit keystroke until there is
+/// evidence the paste batch settled, whichever arrives first:
+///
+/// - **echo** — the terminal's output since the paste contains one of
+///   `echo_probes` (the composer re-rendered with the pasted text). This is
+///   the primary signal for TUIs that repaint continuously (Codex) and
+///   therefore never satisfy a global quiet window (issue #425): a
+///   repainting status line must not delay the Enter.
+/// - **quiet** — no output for `quiet` (the pre-#425 heuristic, still the
+///   path for agents that go quiet after the paste and the fallback when
+///   the echo is not recognized).
+/// - **cap** — the bounded worst case.
+///
+/// `events` must be subscribed BEFORE the paste write so the chunks it
+/// produces are observable here.
 async fn await_paste_settled(
     events: &mut tokio::sync::broadcast::Receiver<Event>,
     terminal_id: TerminalId,
+    echo_probes: &[String],
     quiet: Duration,
     cap: Duration,
-) {
+) -> PasteSettle {
     let cap_at = tokio::time::Instant::now() + cap;
     let mut quiet_at = tokio::time::Instant::now() + quiet;
+    // Raw bytes seen since the paste, accumulated so an echo split across
+    // chunk boundaries (or interleaved with cursor-move escapes) still
+    // matches after ANSI-stripping and compaction.
+    let mut seen: Vec<u8> = Vec::new();
     loop {
         match tokio::time::timeout_at(quiet_at.min(cap_at), events.recv()).await {
             // Quiet window or the cap elapsed — settled either way.
-            Err(_) => return,
+            Err(_) => {
+                return if tokio::time::Instant::now() >= cap_at {
+                    PasteSettle::Cap
+                } else {
+                    PasteSettle::Quiet
+                };
+            }
             Ok(Ok(Event::TerminalOutput {
-                terminal_id: tid, ..
+                terminal_id: tid,
+                bytes,
+                ..
             })) if tid == terminal_id => {
+                if seen.len() < PASTE_ECHO_SCAN_CAP {
+                    seen.extend_from_slice(&bytes);
+                    if lazybox_agents::detect::paste_echo_observed(&seen, echo_probes) {
+                        return PasteSettle::Echo;
+                    }
+                }
                 quiet_at = tokio::time::Instant::now() + quiet;
             }
             Ok(Ok(_)) => {}
@@ -4276,7 +4420,7 @@ async fn await_paste_settled(
             Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
                 quiet_at = tokio::time::Instant::now() + quiet;
             }
-            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return,
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return PasteSettle::Quiet,
         }
     }
 }
@@ -6774,14 +6918,16 @@ mod tests {
         let config = ServerConfig::in_memory();
         let mut events = config.bus.subscribe();
         let t0 = std::time::Instant::now();
-        await_paste_settled(
+        let settle = await_paste_settled(
             &mut events,
             TerminalId(1),
+            &[],
             Duration::from_millis(50),
             Duration::from_secs(5),
         )
         .await;
         let elapsed = t0.elapsed();
+        assert_eq!(settle, PasteSettle::Quiet);
         assert!(elapsed >= Duration::from_millis(50));
         assert!(elapsed < Duration::from_secs(2), "must not ride the cap");
     }
@@ -6809,6 +6955,7 @@ mod tests {
         await_paste_settled(
             &mut events,
             id,
+            &[],
             Duration::from_millis(100),
             Duration::from_secs(5),
         )
@@ -6841,6 +6988,7 @@ mod tests {
         await_paste_settled(
             &mut events,
             TerminalId(3),
+            &[],
             Duration::from_millis(50),
             Duration::from_secs(5),
         )
@@ -6872,16 +7020,125 @@ mod tests {
             }
         });
         let t0 = std::time::Instant::now();
-        await_paste_settled(
+        let settle = await_paste_settled(
             &mut events,
             id,
+            &[],
             Duration::from_millis(100),
             Duration::from_millis(200),
         )
         .await;
         let elapsed = t0.elapsed();
+        assert_eq!(settle, PasteSettle::Cap);
         assert!(elapsed >= Duration::from_millis(200));
         assert!(elapsed < Duration::from_secs(1), "the cap bounds the wait");
+    }
+
+    /// The #425 regression shape: a Codex-style TUI that repaints
+    /// continuously (chunks every few ms) never satisfies the quiet
+    /// window — but the frame that echoes the pasted prompt must release
+    /// the gate immediately, well before the cap.
+    #[tokio::test]
+    async fn paste_settle_fires_on_echo_while_output_never_quiets() {
+        let config = ServerConfig::in_memory();
+        let id = TerminalId(5);
+        let mut events = config.bus.subscribe();
+        let bus = config.bus.clone();
+        let encoded = lazybox_agents::PtyProtocol::GUARDED_COMPOSER.encode_prompt(
+            "Address the review comments on PR #42 and push a fix",
+            lazybox_agents::PromptIntent::Submit,
+        );
+        let probes = encoded.echo_probes().to_vec();
+        tokio::spawn(async move {
+            for seq in 0..400u64 {
+                // Spinner churn on every frame; the composer echo repaint —
+                // ANSI-wrapped, like a real frame — lands on frame 5.
+                let bytes: Vec<u8> = if seq == 5 {
+                    b"\x1b[2K\x1b[1;1H\x1b[7m\xe2\x80\xba\x1b[0m Address the review comments on PR #42 and push a fix".to_vec()
+                } else {
+                    b"\x1b[2K\xe2\x80\xa2 spin".to_vec()
+                };
+                let _ = bus.send(Event::TerminalOutput {
+                    terminal_id: id,
+                    bytes,
+                    first_seq: seq,
+                    seq,
+                });
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        let t0 = std::time::Instant::now();
+        let settle = await_paste_settled(
+            &mut events,
+            id,
+            &probes,
+            Duration::from_millis(500),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(settle, PasteSettle::Echo);
+        assert!(
+            t0.elapsed() < Duration::from_millis(500),
+            "the echo must release the gate before quiet window or cap: {:?}",
+            t0.elapsed()
+        );
+    }
+
+    /// A large paste an agent collapses into placeholder chrome instead of
+    /// echoing verbatim (`[Pasted text #1 +12 lines]`) still counts as the
+    /// paste echo.
+    #[tokio::test]
+    async fn paste_settle_accepts_collapsed_paste_placeholder_as_echo() {
+        let config = ServerConfig::in_memory();
+        let id = TerminalId(6);
+        let mut events = config.bus.subscribe();
+        let bus = config.bus.clone();
+        let encoded = lazybox_agents::PtyProtocol::GUARDED_COMPOSER.encode_prompt(
+            "line one of a long prompt\nline two\nline three",
+            lazybox_agents::PromptIntent::Submit,
+        );
+        let probes = encoded.echo_probes().to_vec();
+        tokio::spawn(async move {
+            let _ = bus.send(Event::TerminalOutput {
+                terminal_id: id,
+                bytes: b"\x1b[2K> \x1b[2m[Pasted text #1 +2 lines]\x1b[0m".to_vec(),
+                first_seq: 0,
+                seq: 0,
+            });
+        });
+        let settle = await_paste_settled(
+            &mut events,
+            id,
+            &probes,
+            Duration::from_secs(2),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(settle, PasteSettle::Echo);
+    }
+
+    /// Post-deadline pending-ready must be bounded: with the terminal alive
+    /// but the ready signal never firing, the wait resolves `Capped` instead
+    /// of parking the prompt forever (issue #425).
+    #[tokio::test]
+    async fn pending_ready_is_bounded_by_its_cap() {
+        let config = ServerConfig::in_memory();
+        let id = TerminalId(7);
+        config
+            .terminals
+            .lock()
+            .await
+            .insert(id, "backend-key".to_string());
+        let ready = tokio::sync::Notify::new();
+        let t0 = std::time::Instant::now();
+        let outcome =
+            await_pending_ready(id, &ready, &config.terminals, Duration::from_millis(120)).await;
+        assert_eq!(outcome, PendingReady::Capped);
+        assert!(t0.elapsed() >= Duration::from_millis(120));
+        assert!(
+            t0.elapsed() < Duration::from_secs(5),
+            "the cap must bound the pending-ready park"
+        );
     }
 
     #[test]
@@ -7784,8 +8041,9 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             ready_signal.notify_one();
         });
-        assert!(
-            await_pending_ready(TerminalId(7), &ready, &terminals).await,
+        assert_eq!(
+            await_pending_ready(TerminalId(7), &ready, &terminals, PENDING_READY_CAP).await,
+            PendingReady::Ready,
             "ready firing must release the pending prompt for delivery",
         );
     }
@@ -7806,8 +8064,9 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             terminals_for_exit.lock().await.remove(&TerminalId(7));
         });
-        assert!(
-            !await_pending_ready(TerminalId(7), &ready, &terminals).await,
+        assert_eq!(
+            await_pending_ready(TerminalId(7), &ready, &terminals, PENDING_READY_CAP).await,
+            PendingReady::TerminalGone,
             "a terminal that exits before ready must end the wait as a failure",
         );
     }

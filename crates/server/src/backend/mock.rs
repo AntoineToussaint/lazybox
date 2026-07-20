@@ -61,6 +61,10 @@ struct MockInner {
     /// argv), so release only records — tests use `released_keys()` to
     /// assert the pump teardown freed the backend slot.
     released: Mutex<Vec<String>>,
+    /// Canned `scrollback()` payloads per key — the mock's stand-in
+    /// for tmux's capture-pane history. Keys without an entry return
+    /// `None`, matching a backend with no history source.
+    deep_scrollback: Mutex<HashMap<String, Vec<u8>>>,
 }
 
 struct MockSession {
@@ -281,6 +285,18 @@ impl MockBackend {
     pub async fn released_keys(&self) -> Vec<String> {
         self.inner.released.lock().await.clone()
     }
+
+    /// Give `scrollback(key)` a canned payload — the mock equivalent
+    /// of tmux's retained pane history. The reported seq is the
+    /// session's live high-water mark at call time, like the real
+    /// backend.
+    pub async fn set_deep_scrollback(&self, key: &str, bytes: impl AsRef<[u8]>) {
+        self.inner
+            .deep_scrollback
+            .lock()
+            .await
+            .insert(key.into(), bytes.as_ref().to_vec());
+    }
 }
 
 impl SessionBackend for MockBackend {
@@ -482,6 +498,23 @@ impl SessionBackend for MockBackend {
                 last_seq: session.last_seq,
                 complete: true,
             })
+        })
+    }
+
+    fn scrollback<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<(Vec<u8>, u64)>, BackendError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let Some(bytes) = self.inner.deep_scrollback.lock().await.get(key).cloned() else {
+                return Ok(None);
+            };
+            let map = self.inner.sessions.lock().await;
+            let session = map
+                .get(key)
+                .ok_or_else(|| BackendError::NotFound(key.into()))?;
+            Ok(Some((bytes, session.last_seq)))
         })
     }
 

@@ -56,12 +56,21 @@
 //! triggers — and those are *ambiguous* (`!clear`) byte-flow `Working`
 //! readings. An ambiguous reading is never evidence the prompt was
 //! answered, so it can never leave `InputNeeded` (no time bound, exactly
-//! like an ambiguous `Working` can never clear `Done`). Navigation must
-//! not change whether an agent is asking (#374). A genuine resolution
+//! like an ambiguous `Working` alone can never clear `Done`). Navigation
+//! must not change whether an agent is asking (#374). A genuine resolution
 //! leaves it on affirmative evidence only: the user submitting input (the
 //! optimistic flip commits `Working` through `transition` directly), an
 //! authoritative hook (likewise), or a *clear* quiet-classification of a
 //! live-again screen.
+//!
+//! `Done` has one extra affirmative exit `InputNeeded` doesn't: a streak
+//! of *progressing* readings ([`Reading::progress`] — chunks that each
+//! changed the meaningful screen content, not repaint churn) re-commits
+//! `Working` (#398). A resumed turn streams heavily and never pauses, so
+//! the quiet classifier can't be the one to notice it; the content
+//! fingerprint moving several chunks in a row is the resume event. A
+//! parked prompt, by contrast, emits nothing, so `InputNeeded` never
+//! sees such a streak and keeps its stricter contract.
 
 use lazybox_ipc::AgentState;
 
@@ -83,7 +92,27 @@ pub struct Reading {
     /// turn to `Done`, and is the only screen-scrape that may leave
     /// `Done`/`InputNeeded`.
     pub clear: bool,
+    /// Whether the chunk behind this reading *changed the meaningful
+    /// content* of the screen (the daemon's letters-only fingerprint
+    /// moved — see `detect::content_fingerprint`), as opposed to
+    /// repaint churn: a spinner frame, a counter tick, a cursor blink.
+    /// A streak of progressing readings is the affirmative "the agent
+    /// resumed real output" event that may leave `Done` (#398) — the
+    /// one exit a busy stream can take, since the quiet classifier
+    /// only ever runs at a pause the stream never offers. Meaningless
+    /// on clear readings (the classification itself is the evidence).
+    pub progress: bool,
 }
+
+/// How many progressing readings ([`Reading::progress`]) in a row —
+/// while `Done`, uninterrupted by a clear classification — count as a
+/// resumed turn and re-open `Working`. One or two is the shape of a
+/// stray full-screen redraw fragmenting into distinct chunks; a
+/// genuinely resumed agent streams past three within a second. A false
+/// trip self-corrects at the next quiet classification (the settle
+/// promotion re-lands `Done`), whereas a `Done` pinned on a visibly
+/// streaming agent has no other exit at all.
+pub(crate) const DONE_EXIT_PROGRESS_STREAK: u8 = 3;
 
 /// Whether the machine permits a move from `from` to a *different* state
 /// `to`. The lifecycle is near-complete — an agent can go busy, ask, or
@@ -156,6 +185,16 @@ pub struct AgentStateMachine {
     /// `Working` and force the forbidden `Working → Idle` settle (or a
     /// false `Done`). See the module docs.
     booted: bool,
+    /// Consecutive-while-`Done` count of progressing readings
+    /// ([`Reading::progress`]). At [`DONE_EXIT_PROGRESS_STREAK`] the
+    /// machine re-commits `Working`: several chunks that each changed
+    /// the meaningful content are a resumed turn, not a stray repaint.
+    /// Interleaved churn frames don't reset it (a busy stream mixes
+    /// content and spinner chunks); a clear reading does — the screen
+    /// settled and was classified authoritatively, so repaint
+    /// fragments can never accumulate across rests into a false
+    /// resume.
+    done_progress_streak: u8,
 }
 
 impl Default for AgentStateMachine {
@@ -167,7 +206,10 @@ impl Default for AgentStateMachine {
 impl AgentStateMachine {
     /// A fresh machine for a just-spawned terminal (not yet booted).
     pub fn new() -> Self {
-        Self { booted: false }
+        Self {
+            booted: false,
+            done_progress_streak: 0,
+        }
     }
 
     /// Mark the agent as booted: its input composer has been drawn at
@@ -216,6 +258,13 @@ impl AgentStateMachine {
     ///     `Done` or `InputNeeded`; both need affirmative (`clear`) evidence
     ///     or a positive transition committed directly.
     pub fn on_reading(&mut self, current: Option<AgentState>, reading: Reading) -> Outcome {
+        // The progress streak only measures consecutive-while-`Done`
+        // evidence; anywhere else it must start from zero. Also covers
+        // `Done` being left through the static `transition` path (a
+        // hook, the user's answer flip) that this instance never sees.
+        if current != Some(AgentState::Done) {
+            self.done_progress_streak = 0;
+        }
         // Boot gate: hold an ambiguous byte-flow `Working` from a *fresh*
         // session (no state reported yet) until the agent has booted, so
         // boot chrome can't enter `Working` and force the settle right after
@@ -232,9 +281,11 @@ impl AgentStateMachine {
             return Outcome::Damped;
         }
         // Any clear reading is an affirmative on-screen classification —
-        // proof the agent is past boot chrome.
+        // proof the agent is past boot chrome, and a settled screen: the
+        // progress streak restarts (see its field docs).
         if reading.clear {
             self.booted = true;
+            self.done_progress_streak = 0;
         }
         // Settle promotion: from `Working`, a quiet screen is a finished
         // turn, not a reversion to the never-worked `Idle`. Any clear
@@ -252,6 +303,7 @@ impl AgentStateMachine {
             Reading {
                 state: AgentState::Done,
                 clear: true,
+                progress: false,
             }
         } else {
             reading
@@ -269,9 +321,31 @@ impl AgentStateMachine {
                 Outcome::Rejected
             };
         }
-        if Self::suppress_input_needed_exit(current, reading)
-            || Self::suppress_done_exit(current, reading)
+        // The `Done` exit for a busy stream (#398). An ambiguous
+        // byte-flow `Working` alone must never clear the "finished,
+        // take a look" alert — a stray repaint (pane resize, reattach
+        // redraw) or the user typing into the composer reads exactly
+        // like it. But a *streak* of progressing readings — several
+        // chunks that each changed the meaningful content — is a
+        // resumed turn, and the only evidence a heavy stream can ever
+        // produce: the quiet classifier needs a pause the stream never
+        // offers. `InputNeeded` deliberately gets no such exit — a
+        // parked prompt means the agent is NOT emitting new content,
+        // and #374 makes `?` yield to affirmative evidence only.
+        if current == Some(AgentState::Done)
+            && reading.state == AgentState::Working
+            && !reading.clear
         {
+            if reading.progress {
+                self.done_progress_streak += 1;
+                if self.done_progress_streak >= DONE_EXIT_PROGRESS_STREAK {
+                    self.done_progress_streak = 0;
+                    return Outcome::Committed(AgentState::Working);
+                }
+            }
+            return Outcome::Damped;
+        }
+        if Self::suppress_input_needed_exit(current, reading) {
             return Outcome::Damped;
         }
         match Self::transition(current, reading.state) {
@@ -294,18 +368,6 @@ impl AgentStateMachine {
         current == Some(AgentState::InputNeeded)
             && reading.state != AgentState::InputNeeded
             && !reading.clear
-    }
-
-    /// Whether to hold an ambiguous `Working` reading against `Done`. A
-    /// byte-flow `Working` — a stray repaint (pane resize, reattach
-    /// redraw) or the user typing into the composer — must not clear the
-    /// "finished, take a look" alert. Leaving `Done` requires affirmative
-    /// evidence: a clear `Working` (a quiet-classified live status line),
-    /// an `InputNeeded`, or a hook (which commits through `transition`
-    /// directly and skips this damper). No time bound — `Done` has no
-    /// natural decay, so ambiguity alone can never end it.
-    fn suppress_done_exit(current: Option<AgentState>, reading: Reading) -> bool {
-        current == Some(AgentState::Done) && reading.state == AgentState::Working && !reading.clear
     }
 }
 
@@ -417,12 +479,26 @@ mod tests {
     }
 
     fn clear(state: AgentState) -> Reading {
-        Reading { state, clear: true }
+        Reading {
+            state,
+            clear: true,
+            progress: false,
+        }
     }
     fn ambiguous(state: AgentState) -> Reading {
         Reading {
             state,
             clear: false,
+            progress: false,
+        }
+    }
+    /// An ambiguous byte-flow `Working` whose chunk changed the content
+    /// fingerprint — the pump's "real output arrived" reading.
+    fn progressing() -> Reading {
+        Reading {
+            state: AgentState::Working,
+            clear: false,
+            progress: true,
         }
     }
 
@@ -668,6 +744,103 @@ mod tests {
         );
     }
 
+    // ── the progress-streak exit from Done (#398) ─────────────────
+
+    #[test]
+    fn sustained_progress_reopens_working_from_done() {
+        // Several chunks that each changed the meaningful content are a
+        // resumed turn — the one exit a heavy stream can take, since it
+        // never pauses long enough for a quiet classification.
+        let mut m = machine();
+        assert_eq!(m.on_reading(Some(Done), progressing()), Outcome::Damped);
+        assert_eq!(m.on_reading(Some(Done), progressing()), Outcome::Damped);
+        assert_eq!(
+            m.on_reading(Some(Done), progressing()),
+            Outcome::Committed(Working),
+            "the third progressing reading is the resume event",
+        );
+    }
+
+    #[test]
+    fn churn_never_reopens_working_from_done() {
+        // Spinner frames and counter ticks (no fingerprint change) are
+        // held forever, interleaved or not — they don't advance the
+        // streak, but they don't reset it either (a busy stream mixes
+        // content and churn chunks).
+        let mut m = machine();
+        for _ in 0..10 {
+            assert_eq!(
+                m.on_reading(Some(Done), ambiguous(Working)),
+                Outcome::Damped
+            );
+        }
+        assert_eq!(m.on_reading(Some(Done), progressing()), Outcome::Damped);
+        assert_eq!(
+            m.on_reading(Some(Done), ambiguous(Working)),
+            Outcome::Damped
+        );
+        assert_eq!(m.on_reading(Some(Done), progressing()), Outcome::Damped);
+        assert_eq!(
+            m.on_reading(Some(Done), progressing()),
+            Outcome::Committed(Working),
+        );
+    }
+
+    #[test]
+    fn a_quiet_classification_resets_the_progress_streak() {
+        // A stray full-screen redraw can fragment into a couple of
+        // distinct chunks; the settle that follows (any clear reading)
+        // restarts the streak, so repaint fragments can never
+        // accumulate across rests into a false resume.
+        let mut m = machine();
+        assert_eq!(m.on_reading(Some(Done), progressing()), Outcome::Damped);
+        assert_eq!(m.on_reading(Some(Done), progressing()), Outcome::Damped);
+        // The redraw ends; the quiet timer classifies the resting
+        // composer — rejected against Done, but it settles the screen.
+        assert_eq!(m.on_reading(Some(Done), clear(Idle)), Outcome::Rejected);
+        assert_eq!(m.on_reading(Some(Done), progressing()), Outcome::Damped);
+        assert_eq!(m.on_reading(Some(Done), progressing()), Outcome::Damped);
+        assert_eq!(
+            m.on_reading(Some(Done), progressing()),
+            Outcome::Committed(Working),
+        );
+    }
+
+    #[test]
+    fn the_progress_streak_never_unasks_a_parked_prompt() {
+        // #374: `?` yields to affirmative evidence only. A parked prompt
+        // emits nothing, so a progressing reading reaching InputNeeded is
+        // repaint fallout, not an answer — no streak exit exists there.
+        let mut m = machine();
+        for _ in 0..10 {
+            assert_eq!(
+                m.on_reading(Some(InputNeeded), progressing()),
+                Outcome::Damped
+            );
+        }
+    }
+
+    #[test]
+    fn the_progress_streak_only_counts_while_done() {
+        // Progress observed in other states must not bank toward the
+        // Done exit: two progressing chunks while Working, a settle to
+        // Done, then one progressing chunk must NOT flip Done back.
+        let mut m = machine();
+        assert_eq!(
+            m.on_reading(Some(Working), progressing()),
+            Outcome::Unchanged
+        );
+        assert_eq!(
+            m.on_reading(Some(Working), progressing()),
+            Outcome::Unchanged
+        );
+        assert_eq!(
+            m.on_reading(Some(Working), clear(Idle)),
+            Outcome::Committed(Done)
+        );
+        assert_eq!(m.on_reading(Some(Done), progressing()), Outcome::Damped);
+    }
+
     /// The end-to-end hookless lifecycle: boot (held) → ready → work →
     /// settle to Done → new turn → crash. No step ever lands on `Idle`
     /// after work, and no false `Done` appears at boot.
@@ -693,7 +866,7 @@ mod tests {
         // A new turn.
         assert_eq!(
             m.on_reading(Some(Done), ambiguous(Working)),
-            Outcome::Damped, // held against Done by suppress_done_exit
+            Outcome::Damped, // a churn-only byte-flow Working is held against Done
         );
         assert_eq!(
             m.on_reading(Some(Done), clear(Working)),

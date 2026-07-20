@@ -74,8 +74,9 @@ impl Sidebar {
             ));
             // Neutral build-provenance tag on dev/source builds: it marks
             // the binary as one you update with `git pull && cargo build`
-            // (not an installer swap) and is why such a build never raises
-            // the "update & restart" nudge below (issue #251).
+            // (not an installer swap), which is also why the warning below
+            // says "rebuild" rather than "update" for it (issues #251,
+            // #391).
             if !crate::build_guard::is_release_build() {
                 header_left.push(Span::styled(" (dev)", Style::default().fg(theme.text_dim)));
             }
@@ -87,7 +88,10 @@ impl Sidebar {
         if let Some(behind) = self.outdated_commits_behind {
             header_left.push(Span::raw("  "));
             header_left.push(Span::styled(
-                format!("⚠ {behind} behind · update & restart"),
+                format!(
+                    "⚠ {behind} behind · {}",
+                    crate::build_guard::update_action()
+                ),
                 Style::default()
                     .fg(theme.error)
                     .add_modifier(Modifier::BOLD),

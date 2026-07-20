@@ -26,6 +26,13 @@ fn kill_test_server(socket: &str) {
 #[tokio::test]
 async fn restarted_backend_seeds_scrollback_from_tmux_history() {
     if modern_tmux_version().is_none() {
+        // Skip-as-pass is how this path could go silently unexercised on
+        // a runner without tmux; the nightly lane closes that hole by
+        // demanding the real thing (#410).
+        assert!(
+            std::env::var("LAZYBOX_E2E_REQUIRE").map(|v| v == "1") != Ok(true),
+            "LAZYBOX_E2E_REQUIRE=1 but tmux is unavailable"
+        );
         eprintln!("tmux missing or too old — skipping restart-recovery test");
         return;
     }

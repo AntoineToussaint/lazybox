@@ -111,37 +111,23 @@ mod effects_tests {
     /// install the daemon/client mismatch check can't see (#234).
     ///
     /// Drives `note_outdated_build` directly to exercise the banner
-    /// render machinery; the provenance gate that decides *whether* to
-    /// reach it lives one layer up in `check_build_freshness`, covered by
-    /// [`check_build_freshness_quiet_on_dev_build`] and
-    /// `build_guard::dev_builds_never_nudge`.
+    /// render machinery. There is no provenance gate above it any more:
+    /// dev builds are checked too (#391 — the stale-dev-binary case is
+    /// the one that actually bites), and the test binary being a dev
+    /// build is why the named fix here is "rebuild".
     #[test]
     fn outdated_build_raises_persistent_warning() {
         use crate::realm::components::footer::NoticeSeverity;
         let mut m = build_model();
 
+        assert!(!crate::build_guard::is_release_build());
         m.note_outdated_build(89);
 
         let n = m.status.notice.as_ref().expect("outdated banner set");
         assert_eq!(n.severity, NoticeSeverity::Permanent);
         assert!(n.message.contains("89"));
-        assert!(n.message.contains("update & restart"));
+        assert!(n.message.contains("rebuild & restart"));
         assert_eq!(m.sidebar.outdated_commits_behind(), Some(89));
-    }
-
-    /// The provenance gate: on a dev/source build `check_build_freshness`
-    /// must leave the UI quiet no matter how far the checkout trails
-    /// `main`, because "update & restart" only fits an installer-managed
-    /// release binary (#251). The test binary is itself a dev build, so
-    /// this asserts the real startup path stays silent.
-    #[test]
-    fn check_build_freshness_quiet_on_dev_build() {
-        let mut m = build_model();
-
-        m.check_build_freshness();
-
-        assert!(m.status.notice.is_none(), "dev build must not nudge");
-        assert_eq!(m.sidebar.outdated_commits_behind(), None);
     }
 
     /// Issue #265: a `g m` merge GitHub rejected must surface as a

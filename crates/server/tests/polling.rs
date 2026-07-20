@@ -4637,7 +4637,9 @@ mod live_collapse_e2e {
         _tmp: tempfile::TempDir,
     }
 
-    async fn spawn_live_agent_on_issue() -> LiveAgent {
+    /// `agent_id` picks the built-in agent to spawn — `"claude"` for the
+    /// hook-carrying default, `"codex"` for the hookless PTY-only path.
+    async fn spawn_live_agent_on_issue(agent_id: &str) -> LiveAgent {
         let (config, mock) = ServerConfig::in_memory_with_mock();
         let (mut client, server) = channel::pair();
         {
@@ -4663,7 +4665,7 @@ mod live_collapse_e2e {
                 model_alias: None,
                 session_key: issue_sk.clone(),
                 session_id: None,
-                kind: TerminalKind::Agent("claude".into()),
+                kind: TerminalKind::Agent(agent_id.into()),
                 cwd: Some(tmp.path().to_string_lossy().into_owned()),
                 initial_prompt: None,
                 on_main: false,
@@ -4750,7 +4752,7 @@ mod live_collapse_e2e {
     #[tokio::test(start_paused = true)]
     async fn collapse_keeps_a_live_input_needed_agent_session() {
         timeout(TEST_DEADLINE, async {
-            let mut live = spawn_live_agent_on_issue().await;
+            let mut live = spawn_live_agent_on_issue("claude").await;
 
             // Park the agent on a prompt — the case that reads as "lost".
             // The `?` surfaces once the PTY has been quiet past the
@@ -4832,7 +4834,7 @@ mod live_collapse_e2e {
         // session — if any captured the issue key at spawn, the key it
         // emits under would still be the issue and the assert fails.
         timeout(TEST_DEADLINE, async {
-            let mut live = spawn_live_agent_on_issue().await;
+            let mut live = spawn_live_agent_on_issue("claude").await;
             live.mock.emit(&live.backend_key, CHOOSER).await;
             agent_state_key(&mut live.client, AgentState::InputNeeded)
                 .await
@@ -4894,7 +4896,7 @@ mod live_collapse_e2e {
         // catch it, or the fresh terminal is orphaned under the deleted
         // issue key.
         timeout(TEST_DEADLINE, async {
-            let mut live = spawn_live_agent_on_issue().await;
+            let mut live = spawn_live_agent_on_issue("claude").await;
             // No InputNeeded driving — collapse straight away.
             let pr_sk = collapse_into_pr(&mut live).await;
 
@@ -4917,6 +4919,302 @@ mod live_collapse_e2e {
                 .expect("persisted record must survive the immediate join");
             let (persisted, _kind): (String, TerminalKind) = serde_json::from_str(&raw).unwrap();
             assert_eq!(persisted, pr_sk.as_str());
+        })
+        .await
+        .expect("deadline");
+    }
+
+    /// Poll a `Command::Write` through the serve loop and wait for the
+    /// bytes to land in the mock backend under `backend_key` — proof the
+    /// terminal is still wired to the SAME backend session.
+    async fn write_reaches_backend(live: &mut LiveAgent, bytes: &[u8]) {
+        live.client
+            .send(Command::Write {
+                terminal_id: live.terminal_id,
+                bytes: bytes.to_vec(),
+            })
+            .unwrap();
+        let want = bytes.to_vec();
+        timeout(DEADLINE, async {
+            loop {
+                if live
+                    .mock
+                    .writes_for(&live.backend_key)
+                    .await
+                    .contains(&want)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("write must reach the original backend session");
+    }
+
+    #[tokio::test]
+    async fn codex_terminal_survives_issue_to_pr_collapse() {
+        // Issue #404, the hookless-agent gap: every prior transfer test
+        // spawns the hardcoded `claude` agent, whose lifecycle hooks give
+        // the daemon a second routing channel. Codex has none — its
+        // terminal is tracked purely through the PTY pump — so a rebadge
+        // bug scoped to the hook-free path would never fail a test. Spawn
+        // a live codex terminal on an issue, collapse into the claiming
+        // PR, and pin the user-visible outcome: rebadged, not killed,
+        // still writable, persisted on the PR.
+        timeout(TEST_DEADLINE, async {
+            let mut live = spawn_live_agent_on_issue("codex").await;
+
+            // Sanity: the backend really runs codex, not claude.
+            let argv = live
+                .mock
+                .argv_for(&live.backend_key)
+                .await
+                .expect("spawned session must have argv");
+            assert_eq!(
+                argv.first().map(String::as_str),
+                Some("codex"),
+                "the live agent under test must be codex (hookless)",
+            );
+
+            // Rebadge burst asserted inside: TerminalsRebadged moves
+            // FROM the issue TO the PR before WorkspaceMerged commits.
+            let pr_sk = collapse_into_pr(&mut live).await;
+            let pr_key = WorkspaceKey::new(pr_sk.as_str().to_string());
+
+            // ── NOT LOST (record) — the session record moved to the PR. ──
+            let pr_ws = load_workspace(&live.config, &pr_key).await;
+            assert_eq!(
+                pr_ws.sessions.len(),
+                1,
+                "the issue's session record must survive on the PR",
+            );
+            assert!(
+                live.config
+                    .store
+                    .get_workspace(&live.issue_key)
+                    .unwrap()
+                    .is_none(),
+                "the issue row is gone",
+            );
+
+            // ── NOT KILLED — the backend session survived the merge. ──
+            assert!(
+                live.mock.list().await.unwrap().contains(&live.backend_key),
+                "the codex PTY/ring-buffer must still exist after the merge",
+            );
+            assert!(
+                !live.mock.released_keys().await.contains(&live.backend_key),
+                "the merge must not tear down the codex backend session",
+            );
+
+            // ── STILL WIRED — in-memory meta repointed at the PR… ──
+            assert_eq!(
+                live.config
+                    .terminal_meta
+                    .lock()
+                    .await
+                    .get(&live.terminal_id)
+                    .expect("terminal must survive the merge")
+                    .0,
+                pr_sk,
+                "terminal_meta must repoint the codex terminal at the PR",
+            );
+            // …writes still reach the SAME backend session (the rebadge
+            // moved the routing, not the PTY)…
+            write_reaches_backend(&mut live, b"still-wired\r").await;
+            // …and the persisted record `recover_sessions` reads at
+            // startup follows too.
+            let raw = live
+                .config
+                .store
+                .get_kv(&format!("terminal:{}", live.backend_key))
+                .unwrap()
+                .expect("persisted terminal record must survive");
+            let (persisted, _kind): (String, TerminalKind) = serde_json::from_str(&raw).unwrap();
+            assert_eq!(
+                persisted,
+                pr_sk.as_str(),
+                "persisted terminal record must follow the codex session to the PR",
+            );
+        })
+        .await
+        .expect("deadline");
+    }
+
+    #[tokio::test]
+    async fn pr_arriving_after_live_spawn_prompts_then_confirmed_merge_rebadges() {
+        // Issue #404, the deferred-arrival gap: the natural lifecycle is
+        // to work the issue FIRST — the agent is spawned while no PR
+        // exists anywhere — and only a LATER poll delivers the PR that
+        // closes it. Prior tests either seed the PR before driving the
+        // merge or fabricate the terminal and call the handlers directly;
+        // none runs poll-arrival → `WorkspaceMergePending` →
+        // `Command::ConfirmMerge` through the real serve loop with a real
+        // spawned terminal. The live-terminal safety gate must stall the
+        // silent merge, and the user's accept must run the full rebadge
+        // without ever killing the session.
+        timeout(TEST_DEADLINE, async {
+            // Bare issue, live agent, NO PR anywhere yet.
+            let mut live = spawn_live_agent_on_issue("claude").await;
+
+            // A later poll upserts the PR claiming the issue.
+            let pr_task = make_pr_closing("o/r#141", &["o/r#71"]);
+            let pr_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&pr_task));
+            let pr_sk: SessionKey = (&pr_key).into();
+            polling::upsert(&live.config, pr_task).await;
+
+            // ── GATE — the live terminal stalls the merge behind a
+            // prompt; any merge/rebadge before the user confirms is the
+            // #404 silent-loss bug.
+            let deadline = tokio::time::Instant::now() + DEADLINE;
+            loop {
+                let remaining = deadline
+                    .checked_duration_since(tokio::time::Instant::now())
+                    .expect("WorkspaceMergePending deadline");
+                match timeout(remaining, live.client.recv()).await {
+                    Ok(Some(Event::WorkspaceMergePending {
+                        issue_workspace_key,
+                        pr_workspace_key,
+                        active_terminal_count,
+                        ..
+                    })) => {
+                        assert_eq!(issue_workspace_key, live.issue_key);
+                        assert_eq!(pr_workspace_key, pr_key);
+                        assert_eq!(
+                            active_terminal_count, 1,
+                            "the prompt must quote the live terminal it is protecting",
+                        );
+                        break;
+                    }
+                    Ok(Some(Event::WorkspaceMerged { .. })) => {
+                        panic!("a live-terminal issue must NOT merge silently")
+                    }
+                    Ok(Some(Event::TerminalsRebadged { .. })) => {
+                        panic!("no rebadge may run before the user confirms")
+                    }
+                    Ok(Some(_)) => continue,
+                    _ => panic!("expected a WorkspaceMergePending prompt"),
+                }
+            }
+            // Both rows still stand, session and terminal untouched.
+            assert!(
+                live.config
+                    .store
+                    .get_workspace(&live.issue_key)
+                    .unwrap()
+                    .is_some(),
+                "the issue workspace must survive until the user confirms",
+            );
+            assert!(live.config.store.get_workspace(&pr_key).unwrap().is_some());
+            assert_eq!(
+                load_workspace(&live.config, &live.issue_key)
+                    .await
+                    .sessions
+                    .len(),
+                1,
+                "the session record must still live on the issue while pending",
+            );
+            assert_eq!(
+                live.config
+                    .terminal_meta
+                    .lock()
+                    .await
+                    .get(&live.terminal_id)
+                    .expect("terminal must be untouched while pending")
+                    .0,
+                live.issue_sk,
+                "the terminal must stay keyed to the issue while pending",
+            );
+
+            // ── ACCEPT — the user answers the prompt via the real
+            // command; the merge must emit TerminalsRebadged (issue→PR)
+            // before committing with WorkspaceMerged.
+            live.client
+                .send(Command::ConfirmMerge {
+                    issue_workspace_key: live.issue_key.clone(),
+                    pr_workspace_key: pr_key.clone(),
+                    accept: true,
+                })
+                .unwrap();
+            let mut saw_rebadge = false;
+            let deadline = tokio::time::Instant::now() + DEADLINE;
+            loop {
+                let remaining = deadline
+                    .checked_duration_since(tokio::time::Instant::now())
+                    .expect("confirm burst deadline");
+                match timeout(remaining, live.client.recv()).await {
+                    Ok(Some(Event::TerminalsRebadged { from, to })) => {
+                        assert_eq!(from, live.issue_sk, "rebadge must move FROM the issue");
+                        assert_eq!(to, pr_sk, "rebadge must move TO the PR");
+                        saw_rebadge = true;
+                    }
+                    Ok(Some(Event::WorkspaceMerged {
+                        issue_workspace_key,
+                        pr_workspace_key,
+                        ..
+                    })) => {
+                        assert_eq!(issue_workspace_key, live.issue_key);
+                        assert_eq!(pr_workspace_key, pr_key);
+                        break;
+                    }
+                    Ok(Some(_)) => continue,
+                    _ => panic!("accepted merge did not complete with WorkspaceMerged"),
+                }
+            }
+            assert!(
+                saw_rebadge,
+                "accepted merge must broadcast TerminalsRebadged before WorkspaceMerged"
+            );
+
+            // ── OUTCOME — session + terminal live on the PR, backend
+            // never killed.
+            assert!(
+                live.config
+                    .store
+                    .get_workspace(&live.issue_key)
+                    .unwrap()
+                    .is_none(),
+                "the issue row is gone after the accepted merge",
+            );
+            let pr_ws = load_workspace(&live.config, &pr_key).await;
+            assert_eq!(
+                pr_ws.sessions.len(),
+                1,
+                "the issue's session record must survive on the PR",
+            );
+            assert!(
+                live.mock.list().await.unwrap().contains(&live.backend_key),
+                "the agent's PTY/ring-buffer must still exist after the merge",
+            );
+            assert!(
+                !live.mock.released_keys().await.contains(&live.backend_key),
+                "the merge must not tear down the backend session",
+            );
+            assert_eq!(
+                live.config
+                    .terminal_meta
+                    .lock()
+                    .await
+                    .get(&live.terminal_id)
+                    .expect("terminal must survive the merge")
+                    .0,
+                pr_sk,
+                "terminal_meta must repoint the terminal at the PR",
+            );
+            write_reaches_backend(&mut live, b"post-merge\r").await;
+            let raw = live
+                .config
+                .store
+                .get_kv(&format!("terminal:{}", live.backend_key))
+                .unwrap()
+                .expect("persisted terminal record must survive");
+            let (persisted, _kind): (String, TerminalKind) = serde_json::from_str(&raw).unwrap();
+            assert_eq!(
+                persisted,
+                pr_sk.as_str(),
+                "persisted terminal record must follow the session to the PR",
+            );
         })
         .await
         .expect("deadline");

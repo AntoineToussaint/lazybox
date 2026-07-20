@@ -451,15 +451,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // Several distinct running agents → ask which one (#418).
                 // The scoped `w c` / `w x` chords (Action::WorkWith) force
                 // a specific agent.
-                use crate::components::sidebar::WorkTarget;
-                match self.work_target() {
-                    WorkTarget::Agent(agent) => {
-                        self.push_work_spawn(&agent, session_id, None, &mut cmds);
-                    }
-                    WorkTarget::Choose(agents) => {
-                        self.mount_work_agent_picker(agents, session_id, None);
-                    }
-                }
+                self.dispatch_work(session_id, None, &mut cmds);
             }
             Action::WorkWith(agent_id) => {
                 // Scoped `w <agent>`: same contextual prompt as `w w`,
@@ -473,15 +465,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // alias is resolved against the target agent's menu daemon-
                 // side, so it degrades to the default model for an agent
                 // that doesn't define the tier.
-                use crate::components::sidebar::WorkTarget;
-                match self.work_target() {
-                    WorkTarget::Agent(agent) => {
-                        self.push_work_spawn(&agent, session_id, Some(alias.clone()), &mut cmds);
-                    }
-                    WorkTarget::Choose(agents) => {
-                        self.mount_work_agent_picker(agents, session_id, Some(alias.clone()));
-                    }
-                }
+                self.dispatch_work(session_id, Some(alias.clone()), &mut cmds);
             }
             Action::SpawnTier(alias) => {
                 // `a S`: spawn the default agent at the picked tier.
@@ -1004,30 +988,51 @@ impl<T: TerminalAdapter> Model<T> {
         cmds
     }
 
+    /// Resolve and fire `w w` (or a `w S` tier chord) on the selected
+    /// workspace (issue #418). Shared by `Work` and `WorkTier` so both
+    /// pick the same agent before layering a tier on top:
+    ///
+    /// - one live agent → work targets IT (whatever it is — the spawn
+    ///   is rewritten into an inject downstream);
+    /// - several distinct live agents → mount the which-agent picker
+    ///   instead of silently guessing (the pick funnels back through
+    ///   [`Self::push_work_spawn`] in `handle_choice_picked`);
+    /// - none → fresh spawn of the configured default.
+    fn dispatch_work(
+        &mut self,
+        session_id: Option<lazybox_core::SessionId>,
+        model_alias: Option<String>,
+        cmds: &mut Vec<IpcCommand>,
+    ) {
+        use crate::components::sidebar::WorkTarget;
+        let default_agent = self.sidebar.default_agent().to_string();
+        let target = match self.sidebar.selected_workspace_key().cloned() {
+            Some(sk) => self.sidebar.work_target(&sk, &default_agent),
+            None => WorkTarget::Agent(default_agent),
+        };
+        match target {
+            WorkTarget::Agent(agent) => {
+                self.push_work_spawn(&agent, session_id, model_alias, cmds);
+            }
+            WorkTarget::Choose(agents) => {
+                self.mount_work_agent_picker(agents, session_id, model_alias);
+            }
+        }
+    }
+
     /// Resolve a "work on this" spawn for `agent_id` and queue it.
-    /// Shared by `w w` ([`Action::Work`]) and the scoped `w c` / `w x`
-    /// chords ([`Action::WorkWith`]): both build the same contextual
-    /// prompt via [`crate::intent::resolve_work`] and differ only in how
-    /// the target agent is chosen. The queued `Spawn` carries the prompt
-    /// so `rewrite_spawn_to_inject` can fold it into an existing terminal.
+    /// Shared by `w w` ([`Action::Work`]), the scoped `w c` / `w x`
+    /// chords ([`Action::WorkWith`]), and the which-agent picker's pick
+    /// (`choice_picked_inner`, issue #418): all build the same
+    /// contextual prompt via [`crate::intent::resolve_work`] and differ
+    /// only in how the target agent is chosen. The queued `Spawn`
+    /// carries the prompt so `rewrite_spawn_to_inject` can fold it into
+    /// an existing terminal.
     ///
     /// The activity selection lives in the right pane, but `w` must honor
     /// it from any focus — reading it here is sound because `set_workspace`
     /// clears the selection whenever the workspace key changes, so the
     /// right pane's indices always belong to the selected workspace.
-    /// The agent `w w` (or a `w S` tier chord) targets on the
-    /// selected workspace: whatever agent is already running there, else
-    /// the configured default; several running agents → `Choose` (the
-    /// caller mounts the picker). Shared by `Work` and `WorkTier` so
-    /// both pick the same agent before layering a tier on top.
-    fn work_target(&self) -> crate::components::sidebar::WorkTarget {
-        let default_agent = self.sidebar.default_agent().to_string();
-        match self.sidebar.selected_workspace_key().cloned() {
-            Some(sk) => self.sidebar.work_target(&sk, &default_agent),
-            None => crate::components::sidebar::WorkTarget::Agent(default_agent),
-        }
-    }
-
     pub(super) fn push_work_spawn(
         &mut self,
         agent_id: &str,

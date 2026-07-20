@@ -1954,6 +1954,11 @@ async fn provision_worktree(
         std::sync::Arc::new(move |phase: CheckoutPhase| {
             let (step, status) = match phase {
                 CheckoutPhase::Cloning => (WorktreeStep::Clone, WorktreeStepStatus::Started),
+                // A live transfer-progress line for the in-flight
+                // clone: keeps the row's label but updates its detail.
+                CheckoutPhase::CloneProgress(line) => {
+                    (WorktreeStep::Clone, WorktreeStepStatus::Progress(line))
+                }
                 CheckoutPhase::Fetching => (WorktreeStep::Fetch, WorktreeStepStatus::Started),
                 CheckoutPhase::AddingWorktree => {
                     (WorktreeStep::WorktreeAdd, WorktreeStepStatus::Started)

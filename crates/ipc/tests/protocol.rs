@@ -444,6 +444,11 @@ fn all_events() -> Vec<Event> {
             step: WorktreeStep::Fetch,
             status: WorktreeStepStatus::Warned("using cached base".into()),
         },
+        Event::WorktreeProgress {
+            session_key: key.clone(),
+            step: WorktreeStep::Clone,
+            status: WorktreeStepStatus::Progress("Receiving objects: 42% (1200/2900)".into()),
+        },
         Event::SessionEnded {
             workspace_key: lazybox_core::WorkspaceKey::new(key.as_str()),
             session_id: lazybox_core::SessionId::new(),

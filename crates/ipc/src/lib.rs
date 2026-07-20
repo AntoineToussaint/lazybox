@@ -1592,8 +1592,9 @@ impl ProviderErrorKind {
 /// jumps straight to done.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorktreeStep {
-    /// `git clone --bare` — the slow part on a brand-new repo. Skipped
-    /// (instant) when a healthy bare clone is already cached.
+    /// The one-time bare clone (a blobless partial fetch) — the slow
+    /// part on a brand-new repo. Skipped (instant) when a healthy bare
+    /// clone is already cached.
     Clone,
     /// Refreshing the remote-tracking ref before branching off it.
     Fetch,
@@ -1609,13 +1610,17 @@ pub enum WorktreeStep {
 /// completed in a degraded way (e.g. the base-ref fetch failed and the
 /// worktree branched off a possibly-stale local ref) — the step still
 /// counts as done, but the modal surfaces the note instead of hiding it
-/// in the log (issue #320).
+/// in the log (issue #320). `Progress` is a live detail line for a step
+/// already `Started` — e.g. the clone transfer's `Receiving objects:
+/// 42% …` — updating the row's detail text without advancing the
+/// checklist (issue #405).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorktreeStepStatus {
     Started,
     Done,
     Warned(String),
     Failed(String),
+    Progress(String),
 }
 
 /// The `Failed` message the daemon broadcasts when a provision is

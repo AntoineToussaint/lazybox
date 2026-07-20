@@ -472,9 +472,10 @@ showing keybinding search only",
             }
             return cmds;
         }
-        // Default-agent picker — pick → persist `setup.default_agent`
-        // and update both panes live (no restart). Empty / Esc drops
-        // the stash without changing anything.
+        // Default-agent picker — pick → persist `setup.default_agent`,
+        // update both panes live (no restart), then chain into the
+        // default-model picker when the agent declares tiers. Empty /
+        // Esc drops the stash without changing anything.
         if matches!(self.modal_stack.last(), Some(Id::DefaultAgentPicker)) {
             let agent = picks
                 .first()
@@ -490,6 +491,51 @@ showing keybinding search only",
                     Ok(()) => {
                         self.set_default_agent(&agent);
                         self.flash_info(format!("default agent: {agent}"));
+                        self.redraw = true;
+                        self.mount_default_model_picker(&agent);
+                    }
+                    Err(e) => self.flash_info(format!("couldn't save config: {e}")),
+                }
+            }
+            return cmds;
+        }
+        // Default-model picker (second step of the default-agent flow)
+        // — pick → persist `agents.<id>.models.default` so bare spawns
+        // use that tier; the `None` row unpins it (agent's own default
+        // model). Empty / Esc keeps the current tier.
+        if matches!(self.modal_stack.last(), Some(Id::DefaultModelPicker)) {
+            let alias = picks
+                .first()
+                .and_then(|i| self.default_model_choices.get(*i).cloned());
+            self.default_model_choices.clear();
+            let agent = self.default_model_agent.take();
+            self.pop_modal();
+            if let (Some(agent), Some(alias)) = (agent, alias) {
+                match lazybox_config::Config::save_with(|c| {
+                    // Unpinning an agent with no YAML block is already
+                    // a no-op — skip the insert so a dead `agents.<id>`
+                    // stanza isn't serialized.
+                    if alias.is_some() || c.agents.contains_key(&agent) {
+                        c.agents.entry(agent.clone()).or_default().models.default = alias.clone();
+                    }
+                }) {
+                    Ok(()) => {
+                        // Mirror the write into the in-memory menu so
+                        // the Settings row badge and the next picker
+                        // open reflect it without a restart.
+                        let label = if let Some(models) = self.agent_models.get_mut(&agent) {
+                            models.default = alias.clone();
+                            alias
+                                .as_deref()
+                                .and_then(|a| models.tier(a))
+                                .map(|t| t.label.clone())
+                        } else {
+                            None
+                        };
+                        self.flash_info(match label {
+                            Some(label) => format!("default model: {label}"),
+                            None => "default model: agent default".to_string(),
+                        });
                         self.redraw = true;
                     }
                     Err(e) => self.flash_info(format!("couldn't save config: {e}")),
@@ -1009,6 +1055,10 @@ showing keybinding search only",
             }
             Some(Id::DefaultAgentPicker) => {
                 self.default_agent_choices.clear();
+            }
+            Some(Id::DefaultModelPicker) => {
+                self.default_model_choices.clear();
+                self.default_model_agent = None;
             }
             Some(Id::Setup) => {
                 // Esc on the (non-runner) Settings window — drop the

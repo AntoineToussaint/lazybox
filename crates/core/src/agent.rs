@@ -37,6 +37,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn priority_aliases_is_unset_only_when_all_empty() {
+        assert!(PriorityAliases::default().is_unset());
+        let set = PriorityAliases {
+            high: Some("L".into()),
+            ..Default::default()
+        };
+        assert!(!set.is_unset());
+    }
+
+    #[test]
     fn resolve_args_uses_named_alias() {
         let m = AgentModels::builtin("claude").unwrap();
         assert_eq!(
@@ -188,6 +198,14 @@ pub struct PriorityAliases {
     pub medium: Option<String>,
     #[serde(default)]
     pub low: Option<String>,
+}
+
+impl PriorityAliases {
+    /// True when no priority maps to an alias — the map is absent from
+    /// config and every priority falls through to the default tier.
+    pub fn is_unset(&self) -> bool {
+        self.high.is_none() && self.medium.is_none() && self.low.is_none()
+    }
 }
 
 /// Per-agent model menu — the ordered tiers a spawn chord can pick from

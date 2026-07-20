@@ -1226,10 +1226,10 @@ snippets:
         );
     }
 
-    /// A multi-line body injects verbatim too — the embedded newlines
-    /// reach the agent as-is, and the reliable submit is the daemon's
-    /// separate Enter, so nothing in the TUI has to pre-rewrite the
-    /// body into a bracketed paste (that's the shell-only encoding).
+    /// A multi-line body preserves its content and trailing newline;
+    /// the reliable submit is the daemon's separate Enter, so nothing
+    /// in the TUI has to pre-rewrite the body into a bracketed paste
+    /// (that's the shell-only encoding).
     #[test]
     fn snippet_into_agent_terminal_injects_multiline_body_verbatim() {
         let mut m = model_with_active_terminal_and_snippet(
@@ -1934,6 +1934,18 @@ snippets:
         assert!(
             bytes.ends_with(b"\x1b[201~\r"),
             "submit CR must land after the close marker, not inside the paste"
+        );
+    }
+
+    #[test]
+    fn encode_snippet_trims_blank_prefix_but_preserves_first_line_indentation() {
+        assert_eq!(
+            super::super::inputs::encode_snippet_for_pty("\n \tcommand"),
+            b"command\r",
+        );
+        assert_eq!(
+            super::super::inputs::encode_snippet_for_pty("    indented command"),
+            b"    indented command\r",
         );
     }
 
@@ -5379,7 +5391,7 @@ mod leader_tile_tests {
                 on_main: false,
                 model_label: None,
                 last_user_message: None,
-                composing_buffer: Some("recover me".into()),
+                composing_buffer: Some("\n  recover me".into()),
             }],
         });
         m.focus = PaneFocus::Terminals;
@@ -5406,6 +5418,14 @@ mod leader_tile_tests {
             }
             None => panic!("`]]r` must emit an InjectPrompt"),
         }
+        assert!(
+            std::iter::from_fn(|| server.rx.try_recv().ok()).any(|command| matches!(
+                command,
+                IpcCommand::RecordComposingBuffer { terminal_id, buffer }
+                    if terminal_id == TerminalId(1) && buffer == "recover me"
+            )),
+            "recall must persist the canonical draft mirrored by the client",
+        );
     }
 }
 

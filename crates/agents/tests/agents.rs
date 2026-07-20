@@ -6,7 +6,7 @@
 use lazybox_agents::agent::builtins::{Claude, Codex, Cursor, GenericCli};
 use lazybox_agents::{
     Agent, AgentObservation, AgentState, PromptFraming, PromptIntent, PromptShape, PtyProtocol,
-    ReadinessPolicy, Registry, SpawnCtx,
+    ReadinessPolicy, Registry, SpawnCtx, trim_leading_blank_lines,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -167,7 +167,7 @@ fn guarded_composer_protocol_is_shared_by_claude_and_codex() {
 }
 
 #[test]
-fn prompt_protocol_trims_leading_whitespace_for_every_framing() {
+fn prompt_protocol_trims_blank_lines_for_every_framing() {
     let (guarded, submit) = PtyProtocol::GUARDED_COMPOSER
         .encode_prompt("\r\n \tadd an issue:", PromptIntent::Submit)
         .into_writes();
@@ -179,6 +179,44 @@ fn prompt_protocol_trims_leading_whitespace_for_every_framing() {
         .into_writes();
     assert_eq!(line, b"add an issue:");
     assert_eq!(submit, None);
+}
+
+#[test]
+fn prompt_protocol_preserves_first_line_indentation_and_trailing_whitespace() {
+    let prompt = "    indented content\nnext line\n";
+    let (guarded, submit) = PtyProtocol::GUARDED_COMPOSER
+        .encode_prompt(prompt, PromptIntent::Compose)
+        .into_writes();
+    assert_eq!(
+        guarded,
+        b"\x1b[200~    indented content\nnext line\n\x1b[201~"
+    );
+    assert_eq!(submit, None);
+}
+
+#[test]
+fn prompt_protocol_trims_unicode_padding_after_a_blank_line() {
+    let (line, submit) = PtyProtocol::LINE_ORIENTED
+        .encode_prompt(" \x1b\n\u{2003}add an issue:", PromptIntent::Compose)
+        .into_writes();
+    assert_eq!(line, b"add an issue:");
+    assert_eq!(submit, None);
+}
+
+#[test]
+fn leading_blank_line_normalization_is_bounded_and_idempotent() {
+    for (input, expected) in [
+        ("", ""),
+        ("   ", "   "),
+        ("    indented", "    indented"),
+        ("\n\n \ttext", "text"),
+        (" \r\n\u{2003}text\n", "text\n"),
+        ("text\nnext", "text\nnext"),
+    ] {
+        let normalized = trim_leading_blank_lines(input);
+        assert_eq!(normalized, expected, "input {input:?}");
+        assert_eq!(trim_leading_blank_lines(normalized), normalized);
+    }
 }
 
 #[test]

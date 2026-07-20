@@ -35,10 +35,50 @@ const CHECK_INTERVAL: Duration = Duration::from_secs(12 * 60 * 60);
 /// so a static is the honest scope.
 static UPDATE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
+/// RAII hold on [`UPDATE_IN_FLIGHT`]. Releasing on `Drop` (not at the
+/// end of the happy path) means a panicking update pass can't leave
+/// the flag stuck and lock updates out for the rest of the process.
+struct UpdateGuard;
+
+impl UpdateGuard {
+    fn acquire() -> Option<Self> {
+        if UPDATE_IN_FLIGHT.swap(true, Ordering::SeqCst) {
+            None
+        } else {
+            Some(UpdateGuard)
+        }
+    }
+}
+
+impl Drop for UpdateGuard {
+    fn drop(&mut self) {
+        UPDATE_IN_FLIGHT.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Why a subprocess produced no usable output. `Spawn` is separated
+/// out because callers treat it differently: a missing agent CLI is
+/// the actionable finding itself, while a missing *registry* tool
+/// (npm on a native-installer machine) just means "no latest lookup
+/// here" and must not raise an error banner.
+#[derive(Debug)]
+enum RunError {
+    Spawn(String),
+    Other(String),
+}
+
+impl RunError {
+    fn into_message(self) -> String {
+        match self {
+            Self::Spawn(m) | Self::Other(m) => m,
+        }
+    }
+}
+
 /// Run `argv` as a bounded subprocess and return its trimmed stdout.
 /// Every failure mode — unspawnable binary, timeout, non-zero exit —
-/// collapses to a human-readable `Err` fit for a footer notice.
-async fn run_argv(argv: &[String], timeout: Duration) -> Result<String, String> {
+/// collapses to a human-readable message fit for a footer notice.
+async fn run_argv(argv: &[String], timeout: Duration) -> Result<String, RunError> {
     let (program, args) = argv
         .split_first()
         .expect("update channel argv is non-empty");
@@ -51,11 +91,11 @@ async fn run_argv(argv: &[String], timeout: Duration) -> Result<String, String> 
         .kill_on_drop(true);
     let child = cmd
         .spawn()
-        .map_err(|e| format!("`{joined}` failed to start: {e}"))?;
+        .map_err(|e| RunError::Spawn(format!("`{joined}` failed to start: {e}")))?;
     let output = tokio::time::timeout(timeout, child.wait_with_output())
         .await
-        .map_err(|_| format!("`{joined}` timed out after {}s", timeout.as_secs()))?
-        .map_err(|e| format!("`{joined}` failed: {e}"))?;
+        .map_err(|_| RunError::Other(format!("`{joined}` timed out after {}s", timeout.as_secs())))?
+        .map_err(|e| RunError::Other(format!("`{joined}` failed: {e}")))?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     } else {
@@ -73,9 +113,11 @@ async fn run_argv(argv: &[String], timeout: Duration) -> Result<String, String> 
             .map(|c| c.to_string())
             .unwrap_or_else(|| "signal".into());
         if detail.is_empty() {
-            Err(format!("`{joined}` exited {code}"))
+            Err(RunError::Other(format!("`{joined}` exited {code}")))
         } else {
-            Err(format!("`{joined}` exited {code}: {detail}"))
+            Err(RunError::Other(format!(
+                "`{joined}` exited {code}: {detail}"
+            )))
         }
     }
 }
@@ -100,7 +142,7 @@ async fn check_channel(
             v
         }
         Err(e) => {
-            error = Some(e);
+            error = Some(e.into_message());
             None
         }
     };
@@ -110,8 +152,17 @@ async fn check_channel(
         // would only decorate the error.
         Some(argv) if installed.is_some() => match run_argv(argv, LATEST_TIMEOUT).await {
             Ok(out) => extract_version(&out),
+            // A machine without the registry tool at all (native
+            // Claude install, no npm on PATH) simply has no latest
+            // lookup — same installed-only reporting as a channel
+            // with no registry, not an error banner. A present tool
+            // that fails (non-zero exit, timeout) stays actionable.
+            Err(RunError::Spawn(e)) => {
+                tracing::info!("agent updates: {agent_id}: no registry lookup — {e}");
+                None
+            }
             Err(e) => {
-                error.get_or_insert(e);
+                error.get_or_insert(e.into_message());
                 None
             }
         },
@@ -201,7 +252,7 @@ async fn update_one(
             (_, Some(a)) => (true, format!("already up to date ({a})")),
             _ => (true, "updated".to_string()),
         },
-        Err(e) => (false, e),
+        Err(e) => (false, e.into_message()),
     };
     if ok {
         tracing::info!("agent updates: {agent_id}: {message}");
@@ -220,19 +271,19 @@ async fn update_one(
 
 /// Update the named agents sequentially (package managers fight over
 /// locks when run concurrently), holding the process-wide in-flight
-/// guard.
-async fn update_agents(config: &ServerConfig, agents: Vec<(String, String, UpdateChannel)>) {
-    if UPDATE_IN_FLIGHT.swap(true, Ordering::SeqCst) {
-        let _ = config.bus.send(Event::Notification {
-            title: "agent updates".into(),
-            body: "an agent-CLI update is already running".into(),
-        });
-        return;
-    }
+/// guard. Returns `false` — without touching anything — when another
+/// pass already holds it.
+async fn update_agents(
+    config: &ServerConfig,
+    agents: Vec<(String, String, UpdateChannel)>,
+) -> bool {
+    let Some(_guard) = UpdateGuard::acquire() else {
+        return false;
+    };
     for (id, name, channel) in &agents {
         update_one(config, id, name, channel).await;
     }
-    UPDATE_IN_FLIGHT.store(false, Ordering::SeqCst);
+    true
 }
 
 /// `Command::UpdateAgentClis` — update every enabled agent with a
@@ -249,7 +300,12 @@ pub fn handle_update_all(config: &ServerConfig) {
             });
             return;
         }
-        update_agents(&config, agents).await;
+        if !update_agents(&config, agents).await {
+            let _ = config.bus.send(Event::Notification {
+                title: "agent updates".into(),
+                body: "an agent-CLI update is already running".into(),
+            });
+        }
     });
 }
 
@@ -259,21 +315,47 @@ pub fn handle_update_all(config: &ServerConfig) {
 /// automatically. Runs beside the polling loop, fully detached from
 /// session spawning.
 pub fn spawn_scheduled(config: ServerConfig) -> tokio::task::JoinHandle<()> {
+    use futures::FutureExt;
     tokio::spawn(async move {
         tokio::time::sleep(STARTUP_DELAY).await;
         loop {
-            let statuses = handle_check(&config, false).await;
-            let auto = auto_update_ids(&statuses);
-            if !auto.is_empty() {
-                let agents = updatable_agents(&config)
-                    .into_iter()
-                    .filter(|(id, _, _)| auto.iter().any(|a| a == id))
-                    .collect();
-                update_agents(&config, agents).await;
+            // Panic-tolerant like the polling loop: tokio swallows
+            // panics in spawned tasks, so an uncaught one would
+            // silently end scheduled update checks until restart.
+            if let Err(payload) = std::panic::AssertUnwindSafe(scheduled_pass(&config))
+                .catch_unwind()
+                .await
+            {
+                let msg = payload
+                    .downcast_ref::<&str>()
+                    .map(|s| (*s).to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "<non-string panic payload>".to_string());
+                tracing::error!("agent updates: scheduled sweep panicked: {msg}");
             }
             tokio::time::sleep(CHECK_INTERVAL).await;
         }
     })
+}
+
+/// One scheduled iteration: check everything, then auto-update the
+/// opted-in agents with updates available. Losing the in-flight guard
+/// to a concurrent manual update just logs — the sweep retries next
+/// interval, and an unprompted "already running" notice would only
+/// confuse.
+async fn scheduled_pass(config: &ServerConfig) {
+    let statuses = handle_check(config, false).await;
+    let auto = auto_update_ids(&statuses);
+    if auto.is_empty() {
+        return;
+    }
+    let agents = updatable_agents(config)
+        .into_iter()
+        .filter(|(id, _, _)| auto.iter().any(|a| a == id))
+        .collect();
+    if !update_agents(config, agents).await {
+        tracing::info!("agent updates: auto-update skipped — another update pass is running");
+    }
 }
 
 /// Which of the checked agents should be auto-updated: an update is
@@ -322,8 +404,10 @@ mod tests {
         let err = run_argv(&sh("echo boom >&2; exit 3"), Duration::from_secs(5))
             .await
             .unwrap_err();
-        assert!(err.contains("exited 3"), "{err}");
-        assert!(err.contains("boom"), "{err}");
+        assert!(matches!(err, RunError::Other(_)));
+        let msg = err.into_message();
+        assert!(msg.contains("exited 3"), "{msg}");
+        assert!(msg.contains("boom"), "{msg}");
     }
 
     #[tokio::test]
@@ -334,7 +418,9 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(err.contains("failed to start"), "{err}");
+        assert!(matches!(err, RunError::Spawn(_)));
+        let msg = err.into_message();
+        assert!(msg.contains("failed to start"), "{msg}");
     }
 
     #[tokio::test]
@@ -343,7 +429,8 @@ mod tests {
         let err = run_argv(&sh("sleep 30"), Duration::from_millis(200))
             .await
             .unwrap_err();
-        assert!(err.contains("timed out"), "{err}");
+        let msg = err.into_message();
+        assert!(msg.contains("timed out"), "{msg}");
         assert!(started.elapsed() < Duration::from_secs(10));
     }
 
@@ -377,6 +464,53 @@ mod tests {
         assert!(s.latest.is_none(), "registry probe should be skipped");
         assert!(!s.update_available);
         assert!(s.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn check_channel_missing_registry_tool_degrades_to_installed_only() {
+        let c = UpdateChannel {
+            version_argv: sh("echo 1.0.0"),
+            latest_argv: Some(vec!["definitely-not-a-real-binary-xyz".into()]),
+            update_argv: sh("true"),
+        };
+        let s = check_channel("fake", "Fake", &c).await;
+        assert_eq!(s.installed.as_deref(), Some("1.0.0"));
+        assert!(s.latest.is_none());
+        assert!(
+            s.error.is_none(),
+            "a machine without the registry tool is not an error: {:?}",
+            s.error
+        );
+    }
+
+    #[tokio::test]
+    async fn check_channel_failing_registry_probe_stays_actionable() {
+        let c = channel("echo 1.0.0", Some("echo registry down >&2; exit 7"), "true");
+        let s = check_channel("fake", "Fake", &c).await;
+        assert_eq!(s.installed.as_deref(), Some("1.0.0"));
+        assert!(s.latest.is_none());
+        let err = s.error.expect("registry failure surfaces");
+        assert!(err.contains("registry down"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn concurrent_update_pass_is_rejected_without_side_effects() {
+        let cfg = ServerConfig::with_store(std::sync::Arc::new(lazybox_store::MemoryStore::new()));
+        let mut rx = cfg.bus.subscribe();
+        let held = UpdateGuard::acquire().expect("guard free");
+        let agents = vec![(
+            "fake".to_string(),
+            "Fake".to_string(),
+            channel("echo 1.0.0", None, "true"),
+        )];
+        assert!(!update_agents(&cfg, agents.clone()).await);
+        assert!(rx.try_recv().is_err(), "a rejected pass must emit nothing");
+        drop(held);
+        assert!(update_agents(&cfg, agents).await, "guard released on drop");
+        assert!(matches!(
+            rx.try_recv().expect("finished event"),
+            Event::AgentCliUpdateFinished { .. }
+        ));
     }
 
     #[tokio::test]

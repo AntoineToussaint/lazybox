@@ -675,6 +675,13 @@ pub struct AgentSection {
     /// Global LLM-gateway base URL. See [`AgentSection::gateway_url`].
     #[serde(default)]
     pub llm_gateway_url: Option<String>,
+    /// Fail-safe watchdog window: seconds a `Working` agent terminal
+    /// may sit with no meaningful screen change (spinner/status churn
+    /// doesn't count) before the daemon classifies the screen and
+    /// forces the turn out of `Working` (→ `InputNeeded` or `Done`).
+    /// Unset → 15; `0` disables the watchdog.
+    #[serde(default)]
+    pub working_watchdog_secs: Option<u64>,
 }
 
 impl Default for AgentSection {
@@ -684,6 +691,7 @@ impl Default for AgentSection {
             autonomous_skip_permissions: true,
             skip_permissions: false,
             llm_gateway_url: None,
+            working_watchdog_secs: None,
         }
     }
 }

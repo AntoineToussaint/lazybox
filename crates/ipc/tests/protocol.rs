@@ -320,6 +320,9 @@ fn all_commands() -> Vec<Command> {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
         },
         Command::KeepMergedWorkspace { session_key: key },
+        Command::FetchScrollback {
+            terminal_id: TerminalId(12),
+        },
         Command::Shutdown,
     ]
 }
@@ -650,6 +653,11 @@ fn all_events() -> Vec<Event> {
             command: "Write".into(),
             message: "terminal command queue is full".into(),
         },
+        Event::TerminalScrollback {
+            terminal_id: TerminalId(12),
+            replay: b"deep history\r\nlive bottom".to_vec(),
+            seq: 42,
+        },
     ]
 }
 
@@ -709,6 +717,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::RemoveProviderCredential { .. } => "RemoveProviderCredential",
         Command::ListProviderCredentials { .. } => "ListProviderCredentials",
         Command::KeepMergedWorkspace { .. } => "KeepMergedWorkspace",
+        Command::FetchScrollback { .. } => "FetchScrollback",
     }
 }
 
@@ -768,6 +777,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::ProviderCredentialsListed { .. } => "ProviderCredentialsListed",
         Event::TerminalInputRejected { .. } => "TerminalInputRejected",
         Event::CommandRejected { .. } => "CommandRejected",
+        Event::TerminalScrollback { .. } => "TerminalScrollback",
     }
 }
 
@@ -779,12 +789,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         (lazybox_ipc::PROTOCOL_VERSION, command_tags.len()),
-        (12, 51),
+        (13, 52),
         "Command gained/lost a variant: update the exhaustive tag, add a sample, and bump PROTOCOL_VERSION",
     );
     assert_eq!(
         (lazybox_ipc::PROTOCOL_VERSION, event_tags.len()),
-        (12, 50),
+        (13, 51),
         "Event gained/lost a variant: update the exhaustive tag, add a sample, and bump PROTOCOL_VERSION",
     );
 }

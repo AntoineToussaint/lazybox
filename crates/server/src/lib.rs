@@ -28,6 +28,7 @@
 
 pub mod agent_runs;
 pub mod agent_stream;
+pub mod agent_updates;
 pub mod api_gateway;
 pub mod auth;
 pub mod backend;
@@ -468,8 +469,13 @@ pub struct ServerConfig {
     /// a drop guard on EVERY exit path; `Kill` also serializes against
     /// it. `parking_lot::Mutex` — the data is tiny and no await ever
     /// happens under the guard, which lets the drop guard release
-    /// synchronously.
-    pub inflight_spawns: Arc<parking_lot::Mutex<HashSet<(String, String)>>>,
+    /// synchronously. Each claim carries a cancel `Notify`:
+    /// `Command::CancelSpawn` pings it and the owning `handle_spawn`
+    /// aborts its provisioning (dropping the in-flight `git` child) —
+    /// how an Esc on the "Setting up workspace" checklist actually
+    /// stops a wedged clone instead of letting it run on (issue #403).
+    pub inflight_spawns:
+        Arc<parking_lot::Mutex<HashMap<(String, String), Arc<tokio::sync::Notify>>>>,
     /// Pinged whenever an in-flight spawn claim is released, so
     /// waiters (duplicate spawns collapsing onto the winner, `Kill`
     /// waiting out a mid-flight provision) re-check promptly instead
@@ -592,7 +598,7 @@ impl ServerConfig {
             removal_prompts: Arc::new(Mutex::new(polling::RemovalPromptMemory::default())),
             viewer_identities: Arc::new(parking_lot::Mutex::new(Vec::new())),
             poll_wake: Arc::new(tokio::sync::Notify::new()),
-            inflight_spawns: Arc::new(parking_lot::Mutex::new(HashSet::new())),
+            inflight_spawns: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             inflight_spawn_changed: Arc::new(tokio::sync::Notify::new()),
             deleted_workspaces: Arc::new(parking_lot::Mutex::new(HashSet::new())),
             archive_updates: Arc::new(parking_lot::Mutex::new(())),
@@ -604,8 +610,34 @@ impl ServerConfig {
 
     /// Manager rooted in this daemon's configured filesystem namespace.
     /// All production worktree paths and all test seams must originate here.
+    ///
+    /// Network git operations authenticate with the same GitHub
+    /// credential chain as the API pollers: the daemon usually has no
+    /// usable SSH agent, so without this every base-ref refresh on an
+    /// SSH-origin bare clone failed `Permission denied (publickey)`
+    /// and new worktrees silently branched from a stale local main
+    /// (issue #394). Resolved lazily per operation; when no token
+    /// resolves, git's native (SSH) behavior is unchanged.
+    /// The filesystem namespace this daemon provisions under —
+    /// `repos/` (bare clones) and worktrees hang off it. Public so
+    /// integration tests can pre-seed a local bare clone and drive the
+    /// real provisioning path without touching the network.
+    pub fn worktree_root_path(&self) -> &Path {
+        &self.worktree_root.path
+    }
+
     pub(crate) fn worktree_manager(&self) -> lazybox_git_ops::WorktreeManager {
-        lazybox_git_ops::WorktreeManager::new(self.worktree_root.path.clone())
+        lazybox_git_ops::WorktreeManager::new(self.worktree_root.path.clone()).with_github_token(
+            Arc::new(|| {
+                Box::pin(async {
+                    lazybox_gh::credential_chain()
+                        .resolve(lazybox_gh::SOURCE)
+                        .await
+                        .ok()
+                        .map(|c| c.into_token())
+                })
+            }),
+        )
     }
 
     /// Serialize a workspace's load-modify-save cycle. Every mutation
@@ -854,6 +886,7 @@ impl Server {
                     // is observable.
                     let label = match &cmd {
                         lazybox_ipc::Command::Spawn { .. } => "Spawn",
+                        lazybox_ipc::Command::CancelSpawn { .. } => "CancelSpawn",
                         lazybox_ipc::Command::Close { .. } => "Close",
                         lazybox_ipc::Command::IngestHook { .. } => "IngestHook",
                         lazybox_ipc::Command::CreateSession { .. } => "CreateSession",
@@ -877,6 +910,7 @@ impl Server {
                         lazybox_ipc::Command::PostReply { .. } => "PostReply",
                         lazybox_ipc::Command::MergePr { .. } => "MergePr",
                         lazybox_ipc::Command::CloseIssue { .. } => "CloseIssue",
+                        lazybox_ipc::Command::DeleteOrClose { .. } => "DeleteOrClose",
                         lazybox_ipc::Command::ConfirmMerge { .. } => "ConfirmMerge",
                         lazybox_ipc::Command::Snooze { .. } => "Snooze",
                         lazybox_ipc::Command::Unsnooze { .. } => "Unsnooze",
@@ -907,6 +941,9 @@ impl Server {
                         lazybox_ipc::Command::CleanWorktrees => "CleanWorktrees",
                         lazybox_ipc::Command::InspectWorktrees => "InspectWorktrees",
                         lazybox_ipc::Command::DeleteOrphanedWorktree { .. } => "DeleteOrphanedWorktree",
+                        lazybox_ipc::Command::FetchScrollback { .. } => "FetchScrollback",
+                        lazybox_ipc::Command::CheckAgentCliUpdates => "CheckAgentCliUpdates",
+                        lazybox_ipc::Command::UpdateAgentClis => "UpdateAgentClis",
                         lazybox_ipc::Command::Shutdown => "Shutdown",
                     };
                     // `Write` fires on every keystroke — at info it floods
@@ -1269,6 +1306,9 @@ pub async fn dispatch_command(
             )
             .await;
         }
+        lazybox_ipc::Command::CancelSpawn { session_key } => {
+            spawn_handler::handle_cancel_spawn(config, &session_key);
+        }
         lazybox_ipc::Command::CreateSession {
             session_key,
             kind,
@@ -1322,6 +1362,9 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::Close { terminal_id } => {
             spawn_handler::handle_close(config, terminal_id).await;
+        }
+        lazybox_ipc::Command::FetchScrollback { terminal_id } => {
+            spawn_handler::handle_fetch_scrollback(config, tx, terminal_id).await;
         }
         lazybox_ipc::Command::IngestHook {
             terminal_id,
@@ -1530,6 +1573,9 @@ pub async fn dispatch_command(
         lazybox_ipc::Command::CloseIssue { workspace_key } => {
             polling::handle_close_issue(config, workspace_key).await;
         }
+        lazybox_ipc::Command::DeleteOrClose { workspace_key } => {
+            polling::handle_delete_or_close(config, workspace_key).await;
+        }
         lazybox_ipc::Command::FetchPrDetails { workspace_key } => {
             polling::handle_fetch_pr_details(config, workspace_key).await;
         }
@@ -1568,6 +1614,12 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::DeleteOrphanedWorktree { path, force } => {
             polling::handle_delete_orphaned_worktree(config, path, force).await;
+        }
+        lazybox_ipc::Command::CheckAgentCliUpdates => {
+            agent_updates::handle_check(config, true).await;
+        }
+        lazybox_ipc::Command::UpdateAgentClis => {
+            agent_updates::handle_update_all(config);
         }
         lazybox_ipc::Command::Shutdown => {
             unreachable!("Shutdown is loop control, intercepted by the serve loop")

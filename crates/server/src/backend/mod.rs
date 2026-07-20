@@ -196,6 +196,28 @@ pub trait SessionBackend: Send + Sync + 'static {
         })
     }
 
+    /// Deep scrollback for a LIVE session, rebuilt from the backend's
+    /// own history rather than the in-memory replay ring. tmux retains
+    /// `history-limit` lines per pane the entire time a session runs —
+    /// the restart/reattach path already seeds reconnecting clients
+    /// from it (`capture-pane`), and this hands the same history to a
+    /// client that never restarted, so live scrollback matches
+    /// post-restart scrollback (one mechanism, issue #393).
+    ///
+    /// Returns `Ok(Some((bytes, seq)))` where `seq` is the session's
+    /// output high-water mark at capture time (live chunks at or below
+    /// it are covered by the capture), or `Ok(None)` when the backend
+    /// has no history source beyond the ring (raw PTY — the client
+    /// already saw every byte).
+    fn scrollback<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<(Vec<u8>, u64)>, BackendError>> + Send + 'a>>
+    {
+        let _ = key;
+        Box::pin(async { Ok(None) })
+    }
+
     /// Wait for the session to exit. Returns the exit code if known.
     /// Implementations should be safe to call repeatedly; subsequent
     /// calls return the cached code.

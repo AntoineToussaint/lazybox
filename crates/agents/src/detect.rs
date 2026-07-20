@@ -23,6 +23,7 @@
 //! `RUST_LOG=lazybox_agents=trace` to debug a misclassification against
 //! `/tmp/lazybox.log`.
 
+use crate::pty::PromptShape;
 use lazybox_ipc::AgentState;
 
 /// Standard bare yes/no prompt markers. Used by every CLI that doesn't
@@ -985,6 +986,26 @@ pub fn last_nonempty_lines(s: &str, n: usize) -> String {
     lines[start..].join("\n")
 }
 
+/// Fingerprint of a PTY chunk's *meaningful* content: a hash of the
+/// letter stream left after dropping ANSI escapes, digits, whitespace,
+/// punctuation, and symbol glyphs. Spinner frames (braille or star
+/// glyphs), elapsed-time and token-counter ticks, clocks, and progress
+/// bars all reduce to an unchanged letter stream — or to nothing at all
+/// (`None`) — so comparing successive chunk fingerprints separates real
+/// output from repaint churn. `None` (no letters in the chunk: pure
+/// cursor/erase churn or an animation-only repaint) is never meaningful.
+pub fn content_fingerprint(bytes: &[u8]) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let s = strip_ansi_lossy(bytes);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut any = false;
+    for c in s.chars().filter(|c| c.is_alphabetic()) {
+        c.hash(&mut hasher);
+        any = true;
+    }
+    any.then(|| hasher.finish())
+}
+
 /// Filter out ANSI escape sequences, then UTF-8-decode the remainder.
 ///
 /// Earlier this function pushed `bytes[i] as char` — that mangled
@@ -1140,6 +1161,60 @@ pub fn codex_state_chunked(recent_output: &[u8], last_chunk_start: usize) -> Opt
     let (s, s_mark) = strip_ansi_lossy_marked(recent_output, mark);
     let (compact, compact_mark) = compact_lower_marked(&s, s_mark);
     Some(codex_state_of(&s, &compact, Some(compact_mark)))
+}
+
+/// Fast-path detector for unmistakable Codex approval chrome painted by the
+/// latest PTY chunk. Unlike [`codex_state_chunked`], this deliberately does
+/// not classify `Working` or `Idle`: it returns the interaction shape only
+/// when a blocking modal marker overlaps the current chunk, so the daemon can
+/// surface `InputNeeded` immediately without re-reading a stale prompt from
+/// scrollback while the agent streams.
+///
+/// A small prefix from the previous chunk is retained so split writes such as
+/// `"Press enter to con"` + `"firm"` still match. Requiring the match to END
+/// after `last_chunk_start` is the stale-marker guard.
+pub fn codex_input_needed_in_current_chunk(
+    recent_output: &[u8],
+    last_chunk_start: usize,
+) -> Option<PromptShape> {
+    let mark = last_chunk_start.min(recent_output.len());
+    let (s, s_mark) = strip_ansi_lossy_marked(recent_output, mark);
+    let (compact, compact_mark) = compact_lower_marked(&s, s_mark);
+
+    let phrase_touched = CODEX_PROMPT_PHRASES.iter().any(|phrase| {
+        let needle: String = phrase
+            .chars()
+            .filter(|c| *c != ' ')
+            .flat_map(char::to_lowercase)
+            .collect();
+        compact
+            .rfind(&needle)
+            .is_some_and(|pos| pos + needle.len() > compact_mark)
+    });
+    if phrase_touched {
+        return Some(PromptShape::Chooser);
+    }
+
+    let arrow_touched = codex_arrow_option_pos(&compact).is_some_and(|pos| {
+        // `›` is three UTF-8 bytes, followed by one ASCII digit and one
+        // ASCII delimiter (`.` or `)`).
+        pos + '›'.len_utf8() + 2 > compact_mark
+    });
+    if arrow_touched {
+        return Some(PromptShape::Chooser);
+    }
+
+    // Bare prompt families do not have Codex's modal chrome. Keep their
+    // existing bottom-of-screen guard and additionally require the latest
+    // chunk to touch the marker.
+    let prompt_zone = last_nonempty_lines(recent_tail(&s, CODEX_PROMPT_TAIL_WINDOW), 5);
+    let bare_prompt_touched = YN_PROMPT_PATTERNS.iter().any(|pattern| {
+        s.rfind(pattern)
+            .is_some_and(|pos| pos + pattern.len() > s_mark && prompt_zone.contains(pattern))
+    }) || s
+        .rfind("approve?")
+        .is_some_and(|pos| pos + "approve?".len() > s_mark && prompt_zone.contains("approve?"));
+    bare_prompt_touched.then_some(PromptShape::Chooser)
 }
 
 /// Whether Codex is ready to receive a pasted prompt: the composer footer is
@@ -1335,6 +1410,37 @@ mod tests {
     fn strip_drops_two_byte_escapes() {
         // `ESC c` (full reset) and friends carry no payload.
         assert_eq!(strip_ansi_lossy(b"\x1bcfresh"), "fresh");
+    }
+
+    // ── content_fingerprint: churn vs progress (#398) ─────────────
+
+    #[test]
+    fn spinner_frames_share_a_fingerprint() {
+        // A spinner repaint changes only the glyph (braille or Claude's
+        // star set) and the counters — the letter stream is identical,
+        // so successive frames must fingerprint the same.
+        let f1 = "\x1b[2K✻ Gusting… (2m 2s · ↓ 7.2k tokens · esc to interrupt)".as_bytes();
+        let f2 = "\x1b[2K✦ Gusting… (2m 3s · ↓ 7.4k tokens · esc to interrupt)".as_bytes();
+        let f3 = "\x1b[2K⠋ Gusting… (2m 4s · ↓ 7.9k tokens · esc to interrupt)".as_bytes();
+        assert_eq!(content_fingerprint(f1), content_fingerprint(f2));
+        assert_eq!(content_fingerprint(f2), content_fingerprint(f3));
+    }
+
+    #[test]
+    fn real_content_changes_the_fingerprint() {
+        let spinner = "✻ Working (12s · esc to interrupt)".as_bytes();
+        let prose = "✻ Working (13s · esc to interrupt)\nWrote src/main.rs".as_bytes();
+        assert_ne!(content_fingerprint(spinner), content_fingerprint(prose));
+    }
+
+    #[test]
+    fn letterless_churn_has_no_fingerprint() {
+        // Pure cursor/erase churn, a clock, a progress bar: no letters,
+        // so no fingerprint — never counts as meaningful.
+        assert_eq!(content_fingerprint(b"\x1b[1;2H\x1b[2K"), None);
+        assert_eq!(content_fingerprint(b"12:03:45"), None);
+        assert_eq!(content_fingerprint("███░░ 45%".as_bytes()), None);
+        assert_eq!(content_fingerprint("⠋".as_bytes()), None);
     }
 
     #[test]

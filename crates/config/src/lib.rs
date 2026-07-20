@@ -650,6 +650,11 @@ pub struct AgentEntry {
     /// a bare spawn uses. Empty → fall back to the built-in preset for
     /// this agent id.
     pub models: lazybox_core::AgentModels,
+    /// Let lazybox apply this agent's CLI updates automatically when
+    /// its scheduled out-of-band check finds a newer version. Off by
+    /// default: the check still runs and surfaces "update available",
+    /// but installing waits for the manual "update agent CLIs" action.
+    pub auto_update: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -675,6 +680,13 @@ pub struct AgentSection {
     /// Global LLM-gateway base URL. See [`AgentSection::gateway_url`].
     #[serde(default)]
     pub llm_gateway_url: Option<String>,
+    /// Fail-safe watchdog window: seconds a `Working` agent terminal
+    /// may sit with no meaningful screen change (spinner/status churn
+    /// doesn't count) before the daemon classifies the screen and
+    /// forces the turn out of `Working` (→ `InputNeeded` or `Done`).
+    /// Unset → 15; `0` disables the watchdog.
+    #[serde(default)]
+    pub working_watchdog_secs: Option<u64>,
 }
 
 impl Default for AgentSection {
@@ -684,6 +696,7 @@ impl Default for AgentSection {
             autonomous_skip_permissions: true,
             skip_permissions: false,
             llm_gateway_url: None,
+            working_watchdog_secs: None,
         }
     }
 }
@@ -1836,5 +1849,21 @@ agents:
         );
         // An empty configured block still inherits the built-in preset.
         assert!(!cfg.agent_models("claude").tiers.is_empty());
+    }
+
+    #[test]
+    fn agent_auto_update_defaults_off_and_parses() {
+        let yaml = r#"
+agents:
+  claude:
+    auto_update: true
+  codex:
+    models:
+      default: M
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse auto_update");
+        assert!(cfg.agents["claude"].auto_update);
+        assert!(!cfg.agents["codex"].auto_update);
+        assert!(!AgentEntry::default().auto_update);
     }
 }

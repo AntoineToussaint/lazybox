@@ -12,6 +12,9 @@ completion. Pick the one that matches what you need to do.
 - **[Run an agent per workspace](/docs/how-to/run-an-agent-per-workspace/)** —
   spawn Claude Code, Codex, or Cursor scoped to one task, including autonomous
   runs.
+- **[Manage automation policies](/docs/how-to/manage-automation-policies/)** —
+  inspect and toggle merge-on-green and per-workspace auto-fix behavior from
+  the unified `g p` menu.
 - **[Per-repo env and mounts](/docs/how-to/per-repo-env-and-mounts/)** — inject
   environment variables, symlink shared directories, and materialize scripts
   into worktrees.

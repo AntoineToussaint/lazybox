@@ -199,7 +199,14 @@ fn fresh_agent_keyboard_bindings_move_the_viewport() {
         "Shift-End returns to the live bottom"
     );
 
-    assert!(cmds.is_empty(), "keyboard scroll is a pure in-process move");
+    // The viewport moves are in-process; the only allowed side effect
+    // is the deep-scrollback fetch (#393) — never a PTY write, which
+    // would leak the scroll keys into the inner program.
+    assert!(
+        cmds.iter()
+            .all(|c| matches!(c, lazybox_ipc::Command::FetchScrollback { .. })),
+        "keyboard scroll must not write to the PTY: {cmds:?}"
+    );
 }
 
 // ── Reattach ────────────────────────────────────────────────────────

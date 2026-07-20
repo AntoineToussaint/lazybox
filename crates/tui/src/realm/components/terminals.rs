@@ -238,6 +238,12 @@ impl Terminals {
         self.inner.cell_in_tile(id, col, row)
     }
 
+    /// Take the deep-scrollback fetch an upward scroll armed, if any.
+    /// The orchestrator ships it as a `Command::FetchScrollback`.
+    pub fn take_scrollback_fetch(&mut self) -> Option<TerminalId> {
+        self.inner.take_scrollback_fetch()
+    }
+
     /// Forward `extract_text` — read the focused terminal's grid
     /// between two absolute frame-space coordinates and return the
     /// plain text. Used by the mouse-up selection-copy path.

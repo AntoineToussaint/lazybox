@@ -14,9 +14,9 @@
 //!
 //! The page's Starlight frontmatter (title/description) is preserved
 //! verbatim from the existing file. Non-catalog extras — pane
-//! navigation, the terminal `]]` menu, mouse, pickers — come from the
-//! static appendix below; keep it in sync with the pane match arms and
-//! `terminal_leader::LeaderCmd` when those change.
+//! navigation, mouse, and pickers come from the static appendix below.
+//! The terminal `]]` menu is generated from the runtime command table,
+//! so dispatch, the which-key popup, and this page share one source.
 
 use lazybox_tui_core::action::{
     ActionDef, ActionKind, CatalogEntry, Chord, Guard, KeyStroke, Section, leader_group_label,
@@ -278,10 +278,9 @@ fn generate(frontmatter: &str) -> String {
     out
 }
 
-/// The Terminal section's non-catalog extras: the `]]` leader menu
-/// (dispatched by `terminal_leader::LeaderCmd`, tile management
-/// included) and the scrollback keys the terminal pane handles
-/// directly. Static by design — update alongside `LeaderCmd::menu_rows`.
+/// The Terminal section's non-catalog extras. The `]]` command rows come
+/// from the same runtime table as dispatch and the which-key popup; only
+/// the pane-owned scrollback keys remain static here.
 fn terminal_appendix() -> String {
     let mut out = String::new();
     out.push_str(
@@ -290,17 +289,15 @@ fn terminal_appendix() -> String {
          `Esc` or any unbound key cancels back into the terminal; a lone `]` followed by \
          any other key is sent to the program verbatim. The escape char is configurable \
          (`terminal.escape_char`; the legacy `ui.terminal_escape_char` alias is still accepted).\n\n\
-         | Chord | Action |\n| --- | --- |\n\
-         | `]]s` | Open the snippet picker (typing a full key auto-submits — `]]srev`) |\n\
-         | `]]f` | Toggle focus mode |\n\
-         | `]]q` | Exit to the sidebar |\n\
-         | ``]]` `` | Open the fuzzy jump-to-workspace picker |\n\
-         | `]]1`…`]]9` | Jump to the Nth agent workspace (sidebar order) |\n\
-         | `]]\\|` | Split the focused tile side-by-side |\n\
-         | `]]-` | Split the focused tile stacked |\n\
-         | `]]←↓↑→` | Move tile focus (cycles tabs in Tabs mode) |\n\
-         | `]]x` | Close the focused terminal (tile or active tab) |\n",
+         | Chord | Action |\n| --- | --- |\n",
     );
+    for (suffix, description) in lazybox_tui::realm::model::terminal_leader_reference_rows() {
+        out.push_str(&format!(
+            "| {} | {} |\n",
+            key_span(&format!("]]{suffix}")),
+            cell(&description),
+        ));
+    }
     out.push_str(
         "\n### Scrollback\n\n\
          | Key | Action |\n| --- | --- |\n\
@@ -339,10 +336,13 @@ fn generated_page_reflects_the_leaders_only_default_keymap() {
     let page = generate(DEFAULT_FRONTMATTER);
     for expected in [
         "`g m`",
+        "`g p`",
         "`a c`",
         "`w c`",
         "`b s`",
         "text selection",
+        "]]r",
+        "]]t",
         "]]x",
         "Shift-Home",
         "new project",

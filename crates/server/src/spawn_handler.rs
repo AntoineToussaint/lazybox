@@ -552,7 +552,7 @@ pub async fn handle_spawn(
     // path: wait for the winner's terminal, deliver the prompt, focus.
     // Held in a drop guard so every exit path — including the failure
     // returns below — releases the claim.
-    let _inflight = match InflightSpawnGuard::try_claim(config, &session_key, &kind, on_main) {
+    let inflight = match InflightSpawnGuard::try_claim(config, &session_key, &kind, on_main) {
         Ok(guard) => guard,
         Err(()) => {
             collapse_onto_inflight_spawn(
@@ -614,7 +614,32 @@ pub async fn handle_spawn(
     ) = if let Some(c) = cwd.as_deref() {
         (Some(PathBuf::from(c)), None, false)
     } else {
-        match resolve_or_create_session(config, &session_key, session_id, &kind, on_main).await {
+        // Race provisioning against a `CancelSpawn` on this claim: Esc
+        // on the setup checklist must abort a wedged cold clone —
+        // dropping the future kills the git child's whole process
+        // group — and release the claim (guard drop at return) so a
+        // retry starts fresh, instead of the clone running on and
+        // every later spawn collapsing onto it (issue #403).
+        let resolve = resolve_or_create_session(config, &session_key, session_id, &kind, on_main);
+        let cancel = inflight.cancel.clone();
+        let resolved = tokio::select! {
+            res = resolve => Some(res),
+            _ = cancel.notified() => None,
+        };
+        let Some(resolved) = resolved else {
+            tracing::info!(%session_key, "handle_spawn: cancelled while provisioning — aborting");
+            // Unstick any client still showing this spawn's checklist
+            // (the canceller's is already dismissed; another attached
+            // client's would otherwise spin forever).
+            emit_worktree_progress(
+                config,
+                &session_key,
+                WorktreeStep::Clone,
+                WorktreeStepStatus::Failed(lazybox_ipc::SPAWN_CANCELLED_NOTE.into()),
+            );
+            return;
+        };
+        match resolved {
             Ok((path, sid, landed)) => (Some(path), Some(sid), landed),
             Err(e) => {
                 let _ = config.bus.send(Event::provider_error_permanent(
@@ -905,6 +930,7 @@ pub async fn handle_spawn(
     // `Instant` is Copy, so both the pump and inject tasks get their own
     // copy of the spawn origin for the timing trace.
     let t0_for_pump = t0;
+    let watchdog_after = working_watchdog_after(&cfg);
     // Broadcast BEFORE spawning the pump task. Otherwise a
     // fast-exiting terminal (e.g. a command that immediately
     // errors) can fire `TerminalExited` from the pump before this
@@ -1002,18 +1028,30 @@ pub async fn handle_spawn(
             // Quiet-classification timer (#289). Re-armed on every chunk;
             // when it fires — PTY_QUIET_CLASSIFY_AFTER with no output —
             // the resting screen is classified. While chunks flow, the
-            // only state reading is `Working` (see `note_pty_activity`).
+            // reading is `Working` unless an adapter recognizes distinctive
+            // prompt chrome in the current chunk (see `note_pty_activity`).
             // Never armed for non-agent terminals (no detector to run).
             let mut quiet_deadline: Option<tokio::time::Instant> = None;
+            // Working-watchdog anchor (#398): the last time a chunk
+            // changed the content fingerprint — i.e. real output, not
+            // repaint churn. A spinner/keepalive re-arms the quiet
+            // timer above on every frame but never moves this anchor,
+            // so `WORKING_WATCHDOG_AFTER` of churn-only output still
+            // fires `watchdog_escape_working`.
+            let mut watchdog_anchor = tokio::time::Instant::now();
+            let mut watchdog_fp: Option<u64> = None;
             // Length of the most recent chunk appended to `state_buf` —
             // the chunk-boundary hint the quiet classifier's same-chunk
             // rule needs.
             let mut last_chunk_len: usize = 0;
             if !sub.replay.is_empty() {
+                let progress = agent_for_pump.is_some()
+                    && watchdog_notes_progress(&mut watchdog_fp, &sub.replay);
                 note_pty_activity(
                     agent_for_pump.as_ref(),
                     &mut state_buf,
                     &sub.replay,
+                    progress,
                     &agent_states_map,
                     &bus,
                     id_for_pump,
@@ -1021,11 +1059,15 @@ pub async fn handle_spawn(
                     &terminal_meta_map,
                     &mut state_machine,
                     &hook_driven_map,
+                    &input_shapes_map,
                 )
                 .await;
                 last_chunk_len = sub.replay.len();
                 if agent_for_pump.is_some() {
                     quiet_deadline = Some(tokio::time::Instant::now() + PTY_QUIET_CLASSIFY_AFTER);
+                    if progress {
+                        watchdog_anchor = tokio::time::Instant::now();
+                    }
                 }
                 if sub.replay_complete {
                     let _ = bus.send(Event::TerminalOutput {
@@ -1112,10 +1154,13 @@ pub async fn handle_spawn(
                     };
                     resync_unavailable_announced = false;
                     state_buf.clear();
+                    let progress = agent_for_pump.is_some()
+                        && watchdog_notes_progress(&mut watchdog_fp, &snapshot.replay);
                     note_pty_activity(
                         agent_for_pump.as_ref(),
                         &mut state_buf,
                         &snapshot.replay,
+                        progress,
                         &agent_states_map,
                         &bus,
                         id_for_pump,
@@ -1123,12 +1168,16 @@ pub async fn handle_spawn(
                         &terminal_meta_map,
                         &mut state_machine,
                         &hook_driven_map,
+                        &input_shapes_map,
                     )
                     .await;
                     last_chunk_len = snapshot.replay.len();
                     if agent_for_pump.is_some() {
                         quiet_deadline =
                             Some(tokio::time::Instant::now() + PTY_QUIET_CLASSIFY_AFTER);
+                        if progress {
+                            watchdog_anchor = tokio::time::Instant::now();
+                        }
                     }
                     check_ready(&state_buf, &mut signaled_ready, &ready_signal_for_pump);
                     let _ = bus.send(Event::TerminalResync {
@@ -1167,10 +1216,13 @@ pub async fn handle_spawn(
                         );
                     }
                 }
+                let progress = agent_for_pump.is_some()
+                    && watchdog_notes_progress(&mut watchdog_fp, &chunk.bytes);
                 note_pty_activity(
                     agent_for_pump.as_ref(),
                     &mut state_buf,
                     &chunk.bytes,
+                    progress,
                     &agent_states_map,
                     &bus,
                     id_for_pump,
@@ -1178,12 +1230,16 @@ pub async fn handle_spawn(
                     &terminal_meta_map,
                     &mut state_machine,
                     &hook_driven_map,
+                    &input_shapes_map,
                 )
                 .await;
                 last_chunk_len = chunk.bytes.len();
                 if agent_for_pump.is_some() {
                     quiet_deadline =
                         Some(tokio::time::Instant::now() + PTY_QUIET_CLASSIFY_AFTER);
+                    if progress {
+                        watchdog_anchor = tokio::time::Instant::now();
+                    }
                 }
                 if !signaled_first_output {
                     first_output_signal_for_pump.notify_one();
@@ -1228,6 +1284,33 @@ pub async fn handle_spawn(
                         )
                         .await;
                     }
+                    // Working watchdog (#398): unlike the quiet arm
+                    // this one cannot be re-armed by byte flow alone —
+                    // only a content-fingerprint change moves
+                    // `watchdog_anchor` — so a spinner-alive-but-idle
+                    // agent still gets classified and forced out of
+                    // `Working`. A no-op tick (terminal not Working,
+                    // or the force gated by fresh hooks) just re-arms.
+                    _ = tokio::time::sleep_until(
+                        watchdog_anchor + watchdog_after.unwrap_or_default()
+                    ), if agent_for_pump.is_some() && watchdog_after.is_some() => {
+                        watchdog_anchor = tokio::time::Instant::now();
+                        watchdog_escape_working(
+                            agent_for_pump.as_ref(),
+                            &state_buf,
+                            last_chunk_len,
+                            &agent_states_map,
+                            &bus,
+                            id_for_pump,
+                            &session_key_for_pump,
+                            &terminal_meta_map,
+                            &mut state_machine,
+                            &hook_driven_map,
+                            &input_shapes_map,
+                            &agent_detect_resets_map,
+                        )
+                        .await;
+                    }
                 }
             }
             backend.wait_exit(&key_for_pump).await
@@ -1240,15 +1323,14 @@ pub async fn handle_spawn(
     // sidebar / activity pane spawn an agent with a pre-built
     // instruction so the user doesn't have to retype it.
     //
-    // Wait for the agent to start `Asking` (its first prompt screen)
-    // before writing. Typing into Claude during its banner boot drops
-    // keystrokes onto the wrong UI surface and the prompt ends up
-    // half-eaten. Timeout after 10s and write anyway — better a
-    // garbled prompt than a silently-lost one.
+    // Wait for the agent's composer before writing. Typing into a full-screen
+    // agent during banner boot drops keystrokes onto the wrong UI surface and
+    // the prompt ends up half-eaten. The PTY protocol declares whether
+    // composer readiness is authoritative or a timed fallback is acceptable.
     if let (Some(prompt), Some(agent)) = (initial_prompt, &agent_for_inject) {
-        let agent = agent.clone();
-        let paste = agent.inject_prompt(&prompt);
-        let submit = agent.inject_submit();
+        let requires_ready = agent.pty_protocol().requires_ready();
+        let encoded_prompt = agent.encode_prompt(&prompt, lazybox_agents::PromptIntent::Submit);
+        let initial_write_len = encoded_prompt.initial_write_len();
         let backend_key = backend_key.clone();
         let id = terminal_id;
         let first_output = first_output_signal_for_inject;
@@ -1257,25 +1339,25 @@ pub async fn handle_spawn(
         let config_for_inject = config.clone();
         tokio::spawn(async move {
             // Wait for the agent's input box to be drawn AND no
-            // permission gate to be up — i.e. "claude is genuinely
+            // permission gate to be up — i.e. "the agent is genuinely
             // ready to receive a pasted prompt." The pump task fires
             // `ready_signal` exactly once when `Agent::
             // detect_ready_for_prompt` first returns true. This is
             // strictly tighter than the previous "wait for not-
             // Asking" approach: the loose Asking detector matched
-            // claude's normal idle screen and made the wait spin
+            // a normal idle screen and made the wait spin
             // the full deadline before every inject.
             //
             // Fallback ladder (each step has its own deadline):
             //   1. ready_signal — preferred path, fires within
-            //      seconds of claude finishing its banner.
+            //      seconds of the agent finishing its banner.
             //   2. first_output + SETTLE — for agents whose
             //      detector never reports ready (default impl),
             //      we still write 600ms past first byte. Agents
             //      with an authoritative readiness detector
-            //      (`inject_requires_ready`) SKIP this rung — a
+            //      (`PtyProtocol::requires_ready`) SKIP this rung — a
             //      blind settle-write would land the paste in
-            //      claude's folder-trust prompt if it's still up.
+            //      a folder-trust prompt if it's still up.
             //   3. HARD_DEADLINE — last resort, inject blindly so
             //      a cold-start hang doesn't silently lose the
             //      user's prompt.
@@ -1283,12 +1365,12 @@ pub async fn handle_spawn(
             const SETTLE: std::time::Duration = std::time::Duration::from_millis(600);
             tracing::info!(
                 terminal_id = ?id,
-                paste_len = paste.len(),
+                initial_write_len,
                 "initial_prompt: waiting for agent ready signal",
             );
 
             let trigger = await_inject_window(
-                agent.inject_requires_ready(),
+                requires_ready,
                 &ready_signal,
                 &first_output,
                 HARD_DEADLINE,
@@ -1297,7 +1379,7 @@ pub async fn handle_spawn(
             .await;
             // The deadline rung means `ready` never fired within
             // HARD_DEADLINE. For an agent with an authoritative readiness
-            // detector (Claude) that does NOT mean "safe to paste": under
+            // detector that does NOT mean "safe to paste": under
             // many concurrent spawns the pump lags behind the deadline, or
             // the agent is still parked on a boot-time gate (folder-trust /
             // login / bypass chooser). A blind paste here lands the
@@ -1311,7 +1393,7 @@ pub async fn handle_spawn(
             // false), whose `ready` signal never fires — losing the prompt
             // to a cold-start hang is worse there than a best-effort paste.
             if trigger == InjectTrigger::Deadline
-                && agent.inject_requires_ready()
+                && requires_ready
                 && !await_pending_ready(id, &ready_signal, &config_for_inject.terminals).await
             {
                 tracing::warn!(
@@ -1326,10 +1408,10 @@ pub async fn handle_spawn(
             }
             tracing::info!(
                 terminal_id = ?id,
-                paste_len = paste.len(),
+                initial_write_len,
                 ?trigger,
                 elapsed_ms = t0_for_inject.elapsed().as_millis(),
-                "initial_prompt: inject window cleared — writing paste to backend",
+                "initial_prompt: inject window cleared — writing prompt sequence to backend",
             );
             let Some(interaction) =
                 terminal_io::acquire_live(&config_for_inject, id, &backend_key).await
@@ -1345,62 +1427,34 @@ pub async fn handle_spawn(
                 });
                 return;
             };
-            // Subscribed before the paste write so the output chunks
-            // the paste triggers are observable by the settle gate.
-            let output_events = submit.is_some().then(|| config_for_inject.bus.subscribe());
-            if let Err(e) =
-                terminal_io::write_locked(&config_for_inject, &backend_key, &paste).await
+            match write_prompt_sequence(
+                &config_for_inject,
+                id,
+                &backend_key,
+                encoded_prompt,
+                interaction,
+            )
+            .await
             {
-                tracing::warn!(
-                    terminal_id = ?id,
-                    "initial_prompt: paste failed: {e}"
-                );
-                let _ = config_for_inject.bus.send(Event::TerminalInputRejected {
-                    terminal_id: id,
-                    message: format!(
-                        "work prompt was not delivered ({e}) — press w again to retry"
-                    ),
-                });
-                return;
-            }
-            // Paste/submit split. Agents like Claude Code batch rapid
-            // byte arrival as a paste; Enter inside that batch is a
-            // soft line break, not a submit. Gate the submit keystroke
-            // on the paste's repaint going quiet so Enter fires as its
-            // own keystroke. Agents that don't need a separate submit
-            // (the default trait impl) return None here and we skip
-            // the second write entirely.
-            if let (Some(submit_bytes), Some(mut output_events)) = (submit, output_events) {
-                await_paste_settled(&mut output_events, id, PASTE_QUIET_WINDOW, PASTE_SETTLE_CAP)
-                    .await;
-                let confirm = prepare_submit_confirmation(&config_for_inject, id).await;
-                if let Err(e) =
-                    terminal_io::write_locked(&config_for_inject, &backend_key, &submit_bytes).await
-                {
-                    tracing::warn!(
-                        terminal_id = ?id,
-                        "initial_prompt: submit failed: {e}"
-                    );
+                Ok(()) => {}
+                Err(PromptWriteError::Initial(e)) => {
+                    tracing::warn!(terminal_id = ?id, "initial_prompt: initial write failed: {e}");
+                    let _ = config_for_inject.bus.send(Event::TerminalInputRejected {
+                        terminal_id: id,
+                        message: format!(
+                            "work prompt was not delivered ({e}) — press w again to retry"
+                        ),
+                    });
+                }
+                Err(PromptWriteError::Submit(e)) => {
+                    tracing::warn!(terminal_id = ?id, "initial_prompt: submit failed: {e}");
                     let _ = config_for_inject.bus.send(Event::TerminalInputRejected {
                         terminal_id: id,
                         message: format!(
                             "work prompt was pasted but could not be submitted ({e}) — open the terminal and press Enter"
                         ),
                     });
-                    return;
                 }
-                // The paste + submit transaction is complete. Confirmation
-                // waits must not monopolize the terminal while the agent
-                // works; any later retry reacquires the same global lock.
-                drop(interaction);
-                confirm_prompt_submission(
-                    confirm,
-                    &config_for_inject,
-                    &backend_key,
-                    &submit_bytes,
-                    SUBMIT_CONFIRM_DEADLINE,
-                )
-                .await;
             }
         });
     }
@@ -1910,6 +1964,19 @@ async fn provision_worktree(
                 CheckoutPhase::BaseRefStale(note) => {
                     (WorktreeStep::Fetch, WorktreeStepStatus::Warned(note))
                 }
+                // The refresh has been failing for over a day — every
+                // worktree since then branched from an aging ref. A
+                // checklist note alone proved too easy to dismiss for
+                // days (issue #394), so also raise a sticky sync-error
+                // banner that outlives the provisioning modal.
+                CheckoutPhase::BaseRefStalePersistent(note) => {
+                    let _ = bus.send(Event::provider_error(
+                        "git:base-ref",
+                        note.clone(),
+                        lazybox_ipc::ProviderErrorKind::Permanent,
+                    ));
+                    (WorktreeStep::Fetch, WorktreeStepStatus::Warned(note))
+                }
             };
             let _ = bus.send(Event::WorktreeProgress {
                 session_key: session_key.clone(),
@@ -2217,6 +2284,43 @@ const HOOK_STALENESS: Duration = Duration::from_secs(30);
 /// does.
 pub(crate) const PTY_QUIET_CLASSIFY_AFTER: Duration = Duration::from_secs(5);
 
+/// Fail-safe watchdog for `Working` (#398). The quiet timer above
+/// measures time since the last *byte*, so any low-rate repaint — a
+/// spinner, a clock, a keepalive — re-arms it forever and
+/// `classify_quiet_screen` never runs; with `Working` a one-way door
+/// (#357) the terminal is then pinned. The watchdog instead measures
+/// time since the last *meaningful* content change
+/// ([`lazybox_agents::detect::content_fingerprint`] — repaint churn
+/// doesn't reset it) and, once a `Working` terminal has shown none for
+/// this long, classifies the screen regardless of byte flow and forces
+/// the turn closed ([`watchdog_escape_working`]). Default; override
+/// with `agent.working_watchdog_secs` (0 disables).
+pub(crate) const WORKING_WATCHDOG_AFTER: Duration = Duration::from_secs(15);
+
+/// The per-spawn watchdog window: the `agent.working_watchdog_secs`
+/// override when set (`0` = disabled → `None`), else the default.
+pub(crate) fn working_watchdog_after(cfg: &lazybox_config::Config) -> Option<Duration> {
+    match cfg.agent.working_watchdog_secs {
+        Some(0) => None,
+        Some(secs) => Some(Duration::from_secs(secs)),
+        None => Some(WORKING_WATCHDOG_AFTER),
+    }
+}
+
+/// Fold one PTY chunk into the watchdog's meaningful-progress tracker:
+/// returns whether `bytes` changed the content fingerprint — real
+/// output — as opposed to repaint churn (a spinner frame, a counter
+/// tick, cursor noise) that must NOT keep the watchdog at bay.
+pub(crate) fn watchdog_notes_progress(last_fp: &mut Option<u64>, bytes: &[u8]) -> bool {
+    match lazybox_agents::detect::content_fingerprint(bytes) {
+        Some(fp) if *last_fp != Some(fp) => {
+            *last_fp = Some(fp);
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Whether a PTY-detector reading may be emitted for a hook-driven
 /// terminal. Fresh hooks own Working↔Idle, so only two corrections
 /// pass: an on-screen permission dialog (`InputNeeded`) and an
@@ -2409,42 +2513,58 @@ pub(crate) async fn find_existing_singleton(
 /// backend failure, panic) — and pings waiters so collapsing duplicates
 /// and `Kill` re-check promptly.
 struct InflightSpawnGuard {
-    set: std::sync::Arc<parking_lot::Mutex<std::collections::HashSet<(String, String)>>>,
+    set: std::sync::Arc<
+        parking_lot::Mutex<
+            std::collections::HashMap<(String, String), std::sync::Arc<tokio::sync::Notify>>,
+        >,
+    >,
     changed: std::sync::Arc<tokio::sync::Notify>,
     key: (String, String),
+    /// Pinged by `handle_cancel_spawn`; the owning `handle_spawn` races
+    /// its provisioning against it and aborts when it fires.
+    cancel: std::sync::Arc<tokio::sync::Notify>,
 }
 
 impl InflightSpawnGuard {
-    /// Claim `(workspace key, singleton kind key)` if free. `Ok(None)`
-    /// for non-singleton kinds (shells spawn freely, no guard);
-    /// `Err(())` when another spawn already holds the identity.
+    /// Claim an in-flight identity. Singleton kinds (agents) claim
+    /// `(workspace key, singleton kind key)`; `Err(())` when another
+    /// spawn already holds it. Non-singleton kinds (shells, log tails)
+    /// spawn freely — they claim a unique key that can never collide,
+    /// so their provision is still cancellable (`CancelSpawn`) and
+    /// `Kill`'s teardown still waits for it, without introducing any
+    /// duplicate-collapse semantics.
     fn try_claim(
         config: &ServerConfig,
         session_key: &SessionKey,
         kind: &TerminalKind,
         on_main: bool,
-    ) -> Result<Option<Self>, ()> {
-        let Some(target) = kind.singleton_key() else {
-            return Ok(None);
-        };
-        // Fold the checkout into the identity so a main-checkout spawn
-        // doesn't race-collapse onto an in-flight isolated spawn of the
-        // same agent (mirrors `find_existing_singleton`).
-        let target = if on_main {
-            format!("{target}:main")
-        } else {
-            target
+    ) -> Result<Self, ()> {
+        let (target, exclusive) = match kind.singleton_key() {
+            // Fold the checkout into the identity so a main-checkout
+            // spawn doesn't race-collapse onto an in-flight isolated
+            // spawn of the same agent (mirrors
+            // `find_existing_singleton`).
+            Some(target) if on_main => (format!("{target}:main"), true),
+            Some(target) => (target, true),
+            None => {
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                (format!("nonsingleton:{n}"), false)
+            }
         };
         let key = (session_key.as_str().to_string(), target);
+        let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
         let mut set = config.inflight_spawns.lock();
-        if !set.insert(key.clone()) {
+        if exclusive && set.contains_key(&key) {
             return Err(());
         }
-        Ok(Some(Self {
+        set.insert(key.clone(), cancel.clone());
+        Ok(Self {
             set: config.inflight_spawns.clone(),
             changed: config.inflight_spawn_changed.clone(),
             key,
-        }))
+            cancel,
+        })
     }
 }
 
@@ -2452,6 +2572,31 @@ impl Drop for InflightSpawnGuard {
     fn drop(&mut self) {
         self.set.lock().remove(&self.key);
         self.changed.notify_waiters();
+    }
+}
+
+/// `Command::CancelSpawn` — the user Esc'd the "Setting up workspace"
+/// checklist. Ping every in-flight spawn claim on the workspace; each
+/// owning `handle_spawn` aborts its provisioning, which drops (and so
+/// kills, process group included) any in-flight `git clone`/`fetch`
+/// child and releases the claim so a retry starts fresh. `notify_one`
+/// stores a permit, so a cancel landing before the winner reaches its
+/// select point is not lost. No-op when nothing is in flight.
+pub(crate) fn handle_cancel_spawn(config: &ServerConfig, session_key: &SessionKey) {
+    let cancels: Vec<_> = config
+        .inflight_spawns
+        .lock()
+        .iter()
+        .filter(|((ws, _), _)| ws == session_key.as_str())
+        .map(|(_, cancel)| cancel.clone())
+        .collect();
+    tracing::info!(
+        %session_key,
+        claims = cancels.len(),
+        "cancel_spawn: signalling in-flight provisions"
+    );
+    for cancel in cancels {
+        cancel.notify_one();
     }
 }
 
@@ -2464,8 +2609,11 @@ const INFLIGHT_COLLAPSE_DEADLINE: Duration = Duration::from_secs(600);
 /// A duplicate `handle_spawn` lost the in-flight claim. Wait for the
 /// winner's terminal, then behave exactly like the existing-singleton
 /// path: deliver the prompt (if any) into it and request focus. When
-/// the winner fails (claim released, no terminal), drop the duplicate —
-/// loudly when a prompt was lost with it.
+/// the winner fails (claim released, no terminal), drop the duplicate
+/// with a retry notice — always, not only when a prompt was lost: an
+/// Esc-cancel followed by an immediate re-press can land the retry
+/// while the cancelled claim is still releasing, and a silently
+/// swallowed key press reads as "lazybox ignored me".
 async fn collapse_onto_inflight_spawn(
     config: &ServerConfig,
     session_key: &SessionKey,
@@ -2486,12 +2634,10 @@ async fn collapse_onto_inflight_spawn(
             ?kind,
             "handle_spawn: in-flight spawn released without producing a terminal — dropping duplicate",
         );
-        if prompt.is_some() {
-            let _ = config.bus.send(Event::provider_error_retryable(
-                "spawn",
-                "an agent spawn was already in flight but failed — press the key again",
-            ));
-        }
+        let _ = config.bus.send(Event::provider_error_retryable(
+            "spawn",
+            "an agent spawn was already in flight but failed — press the key again",
+        ));
         return;
     };
     if let Some(prompt) = prompt {
@@ -2532,7 +2678,7 @@ async fn await_inflight_singleton(
         if let Some(id) = live_singleton(config, session_key, &target, on_main).await {
             return Some(id);
         }
-        let claimed = config.inflight_spawns.lock().contains(&claim);
+        let claimed = config.inflight_spawns.lock().contains_key(&claim);
         if !claimed || tokio::time::Instant::now() >= deadline {
             // Winner released (or we timed out). One final scan closes
             // the insert→release window — the maps are populated before
@@ -2612,7 +2758,7 @@ pub(crate) async fn await_inflight_spawns(config: &ServerConfig, workspace_key: 
         let busy = config
             .inflight_spawns
             .lock()
-            .iter()
+            .keys()
             .any(|(ws, _)| ws == workspace_key);
         if !busy {
             return;
@@ -3263,24 +3409,28 @@ async fn finish_terminal(
 }
 
 /// Ingest one PTY output chunk for a terminal: append it to the rolling
-/// detection buffer and offer the state machine a `Working` reading.
-/// Bytes flowing IS the working signal (issue #289) — no screen-scrape
-/// classification happens here. A stale prompt marker in the scrollback
-/// of a visibly-streaming session once pinned `InputNeeded`, so the
-/// classifier now runs only after the stream has gone quiet
-/// (`classify_quiet_screen`); mid-stream, the only thing a chunk can
-/// say is "the agent is doing something".
+/// detection buffer and offer the state machine a reading. Bytes flowing is
+/// normally the working signal (issue #289). The only immediate exception is
+/// an adapter's high-confidence current-chunk prompt detector: it may surface
+/// unmistakable modal chrome without waiting for quiet. Inspecting only a
+/// marker touched by the newest chunk preserves the stale-scrollback guard;
+/// the full classifier still runs only in [`classify_quiet_screen`].
 ///
-/// The reading is offered as ambiguous (`clear: false`): a byte-flow
-/// `Working` is inferred, not an affirmative status line, so it can never
-/// clear a parked `?` or a finished `Done` (an incidental repaint — a
-/// click, a focus, a pane resize — must not un-ask or un-finish, #374).
-/// A genuinely resumed stream instead commits `Working` off the next
-/// clear quiet-classification, once it comes to rest.
+/// The ordinary byte-flow `Working` reading is ambiguous (`clear: false`),
+/// so it can never clear a parked `?` or a finished `Done` (an incidental
+/// repaint — a click, a focus, a pane resize — must not un-ask or un-finish,
+/// #374). A positive current-chunk modal match is authoritative
+/// (`InputNeeded`, `clear: true`). A genuinely resumed stream commits
+/// `Working` off the next clear quiet-classification, once it comes to rest.
 pub(crate) async fn note_pty_activity(
     agent: Option<&std::sync::Arc<dyn lazybox_agents::Agent>>,
     buf: &mut Vec<u8>,
     bytes: &[u8],
+    // Whether this chunk moved the content fingerprint (the pump's
+    // watchdog tracker) — real output rather than repaint churn. Rides
+    // the byte-flow `Working` reading so a progress streak can re-open
+    // `Working` from `Done` (#398).
+    progress: bool,
     states: &std::sync::Arc<
         tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
     >,
@@ -3295,6 +3445,9 @@ pub(crate) async fn note_pty_activity(
     state_machine: &mut lazybox_agents::AgentStateMachine,
     hook_driven: &std::sync::Arc<
         tokio::sync::Mutex<std::collections::HashMap<TerminalId, std::time::Instant>>,
+    >,
+    input_shapes: &std::sync::Arc<
+        tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_agents::PromptShape>>,
     >,
 ) {
     const STATE_BUF_CAP: usize = 32 * 1024;
@@ -3313,13 +3466,27 @@ pub(crate) async fn note_pty_activity(
         let drop = buf.len() - STATE_BUF_CAP;
         buf.drain(..drop);
     }
-    let reading = lazybox_agents::Reading {
-        state: lazybox_ipc::AgentState::Working,
-        clear: false,
+    let detect_window = detect_window(buf);
+    let last_chunk_start = detect_window.len().saturating_sub(bytes.len());
+    let immediate_shape =
+        agent.detect_input_needed_in_current_chunk(detect_window, last_chunk_start);
+    let reading = if let Some(shape) = immediate_shape {
+        input_shapes.lock().await.insert(id, shape);
+        lazybox_agents::Reading {
+            state: lazybox_ipc::AgentState::InputNeeded,
+            clear: true,
+            progress: false,
+        }
+    } else {
+        lazybox_agents::Reading {
+            state: lazybox_ipc::AgentState::Working,
+            clear: false,
+            progress,
+        }
     };
     commit_pty_reading(
         agent,
-        detect_window(buf),
+        detect_window,
         reading,
         false,
         states,
@@ -3388,15 +3555,16 @@ pub(crate) async fn classify_quiet_screen(
         return;
     }
     let last_chunk_start = detect_window.len().saturating_sub(last_chunk_len);
-    let new_state = match agent.detect_state_chunked(detect_window, last_chunk_start) {
-        Some(new_state) => {
+    let new_state = match agent.detect_observation_chunked(detect_window, last_chunk_start) {
+        Some(observation) => {
+            let new_state = observation.state();
             tracing::trace!(
                 terminal_id = ?id,
                 buf_len = buf.len(),
                 detected = ?new_state,
                 "classify_quiet_screen ran",
             );
-            if new_state == lazybox_ipc::AgentState::InputNeeded {
+            if let Some(shape) = observation.prompt_shape() {
                 tracing::debug!(
                     terminal_id = ?id,
                     buf_len = buf.len(),
@@ -3405,17 +3573,10 @@ pub(crate) async fn classify_quiet_screen(
                     ),
                     "classify_quiet_screen → InputNeeded",
                 );
-                // Every InputNeeded the PTY detector raises is
-                // structurally a chooser / permission / consent dialog
-                // (freeform asks are deliberately not flagged), so a
-                // bare chooser keystroke is a complete answer. Hook-
-                // raised elicitations overwrite this with `FreeText` in
-                // `handle_ingest_hook`. Recorded before the dedupe
-                // below so a re-rendered prompt refreshes the shape.
-                input_shapes
-                    .lock()
-                    .await
-                    .insert(id, lazybox_agents::PromptShape::Chooser);
+                // Shape comes from the adapter's semantic observation rather
+                // than being guessed here. Recorded before state dedupe so a
+                // re-rendered prompt can refresh its interaction contract.
+                input_shapes.lock().await.insert(id, shape);
             }
             new_state
         }
@@ -3446,12 +3607,104 @@ pub(crate) async fn classify_quiet_screen(
     let reading = lazybox_agents::Reading {
         state: new_state,
         clear: true,
+        progress: false,
     };
     commit_pty_reading(
         agent,
         detect_window,
         reading,
         ready_for_prompt,
+        states,
+        bus,
+        id,
+        session_key,
+        terminal_meta,
+        state_machine,
+        hook_driven,
+    )
+    .await;
+}
+
+/// The Working watchdog fired (#398): [`WORKING_WATCHDOG_AFTER`] with
+/// no meaningful content change while the terminal reads `Working`.
+/// Classify the screen exactly as the quiet path would — this is how a
+/// parked prompt hidden behind spinner/status churn surfaces as `?`,
+/// since churn re-arms the quiet timer and `classify_quiet_screen`
+/// never runs on its own — and, if the terminal *still* reads
+/// `Working` afterwards (a frozen status line re-reads as `Working`;
+/// hookless agents have no other exit), force the turn closed with a
+/// clear `Done` reading.
+///
+/// The force commits through [`commit_pty_reading`], so the
+/// hooks-primary gate still applies: while hooks are fresh they own
+/// `Working` (a long silent tool call is normal there) and the forced
+/// `Done` is dropped — the pump re-arms and retries a window later.
+/// A pending answer reset vetoes the whole tick, same as the quiet
+/// path: the buffer predates the user's answer by decree.
+pub(crate) async fn watchdog_escape_working(
+    agent: Option<&std::sync::Arc<dyn lazybox_agents::Agent>>,
+    buf: &[u8],
+    last_chunk_len: usize,
+    states: &std::sync::Arc<
+        tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
+    >,
+    bus: &tokio::sync::broadcast::Sender<Event>,
+    id: TerminalId,
+    session_key: &SessionKey,
+    terminal_meta: &std::sync::Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<TerminalId, (SessionKey, lazybox_ipc::TerminalKind)>,
+        >,
+    >,
+    state_machine: &mut lazybox_agents::AgentStateMachine,
+    hook_driven: &std::sync::Arc<
+        tokio::sync::Mutex<std::collections::HashMap<TerminalId, std::time::Instant>>,
+    >,
+    input_shapes: &std::sync::Arc<
+        tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_agents::PromptShape>>,
+    >,
+    detect_resets: &std::sync::Arc<tokio::sync::Mutex<std::collections::HashSet<TerminalId>>>,
+) {
+    let Some(agent) = agent else {
+        return;
+    };
+    if states.lock().await.get(&id).copied() != Some(lazybox_ipc::AgentState::Working) {
+        return;
+    }
+    if detect_resets.lock().await.contains(&id) {
+        return;
+    }
+    classify_quiet_screen(
+        Some(agent),
+        buf,
+        last_chunk_len,
+        states,
+        bus,
+        id,
+        session_key,
+        terminal_meta,
+        state_machine,
+        hook_driven,
+        input_shapes,
+        detect_resets,
+    )
+    .await;
+    if states.lock().await.get(&id).copied() != Some(lazybox_ipc::AgentState::Working) {
+        return;
+    }
+    tracing::info!(
+        terminal_id = ?id,
+        "working watchdog: no meaningful output change; forcing the turn closed",
+    );
+    commit_pty_reading(
+        agent,
+        detect_window(buf),
+        lazybox_agents::Reading {
+            state: lazybox_ipc::AgentState::Done,
+            clear: true,
+            progress: false,
+        },
+        false,
         states,
         bus,
         id,
@@ -3590,6 +3843,38 @@ async fn commit_pty_reading(
     }
 }
 
+/// `Command::FetchScrollback` — hand the requesting client the
+/// terminal's deep history from the backend's own retention (tmux
+/// `capture-pane`), the same seed the restart/reattach path uses. The
+/// reply goes to the requesting connection only: other clients keep
+/// their local scrollback until they ask themselves, so a fetch never
+/// resets a grid nobody asked to rebuild.
+pub async fn handle_fetch_scrollback(
+    config: &ServerConfig,
+    tx: &lazybox_ipc::EventSender,
+    terminal_id: TerminalId,
+) {
+    let Some(key) = config.backend_key_for(terminal_id).await else {
+        tracing::trace!("scrollback fetch for unknown terminal {terminal_id:?}");
+        return;
+    };
+    match config.backend.scrollback(&key).await {
+        Ok(Some((replay, seq))) => {
+            let _ = tx.send(Event::TerminalScrollback {
+                terminal_id,
+                replay,
+                seq,
+            });
+        }
+        // No history source (raw PTY) — the client's ring-fed
+        // scrollback is already everything there is.
+        Ok(None) => {}
+        Err(e) => {
+            tracing::debug!(key = %key, "backend scrollback fetch failed: {e}");
+        }
+    }
+}
+
 pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes: &[u8]) {
     handle_write_batch(config, terminal_id, &[bytes.to_vec()]).await;
 }
@@ -3675,8 +3960,9 @@ pub(crate) async fn handle_write_batch(
     // just typing into the field — flipping the pill on it cleared a
     // real "agent is waiting on you". Enter is exempt: it submits the
     // elicitation answer, so the flip is correct. The shape is recorded
-    // at detection time (PTY triggers are all chooser-shaped) and by
-    // `handle_ingest_hook` (permission → chooser, elicit → free text);
+    // at detection time by the agent observation (including its current-
+    // chunk fast path) and by `handle_ingest_hook` (permission → chooser,
+    // elicit → free text);
     // with no recorded shape we conservatively don't flip on a bare key.
     if !pressed_enter {
         let shape = config
@@ -3764,6 +4050,66 @@ const PASTE_QUIET_WINDOW: Duration = Duration::from_millis(250);
 /// submit is written anyway and the confirm loop's resends carry the
 /// recovery instead.
 const PASTE_SETTLE_CAP: Duration = Duration::from_secs(2);
+
+/// Stage-specific failure from the shared PTY prompt writer. Callers keep
+/// their context-specific user message (initial work vs live injection), while
+/// framing, settle timing, submit ordering, and confirmation live in one path.
+#[derive(Debug, thiserror::Error)]
+enum PromptWriteError {
+    #[error("initial prompt write failed: {0}")]
+    Initial(#[source] terminal_io::TerminalIoFailure),
+    #[error("prompt submit write failed: {0}")]
+    Submit(#[source] terminal_io::TerminalIoFailure),
+}
+
+/// Execute one agent-declared prompt sequence while holding the terminal's
+/// interaction lock. This is the single shell/PTY wrapper used by both
+/// spawn-time work delivery and injection into an existing agent.
+///
+/// For guarded composers the first write is an explicit bracketed paste. The
+/// second write is delayed until its repaint settles, then registered for
+/// confirmation before Enter is sent. The lock is released before the
+/// potentially long confirmation/retry loop; retries reacquire it through the
+/// normal serialized terminal-I/O path.
+async fn write_prompt_sequence(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    backend_key: &str,
+    encoded: lazybox_agents::EncodedPrompt,
+    interaction: tokio::sync::OwnedMutexGuard<()>,
+) -> Result<(), PromptWriteError> {
+    let (initial_write, submit_write) = encoded.into_writes();
+    // Subscribe BEFORE the first write so its repaint chunks cannot race the
+    // settle gate. Line-oriented prompts submit inline and skip this receiver.
+    let output_events = submit_write.is_some().then(|| config.bus.subscribe());
+    terminal_io::write_locked(config, backend_key, &initial_write)
+        .await
+        .map_err(PromptWriteError::Initial)?;
+
+    if let (Some(submit_bytes), Some(mut output_events)) = (submit_write, output_events) {
+        await_paste_settled(
+            &mut output_events,
+            terminal_id,
+            PASTE_QUIET_WINDOW,
+            PASTE_SETTLE_CAP,
+        )
+        .await;
+        let confirm = prepare_submit_confirmation(config, terminal_id).await;
+        terminal_io::write_locked(config, backend_key, &submit_bytes)
+            .await
+            .map_err(PromptWriteError::Submit)?;
+        drop(interaction);
+        confirm_prompt_submission(
+            confirm,
+            config,
+            backend_key,
+            &submit_bytes,
+            SUBMIT_CONFIRM_DEADLINE,
+        )
+        .await;
+    }
+    Ok(())
+}
 
 /// Wait plumbing for [`confirm_prompt_submission`], registered BEFORE
 /// the submit keystroke is written so a fast hook can't race the
@@ -4122,11 +4468,15 @@ pub async fn handle_inject_prompt(
             return;
         }
     };
-    let paste = agent.inject_prompt(prompt);
-    // Recall (`submit == false`) drops the recovered text into the
-    // composer for the user to edit — skip the Enter keystroke and the
-    // settle gate that guards it.
-    let submit = if submit { agent.inject_submit() } else { None };
+    // The PTY protocol owns BOTH framing and submission. In particular,
+    // compose-only recall must omit the inline newline for line-oriented
+    // agents as well as the separate CR used by guarded composers.
+    let intent = if submit {
+        lazybox_agents::PromptIntent::Submit
+    } else {
+        lazybox_agents::PromptIntent::Compose
+    };
+    let encoded_prompt = agent.encode_prompt(prompt, intent);
 
     // An InputNeeded gate may hold the waiter below for 30 seconds. Without a
     // per-terminal reservation every repeated `w` press spawned another
@@ -4205,8 +4555,6 @@ pub async fn handle_inject_prompt(
             blocked =
                 states.lock().await.get(&id).copied() == Some(lazybox_ipc::AgentState::InputNeeded);
         }
-        // Subscribed before the paste write so the output chunks the
-        // paste triggers are observable by the settle gate.
         let Some(interaction) =
             terminal_io::acquire_live(&config_for_confirm, id, &backend_key).await
         else {
@@ -4222,26 +4570,26 @@ pub async fn handle_inject_prompt(
         if let Some(tx) = registered_tx.take() {
             let _ = tx.send(());
         }
-        let output_events = submit.is_some().then(|| bus.subscribe());
-        if let Err(e) = terminal_io::write_locked(&config_for_confirm, &backend_key, &paste).await {
-            tracing::warn!("inject_prompt: paste failed: {e}");
-            let _ = bus.send(Event::TerminalInputRejected {
-                terminal_id: id,
-                message: format!(
-                    "injected prompt was not delivered ({e}) — press w again to retry"
-                ),
-            });
-            return;
-        }
-        // Gate the submit keystroke on the paste's repaint going quiet
-        // (Claude treats rapid bytes as a paste — Enter inside the
-        // paste is a soft line break).
-        if let (Some(submit_bytes), Some(mut output_events)) = (submit, output_events) {
-            await_paste_settled(&mut output_events, id, PASTE_QUIET_WINDOW, PASTE_SETTLE_CAP).await;
-            let confirm = prepare_submit_confirmation(&config_for_confirm, id).await;
-            if let Err(e) =
-                terminal_io::write_locked(&config_for_confirm, &backend_key, &submit_bytes).await
-            {
+        match write_prompt_sequence(
+            &config_for_confirm,
+            id,
+            &backend_key,
+            encoded_prompt,
+            interaction,
+        )
+        .await
+        {
+            Ok(()) => {}
+            Err(PromptWriteError::Initial(e)) => {
+                tracing::warn!("inject_prompt: initial write failed: {e}");
+                let _ = bus.send(Event::TerminalInputRejected {
+                    terminal_id: id,
+                    message: format!(
+                        "injected prompt was not delivered ({e}) — press w again to retry"
+                    ),
+                });
+            }
+            Err(PromptWriteError::Submit(e)) => {
                 tracing::warn!("inject_prompt: submit failed: {e}");
                 let _ = bus.send(Event::TerminalInputRejected {
                     terminal_id: id,
@@ -4249,17 +4597,7 @@ pub async fn handle_inject_prompt(
                         "prompt was pasted but could not be submitted ({e}) — open the terminal and press Enter"
                     ),
                 });
-                return;
             }
-            drop(interaction);
-            confirm_prompt_submission(
-                confirm,
-                &config_for_confirm,
-                &backend_key,
-                &submit_bytes,
-                SUBMIT_CONFIRM_DEADLINE,
-            )
-            .await;
         }
     });
     // A dropped sender means the task ended before it could establish either
@@ -5738,7 +6076,7 @@ mod tests {
     }
 
     /// The in-flight spawn guard claims a singleton identity exactly
-    /// once, never guards multi-instance kinds (shells), and releases
+    /// once, never blocks multi-instance kinds (shells), and releases
     /// on drop — including the early-return failure paths, which is the
     /// whole point of it being a drop guard.
     #[tokio::test]
@@ -5747,9 +6085,8 @@ mod tests {
         let key: SessionKey = "test:ws-guard".into();
         let kind = TerminalKind::Agent("claude".into());
 
-        let guard = InflightSpawnGuard::try_claim(&config, &key, &kind, false)
-            .expect("first claim wins")
-            .expect("agents are singletons");
+        let guard =
+            InflightSpawnGuard::try_claim(&config, &key, &kind, false).expect("first claim wins");
         // Second claim on the same identity loses.
         assert!(InflightSpawnGuard::try_claim(&config, &key, &kind, false).is_err());
         // A different kind on the same workspace is a separate identity.
@@ -5762,14 +6099,72 @@ mod tests {
             )
             .is_ok()
         );
-        // Shells are never singletons — no guard, never blocked.
-        assert!(matches!(
-            InflightSpawnGuard::try_claim(&config, &key, &TerminalKind::Shell, false),
-            Ok(None)
-        ));
+        // Shells are never singletons: every shell spawn claims its own
+        // unique key (for cancellability + Kill serialization), so two
+        // concurrent shell claims coexist and never collide.
+        let _shell_a = InflightSpawnGuard::try_claim(&config, &key, &TerminalKind::Shell, false)
+            .expect("shells never collide");
+        let _shell_b = InflightSpawnGuard::try_claim(&config, &key, &TerminalKind::Shell, false)
+            .expect("shells never collide");
         drop(guard);
         // Released → claimable again.
         assert!(InflightSpawnGuard::try_claim(&config, &key, &kind, false).is_ok());
+    }
+
+    /// `CancelSpawn` pings the cancel channel of every in-flight claim
+    /// on the target workspace — and only that workspace — so the
+    /// owning `handle_spawn` aborts its provisioning. `notify_one`
+    /// stores a permit, so a cancel that lands before the winner
+    /// reaches its select point still takes effect (issue #403).
+    #[tokio::test]
+    async fn cancel_spawn_pings_only_the_workspaces_inflight_claims() {
+        let config = ServerConfig::in_memory();
+        let key: SessionKey = "test:ws-cancel".into();
+        let other: SessionKey = "test:ws-untouched".into();
+        let kind = TerminalKind::Agent("claude".into());
+
+        let guard = InflightSpawnGuard::try_claim(&config, &key, &kind, false).expect("claim wins");
+        let shell = InflightSpawnGuard::try_claim(&config, &key, &TerminalKind::Shell, false)
+            .expect("shells never collide");
+        let bystander =
+            InflightSpawnGuard::try_claim(&config, &other, &kind, false).expect("claim wins");
+
+        // Cancel fired BEFORE anyone waits: the permit must persist.
+        handle_cancel_spawn(&config, &key);
+        tokio::time::timeout(Duration::from_secs(1), guard.cancel.notified())
+            .await
+            .expect("the claim's cancel channel fires");
+        tokio::time::timeout(Duration::from_secs(1), shell.cancel.notified())
+            .await
+            .expect("a shell provision on the workspace is cancellable too");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), bystander.cancel.notified())
+                .await
+                .is_err(),
+            "a cancel must not leak to another workspace's claim"
+        );
+    }
+
+    /// A duplicate whose in-flight winner dies without producing a
+    /// terminal must surface the retry notice even when it carried no
+    /// prompt — an Esc-cancel followed by an immediate re-press lands
+    /// exactly here, and a silently swallowed key press reads as
+    /// "lazybox ignored me".
+    #[tokio::test]
+    async fn promptless_collapse_on_dead_winner_still_notifies() {
+        let config = ServerConfig::in_memory();
+        let key: SessionKey = "test:ws-collapse-notice".into();
+        let kind = TerminalKind::Agent("claude".into());
+        let mut rx = config.bus.subscribe();
+        // No claim, no terminal: the winner is already gone.
+        collapse_onto_inflight_spawn(&config, &key, &kind, false, None).await;
+        match rx.try_recv().expect("a retry notice is broadcast") {
+            Event::ProviderError { source, kind, .. } => {
+                assert_eq!(source, "spawn");
+                assert_eq!(kind, "retryable");
+            }
+            other => panic!("expected ProviderError, got {other:?}"),
+        }
     }
 
     /// #271: a main-checkout spawn of an agent is a DISTINCT singleton
@@ -5783,14 +6178,12 @@ mod tests {
         let kind = TerminalKind::Agent("claude".into());
 
         let _isolated = InflightSpawnGuard::try_claim(&config, &key, &kind, false)
-            .expect("isolated claim wins")
-            .expect("agents are singletons");
+            .expect("isolated claim wins");
         // The isolated identity is taken…
         assert!(InflightSpawnGuard::try_claim(&config, &key, &kind, false).is_err());
         // …but the on-main identity is still free.
-        let _main = InflightSpawnGuard::try_claim(&config, &key, &kind, true)
-            .expect("main claim wins")
-            .expect("agents are singletons");
+        let _main =
+            InflightSpawnGuard::try_claim(&config, &key, &kind, true).expect("main claim wins");
         // And now the on-main identity is taken too.
         assert!(InflightSpawnGuard::try_claim(&config, &key, &kind, true).is_err());
     }
@@ -5852,9 +6245,7 @@ mod tests {
         let config = ServerConfig::in_memory();
         let key: SessionKey = "test:ws-kill".into();
         let kind = TerminalKind::Agent("claude".into());
-        let guard = InflightSpawnGuard::try_claim(&config, &key, &kind, false)
-            .unwrap()
-            .unwrap();
+        let guard = InflightSpawnGuard::try_claim(&config, &key, &kind, false).unwrap();
 
         let cfg = config.clone();
         let waiter = tokio::spawn(async move {
@@ -7452,6 +7843,9 @@ mod tests {
             tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_agents::PromptShape>>,
         >,
         detect_resets: std::sync::Arc<tokio::sync::Mutex<std::collections::HashSet<TerminalId>>>,
+        /// The pump's rolling content fingerprint, mirrored so `feed`
+        /// derives each chunk's progress bit the same way production does.
+        watchdog_fp: Option<u64>,
     }
 
     impl PumpDriver {
@@ -7495,6 +7889,7 @@ mod tests {
             Self {
                 agent,
                 buf: Vec::new(),
+                watchdog_fp: None,
                 last_chunk_len: 0,
                 states: std::sync::Arc::new(tokio::sync::Mutex::new(
                     std::collections::HashMap::new(),
@@ -7522,12 +7917,21 @@ mod tests {
         }
 
         /// Feed one PTY chunk; return the `AgentState`s broadcast for this
-        /// terminal as a result (usually 0 or 1).
+        /// terminal as a result (usually 0 or 1). Mirrors the pump's chunk
+        /// arm: a pending answer reset drops the accumulated detection
+        /// buffer before the chunk is ingested, and the progress bit is
+        /// derived through the rolling content fingerprint — so churn vs
+        /// content behaves as in production.
         async fn feed(&mut self, bytes: &[u8]) -> Vec<lazybox_ipc::AgentState> {
+            if self.detect_resets.lock().await.remove(&self.id) {
+                self.buf.clear();
+            }
+            let progress = watchdog_notes_progress(&mut self.watchdog_fp, bytes);
             note_pty_activity(
                 Some(&self.agent),
                 &mut self.buf,
                 bytes,
+                progress,
                 &self.states,
                 &self.bus,
                 self.id,
@@ -7535,6 +7939,7 @@ mod tests {
                 &self.terminal_meta,
                 &mut self.state_machine,
                 &self.hook_driven,
+                &self.input_shapes,
             )
             .await;
             self.last_chunk_len = bytes.len();
@@ -7546,6 +7951,41 @@ mod tests {
         /// `AgentState`s broadcast as a result.
         async fn quiet(&mut self) -> Vec<lazybox_ipc::AgentState> {
             classify_quiet_screen(
+                Some(&self.agent),
+                &self.buf,
+                self.last_chunk_len,
+                &self.states,
+                &self.bus,
+                self.id,
+                &self.session_key,
+                &self.terminal_meta,
+                &mut self.state_machine,
+                &self.hook_driven,
+                &self.input_shapes,
+                &self.detect_resets,
+            )
+            .await;
+            self.drain()
+        }
+
+        /// The user answers the parked prompt through lazybox:
+        /// `handle_write`'s optimistic flip commits `Working` into the
+        /// state cache and marks the detection buffer for reset (#101).
+        /// The pump's own state machine is not consulted by the flip.
+        async fn answer(&mut self) {
+            self.states
+                .lock()
+                .await
+                .insert(self.id, lazybox_ipc::AgentState::Working);
+            self.detect_resets.lock().await.insert(self.id);
+        }
+
+        /// The pump's Working watchdog fired — [`WORKING_WATCHDOG_AFTER`]
+        /// with no meaningful content change — so classify the screen and,
+        /// if still Working, force the turn closed; return the
+        /// `AgentState`s broadcast as a result.
+        async fn watchdog(&mut self) -> Vec<lazybox_ipc::AgentState> {
+            watchdog_escape_working(
                 Some(&self.agent),
                 &self.buf,
                 self.last_chunk_len,
@@ -7757,6 +8197,176 @@ mod tests {
         }
     }
 
+    /// Codex approval chrome is strong enough to bypass the quiet timer.
+    /// This is the exact command-approval shape from the TUI: the sidebar
+    /// must show `?` as soon as the modal paints, even if status repaints
+    /// keep the PTY from ever remaining quiet for five seconds.
+    #[tokio::test]
+    async fn codex_approval_modal_surfaces_input_needed_immediately() {
+        use lazybox_ipc::AgentState::InputNeeded;
+        let agent = lazybox_agents::registry()
+            .get("codex")
+            .expect("codex agent is a built-in");
+        let mut p = PumpDriver::with_agent(agent, Duration::ZERO, Duration::ZERO);
+        let modal = "Would you like to run the following command?\n\
+                     Environment: local\n\
+                     › 1. Yes, proceed (y)\n\
+                       2. Yes, and don't ask again\n\
+                       3. No, and tell Codex what to do differently (esc)\n\
+                     Press enter to confirm or esc to cancel";
+
+        assert_eq!(p.feed(modal.as_bytes()).await, vec![InputNeeded]);
+        assert_eq!(p.state().await, Some(InputNeeded));
+        assert_eq!(
+            p.input_shapes.lock().await.get(&p.id),
+            Some(&lazybox_agents::PromptShape::Chooser),
+        );
+    }
+
+    /// The #399 acceptance flow, replayed over raw bytes captured from a
+    /// live codex 0.144.6 approval round-trip: the sidebar `?` must surface
+    /// on the modal's paint burst itself (the parked modal churns spinner
+    /// repaints, so the quiet classifier never gets a turn), hold through
+    /// that churn, and clear once the user answers through lazybox —
+    /// never re-surfacing off the aftermath.
+    #[tokio::test]
+    async fn codex_real_capture_approval_flow_surfaces_and_clears() {
+        use lazybox_ipc::AgentState::InputNeeded;
+        let working = include_bytes!("../../agents/tests/fixtures/codex_real_working.bin");
+        let paint =
+            include_bytes!("../../agents/tests/fixtures/codex_real_approval_paint_burst.bin");
+        let ticks =
+            include_bytes!("../../agents/tests/fixtures/codex_real_approval_parked_ticks.bin");
+        let answered =
+            include_bytes!("../../agents/tests/fixtures/codex_real_approval_answered.bin");
+        let settled =
+            include_bytes!("../../agents/tests/fixtures/codex_real_approval_settled_idle.bin");
+        let agent = lazybox_agents::registry()
+            .get("codex")
+            .expect("codex agent is a built-in");
+        let mut p = PumpDriver::with_agent(agent, Duration::ZERO, Duration::ZERO);
+
+        p.feed(working).await;
+        // The paint burst flips the pill on the chunk itself — the "within
+        // ~1s" acceptance is this line needing no quiet() first.
+        assert_eq!(p.feed(paint).await, vec![InputNeeded]);
+        assert_eq!(
+            p.input_shapes.lock().await.get(&p.id),
+            Some(&lazybox_agents::PromptShape::Chooser),
+        );
+        // The parked modal keeps repainting its spinner ticks; none of that
+        // churn may flap the `?`, and a quiet window that does sneak in
+        // re-reads the same modal as a no-op.
+        for chunk in ticks.chunks(1024) {
+            assert!(p.feed(chunk).await.is_empty());
+        }
+        assert!(p.quiet().await.is_empty());
+        assert_eq!(p.state().await, Some(InputNeeded));
+
+        // The user answers through lazybox; from here `?` must never
+        // return, even though the answered modal is still in the raw
+        // stream's scrollback.
+        p.answer().await;
+        let mut after = Vec::new();
+        for chunk in answered.chunks(2048) {
+            after.extend(p.feed(chunk).await);
+        }
+        after.extend(p.quiet().await);
+        after.extend(p.feed(settled).await);
+        after.extend(p.quiet().await);
+        assert!(
+            !after.contains(&InputNeeded),
+            "an answered approval must not re-surface `?`; got {after:?}",
+        );
+        assert_ne!(p.state().await, Some(InputNeeded));
+    }
+
+    /// The negative case from #399: the user answers the modal *inside the
+    /// terminal* before the optimistic flip lands (no buffer reset), so the
+    /// answered modal lingers verbatim in the detection window's scrollback
+    /// while the aftermath streams over it. The stale-marker guard must keep
+    /// the chunk path silent, and the quiet classification must read the
+    /// post-answer screen, not the lingering modal.
+    #[tokio::test]
+    async fn answered_codex_modal_in_scrollback_never_resurfaces() {
+        use lazybox_ipc::AgentState::InputNeeded;
+        let working = include_bytes!("../../agents/tests/fixtures/codex_real_working.bin");
+        let paint =
+            include_bytes!("../../agents/tests/fixtures/codex_real_approval_paint_burst.bin");
+        let answered =
+            include_bytes!("../../agents/tests/fixtures/codex_real_approval_answered.bin");
+        let settled =
+            include_bytes!("../../agents/tests/fixtures/codex_real_approval_settled_idle.bin");
+        let agent = lazybox_agents::registry()
+            .get("codex")
+            .expect("codex agent is a built-in");
+        let mut p = PumpDriver::with_agent(agent, Duration::ZERO, Duration::ZERO);
+
+        p.feed(working).await;
+        assert_eq!(p.feed(paint).await, vec![InputNeeded]);
+
+        // No answer() — the aftermath just streams in over the parked `?`.
+        let mut after = Vec::new();
+        for chunk in answered.chunks(2048) {
+            after.extend(p.feed(chunk).await);
+        }
+        after.extend(p.quiet().await);
+        after.extend(p.feed(settled).await);
+        after.extend(p.quiet().await);
+        assert!(
+            !after.contains(&InputNeeded),
+            "a lingering answered modal must not re-fire `?`; got {after:?}",
+        );
+        assert_ne!(
+            p.state().await,
+            Some(InputNeeded),
+            "the settled post-answer screen must have cleared the `?`",
+        );
+    }
+
+    struct FreeTextPromptAgent;
+
+    impl lazybox_agents::Agent for FreeTextPromptAgent {
+        fn id(&self) -> &'static str {
+            "free-text-test"
+        }
+
+        fn display_name(&self) -> &'static str {
+            "Free-text test agent"
+        }
+
+        fn spawn(&self, _ctx: &lazybox_agents::SpawnCtx) -> Vec<String> {
+            vec!["free-text-test".into()]
+        }
+
+        fn detect_observation_chunked(
+            &self,
+            _recent_output: &[u8],
+            _last_chunk_start: usize,
+        ) -> Option<lazybox_agents::AgentObservation> {
+            Some(lazybox_agents::AgentObservation::input_needed(
+                lazybox_agents::PromptShape::FreeText,
+            ))
+        }
+    }
+
+    /// Prompt shape belongs to the adapter observation; the daemon must
+    /// preserve it instead of collapsing every quiet prompt to a chooser.
+    #[tokio::test]
+    async fn quiet_classifier_preserves_agent_declared_prompt_shape() {
+        use lazybox_ipc::AgentState::{InputNeeded, Working};
+        let agent: std::sync::Arc<dyn lazybox_agents::Agent> =
+            std::sync::Arc::new(FreeTextPromptAgent);
+        let mut p = PumpDriver::with_agent(agent, Duration::ZERO, Duration::ZERO);
+
+        assert_eq!(p.feed(b"Please explain:").await, vec![Working]);
+        assert_eq!(p.quiet().await, vec![InputNeeded]);
+        assert_eq!(
+            p.input_shapes.lock().await.get(&p.id),
+            Some(&lazybox_agents::PromptShape::FreeText),
+        );
+    }
+
     /// The counterpart: once the PTY has been quiet for the classify
     /// window, a permission prompt at rest MUST surface as `?`.
     #[tokio::test]
@@ -7892,6 +8502,196 @@ mod tests {
         assert_eq!(p.states.lock().await.get(&p.id), Some(&InputNeeded));
     }
 
+    /// The #398 acceptance scenario: an agent that stops doing work but
+    /// keeps animating a spinner never goes byte-quiet, so the quiet
+    /// timer never fires — yet the content fingerprint stops changing,
+    /// so the watchdog fires and forces the pinned `Working` closed.
+    #[tokio::test]
+    async fn spinner_pinned_working_is_forced_out_by_the_watchdog() {
+        use lazybox_ipc::AgentState::{Done, Working};
+        let working = include_bytes!("../../agents/tests/fixtures/working_status_line.bin");
+
+        let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
+        assert_eq!(p.feed(working).await, vec![Working]);
+        // The agent stalls but keeps repainting its spinner: glyph and
+        // counters change, the letter stream doesn't. Byte flow re-arms
+        // the quiet timer every frame; the watchdog anchor must not move.
+        let mut fp = None;
+        watchdog_notes_progress(&mut fp, working);
+        for tick in 0..4u32 {
+            let frame =
+                format!("\r\x1b[2K✻ Gusting… ({tick}s · ↓ 7.{tick}k tokens · esc to interrupt)");
+            assert_eq!(
+                p.feed(frame.as_bytes()).await,
+                Vec::<lazybox_ipc::AgentState>::new(),
+                "spinner frames are plain byte flow — still Working",
+            );
+            if tick > 0 {
+                assert!(
+                    !watchdog_notes_progress(&mut fp, frame.as_bytes()),
+                    "a spinner-only repaint must not reset the watchdog",
+                );
+            } else {
+                watchdog_notes_progress(&mut fp, frame.as_bytes());
+            }
+        }
+        // The watchdog window elapses with no meaningful change: the
+        // screen still *reads* Working (live-looking status line), so
+        // the classification can't help — the force closes the turn.
+        assert_eq!(
+            p.watchdog().await,
+            vec![Done],
+            "the watchdog must force a spinner-pinned Working out",
+        );
+    }
+
+    /// The counterpart to the force: once `Done` (watchdog-forced or
+    /// settled), resumed REAL output must re-open `Working` without
+    /// waiting for a quiet pause — a heavy stream never offers one.
+    /// Chunks that keep changing the content fingerprint are the resume
+    /// event ([`lazybox_agents::state_machine`]'s progress streak);
+    /// churn alone keeps `Done` pinned forever.
+    #[tokio::test]
+    async fn resumed_real_output_reopens_working_after_forced_done() {
+        use lazybox_ipc::AgentState::{Done, Working};
+        let working = include_bytes!("../../agents/tests/fixtures/working_status_line.bin");
+
+        let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
+        assert_eq!(p.feed(working).await, vec![Working]);
+        assert_eq!(p.watchdog().await, vec![Done]);
+        // Spinner churn keeps arriving: identical letter stream, no
+        // progress streak — Done must hold.
+        for _ in 0..5 {
+            assert_eq!(
+                p.feed("\r\x1b[2K✻ Gusting… (2s · esc to interrupt)".as_bytes())
+                    .await,
+                Vec::<lazybox_ipc::AgentState>::new(),
+                "churn alone must never clear Done",
+            );
+        }
+        assert_eq!(p.states.lock().await.get(&p.id), Some(&Done));
+        // The agent genuinely resumes: every chunk carries new content.
+        let mut seq = Vec::new();
+        seq.extend(p.feed(b"Reading crates/server/src/lib.rs\n").await);
+        seq.extend(p.feed(b"Editing spawn_handler.rs\n").await);
+        seq.extend(p.feed(b"Running cargo check\n").await);
+        assert_eq!(
+            seq,
+            vec![Working],
+            "sustained new content must re-open Working mid-stream",
+        );
+    }
+
+    /// A parked prompt hidden behind spinner churn: the repaint keeps
+    /// re-arming the quiet timer so `classify_quiet_screen` never runs
+    /// on its own — the watchdog tick classifies regardless of byte
+    /// flow and the dialog surfaces as `?` (no false `Done`).
+    #[tokio::test]
+    async fn parked_prompt_behind_spinner_churn_surfaces_via_watchdog() {
+        use lazybox_ipc::AgentState::{InputNeeded, Working};
+        let input = include_bytes!("../../agents/tests/fixtures/permission_prompt_fragmented.bin");
+
+        let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
+        assert_eq!(p.feed(input).await, vec![Working]);
+        let mut fp = None;
+        watchdog_notes_progress(&mut fp, input);
+        for _ in 0..4 {
+            // A one-cell spinner repaint: letterless, so it has no
+            // fingerprint at all and can never count as progress.
+            let frame = "\x1b[1;1H⠋".as_bytes();
+            assert_eq!(p.feed(frame).await, Vec::<lazybox_ipc::AgentState>::new());
+            assert!(!watchdog_notes_progress(&mut fp, frame));
+        }
+        assert_eq!(
+            p.watchdog().await,
+            vec![InputNeeded],
+            "the watchdog tick must surface the parked dialog, not claim Done",
+        );
+    }
+
+    /// The hooks-primary gate holds for the watchdog's force too: fresh
+    /// hooks own `Working` (a long silent tool call is normal there), so
+    /// the forced `Done` is dropped until the hook pipeline goes stale.
+    #[tokio::test]
+    async fn watchdog_force_respects_fresh_hooks() {
+        use lazybox_ipc::AgentState::{Done, Working};
+        let working = include_bytes!("../../agents/tests/fixtures/working_status_line.bin");
+
+        let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
+        assert_eq!(p.feed(working).await, vec![Working]);
+        p.hook_driven
+            .lock()
+            .await
+            .insert(p.id, std::time::Instant::now());
+        assert_eq!(
+            p.watchdog().await,
+            Vec::<lazybox_ipc::AgentState>::new(),
+            "fresh hooks own Working — the watchdog force must be gated",
+        );
+        assert_eq!(p.states.lock().await.get(&p.id), Some(&Working));
+        // The hook pipeline stopped flowing; the next tick forces.
+        p.hook_driven
+            .lock()
+            .await
+            .insert(p.id, std::time::Instant::now() - Duration::from_secs(31));
+        assert_eq!(p.watchdog().await, vec![Done]);
+    }
+
+    /// The watchdog tick is inert when there is nothing to escape: a
+    /// pending answer reset (the buffer predates the user's answer) and
+    /// a terminal that isn't `Working` both veto it.
+    #[tokio::test]
+    async fn watchdog_is_inert_after_an_answer_or_out_of_working() {
+        use lazybox_ipc::AgentState::{Done, Working};
+        let working = include_bytes!("../../agents/tests/fixtures/working_status_line.bin");
+
+        let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
+        assert_eq!(p.feed(working).await, vec![Working]);
+        p.detect_resets.lock().await.insert(p.id);
+        assert_eq!(
+            p.watchdog().await,
+            Vec::<lazybox_ipc::AgentState>::new(),
+            "a pending answer reset must veto the watchdog tick",
+        );
+        assert_eq!(p.states.lock().await.get(&p.id), Some(&Working));
+        p.detect_resets.lock().await.remove(&p.id);
+        p.states.lock().await.insert(p.id, Done);
+        assert_eq!(
+            p.watchdog().await,
+            Vec::<lazybox_ipc::AgentState>::new(),
+            "out of Working the tick is a no-op",
+        );
+        assert_eq!(p.states.lock().await.get(&p.id), Some(&Done));
+    }
+
+    #[test]
+    fn watchdog_progress_ignores_churn() {
+        let mut fp = None;
+        assert!(watchdog_notes_progress(&mut fp, b"Compiling lazybox v0.1"));
+        // The same letters again — a repaint — are not progress.
+        assert!(!watchdog_notes_progress(&mut fp, b"Compiling lazybox v0.1"));
+        // Letterless churn never is, and must not clobber the anchor
+        // fingerprint (the next identical repaint still dedupes).
+        assert!(!watchdog_notes_progress(&mut fp, b"\x1b[2K"));
+        assert!(!watchdog_notes_progress(&mut fp, b"12:03"));
+        assert!(!watchdog_notes_progress(&mut fp, b"Compiling lazybox v0.1"));
+        assert!(watchdog_notes_progress(&mut fp, b"Finished dev profile"));
+    }
+
+    #[test]
+    fn watchdog_window_reads_config() {
+        let mut cfg = lazybox_config::Config::default();
+        assert_eq!(working_watchdog_after(&cfg), Some(WORKING_WATCHDOG_AFTER));
+        cfg.agent.working_watchdog_secs = Some(30);
+        assert_eq!(working_watchdog_after(&cfg), Some(Duration::from_secs(30)));
+        cfg.agent.working_watchdog_secs = Some(0);
+        assert_eq!(
+            working_watchdog_after(&cfg),
+            None,
+            "0 disables the watchdog"
+        );
+    }
+
     fn hook_event(kind: lazybox_ipc::HookEventKind) -> lazybox_ipc::HookEvent {
         lazybox_ipc::HookEvent {
             kind,
@@ -7967,6 +8767,7 @@ mod tests {
             Some(&agent),
             &mut buf,
             working,
+            false,
             &config.agent_states,
             &config.bus,
             id,
@@ -7974,6 +8775,7 @@ mod tests {
             &config.terminal_meta,
             &mut state_machine,
             &config.hook_driven_terminals,
+            &config.input_needed_shapes,
         )
         .await;
         assert_eq!(

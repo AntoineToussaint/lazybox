@@ -3544,14 +3544,16 @@ mod merge_focus_follow_tests {
     /// stashed — the wiring the direct `handle_choice_picked` tests skip.
     #[test]
     fn manage_policies_action_mounts_picker() {
-        use lazybox_tui_core::action::Action;
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
         let mut m = build_model();
         let ws = workspace("owner/repo#3", true, Duration::hours(1));
         let ws_key = ws.key.clone();
         m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
         assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
 
-        m.dispatch_action(&Action::ManagePolicies);
+        m.dispatch_key(KeyEvent::new(Key::Char('g'), KeyModifiers::NONE));
+        m.dispatch_key(KeyEvent::new(Key::Char('p'), KeyModifiers::NONE));
         assert_eq!(
             m.modal_stack.last(),
             Some(&Id::PolicyPicker),
@@ -4626,10 +4628,16 @@ mod wheel_routing_tests {
         m.redraw = false;
         m.handle_mouse(wheel_up_at(bottom.x + 2, bottom.y + 2));
 
-        assert!(
-            server.rx.try_recv().is_err(),
-            "local scrollback path must not send any IPC command"
-        );
+        // The viewport move is in-process; the only allowed daemon
+        // traffic is the first-scroll deep-scrollback fetch (#393) —
+        // never a Write, which would leak the wheel into the inner
+        // program.
+        while let Ok(cmd) = server.rx.try_recv() {
+            assert!(
+                matches!(cmd, lazybox_ipc::Command::FetchScrollback { .. }),
+                "local scrollback path must not send PTY traffic: {cmd:?}"
+            );
+        }
         assert!(m.redraw, "local scroll repaints the viewport");
     }
 
@@ -4803,12 +4811,15 @@ mod wheel_routing_tests {
             bottom_offset - 3,
             "wheel must scroll the pane scrollback, not forward to the app",
         );
-        // …and nothing was written to the daemon — this is a pure
-        // in-process scroll, no SGR report leaked to the inner program.
-        assert!(
-            server.rx.try_recv().is_err(),
-            "a primary-screen wheel must not forward an SGR report",
-        );
+        // …and no SGR report leaked to the inner program — the only
+        // allowed daemon traffic is the first-scroll deep-scrollback
+        // fetch (#393), which carries no PTY bytes.
+        while let Ok(cmd) = server.rx.try_recv() {
+            assert!(
+                matches!(cmd, lazybox_ipc::Command::FetchScrollback { .. }),
+                "a primary-screen wheel must not forward an SGR report: {cmd:?}",
+            );
+        }
     }
 
     /// #360 (chronic regression): a brand-new agent — a
@@ -4846,10 +4857,15 @@ mod wheel_routing_tests {
         );
         while server.rx.try_recv().is_ok() {}
         m.handle_mouse(wheel_up_at(bottom.x + 6, bottom.y + 8));
-        assert!(
-            server.rx.try_recv().is_err(),
-            "a fresh primary-screen wheel must not forward an SGR report",
-        );
+        // The first upward wheel may carry the deep-scrollback fetch
+        // (#393) — content-free daemon traffic — but never an SGR
+        // report into the app.
+        while let Ok(cmd) = server.rx.try_recv() {
+            assert!(
+                matches!(cmd, lazybox_ipc::Command::FetchScrollback { .. }),
+                "a fresh primary-screen wheel must not forward an SGR report: {cmd:?}",
+            );
+        }
 
         // Now the agent spills a screenful-plus of history (still on the
         // primary screen, still mouse-tracking). The wheel must move the
@@ -4878,10 +4894,12 @@ mod wheel_routing_tests {
             bottom_offset - 3,
             "the wheel must move the fresh agent's viewport into scrollback",
         );
-        assert!(
-            server.rx.try_recv().is_err(),
-            "the local scroll must not forward an SGR report",
-        );
+        while let Ok(cmd) = server.rx.try_recv() {
+            assert!(
+                matches!(cmd, lazybox_ipc::Command::FetchScrollback { .. }),
+                "the local scroll must not forward an SGR report: {cmd:?}",
+            );
+        }
     }
 
     /// An alt-screen app that never enabled mouse reporting (less, man,
@@ -5206,10 +5224,20 @@ mod leader_tile_tests {
             "wheeling over the unfocused left tile must not scroll the focused right tile",
         );
         assert!(m.redraw, "scrolling the hovered tile repaints");
-        assert!(
-            server.rx.try_recv().is_err(),
-            "a local scroll of the hovered tile sends no IPC",
-        );
+        // The only allowed IPC is the hovered tile's first-scroll
+        // deep-scrollback fetch (#393) — no Write may leak, and the
+        // fetch must target the HOVERED terminal, not the focused one.
+        while let Ok(cmd) = server.rx.try_recv() {
+            assert!(
+                matches!(
+                    cmd,
+                    lazybox_ipc::Command::FetchScrollback {
+                        terminal_id: TerminalId(1)
+                    }
+                ),
+                "a local scroll of the hovered tile sends no PTY traffic: {cmd:?}",
+            );
+        }
     }
 
     /// #362: a wheel over a non-focused tile running a mouse-tracking
@@ -5587,6 +5615,82 @@ mod destructive_confirm_tests {
         assert!(
             cmds.is_empty(),
             "a closed-under-modal issue must not re-fire a close: {cmds:?}",
+        );
+    }
+
+    #[test]
+    fn delete_or_close_on_issue_gates_on_confirm_then_fires_command() {
+        // Issue #408: `g d` on an issue workspace routes through the
+        // confirm modal (nothing deleted without a yes); Yes emits a
+        // single `DeleteOrClose` aimed at the focused workspace.
+        let mut m = build_model();
+        let ws = open_issue_workspace("github:o/r#7");
+        let wk = ws.key.clone();
+        let sk = SessionKey::from(&wk);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&sk), "issue row focusable");
+
+        let cmds = m.dispatch_action(&Action::DeleteOrClose);
+        assert!(
+            cmds.is_empty(),
+            "delete must gate on confirm first: {cmds:?}"
+        );
+        assert_eq!(m.modal_stack.last(), Some(&Id::ActionConfirm));
+
+        let cmds = m.handle_confirmed(true);
+        match cmds.as_slice() {
+            [IpcCommand::DeleteOrClose { workspace_key }] => assert_eq!(workspace_key, &wk),
+            other => panic!("expected a single DeleteOrClose command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delete_or_close_on_pr_gates_on_confirm_then_fires_command() {
+        // Issue #408: the same `g d` on a PR workspace resolves to a
+        // PR close — still confirm-gated, same command.
+        let mut m = build_model();
+        let pr = merge_ready_pr_without_approval("github:owner/repo#1");
+        let wk = pr.key.clone();
+        let sk = SessionKey::from(&wk);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        assert!(m.sidebar.focus_workspace_key(&sk), "PR row focusable");
+
+        let cmds = m.dispatch_action(&Action::DeleteOrClose);
+        assert!(cmds.is_empty(), "close must gate on confirm: {cmds:?}");
+        assert_eq!(m.modal_stack.last(), Some(&Id::ActionConfirm));
+
+        let cmds = m.handle_confirmed(true);
+        match cmds.as_slice() {
+            [IpcCommand::DeleteOrClose { workspace_key }] => assert_eq!(workspace_key, &wk),
+            other => panic!("expected a single DeleteOrClose command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delete_or_close_confirm_noops_when_pr_merged_under_the_modal() {
+        // The confirmed dispatch re-checks the stashed workspace: if a
+        // poll merged the PR while the modal was up, Yes must NOT fire
+        // a redundant close — it flashes and emits nothing.
+        let mut m = build_model();
+        let pr = merge_ready_pr_without_approval("github:owner/repo#1");
+        let sk = SessionKey::from(&pr.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        assert!(m.sidebar.focus_workspace_key(&sk));
+
+        let _ = m.dispatch_action(&Action::DeleteOrClose);
+        assert_eq!(m.modal_stack.last(), Some(&Id::ActionConfirm));
+
+        // The PR merges upstream while the modal is up.
+        let mut merged = merge_ready_pr_without_approval("github:owner/repo#1");
+        if let Some(pr) = merged.pr.as_mut() {
+            pr.state = lazybox_core::TaskState::Merged;
+        }
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(merged)));
+
+        let cmds = m.handle_confirmed(true);
+        assert!(
+            cmds.is_empty(),
+            "a merged-under-modal PR must not fire a close: {cmds:?}",
         );
     }
 
@@ -9584,6 +9688,85 @@ mod worktree_progress_dismiss_tests {
         assert!(m.worktree_progress.is_none());
     }
 
+    /// Esc while provisioning is still in flight is a real cancel: it
+    /// must send `CancelSpawn` so the daemon aborts the provision
+    /// (killing a wedged clone and releasing the singleton claim so a
+    /// retry starts fresh — issue #403), not just close the view.
+    #[test]
+    fn esc_mid_provision_sends_cancel_spawn() {
+        let mut m = build_model();
+        let key = SessionKey::from("github:o/r#1");
+
+        m.handle_daemon_event(progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        let cmds = m.handle_modal_dismissed();
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                lazybox_ipc::Command::CancelSpawn { session_key } if session_key == &key
+            )),
+            "Esc mid-provision must cancel the spawn, got {cmds:?}"
+        );
+    }
+
+    /// The daemon's confirmation of this client's own Esc-cancel (a
+    /// `Failed` carrying `SPAWN_CANCELLED_NOTE`) must read as a plain
+    /// info notice, not an error — the user asked for it.
+    #[test]
+    fn cancel_confirmation_flashes_info_not_error() {
+        use crate::realm::components::footer::NoticeSeverity;
+        let mut m = build_model();
+        let key = SessionKey::from("github:o/r#1");
+
+        m.handle_daemon_event(progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        let _ = m.handle_modal_dismissed();
+
+        m.handle_daemon_event(progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Failed(lazybox_ipc::SPAWN_CANCELLED_NOTE.into()),
+        ));
+        let n = m.status.notice.as_ref().expect("cancel confirmation");
+        assert_eq!(n.severity, NoticeSeverity::Info, "got {:?}", n.message);
+        assert!(n.message.contains("cancelled"), "got {:?}", n.message);
+        assert!(
+            m.worktree_progress_dismissed.is_none(),
+            "the cancelled op must release the dismissal marker so a retry shows its checklist"
+        );
+    }
+
+    /// Esc on a checklist frozen on a FAILED step is just an
+    /// acknowledgement — the provision already ended, there is nothing
+    /// to cancel.
+    #[test]
+    fn esc_on_failed_checklist_does_not_send_cancel_spawn() {
+        let mut m = build_model();
+        let key = SessionKey::from("github:o/r#1");
+
+        m.handle_daemon_event(progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        m.handle_daemon_event(progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Failed("clone exploded".into()),
+        ));
+        let cmds = m.handle_modal_dismissed();
+        assert!(
+            cmds.is_empty(),
+            "a failed provision has nothing to cancel, got {cmds:?}"
+        );
+    }
+
     /// A failed step still surfaces even while dismissed — Esc must
     /// not hide a broken provision.
     #[test]
@@ -10466,6 +10649,62 @@ mod keybinding_audit_tests {
         );
     }
 
+    #[test]
+    fn confirmed_delete_or_close_flashes_kind_specific_notices() {
+        // PR workspace → "closing PR #42…".
+        let (mut m, _server) = build_model();
+        let ws = pr_workspace("github:o/r#42", 0);
+        let sk = SessionKey::from(&ws.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&sk));
+
+        let cmds = m.dispatch_action(&Action::DeleteOrClose);
+        assert!(cmds.is_empty(), "delete/close gates on confirm");
+        let cmds = m.handle_confirmed(true);
+        assert!(matches!(
+            cmds.as_slice(),
+            [IpcCommand::DeleteOrClose { .. }]
+        ));
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .map(|n| n.message.clone())
+            .unwrap_or_default();
+        assert!(
+            notice.contains("closing PR #42"),
+            "pending close feedback missing: {notice:?}",
+        );
+
+        // Issue workspace → "deleting issue #7…".
+        let (mut m, _server) = build_model();
+        let mut ws = pr_workspace("github:o/r#7", 0);
+        let mut issue = ws.pr.take().expect("fixture has a PR to reshape");
+        issue.url = "https://github.com/o/r/issues/7".into();
+        ws.attach_task(issue);
+        let sk = SessionKey::from(&ws.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&sk));
+
+        let cmds = m.dispatch_action(&Action::DeleteOrClose);
+        assert!(cmds.is_empty(), "delete/close gates on confirm");
+        let cmds = m.handle_confirmed(true);
+        assert!(matches!(
+            cmds.as_slice(),
+            [IpcCommand::DeleteOrClose { .. }]
+        ));
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .map(|n| n.message.clone())
+            .unwrap_or_default();
+        assert!(
+            notice.contains("deleting issue #7"),
+            "pending delete feedback missing: {notice:?}",
+        );
+    }
+
     // ── 10: quit-chord grammar ──────────────────────────────────────
 
     #[test]
@@ -10822,5 +11061,254 @@ mod settings_window_tests {
                 .any(|a| a.label() == format!("Change theme (live preview) · {current}")),
             "theme row must show the active theme"
         );
+    }
+}
+
+#[cfg(test)]
+mod agent_cli_update_tests {
+    //! Lazybox-managed agent-CLI updates (#400): the daemon's check /
+    //! update-finished events become footer notices, and the Settings
+    //! Maintenance rows dispatch the check/update commands.
+    use super::super::*;
+    use crate::realm::components::footer::NoticeSeverity;
+    use crate::realm::setup_ctx::SettingsAction;
+    use lazybox_ipc::{AgentCliUpdateStatus, Client, Event as IpcEvent, channel};
+    use tokio::sync::mpsc;
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn status(
+        id: &str,
+        name: &str,
+        installed: Option<&str>,
+        latest: Option<&str>,
+        error: Option<&str>,
+    ) -> AgentCliUpdateStatus {
+        let update_available = matches!((installed, latest), (Some(i), Some(l)) if i != l);
+        AgentCliUpdateStatus {
+            agent_id: id.into(),
+            display_name: name.into(),
+            installed: installed.map(Into::into),
+            latest: latest.map(Into::into),
+            update_available,
+            error: error.map(Into::into),
+            auto_update: false,
+        }
+    }
+
+    #[test]
+    fn available_update_flashes_even_on_scheduled_checks() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::AgentCliUpdatesChecked {
+            statuses: vec![status(
+                "claude",
+                "Claude Code",
+                Some("2.1.3"),
+                Some("2.1.4"),
+                None,
+            )],
+            manual: false,
+        });
+        let n = m.status.notice.as_ref().expect("availability notice");
+        assert_eq!(n.severity, NoticeSeverity::Info);
+        assert!(
+            n.message.contains("Claude Code 2.1.3 → 2.1.4"),
+            "{}",
+            n.message
+        );
+    }
+
+    #[test]
+    fn scheduled_check_with_nothing_actionable_stays_quiet() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::AgentCliUpdatesChecked {
+            statuses: vec![
+                status("claude", "Claude Code", Some("2.1.4"), Some("2.1.4"), None),
+                status(
+                    "codex",
+                    "Codex",
+                    None,
+                    None,
+                    Some("`codex --version` timed out"),
+                ),
+            ],
+            manual: false,
+        });
+        assert!(
+            m.status.notice.is_none(),
+            "a quiet scheduled sweep must not flash, got {:?}",
+            m.status.notice
+        );
+    }
+
+    /// A scheduled sweep announcing an update the daemon will apply
+    /// itself must say "auto-updating", not send the user to the
+    /// maintenance menu to race the running pass.
+    #[test]
+    fn scheduled_check_words_auto_update_agents_as_auto_updating() {
+        let mut m = build_model();
+        let mut auto = status("claude", "Claude Code", Some("2.1.3"), Some("2.1.4"), None);
+        auto.auto_update = true;
+        m.handle_daemon_event(IpcEvent::AgentCliUpdatesChecked {
+            statuses: vec![auto.clone()],
+            manual: false,
+        });
+        let n = m.status.notice.as_ref().expect("auto-updating notice");
+        assert!(n.message.contains("auto-updating"), "{}", n.message);
+        assert!(
+            !n.message.contains("maintenance"),
+            "must not instruct a manual update: {}",
+            n.message
+        );
+
+        // The same agent on a MANUAL check is the user's to update.
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::AgentCliUpdatesChecked {
+            statuses: vec![auto],
+            manual: true,
+        });
+        let n = m.status.notice.as_ref().expect("availability notice");
+        assert!(n.message.contains("maintenance"), "{}", n.message);
+    }
+
+    /// A manual check must never swallow a broken agent's probe error
+    /// just because another agent has an update available — the sticky
+    /// error wins the footer (both land in the Shift-M log).
+    #[test]
+    fn manual_check_reports_errors_even_when_updates_are_available() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::AgentCliUpdatesChecked {
+            statuses: vec![
+                status("claude", "Claude Code", Some("2.1.3"), Some("2.1.4"), None),
+                status(
+                    "codex",
+                    "Codex",
+                    None,
+                    None,
+                    Some("`codex --version` failed"),
+                ),
+            ],
+            manual: true,
+        });
+        let n = m.status.notice.as_ref().expect("error notice");
+        assert_eq!(n.severity, NoticeSeverity::Permanent);
+        assert!(n.message.contains("Codex"), "{}", n.message);
+    }
+
+    #[test]
+    fn manual_check_answers_up_to_date_with_versions() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::AgentCliUpdatesChecked {
+            statuses: vec![status(
+                "claude",
+                "Claude Code",
+                Some("2.1.4"),
+                Some("2.1.4"),
+                None,
+            )],
+            manual: true,
+        });
+        let n = m.status.notice.as_ref().expect("up-to-date notice");
+        assert_eq!(n.severity, NoticeSeverity::Info);
+        assert!(n.message.contains("up to date"), "{}", n.message);
+        assert!(n.message.contains("Claude Code 2.1.4"), "{}", n.message);
+    }
+
+    #[test]
+    fn manual_check_surfaces_probe_errors() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::AgentCliUpdatesChecked {
+            statuses: vec![status(
+                "codex",
+                "Codex",
+                None,
+                None,
+                Some("`codex --version` failed to start"),
+            )],
+            manual: true,
+        });
+        let n = m.status.notice.as_ref().expect("error notice");
+        assert_eq!(n.severity, NoticeSeverity::Permanent);
+        assert!(n.message.contains("Codex"), "{}", n.message);
+        assert!(n.message.contains("failed to start"), "{}", n.message);
+    }
+
+    #[test]
+    fn update_finished_reports_success_and_failure() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::AgentCliUpdateFinished {
+            agent_id: "claude".into(),
+            display_name: "Claude Code".into(),
+            ok: true,
+            installed_before: Some("2.1.3".into()),
+            installed_after: Some("2.1.4".into()),
+            message: "updated 2.1.3 → 2.1.4".into(),
+        });
+        let n = m.status.notice.as_ref().expect("success notice");
+        assert_eq!(n.severity, NoticeSeverity::Info);
+        assert!(n.message.contains("✓ Claude Code"), "{}", n.message);
+        assert!(n.message.contains("updated 2.1.3 → 2.1.4"), "{}", n.message);
+
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::AgentCliUpdateFinished {
+            agent_id: "codex".into(),
+            display_name: "Codex".into(),
+            ok: false,
+            installed_before: Some("0.46.0".into()),
+            installed_after: None,
+            message: "`brew upgrade --cask codex` exited 1: lock held".into(),
+        });
+        let n = m.status.notice.as_ref().expect("failure notice");
+        assert_eq!(n.severity, NoticeSeverity::Permanent);
+        assert!(n.message.contains("Codex update failed"), "{}", n.message);
+        assert!(n.message.contains("lock held"), "{}", n.message);
+    }
+
+    /// The Settings Maintenance rows exist and fire the daemon
+    /// commands — the manual "update agents now" surface.
+    #[test]
+    fn settings_actions_dispatch_check_and_update_commands() {
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let (_evt_tx, evt_rx) = mpsc::channel(8);
+        let client = Client::from_channels(cmd_tx, evt_rx);
+        let mut m = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+        let mut persisted = lazybox_core::PersistedSetup::default();
+        persisted.enabled_providers.insert("github".into());
+        m.cache_persisted_setup(persisted);
+        m.open_settings();
+        assert!(
+            m.setup
+                .settings_actions
+                .iter()
+                .any(|a| matches!(a, SettingsAction::CheckAgentUpdates)),
+            "maintenance tab must list the check action"
+        );
+        assert!(
+            m.setup
+                .settings_actions
+                .iter()
+                .any(|a| matches!(a, SettingsAction::UpdateAgentClis)),
+            "maintenance tab must list the update action"
+        );
+
+        m.dispatch_settings_action(SettingsAction::CheckAgentUpdates);
+        assert!(matches!(
+            cmd_rx.try_recv().expect("check command sent"),
+            lazybox_ipc::Command::CheckAgentCliUpdates
+        ));
+
+        m.dispatch_settings_action(SettingsAction::UpdateAgentClis);
+        assert!(matches!(
+            cmd_rx.try_recv().expect("update command sent"),
+            lazybox_ipc::Command::UpdateAgentClis
+        ));
     }
 }

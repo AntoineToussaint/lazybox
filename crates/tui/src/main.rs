@@ -659,6 +659,10 @@ async fn run_embedded_realm(
     // writes `config.yaml` and the Refresh wakes the loop.
     polling::spawn(config.clone(), resolve_poll_interval());
 
+    // Out-of-band agent-CLI update sweep (managed replacement for the
+    // suppressed in-session self-updaters; issue #400).
+    lazybox_server::agent_updates::spawn_scheduled(config.clone());
+
     // Slack mirror — opt-in via `~/.lazybox/config.yaml::slack.{bot_token,
     // app_token}` (or `$SLACK_BOT_TOKEN` / `$SLACK_APP_TOKEN`). No-op
     // when neither token is set.
@@ -1215,6 +1219,7 @@ async fn server_start() -> anyhow::Result<()> {
     }
     polling::migrate_legacy_sandbox(&config);
     polling::spawn(config.clone(), resolve_poll_interval());
+    lazybox_server::agent_updates::spawn_scheduled(config.clone());
     if let Ok(yaml) = lazybox_config::Config::load() {
         let _ = lazybox_server::slack::spawn(config.clone(), yaml.slack);
     }

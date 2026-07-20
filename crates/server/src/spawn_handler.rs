@@ -1885,6 +1885,19 @@ async fn provision_worktree(
                 CheckoutPhase::BaseRefStale(note) => {
                     (WorktreeStep::Fetch, WorktreeStepStatus::Warned(note))
                 }
+                // The refresh has been failing for over a day — every
+                // worktree since then branched from an aging ref. A
+                // checklist note alone proved too easy to dismiss for
+                // days (issue #394), so also raise a sticky sync-error
+                // banner that outlives the provisioning modal.
+                CheckoutPhase::BaseRefStalePersistent(note) => {
+                    let _ = bus.send(Event::provider_error(
+                        "git:base-ref",
+                        note.clone(),
+                        lazybox_ipc::ProviderErrorKind::Permanent,
+                    ));
+                    (WorktreeStep::Fetch, WorktreeStepStatus::Warned(note))
+                }
             };
             let _ = bus.send(Event::WorktreeProgress {
                 session_key: session_key.clone(),

@@ -29,24 +29,23 @@ the channel appropriate to the running build and opens a dismissable
 update modal when something newer exists:
 
 - Dev/source builds compare the baked `LAZYBOX_BUILD_GIT_SHA` with the
-  baked checkout's local `origin/main` ref. This path performs no
-  network request and still runs for dirty builds.
+  baked checkout's current `HEAD` and, when it can fast-forward safely,
+  that branch's tracking upstream. This path performs no network request
+  and still runs for dirty builds.
 - Cargo-dist release builds compare `CARGO_PKG_VERSION` with GitHub's
-  latest published release through a bounded API request.
+  latest published release through a bounded, cached API request.
 
 Dismissal is persisted for the available commit/release, so the same
 target does not reappear on the next launch. A newer target is shown
 again. Lazybox never updates itself; the modal only names the command:
 
-```bash
-brew upgrade lazybox                              # release install
-git pull --ff-only && cargo build --release       # source build
-```
+Release installs get the command for their actual channel: Homebrew uses
+`brew upgrade lazybox`, while cargo-dist's shell installer is re-run. Source
+commands `cd` to the baked checkout before pulling or rebuilding, so they
+never operate on the repository from which lazybox happened to be launched.
 
-The running build version remains visible in the sidebar header and
-through `lazybox --version`. The older persistent header nudge stays
-release-provenance gated; source staleness is surfaced by the startup
-modal so a normal ahead-of-release checkout is not mislabeled.
+The running build version remains visible in the sidebar header and through
+`lazybox --version`.
 
 ## Architecture
 

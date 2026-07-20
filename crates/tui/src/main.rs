@@ -492,7 +492,26 @@ async fn run_remote(
             socket_path.display()
         );
     }
-    let update_check = tokio::spawn(lazybox_tui::build_guard::available_update());
+    let update_check = tokio::spawn(async {
+        let open_store = tokio::task::spawn_blocking(lazybox_server::open_store);
+        let store = match tokio::time::timeout(Duration::from_millis(500), open_store).await {
+            Ok(Ok(Ok(store))) => Some(store),
+            Ok(Ok(Err(error))) => {
+                tracing::warn!("update dismissal store unavailable: {error}");
+                None
+            }
+            Ok(Err(error)) => {
+                tracing::warn!("update dismissal store task failed: {error}");
+                None
+            }
+            Err(_) => {
+                tracing::warn!("update dismissal store open timed out");
+                None
+            }
+        };
+        let update = lazybox_tui::build_guard::available_update(store.clone()).await;
+        (update, store)
+    });
     let (client, daemon) = match socket::connect(socket_path).await {
         Ok(pair) => pair,
         Err(e) => {
@@ -512,17 +531,13 @@ async fn run_remote(
         .map(|c| c.attention.notifier)
         .unwrap_or_default();
     lazybox_tui::platform::set_notifier_backend(map_notifier_backend(notifier));
-    let available_update = update_check.await.unwrap_or_else(|error| {
+    let (available_update, update_store) = update_check.await.unwrap_or_else(|error| {
         tracing::debug!("startup update check task failed: {error}");
-        None
+        (None, None)
     });
-    let update_store = lazybox_server::open_store()
-        .map_err(|error| tracing::warn!("update dismissal store unavailable: {error}"))
-        .ok();
     tokio::task::spawn_blocking(move || {
         let mut model = lazybox_tui::realm::Model::new(client)?;
         model.note_daemon_build(&daemon.build);
-        model.check_build_freshness();
         if let Some(update) = available_update {
             model.show_update_if_new(update, update_store);
         }
@@ -543,7 +558,9 @@ async fn run_embedded_realm(
 ) -> anyhow::Result<()> {
     let (client, server) = channel::pair();
     let config = server_config_from_user()?;
-    let update_check = tokio::spawn(lazybox_tui::build_guard::available_update());
+    let update_check = tokio::spawn(lazybox_tui::build_guard::available_update(Some(
+        config.store.clone(),
+    )));
 
     // Recovery probes the backend (`tmux list-sessions`) before the UI
     // paints — bound it so a wedged tmux server degrades to "no
@@ -834,9 +851,6 @@ async fn run_embedded_realm(
             // hasn't been seen (e.g. an upgrade into this feature).
             model.maybe_mount_tour();
         }
-        // Warn if this build trails `main` — the uniformly-stale install
-        // that no daemon/client mismatch catches (issue #234).
-        model.check_build_freshness();
         if let Some(update) = available_update {
             model.show_update_if_new(update, Some(config.store.clone()));
         }

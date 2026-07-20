@@ -14,7 +14,7 @@
 //! `mount_setup_modal`, `unmount_setup_modal`) co-locates here
 //! since it's the same modal-state-mutation shape.
 
-use super::{DISMISSED_UPDATE_KV_KEY, Id, Model, Msg};
+use super::{Id, Model, Msg, dismissed_update_key};
 use crate::realm::UserEvent;
 use lazybox_ipc::Command as IpcCommand;
 use tuirealm::terminal::TerminalAdapter;
@@ -870,11 +870,29 @@ showing keybinding search only",
     pub fn handle_modal_dismissed(&mut self) -> Vec<IpcCommand> {
         if self.modal_stack.last() == Some(&Id::Update) {
             self.pop_modal();
-            if let Some(target) = self.pending_update_target.take()
-                && let Some(store) = self.update_store.take()
-                && let Err(error) = store.set_kv(DISMISSED_UPDATE_KV_KEY, &target)
-            {
-                tracing::warn!("persist dismissed update target failed: {error}");
+            if let Some(target) = self.pending_update_target.take() {
+                if let Some(store) = self.update_store.take() {
+                    let key = dismissed_update_key(&target);
+                    let result_tx = self.update_dismissal_tx.clone();
+                    match std::thread::Builder::new()
+                        .name("update-dismissal".into())
+                        .spawn(move || {
+                            let result = store.set_kv(&key, "1").map_err(|error| error.to_string());
+                            let _ = result_tx.send(result);
+                        }) {
+                        Ok(_worker) => self.update_dismissals_pending += 1,
+                        Err(error) => {
+                            self.flash_error(format!(
+                                "could not remember update dismissal; it may reappear next launch: \
+                                 {error}"
+                            ));
+                        }
+                    }
+                } else {
+                    self.flash_error(
+                        "could not remember update dismissal; local state is unavailable",
+                    );
+                }
             }
             self.drain_queued_daemon_prompts();
             return Vec::new();

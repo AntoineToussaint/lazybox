@@ -461,12 +461,6 @@ pub struct Sidebar {
     /// marks survive re-sorts and j/k navigation; pruned when a
     /// workspace is removed and cleared by Esc or a successful send.
     broadcast_selected: std::collections::HashSet<SessionKey>,
-    /// How many commits this build trails `origin/main`, when stale.
-    /// `Some(n)` paints a persistent "outdated build" warning in the
-    /// header so a uniformly-stale install (daemon + client both behind)
-    /// can't masquerade as a live regression. Set once at startup by
-    /// [`crate::build_guard`]; `None` is the current-build common case.
-    outdated_commits_behind: Option<u32>,
 }
 
 /// A queued user-facing notification that the outer (IO-aware) layer
@@ -510,7 +504,6 @@ impl Sidebar {
             now_override: None,
             search: None,
             broadcast_selected: std::collections::HashSet::new(),
-            outdated_commits_behind: None,
         }
     }
 
@@ -532,17 +525,6 @@ impl Sidebar {
     /// Intended for tests only; production reads the wall clock.
     pub fn set_now_override(&mut self, now: chrono::DateTime<chrono::Utc>) {
         self.now_override = Some(now);
-    }
-
-    /// Record how many commits this build trails `main` so the header
-    /// can paint the persistent "outdated build" warning. `Some(0)` is
-    /// normalized to `None` — zero behind is current, not stale.
-    pub fn set_outdated_build(&mut self, commits_behind: Option<u32>) {
-        self.outdated_commits_behind = commits_behind.filter(|&n| n > 0);
-    }
-
-    pub fn outdated_commits_behind(&self) -> Option<u32> {
-        self.outdated_commits_behind
     }
 
     /// Sync the "working" spinner to the wall clock. Returns `true`

@@ -49,7 +49,7 @@ pub const PROTOCOL_MAGIC: [u8; 4] = *b"LZBX";
 /// order, so adding, removing, or reordering a variant or field makes
 /// an old peer silently misread every subsequent frame. The handshake
 /// turns that garbage into a clear "restart the daemon" error.
-pub const PROTOCOL_VERSION: u32 = 13;
+pub const PROTOCOL_VERSION: u32 = 14;
 
 /// This binary's build identity: the workspace version plus the git
 /// short SHA captured at compile time (`build.rs`). Two binaries built
@@ -773,6 +773,16 @@ pub enum Command {
     CloseIssue {
         workspace_key: lazybox_core::WorkspaceKey,
     },
+    /// Delete or close the workspace's primary upstream item, resolved
+    /// by kind: a PR is closed without merging (`closePullRequest`);
+    /// an issue is hard-deleted (`deleteIssue`) when the token has the
+    /// admin rights GitHub requires, degrading to a NOT_PLANNED close
+    /// otherwise. Fires from the github leader's `g d` chord, after a
+    /// confirm. The next poll's rescope sweep removes the vanished
+    /// item's workspace from the inbox.
+    DeleteOrClose {
+        workspace_key: lazybox_core::WorkspaceKey,
+    },
     /// Request reviews on the workspace's PR from the given GitHub
     /// logins. Adds to the existing reviewer set (no replacement).
     /// Only meaningful when the focused workspace's primary task is
@@ -1104,6 +1114,32 @@ pub enum Event {
     IssueCloseFailed {
         workspace_key: lazybox_core::WorkspaceKey,
         issue_label: String,
+        reason: String,
+    },
+    /// The PR for `workspace_key` was closed (without merging) via
+    /// `Command::DeleteOrClose`. Same "flash a notice now, poll
+    /// reconciles later" contract as [`Event::PrMerged`].
+    PrClosed {
+        workspace_key: lazybox_core::WorkspaceKey,
+        pr_label: String,
+    },
+    /// The issue for `workspace_key` was removed upstream via
+    /// `Command::DeleteOrClose` — hard-deleted when the token had
+    /// admin rights, otherwise (`fell_back_to_close`) closed as
+    /// NOT_PLANNED because GitHub refused the delete. The TUI names
+    /// the degradation so the user knows the issue still exists.
+    IssueDeleted {
+        workspace_key: lazybox_core::WorkspaceKey,
+        issue_label: String,
+        fell_back_to_close: bool,
+    },
+    /// `Command::DeleteOrClose` failed at the GitHub API — nothing was
+    /// deleted or closed (for an issue, even the close fallback
+    /// failed). Surfaced as a prominent, persistent error naming the
+    /// reason, mirroring `PrMergeFailed` / `IssueCloseFailed`.
+    DeleteOrCloseFailed {
+        workspace_key: lazybox_core::WorkspaceKey,
+        label: String,
         reason: String,
     },
     /// A workspace's primary task reached a terminal state (a PR

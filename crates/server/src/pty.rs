@@ -251,8 +251,12 @@ pub struct Subscription {
 
 impl DaemonPty {
     /// Spawn a command in a new PTY. `env` augments (does not replace)
-    /// the parent environment except for `TERM` which we override to
-    /// `xterm-256color` so agents render consistent colors.
+    /// the parent environment except for `TERM`/`COLORTERM`, which we
+    /// override to `xterm-256color` + `truecolor` so agents render
+    /// consistent colors: modern TUIs (Codex among them) gate full
+    /// color on `COLORTERM=truecolor`, and with `TERM` alone many fall
+    /// back to degraded or no color (#421). The vendored libghostty-vt
+    /// parser handles 24-bit SGR regardless of the hosting terminal.
     ///
     /// `initial` pre-seeds the replay ring: a (re)attaching client
     /// rebuilds its VT grid — scrollback included — purely from the
@@ -286,6 +290,7 @@ impl DaemonPty {
             command.env(k, v);
         }
         command.env("TERM", "xterm-256color");
+        command.env("COLORTERM", "truecolor");
 
         let mut child = pair
             .slave
@@ -845,6 +850,40 @@ mod seed_tests {
             pixel_width: 0,
             pixel_height: 0,
         }
+    }
+
+    /// The spawned child sees `TERM=xterm-256color` AND
+    /// `COLORTERM=truecolor`. `TERM` alone is not enough: modern TUIs
+    /// (Codex among them) gate full color on `COLORTERM`, and without
+    /// it they render degraded/monochrome. Regression for #421. The
+    /// forced pair also wins over caller-provided values, matching the
+    /// documented override semantics.
+    #[tokio::test]
+    async fn spawn_env_forces_term_and_colorterm() {
+        let pty = DaemonPty::spawn(
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                r#"printf 'TERM=[%s] COLORTERM=[%s]' "$TERM" "$COLORTERM""#.to_string(),
+            ],
+            small(),
+            None,
+            vec![("COLORTERM".to_string(), "none".to_string())],
+            &[],
+        )
+        .expect("spawn");
+        pty.wait_finished().await;
+
+        let sub = pty.subscribe().await;
+        let out = String::from_utf8_lossy(&sub.replay).into_owned();
+        assert!(
+            out.contains("TERM=[xterm-256color]"),
+            "TERM forced in child env: {out:?}"
+        );
+        assert!(
+            out.contains("COLORTERM=[truecolor]"),
+            "COLORTERM forced in child env: {out:?}"
+        );
     }
 
     /// A seeded spawn replays the seed AHEAD of the child's own output:

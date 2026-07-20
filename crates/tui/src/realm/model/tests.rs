@@ -3878,6 +3878,230 @@ mod merge_focus_follow_tests {
         );
     }
 
+    /// Issue #418: with SEVERAL distinct agents running, `w w` must ask
+    /// which one to inject into (a chooser modal) instead of silently
+    /// picking the default; the pick replays the work spawn against the
+    /// chosen agent.
+    #[test]
+    fn bare_w_with_several_agents_mounts_chooser_and_pick_targets_it() {
+        use lazybox_ipc::{Command, TerminalId, TerminalKind};
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        let pr = workspace("owner/repo#1", true, Duration::hours(1));
+        let sk: SessionKey = (&pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        for (tid, agent) in [(3, "codex"), (4, "claude")] {
+            m.handle_daemon_event(IpcEvent::TerminalSpawned {
+                model_label: None,
+                terminal_id: TerminalId(tid),
+                session_key: sk.clone(),
+                kind: TerminalKind::Agent(agent.into()),
+                no_permission: false,
+                on_main: false,
+            });
+        }
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        assert!(m.sidebar.focus_workspace_key(&sk));
+
+        let cmds = m.dispatch_action(&Action::Work);
+        assert!(
+            cmds.is_empty(),
+            "several running agents must not silently spawn/inject: {cmds:?}",
+        );
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::WorkAgentPicker),
+            "the multi-agent chooser is up",
+        );
+        let agents = m
+            .pending_work_picker
+            .as_ref()
+            .map(|p| p.agents.clone())
+            .expect("picker stash armed");
+        assert_eq!(
+            agents,
+            vec!["claude".to_string(), "codex".to_string()],
+            "rows list every running agent, sorted",
+        );
+
+        // Pick Codex (row 1) → the same work spawn `w` would have
+        // queued, targeted at Codex, prompt included.
+        let cmds = m.handle_choice_picked(vec![1]);
+        match cmds.as_slice() {
+            [
+                Command::Spawn {
+                    kind: TerminalKind::Agent(id),
+                    initial_prompt: Some(_),
+                    ..
+                },
+            ] => assert_eq!(id, "codex"),
+            other => panic!("expected one Spawn(Agent(codex), prompt), got {other:?}"),
+        }
+        assert!(m.pending_work_picker.is_none(), "stash consumed");
+    }
+
+    /// Issue #418: the chooser's pick rides the same spawn→inject
+    /// rewrite as the keyboard path, so picking a running Codex injects
+    /// into its terminal instead of spawning a second Codex.
+    #[test]
+    fn work_chooser_pick_injects_into_the_chosen_agent() {
+        use lazybox_ipc::{Client, Command, EVENT_CHANNEL_CAPACITY, TerminalId, TerminalKind};
+        use lazybox_tui_core::action::Action;
+        use tokio::sync::mpsc;
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let (_evt_tx, evt_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let client = Client::from_channels(cmd_tx, evt_rx);
+        let mut m = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+
+        let pr = workspace("owner/repo#1", true, Duration::hours(1));
+        let sk: SessionKey = (&pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        for (tid, agent) in [(3, "codex"), (4, "claude")] {
+            m.handle_daemon_event(IpcEvent::TerminalSpawned {
+                model_label: None,
+                terminal_id: TerminalId(tid),
+                session_key: sk.clone(),
+                kind: TerminalKind::Agent(agent.into()),
+                no_permission: false,
+                on_main: false,
+            });
+        }
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        assert!(m.sidebar.focus_workspace_key(&sk));
+        assert!(m.dispatch_action(&Action::Work).is_empty());
+        while cmd_rx.try_recv().is_ok() {} // drop setup traffic
+
+        // Pick Codex (row 1), flushed the way Msg::ChoicePicked flushes.
+        let cmds = m.handle_choice_picked(vec![1]);
+        m.flush_dispatched_cmds(cmds);
+        let inject = std::iter::from_fn(|| cmd_rx.try_recv().ok()).find_map(|c| match c {
+            Command::InjectPrompt { terminal_id, .. } => Some(terminal_id),
+            _ => None,
+        });
+        assert_eq!(
+            inject,
+            Some(TerminalId(3)),
+            "the pick injects into the running Codex terminal",
+        );
+    }
+
+    /// Issue #418: Esc on the multi-agent chooser cancels cleanly —
+    /// stash dropped, nothing spawned.
+    #[test]
+    fn work_chooser_dismiss_drops_the_stash() {
+        use lazybox_ipc::{TerminalId, TerminalKind};
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        let pr = workspace("owner/repo#1", true, Duration::hours(1));
+        let sk: SessionKey = (&pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        for (tid, agent) in [(3, "codex"), (4, "cursor")] {
+            m.handle_daemon_event(IpcEvent::TerminalSpawned {
+                model_label: None,
+                terminal_id: TerminalId(tid),
+                session_key: sk.clone(),
+                kind: TerminalKind::Agent(agent.into()),
+                no_permission: false,
+                on_main: false,
+            });
+        }
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        assert!(m.sidebar.focus_workspace_key(&sk));
+        assert!(m.dispatch_action(&Action::Work).is_empty());
+        assert!(m.pending_work_picker.is_some());
+
+        let cmds = m.handle_modal_dismissed();
+        assert!(cmds.is_empty(), "Esc fires nothing: {cmds:?}");
+        assert!(m.pending_work_picker.is_none(), "stash dropped on Esc");
+    }
+
+    /// Issue #418: a `w S` tier chord that lands on several running
+    /// agents routes through the same chooser, and the picked spawn
+    /// still carries the tier alias.
+    #[test]
+    fn work_tier_chooser_carries_model_alias_through_the_pick() {
+        use lazybox_ipc::{Command, TerminalId, TerminalKind};
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        let pr = workspace("owner/repo#1", true, Duration::hours(1));
+        let sk: SessionKey = (&pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        for (tid, agent) in [(3, "codex"), (4, "claude")] {
+            m.handle_daemon_event(IpcEvent::TerminalSpawned {
+                model_label: None,
+                terminal_id: TerminalId(tid),
+                session_key: sk.clone(),
+                kind: TerminalKind::Agent(agent.into()),
+                no_permission: false,
+                on_main: false,
+            });
+        }
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        assert!(m.sidebar.focus_workspace_key(&sk));
+
+        assert!(m.dispatch_action(&Action::WorkTier("M".into())).is_empty());
+        assert_eq!(m.modal_stack.last(), Some(&Id::WorkAgentPicker));
+
+        let cmds = m.handle_choice_picked(vec![1]);
+        match cmds.as_slice() {
+            [
+                Command::Spawn {
+                    kind: TerminalKind::Agent(id),
+                    model_alias,
+                    ..
+                },
+            ] => {
+                assert_eq!(id, "codex");
+                assert_eq!(
+                    model_alias.as_deref(),
+                    Some("M"),
+                    "tier alias survives the pick"
+                );
+            }
+            other => panic!("expected one tiered Spawn, got {other:?}"),
+        }
+    }
+
+    /// Issue #418: the default agent is the target only when NOTHING is
+    /// running on the workspace.
+    #[test]
+    fn bare_w_with_no_running_agent_spawns_the_default() {
+        use lazybox_ipc::{Command, TerminalKind};
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        let pr = workspace("owner/repo#1", true, Duration::hours(1));
+        let sk: SessionKey = (&pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        assert!(m.sidebar.focus_workspace_key(&sk));
+
+        let cmds = m.dispatch_action(&Action::Work);
+        let agent = cmds.iter().find_map(|c| match c {
+            Command::Spawn {
+                kind: TerminalKind::Agent(id),
+                ..
+            } => Some(id.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            agent.as_deref(),
+            Some(m.sidebar.default_agent()),
+            "no running agent → the configured default spawns",
+        );
+    }
+
     /// Issue #224: the scoped `w x` chord forces Codex, injecting the
     /// contextual work prompt into the already-running Codex session
     /// (rather than spawning a fresh one).

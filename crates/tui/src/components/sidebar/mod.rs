@@ -316,6 +316,18 @@ pub struct AttentionSummary {
     pub review_pending: usize,
 }
 
+/// Which agent `w` ("work on this") should act on, resolved from the
+/// workspace's live terminals by [`Sidebar::work_target`] (#418).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkTarget {
+    /// Target this agent id: the single running one (whatever it is),
+    /// or the configured default when nothing is running.
+    Agent(String),
+    /// Several distinct agents are running — the model must ask which
+    /// one to inject into. Ids are sorted for a stable picker order.
+    Choose(Vec<String>),
+}
+
 pub struct Sidebar {
     id: PaneId,
     workspaces: HashMap<SessionKey, Workspace>,
@@ -653,9 +665,8 @@ impl Sidebar {
     }
 
     /// Distinct agent ids with a running terminal in `workspace_key`.
-    /// The order is unspecified (it walks a hash map), but the only
-    /// consumer ([`Self::work_target_agent`]) keys off the *set*, never
-    /// the order.
+    /// The order is unspecified (it walks a hash map); the consumer
+    /// ([`Self::work_target`]) sorts before presenting.
     pub fn running_agent_ids(&self, workspace_key: &SessionKey) -> Vec<String> {
         let mut ids: Vec<String> = Vec::new();
         for (sk, kind) in self.running_terminals.values() {
@@ -672,24 +683,23 @@ impl Sidebar {
     }
 
     /// Pick the agent `w` ("work on this") should target for a
-    /// workspace. An agent already running here wins over the default
-    /// so `w` continues the existing conversation (e.g. an open Codex
-    /// session) instead of always spawning a fresh default agent —
+    /// workspace (#418). An agent already running here wins over the
+    /// default so `w` continues the existing conversation (e.g. an open
+    /// Codex session) instead of always spawning a fresh default agent —
     /// `rewrite_spawn_to_inject` then injects into it because the
     /// resolved agent id matches the running one.
     ///
-    /// Tie-break when several DIFFERENT agents run at once: prefer the
-    /// default if it's among them, otherwise fall back to the default
-    /// (a fresh spawn) so the outcome stays predictable. The scoped
-    /// `w c` / `w x` chords are how the user targets a specific one.
-    pub fn work_target_agent(&self, workspace_key: &SessionKey, default_agent: &str) -> String {
-        let running = self.running_agent_ids(workspace_key);
-        if running.iter().any(|id| id == default_agent) {
-            return default_agent.to_string();
-        }
+    /// When several DIFFERENT agents run at once there is no right
+    /// guess — not even the default, which the user may not be looking
+    /// at — so the caller must ask ([`WorkTarget::Choose`]). The default
+    /// agent is the answer only when nothing is running.
+    pub fn work_target(&self, workspace_key: &SessionKey, default_agent: &str) -> WorkTarget {
+        let mut running = self.running_agent_ids(workspace_key);
+        running.sort_unstable();
         match running.as_slice() {
-            [only] => only.clone(),
-            _ => default_agent.to_string(),
+            [] => WorkTarget::Agent(default_agent.to_string()),
+            [only] => WorkTarget::Agent(only.clone()),
+            _ => WorkTarget::Choose(running),
         }
     }
 

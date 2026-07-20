@@ -91,3 +91,15 @@ land with the #403/#405 fixes, against the e2e success contract above.
 | `crates/tui/src/build_guard.rs::release_comparison_only_reports_newer_semver` | installed releases only notify for a strictly newer published semantic version |
 | `crates/tui/src/build_guard.rs::modal_copy_scopes_commands_and_names_the_install_channel` | source commands run in the baked checkout and release commands match Homebrew versus the shell installer |
 | `crates/tui/src/realm/model/tests.rs::update_modal_dismissal_is_persisted_per_available_target` | explicit dismissal is remembered for one target while a later target is shown again |
+
+## `w` targets the running agent (#224, #418)
+
+| guard | shape it covers |
+|---|---|
+| `crates/tui/src/components/sidebar/tests.rs::single_running_agent_wins_over_default` | #224/#418 — one running non-default agent (Codex) is the `w` target, never the configured default |
+| `crates/tui/src/realm/model/tests.rs::bare_w_targets_the_running_agent_over_default` | #224 — the same contract through catalog dispatch (`w w` → Spawn(codex)) |
+| `crates/tui/src/realm/model/tests.rs::w_w_fires_default_work_immediately` | #224 — full key path: `w w` on a running Codex lands an `InjectPrompt`, not a fresh spawn |
+| `crates/tui/src/components/sidebar/tests.rs::several_agents_ask_even_when_default_is_among_them` | #418 — several distinct agents resolve to `Choose`, even when the default is one of them |
+| `crates/tui/src/realm/model/tests.rs::bare_w_with_several_agents_mounts_chooser_and_pick_targets_it` | #418 — the chooser modal mounts, and the pick replays the work spawn against the chosen agent |
+| `crates/tui/src/realm/model/tests.rs::work_chooser_pick_injects_into_the_chosen_agent` | #418 — the pick rides the spawn→inject rewrite into the chosen agent's terminal |
+| `crates/tui/src/realm/model/tests.rs::bare_w_with_no_running_agent_spawns_the_default` | #418 — the default agent is the answer only when nothing is running |

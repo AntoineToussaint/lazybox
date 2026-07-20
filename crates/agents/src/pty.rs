@@ -115,7 +115,16 @@ impl PtyProtocol {
     /// Raw ESC bytes are always removed before framing. PR/issue text is
     /// third-party-authored; without this guard an embedded `ESC[201~` could
     /// end bracketed paste early and turn the remainder into live keystrokes.
+    ///
+    /// Surrounding whitespace is also stripped so delivered text starts
+    /// flush on the composer's prompt line. Composed / recalled prompts can
+    /// carry padding (a draft that began with Enter, a recalled composing
+    /// buffer); delivered verbatim, a leading newline renders as a blank
+    /// first row in the agent's composer (issue #416), and a trailing
+    /// newline on a compose-only `Line` prompt would submit it. Interior
+    /// newlines are untouched — multi-line prompts stay multi-line.
     pub fn encode_prompt(self, prompt: &str, intent: PromptIntent) -> EncodedPrompt {
+        let prompt = prompt.trim();
         let sanitized = prompt.bytes().filter(|&byte| byte != 0x1b);
         match self.framing {
             PromptFraming::Line => {

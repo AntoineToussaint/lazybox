@@ -188,6 +188,36 @@ fn prompt_protocol_neutralizes_escape_bytes_once_for_every_agent() {
 }
 
 #[test]
+fn prompt_delivery_starts_flush_on_the_composer_line() {
+    // Issue #416: composed / recalled text can carry surrounding padding
+    // (a draft that began with Enter, a recalled composing buffer).
+    // Delivered verbatim, a leading newline renders as a blank first row
+    // in the agent's composer. The protocol boundary must trim it.
+    let (initial, submit) = PtyProtocol::GUARDED_COMPOSER
+        .encode_prompt("\nadd an issue:", PromptIntent::Compose)
+        .into_writes();
+    assert_eq!(initial, b"\x1b[200~add an issue:\x1b[201~");
+    assert_eq!(submit, None);
+
+    // Trailing padding and mixed whitespace go too, on submit as well;
+    // interior newlines survive (multi-line prompts stay multi-line).
+    let (initial, submit) = PtyProtocol::GUARDED_COMPOSER
+        .encode_prompt(" \n first\nsecond \n ", PromptIntent::Submit)
+        .into_writes();
+    assert_eq!(initial, b"\x1b[200~first\nsecond\x1b[201~");
+    assert_eq!(submit, Some(vec![b'\r']));
+
+    // Line framing: a trailing newline on a compose-only recall must not
+    // become an accidental submit, and a leading one must not indent the
+    // prompt onto a second line.
+    let (initial, submit) = PtyProtocol::LINE_ORIENTED
+        .encode_prompt("\ndraft\n", PromptIntent::Compose)
+        .into_writes();
+    assert_eq!(initial, b"draft");
+    assert_eq!(submit, None);
+}
+
+#[test]
 fn line_protocol_distinguishes_submit_from_compose_only_recall() {
     let generic = GenericCli {
         id: "custom",

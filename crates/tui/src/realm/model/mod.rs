@@ -265,6 +265,14 @@ pub enum Id {
     /// applies it natively (write + hot-reload / persist + live-apply).
     /// Esc / No drops the stash and changes nothing.
     HelpActionConfirm,
+    /// Single-pick `Choice` mounted when `w` ("work on this") lands on
+    /// a workspace with SEVERAL distinct running agents (#418) —
+    /// injecting must not silently guess between them. The listed
+    /// agent ids + the spawn params to replay live in
+    /// `pending_work_picker`; `Msg::ChoicePicked` resolves the index
+    /// and fires the same work spawn `w` would have, targeted at the
+    /// chosen agent.
+    WorkAgentPicker,
 }
 
 impl Id {
@@ -675,6 +683,11 @@ pub struct Model<T: TerminalAdapter> {
     /// The duration each picker option maps to. Order MUST match
     /// the labels rendered in `mount_snooze_picker`.
     snooze_choices: Vec<std::time::Duration>,
+    /// Stash for the `w` multi-agent chooser (`Id::WorkAgentPicker`,
+    /// #418): the running agent ids listed (row order) plus the spawn
+    /// params the pick replays through `push_work_spawn`. Cleared on
+    /// submit / dismiss.
+    pending_work_picker: Option<crate::realm::model::modals::PendingWorkPicker>,
     /// Workspace the `PolicyPicker` (`g p`, issue #363) is targeting.
     /// `Msg::ChoicePicked` reads it + `policy_choices` to turn the
     /// picked index into a toggle command. Cleared on dismiss.
@@ -1163,6 +1176,7 @@ impl<T: TerminalAdapter> Model<T> {
             labels_choices: Vec::new(),
             pending_snooze_workspace: None,
             snooze_choices: Vec::new(),
+            pending_work_picker: None,
             pending_policy_workspace: None,
             policy_choices: Vec::new(),
             pending_removal_prompts: std::collections::VecDeque::new(),
@@ -3313,7 +3327,12 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Msg::ChoicePicked(picks) => {
                 let cmds = self.handle_choice_picked(picks);
-                self.dispatch_cmds(cmds);
+                // Flush (not raw-dispatch) so a pick that resolves to a
+                // work spawn gets the same spawn-spinner + spawn→inject
+                // rewrite the keyboard path gets — the `w` multi-agent
+                // chooser (#418) and the sidebar context menu both emit
+                // Spawns that must fold into a running agent.
+                self.flush_dispatched_cmds(cmds);
             }
             Msg::ChoiceRefresh => {
                 if let Some(mut runner) = self.setup.runner.take() {

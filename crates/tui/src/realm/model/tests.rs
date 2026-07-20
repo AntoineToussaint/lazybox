@@ -5540,6 +5540,82 @@ mod destructive_confirm_tests {
         );
     }
 
+    #[test]
+    fn delete_or_close_on_issue_gates_on_confirm_then_fires_command() {
+        // Issue #408: `g d` on an issue workspace routes through the
+        // confirm modal (nothing deleted without a yes); Yes emits a
+        // single `DeleteOrClose` aimed at the focused workspace.
+        let mut m = build_model();
+        let ws = open_issue_workspace("github:o/r#7");
+        let wk = ws.key.clone();
+        let sk = SessionKey::from(&wk);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&sk), "issue row focusable");
+
+        let cmds = m.dispatch_action(&Action::DeleteOrClose);
+        assert!(
+            cmds.is_empty(),
+            "delete must gate on confirm first: {cmds:?}"
+        );
+        assert_eq!(m.modal_stack.last(), Some(&Id::ActionConfirm));
+
+        let cmds = m.handle_confirmed(true);
+        match cmds.as_slice() {
+            [IpcCommand::DeleteOrClose { workspace_key }] => assert_eq!(workspace_key, &wk),
+            other => panic!("expected a single DeleteOrClose command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delete_or_close_on_pr_gates_on_confirm_then_fires_command() {
+        // Issue #408: the same `g d` on a PR workspace resolves to a
+        // PR close — still confirm-gated, same command.
+        let mut m = build_model();
+        let pr = merge_ready_pr_without_approval("github:owner/repo#1");
+        let wk = pr.key.clone();
+        let sk = SessionKey::from(&wk);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        assert!(m.sidebar.focus_workspace_key(&sk), "PR row focusable");
+
+        let cmds = m.dispatch_action(&Action::DeleteOrClose);
+        assert!(cmds.is_empty(), "close must gate on confirm: {cmds:?}");
+        assert_eq!(m.modal_stack.last(), Some(&Id::ActionConfirm));
+
+        let cmds = m.handle_confirmed(true);
+        match cmds.as_slice() {
+            [IpcCommand::DeleteOrClose { workspace_key }] => assert_eq!(workspace_key, &wk),
+            other => panic!("expected a single DeleteOrClose command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delete_or_close_confirm_noops_when_pr_merged_under_the_modal() {
+        // The confirmed dispatch re-checks the stashed workspace: if a
+        // poll merged the PR while the modal was up, Yes must NOT fire
+        // a redundant close — it flashes and emits nothing.
+        let mut m = build_model();
+        let pr = merge_ready_pr_without_approval("github:owner/repo#1");
+        let sk = SessionKey::from(&pr.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        assert!(m.sidebar.focus_workspace_key(&sk));
+
+        let _ = m.dispatch_action(&Action::DeleteOrClose);
+        assert_eq!(m.modal_stack.last(), Some(&Id::ActionConfirm));
+
+        // The PR merges upstream while the modal is up.
+        let mut merged = merge_ready_pr_without_approval("github:owner/repo#1");
+        if let Some(pr) = merged.pr.as_mut() {
+            pr.state = lazybox_core::TaskState::Merged;
+        }
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(merged)));
+
+        let cmds = m.handle_confirmed(true);
+        assert!(
+            cmds.is_empty(),
+            "a merged-under-modal PR must not fire a close: {cmds:?}",
+        );
+    }
+
     /// An open GitHub issue workspace (no PR) — the only shape the
     /// close action is offered on. Built by reshaping a PR fixture into
     /// an issue (matching `intent.rs`'s test helper).
@@ -10413,6 +10489,62 @@ mod keybinding_audit_tests {
         assert!(
             notice.contains("closing issue #7"),
             "pending close feedback missing: {notice:?}",
+        );
+    }
+
+    #[test]
+    fn confirmed_delete_or_close_flashes_kind_specific_notices() {
+        // PR workspace → "closing PR #42…".
+        let (mut m, _server) = build_model();
+        let ws = pr_workspace("github:o/r#42", 0);
+        let sk = SessionKey::from(&ws.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&sk));
+
+        let cmds = m.dispatch_action(&Action::DeleteOrClose);
+        assert!(cmds.is_empty(), "delete/close gates on confirm");
+        let cmds = m.handle_confirmed(true);
+        assert!(matches!(
+            cmds.as_slice(),
+            [IpcCommand::DeleteOrClose { .. }]
+        ));
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .map(|n| n.message.clone())
+            .unwrap_or_default();
+        assert!(
+            notice.contains("closing PR #42"),
+            "pending close feedback missing: {notice:?}",
+        );
+
+        // Issue workspace → "deleting issue #7…".
+        let (mut m, _server) = build_model();
+        let mut ws = pr_workspace("github:o/r#7", 0);
+        let mut issue = ws.pr.take().expect("fixture has a PR to reshape");
+        issue.url = "https://github.com/o/r/issues/7".into();
+        ws.attach_task(issue);
+        let sk = SessionKey::from(&ws.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&sk));
+
+        let cmds = m.dispatch_action(&Action::DeleteOrClose);
+        assert!(cmds.is_empty(), "delete/close gates on confirm");
+        let cmds = m.handle_confirmed(true);
+        assert!(matches!(
+            cmds.as_slice(),
+            [IpcCommand::DeleteOrClose { .. }]
+        ));
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .map(|n| n.message.clone())
+            .unwrap_or_default();
+        assert!(
+            notice.contains("deleting issue #7"),
+            "pending delete feedback missing: {notice:?}",
         );
     }
 

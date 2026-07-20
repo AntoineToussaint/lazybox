@@ -222,12 +222,14 @@ resize.
 
 **Sidebar**: `j/k` or arrows navigate, `Enter` open (focus activity),
 `w` work on this (contextual agent prompt), `s` shell, `e` editor,
-`m` mark read, `z` snooze, `Shift-Z` long snooze, `f` cycle role
+`m` mark read, `z` snooze, `f` cycle role
 filter, `o` cycle sort, `Space` collapse/expand repo group, `Shift-S`
-cycle mailbox (Inbox → Inactive → Snoozed), `/` search, `n` new
-workspace, `Shift-N` new project, `Shift-A` adopt sessions, `Shift-J`
-join issue into PR, `Shift-X` archive, `Shift-C` close issue
-(as not-planned, upstream; issue workspaces only, confirmed first),
+cycle mailbox (Inbox → Inactive → Snoozed), `/` search. `x` is a
+leader for the **workspace** group (which-key popup): `x n` new
+workspace, `x p` new project, `x a` adopt sessions, `x j` join issue
+into PR, `x z` long snooze, `x x` archive, `x c` close issue
+(as not-planned, upstream; issue workspaces only, confirmed first) —
+the legacy `Shift-{N,A,J,X,C,Z}` direct aliases are gone (#304).
 `r` reply (works from the sidebar as well as the activity pane —
 it's a Workspace-section action). `v` multi-selects workspace
 rows (marks survive j/k; `Esc` clears) and `Shift-B` broadcasts one
@@ -254,8 +256,11 @@ own PR, no conflicts, no changes requested; only while lazybox runs),
 `g p` policies (the unified automation-policies menu — one surface
 listing merge-on-green, per-session auto-fix arm/disarm, and
 GitHub-native auto-merge status for the focused PR/issue, each toggled
-in place; #363), `g v` reviewers, `g a` assignees, `g l` labels,
-`g o` open in browser — leader chords only, the legacy
+in place; #363), `g r` reviewers, `g a` assignees, `g l` labels,
+`g o` open in browser, `g d` delete issue / close PR (confirmed
+first, naming the target; an issue is hard-deleted when the token
+has admin rights, else closed as not-planned with a notice; a PR is
+closed without merging; #408) — leader chords only, the legacy
 `Shift-{M,V,G,L,O}` direct aliases are gone (#304). Armed policies
 surface as row pills (`ARM` merge-on-green, `FIX` auto-fix); the
 per-session auto-fix arm/disarm overrides the global `no-auto-fix` /

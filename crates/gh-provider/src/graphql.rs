@@ -745,6 +745,41 @@ pub fn close_issue_body(issue_node_id: &str) -> serde_json::Value {
     })
 }
 
+/// GraphQL mutation that closes a PR without merging it. Closing an
+/// already-closed PR is a no-op on GitHub's side, so retrying is safe.
+const CLOSE_PR_MUTATION: &str = r#"
+mutation($id: ID!) {
+  closePullRequest(input: { pullRequestId: $id }) {
+    pullRequest { id state }
+  }
+}
+"#;
+
+pub fn close_pr_body(pull_request_node_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "query": CLOSE_PR_MUTATION,
+        "variables": { "id": pull_request_node_id },
+    })
+}
+
+/// GraphQL mutation that hard-deletes an issue. GitHub only allows
+/// this for repo admins — everyone else gets a FORBIDDEN error, which
+/// the caller degrades to a `closeIssue` (NOT_PLANNED) instead.
+const DELETE_ISSUE_MUTATION: &str = r#"
+mutation($id: ID!) {
+  deleteIssue(input: { issueId: $id }) {
+    clientMutationId
+  }
+}
+"#;
+
+pub fn delete_issue_body(issue_node_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "query": DELETE_ISSUE_MUTATION,
+        "variables": { "id": issue_node_id },
+    })
+}
+
 /// GraphQL mutation: add a 👀 reaction to any `Reactable` (Issue body
 /// or IssueComment, in lazybox's case). Posting this reaction is the
 /// authoritative idempotency marker for the `@lazybox`-mention
@@ -2525,6 +2560,22 @@ mod tests {
         let query = body["query"].as_str().unwrap();
         assert!(query.contains("closeIssue"));
         assert!(query.contains("stateReason: NOT_PLANNED"));
+    }
+
+    #[test]
+    fn close_pr_body_targets_the_node() {
+        let body = close_pr_body("PR_kwDOabc123");
+        assert_eq!(body["variables"]["id"], "PR_kwDOabc123");
+        let query = body["query"].as_str().unwrap();
+        assert!(query.contains("closePullRequest"));
+    }
+
+    #[test]
+    fn delete_issue_body_targets_the_node() {
+        let body = delete_issue_body("I_kwDOabc123");
+        assert_eq!(body["variables"]["id"], "I_kwDOabc123");
+        let query = body["query"].as_str().unwrap();
+        assert!(query.contains("deleteIssue"));
     }
 
     #[test]

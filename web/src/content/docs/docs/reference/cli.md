@@ -51,6 +51,29 @@ first.
 | `lazybox --fresh` | Wipe `~/.lazybox/v2/state.db` and re-run the setup wizard |
 | `lazybox --test` | Throwaway tempdir repo with one seeded workspace, no GitHub |
 | `lazybox --connect <socket>` | Connect to a remote daemon over a Unix socket |
+| `lazybox scan [ROOTS...] [--depth N] [--hidden]` | Find existing git clones and linked worktrees without modifying them |
+
+## `lazybox scan`
+
+`lazybox scan` is a read-only inventory of git checkouts created outside
+lazybox. Pass one or more roots directly, or configure `scan.roots` and run it
+with no positional arguments:
+
+```bash
+lazybox scan ~/code ~/work --depth 5
+lazybox scan --hidden
+```
+
+| Option | Effect |
+| --- | --- |
+| `[ROOTS...]` | Directories to walk; overrides `scan.roots` when present |
+| `--depth N` | Maximum levels below each root; overrides `scan.max_depth` |
+| `--hidden` | Include dot-directories, which are skipped by default |
+
+Results are ordered by recent commit activity and identify the branch, path,
+linked worktrees, dirty checkouts, and any checkout lazybox already tracks.
+Lazybox's own managed worktree directory is excluded. The command only reports
+what it finds; importing an external checkout in place is not implemented yet.
 
 ## `lazybox server`
 

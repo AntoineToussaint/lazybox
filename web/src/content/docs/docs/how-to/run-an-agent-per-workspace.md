@@ -59,6 +59,41 @@ menu; other agents define theirs under `agents.<id>.models` in
 [configuration reference](/docs/reference/configuration/#agentsid)). The
 picked tier's label rides a `◆ Opus`-style badge on the terminal tab.
 
+## Choose splits or tabs
+
+The first terminal occupies the workspace's terminal pane. By default, each
+additional ordinary shell or agent spawn opens as a side-by-side split. Set a
+tabs-first default instead:
+
+```yaml
+ui:
+  terminal_new_layout: tabs
+```
+
+From inside a terminal, `]]t` flips this preference between `split` and `tabs`
+and saves it. The change affects the next spawn, not terminals already open.
+Explicit `]]|` and `]]-` commands always create a side-by-side or stacked split
+regardless of the preference.
+
+## Recover input and failed agents
+
+Press `]]r` to restore the in-flight draft—or, when there is no draft, the last
+submitted agent prompt—into the composer without sending it. The prompt is
+persisted, so a lazybox restart does not erase the last command you were
+working with.
+
+Terminal exits are explicit rather than inferred from a quiet screen:
+
+- a cleanly finished agent terminal closes automatically;
+- a crash, signal exit, or non-zero exit stays frozen on its final screen with
+  the exit code and a restart affordance;
+- an agent that exits before it ever engages is treated as failed-to-start and
+  also remains inspectable;
+- the workspace and its worktree survive the failed process.
+
+The failed-to-start grace period is configurable with
+`terminal.agent_dead_on_arrival_ms`.
+
 ## Autonomous runs and skip-permissions
 
 For hands-off work, lazybox can run Claude with permission prompts disabled. The
@@ -86,5 +121,7 @@ full schema.
 
 - [Per-repo env and mounts](/docs/how-to/per-repo-env-and-mounts/) to give every
   agent session the environment and shared files it needs.
+- [Manage automation policies](/docs/how-to/manage-automation-policies/) to
+  control merge and auto-fix behavior for the workspace.
 - The [keybindings reference](/docs/reference/keybindings/) for every sidebar
   action.

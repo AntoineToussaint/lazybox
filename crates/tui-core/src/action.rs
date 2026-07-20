@@ -324,6 +324,7 @@ pub struct ActionDef {
 /// time — see `for_action(&Action)` which builds an owned `ActionDef`
 /// substituting the runtime label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum ActionKind {
     // Workspace
     OpenWorkspace,
@@ -392,6 +393,93 @@ pub enum ActionKind {
     // Terminal
     TerminalScroll,
     LeaveTerminal,
+}
+
+impl ActionKind {
+    /// Number of real variants in this contiguous `repr(u8)` enum.
+    /// `LeaveTerminal` deliberately stays last: the fixed-size display
+    /// order below then becomes a compile-time completeness check whenever
+    /// a new action kind is added.
+    const COUNT: usize = Self::LeaveTerminal as usize + 1;
+
+    /// Canonical help/catalog order. The array length is tied to the enum's
+    /// variant count, so omitting a newly-added action is a compile error;
+    /// the unit test below separately rejects duplicates.
+    const DISPLAY_ORDER: [Self; Self::COUNT] = [
+        // Global
+        Self::CyclePane,
+        Self::Refresh,
+        Self::ForceRedraw,
+        Self::OpenSettings,
+        Self::OpenThemePicker,
+        Self::OpenSnippets,
+        Self::OpenHelp,
+        Self::OpenTour,
+        Self::OpenSyncStatus,
+        Self::OpenMessages,
+        Self::DismissNotice,
+        // The three Jump actions sit together so the help panel reads
+        // them as one coherent group.
+        Self::JumpToWorkspace,
+        Self::JumpToAsking,
+        Self::JumpToFailingCi,
+        Self::ToggleFocusMode,
+        Self::StartAgent,
+        Self::ToggleActivityPane,
+        Self::ToggleMouseCapture,
+        Self::ResizeSplitter,
+        Self::Quit,
+        // Workspace
+        Self::OpenWorkspace,
+        Self::Work,
+        Self::WorkWith,
+        Self::SpawnAgent,
+        Self::SpawnShell,
+        Self::SpawnAgentOnMain,
+        Self::SpawnShellOnMain,
+        Self::OpenEditor,
+        Self::MarkAllRead,
+        Self::ToggleSnooze,
+        // Workspace-management menu: creation and movement first,
+        // hiding/destructive actions last. The runtime which-key popup
+        // inherits this order directly.
+        Self::NewWorkspace,
+        Self::NewProject,
+        Self::AdoptSessions,
+        Self::CollapseIntoPr,
+        Self::LongSnooze,
+        Self::Archive,
+        Self::CloseIssue,
+        // GitHub menu.
+        Self::MergePr,
+        Self::ToggleAutoMerge,
+        Self::ManagePolicies,
+        Self::RequestReviewers,
+        Self::AddAssignees,
+        Self::ManageLabels,
+        Self::OpenInBrowser,
+        Self::DeleteOrClose,
+        Self::Reply,
+        // Sidebar list management
+        Self::CycleRoleFilter,
+        Self::CycleSort,
+        Self::CycleMailbox,
+        Self::OpenSearch,
+        Self::ToggleRepoGroup,
+        Self::SelectWorkspace,
+        Self::BroadcastToSelected,
+        // Activity
+        Self::ToggleActivity,
+        Self::ToggleRow,
+        Self::ActivityTop,
+        Self::ActivityBottom,
+        Self::ToggleDescription,
+        Self::SelectRow,
+        Self::UndoMarkRead,
+        // Terminal
+        Self::TerminalScroll,
+        Self::LeaveTerminal,
+    ];
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -994,84 +1082,7 @@ impl ActionDef {
     /// Every catalog entry. Iteration order = help-panel order.
     /// Use this for rendering the `?` modal.
     pub fn all() -> impl Iterator<Item = &'static ActionDef> {
-        // The `for_kind` arms enumerate every variant of ActionKind.
-        // Listing them here in display order avoids macro magic and
-        // keeps the canonical ordering inspectable.
-        [
-            // Global
-            ActionKind::CyclePane,
-            ActionKind::Refresh,
-            ActionKind::ForceRedraw,
-            ActionKind::OpenSettings,
-            ActionKind::OpenThemePicker,
-            ActionKind::OpenSnippets,
-            ActionKind::OpenHelp,
-            ActionKind::OpenTour,
-            ActionKind::OpenSyncStatus,
-            ActionKind::OpenMessages,
-            ActionKind::DismissNotice,
-            // The three Jump actions sit together so the help panel
-            // reads them as one coherent group.
-            ActionKind::JumpToWorkspace,
-            ActionKind::JumpToAsking,
-            ActionKind::JumpToFailingCi,
-            ActionKind::ToggleFocusMode,
-            ActionKind::StartAgent,
-            ActionKind::ToggleActivityPane,
-            ActionKind::ToggleMouseCapture,
-            ActionKind::ResizeSplitter,
-            ActionKind::Quit,
-            // Workspace
-            ActionKind::OpenWorkspace,
-            ActionKind::Work,
-            ActionKind::WorkWith,
-            ActionKind::SpawnAgent,
-            ActionKind::SpawnShell,
-            ActionKind::SpawnAgentOnMain,
-            ActionKind::SpawnShellOnMain,
-            ActionKind::OpenEditor,
-            ActionKind::MarkAllRead,
-            ActionKind::ToggleSnooze,
-            // Workspace-management menu: creation and movement first,
-            // hiding/destructive actions last. The runtime which-key
-            // popup inherits this order directly.
-            ActionKind::NewWorkspace,
-            ActionKind::NewProject,
-            ActionKind::AdoptSessions,
-            ActionKind::CollapseIntoPr,
-            ActionKind::LongSnooze,
-            ActionKind::Archive,
-            ActionKind::CloseIssue,
-            ActionKind::MergePr,
-            ActionKind::ToggleAutoMerge,
-            ActionKind::RequestReviewers,
-            ActionKind::AddAssignees,
-            ActionKind::ManageLabels,
-            ActionKind::OpenInBrowser,
-            ActionKind::DeleteOrClose,
-            ActionKind::Reply,
-            // Sidebar list management
-            ActionKind::CycleRoleFilter,
-            ActionKind::CycleSort,
-            ActionKind::CycleMailbox,
-            ActionKind::OpenSearch,
-            ActionKind::ToggleRepoGroup,
-            ActionKind::SelectWorkspace,
-            ActionKind::BroadcastToSelected,
-            // Activity
-            ActionKind::ToggleActivity,
-            ActionKind::ToggleRow,
-            ActionKind::ActivityTop,
-            ActionKind::ActivityBottom,
-            ActionKind::ToggleDescription,
-            ActionKind::SelectRow,
-            ActionKind::UndoMarkRead,
-            // Terminal
-            ActionKind::TerminalScroll,
-            ActionKind::LeaveTerminal,
-        ]
-        .into_iter()
-        .map(Self::for_kind)
+        ActionKind::DISPLAY_ORDER.into_iter().map(Self::for_kind)
     }
 }
 
@@ -2287,10 +2298,19 @@ mod tests {
 
     #[test]
     fn every_kind_has_a_def() {
-        // If `for_kind` ever gets out of sync with `ActionKind` it
-        // would panic at compile time on an unmatched variant. This
-        // test additionally guards against `for_kind` shadowing a
-        // variant with a stale label by accident.
+        // DISPLAY_ORDER's fixed length makes omissions a compile error;
+        // this uniqueness check prevents a duplicate from masking one.
+        let kinds: Vec<ActionKind> = ActionDef::all().map(|def| def.kind).collect();
+        assert_eq!(kinds.len(), ActionKind::COUNT);
+        for (index, kind) in kinds.iter().enumerate() {
+            assert!(
+                !kinds[..index].contains(kind),
+                "{kind:?} appears more than once in ActionKind::DISPLAY_ORDER"
+            );
+        }
+
+        // `for_kind` is an exhaustive match, so the compiler guards the
+        // definition side. Labels must also stay renderable.
         //
         // `default_keys` is allowed to be empty for actions that
         // exist in the catalog but aren't bound to a key (still

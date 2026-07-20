@@ -61,6 +61,10 @@ export default defineConfig({
               slug: 'docs/how-to/run-an-agent-per-workspace',
             },
             {
+              label: 'Manage automation policies',
+              slug: 'docs/how-to/manage-automation-policies',
+            },
+            {
               label: 'Per-repo env and mounts',
               slug: 'docs/how-to/per-repo-env-and-mounts',
             },

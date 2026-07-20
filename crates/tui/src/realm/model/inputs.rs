@@ -1462,6 +1462,7 @@ showing keybinding search only",
 /// settling, the only way to make the submit reliable across agents
 /// whose input areas debounce pasted bursts (#246).
 pub(super) fn encode_snippet_for_pty(body: &str) -> Vec<u8> {
+    let body = lazybox_agents::trim_leading_blank_lines(body);
     if !body.contains('\n') {
         let mut bytes = Vec::with_capacity(body.len() + 1);
         bytes.extend_from_slice(body.as_bytes());

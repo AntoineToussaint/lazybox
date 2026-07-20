@@ -376,7 +376,7 @@ impl Terminals {
     /// The text a `]]r` recall should drop back into the focused agent
     /// composer (in-flight draft, else last submitted message), with the
     /// target terminal id. `None` when there's nothing to recall.
-    pub fn recall_prompt(&self) -> Option<(lazybox_ipc::TerminalId, String)> {
+    pub fn recall_prompt(&mut self) -> Option<(lazybox_ipc::TerminalId, String)> {
         self.inner.recall_prompt()
     }
 

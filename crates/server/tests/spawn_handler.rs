@@ -1191,7 +1191,7 @@ async fn line_oriented_prompt_recall_omits_the_inline_newline() {
         client
             .send(Command::InjectPrompt {
                 terminal_id,
-                prompt: "edit this draft".into(),
+                prompt: "\n  edit this draft".into(),
                 fallback_spawn: None,
                 submit: false,
             })

@@ -114,6 +114,15 @@ pub enum SettingsAction {
     /// uncommitted / unpushed work, lets the user delete per-row or
     /// bulk-delete the clearly-safe set.
     InspectWorktrees,
+    /// Probe each enabled agent CLI's installed vs latest version and
+    /// report in the footer. Dispatches `Command::CheckAgentCliUpdates`.
+    CheckAgentUpdates,
+    /// Update every enabled agent CLI through its lazybox-managed
+    /// channel (npm / brew / the CLI's own updater), out of band —
+    /// never inside a live session. Dispatches
+    /// `Command::UpdateAgentClis`; per-agent outcomes arrive as
+    /// footer notices.
+    UpdateAgentClis,
 }
 
 impl SettingsAction {
@@ -139,6 +148,8 @@ impl SettingsAction {
             Self::FullSetup => "Run the full setup wizard".into(),
             Self::CleanWorktrees => "Clean worktrees (free disk, keep inbox)".into(),
             Self::InspectWorktrees => "Inspect worktrees…".into(),
+            Self::CheckAgentUpdates => "Check agent CLI updates".into(),
+            Self::UpdateAgentClis => "Update agent CLIs now".into(),
         }
     }
 
@@ -155,9 +166,11 @@ impl SettingsAction {
             | Self::ToggleSkipPermissions { .. }
             | Self::EditLlmGateway { .. } => SettingsSection::Agents,
             Self::EditTheme { .. } | Self::EditSnippets => SettingsSection::Appearance,
-            Self::FullSetup | Self::CleanWorktrees | Self::InspectWorktrees => {
-                SettingsSection::Maintenance
-            }
+            Self::FullSetup
+            | Self::CleanWorktrees
+            | Self::InspectWorktrees
+            | Self::CheckAgentUpdates
+            | Self::UpdateAgentClis => SettingsSection::Maintenance,
         }
     }
 }

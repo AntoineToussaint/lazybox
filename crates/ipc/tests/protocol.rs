@@ -326,6 +326,8 @@ fn all_commands() -> Vec<Command> {
         Command::FetchScrollback {
             terminal_id: TerminalId(12),
         },
+        Command::CheckAgentCliUpdates,
+        Command::UpdateAgentClis,
         Command::Shutdown,
     ]
 }
@@ -670,6 +672,26 @@ fn all_events() -> Vec<Event> {
             replay: b"deep history\r\nlive bottom".to_vec(),
             seq: 42,
         },
+        Event::AgentCliUpdatesChecked {
+            statuses: vec![lazybox_ipc::AgentCliUpdateStatus {
+                agent_id: "claude".into(),
+                display_name: "Claude Code".into(),
+                installed: Some("2.1.3".into()),
+                latest: Some("2.1.4".into()),
+                update_available: true,
+                error: None,
+                auto_update: true,
+            }],
+            manual: true,
+        },
+        Event::AgentCliUpdateFinished {
+            agent_id: "codex".into(),
+            display_name: "Codex".into(),
+            ok: false,
+            installed_before: Some("0.46.0".into()),
+            installed_after: None,
+            message: "brew upgrade --cask codex failed: exit 1".into(),
+        },
     ]
 }
 
@@ -731,6 +753,8 @@ fn command_tag(command: &Command) -> &'static str {
         Command::ListProviderCredentials { .. } => "ListProviderCredentials",
         Command::KeepMergedWorkspace { .. } => "KeepMergedWorkspace",
         Command::FetchScrollback { .. } => "FetchScrollback",
+        Command::CheckAgentCliUpdates => "CheckAgentCliUpdates",
+        Command::UpdateAgentClis => "UpdateAgentClis",
     }
 }
 
@@ -794,6 +818,8 @@ fn event_tag(event: &Event) -> &'static str {
         Event::TerminalInputRejected { .. } => "TerminalInputRejected",
         Event::CommandRejected { .. } => "CommandRejected",
         Event::TerminalScrollback { .. } => "TerminalScrollback",
+        Event::AgentCliUpdatesChecked { .. } => "AgentCliUpdatesChecked",
+        Event::AgentCliUpdateFinished { .. } => "AgentCliUpdateFinished",
     }
 }
 
@@ -805,12 +831,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         (lazybox_ipc::PROTOCOL_VERSION, command_tags.len()),
-        (13, 53),
+        (14, 55),
         "Command gained/lost a variant: update the exhaustive tag, add a sample, and bump PROTOCOL_VERSION",
     );
     assert_eq!(
         (lazybox_ipc::PROTOCOL_VERSION, event_tags.len()),
-        (13, 54),
+        (14, 56),
         "Event gained/lost a variant: update the exhaustive tag, add a sample, and bump PROTOCOL_VERSION",
     );
 }

@@ -229,11 +229,16 @@ impl WorktreeProgressState {
         self.target = self.target.max(row as u8);
     }
 
-    /// The label for `row`, cold/warm-aware on the first row only.
+    /// The label for `row`, cold/warm-aware on the first two rows.
     fn label(&self, row: Row) -> &'static str {
         match row {
             Row::Prepare if self.cold_clone => "Cloning repository (one-time)",
             Row::Prepare => "Preparing worktree",
+            // The blobless clone defers file contents, so the first
+            // checkout after a cold clone is where the bulk download
+            // actually happens — name the wait instead of implying a
+            // quick local materialization.
+            Row::WorktreeAdd if self.cold_clone => "Creating worktree (downloading files)",
             Row::WorktreeAdd => "Creating worktree",
             Row::Setup => "Setting up",
             Row::Agent => "Starting agent",
@@ -492,7 +497,11 @@ mod tests {
         let out = render(&mut comp, 70, 12);
         assert!(out.contains("Setting up workspace"), "{out}");
         assert!(out.contains("Cloning repository (one-time)"), "{out}");
-        assert!(out.contains("Creating worktree"), "{out}");
+        // The first checkout after a cold clone is the bulk download.
+        assert!(
+            out.contains("Creating worktree (downloading files)"),
+            "{out}"
+        );
         assert!(out.contains("Starting agent"), "{out}");
         // Later steps still pending → hollow bullet.
         assert!(out.contains('○'), "{out}");
@@ -549,13 +558,16 @@ mod tests {
             !out.to_lowercase().contains("clon"),
             "warm provision must not imply a clone: {out}",
         );
-        // A following worktree-add still advances the checklist normally.
+        // A following worktree-add still advances the checklist normally
+        // — and, blobs being local on the warm path, never claims to be
+        // downloading either.
         st.apply(WorktreeStep::WorktreeAdd, WorktreeStepStatus::Started);
         let t0 = Instant::now();
         st.shown_since = t0;
         assert!(st.tick(t0 + MIN_STEP_DWELL));
         let out = render(&mut WorktreeProgress::from_state(&st), 70, 12);
         assert!(out.contains("Creating worktree"), "{out}");
+        assert!(!out.contains("downloading"), "{out}");
     }
 
     #[test]

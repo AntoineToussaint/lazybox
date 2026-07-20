@@ -1598,7 +1598,9 @@ pub enum WorktreeStep {
     Clone,
     /// Refreshing the remote-tracking ref before branching off it.
     Fetch,
-    /// `git worktree add` materializing the checkout on disk.
+    /// `git worktree add` materializing the checkout on disk. From a
+    /// blobless clone this includes downloading the checked-out files,
+    /// making it the bulk of a cold provision's wall-clock.
     WorktreeAdd,
     /// Applying configured mounts + setup scripts to the fresh tree.
     Setup,

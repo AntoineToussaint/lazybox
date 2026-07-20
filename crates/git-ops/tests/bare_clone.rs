@@ -198,3 +198,112 @@ async fn worktree_from_blobless_clone_fetches_blobs_lazily() {
 
     drop(upstream);
 }
+
+/// The trade a blobless clone makes: refs tolerate an unreachable
+/// origin (stale-base fallback), but the worktree checkout itself
+/// needs origin to download file contents. When that fails, the error
+/// must say so — git's raw "could not fetch <oid> from promisor
+/// remote" names neither the cause nor the remedy.
+#[tokio::test]
+async fn blobless_checkout_fails_clearly_when_origin_unreachable() {
+    let (upstream, base, bare, _partial) = setup_with_partial("acme", "offline");
+
+    let wm = WorktreeManager::new(base.path().to_path_buf());
+    // Materialize the blobless bare clone while origin is reachable …
+    wm.default_branch("acme", "offline")
+        .await
+        .expect("cold clone succeeds");
+    assert!(bare.exists());
+
+    // … then lose the origin before the first checkout.
+    drop(upstream);
+
+    let err = wm
+        .checkout_new_branch_at(
+            &base.path().join("wt"),
+            "acme",
+            "offline",
+            "feature/x",
+            "trunk",
+        )
+        .await
+        .expect_err("checkout needs origin for blobs");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("blobless clone") && msg.contains("file contents"),
+        "error names the real cause: {msg}"
+    );
+}
+
+/// A resumed fetch that fails against the same origin a fresh attempt
+/// would use keeps the staging repo — resume and restart are
+/// equivalent there, and the accumulated objects are the whole point
+/// of resuming.
+#[tokio::test]
+async fn failed_resume_keeps_partial_when_origin_matches() {
+    let base = TempDir::new().unwrap();
+    let bare = base.path().join("repos").join("acme").join("dead.git");
+    let partial = PathBuf::from(format!("{}.partial", bare.display()));
+    let dead_origin = base.path().join("nowhere").display().to_string();
+
+    // A condemned bare (fails validation) whose surviving config names
+    // the dead origin — the URL a from-scratch attempt would reuse.
+    std::fs::create_dir_all(&bare).unwrap();
+    std::fs::write(
+        bare.join("config"),
+        format!("[remote \"origin\"]\n\turl = {dead_origin}\n"),
+    )
+    .unwrap();
+
+    // A staged partial pointing at the same dead origin.
+    std::fs::create_dir_all(partial.parent().unwrap()).unwrap();
+    git(
+        base.path(),
+        &["init", "--quiet", "--bare", &partial.to_string_lossy()],
+    );
+    git(&partial, &["config", "remote.origin.url", &dead_origin]);
+    std::fs::write(partial.join("resume-marker"), "kept\n").unwrap();
+
+    let wm = WorktreeManager::new(base.path().to_path_buf());
+    wm.default_branch("acme", "dead")
+        .await
+        .expect_err("fetch from a dead origin fails");
+
+    assert!(
+        partial.join("resume-marker").exists(),
+        "matching-origin partial survives its failed fetch for the next retry"
+    );
+}
+
+/// A resumed fetch that fails against an *adopted* origin different
+/// from the canonical one discards the staging repo: nothing else ever
+/// deletes a resumable `.partial`, so keeping it would wedge every
+/// retry on the dead adopted remote with no path back to the canonical
+/// URL.
+#[tokio::test]
+async fn failed_resume_with_divergent_origin_discards_partial() {
+    let base = TempDir::new().unwrap();
+    let bare = base.path().join("repos").join("acme").join("moved.git");
+    let partial = PathBuf::from(format!("{}.partial", bare.display()));
+    let dead_origin = base.path().join("nowhere").display().to_string();
+
+    // No bare clone: the canonical URL is the github.com form, which
+    // differs from the partial's dead local-path origin.
+    std::fs::create_dir_all(partial.parent().unwrap()).unwrap();
+    git(
+        base.path(),
+        &["init", "--quiet", "--bare", &partial.to_string_lossy()],
+    );
+    git(&partial, &["config", "remote.origin.url", &dead_origin]);
+
+    let wm = WorktreeManager::new(base.path().to_path_buf());
+    wm.default_branch("acme", "moved")
+        .await
+        .expect_err("fetch from the adopted dead origin fails");
+
+    assert!(
+        !partial.exists(),
+        "divergent-origin partial is discarded so the next attempt \
+         re-clones from the canonical remote"
+    );
+}

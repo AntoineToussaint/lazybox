@@ -1460,6 +1460,14 @@ pub struct AgentCliUpdateStatus {
     pub update_available: bool,
     /// Human-readable failure detail from either probe.
     pub error: Option<String>,
+    /// The user opted this agent into `agents.<id>.auto_update`, so a
+    /// scheduled sweep applies an available update itself — clients
+    /// word the availability notice as "auto-updating" instead of
+    /// telling the user to trigger it manually. The `#[serde(default)]`
+    /// only matters on the JSON gateway; over the socket this field
+    /// rides the same `PROTOCOL_VERSION` bump as the event itself.
+    #[serde(default)]
+    pub auto_update: bool,
 }
 
 /// Severity classification for `Event::ProviderError`. The TUI uses

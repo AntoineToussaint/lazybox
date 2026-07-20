@@ -1546,30 +1546,39 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
-    /// Turn an agent-CLI update-check reading into at most one footer
-    /// notice. Updates available → always announced. Everything else
-    /// only answers a manual check (`,` → maintenance): a scheduled
-    /// sweep that finds nothing actionable stays silent, and its probe
-    /// errors stay in the daemon log rather than the footer.
+    /// Turn an agent-CLI update-check reading into footer notices.
+    /// Availability is always announced — but an agent the daemon is
+    /// about to auto-update (scheduled sweep + `auto_update: true`) is
+    /// announced as exactly that, not as an instruction to go update
+    /// it manually. A manual check (`,` → maintenance) always answers,
+    /// including probe errors; a scheduled sweep with nothing
+    /// actionable stays silent and leaves its probe errors in the
+    /// daemon log.
     pub(super) fn note_agent_cli_updates(
         &mut self,
         statuses: &[lazybox_ipc::AgentCliUpdateStatus],
         manual: bool,
     ) {
-        let available: Vec<String> = statuses
+        let label = |s: &lazybox_ipc::AgentCliUpdateStatus| match (&s.installed, &s.latest) {
+            (Some(i), Some(l)) => format!("{} {i} → {l}", s.display_name),
+            _ => s.display_name.clone(),
+        };
+        // On a scheduled sweep the daemon applies auto_update agents'
+        // updates itself right after this event; only on a manual
+        // check is every available update the user's to trigger.
+        let (auto, needs_action): (Vec<_>, Vec<_>) = statuses
             .iter()
             .filter(|s| s.update_available)
-            .map(|s| match (&s.installed, &s.latest) {
-                (Some(i), Some(l)) => format!("{} {i} → {l}", s.display_name),
-                _ => s.display_name.clone(),
-            })
-            .collect();
-        if !available.is_empty() {
+            .partition(|s| s.auto_update && !manual);
+        let needs_action: Vec<String> = needs_action.into_iter().map(label).collect();
+        let auto: Vec<String> = auto.into_iter().map(label).collect();
+        if !needs_action.is_empty() {
             self.flash_info(format!(
                 "⬆ agent update available — {} · update via , ▸ maintenance",
-                available.join(", ")
+                needs_action.join(", ")
             ));
-            return;
+        } else if !auto.is_empty() {
+            self.flash_info(format!("⬆ auto-updating agent CLIs — {}", auto.join(", ")));
         }
         if !manual {
             return;
@@ -1579,10 +1588,13 @@ impl<T: TerminalAdapter> Model<T> {
             .filter_map(|s| s.error.as_ref().map(|e| format!("{}: {e}", s.display_name)))
             .collect();
         if !errors.is_empty() {
+            // May displace the availability notice above — both land
+            // in the Shift-M log, and the sticky error is the one the
+            // user must not miss.
             self.flash_error(format!("✗ agent update check — {}", errors.join(" · ")));
         } else if statuses.is_empty() {
             self.flash_hint("no enabled agent has a managed update channel");
-        } else {
+        } else if needs_action.is_empty() {
             let versions: Vec<String> = statuses
                 .iter()
                 .map(|s| match &s.installed {

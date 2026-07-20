@@ -655,6 +655,7 @@ fn all_events() -> Vec<Event> {
                 latest: Some("2.1.4".into()),
                 update_available: true,
                 error: None,
+                auto_update: true,
             }],
             manual: true,
         },

@@ -10781,6 +10781,7 @@ mod agent_cli_update_tests {
             latest: latest.map(Into::into),
             update_available,
             error: error.map(Into::into),
+            auto_update: false,
         }
     }
 
@@ -10827,6 +10828,60 @@ mod agent_cli_update_tests {
             "a quiet scheduled sweep must not flash, got {:?}",
             m.status.notice
         );
+    }
+
+    /// A scheduled sweep announcing an update the daemon will apply
+    /// itself must say "auto-updating", not send the user to the
+    /// maintenance menu to race the running pass.
+    #[test]
+    fn scheduled_check_words_auto_update_agents_as_auto_updating() {
+        let mut m = build_model();
+        let mut auto = status("claude", "Claude Code", Some("2.1.3"), Some("2.1.4"), None);
+        auto.auto_update = true;
+        m.handle_daemon_event(IpcEvent::AgentCliUpdatesChecked {
+            statuses: vec![auto.clone()],
+            manual: false,
+        });
+        let n = m.status.notice.as_ref().expect("auto-updating notice");
+        assert!(n.message.contains("auto-updating"), "{}", n.message);
+        assert!(
+            !n.message.contains("maintenance"),
+            "must not instruct a manual update: {}",
+            n.message
+        );
+
+        // The same agent on a MANUAL check is the user's to update.
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::AgentCliUpdatesChecked {
+            statuses: vec![auto],
+            manual: true,
+        });
+        let n = m.status.notice.as_ref().expect("availability notice");
+        assert!(n.message.contains("maintenance"), "{}", n.message);
+    }
+
+    /// A manual check must never swallow a broken agent's probe error
+    /// just because another agent has an update available — the sticky
+    /// error wins the footer (both land in the Shift-M log).
+    #[test]
+    fn manual_check_reports_errors_even_when_updates_are_available() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::AgentCliUpdatesChecked {
+            statuses: vec![
+                status("claude", "Claude Code", Some("2.1.3"), Some("2.1.4"), None),
+                status(
+                    "codex",
+                    "Codex",
+                    None,
+                    None,
+                    Some("`codex --version` failed"),
+                ),
+            ],
+            manual: true,
+        });
+        let n = m.status.notice.as_ref().expect("error notice");
+        assert_eq!(n.severity, NoticeSeverity::Permanent);
+        assert!(n.message.contains("Codex"), "{}", n.message);
     }
 
     #[test]

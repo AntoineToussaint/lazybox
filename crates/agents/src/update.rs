@@ -62,19 +62,20 @@ pub fn codex_channel() -> UpdateChannel {
     }
 }
 
-/// Pick Codex's update command from its resolved install location. A
-/// canonical path inside Homebrew's Caskroom/Cellar means brew owns the
-/// install; anything else (including an unresolvable binary) falls back
-/// to npm, the other supported channel.
+/// Pick Codex's update command from its resolved install location.
+/// Homebrew distributes Codex as a cask today but shipped it as a
+/// formula historically, and upgrading one through the other's flag
+/// fails (openai/codex#5607) — so the flag follows the layout:
+/// Caskroom → cask, Cellar → formula. Anything else (including an
+/// unresolvable binary) falls back to npm, the other supported
+/// channel.
 pub fn codex_update_argv(canonical_bin: Option<&Path>) -> Vec<String> {
-    let brew_owned = canonical_bin.is_some_and(|p| {
-        p.components().any(|c| {
-            let c = c.as_os_str();
-            c == "Caskroom" || c == "Cellar"
-        })
-    });
-    if brew_owned {
+    let dir_of =
+        |name: &str| canonical_bin.is_some_and(|p| p.components().any(|c| c.as_os_str() == name));
+    if dir_of("Caskroom") {
         argv(&["brew", "upgrade", "--cask", "codex"])
+    } else if dir_of("Cellar") {
+        argv(&["brew", "upgrade", "--formula", "codex"])
     } else {
         argv(&["npm", "install", "-g", "@openai/codex@latest"])
     }
@@ -99,14 +100,26 @@ fn resolve_in_path(name: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-/// First dotted numeric token (`X.Y…`) in a command's output — the
-/// version out of `"2.1.4 (Claude Code)"`, `"codex-cli 0.46.0"`, or a
-/// bare `"0.46.0"`.
+/// First dotted numeric version in a command's output — out of
+/// `"2.1.4 (Claude Code)"`, `"codex-cli 0.46.0"`, `"v2.1.0"`, or a
+/// bare `"0.46.0"`. A prerelease suffix (`0.47.0-alpha.3`) is cut at
+/// the numeric core: keeping it would fail [`is_newer`]'s numeric
+/// parse and fall back to plain inequality, which reads a stable
+/// registry release as "newer" than a same-or-higher prerelease and
+/// offers a downgrade.
 pub fn extract_version(output: &str) -> Option<String> {
     for token in output.split_whitespace() {
-        let trimmed = token.trim_matches(|c: char| !c.is_ascii_digit());
-        if trimmed.contains('.') && trimmed.split('.').all(|p| p.parse::<u64>().is_ok()) {
-            return Some(trimmed.to_string());
+        let t = token.trim_start_matches(|c: char| !c.is_ascii_digit());
+        let end = t
+            .find(|c: char| !c.is_ascii_digit() && c != '.')
+            .unwrap_or(t.len());
+        let head = t[..end].trim_end_matches('.');
+        if head.contains('.')
+            && head
+                .split('.')
+                .all(|p| !p.is_empty() && p.parse::<u64>().is_ok())
+        {
+            return Some(head.to_string());
         }
     }
     None
@@ -157,6 +170,19 @@ mod tests {
     }
 
     #[test]
+    fn extracts_numeric_core_from_prerelease_and_prefixed_versions() {
+        assert_eq!(
+            extract_version("codex-cli 0.47.0-alpha.3").as_deref(),
+            Some("0.47.0")
+        );
+        assert_eq!(extract_version("v2.1.0").as_deref(), Some("2.1.0"));
+        assert_eq!(
+            extract_version("agent 1.2.3+build.7").as_deref(),
+            Some("1.2.3")
+        );
+    }
+
+    #[test]
     fn version_ordering_is_numeric_not_lexical() {
         assert!(is_newer("0.10.0", "0.9.9"));
         assert!(is_newer("2.1.10", "2.1.9"));
@@ -173,16 +199,19 @@ mod tests {
     }
 
     #[test]
-    fn codex_update_prefers_brew_for_caskroom_installs() {
-        let brew = Path::new("/opt/homebrew/Caskroom/codex/0.144.6/codex-aarch64-apple-darwin");
+    fn codex_update_matches_brew_layout_to_the_right_flag() {
+        let cask = Path::new("/opt/homebrew/Caskroom/codex/0.144.6/codex-aarch64-apple-darwin");
         assert_eq!(
-            codex_update_argv(Some(brew)),
+            codex_update_argv(Some(cask)),
             vec!["brew", "upgrade", "--cask", "codex"]
         );
-        let cellar = Path::new("/usr/local/Cellar/codex/1.0.0/bin/codex");
+        // A legacy formula install must NOT get the cask flag —
+        // `brew upgrade --cask` refuses to touch a Cellar install
+        // (openai/codex#5607).
+        let formula = Path::new("/usr/local/Cellar/codex/1.0.0/bin/codex");
         assert_eq!(
-            codex_update_argv(Some(cellar)),
-            vec!["brew", "upgrade", "--cask", "codex"]
+            codex_update_argv(Some(formula)),
+            vec!["brew", "upgrade", "--formula", "codex"]
         );
     }
 

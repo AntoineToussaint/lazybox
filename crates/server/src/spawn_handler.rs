@@ -7571,8 +7571,13 @@ mod tests {
         }
 
         /// Feed one PTY chunk; return the `AgentState`s broadcast for this
-        /// terminal as a result (usually 0 or 1).
+        /// terminal as a result (usually 0 or 1). Mirrors the pump's chunk
+        /// arm: a pending answer reset drops the accumulated detection
+        /// buffer before the chunk is ingested.
         async fn feed(&mut self, bytes: &[u8]) -> Vec<lazybox_ipc::AgentState> {
+            if self.detect_resets.lock().await.remove(&self.id) {
+                self.buf.clear();
+            }
             note_pty_activity(
                 Some(&self.agent),
                 &mut self.buf,
@@ -7611,6 +7616,18 @@ mod tests {
             )
             .await;
             self.drain()
+        }
+
+        /// The user answers the parked prompt through lazybox:
+        /// `handle_write`'s optimistic flip commits `Working` into the
+        /// state cache and marks the detection buffer for reset (#101).
+        /// The pump's own state machine is not consulted by the flip.
+        async fn answer(&mut self) {
+            self.states
+                .lock()
+                .await
+                .insert(self.id, lazybox_ipc::AgentState::Working);
+            self.detect_resets.lock().await.insert(self.id);
         }
 
         fn drain(&mut self) -> Vec<lazybox_ipc::AgentState> {
@@ -7830,6 +7847,107 @@ mod tests {
         assert_eq!(
             p.input_shapes.lock().await.get(&p.id),
             Some(&lazybox_agents::PromptShape::Chooser),
+        );
+    }
+
+    /// The #399 acceptance flow, replayed over raw bytes captured from a
+    /// live codex 0.144.6 approval round-trip: the sidebar `?` must surface
+    /// on the modal's paint burst itself (the parked modal churns spinner
+    /// repaints, so the quiet classifier never gets a turn), hold through
+    /// that churn, and clear once the user answers through lazybox —
+    /// never re-surfacing off the aftermath.
+    #[tokio::test]
+    async fn codex_real_capture_approval_flow_surfaces_and_clears() {
+        use lazybox_ipc::AgentState::InputNeeded;
+        let working = include_bytes!("../../agents/tests/fixtures/codex_real_working.bin");
+        let paint =
+            include_bytes!("../../agents/tests/fixtures/codex_real_approval_paint_burst.bin");
+        let ticks =
+            include_bytes!("../../agents/tests/fixtures/codex_real_approval_parked_ticks.bin");
+        let answered =
+            include_bytes!("../../agents/tests/fixtures/codex_real_approval_answered.bin");
+        let settled =
+            include_bytes!("../../agents/tests/fixtures/codex_real_approval_settled_idle.bin");
+        let agent = lazybox_agents::registry()
+            .get("codex")
+            .expect("codex agent is a built-in");
+        let mut p = PumpDriver::with_agent(agent, Duration::ZERO, Duration::ZERO);
+
+        p.feed(working).await;
+        // The paint burst flips the pill on the chunk itself — the "within
+        // ~1s" acceptance is this line needing no quiet() first.
+        assert_eq!(p.feed(paint).await, vec![InputNeeded]);
+        assert_eq!(
+            p.input_shapes.lock().await.get(&p.id),
+            Some(&lazybox_agents::PromptShape::Chooser),
+        );
+        // The parked modal keeps repainting its spinner ticks; none of that
+        // churn may flap the `?`, and a quiet window that does sneak in
+        // re-reads the same modal as a no-op.
+        for chunk in ticks.chunks(1024) {
+            assert!(p.feed(chunk).await.is_empty());
+        }
+        assert!(p.quiet().await.is_empty());
+        assert_eq!(p.state().await, Some(InputNeeded));
+
+        // The user answers through lazybox; from here `?` must never
+        // return, even though the answered modal is still in the raw
+        // stream's scrollback.
+        p.answer().await;
+        let mut after = Vec::new();
+        for chunk in answered.chunks(2048) {
+            after.extend(p.feed(chunk).await);
+        }
+        after.extend(p.quiet().await);
+        after.extend(p.feed(settled).await);
+        after.extend(p.quiet().await);
+        assert!(
+            !after.contains(&InputNeeded),
+            "an answered approval must not re-surface `?`; got {after:?}",
+        );
+        assert_ne!(p.state().await, Some(InputNeeded));
+    }
+
+    /// The negative case from #399: the user answers the modal *inside the
+    /// terminal* before the optimistic flip lands (no buffer reset), so the
+    /// answered modal lingers verbatim in the detection window's scrollback
+    /// while the aftermath streams over it. The stale-marker guard must keep
+    /// the chunk path silent, and the quiet classification must read the
+    /// post-answer screen, not the lingering modal.
+    #[tokio::test]
+    async fn answered_codex_modal_in_scrollback_never_resurfaces() {
+        use lazybox_ipc::AgentState::InputNeeded;
+        let working = include_bytes!("../../agents/tests/fixtures/codex_real_working.bin");
+        let paint =
+            include_bytes!("../../agents/tests/fixtures/codex_real_approval_paint_burst.bin");
+        let answered =
+            include_bytes!("../../agents/tests/fixtures/codex_real_approval_answered.bin");
+        let settled =
+            include_bytes!("../../agents/tests/fixtures/codex_real_approval_settled_idle.bin");
+        let agent = lazybox_agents::registry()
+            .get("codex")
+            .expect("codex agent is a built-in");
+        let mut p = PumpDriver::with_agent(agent, Duration::ZERO, Duration::ZERO);
+
+        p.feed(working).await;
+        assert_eq!(p.feed(paint).await, vec![InputNeeded]);
+
+        // No answer() — the aftermath just streams in over the parked `?`.
+        let mut after = Vec::new();
+        for chunk in answered.chunks(2048) {
+            after.extend(p.feed(chunk).await);
+        }
+        after.extend(p.quiet().await);
+        after.extend(p.feed(settled).await);
+        after.extend(p.quiet().await);
+        assert!(
+            !after.contains(&InputNeeded),
+            "a lingering answered modal must not re-fire `?`; got {after:?}",
+        );
+        assert_ne!(
+            p.state().await,
+            Some(InputNeeded),
+            "the settled post-answer screen must have cleared the `?`",
         );
     }
 

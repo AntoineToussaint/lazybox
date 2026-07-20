@@ -1,21 +1,26 @@
 //! Real-byte Codex detector fixtures.
 //!
 //! Each `include_bytes!` is a raw PTY transcript captured from a genuine
-//! `codex` 0.142 session — real CSI/SGR escapes, cursor-positioned status
-//! bar, the U+203A chooser arrow, the U+2022 spinner bullet and the U+00B7
-//! footer separator. Codex renders INLINE (no alt-screen) and animates its
-//! "Working" spinner with heavy cursor churn, so the wire shape looks nothing
-//! like the hand-typed strings in `agents.rs`; this suite is what keeps the
-//! `detect::codex_state*` family honest against it.
+//! `codex` session (0.142 for the original corpus, 0.144.6 for the
+//! `codex_real_approval_*` phases) — real CSI/SGR escapes, cursor-positioned
+//! status bar, the U+203A chooser arrow, the U+2022 spinner bullet and the
+//! U+00B7 footer separator. Codex renders INLINE (no alt-screen) and animates
+//! its "Working" spinner with heavy cursor churn, so the wire shape looks
+//! nothing like the hand-typed strings in `agents.rs`; this suite is what
+//! keeps the `detect::codex_state*` family honest against it.
 //!
 //! Capture recipe (a PTY harness that drives `codex`, sends a prompt, and
-//! dumps the raw bytes per phase) is described in the PR for issue #225.
+//! dumps the raw bytes per phase) is described in the PR for issue #225; the
+//! approval round-trip phases were sliced from one continuous
+//! `tmux pipe-pane` capture of a live command approval (issue #399).
 //! Acceptance: the state pill must match reality for idle, working, the
 //! command/edit approval modals, the directory-trust gate, and the
 //! finished-turn idle screen that must evict a now-stale `esc to interrupt`.
 
-use lazybox_agents::AgentState;
-use lazybox_agents::detect::{codex_ready_for_prompt, codex_state, codex_state_chunked};
+use lazybox_agents::detect::{
+    codex_input_needed_in_current_chunk, codex_ready_for_prompt, codex_state, codex_state_chunked,
+};
+use lazybox_agents::{AgentState, PromptShape};
 
 struct ByteFixture {
     name: &'static str,
@@ -86,6 +91,24 @@ const FIXTURES: &[ByteFixture] = &[
         expected: AgentState::InputNeeded,
         ready: false,
     },
+    // The 0.144.6 command-approval chrome (the older approval fixtures are
+    // 0.142): the burst that paints `Would you like to run the following
+    // command?` + the three-option chooser mid-turn, working spinner still
+    // churning above it.
+    ByteFixture {
+        name: "codex_real_approval_paint_burst",
+        bytes: include_bytes!("fixtures/codex_real_approval_paint_burst.bin"),
+        expected: AgentState::InputNeeded,
+        ready: false,
+    },
+    // The screen at rest after that approval round-trip completed: resting
+    // composer + footer, the turn's transcript above.
+    ByteFixture {
+        name: "codex_real_approval_settled_idle",
+        bytes: include_bytes!("fixtures/codex_real_approval_settled_idle.bin"),
+        expected: AgentState::Idle,
+        ready: true,
+    },
 ];
 
 #[test]
@@ -155,6 +178,70 @@ fn codex_detector_matches_real_byte_corpus_as_full_repaint() {
         FIXTURES.len(),
         failures.join("\n"),
     );
+}
+
+/// A full command-approval round-trip captured phase-by-phase from one live
+/// codex 0.144.6 session (issue #399), replayed against the per-chunk
+/// detector the daemon runs on every PTY read. A parked approval modal keeps
+/// repainting its spinner ticks, so the PTY never stays quiet long enough
+/// for the resting-screen classifier — the current-chunk detector is the
+/// only thing that can surface the `?`, and it must fire off the paint burst
+/// alone, then stay silent for every later phase (the answered modal lingers
+/// in the window's scrollback for all of them).
+#[test]
+fn codex_real_approval_round_trip_drives_the_chunk_detector() {
+    let working = include_bytes!("fixtures/codex_real_working.bin");
+    let paint = include_bytes!("fixtures/codex_real_approval_paint_burst.bin");
+    let ticks = include_bytes!("fixtures/codex_real_approval_parked_ticks.bin");
+    let answered = include_bytes!("fixtures/codex_real_approval_answered.bin");
+    let settled = include_bytes!("fixtures/codex_real_approval_settled_idle.bin");
+
+    // Phase 1 — the modal paint burst arrives while the working screen is
+    // already in the window: the chunk detector fires on that burst itself,
+    // with no quiet wait.
+    let mut buf = working.to_vec();
+    let paint_start = buf.len();
+    buf.extend_from_slice(paint);
+    assert_eq!(
+        codex_input_needed_in_current_chunk(&buf, paint_start),
+        Some(PromptShape::Chooser),
+        "the approval paint burst must surface InputNeeded immediately",
+    );
+    assert_eq!(
+        codex_state_chunked(&buf, paint_start),
+        Some(AgentState::InputNeeded)
+    );
+
+    // Phase 2 — the parked modal repaints only its spinner ticks; they never
+    // retouch the modal markers, so the chunk detector must not re-fire, and
+    // the resting classification still reads the parked modal as asking.
+    let ticks_start = buf.len();
+    buf.extend_from_slice(ticks);
+    assert_eq!(codex_input_needed_in_current_chunk(&buf, ticks_start), None);
+    assert_eq!(codex_state(&buf), Some(AgentState::InputNeeded));
+
+    // Phase 3 — the user answered: the aftermath (`✔ You approved codex to
+    // run …`, the tool run, a fresh working line, the repainted footer)
+    // streams in while the answered modal still sits in scrollback. Neither
+    // detector may re-surface it.
+    let answered_start = buf.len();
+    buf.extend_from_slice(answered);
+    assert_eq!(
+        codex_input_needed_in_current_chunk(&buf, answered_start),
+        None,
+        "an answered modal lingering in scrollback must not re-fire off fresh output",
+    );
+    assert_ne!(
+        codex_state(&buf),
+        Some(AgentState::InputNeeded),
+        "the post-answer screen must not classify as still asking",
+    );
+
+    // Phase 4 — the turn settles: composer + footer at rest → Idle and ready,
+    // answered modal still in the window the whole time.
+    buf.extend_from_slice(settled);
+    assert_eq!(codex_state(&buf), Some(AgentState::Idle));
+    assert!(codex_ready_for_prompt(&buf));
 }
 
 /// The fixtures must actually carry ANSI escape bytes — otherwise this suite

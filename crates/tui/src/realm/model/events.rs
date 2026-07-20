@@ -339,7 +339,9 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::ProviderCredentialRemoved { .. }
                 | IpcEvent::ProviderCredentialsListed { .. }
                 | IpcEvent::TerminalInputRejected { .. }
-                | IpcEvent::CommandRejected { .. } => {}
+                | IpcEvent::CommandRejected { .. }
+                | IpcEvent::AgentCliUpdatesChecked { .. }
+                | IpcEvent::AgentCliUpdateFinished { .. } => {}
             }
         }
         // Agent-state pings repeat at the detector's cadence while an
@@ -803,7 +805,9 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::ProviderCredentialRemoved { .. }
             | IpcEvent::ProviderCredentialsListed { .. }
             | IpcEvent::TerminalInputRejected { .. }
-            | IpcEvent::CommandRejected { .. } => {}
+            | IpcEvent::CommandRejected { .. }
+            | IpcEvent::AgentCliUpdatesChecked { .. }
+            | IpcEvent::AgentCliUpdateFinished { .. } => {}
         }
         // Background-poll indicator. Lights up whenever the daemon
         // emits PollProgress (any cycle, initial or not); clears on
@@ -960,7 +964,9 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::ProviderCredentialRemoved { .. }
                 | IpcEvent::ProviderCredentialsListed { .. }
                 | IpcEvent::TerminalInputRejected { .. }
-                | IpcEvent::CommandRejected { .. } => {}
+                | IpcEvent::CommandRejected { .. }
+                | IpcEvent::AgentCliUpdatesChecked { .. }
+                | IpcEvent::AgentCliUpdateFinished { .. } => {}
             }
         }
         // CleanWorktrees finished — replace the "cleaning…" notice
@@ -993,6 +999,28 @@ impl<T: TerminalAdapter> Model<T> {
                 format!("⚠ {command} was not accepted — {message}"),
                 crate::realm::components::footer::NoticeSeverity::Retryable,
             );
+        }
+        // Out-of-band agent-CLI version check. A scheduled sweep stays
+        // quiet unless something is actionable; a manual check always
+        // answers, even when everything is current.
+        if let IpcEvent::AgentCliUpdatesChecked { statuses, manual } = &event {
+            self.note_agent_cli_updates(statuses, *manual);
+        }
+        // One agent's managed update finished — success and failure
+        // both name the agent and the outcome, replacing the CLIs' own
+        // in-session banners.
+        if let IpcEvent::AgentCliUpdateFinished {
+            display_name,
+            ok,
+            message,
+            ..
+        } = &event
+        {
+            if *ok {
+                self.flash_info(format!("✓ {display_name}: {message}"));
+            } else {
+                self.flash_error(format!("✗ {display_name} update failed — {message}"));
+            }
         }
         // Worktree inspector replied. Swap the placeholder for the
         // real list. `mount_inspect_list` is idempotent — calling it
@@ -1515,6 +1543,54 @@ impl<T: TerminalAdapter> Model<T> {
             self.focus = remembered;
             self.set_focus_attr();
             self.redraw = true;
+        }
+    }
+
+    /// Turn an agent-CLI update-check reading into at most one footer
+    /// notice. Updates available → always announced. Everything else
+    /// only answers a manual check (`,` → maintenance): a scheduled
+    /// sweep that finds nothing actionable stays silent, and its probe
+    /// errors stay in the daemon log rather than the footer.
+    pub(super) fn note_agent_cli_updates(
+        &mut self,
+        statuses: &[lazybox_ipc::AgentCliUpdateStatus],
+        manual: bool,
+    ) {
+        let available: Vec<String> = statuses
+            .iter()
+            .filter(|s| s.update_available)
+            .map(|s| match (&s.installed, &s.latest) {
+                (Some(i), Some(l)) => format!("{} {i} → {l}", s.display_name),
+                _ => s.display_name.clone(),
+            })
+            .collect();
+        if !available.is_empty() {
+            self.flash_info(format!(
+                "⬆ agent update available — {} · update via , ▸ maintenance",
+                available.join(", ")
+            ));
+            return;
+        }
+        if !manual {
+            return;
+        }
+        let errors: Vec<String> = statuses
+            .iter()
+            .filter_map(|s| s.error.as_ref().map(|e| format!("{}: {e}", s.display_name)))
+            .collect();
+        if !errors.is_empty() {
+            self.flash_error(format!("✗ agent update check — {}", errors.join(" · ")));
+        } else if statuses.is_empty() {
+            self.flash_hint("no enabled agent has a managed update channel");
+        } else {
+            let versions: Vec<String> = statuses
+                .iter()
+                .map(|s| match &s.installed {
+                    Some(v) => format!("{} {v}", s.display_name),
+                    None => s.display_name.clone(),
+                })
+                .collect();
+            self.flash_info(format!("✓ agent CLIs up to date — {}", versions.join(", ")));
         }
     }
 

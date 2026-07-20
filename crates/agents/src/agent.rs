@@ -301,6 +301,17 @@ pub trait Agent: Send + Sync {
         false
     }
 
+    /// How lazybox keeps this agent's CLI current, out of band. The
+    /// daemon runs the channel's commands in plain bounded
+    /// subprocesses — never inside a live session PTY, where the
+    /// agents' own self-updaters fail or churn (the reason lazybox
+    /// suppresses them at spawn). The default `None` opts out: an
+    /// agent with no known install channel (a `GenericCli` pointed at
+    /// an arbitrary command) is never version-checked or updated.
+    fn update_channel(&self) -> Option<crate::update::UpdateChannel> {
+        None
+    }
+
     /// Build the settings JSON to launch this agent with so it reports
     /// state through structured lifecycle hooks instead of (or
     /// alongside) PTY screen-scraping. `hook_command` is the shell
@@ -441,6 +452,10 @@ pub mod builtins {
             }
         }
 
+        fn update_channel(&self) -> Option<crate::update::UpdateChannel> {
+            Some(crate::update::claude_channel())
+        }
+
         /// Wire lazybox's hook command into a settings file Claude
         /// launches with, merging the user's existing hooks. Delegates
         /// to [`crate::hook_settings::build_settings`].
@@ -548,6 +563,10 @@ pub mod builtins {
             vec![("HOMEBREW_NO_AUTO_UPDATE".to_string(), "1".to_string())]
         }
 
+        fn update_channel(&self) -> Option<crate::update::UpdateChannel> {
+            Some(crate::update::codex_channel())
+        }
+
         /// Codex Code's three observable states. Delegates to the pure
         /// [`crate::detect::codex_state`] — its live `• Working
         /// (… esc to interrupt)` status line (`Working`), its approval /
@@ -603,6 +622,10 @@ pub mod builtins {
         }
         fn spawn(&self, _ctx: &SpawnCtx) -> Vec<String> {
             vec!["cursor-agent".into()]
+        }
+
+        fn update_channel(&self) -> Option<crate::update::UpdateChannel> {
+            Some(crate::update::cursor_channel())
         }
 
         /// Cursor uses the bare yes/no prompt family — no custom
@@ -715,6 +738,21 @@ mod tests {
         };
         assert_eq!(agent.llm_provider(), None);
         assert_eq!(agent.structured_protocol(), None);
+    }
+
+    #[test]
+    fn builtins_advertise_update_channels_generic_opts_out() {
+        assert!(Claude.update_channel().is_some());
+        assert!(super::builtins::Codex.update_channel().is_some());
+        assert!(super::builtins::Cursor.update_channel().is_some());
+        let generic = super::builtins::GenericCli {
+            id: "custom",
+            display_name: "Custom",
+            spawn_cmd: vec!["custom".into()],
+            resume_cmd: None,
+            asking_patterns: vec![],
+        };
+        assert!(generic.update_channel().is_none());
     }
 
     #[test]

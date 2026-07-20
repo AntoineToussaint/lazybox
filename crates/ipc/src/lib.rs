@@ -49,7 +49,7 @@ pub const PROTOCOL_MAGIC: [u8; 4] = *b"LZBX";
 /// order, so adding, removing, or reordering a variant or field makes
 /// an old peer silently misread every subsequent frame. The handshake
 /// turns that garbage into a clear "restart the daemon" error.
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 
 /// This binary's build identity: the workspace version plus the git
 /// short SHA captured at compile time (`build.rs`). Two binaries built
@@ -917,6 +917,17 @@ pub enum Command {
     KeepMergedWorkspace {
         session_key: SessionKey,
     },
+    /// Re-run the out-of-band agent-CLI version check now and report
+    /// via `Event::AgentCliUpdatesChecked` (with `manual: true`).
+    /// Appended last; see `KeepMergedWorkspace`.
+    CheckAgentCliUpdates,
+    /// Update every enabled agent CLI through its lazybox-managed
+    /// channel — the sanctioned replacement for the in-session
+    /// self-updaters lazybox suppresses at spawn. Runs detached from
+    /// any session PTY; each agent's outcome arrives as an
+    /// `Event::AgentCliUpdateFinished`. Appended last; see
+    /// `KeepMergedWorkspace`.
+    UpdateAgentClis,
 }
 
 /// The terminal state a removable workspace's primary task reached,
@@ -1410,6 +1421,45 @@ pub enum Event {
         command: String,
         message: String,
     },
+    /// Result of an out-of-band agent-CLI version check (scheduled, or
+    /// `Command::CheckAgentCliUpdates`). One status per enabled agent
+    /// that advertises an update channel. `manual` distinguishes a
+    /// user-triggered check — always worth a footer summary — from the
+    /// scheduled sweep, which clients only surface when something is
+    /// available or failed. Appended last; see `KeepMergedWorkspace`.
+    AgentCliUpdatesChecked {
+        statuses: Vec<AgentCliUpdateStatus>,
+        manual: bool,
+    },
+    /// One agent's lazybox-managed CLI update finished. `message`
+    /// carries the actionable failure detail when `ok` is false.
+    /// Appended last; see `KeepMergedWorkspace`.
+    AgentCliUpdateFinished {
+        agent_id: String,
+        display_name: String,
+        ok: bool,
+        installed_before: Option<String>,
+        installed_after: Option<String>,
+        message: String,
+    },
+}
+
+/// Installed-vs-latest reading for one agent CLI, produced by the
+/// daemon's out-of-band update check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCliUpdateStatus {
+    pub agent_id: String,
+    pub display_name: String,
+    /// Parsed installed version, `None` when the CLI is missing or its
+    /// version command failed (see `error`).
+    pub installed: Option<String>,
+    /// Latest released version, `None` when the agent has no queryable
+    /// registry or the lookup failed.
+    pub latest: Option<String>,
+    /// `latest` is known and strictly newer than `installed`.
+    pub update_available: bool,
+    /// Human-readable failure detail from either probe.
+    pub error: Option<String>,
 }
 
 /// Severity classification for `Event::ProviderError`. The TUI uses

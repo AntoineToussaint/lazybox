@@ -926,6 +926,7 @@ impl Server {
                         lazybox_ipc::Command::CleanWorktrees => "CleanWorktrees",
                         lazybox_ipc::Command::InspectWorktrees => "InspectWorktrees",
                         lazybox_ipc::Command::DeleteOrphanedWorktree { .. } => "DeleteOrphanedWorktree",
+                        lazybox_ipc::Command::FetchScrollback { .. } => "FetchScrollback",
                         lazybox_ipc::Command::CheckAgentCliUpdates => "CheckAgentCliUpdates",
                         lazybox_ipc::Command::UpdateAgentClis => "UpdateAgentClis",
                         lazybox_ipc::Command::Shutdown => "Shutdown",
@@ -1343,6 +1344,9 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::Close { terminal_id } => {
             spawn_handler::handle_close(config, terminal_id).await;
+        }
+        lazybox_ipc::Command::FetchScrollback { terminal_id } => {
+            spawn_handler::handle_fetch_scrollback(config, tx, terminal_id).await;
         }
         lazybox_ipc::Command::IngestHook {
             terminal_id,

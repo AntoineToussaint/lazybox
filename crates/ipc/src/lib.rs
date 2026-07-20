@@ -49,7 +49,7 @@ pub const PROTOCOL_MAGIC: [u8; 4] = *b"LZBX";
 /// order, so adding, removing, or reordering a variant or field makes
 /// an old peer silently misread every subsequent frame. The handshake
 /// turns that garbage into a clear "restart the daemon" error.
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 
 /// This binary's build identity: the workspace version plus the git
 /// short SHA captured at compile time (`build.rs`). Two binaries built
@@ -917,9 +917,27 @@ pub enum Command {
     KeepMergedWorkspace {
         session_key: SessionKey,
     },
+    /// Ask the daemon for the terminal's deep scrollback, rebuilt from
+    /// the backend's own history (tmux `capture-pane`) rather than the
+    /// in-memory replay ring. Sent when the user scrolls a live
+    /// terminal up into local scrollback: a full-screen agent's
+    /// in-place redraws leave almost nothing in the client's
+    /// libghostty scrollback, while tmux has been retaining
+    /// `history-limit` lines the whole time — the same history the
+    /// restart/reattach path already seeds from. The daemon replies on
+    /// this connection with [`Event::TerminalScrollback`]; backends
+    /// without a history source (raw PTY) reply nothing.
+    ///
+    /// Appended last: bincode identifies variants by ordinal, so this
+    /// position (with the accompanying `PROTOCOL_VERSION` bump) keeps
+    /// the change mechanical.
+    FetchScrollback {
+        terminal_id: TerminalId,
+    },
     /// Re-run the out-of-band agent-CLI version check now and report
     /// via `Event::AgentCliUpdatesChecked` (with `manual: true`).
-    /// Appended last; see `KeepMergedWorkspace`.
+    /// Appended last — after `FetchScrollback`, which shipped at
+    /// protocol 12; see `KeepMergedWorkspace`.
     CheckAgentCliUpdates,
     /// Update every enabled agent CLI through its lazybox-managed
     /// channel — the sanctioned replacement for the in-session
@@ -1421,12 +1439,32 @@ pub enum Event {
         command: String,
         message: String,
     },
+    /// Reply to [`Command::FetchScrollback`]: the terminal's history as
+    /// the backend retains it (tmux `capture-pane -e -S -<limit>`,
+    /// normalized like the restart-recovery seed). Unlike
+    /// [`Event::TerminalResync`] — whose `replay` is the raw ring
+    /// stream and therefore carries the inner program's escape
+    /// sequences — this payload is content-only: the consumer re-feeds
+    /// it for DEEP scrollback but must preserve terminal modes (mouse
+    /// tracking, DECCKM, …) across the rebuild itself, because a
+    /// capture never re-asserts them. `seq` is the ring's high-water
+    /// mark at capture time; live chunks at or below it are covered by
+    /// the capture.
+    ///
+    /// Appended last (bincode ordinal compatibility, see
+    /// `PROTOCOL_VERSION`).
+    TerminalScrollback {
+        terminal_id: TerminalId,
+        replay: Vec<u8>,
+        seq: u64,
+    },
     /// Result of an out-of-band agent-CLI version check (scheduled, or
     /// `Command::CheckAgentCliUpdates`). One status per enabled agent
     /// that advertises an update channel. `manual` distinguishes a
     /// user-triggered check — always worth a footer summary — from the
     /// scheduled sweep, which clients only surface when something is
-    /// available or failed. Appended last; see `KeepMergedWorkspace`.
+    /// available or failed. Appended last — after `TerminalScrollback`,
+    /// which shipped at protocol 12; see `KeepMergedWorkspace`.
     AgentCliUpdatesChecked {
         statuses: Vec<AgentCliUpdateStatus>,
         manual: bool,

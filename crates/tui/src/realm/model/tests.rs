@@ -4550,10 +4550,16 @@ mod wheel_routing_tests {
         m.redraw = false;
         m.handle_mouse(wheel_up_at(bottom.x + 2, bottom.y + 2));
 
-        assert!(
-            server.rx.try_recv().is_err(),
-            "local scrollback path must not send any IPC command"
-        );
+        // The viewport move is in-process; the only allowed daemon
+        // traffic is the first-scroll deep-scrollback fetch (#393) —
+        // never a Write, which would leak the wheel into the inner
+        // program.
+        while let Ok(cmd) = server.rx.try_recv() {
+            assert!(
+                matches!(cmd, lazybox_ipc::Command::FetchScrollback { .. }),
+                "local scrollback path must not send PTY traffic: {cmd:?}"
+            );
+        }
         assert!(m.redraw, "local scroll repaints the viewport");
     }
 
@@ -4727,12 +4733,15 @@ mod wheel_routing_tests {
             bottom_offset - 3,
             "wheel must scroll the pane scrollback, not forward to the app",
         );
-        // …and nothing was written to the daemon — this is a pure
-        // in-process scroll, no SGR report leaked to the inner program.
-        assert!(
-            server.rx.try_recv().is_err(),
-            "a primary-screen wheel must not forward an SGR report",
-        );
+        // …and no SGR report leaked to the inner program — the only
+        // allowed daemon traffic is the first-scroll deep-scrollback
+        // fetch (#393), which carries no PTY bytes.
+        while let Ok(cmd) = server.rx.try_recv() {
+            assert!(
+                matches!(cmd, lazybox_ipc::Command::FetchScrollback { .. }),
+                "a primary-screen wheel must not forward an SGR report: {cmd:?}",
+            );
+        }
     }
 
     /// #360 (chronic regression): a brand-new agent — a
@@ -4770,10 +4779,15 @@ mod wheel_routing_tests {
         );
         while server.rx.try_recv().is_ok() {}
         m.handle_mouse(wheel_up_at(bottom.x + 6, bottom.y + 8));
-        assert!(
-            server.rx.try_recv().is_err(),
-            "a fresh primary-screen wheel must not forward an SGR report",
-        );
+        // The first upward wheel may carry the deep-scrollback fetch
+        // (#393) — content-free daemon traffic — but never an SGR
+        // report into the app.
+        while let Ok(cmd) = server.rx.try_recv() {
+            assert!(
+                matches!(cmd, lazybox_ipc::Command::FetchScrollback { .. }),
+                "a fresh primary-screen wheel must not forward an SGR report: {cmd:?}",
+            );
+        }
 
         // Now the agent spills a screenful-plus of history (still on the
         // primary screen, still mouse-tracking). The wheel must move the
@@ -4802,10 +4816,12 @@ mod wheel_routing_tests {
             bottom_offset - 3,
             "the wheel must move the fresh agent's viewport into scrollback",
         );
-        assert!(
-            server.rx.try_recv().is_err(),
-            "the local scroll must not forward an SGR report",
-        );
+        while let Ok(cmd) = server.rx.try_recv() {
+            assert!(
+                matches!(cmd, lazybox_ipc::Command::FetchScrollback { .. }),
+                "the local scroll must not forward an SGR report: {cmd:?}",
+            );
+        }
     }
 
     /// An alt-screen app that never enabled mouse reporting (less, man,
@@ -5130,10 +5146,20 @@ mod leader_tile_tests {
             "wheeling over the unfocused left tile must not scroll the focused right tile",
         );
         assert!(m.redraw, "scrolling the hovered tile repaints");
-        assert!(
-            server.rx.try_recv().is_err(),
-            "a local scroll of the hovered tile sends no IPC",
-        );
+        // The only allowed IPC is the hovered tile's first-scroll
+        // deep-scrollback fetch (#393) — no Write may leak, and the
+        // fetch must target the HOVERED terminal, not the focused one.
+        while let Ok(cmd) = server.rx.try_recv() {
+            assert!(
+                matches!(
+                    cmd,
+                    lazybox_ipc::Command::FetchScrollback {
+                        terminal_id: TerminalId(1)
+                    }
+                ),
+                "a local scroll of the hovered tile sends no PTY traffic: {cmd:?}",
+            );
+        }
     }
 
     /// #362: a wheel over a non-focused tile running a mouse-tracking

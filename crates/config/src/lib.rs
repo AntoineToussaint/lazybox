@@ -320,8 +320,13 @@ pub struct UiSection {
     /// non-systemd Linux gets a logged warning and no inhibition)
     /// for exactly as long as ≥1 agent terminal is `Working`, and
     /// releases it the moment everything goes idle — the box never
-    /// stays pinned awake just because lazybox is open. Defaults to
-    /// `false`: sleep behavior is unchanged unless opted in.
+    /// stays pinned awake just because lazybox is open. "Working"
+    /// means actively computing: an agent parked at a permission
+    /// prompt or resting after its turn lets the machine sleep
+    /// normally. The daemon re-reads this flag on every agent
+    /// transition, so editing it takes effect without a restart.
+    /// Defaults to `false`: sleep behavior is unchanged unless
+    /// opted in.
     #[serde(default)]
     pub keep_awake: bool,
 }

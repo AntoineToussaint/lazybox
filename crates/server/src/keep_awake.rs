@@ -8,37 +8,75 @@
 //! (`caffeinate -w` / `tail --pid`), so even a SIGKILL'd daemon
 //! cannot leak the inhibition past its own lifetime.
 //!
+//! The `ui.keep_awake` flag is re-read from YAML on every recompute
+//! (mirroring the polling loop's live re-read), so toggling it in
+//! config takes effect on the next agent transition without a daemon
+//! restart.
+//!
 //! Linux without systemd: spawning `systemd-inhibit` fails, a warning
-//! is logged, and sleep behavior is unchanged — there is no portable
-//! fallback worth shipping.
+//! is logged (once), and sleep behavior is unchanged — there is no
+//! portable fallback worth shipping.
 
-use lazybox_ipc::{AgentState, Event};
+use std::collections::HashMap;
 use std::process::{Child, Command, Stdio};
-use tokio::sync::broadcast;
+use std::sync::Arc;
+
+use lazybox_ipc::{AgentState, Event, TerminalId};
+use tokio::sync::{Mutex, broadcast};
 
 use crate::ServerConfig;
 
-/// Spawn the keep-awake watcher. No-op (`None`) unless the user opted
-/// in via `ui.keep_awake` — and on platforms with no known inhibitor.
-pub fn spawn(config: ServerConfig, enabled: bool) -> Option<tokio::task::JoinHandle<()>> {
-    if !enabled {
-        return None;
-    }
+/// Spawn the keep-awake watcher. `None` only on platforms with no
+/// known inhibitor — the task itself is cheap and re-reads
+/// `ui.keep_awake` live, so it runs even for users who have not (yet)
+/// opted in.
+pub fn spawn(config: &ServerConfig) -> Option<tokio::task::JoinHandle<()>> {
     let Some(argv) = inhibit_argv(std::process::id()) else {
-        tracing::warn!("ui.keep_awake is set but no sleep inhibitor exists for this platform");
+        if keep_awake_enabled() {
+            tracing::warn!("ui.keep_awake is set but no sleep inhibitor exists for this platform");
+        }
         return None;
     };
-    Some(tokio::spawn(run(config, argv)))
+    // Subscribe here, not inside the task: events broadcast between
+    // this call returning and the task's first poll must queue, not
+    // vanish.
+    let rx = config.bus.subscribe();
+    let states = config.agent_states.clone();
+    Some(tokio::spawn(async move {
+        run(rx, states, argv, keep_awake_enabled).await;
+    }))
 }
 
-/// Watch the event bus and mirror "any agent `Working`" into the
-/// inhibitor. Every `AgentState` transition passes over the bus, so
-/// recomputing from the authoritative `agent_states` map on each one
+/// Current `ui.keep_awake` from YAML; an unreadable config means off.
+fn keep_awake_enabled() -> bool {
+    lazybox_config::Config::load()
+        .map(|c| c.ui.keep_awake)
+        .unwrap_or(false)
+}
+
+/// Watch the event bus and mirror "enabled AND any agent `Working`"
+/// into the inhibitor. Every `AgentState` transition passes over the
+/// bus, so recomputing from the authoritative states map on each one
 /// (plus `TerminalExited` for teardown sweeps, plus lag recovery)
 /// converges even if individual events are missed.
-async fn run(config: ServerConfig, argv: Vec<String>) {
-    let mut rx = config.bus.subscribe();
+///
+/// Returns the inhibitor (for tests) when the bus closes. In
+/// production the bus never closes — the daemon exits by dropping the
+/// runtime, which drops this task's future mid-`recv` and releases a
+/// held inhibitor via `Inhibitor::drop`; a hard kill is covered by the
+/// pid tether in [`inhibit_argv`].
+async fn run(
+    mut rx: broadcast::Receiver<Event>,
+    states: Arc<Mutex<HashMap<TerminalId, AgentState>>>,
+    argv: Vec<String>,
+    enabled: impl Fn() -> bool,
+) -> Inhibitor {
     let mut inhibitor = Inhibitor::new(argv);
+    // Prime before the first event: a session recovered mid-`Working`
+    // broadcasts its state once, possibly before this task subscribed,
+    // and the state owner's dedup means no further event may arrive
+    // for the rest of that run.
+    inhibitor.set_active(enabled() && any_working(&states).await);
     loop {
         match rx.recv().await {
             Ok(Event::AgentState { .. } | Event::TerminalExited { .. })
@@ -46,15 +84,17 @@ async fn run(config: ServerConfig, argv: Vec<String>) {
             Ok(_) => continue,
             Err(broadcast::error::RecvError::Closed) => break,
         }
-        let active = config
-            .agent_states
-            .lock()
-            .await
-            .values()
-            .any(|s| matches!(s, AgentState::Working));
-        inhibitor.set_active(active);
+        inhibitor.set_active(enabled() && any_working(&states).await);
     }
-    // Bus closed = daemon shutdown; Drop releases a held inhibitor.
+    inhibitor
+}
+
+async fn any_working(states: &Mutex<HashMap<TerminalId, AgentState>>) -> bool {
+    states
+        .lock()
+        .await
+        .values()
+        .any(|s| matches!(s, AgentState::Working))
 }
 
 /// The platform's inhibitor command line, or `None` when the platform
@@ -105,11 +145,19 @@ fn inhibit_argv(daemon_pid: u32) -> Option<Vec<String>> {
 struct Inhibitor {
     argv: Vec<String>,
     child: Option<Child>,
+    /// Spawn failures repeat on every `Working` transition (e.g.
+    /// non-systemd Linux); warn on the first one per healthy spell and
+    /// demote the rest to debug so a long session isn't log spam.
+    spawn_warned: bool,
 }
 
 impl Inhibitor {
     fn new(argv: Vec<String>) -> Self {
-        Self { argv, child: None }
+        Self {
+            argv,
+            child: None,
+            spawn_warned: false,
+        }
     }
 
     #[cfg(test)]
@@ -129,8 +177,8 @@ impl Inhibitor {
         if let Some(child) = &mut self.child {
             match child.try_wait() {
                 Ok(None) => return,
-                // Died underneath us (e.g. binary missing at first,
-                // installed since) — reap and fall through to respawn.
+                // Died underneath us (e.g. logind unavailable) — reap
+                // and fall through to respawn.
                 _ => self.child = None,
             }
         }
@@ -150,9 +198,14 @@ impl Inhibitor {
             Ok(child) => {
                 tracing::info!(pid = child.id(), cmd = %self.argv[0], "keep-awake: holding sleep inhibitor");
                 self.child = Some(child);
+                self.spawn_warned = false;
+            }
+            Err(e) if !self.spawn_warned => {
+                self.spawn_warned = true;
+                tracing::warn!("keep-awake: failed to spawn {}: {e}", self.argv[0]);
             }
             Err(e) => {
-                tracing::warn!("keep-awake: failed to spawn {}: {e}", self.argv[0]);
+                tracing::debug!("keep-awake: failed to spawn {}: {e}", self.argv[0]);
             }
         }
     }
@@ -183,10 +236,21 @@ impl Drop for Inhibitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn alive(pid: u32) -> bool {
         // SAFETY: signal 0 probes existence without sending anything.
         unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+
+    fn sleep_argv() -> Vec<String> {
+        vec!["sleep".into(), "300".into()]
+    }
+
+    fn working_states() -> Arc<Mutex<HashMap<TerminalId, AgentState>>> {
+        let mut map = HashMap::new();
+        map.insert(TerminalId(1), AgentState::Working);
+        Arc::new(Mutex::new(map))
     }
 
     #[cfg(target_os = "macos")]
@@ -206,12 +270,56 @@ mod tests {
         assert!(argv.contains(&"4242".to_string()));
     }
 
+    /// A `Working` agent whose state landed in the map before the
+    /// watcher subscribed (session recovery) must be picked up by the
+    /// priming pass — its one broadcast is gone and the state owner's
+    /// dedup means no further event may ever arrive.
+    #[tokio::test]
+    async fn primes_from_state_recovered_before_subscribe() {
+        let (tx, rx) = broadcast::channel(8);
+        drop(tx);
+        let inh = run(rx, working_states(), sleep_argv(), || true).await;
+        assert!(inh.holding(), "priming pass must acquire without any event");
+    }
+
+    /// `ui.keep_awake` is re-read on every recompute: flipping it off
+    /// mid-hold releases on the next event, without a restart.
+    #[tokio::test]
+    async fn toggling_the_flag_off_releases_on_the_next_event() {
+        let (tx, rx) = broadcast::channel(8);
+        tx.send(Event::AgentState {
+            session_key: "ws:1".into(),
+            terminal_id: TerminalId(1),
+            state: AgentState::Working,
+        })
+        .unwrap();
+        drop(tx);
+        // First read (priming) sees the flag on; the second (the
+        // queued event) sees it off.
+        let reads = AtomicUsize::new(0);
+        let inh = run(rx, working_states(), sleep_argv(), move || {
+            reads.fetch_add(1, Ordering::SeqCst) == 0
+        })
+        .await;
+        assert!(!inh.holding(), "toggle-off must release the inhibitor");
+    }
+
+    /// With the flag off nothing is ever spawned, no matter how busy
+    /// the agents are.
+    #[tokio::test]
+    async fn disabled_flag_never_holds() {
+        let (tx, rx) = broadcast::channel(8);
+        drop(tx);
+        let inh = run(rx, working_states(), sleep_argv(), || false).await;
+        assert!(!inh.holding());
+    }
+
     /// The full hold/release cycle against a real child process:
     /// acquire spawns it, a second acquire is a no-op on the same
     /// child, release kills and reaps it.
     #[test]
     fn inhibitor_holds_and_releases_a_child() {
-        let mut inh = Inhibitor::new(vec!["sleep".into(), "300".into()]);
+        let mut inh = Inhibitor::new(sleep_argv());
         assert!(!inh.holding());
 
         inh.set_active(true);
@@ -245,18 +353,21 @@ mod tests {
     /// child — the assertion can't leak past the watcher task.
     #[test]
     fn drop_releases_a_held_child() {
-        let mut inh = Inhibitor::new(vec!["sleep".into(), "300".into()]);
+        let mut inh = Inhibitor::new(sleep_argv());
         inh.set_active(true);
         let pid = inh.child.as_ref().expect("spawned").id();
         drop(inh);
         assert!(!alive(pid), "drop must kill the inhibitor child");
     }
 
-    /// A missing inhibitor binary degrades to a warning, not a panic,
-    /// and the inhibitor simply doesn't hold.
+    /// A missing inhibitor binary degrades to a warning, not a panic;
+    /// repeated failures only warn once per healthy spell.
     #[test]
-    fn missing_binary_is_not_fatal() {
+    fn missing_binary_is_not_fatal_and_warns_once() {
         let mut inh = Inhibitor::new(vec!["lazybox-no-such-inhibitor".into()]);
+        inh.set_active(true);
+        assert!(!inh.holding());
+        assert!(inh.spawn_warned);
         inh.set_active(true);
         assert!(!inh.holding());
     }

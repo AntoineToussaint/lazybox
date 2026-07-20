@@ -467,10 +467,12 @@ pub struct Sidebar {
     /// can't masquerade as a live regression. Set once at startup by
     /// [`crate::build_guard`]; `None` is the current-build common case.
     outdated_commits_behind: Option<u32>,
-    /// Mirror of `ui.keep_awake`. When set, the header paints a small
-    /// "awake" badge while any agent is `Working` — the same condition
-    /// under which the daemon holds its OS sleep inhibitor — so the
-    /// user can see the machine is being kept awake and why.
+    /// Mirror of `ui.keep_awake` as loaded at startup. When set, the
+    /// header paints a small "awake" badge while any agent is
+    /// `Working` — the same condition under which the daemon holds
+    /// its OS sleep inhibitor — so the user can see the machine is
+    /// being kept awake and why. The daemon re-reads the flag live;
+    /// this client-side mirror refreshes on restart.
     keep_awake: bool,
 }
 

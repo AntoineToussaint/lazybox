@@ -2351,3 +2351,52 @@ mod outdated_build_tests {
         assert!(!header_row(&mut sb).contains("behind"));
     }
 }
+
+#[cfg(test)]
+mod keep_awake_badge_tests {
+    use super::super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn header_row(sb: &mut Sidebar) -> String {
+        let backend = TestBackend::new(80, 20);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| sb.render(Rect::new(0, 0, 80, 20), f, true))
+            .unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..80).map(|x| buf[(x, 0)].symbol()).collect::<String>()
+    }
+
+    fn working_agent(sb: &mut Sidebar) {
+        let ws: SessionKey = (&lazybox_core::WorkspaceKey::new("github:o/r#1")).into();
+        sb.agents.insert(ws, lazybox_ipc::AgentState::Working);
+    }
+
+    /// The badge paints exactly while the daemon's inhibitor holds:
+    /// `ui.keep_awake` on AND ≥1 agent working. Either side alone
+    /// paints nothing.
+    #[test]
+    fn awake_badge_requires_option_and_a_working_agent() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        working_agent(&mut sb);
+        assert!(!header_row(&mut sb).contains("awake"));
+
+        sb.set_keep_awake(true);
+        assert!(header_row(&mut sb).contains("awake"));
+    }
+
+    #[test]
+    fn awake_badge_clears_when_agents_go_idle() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.set_keep_awake(true);
+        assert!(!header_row(&mut sb).contains("awake"));
+
+        working_agent(&mut sb);
+        assert!(header_row(&mut sb).contains("awake"));
+
+        for state in sb.agents.values_mut() {
+            *state = lazybox_ipc::AgentState::Done;
+        }
+        assert!(!header_row(&mut sb).contains("awake"));
+    }
+}

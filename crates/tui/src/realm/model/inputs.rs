@@ -512,7 +512,12 @@ showing keybinding search only",
             self.pop_modal();
             if let (Some(agent), Some(alias)) = (agent, alias) {
                 match lazybox_config::Config::save_with(|c| {
-                    c.agents.entry(agent.clone()).or_default().models.default = alias.clone();
+                    // Unpinning an agent with no YAML block is already
+                    // a no-op — skip the insert so a dead `agents.<id>`
+                    // stanza isn't serialized.
+                    if alias.is_some() || c.agents.contains_key(&agent) {
+                        c.agents.entry(agent.clone()).or_default().models.default = alias.clone();
+                    }
                 }) {
                     Ok(()) => {
                         // Mirror the write into the in-memory menu so

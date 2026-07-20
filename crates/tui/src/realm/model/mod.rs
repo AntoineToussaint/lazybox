@@ -1876,9 +1876,13 @@ impl<T: TerminalAdapter> Model<T> {
 
     /// Update the default agent both panes resolve `w` against, live —
     /// no restart. Mirrors the startup wiring in `apply_sidebar_config`.
+    /// Also rebuilds the action catalog: the `w S` / `a S` tier chords
+    /// key off the default agent's menu, so they must re-key to the new
+    /// agent's tiers (or disappear when it declares none).
     pub(crate) fn set_default_agent(&mut self, agent: &str) {
         self.sidebar.set_default_agent(agent);
         self.right.set_default_agent(agent);
+        self.rebuild_catalog();
     }
 
     /// Land the cursor on `key` and follow it with the panes: show its
@@ -2854,30 +2858,30 @@ impl<T: TerminalAdapter> Model<T> {
         }
         actions.push(SettingsAction::EditProviders);
         actions.push(SettingsAction::EditAgents);
+        // One fresh load feeds every config-backed row below, so even a
+        // hand-edited YAML shows its current values without a restart.
+        let cfg = lazybox_config::Config::load().unwrap_or_default();
         let default_agent = self.sidebar.default_agent().to_string();
-        let default_tier = self
-            .agent_models
-            .get(&default_agent)
-            .and_then(|m| m.default.as_deref().and_then(|a| m.tier(a)))
+        let models = cfg.agent_models(&default_agent);
+        let default_tier = models
+            .default
+            .as_deref()
+            .and_then(|a| models.tier(a))
             .map(|t| t.label.clone());
         actions.push(SettingsAction::EditDefaultAgent {
             current: default_agent,
             tier: default_tier,
         });
-        let skip_permissions = lazybox_config::Config::load()
-            .map(|c| c.agent.skip_permissions)
-            .unwrap_or(false);
         actions.push(SettingsAction::ToggleSkipPermissions {
-            enabled: skip_permissions,
+            enabled: cfg.agent.skip_permissions,
         });
         actions.push(SettingsAction::EditSnippets);
         actions.push(SettingsAction::EditTheme {
             current: crate::theme::current().name.to_string(),
         });
-        let gateway_set = lazybox_config::Config::load()
-            .map(|c| c.agent.gateway_url().is_some())
-            .unwrap_or(false);
-        actions.push(SettingsAction::EditLlmGateway { set: gateway_set });
+        actions.push(SettingsAction::EditLlmGateway {
+            set: cfg.agent.gateway_url().is_some(),
+        });
         actions.push(SettingsAction::CheckAgentUpdates);
         actions.push(SettingsAction::UpdateAgentClis);
         actions.push(SettingsAction::InspectWorktrees);

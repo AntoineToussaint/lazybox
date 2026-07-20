@@ -2,6 +2,14 @@
 // crate-wide blocking-call ban in clippy.toml targets the run loop.
 #![allow(clippy::disallowed_methods)]
 
+/// Serializes tests that mutate the process-global `LAZYBOX_HOME` so a
+/// parallel test can't observe another's temp home (or the real one).
+/// Shared across every test module in this binary — a per-module lock
+/// would let two modules' mutators race. Held for the whole body of
+/// each such test.
+#[cfg(test)]
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod effects_tests {
     //! Handler effect-contract tests.
@@ -3177,6 +3185,149 @@ mod modal_input_responsiveness_tests {
         let mut m = build_model();
         m.mount_default_model_picker("codex");
         assert!(m.top_modal().is_none(), "no tier menu → no second step");
+    }
+
+    /// End-to-end settings flow on a temp `LAZYBOX_HOME`: picking the
+    /// default agent persists `setup.default_agent` and chains into the
+    /// tier picker; picking a tier persists
+    /// `agents.<id>.models.default` and mirrors it into the in-memory
+    /// menu so the Settings badge and the next picker open reflect it
+    /// without a restart.
+    #[test]
+    fn default_agent_pick_chains_into_tier_pick_and_persists_both() {
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home =
+            std::env::temp_dir().join(format!("lazybox-default-tier-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator in
+        // this binary, so this single-writer mutation can't race.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        let mut m = build_model();
+        m.set_agent_models(
+            [(
+                "claude".to_string(),
+                lazybox_core::AgentModels::builtin("claude").unwrap(),
+            )]
+            .into(),
+        );
+        m.mount_default_agent_picker();
+        let claude = m
+            .default_agent_choices
+            .iter()
+            .position(|id| id == "claude")
+            .expect("claude is an enabled agent");
+        let _ = m.handle_choice_picked(vec![claude]);
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::DefaultModelPicker),
+            "agent pick chains into the tier picker",
+        );
+
+        let opus = m
+            .default_model_choices
+            .iter()
+            .position(|a| a.as_deref() == Some("L"))
+            .expect("Opus row offered");
+        let _ = m.handle_choice_picked(vec![opus]);
+        assert!(m.top_modal().is_none(), "tier pick ends the flow");
+
+        let cfg = lazybox_config::Config::load_from(&home.join("config.yaml")).expect("config");
+        assert_eq!(cfg.setup.default_agent.as_deref(), Some("claude"));
+        assert_eq!(cfg.agent_models("claude").default.as_deref(), Some("L"));
+        assert_eq!(
+            m.agent_models["claude"].default.as_deref(),
+            Some("L"),
+            "mirrored into the in-memory menu",
+        );
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Unpinning ("Agent default") for an agent with no YAML block is
+    /// already a no-op — no dead `agents.<id>` stanza is serialized.
+    #[test]
+    fn unpinning_an_unconfigured_agent_writes_no_agents_stanza() {
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("lazybox-unpin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator in
+        // this binary, so this single-writer mutation can't race.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        let mut m = build_model();
+        m.set_agent_models(
+            [(
+                "claude".to_string(),
+                lazybox_core::AgentModels::builtin("claude").unwrap(),
+            )]
+            .into(),
+        );
+        m.mount_default_model_picker("claude");
+        let _ = m.handle_choice_picked(vec![0]);
+
+        let cfg = lazybox_config::Config::load_from(&home.join("config.yaml")).expect("config");
+        assert!(
+            !cfg.agents.contains_key("claude"),
+            "no dead stanza for an unpin that changed nothing",
+        );
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Switching the default agent re-keys the `w S` / `a S` tier
+    /// chords to the new agent's menu live — the catalog must not keep
+    /// serving the previous agent's tier labels until a restart.
+    #[test]
+    fn switching_default_agent_rekeys_tier_chords_live() {
+        use lazybox_tui_core::action::Param;
+        let mut m = build_model();
+        m.set_agent_models(
+            [
+                (
+                    "claude".to_string(),
+                    lazybox_core::AgentModels::builtin("claude").unwrap(),
+                ),
+                (
+                    "codex".to_string(),
+                    lazybox_core::AgentModels {
+                        tiers: vec![lazybox_core::ModelTier {
+                            alias: "M".into(),
+                            label: "GPT-5".into(),
+                            args: vec![],
+                        }],
+                        ..Default::default()
+                    },
+                ),
+            ]
+            .into(),
+        );
+        let tier_labels = |m: &Model<tuirealm::terminal::TestTerminalAdapter>| -> Vec<String> {
+            m.catalog()
+                .iter()
+                .filter(|e| matches!(&e.param, Some(Param::Tier(_))))
+                .map(|e| e.label.to_string())
+                .collect()
+        };
+        assert!(
+            tier_labels(&m).contains(&"Opus".to_string()),
+            "claude (the startup default) drives the chords",
+        );
+
+        m.set_default_agent("codex");
+        let labels = tier_labels(&m);
+        assert!(
+            labels.contains(&"GPT-5".to_string()),
+            "codex's menu drives the chords after the switch",
+        );
+        assert!(
+            !labels.contains(&"Opus".to_string()),
+            "claude's rows are gone",
+        );
     }
 
     /// `set_default_agent` updates the agent both panes resolve `w`
@@ -8678,10 +8829,7 @@ mod help_ask_tests {
 
     // ── Ask Lazybox actions (#353) ──────────────────────────────────
 
-    /// Serializes tests that mutate the process-global `LAZYBOX_HOME`
-    /// so a parallel test can't observe another's temp home (or the
-    /// real one). Held for the whole body of each such test.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use super::ENV_LOCK;
 
     /// A finished answer carrying an `add_snippet` block.
     fn add_snippet_answer(key: &str) -> String {

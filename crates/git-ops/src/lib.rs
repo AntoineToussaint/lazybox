@@ -1662,11 +1662,12 @@ fn explain_promisor_failure(err: GitError) -> GitError {
 /// `\n`, progress-looking lines (`Receiving objects: 42% …`) are
 /// forwarded to `on_progress` throttled to ~10/s, and a short tail is
 /// kept for error reporting. Shares [`run_git`]'s generous wall-clock
-/// cap — transfers are slow by nature but must stay finite;
-/// `kill_on_drop` reaps a timed-out child. Callers hold the repo lock
-/// throughout, so this cap is also how long a hung transfer can stall
-/// every other operation on the same repo — adaptive/timeout tuning is
-/// issue #403's territory.
+/// cap — transfers are slow by nature but must stay finite — and
+/// [`exec_git_bounded`]'s process-group sweep, so a timed-out or
+/// cancelled transfer takes its ssh / remote helpers down with it.
+/// Callers hold the repo lock throughout, so the cap is also how long
+/// a hung transfer can stall every other operation on the same repo —
+/// adaptive/timeout tuning is issue #403's territory.
 async fn run_git_transfer(
     cwd: &Path,
     args: &[&str],
@@ -1679,13 +1680,22 @@ async fn run_git_transfer(
     const TAIL_LINES: usize = 8;
     let started = std::time::Instant::now();
     tracing::info!("git (in {}) {}", cwd.display(), args.join(" "));
-    let mut child = apply_git_env(Command::new("git").current_dir(cwd).args(args))
+    let mut cmd = Command::new("git");
+    cmd.current_dir(cwd);
+    apply_git_env(cmd.args(args))
         .envs(envs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()?;
+        .kill_on_drop(true);
+    // Same process-group discipline as `exec_git_bounded`: transfers
+    // are the invocations most likely to be sitting on a live ssh /
+    // remote helper when they time out or their future is dropped
+    // (Esc-cancel), and `kill_on_drop` alone orphans those helpers.
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let mut child = cmd.spawn()?;
+    let mut group = KillGroupOnDrop(child.id().map(|id| id as i32));
     let mut stderr = child
         .stderr
         .take()
@@ -1744,6 +1754,11 @@ async fn run_git_transfer(
     let elapsed = started.elapsed();
     match result {
         Ok((_, Ok(status))) if status.success() => {
+            // Disarm only on a clean exit — a non-zero or timed-out git
+            // may have left transport helpers behind, and sweeping the
+            // dead leader's group costs one syscall that can only reach
+            // processes this spawn created.
+            group.0 = None;
             tracing::info!(
                 "git (in {}) {} ok ({elapsed:?})",
                 cwd.display(),

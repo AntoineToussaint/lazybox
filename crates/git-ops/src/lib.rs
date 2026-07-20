@@ -311,6 +311,10 @@ impl WorktreeManager {
             tokio::fs::create_dir_all(parent).await?;
         }
         let partial = partial_clone_path(&bare_path);
+        // The URL a from-scratch attempt would use, captured before a
+        // resumed staging repo can substitute its own origin below —
+        // the escape hatch when that adopted origin turns out dead.
+        let fresh_start_url = url.clone();
         let mut resuming = false;
         if partial.exists() {
             // Resume when the staging dir is a usable repo: it records
@@ -346,7 +350,12 @@ impl WorktreeManager {
                 &[],
             )
             .await?;
-            run_git_in(&partial, &["remote", "add", "origin", &url]).await?;
+            // `config remote.origin.url` rather than `remote add`: the
+            // latter also writes a fetch refspec `git clone --bare`
+            // never had, silently diverging new cache entries from old
+            // ones (a plain `git fetch` in a worktree would start
+            // materializing remote-tracking refs for every branch).
+            run_git_in(&partial, &["config", "remote.origin.url", &url]).await?;
         }
         self.report(CheckoutPhase::Cloning);
         let auth = self.network_env().await;
@@ -356,7 +365,7 @@ impl WorktreeManager {
         // actually reads them. A server without filter support ignores
         // the flag (git warns and sends everything), so this degrades
         // to a full clone rather than failing.
-        run_git_transfer(
+        if let Err(e) = run_git_transfer(
             &partial,
             &[
                 "fetch",
@@ -368,7 +377,29 @@ impl WorktreeManager {
             &auth,
             Some(&progress),
         )
-        .await?;
+        .await
+        {
+            // Nothing else ever discards a resumable `.partial`, so a
+            // staging repo aimed at a remote a fresh attempt would not
+            // use must not survive its own failure — it would wedge
+            // every retry forever with no path back to the canonical
+            // URL. When the origins match, resume and restart are
+            // equivalent: keep the accumulated objects.
+            if resuming && url != fresh_start_url {
+                tracing::warn!(
+                    owner,
+                    repo,
+                    path = %partial.display(),
+                    adopted = %url,
+                    canonical = %fresh_start_url,
+                    "resumed clone failed against its adopted origin; \
+                     discarding the partial so the next attempt re-clones \
+                     from the canonical remote"
+                );
+                let _ = tokio::fs::remove_dir_all(&partial).await;
+            }
+            return Err(e);
+        }
         set_head_to_remote_default(&partial, &auth).await?;
         tokio::fs::rename(&partial, &bare_path).await?;
         Ok(bare_path)
@@ -431,7 +462,11 @@ impl WorktreeManager {
         // branch). Common reasons fetch can fail and that we tolerate:
         // remote branch was deleted post-merge, offline, auth issue.
         // In all cases the start_point lookup below falls back to the
-        // local ref. `fetch_origin_ref` logs a warning so the
+        // local ref. Note the fallback covers *refs* only: from a
+        // blobless clone the worktree add below still needs origin
+        // reachable to download file contents, so a fully offline
+        // provision only succeeds when the tree's blobs are already
+        // local (a legacy full clone, or a tree checked out before). `fetch_origin_ref` logs a warning so the
         // degradation isn't silent; a network/auth failure (as opposed
         // to a deleted remote branch) also surfaces in the provisioning
         // checklist via a `BaseRefStale` report (issue #320).
@@ -477,7 +512,8 @@ impl WorktreeManager {
             &auth,
             None,
         )
-        .await?;
+        .await
+        .map_err(explain_promisor_failure)?;
 
         // Record the upstream when we branched off the remote-tracking
         // ref. `git worktree add -B` doesn't set it, so without this
@@ -583,12 +619,16 @@ impl WorktreeManager {
         // worktree.
         //
         // Tolerate fetch failure (offline / auth): warn and proceed
-        // from whatever local ref we have. Per the issue's acceptance
-        // criteria, worktree creation must not block on the network — but
-        // a failed refresh is surfaced in the provisioning checklist via
-        // a `BaseRefStale` report so the "branched off latest main"
-        // guarantee degrading to "branched off a stale local ref" is
-        // visible, not buried in the log (issue #320).
+        // from whatever local ref we have, so a stale base never blocks
+        // branching (issue #35) — but a failed refresh is surfaced in
+        // the provisioning checklist via a `BaseRefStale` report so the
+        // "branched off latest main" guarantee degrading to "branched
+        // off a stale local ref" is visible, not buried in the log
+        // (issue #320). The tolerance covers *refs* only: from a
+        // blobless clone the worktree add below still needs origin
+        // reachable for file contents, so a fully offline provision
+        // only succeeds when the tree's blobs are already local (a
+        // legacy full clone, or a tree checked out before).
         self.report(CheckoutPhase::Fetching);
         let auth = self.network_env().await;
         match fetch_origin_ref(&bare_path, owner, repo, base_branch, &auth).await {
@@ -658,7 +698,8 @@ impl WorktreeManager {
             &auth,
             None,
         )
-        .await?;
+        .await
+        .map_err(explain_promisor_failure)?;
 
         let name = wt_path
             .file_name()
@@ -1504,6 +1545,29 @@ pub(crate) fn apply_git_env(cmd: &mut Command) -> &mut Command {
         .env_remove("GIT_COMMON_DIR")
 }
 
+/// A transfer-progress stderr line, as opposed to a ref listing,
+/// remote banner, or fatal error. Gates both the `on_progress` sink in
+/// [`run_git_transfer`] and the noise filter on its error tail.
+fn is_transfer_progress(line: &str) -> bool {
+    line.contains('%') || line.ends_with("done.")
+}
+
+/// A blobless clone materializes file contents through origin at
+/// checkout time, so `worktree add` can fail on a *network* problem
+/// even though every ref it needs is local. Reword git's opaque
+/// promisor error ("could not fetch <oid> from promisor remote") into
+/// the actual cause; anything else passes through untouched.
+fn explain_promisor_failure(err: GitError) -> GitError {
+    match err {
+        GitError::Command(msg) if msg.contains("promisor remote") => GitError::Command(format!(
+            "could not download file contents from origin — worktrees \
+                 from a blobless clone need the remote reachable to \
+                 populate files: {msg}"
+        )),
+        other => other,
+    }
+}
+
 /// Run a long, network-heavy git transfer (the initial clone fetch, a
 /// blob-materializing `worktree add`) with the same env hygiene as
 /// [`run_git`] but stderr streamed instead of buffered: git rewrites
@@ -1512,7 +1576,10 @@ pub(crate) fn apply_git_env(cmd: &mut Command) -> &mut Command {
 /// forwarded to `on_progress` throttled to ~10/s, and a short tail is
 /// kept for error reporting. Shares [`run_git`]'s generous wall-clock
 /// cap — transfers are slow by nature but must stay finite;
-/// `kill_on_drop` reaps a timed-out child.
+/// `kill_on_drop` reaps a timed-out child. Callers hold the repo lock
+/// throughout, so this cap is also how long a hung transfer can stall
+/// every other operation on the same repo — adaptive/timeout tuning is
+/// issue #403's territory.
 async fn run_git_transfer(
     cwd: &Path,
     args: &[&str],
@@ -1566,9 +1633,8 @@ async fn run_git_transfer(
                 push_tail(text.clone());
                 // Only transfer-progress lines reach the sink — ref
                 // listings and remote banners stay in the log tail.
-                let looks_like_progress = text.contains('%') || text.ends_with("done.");
                 if let Some(cb) = on_progress
-                    && looks_like_progress
+                    && is_transfer_progress(&text)
                     && last_emit.is_none_or(|t| t.elapsed() >= PROGRESS_MIN_INTERVAL)
                 {
                     last_emit = Some(std::time::Instant::now());
@@ -1599,7 +1665,20 @@ async fn run_git_transfer(
             Ok(())
         }
         Ok((tail, Ok(_))) => {
-            let stderr_tail = tail.into_iter().collect::<Vec<_>>().join("\n");
+            // Progress fragments in the tail bury the fatal line —
+            // drop them from the surfaced error unless they're all
+            // there is.
+            let causes: Vec<String> = tail
+                .iter()
+                .filter(|l| !is_transfer_progress(l))
+                .cloned()
+                .collect();
+            let lines = if causes.is_empty() {
+                tail.into_iter().collect()
+            } else {
+                causes
+            };
+            let stderr_tail = lines.join("\n");
             tracing::error!(
                 "git (in {}) {} failed ({elapsed:?}): {}",
                 cwd.display(),

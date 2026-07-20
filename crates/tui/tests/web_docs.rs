@@ -1,0 +1,112 @@
+//! Contracts for the hand-maintained parts of lazybox.ai.
+//!
+//! Keybindings have their own runtime-backed generator. These checks cover
+//! the remaining seams that previously let a release add a CLI command or
+//! config section while the website stayed silently stale.
+
+use std::path::{Path, PathBuf};
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+fn read(relative: impl AsRef<Path>) -> String {
+    let path = repo_root().join(relative);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read website source {}: {error}", path.display()))
+}
+
+#[test]
+fn configuration_reference_lists_every_top_level_section() {
+    let page = read("web/src/content/docs/docs/reference/configuration.md");
+    let value =
+        serde_yaml::to_value(lazybox_config::Config::default()).expect("default config serializes");
+    let mapping = value.as_mapping().expect("config serializes as a mapping");
+
+    for key in mapping.keys().filter_map(serde_yaml::Value::as_str) {
+        let linked_row = format!("| [`{key}`]");
+        assert!(
+            page.contains(&linked_row),
+            "configuration reference top-level table is missing `{key}`"
+        );
+    }
+}
+
+#[test]
+fn website_covers_v017_public_contracts() {
+    let cli = read("web/src/content/docs/docs/reference/cli.md");
+    for expected in [
+        "lazybox scan [ROOTS...]",
+        "--depth N",
+        "--hidden",
+        "read-only",
+        "not implemented yet",
+    ] {
+        assert!(cli.contains(expected), "CLI reference missing {expected:?}");
+    }
+
+    let config = read("web/src/content/docs/docs/reference/configuration.md");
+    for expected in [
+        "scan.roots",
+        "max_depth",
+        "agent_dead_on_arrival_ms",
+        "terminal_new_layout",
+        "manage_policies",
+    ] {
+        assert!(
+            config.contains(expected),
+            "configuration reference missing {expected:?}"
+        );
+    }
+
+    let agent_guide = read("web/src/content/docs/docs/how-to/run-an-agent-per-workspace.md");
+    for expected in ["]]r", "]]t", "exit code", "failed-to-start"] {
+        assert!(
+            agent_guide.contains(expected),
+            "terminal workflow guide missing {expected:?}"
+        );
+    }
+
+    let policy_guide = read("web/src/content/docs/docs/how-to/manage-automation-policies.md");
+    for expected in [
+        "g p",
+        "merge on green",
+        "GitHub auto-merge",
+        "auto-fix CI",
+        "auto-fix conflict",
+    ] {
+        assert!(
+            policy_guide.contains(expected),
+            "automation guide missing {expected:?}"
+        );
+    }
+
+    let sidebar = read("web/astro.config.mjs");
+    assert!(
+        sidebar.contains("docs/how-to/manage-automation-policies"),
+        "automation guide is not linked from the docs sidebar"
+    );
+
+    let architecture = read("web/src/content/docs/docs/explanation/architecture.md");
+    for expected in ["Protocol v11", "bounded", "exit code"] {
+        assert!(
+            architecture.contains(expected),
+            "architecture page missing {expected:?}"
+        );
+    }
+}
+
+#[test]
+fn homepage_never_advertises_the_removed_single_w_action() {
+    let page = read("web/src/pages/index.astro");
+    assert!(
+        !page.contains("<kbd>w</kbd>"),
+        "homepage still advertises timed single-w work; use deterministic `w w`"
+    );
+    assert!(
+        page.matches("w w").count() >= 5,
+        "homepage barely teaches `w w`"
+    );
+    assert!(page.contains("Automation you can see"));
+    assert!(page.contains("Terminals fail visibly"));
+}

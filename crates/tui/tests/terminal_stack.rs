@@ -637,13 +637,20 @@ fn shift_pageup_scrolls_local_scrollback_without_pty_writes() {
         KeyEvent::new(KeyCode::PageUp, KeyModifiers::SHIFT),
         &mut cmds,
     );
-    assert!(cmds.is_empty(), "scroll keys never reach the PTY: {cmds:?}");
+    // The first upward scroll may ship a deep-scrollback fetch (#393),
+    // but never a PTY write — that's what would leak scroll keys into
+    // the inner program.
+    assert!(
+        !cmds.iter().any(|c| matches!(c, Command::Write { .. })),
+        "scroll keys never reach the PTY: {cmds:?}"
+    );
     let scrolled = t.scrollbar_summary().expect("scrollbar state");
     assert_ne!(
         scrolled, at_bottom,
         "Shift-PageUp must move the viewport into scrollback"
     );
 
+    cmds.clear();
     let _ = t.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::SHIFT), &mut cmds);
     assert!(cmds.is_empty(), "scroll keys never reach the PTY: {cmds:?}");
     assert_eq!(

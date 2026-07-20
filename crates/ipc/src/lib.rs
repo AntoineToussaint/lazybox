@@ -49,7 +49,7 @@ pub const PROTOCOL_MAGIC: [u8; 4] = *b"LZBX";
 /// order, so adding, removing, or reordering a variant or field makes
 /// an old peer silently misread every subsequent frame. The handshake
 /// turns that garbage into a clear "restart the daemon" error.
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 15;
 
 /// This binary's build identity: the workspace version plus the git
 /// short SHA captured at compile time (`build.rs`). Two binaries built
@@ -491,6 +491,16 @@ pub enum Command {
         #[serde(default)]
         model_alias: Option<String>,
     },
+    /// Cancel an in-flight `Spawn` for this workspace that is still
+    /// provisioning its worktree (cold clone / fetch). The daemon
+    /// aborts the provision — killing the underlying `git`/transport
+    /// child so a stalled clone doesn't linger orphaned — and releases
+    /// the in-flight singleton claim so a retry starts fresh. A no-op
+    /// when nothing is in flight (the spawn already finished or
+    /// failed), so the client can send it unconditionally on Esc.
+    CancelSpawn {
+        session_key: SessionKey,
+    },
     Write {
         terminal_id: TerminalId,
         bytes: Vec<u8>,
@@ -511,8 +521,8 @@ pub enum Command {
     /// a live terminal so `w fix CI` / `w address comments` reuses
     /// the user's running claude tab instead of spawning a second
     /// one. The daemon looks up the agent for `terminal_id` and
-    /// runs `agent.inject_prompt(prompt)` + `agent.inject_submit()`,
-    /// the same paste/submit split used at spawn time.
+    /// asks the agent's PTY protocol for one atomic prompt write sequence,
+    /// the same paste/settle/submit flow used at spawn time.
     ///
     /// `fallback_spawn` covers the race where the TUI cached the
     /// agent's terminal id, the agent died, `TerminalExited` is in
@@ -773,6 +783,16 @@ pub enum Command {
     CloseIssue {
         workspace_key: lazybox_core::WorkspaceKey,
     },
+    /// Delete or close the workspace's primary upstream item, resolved
+    /// by kind: a PR is closed without merging (`closePullRequest`);
+    /// an issue is hard-deleted (`deleteIssue`) when the token has the
+    /// admin rights GitHub requires, degrading to a NOT_PLANNED close
+    /// otherwise. Fires from the github leader's `g d` chord, after a
+    /// confirm. The next poll's rescope sweep removes the vanished
+    /// item's workspace from the inbox.
+    DeleteOrClose {
+        workspace_key: lazybox_core::WorkspaceKey,
+    },
     /// Request reviews on the workspace's PR from the given GitHub
     /// logins. Adds to the existing reviewer set (no replacement).
     /// Only meaningful when the focused workspace's primary task is
@@ -917,6 +937,35 @@ pub enum Command {
     KeepMergedWorkspace {
         session_key: SessionKey,
     },
+    /// Ask the daemon for the terminal's deep scrollback, rebuilt from
+    /// the backend's own history (tmux `capture-pane`) rather than the
+    /// in-memory replay ring. Sent when the user scrolls a live
+    /// terminal up into local scrollback: a full-screen agent's
+    /// in-place redraws leave almost nothing in the client's
+    /// libghostty scrollback, while tmux has been retaining
+    /// `history-limit` lines the whole time — the same history the
+    /// restart/reattach path already seeds from. The daemon replies on
+    /// this connection with [`Event::TerminalScrollback`]; backends
+    /// without a history source (raw PTY) reply nothing.
+    ///
+    /// Appended last: bincode identifies variants by ordinal, so this
+    /// position (with the accompanying `PROTOCOL_VERSION` bump) keeps
+    /// the change mechanical.
+    FetchScrollback {
+        terminal_id: TerminalId,
+    },
+    /// Re-run the out-of-band agent-CLI version check now and report
+    /// via `Event::AgentCliUpdatesChecked` (with `manual: true`).
+    /// Appended last — after `FetchScrollback`, which shipped at
+    /// protocol 12; see `KeepMergedWorkspace`.
+    CheckAgentCliUpdates,
+    /// Update every enabled agent CLI through its lazybox-managed
+    /// channel — the sanctioned replacement for the in-session
+    /// self-updaters lazybox suppresses at spawn. Runs detached from
+    /// any session PTY; each agent's outcome arrives as an
+    /// `Event::AgentCliUpdateFinished`. Appended last; see
+    /// `KeepMergedWorkspace`.
+    UpdateAgentClis,
 }
 
 /// The terminal state a removable workspace's primary task reached,
@@ -1075,6 +1124,32 @@ pub enum Event {
     IssueCloseFailed {
         workspace_key: lazybox_core::WorkspaceKey,
         issue_label: String,
+        reason: String,
+    },
+    /// The PR for `workspace_key` was closed (without merging) via
+    /// `Command::DeleteOrClose`. Same "flash a notice now, poll
+    /// reconciles later" contract as [`Event::PrMerged`].
+    PrClosed {
+        workspace_key: lazybox_core::WorkspaceKey,
+        pr_label: String,
+    },
+    /// The issue for `workspace_key` was removed upstream via
+    /// `Command::DeleteOrClose` — hard-deleted when the token had
+    /// admin rights, otherwise (`fell_back_to_close`) closed as
+    /// NOT_PLANNED because GitHub refused the delete. The TUI names
+    /// the degradation so the user knows the issue still exists.
+    IssueDeleted {
+        workspace_key: lazybox_core::WorkspaceKey,
+        issue_label: String,
+        fell_back_to_close: bool,
+    },
+    /// `Command::DeleteOrClose` failed at the GitHub API — nothing was
+    /// deleted or closed (for an issue, even the close fallback
+    /// failed). Surfaced as a prominent, persistent error naming the
+    /// reason, mirroring `PrMergeFailed` / `IssueCloseFailed`.
+    DeleteOrCloseFailed {
+        workspace_key: lazybox_core::WorkspaceKey,
+        label: String,
         reason: String,
     },
     /// A workspace's primary task reached a terminal state (a PR
@@ -1410,6 +1485,73 @@ pub enum Event {
         command: String,
         message: String,
     },
+    /// Reply to [`Command::FetchScrollback`]: the terminal's history as
+    /// the backend retains it (tmux `capture-pane -e -S -<limit>`,
+    /// normalized like the restart-recovery seed). Unlike
+    /// [`Event::TerminalResync`] — whose `replay` is the raw ring
+    /// stream and therefore carries the inner program's escape
+    /// sequences — this payload is content-only: the consumer re-feeds
+    /// it for DEEP scrollback but must preserve terminal modes (mouse
+    /// tracking, DECCKM, …) across the rebuild itself, because a
+    /// capture never re-asserts them. `seq` is the ring's high-water
+    /// mark at capture time; live chunks at or below it are covered by
+    /// the capture.
+    ///
+    /// Appended last (bincode ordinal compatibility, see
+    /// `PROTOCOL_VERSION`).
+    TerminalScrollback {
+        terminal_id: TerminalId,
+        replay: Vec<u8>,
+        seq: u64,
+    },
+    /// Result of an out-of-band agent-CLI version check (scheduled, or
+    /// `Command::CheckAgentCliUpdates`). One status per enabled agent
+    /// that advertises an update channel. `manual` distinguishes a
+    /// user-triggered check — always worth a footer summary — from the
+    /// scheduled sweep, which clients only surface when something is
+    /// available or failed. Appended last — after `TerminalScrollback`,
+    /// which shipped at protocol 12; see `KeepMergedWorkspace`.
+    AgentCliUpdatesChecked {
+        statuses: Vec<AgentCliUpdateStatus>,
+        manual: bool,
+    },
+    /// One agent's lazybox-managed CLI update finished. `message`
+    /// carries the actionable failure detail when `ok` is false.
+    /// Appended last; see `KeepMergedWorkspace`.
+    AgentCliUpdateFinished {
+        agent_id: String,
+        display_name: String,
+        ok: bool,
+        installed_before: Option<String>,
+        installed_after: Option<String>,
+        message: String,
+    },
+}
+
+/// Installed-vs-latest reading for one agent CLI, produced by the
+/// daemon's out-of-band update check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCliUpdateStatus {
+    pub agent_id: String,
+    pub display_name: String,
+    /// Parsed installed version, `None` when the CLI is missing or its
+    /// version command failed (see `error`).
+    pub installed: Option<String>,
+    /// Latest released version, `None` when the agent has no queryable
+    /// registry or the lookup failed.
+    pub latest: Option<String>,
+    /// `latest` is known and strictly newer than `installed`.
+    pub update_available: bool,
+    /// Human-readable failure detail from either probe.
+    pub error: Option<String>,
+    /// The user opted this agent into `agents.<id>.auto_update`, so a
+    /// scheduled sweep applies an available update itself — clients
+    /// word the availability notice as "auto-updating" instead of
+    /// telling the user to trigger it manually. The `#[serde(default)]`
+    /// only matters on the JSON gateway; over the socket this field
+    /// rides the same `PROTOCOL_VERSION` bump as the event itself.
+    #[serde(default)]
+    pub auto_update: bool,
 }
 
 /// Severity classification for `Event::ProviderError`. The TUI uses
@@ -1475,6 +1617,13 @@ pub enum WorktreeStepStatus {
     Warned(String),
     Failed(String),
 }
+
+/// The `Failed` message the daemon broadcasts when a provision is
+/// aborted by [`Command::CancelSpawn`]. `Failed` (not `Warned`) so any
+/// client's checklist stops and its Esc-dismissal marker releases —
+/// but clients match on this exact string to frame the notice as a
+/// confirmation of the user's own cancel rather than an error.
+pub const SPAWN_CANCELLED_NOTE: &str = "workspace setup cancelled";
 
 impl Event {
     /// Build a `ProviderError` event with the given source / message

@@ -95,6 +95,9 @@ fn all_commands() -> Vec<Command> {
             on_main: false,
             model_alias: None,
         },
+        Command::CancelSpawn {
+            session_key: key.clone(),
+        },
         Command::CreateSession {
             session_key: key.clone(),
             kind: TerminalKind::Shell,
@@ -286,6 +289,9 @@ fn all_commands() -> Vec<Command> {
         Command::CloseIssue {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
         },
+        Command::DeleteOrClose {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
+        },
         Command::RequestReviewers {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
             logins: vec!["octocat".into()],
@@ -320,6 +326,11 @@ fn all_commands() -> Vec<Command> {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
         },
         Command::KeepMergedWorkspace { session_key: key },
+        Command::FetchScrollback {
+            terminal_id: TerminalId(12),
+        },
+        Command::CheckAgentCliUpdates,
+        Command::UpdateAgentClis,
         Command::Shutdown,
     ]
 }
@@ -395,6 +406,20 @@ fn all_events() -> Vec<Event> {
         Event::IssueCloseFailed {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
             issue_label: "o/r#1".into(),
+            reason: "permission denied".into(),
+        },
+        Event::PrClosed {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            pr_label: "o/r#2".into(),
+        },
+        Event::IssueDeleted {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
+            issue_label: "o/r#1".into(),
+            fell_back_to_close: true,
+        },
+        Event::DeleteOrCloseFailed {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
+            label: "o/r#1".into(),
             reason: "permission denied".into(),
         },
         Event::MergedPrRemovable {
@@ -645,6 +670,31 @@ fn all_events() -> Vec<Event> {
             command: "Write".into(),
             message: "terminal command queue is full".into(),
         },
+        Event::TerminalScrollback {
+            terminal_id: TerminalId(12),
+            replay: b"deep history\r\nlive bottom".to_vec(),
+            seq: 42,
+        },
+        Event::AgentCliUpdatesChecked {
+            statuses: vec![lazybox_ipc::AgentCliUpdateStatus {
+                agent_id: "claude".into(),
+                display_name: "Claude Code".into(),
+                installed: Some("2.1.3".into()),
+                latest: Some("2.1.4".into()),
+                update_available: true,
+                error: None,
+                auto_update: true,
+            }],
+            manual: true,
+        },
+        Event::AgentCliUpdateFinished {
+            agent_id: "codex".into(),
+            display_name: "Codex".into(),
+            ok: false,
+            installed_before: Some("0.46.0".into()),
+            installed_after: None,
+            message: "brew upgrade --cask codex failed: exit 1".into(),
+        },
     ]
 }
 
@@ -656,6 +706,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::Subscribe => "Subscribe",
         Command::CreateSession { .. } => "CreateSession",
         Command::Spawn { .. } => "Spawn",
+        Command::CancelSpawn { .. } => "CancelSpawn",
         Command::Write { .. } => "Write",
         Command::RecordUserMessage { .. } => "RecordUserMessage",
         Command::InjectPrompt { .. } => "InjectPrompt",
@@ -686,6 +737,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::AdoptSessions { .. } => "AdoptSessions",
         Command::MergePr { .. } => "MergePr",
         Command::CloseIssue { .. } => "CloseIssue",
+        Command::DeleteOrClose { .. } => "DeleteOrClose",
         Command::RequestReviewers { .. } => "RequestReviewers",
         Command::AddAssignees { .. } => "AddAssignees",
         Command::SetAssignees { .. } => "SetAssignees",
@@ -704,6 +756,9 @@ fn command_tag(command: &Command) -> &'static str {
         Command::RemoveProviderCredential { .. } => "RemoveProviderCredential",
         Command::ListProviderCredentials { .. } => "ListProviderCredentials",
         Command::KeepMergedWorkspace { .. } => "KeepMergedWorkspace",
+        Command::FetchScrollback { .. } => "FetchScrollback",
+        Command::CheckAgentCliUpdates => "CheckAgentCliUpdates",
+        Command::UpdateAgentClis => "UpdateAgentClis",
     }
 }
 
@@ -726,6 +781,9 @@ fn event_tag(event: &Event) -> &'static str {
         Event::PrMergeFailed { .. } => "PrMergeFailed",
         Event::IssueClosed { .. } => "IssueClosed",
         Event::IssueCloseFailed { .. } => "IssueCloseFailed",
+        Event::PrClosed { .. } => "PrClosed",
+        Event::IssueDeleted { .. } => "IssueDeleted",
+        Event::DeleteOrCloseFailed { .. } => "DeleteOrCloseFailed",
         Event::MergedPrRemovable { .. } => "MergedPrRemovable",
         Event::RepoLabels { .. } => "RepoLabels",
         Event::SessionCreated(_) => "SessionCreated",
@@ -763,6 +821,9 @@ fn event_tag(event: &Event) -> &'static str {
         Event::ProviderCredentialsListed { .. } => "ProviderCredentialsListed",
         Event::TerminalInputRejected { .. } => "TerminalInputRejected",
         Event::CommandRejected { .. } => "CommandRejected",
+        Event::TerminalScrollback { .. } => "TerminalScrollback",
+        Event::AgentCliUpdatesChecked { .. } => "AgentCliUpdatesChecked",
+        Event::AgentCliUpdateFinished { .. } => "AgentCliUpdateFinished",
     }
 }
 
@@ -774,12 +835,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         (lazybox_ipc::PROTOCOL_VERSION, command_tags.len()),
-        (11, 51),
+        (15, 56),
         "Command gained/lost a variant: update the exhaustive tag, add a sample, and bump PROTOCOL_VERSION",
     );
     assert_eq!(
         (lazybox_ipc::PROTOCOL_VERSION, event_tags.len()),
-        (11, 50),
+        (15, 56),
         "Event gained/lost a variant: update the exhaustive tag, add a sample, and bump PROTOCOL_VERSION",
     );
 }

@@ -659,6 +659,14 @@ async fn run_embedded_realm(
     // writes `config.yaml` and the Refresh wakes the loop.
     polling::spawn(config.clone(), resolve_poll_interval());
 
+    // Keep-awake watcher — reads `ui.keep_awake` live, so it spawns
+    // unconditionally and is inert until the user opts in.
+    let _ = lazybox_server::keep_awake::spawn(&config);
+
+    // Out-of-band agent-CLI update sweep (managed replacement for the
+    // suppressed in-session self-updaters; issue #400).
+    lazybox_server::agent_updates::spawn_scheduled(config.clone());
+
     // Slack mirror — opt-in via `~/.lazybox/config.yaml::slack.{bot_token,
     // app_token}` (or `$SLACK_BOT_TOKEN` / `$SLACK_APP_TOKEN`). No-op
     // when neither token is set.
@@ -1215,6 +1223,8 @@ async fn server_start() -> anyhow::Result<()> {
     }
     polling::migrate_legacy_sandbox(&config);
     polling::spawn(config.clone(), resolve_poll_interval());
+    let _ = lazybox_server::keep_awake::spawn(&config);
+    lazybox_server::agent_updates::spawn_scheduled(config.clone());
     if let Ok(yaml) = lazybox_config::Config::load() {
         let _ = lazybox_server::slack::spawn(config.clone(), yaml.slack);
     }
@@ -1313,6 +1323,7 @@ async fn server_api(args: &[String]) -> anyhow::Result<()> {
     {
         tracing::warn!("recover_sessions timed out after 5s — continuing without recovery");
     }
+    let _ = lazybox_server::keep_awake::spawn(&config);
     println!("lazybox API listening on http://{bind_addr}");
     if token.is_some() {
         println!("lazybox API bearer auth enabled via LAZYBOX_API_TOKEN");

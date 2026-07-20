@@ -35,6 +35,14 @@ fn stale_note(seen: &PhaseLog) -> Option<String> {
     })
 }
 
+/// The `BaseRefStalePersistent` note, if the sink recorded one.
+fn persistent_stale_note(seen: &PhaseLog) -> Option<String> {
+    seen.lock().unwrap().iter().find_map(|p| match p {
+        CheckoutPhase::BaseRefStalePersistent(note) => Some(note.clone()),
+        _ => None,
+    })
+}
+
 /// Build a Command for git in `cwd`, with GIT_DIR / GIT_WORK_TREE
 /// scrubbed. `cargo test` inherits env vars from the surrounding
 /// lazybox worktree (its `.git` is a gitfile pointing into the main
@@ -268,10 +276,137 @@ async fn new_branch_surfaces_stale_base_when_fetch_fails() {
     assert_eq!(bare_ref(&bare, "refs/heads/main"), initial);
 
     // … but the degradation is surfaced, not silent: a stale-base note
-    // naming the branch and the fallback commit.
+    // naming the branch, the fallback commit, and why the fetch failed.
     let note = stale_note(&seen).expect("BaseRefStale reported on fetch failure");
     assert!(note.contains("could not refresh main"), "note: {note}");
     assert!(note.contains(&short), "note names the fallback sha: {note}");
+    assert!(
+        note.contains("fetch failed:"),
+        "note carries the cause: {note}"
+    );
+}
+
+#[tokio::test]
+async fn token_source_is_consulted_and_leaves_non_github_origins_alone() {
+    // The HTTPS-rewrite env only touches github.com URLs — a local /
+    // enterprise origin must keep working exactly as before even when
+    // a token resolves.
+    let (upstream, base, _bare) = setup("acme", "tokenized");
+
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let source: lazybox_git_ops::GithubTokenSource = {
+        let calls = Arc::clone(&calls);
+        Arc::new(move || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Some("test-token".to_string()) })
+        })
+    };
+    let (seen, sink) = recording_sink();
+    let wm = WorktreeManager::new(base.path().to_path_buf())
+        .with_github_token(source)
+        .with_progress(sink);
+    let wt_path = base.path().join("token-wt");
+    wm.checkout_new_branch_at(&wt_path, "acme", "tokenized", "feature/t", "main")
+        .await
+        .expect("checkout with a token attached still works on a local origin");
+
+    assert!(
+        calls.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        "the token source must be consulted for the base-ref fetch"
+    );
+    assert!(
+        stale_note(&seen).is_none() && persistent_stale_note(&seen).is_none(),
+        "the auth env must not break a non-github fetch"
+    );
+
+    drop(upstream);
+}
+
+#[tokio::test]
+async fn long_broken_refresh_escalates_to_persistent_stale() {
+    let (upstream, base, bare) = setup("acme", "olde");
+    drop(upstream);
+
+    // Age the clone's last-contact marker past the 24h escalation
+    // threshold: no fetch ever succeeded here, so HEAD's clone-time
+    // mtime is the marker.
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(4 * 24 * 3600);
+    std::fs::File::options()
+        .write(true)
+        .open(bare.join("HEAD"))
+        .expect("open HEAD")
+        .set_modified(old)
+        .expect("backdate HEAD");
+
+    let (seen, sink) = recording_sink();
+    let wm = WorktreeManager::new(base.path().to_path_buf()).with_progress(sink);
+    let wt_path = base.path().join("olde-wt");
+    wm.checkout_new_branch_at(&wt_path, "acme", "olde", "feature/old", "main")
+        .await
+        .expect("checkout still succeeds offline");
+
+    assert!(
+        stale_note(&seen).is_none(),
+        "a days-old failure must escalate, not re-report the one-off note"
+    );
+    let note = persistent_stale_note(&seen).expect("persistent staleness reported");
+    assert!(note.contains("could not refresh main"), "note: {note}");
+    assert!(
+        note.contains("origin has not refreshed in 4 days"),
+        "note quantifies the staleness: {note}"
+    );
+}
+
+#[tokio::test]
+async fn recent_successful_fetch_keeps_a_new_failure_a_one_off() {
+    // The last-contact marker must record fetch SUCCESS, not attempts
+    // (git's own FETCH_HEAD is truncated + touched even by a failed
+    // fetch, which would make days of failures look fresh forever).
+    let (upstream, base, bare) = setup("acme", "recent");
+
+    // One healthy checkout writes the success stamp …
+    let wm = WorktreeManager::new(base.path().to_path_buf());
+    wm.checkout_new_branch_at(
+        &base.path().join("ok-wt"),
+        "acme",
+        "recent",
+        "feature/ok",
+        "main",
+    )
+    .await
+    .expect("healthy checkout");
+
+    // … so even with an ancient clone-time HEAD, a fresh failure right
+    // after a success is a blip, not a persistent degradation.
+    drop(upstream);
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 24 * 3600);
+    std::fs::File::options()
+        .write(true)
+        .open(bare.join("HEAD"))
+        .expect("open HEAD")
+        .set_modified(old)
+        .expect("backdate HEAD");
+
+    let (seen, sink) = recording_sink();
+    let wm = WorktreeManager::new(base.path().to_path_buf()).with_progress(sink);
+    wm.checkout_new_branch_at(
+        &base.path().join("blip-wt"),
+        "acme",
+        "recent",
+        "feature/blip",
+        "main",
+    )
+    .await
+    .expect("checkout still succeeds offline");
+
+    assert!(
+        persistent_stale_note(&seen).is_none(),
+        "a failure minutes after a successful fetch must not escalate"
+    );
+    assert!(
+        stale_note(&seen).is_some(),
+        "the one-off degradation is still surfaced"
+    );
 }
 
 #[tokio::test]

@@ -22,6 +22,13 @@ length-prefixed bincode, and the TUI connects over it. Because it's a Unix
 socket, SSH local forwarding (`ssh -L`) carries it across machines — that's how
 [remote over SSH](/docs/how-to/remote-over-ssh/) works.
 
+The socket starts with an explicit protocol/build handshake. A stale client or
+daemon is rejected with a restart message before application frames flow,
+rather than failing later as a decode error. Frames, command queues, event
+forwarders, and connection admission are bounded; malformed trailing bytes and
+oversized payloads are rejected. Protocol v11 clients and daemons must be
+upgraded together.
+
 ## The crates
 
 lazybox is built from 16 crates (including two vendored libghostty crates),
@@ -61,6 +68,13 @@ vendored **libghostty-vt** parser, and rendered as a widget — the same compone
 both the daemon (which owns the PTY) and the TUI (which replays it) use. The
 daemon keeps a per-terminal **ring buffer** so that when a client reconnects, the
 recent screen contents replay instantly instead of starting blank.
+
+Replay uses sequence numbers and gap resynchronization, while all terminal
+input and scroll mutations pass through one ordered owner. The client therefore
+reaches the same screen and scrollback state after a reconnect as a fresh
+attach. Process exit is a first-class lifecycle event carrying the exit code:
+clean agent exits can close automatically, while crashes and failed starts keep
+their final screen visible without deleting the workspace.
 
 ## Where to go next
 

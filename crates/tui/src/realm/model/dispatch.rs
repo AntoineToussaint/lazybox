@@ -20,6 +20,17 @@ fn task_number_suffix(task_key: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Cap a task title for confirm-modal copy (same 80-char convention
+/// as the removal prompts) so a long title can't blow up the modal.
+fn truncate_title(title: &str) -> String {
+    if title.chars().count() > 80 {
+        let truncated: String = title.chars().take(79).collect();
+        format!("{truncated}…")
+    } else {
+        title.to_string()
+    }
+}
+
 impl<T: TerminalAdapter> Model<T> {
     /// Single fan-out from a catalog `Action` to its effect (IPC
     /// command, modal mount, focus shift, …). Surfaces (keyboard,
@@ -146,6 +157,47 @@ impl<T: TerminalAdapter> Model<T> {
                             Vec::new()
                         }
                     },
+                    Action::DeleteOrClose => match workspace.as_ref() {
+                        // Re-check against the STASHED workspace — the
+                        // item may have merged/closed or the workspace
+                        // changed shape while the modal was up. Same
+                        // predicate the catalog gates the keypress on.
+                        Some(ws)
+                            if lazybox_tui_core::action::availability(
+                                lazybox_tui_core::action::ActionKind::DeleteOrClose,
+                                Some(ws),
+                            ) =>
+                        {
+                            // Pending feedback at command send — the
+                            // provider round trip takes seconds (same
+                            // convention as merge/close).
+                            if let Some(pr) = ws.pr.as_ref() {
+                                self.flash_info(format!(
+                                    "closing PR{}…",
+                                    task_number_suffix(&pr.id.key)
+                                ));
+                            } else {
+                                self.flash_info(format!(
+                                    "deleting issue{}…",
+                                    task_number_suffix(
+                                        ws.gh_issues
+                                            .first()
+                                            .map(|i| i.id.key.as_str())
+                                            .unwrap_or("")
+                                    )
+                                ));
+                            }
+                            vec![IpcCommand::DeleteOrClose {
+                                workspace_key: ws.key.clone(),
+                            }]
+                        }
+                        _ => {
+                            self.flash_info(
+                                "the issue / PR is no longer open — nothing to delete or close",
+                            );
+                            Vec::new()
+                        }
+                    },
                     Action::LongSnooze => {
                         // Re-resolve against the stashed workspace so a
                         // state change while the modal was up can't
@@ -266,6 +318,29 @@ impl<T: TerminalAdapter> Model<T> {
     /// context-sensitive copy out of the dispatch.
     fn action_confirm_override(&self, action: &lazybox_tui_core::action::Action) -> Option<String> {
         use lazybox_tui_core::action::Action;
+        // Delete/close names its exact target — the number + title of
+        // the issue/PR the confirmed keypress destroys — so the modal
+        // never asks about an ambiguous "this".
+        if matches!(action, Action::DeleteOrClose) {
+            let sk = self.sidebar.selected_workspace_key()?;
+            let ws = self.sidebar.workspace_by_key(sk)?;
+            return Some(match ws.pr.as_ref() {
+                Some(pr) => format!(
+                    "Close PR {} — \"{}\" — without merging? Reopen on GitHub to undo.",
+                    pr.id.key,
+                    truncate_title(&pr.title),
+                ),
+                None => {
+                    let issue = ws.gh_issues.first()?;
+                    format!(
+                        "Delete issue {} — \"{}\"? Deletion is permanent; without admin \
+                         rights it is closed as not-planned instead.",
+                        issue.id.key,
+                        truncate_title(&issue.title),
+                    )
+                }
+            });
+        }
         if !matches!(action, Action::Archive) {
             return None;
         }

@@ -1119,6 +1119,98 @@ async fn spawn_with_initial_prompt_delivers_work_to_agent() {
     .expect("deadline");
 }
 
+/// Codex's TUI also treats a rapid multi-line write as a paste. Its work
+/// prompt must therefore use explicit bracketed-paste markers followed by a
+/// separate carriage-return write; appending `\n` to the prompt body leaves
+/// the text sitting unsubmitted in the composer.
+#[tokio::test]
+async fn codex_initial_prompt_pastes_then_sends_enter_separately() {
+    timeout(TEST_DEADLINE, async {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config).await;
+
+        const WORK: &str = "Implement issue #391.\nRun the focused tests.";
+        client
+            .send(Command::Spawn {
+                model_alias: None,
+                session_key: "test:ws-codex-ingest".into(),
+                session_id: None,
+                kind: TerminalKind::Agent("codex".into()),
+                cwd: test_cwd(),
+                initial_prompt: Some(WORK.into()),
+                on_main: false,
+            })
+            .unwrap();
+        wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalSpawned { .. }),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("TerminalSpawned arrived");
+
+        let key = mock.list().await.unwrap().into_iter().next().unwrap();
+        mock.emit(&key, "› Try something\ngpt-5.4 xhigh · /repo")
+            .await;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let writes = loop {
+            let writes = mock.writes_for(&key).await;
+            if writes.len() >= 2 || tokio::time::Instant::now() >= deadline {
+                break writes;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert!(
+            writes.len() >= 2,
+            "Codex prompt was not followed by a separate Enter; writes = {writes:?}",
+        );
+        let mut expected_paste = b"\x1b[200~".to_vec();
+        expected_paste.extend_from_slice(WORK.as_bytes());
+        expected_paste.extend_from_slice(b"\x1b[201~");
+        assert_eq!(writes[0], expected_paste);
+        assert_eq!(writes[1], b"\r");
+    })
+    .await
+    .expect("deadline");
+}
+
+/// The atomic PTY protocol must honor compose-only recall for line-oriented
+/// agents too. Under the former split API, the line adapter embedded `\n` in
+/// its first write before the server could suppress submission, so recalling a
+/// draft accidentally started a turn.
+#[tokio::test]
+async fn line_oriented_prompt_recall_omits_the_inline_newline() {
+    timeout(TEST_DEADLINE, async {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config).await;
+        let terminal_id =
+            spawn_and_wait(&mut client, TerminalKind::Agent("cursor-agent".into())).await;
+        let key = mock.list().await.unwrap().into_iter().next().unwrap();
+
+        client
+            .send(Command::InjectPrompt {
+                terminal_id,
+                prompt: "edit this draft".into(),
+                fallback_spawn: None,
+                submit: false,
+            })
+            .unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let writes = loop {
+            let writes = mock.writes_for(&key).await;
+            if !writes.is_empty() || tokio::time::Instant::now() >= deadline {
+                break writes;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert_eq!(writes, vec![b"edit this draft".to_vec()]);
+    })
+    .await
+    .expect("deadline");
+}
+
 /// Regression: a prompt-carrying Spawn that collapses onto an existing
 /// singleton must still deliver its prompt. Pre-fix, `handle_spawn`
 /// only broadcast `TerminalFocusRequested` and the `w`-built work
@@ -2547,6 +2639,77 @@ async fn many_concurrent_prompt_spawns_all_deliver() {
                 "work prompt was dropped: {prompt:?}",
             );
         }
+    })
+    .await
+    .expect("deadline");
+}
+
+/// `Command::FetchScrollback` round-trips the backend's deep history
+/// (#393): the daemon resolves the terminal's backend key, asks the
+/// backend for its retained scrollback — for tmux, the same
+/// capture-pane seed the restart path uses — and replies with
+/// `Event::TerminalScrollback` carrying the live stream's seq
+/// high-water mark, so the client can rebuild a live session's grid
+/// as deep as a restarted one.
+#[tokio::test]
+async fn fetch_scrollback_round_trips_backend_history() {
+    timeout(TEST_DEADLINE, async {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config).await;
+        let terminal_id = spawn_and_wait(&mut client, TerminalKind::Agent("claude".into())).await;
+        let key = mock.list().await.unwrap().into_iter().next().unwrap();
+        mock.emit(&key, b"live chunk").await;
+        mock.set_deep_scrollback(&key, b"deep history\r\nlive chunk")
+            .await;
+
+        client
+            .send(Command::FetchScrollback { terminal_id })
+            .unwrap();
+        let ev = wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalScrollback { .. }),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("TerminalScrollback reply");
+        match ev {
+            Event::TerminalScrollback {
+                terminal_id: id,
+                replay,
+                seq,
+            } => {
+                assert_eq!(id, terminal_id);
+                assert_eq!(replay, b"deep history\r\nlive chunk".to_vec());
+                assert_eq!(seq, 1, "seq is the live high-water mark at capture time");
+            }
+            _ => unreachable!(),
+        }
+    })
+    .await
+    .expect("deadline");
+}
+
+/// A backend/terminal with no history source beyond the ring (raw PTY,
+/// or a session tmux has nothing for) answers a fetch with silence —
+/// the client's ring-fed scrollback is already everything there is.
+#[tokio::test]
+async fn fetch_scrollback_without_history_source_is_silent() {
+    timeout(TEST_DEADLINE, async {
+        let (config, _mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config).await;
+        let terminal_id = spawn_and_wait(&mut client, TerminalKind::Shell).await;
+
+        // No `set_deep_scrollback` → the backend reports `None`.
+        client
+            .send(Command::FetchScrollback { terminal_id })
+            .unwrap();
+        let ev = wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalScrollback { .. }),
+            Duration::from_millis(300),
+        )
+        .await;
+        assert!(ev.is_none(), "no history source must reply nothing: {ev:?}");
     })
     .await
     .expect("deadline");

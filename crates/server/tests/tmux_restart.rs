@@ -23,9 +23,98 @@ fn kill_test_server(socket: &str) {
         .output();
 }
 
+/// Live-session counterpart of the restart test (#393): the SAME
+/// capture-pane history must be reachable while the original backend —
+/// and its attach client — are still running. Before the fix only the
+/// restart path read it, so a live full-screen agent scrolled back a
+/// few lines while tmux silently held thousands.
+#[tokio::test]
+async fn live_backend_serves_deep_scrollback_without_restart() {
+    if modern_tmux_version().is_none() {
+        eprintln!("tmux missing or too old — skipping live-scrollback test");
+        return;
+    }
+    let socket = format!("lazybox-test-live-scrollback-{}", std::process::id());
+    let result = timeout(TEST_DEADLINE, async {
+        // Same output-then-park shape as the restart test (see its
+        // comment for why the output comes from the command, not a
+        // `write` to an interactive shell).
+        let backend = TmuxBackend::with_socket(&socket).expect("conf written");
+        let key = backend
+            .spawn(
+                &[
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "for i in $(seq 1 200); do echo line-$i; done; exec sleep 300".to_string(),
+                ],
+                None,
+                &[],
+                "live-scrollback-test",
+            )
+            .await
+            .expect("tmux spawn");
+
+        // Wait until the full output reached tmux (observed through the
+        // live attach client, the same byte path the TUI consumes).
+        let mut ticker = tokio::time::interval(Duration::from_millis(100));
+        for attempt in 0.. {
+            ticker.tick().await;
+            let sub = backend.subscribe(&key).await.expect("subscribe");
+            if String::from_utf8_lossy(&sub.replay).contains("line-200") {
+                break;
+            }
+            assert!(
+                attempt < 100,
+                "pane output never reached the attach client; last replay \
+                 ({} bytes): {:?}",
+                sub.replay.len(),
+                String::from_utf8_lossy(&sub.replay[sub.replay.len().saturating_sub(600)..]),
+            );
+        }
+
+        // NO restart — ask the live backend for the deep scrollback.
+        let (replay, seq) = backend
+            .scrollback(&key)
+            .await
+            .expect("scrollback")
+            .expect("tmux session must have history to serve");
+        let replay = String::from_utf8_lossy(&replay);
+        // line-5 scrolled out of the 32-row pane long ago — on a live
+        // session it can only come from the capture-pane history, which
+        // is exactly what a restarted backend would have seeded. The
+        // `\r` pins the exact line (capture lines are CRLF-joined).
+        assert!(
+            replay.contains("line-5\r"),
+            "live scrollback must reach deep history, got {} bytes: {:?}…",
+            replay.len(),
+            &replay[..replay.len().min(400)],
+        );
+        assert!(
+            replay.contains("line-200"),
+            "live scrollback must reach the most recent output",
+        );
+        assert!(
+            seq > 0,
+            "capture must report the live stream's high-water mark"
+        );
+
+        let _ = backend.kill(&key).await;
+    })
+    .await;
+    kill_test_server(&socket);
+    result.expect("test timed out");
+}
+
 #[tokio::test]
 async fn restarted_backend_seeds_scrollback_from_tmux_history() {
     if modern_tmux_version().is_none() {
+        // Skip-as-pass is how this path could go silently unexercised on
+        // a runner without tmux; the nightly lane closes that hole by
+        // demanding the real thing (#410).
+        assert!(
+            std::env::var("LAZYBOX_E2E_REQUIRE").map(|v| v == "1") != Ok(true),
+            "LAZYBOX_E2E_REQUIRE=1 but tmux is unavailable"
+        );
         eprintln!("tmux missing or too old — skipping restart-recovery test");
         return;
     }

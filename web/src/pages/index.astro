@@ -34,6 +34,17 @@ const features = [
     body: 'Press w w and lazybox reads the row — failing CI, a merge conflict, an open issue, review comments — and launches the agent with exactly the right brief.',
   },
   {
+    icon: '◎',
+    title: 'Automation you can see',
+    body: 'Press g p for one policies surface: merge on green, auto-fix CI and conflicts, and GitHub auto-merge status — every switch and override visible in one place.',
+  },
+  {
+    icon: '↻',
+    title: 'Terminals fail visibly',
+    body: 'Choose splits or tabs, recall the last prompt after a restart, and inspect the final screen when an agent crashes or fails to start. Clean exits disappear; failures never do.',
+    wide: true,
+  },
+  {
     icon: '∑',
     title: 'Route agents through your gateway',
     body: 'Set one llm_gateway_url and every spawned agent points at your own LLM gateway — lazybox injects the right base-URL env var per provider (Anthropic or OpenAI). Your API key goes straight to the gateway; the daemon never sees it.',
@@ -215,7 +226,7 @@ const steps = [
             <div class="lbl">With lazybox</div>
             <ul>
               <li>Issues and PRs land in one inbox, flagged unread.</li>
-              <li>Press <kbd>w</kbd> — the agent starts with the right brief, already in context.</li>
+              <li>Press <kbd>w w</kbd> — the agent starts with the right brief, already in context.</li>
               <li>A fresh worktree appears on its own. Nothing to stash.</li>
               <li>Get a desktop ping the moment one needs a decision.</li>
               <li>Run a dozen at once. Step in only where it counts.</li>
@@ -226,7 +237,7 @@ const steps = [
           <span class="tag">in practice</span>
           <p>
             <span class="c">$</span> I keep a workspace called <b>Issues &amp; Features</b>. When something
-            comes up, I drop a GitHub issue in it. It shows up in lazybox, I hit <kbd>w</kbd>, and the
+            comes up, I drop a GitHub issue in it. It shows up in lazybox, I hit <kbd>w w</kbd>, and the
             agent goes to work — I only look up when it needs me.
           </p>
         </div>
@@ -247,7 +258,7 @@ const steps = [
             <div class="keys-list">
               <div class="k"><kbd>j</kbd><kbd>k</kbd> navigate the inbox</div>
               <div class="k"><kbd>a c</kbd>&nbsp;·&nbsp;<kbd>a x</kbd>&nbsp;·&nbsp;<kbd>a u</kbd> spawn Claude / Codex / Cursor</div>
-              <div class="k"><kbd>w</kbd> auto-prompt for the row's state</div>
+              <div class="k"><kbd>w w</kbd> auto-prompt for the row's state</div>
               <div class="k"><kbd>!</kbd> jump to the next agent that needs you</div>
             </div>
           </div>

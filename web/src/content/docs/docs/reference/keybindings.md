@@ -109,14 +109,16 @@ A focused terminal forwards every key to the PTY; only the chords below are inte
 | Chord | Action |
 | --- | --- |
 | `]]s` | Open the snippet picker (typing a full key auto-submits — `]]srev`) |
+| `]]r` | Restore the in-flight draft, or the last submitted agent prompt, without sending it |
 | `]]f` | Toggle focus mode |
 | `]]q` | Exit to the sidebar |
-| ``]]` `` | Open the fuzzy jump-to-workspace picker |
-| `]]1`…`]]9` | Jump to the Nth agent workspace (sidebar order) |
-| `]]\|` | Split the focused tile side-by-side |
+| `` ]]` `` | Open the fuzzy jump-to-workspace picker |
+| `]]1…9` | Jump to the Nth agent workspace (sidebar order) |
+| `]]\|` | Split the focused tile side-by-side (`]]\` is an alias) |
 | `]]-` | Split the focused tile stacked |
-| `]]←↓↑→` | Move tile focus (cycles tabs in Tabs mode) |
+| `]]←↓↑→` | Move tile focus; Left/Right cycles tabs in Tabs mode |
 | `]]x` | Close the focused terminal (tile or active tab) |
+| `]]t` | Toggle whether the next terminal opens as a split or a tab; persists `ui.terminal_new_layout` |
 
 ### Scrollback
 
@@ -170,10 +172,12 @@ Press the leader key, then the second key. Every menu shows a which-key popup wh
 | --- | --- |
 | `g m` | merge PR *(confirmed first)* |
 | `g g` | auto-merge on green |
+| `g p` | policies |
 | `g r` | reviewers |
 | `g a` | assignees |
 | `g l` | labels |
 | `g o` | open in browser |
+| `g d` | delete / close *(confirmed first)* |
 
 ### `x` — workspace
 

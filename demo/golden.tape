@@ -1,4 +1,4 @@
-# Deterministic golden snapshot for CI's stale-demo check.
+# Deterministic manual keybinding-table reference.
 #
 # Why a SEPARATE tape from lazybox.tape: the pretty demo spawns a shell, whose
 # prompt carries volatile content (a random tempdir suffix, the wall clock, the
@@ -8,18 +8,17 @@
 # from `ActionDef::all()`, no live data), so its content only changes when the
 # UI or a keybinding actually changes.
 #
-# What the demo workflow diffs: NOT this whole `.ascii` file. VHS's `.ascii`
-# output is the terminal's scrollback at end-of-tape — a vertical concatenation
+# Do not keep the whole `.ascii` output as the reference. It is the terminal's
+# scrollback at end-of-tape — a vertical concatenation
 # of however many full-screen repaints happened, which varies with render
-# timing and across machines (Linux CI vs. a dev's macOS). The byte-stable part
-# is the keybinding table itself, so the workflow extracts just that table from
-# the render and diffs it against the committed `golden.ascii` (which holds only
-# the table). See `.github/workflows/demo.yml`.
+# timing and across machines. The byte-stable part is the keybinding table
+# itself, so local regeneration extracts just that table into the committed
+# `golden.ascii`.
 #
 # Regenerate alongside lazybox.tape whenever the UI changes:
 #   cargo build -p lazybox-tui
 #   PATH="$PWD/target/debug:$PATH" vhs demo/golden.tape
-#   # then extract the table (same awk the workflow uses) into golden.ascii:
+#   # then extract the table into golden.ascii:
 #   awk '/Tab .* cycle panes/{c=1;b=""} c{b=b $0 ORS} c&&/exit to sidebar/{last=b;c=0} END{printf "%s",last}' \
 #     demo/golden.ascii > demo/golden.ascii.tmp && mv demo/golden.ascii.tmp demo/golden.ascii
 
@@ -43,8 +42,8 @@ Hide
 Type "lazybox --test"
 Enter
 # Boot settle: `--test` provisions a throwaway git repo + spins up the
-# daemon before the first full-size frame renders. On a loaded Linux CI
-# runner that can outlast any fixed `Sleep` — and pressing `?` before the
+# daemon before the first full-size frame renders. On a loaded machine this can
+# outlast any fixed `Sleep` — and pressing `?` before the
 # UI has settled at full size paints a clipped overlay whose bottom row
 # never repaints, so the golden `Wait+Screen` below times out (blank or
 # truncated grab). Block on the seeded workspace row instead: once
@@ -68,9 +67,9 @@ Type "?"
 # once it appears the whole table above it has been painted. We key on
 # `exit to sidebar` rather than `snippets` because `snippets` now labels two
 # rows (the global `]` browser and the terminal `]]<key>` leader) — the
-# workflow's table extraction anchors on the same unique `exit to sidebar`
-# marker. This guarantees the final captured frame contains a complete table
-# for the workflow to extract — a fixed Sleep only moves WHEN the frame is
+# manual table extraction anchors on the same unique `exit to sidebar` marker.
+# This guarantees the final captured frame contains a complete table to extract
+# — a fixed Sleep only moves WHEN the frame is
 # grabbed and can't guarantee it lands on a fully-painted overlay (the
 # historical flake: the grab landed mid-paint and the table was truncated
 # mid-row with the rest blanked; the sleep was bumped 1.5s → 3s → 6s and still

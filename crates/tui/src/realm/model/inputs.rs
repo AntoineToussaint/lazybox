@@ -877,7 +877,7 @@ showing keybinding search only",
         // route the "no" decision correctly.
         let top = self.modal_stack.last().cloned();
         self.pop_modal();
-        let cmds: Vec<IpcCommand> = Vec::new();
+        let mut cmds: Vec<IpcCommand> = Vec::new();
         match top {
             Some(Id::RemoveOutOfScope) => {
                 self.active_removal_prompt = None;
@@ -944,8 +944,22 @@ showing keybinding search only",
                 // is typing (they update silently instead; see
                 // `apply_worktree_progress`). Then drop the accumulated
                 // state so a later spawn starts a fresh one.
-                // Provisioning keeps running on the daemon; this only
-                // closes the view.
+                // While provisioning is still in flight, Esc is a real
+                // cancel: tell the daemon to abort the provision (which
+                // kills a wedged `git clone` and releases the in-flight
+                // singleton claim so a retry starts fresh — issue #403)
+                // rather than just closing the view over a hang. A
+                // finished op (failed / degraded / session already
+                // live) has nothing left to cancel.
+                if let Some(state) = self.worktree_progress.as_ref()
+                    && !state.failed()
+                    && !state.warned()
+                    && !state.dismiss_queued()
+                {
+                    cmds.push(IpcCommand::CancelSpawn {
+                        session_key: state.session_key.clone(),
+                    });
+                }
                 self.worktree_progress_dismissed = self
                     .worktree_progress
                     .as_ref()

@@ -470,8 +470,13 @@ pub struct ServerConfig {
     /// a drop guard on EVERY exit path; `Kill` also serializes against
     /// it. `parking_lot::Mutex` — the data is tiny and no await ever
     /// happens under the guard, which lets the drop guard release
-    /// synchronously.
-    pub inflight_spawns: Arc<parking_lot::Mutex<HashSet<(String, String)>>>,
+    /// synchronously. Each claim carries a cancel `Notify`:
+    /// `Command::CancelSpawn` pings it and the owning `handle_spawn`
+    /// aborts its provisioning (dropping the in-flight `git` child) —
+    /// how an Esc on the "Setting up workspace" checklist actually
+    /// stops a wedged clone instead of letting it run on (issue #403).
+    pub inflight_spawns:
+        Arc<parking_lot::Mutex<HashMap<(String, String), Arc<tokio::sync::Notify>>>>,
     /// Pinged whenever an in-flight spawn claim is released, so
     /// waiters (duplicate spawns collapsing onto the winner, `Kill`
     /// waiting out a mid-flight provision) re-check promptly instead
@@ -594,7 +599,7 @@ impl ServerConfig {
             removal_prompts: Arc::new(Mutex::new(polling::RemovalPromptMemory::default())),
             viewer_identities: Arc::new(parking_lot::Mutex::new(Vec::new())),
             poll_wake: Arc::new(tokio::sync::Notify::new()),
-            inflight_spawns: Arc::new(parking_lot::Mutex::new(HashSet::new())),
+            inflight_spawns: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             inflight_spawn_changed: Arc::new(tokio::sync::Notify::new()),
             deleted_workspaces: Arc::new(parking_lot::Mutex::new(HashSet::new())),
             archive_updates: Arc::new(parking_lot::Mutex::new(())),
@@ -882,6 +887,7 @@ impl Server {
                     // is observable.
                     let label = match &cmd {
                         lazybox_ipc::Command::Spawn { .. } => "Spawn",
+                        lazybox_ipc::Command::CancelSpawn { .. } => "CancelSpawn",
                         lazybox_ipc::Command::Close { .. } => "Close",
                         lazybox_ipc::Command::IngestHook { .. } => "IngestHook",
                         lazybox_ipc::Command::CreateSession { .. } => "CreateSession",
@@ -1300,6 +1306,9 @@ pub async fn dispatch_command(
                 model_alias,
             )
             .await;
+        }
+        lazybox_ipc::Command::CancelSpawn { session_key } => {
+            spawn_handler::handle_cancel_spawn(config, &session_key);
         }
         lazybox_ipc::Command::CreateSession {
             session_key,

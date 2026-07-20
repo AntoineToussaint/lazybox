@@ -37,6 +37,14 @@ pub use helpers::{run_loop_with_model, run_with_client};
 use host_terminal::HostTerminalGuard;
 pub use host_terminal::restore_host_terminal;
 
+/// Runtime-backed rows for the generated public keybinding reference.
+/// Kept doc-hidden because this is build/test plumbing rather than a
+/// stable library API.
+#[doc(hidden)]
+pub fn terminal_leader_reference_rows() -> Vec<(String, String)> {
+    terminal_leader::LeaderCmd::reference_rows()
+}
+
 // Re-export helper free functions so sibling submodules
 // (`keys.rs`, etc.) can keep their `super::foo` import shape after
 // the helpers moved out of mod.rs.

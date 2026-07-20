@@ -22,7 +22,8 @@ contain explicitly documented compatibility changes.
 - An accessible custom 404 page and resilient no-JavaScript homepage content.
 - Ask Lazybox as the primary `?` surface, with live effective-keymap search,
   conversational workflow help, and searchable terminal-leader commands.
-- `lazybox scan` for discovering and adopting externally created checkouts.
+- `lazybox scan` for read-only discovery of externally created checkouts (the
+  future in-place import flow is not wired yet).
 - A unified policies menu for per-PR and per-issue automation controls, plus a
   configurable tabs-first layout for newly opened terminals.
 - Explicit terminal `Exited` state so clean exits, crashes, and agents that

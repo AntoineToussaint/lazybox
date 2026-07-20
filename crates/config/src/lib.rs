@@ -650,6 +650,11 @@ pub struct AgentEntry {
     /// a bare spawn uses. Empty → fall back to the built-in preset for
     /// this agent id.
     pub models: lazybox_core::AgentModels,
+    /// Let lazybox apply this agent's CLI updates automatically when
+    /// its scheduled out-of-band check finds a newer version. Off by
+    /// default: the check still runs and surfaces "update available",
+    /// but installing waits for the manual "update agent CLIs" action.
+    pub auto_update: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1844,5 +1849,21 @@ agents:
         );
         // An empty configured block still inherits the built-in preset.
         assert!(!cfg.agent_models("claude").tiers.is_empty());
+    }
+
+    #[test]
+    fn agent_auto_update_defaults_off_and_parses() {
+        let yaml = r#"
+agents:
+  claude:
+    auto_update: true
+  codex:
+    models:
+      default: M
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse auto_update");
+        assert!(cfg.agents["claude"].auto_update);
+        assert!(!cfg.agents["codex"].auto_update);
+        assert!(!AgentEntry::default().auto_update);
     }
 }

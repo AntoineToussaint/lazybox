@@ -2807,6 +2807,8 @@ impl<T: TerminalAdapter> Model<T> {
             .map(|c| c.agent.gateway_url().is_some())
             .unwrap_or(false);
         actions.push(SettingsAction::EditLlmGateway { set: gateway_set });
+        actions.push(SettingsAction::CheckAgentUpdates);
+        actions.push(SettingsAction::UpdateAgentClis);
         actions.push(SettingsAction::InspectWorktrees);
         actions.push(SettingsAction::CleanWorktrees);
         actions.push(SettingsAction::FullSetup);
@@ -2856,6 +2858,19 @@ impl<T: TerminalAdapter> Model<T> {
             self.mount_default_agent_picker();
             return;
         }
+        // Agent-CLI update actions are fire-and-forget daemon commands;
+        // results come back as AgentCliUpdatesChecked / -UpdateFinished
+        // footer notices.
+        if matches!(action, SettingsAction::CheckAgentUpdates) {
+            self.send_cmd(lazybox_ipc::Command::CheckAgentCliUpdates);
+            self.flash_hint("checking agent CLI versions…");
+            return;
+        }
+        if matches!(action, SettingsAction::UpdateAgentClis) {
+            self.send_cmd(lazybox_ipc::Command::UpdateAgentClis);
+            self.flash_hint("updating agent CLIs in the background…");
+            return;
+        }
         let Some((report, sources)) = self.setup.inputs.clone() else {
             tracing::warn!("dispatch_settings_action: no cached inputs");
             return;
@@ -2881,6 +2896,7 @@ impl<T: TerminalAdapter> Model<T> {
             }
             SettingsAction::ToggleSkipPermissions { .. } => return,
             // Handled by the early returns above; listed for exhaustiveness.
+            SettingsAction::CheckAgentUpdates | SettingsAction::UpdateAgentClis => return,
             SettingsAction::EditSnippets => return,
             SettingsAction::EditTheme { .. } => return,
             SettingsAction::EditLlmGateway { .. } => return,

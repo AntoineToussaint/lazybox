@@ -28,6 +28,7 @@
 
 pub mod agent_runs;
 pub mod agent_stream;
+pub mod agent_updates;
 pub mod api_gateway;
 pub mod auth;
 pub mod backend;
@@ -935,6 +936,8 @@ impl Server {
                         lazybox_ipc::Command::InspectWorktrees => "InspectWorktrees",
                         lazybox_ipc::Command::DeleteOrphanedWorktree { .. } => "DeleteOrphanedWorktree",
                         lazybox_ipc::Command::FetchScrollback { .. } => "FetchScrollback",
+                        lazybox_ipc::Command::CheckAgentCliUpdates => "CheckAgentCliUpdates",
+                        lazybox_ipc::Command::UpdateAgentClis => "UpdateAgentClis",
                         lazybox_ipc::Command::Shutdown => "Shutdown",
                     };
                     // `Write` fires on every keystroke — at info it floods
@@ -1602,6 +1605,12 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::DeleteOrphanedWorktree { path, force } => {
             polling::handle_delete_orphaned_worktree(config, path, force).await;
+        }
+        lazybox_ipc::Command::CheckAgentCliUpdates => {
+            agent_updates::handle_check(config, true).await;
+        }
+        lazybox_ipc::Command::UpdateAgentClis => {
+            agent_updates::handle_update_all(config);
         }
         lazybox_ipc::Command::Shutdown => {
             unreachable!("Shutdown is loop control, intercepted by the serve loop")

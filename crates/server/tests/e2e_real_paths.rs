@@ -621,3 +621,113 @@ async fn e2e_real_codex_boots_to_a_detected_ready_state() {
         .output();
     result.expect("deadline");
 }
+
+/// #393 through the FULL serve loop with real tmux, no restart: the
+/// scroll-triggered `Command::FetchScrollback` must come back as an
+/// `Event::TerminalScrollback` carrying tmux's retained pane history —
+/// the same depth a restarted daemon would seed. The landed unit tests
+/// cover the mock round trip and the backend call in isolation; this
+/// pins the wire path a real TUI actually rides when the user scrolls
+/// a live session up.
+#[tokio::test]
+async fn e2e_live_scroll_fetch_serves_deep_history_without_restart() {
+    if modern_tmux_version().is_none() {
+        skip_or_fail("modern tmux");
+        return;
+    }
+    let _home = IsolatedConfigHome::new();
+    let socket = format!("lazybox-e2e-scroll-{}", std::process::id());
+    let result = timeout(TEST_DEADLINE, async {
+        let backend = TmuxBackend::with_socket(&socket).expect("conf written");
+        let config = ServerConfig::with_store_and_backend(
+            Arc::new(MemoryStore::new()),
+            Arc::new(backend),
+        );
+        let (mut client, _daemon) = subscribed(config).await;
+
+        let cwd = tempfile::TempDir::new().unwrap();
+        client
+            .send(Command::Spawn {
+                model_alias: None,
+                session_key: "test:e2e-scroll".into(),
+                session_id: None,
+                kind: TerminalKind::Shell,
+                cwd: Some(cwd.path().to_string_lossy().into_owned()),
+                initial_prompt: None,
+                on_main: false,
+            })
+            .unwrap();
+        let terminal_id = match wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalSpawned { .. }),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("TerminalSpawned")
+        {
+            Event::TerminalSpawned { terminal_id, .. } => terminal_id,
+            _ => unreachable!(),
+        };
+
+        client
+            .send(Command::Write {
+                terminal_id,
+                bytes: b"for i in $(seq 1 200); do echo line-$i; done\n".to_vec(),
+            })
+            .unwrap();
+        let mut seen = Vec::new();
+        let done = wait_for(
+            &mut client,
+            |e| {
+                if let Event::TerminalOutput {
+                    terminal_id: id,
+                    bytes,
+                    ..
+                } = e
+                    && *id == terminal_id
+                {
+                    seen.extend_from_slice(bytes);
+                }
+                String::from_utf8_lossy(&seen).contains("line-200")
+            },
+            Duration::from_secs(30),
+        )
+        .await;
+        assert!(done.is_some(), "the shell must produce all 200 lines");
+
+        // What the TUI sends on the first upward scroll of a visit.
+        client
+            .send(Command::FetchScrollback { terminal_id })
+            .unwrap();
+        let reply = wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalScrollback { terminal_id: id, .. } if *id == terminal_id),
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("TerminalScrollback reply — a live session must serve deep history");
+        let Event::TerminalScrollback { replay, seq, .. } = reply else {
+            unreachable!();
+        };
+        let replay = String::from_utf8_lossy(&replay);
+        // line-5 scrolled out of the 32-row pane ~170 lines ago: only
+        // tmux's pane history can supply it on a never-restarted
+        // session. The `\r` pins the capture-normalized exact line.
+        assert!(
+            replay.contains("line-5\r"),
+            "live fetch must reach deep history, got {} bytes: {:?}…",
+            replay.len(),
+            &replay[..replay.len().min(400)],
+        );
+        assert!(
+            replay.contains("line-200"),
+            "live fetch must include the latest output"
+        );
+        assert!(seq > 0, "reply must carry the live seq high-water mark");
+    })
+    .await;
+    let _ = std::process::Command::new("tmux")
+        .args(["-L", &socket, "kill-server"])
+        .output();
+    result.expect("deadline");
+}

@@ -64,15 +64,25 @@ test could skip-as-pass on runners without tmux (closed —
 `LAZYBOX_E2E_REQUIRE=1` fails instead), and nothing exercised
 restart-recovery through the *serve loop* a TUI actually reconnects to
 (closed — `e2e_serve_loop_restart_recovers_session_with_deep_scrollback`).
-Still unenforced, tracked in #393: live-vs-restart *grid equivalence*
-(same program output through both paths, compare reconstructed grids)
-and byte↔line budget parity.
 
-**Consolidation verdict:** unify the source behind one mechanism (#393
-proposes capture-pane for live too). Deliberately **not** bundled here:
-it changes the live hot path and deserves its own change with the
-equivalence test landing alongside. Until then the divergence is
-documented and its restart half is pinned by the e2e tier.
+**Consolidation verdict — landed (PR #395, 2026-07-20):** live sessions
+now read the same capture-pane history as the restart path — the first
+upward scroll of a visit sends `Command::FetchScrollback` and the
+client rebuilds its grid from the reply, preserving DEC modes and the
+viewport's distance from the bottom. The e2e tier pins the whole wire
+path against real tmux with no restart
+(`e2e_live_scroll_fetch_serves_deep_history_without_restart`), and a
+libghostty-level test pins the invariant that makes parking in deep
+scrollback usable at all (a streamed chunk never snaps a scrolled-up
+viewport to the bottom). Remaining divergence, deliberately accepted
+for now: capture fidelity (OSC 8 hyperlinks, soft-wrap geometry) and
+byte↔line budget parity are not equivalence-tested — depth is.
+
+**Operational note:** #395 merged the same day this audit closed. Any
+"scrolling is STILL broken" report should first check the running
+binary's build (`lazybox --version` vs `git log`) — the dormant
+dev-build staleness guard this PR fixes is exactly why a pre-#395
+binary could run for days with zero signal.
 
 ---
 

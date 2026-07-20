@@ -25,10 +25,17 @@ about it.
 | `crates/server/tests/replay_scrollback.rs::recovered_session_retains_meaningful_scrollback` | ring-budget depth under churn-heavy streams (live path, unit) |
 | `crates/server/tests/tmux_restart.rs::restarted_backend_seeds_scrollback_from_tmux_history` | #306 restart half — capture-pane re-seed against a **real tmux server**; skip-as-pass is forbidden under `LAZYBOX_E2E_REQUIRE=1` |
 | `crates/server/tests/e2e_real_paths.rs::e2e_serve_loop_restart_recovers_session_with_deep_scrollback` | #393 restart half, **real shape** — full serve loop, real tmux, daemon torn down, reconnecting client's snapshot reaches deep history |
+| `crates/server/tests/tmux_restart.rs::live_backend_serves_deep_scrollback_without_restart` | #393 live half (PR #395) — the backend serves capture-pane history to a never-restarted session |
+| `crates/server/tests/spawn_handler.rs::fetch_scrollback_round_trips_backend_history` | #393 — the FetchScrollback → TerminalScrollback wire round trip (mock backend) |
+| `crates/tui/src/components/terminal_stack.rs::scroll_up_arms_one_fetch_per_visit` | #393 — the client trigger fires on the first upward scroll, even with zero local scrollback |
+| `crates/tui/src/components/terminal_stack.rs::apply_scrollback_keeps_viewport_distance_from_bottom` | #393 — the deep rebuild doesn't yank the user out of their scroll position |
+| `crates/server/tests/e2e_real_paths.rs::e2e_live_scroll_fetch_serves_deep_history_without_restart` | #393, **real shape** — the scroll-triggered fetch through the full serve loop against real tmux, no restart |
+| `crates/libghostty-vt/tests/feed_while_scrolled.rs::viewport_stays_anchored_while_output_streams_in` | the invariant that makes live deep scrollback usable at all: streamed output must not snap a scrolled-up viewport to the bottom |
 
-**OPEN GAP (#393):** live-vs-restart *equivalence* — same output through
-the live byte stream and through capture-pane must reconstruct the same
-grid (hyperlinks, soft wraps, depth). Lands with the #393 unification.
+**Narrowed gap (#393):** live-vs-restart *fidelity equivalence* — the
+capture path drops OSC 8 hyperlinks and flattens soft wraps relative to
+the raw stream. Depth parity is now guarded (above); styling/wrap
+parity is not.
 
 ## Agent state / needs-input (#225, #357, #374, #397, #399)
 

@@ -174,6 +174,12 @@ impl Sidebar {
         self.inner.outdated_commits_behind()
     }
 
+    /// Record whether `ui.keep_awake` is on so the header can badge
+    /// active sleep inhibition.
+    pub fn set_keep_awake(&mut self, keep_awake: bool) {
+        self.inner.set_keep_awake(keep_awake);
+    }
+
     /// True while the `/` search bar is capturing keystrokes. The
     /// orchestrator checks this before its normal key routing so a
     /// query can swallow keys that would otherwise fire shortcuts.

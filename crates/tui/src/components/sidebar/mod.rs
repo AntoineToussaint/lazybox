@@ -467,6 +467,13 @@ pub struct Sidebar {
     /// can't masquerade as a live regression. Set once at startup by
     /// [`crate::build_guard`]; `None` is the current-build common case.
     outdated_commits_behind: Option<u32>,
+    /// Mirror of `ui.keep_awake` as loaded at startup. When set, the
+    /// header paints a small "awake" badge while any agent is
+    /// `Working` — the same condition under which the daemon holds
+    /// its OS sleep inhibitor — so the user can see the machine is
+    /// being kept awake and why. The daemon re-reads the flag live;
+    /// this client-side mirror refreshes on restart.
+    keep_awake: bool,
 }
 
 /// A queued user-facing notification that the outer (IO-aware) layer
@@ -511,6 +518,7 @@ impl Sidebar {
             search: None,
             broadcast_selected: std::collections::HashSet::new(),
             outdated_commits_behind: None,
+            keep_awake: false,
         }
     }
 
@@ -545,6 +553,21 @@ impl Sidebar {
         self.outdated_commits_behind
     }
 
+    /// Record whether `ui.keep_awake` is on, so the header can badge
+    /// active sleep inhibition. Display-only — the daemon holds the
+    /// actual inhibitor.
+    pub fn set_keep_awake(&mut self, keep_awake: bool) {
+        self.keep_awake = keep_awake;
+    }
+
+    /// True while ≥1 agent in the sidebar is `Working` — the same
+    /// predicate the daemon's keep-awake watcher inhibits sleep on.
+    fn any_agent_working(&self) -> bool {
+        self.agents
+            .values()
+            .any(|s| matches!(s, lazybox_ipc::AgentState::Working))
+    }
+
     /// Sync the "working" spinner to the wall clock. Returns `true`
     /// when the displayed frame changed, so the caller knows a
     /// re-render is warranted.
@@ -564,11 +587,7 @@ impl Sidebar {
     /// rest of the time, so it never forces a faster redraw and a single
     /// shared frame index means no per-row work on each tick.
     pub fn tick_working(&mut self) -> bool {
-        if !self
-            .agents
-            .values()
-            .any(|s| matches!(s, lazybox_ipc::AgentState::Working))
-        {
+        if !self.any_agent_working() {
             return false;
         }
         let frame =

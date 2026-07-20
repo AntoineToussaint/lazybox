@@ -314,6 +314,21 @@ pub struct UiSection {
     /// here.
     #[serde(default, deserialize_with = "de_lenient_new_terminal_layout")]
     pub terminal_new_layout: NewTerminalLayout,
+    /// Keep the machine awake while any agent is actively working.
+    /// When `true`, the daemon holds an OS sleep inhibitor
+    /// (`caffeinate` on macOS, `systemd-inhibit` on Linux — a
+    /// non-systemd Linux gets a logged warning and no inhibition)
+    /// for exactly as long as ≥1 agent terminal is `Working`, and
+    /// releases it the moment everything goes idle — the box never
+    /// stays pinned awake just because lazybox is open. "Working"
+    /// means actively computing: an agent parked at a permission
+    /// prompt or resting after its turn lets the machine sleep
+    /// normally. The daemon re-reads this flag on every agent
+    /// transition, so editing it takes effect without a restart.
+    /// Defaults to `false`: sleep behavior is unchanged unless
+    /// opted in.
+    #[serde(default)]
+    pub keep_awake: bool,
 }
 
 fn default_true() -> bool {
@@ -342,6 +357,7 @@ impl Default for UiSection {
             show_tips: true,
             tips_seen: Vec::new(),
             terminal_new_layout: NewTerminalLayout::default(),
+            keep_awake: false,
         }
     }
 }
@@ -373,6 +389,9 @@ pub struct UiDefaults {
     /// Layout for an auto-spawned second-or-later terminal. See
     /// [`UiSection::terminal_new_layout`].
     pub terminal_new_layout: NewTerminalLayout,
+    /// Hold an OS sleep inhibitor while agents work. See
+    /// [`UiSection::keep_awake`].
+    pub keep_awake: bool,
 }
 
 impl Default for UiDefaults {
@@ -390,6 +409,7 @@ impl Default for UiDefaults {
             browser: None,
             agent_dead_on_arrival: Duration::from_millis(10_000),
             terminal_new_layout: NewTerminalLayout::default(),
+            keep_awake: false,
         }
     }
 }
@@ -422,6 +442,7 @@ impl UiSection {
             // override is applied.
             agent_dead_on_arrival: d.agent_dead_on_arrival,
             terminal_new_layout: self.terminal_new_layout,
+            keep_awake: self.keep_awake,
         }
     }
 }
@@ -1313,6 +1334,20 @@ mod tests {
         assert_eq!(mode_of(&path), 0o600, "load must tighten a loose file");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `ui.keep_awake` is opt-in: absent means off (sleep behavior
+    /// unchanged), and both the raw section and the resolved defaults
+    /// carry an explicit `true`.
+    #[test]
+    fn keep_awake_defaults_off_and_parses() {
+        let cfg: Config = serde_yaml::from_str("{}").expect("parse");
+        assert!(!cfg.ui.keep_awake);
+        assert!(!cfg.ui.resolved().keep_awake);
+
+        let cfg: Config = serde_yaml::from_str("ui:\n  keep_awake: true\n").expect("parse");
+        assert!(cfg.ui.keep_awake);
+        assert!(cfg.ui.resolved().keep_awake);
     }
 
     /// `repos.<owner/name>.{env,mounts}` should round-trip cleanly

@@ -137,6 +137,16 @@ fn transparent_conf(native_scrollback: bool) -> String {
         conf.push_str("set -g mouse on\n");
     }
     conf.push_str(&format!("set -g history-limit {HISTORY_LIMIT}\n"));
+    // Lazybox scrollback exists ONLY for pane content that scrolls into
+    // tmux history — the restart seed, the live deep-scrollback fetch,
+    // and the attach client's own accumulation all read from the primary
+    // screen's scroll-off. A program that switches its pane to the
+    // alternate screen (Claude Code ≥2.1 does) accumulates ZERO history:
+    // scrollback silently dies for that session, live and after restart
+    // alike. Deny the alt screen at the pane level so agent output keeps
+    // flowing where history is retained — the pane-side counterpart of
+    // the attach-side `smcup@/rmcup@` stripping below.
+    conf.push_str("set -g alternate-screen off\n");
     conf.push_str(
         "set -g default-terminal \"xterm-256color\"\n\
          set -g escape-time 0\n\
@@ -226,6 +236,12 @@ fn server_option_cmds(native_scrollback: bool) -> Vec<Vec<&'static str>> {
     // focus-events off. We own the config, so enable it for both fresh
     // and recovered servers.
     let focus_events = vec!["set-option", "-g", "focus-events", "on"];
+    // Pane-level alt-screen denial (see `transparent_conf`): a
+    // pre-existing server from an older lazybox still allows it, and
+    // every alt-screen pane retains zero history — pushing this heals
+    // sessions spawned after the push (a pane already inside the alt
+    // screen stays there until its program leaves it).
+    let no_alt_screen = vec!["set-option", "-g", "alternate-screen", "off"];
     // `terminal-features` is independent of the scrollback flavor — an
     // already-running server must learn the client speaks OSC 8 either
     // way, else surviving sessions keep stripping hyperlinks.
@@ -255,6 +271,7 @@ fn server_option_cmds(native_scrollback: bool) -> Vec<Vec<&'static str>> {
     };
     cmds.extend(clipboard);
     cmds.push(focus_events);
+    cmds.push(no_alt_screen);
     cmds
 }
 
@@ -542,6 +559,28 @@ impl TmuxBackend {
     ///
     /// Best-effort: any failure returns an empty seed and the client
     /// simply starts from the live repaint, exactly as before this fix.
+    /// Whether `key`'s pane is on the alternate screen, and how many
+    /// history lines tmux retains for it. `None` when tmux can't answer
+    /// (dead session, wedged server) — callers treat that as "don't
+    /// know" rather than "no history".
+    async fn pane_history_state(&self, key: &str) -> Option<(bool, u64)> {
+        let out = self
+            .tmux(&[
+                "display-message",
+                "-p",
+                "-t",
+                key,
+                "#{alternate_on}\t#{history_size}",
+            ])
+            .await
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut parts = text.trim().split('\t');
+        let alternate_on = parts.next()? == "1";
+        let history_size = parts.next()?.parse().ok()?;
+        Some((alternate_on, history_size))
+    }
+
     async fn capture_history(&self, key: &str) -> Vec<u8> {
         let start = format!("-{HISTORY_LIMIT}");
         let out = match self
@@ -971,6 +1010,27 @@ impl SessionBackend for TmuxBackend {
     ) -> Pin<Box<dyn Future<Output = Result<Option<(Vec<u8>, u64)>, BackendError>> + Send + 'a>>
     {
         Box::pin(async move {
+            // A pane with no retained history has nothing deeper than
+            // what the client already rendered — capture-pane would
+            // return just the visible screen, and adopting that as the
+            // rebuilt grid REPLACES the client's (possibly deeper) local
+            // scrollback with ~one screenful: the "scrollbar disappears
+            // on the first scroll" regression. The alt screen is the
+            // systematic zero-history case (now denied pane-side via
+            // `alternate-screen off`, but panes that entered it under an
+            // older server config stay there until their program leaves).
+            match self.pane_history_state(key).await {
+                Some((alternate_on, history_size)) if alternate_on || history_size == 0 => {
+                    tracing::debug!(
+                        key,
+                        alternate_on,
+                        history_size,
+                        "scrollback fetch skipped — pane has no retained history"
+                    );
+                    return Ok(None);
+                }
+                _ => {}
+            }
             // Same seed the restart/reattach path uses — tmux holds
             // `history-limit` lines for live sessions too, the client
             // just never read them before (#393).
@@ -1066,6 +1126,7 @@ mod tests {
             "xterm*:hyperlinks",
         ];
         let focus_events = vec!["set-option", "-g", "focus-events", "on"];
+        let no_alt_screen = vec!["set-option", "-g", "alternate-screen", "off"];
         let native = server_option_cmds(true);
         assert_eq!(
             native,
@@ -1081,6 +1142,7 @@ mod tests {
                 clipboard[0].clone(),
                 clipboard[1].clone(),
                 focus_events.clone(),
+                no_alt_screen.clone(),
             ]
         );
         let legacy = server_option_cmds(false);
@@ -1093,8 +1155,26 @@ mod tests {
                 clipboard[0].clone(),
                 clipboard[1].clone(),
                 focus_events,
+                no_alt_screen,
             ]
         );
+    }
+
+    /// Scrollback only exists for content that reaches tmux's pane
+    /// history, and a pane on the alternate screen retains NONE — a
+    /// Claude ≥2.1 session under the old config scrolled back through
+    /// nothing, live and after restart alike. Both conf flavors (and
+    /// the option push for pre-existing servers, above) must deny the
+    /// alt screen at the pane level.
+    #[test]
+    fn both_conf_flavors_deny_the_pane_alternate_screen() {
+        for native in [true, false] {
+            let conf = transparent_conf(native);
+            assert!(
+                conf.contains("set -g alternate-screen off\n"),
+                "native={native}"
+            );
+        }
     }
 
     /// Both conf flavors enable clipboard passthrough so an inner

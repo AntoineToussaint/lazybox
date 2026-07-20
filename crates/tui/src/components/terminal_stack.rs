@@ -2307,6 +2307,30 @@ impl TerminalStack {
         if on_alt_screen {
             return;
         }
+        // Pre-flight the rebuild in a scratch parser at the same width
+        // and only adopt it when it is actually DEEPER than the current
+        // grid. A capture from a pane with no retained history — the
+        // pane sat on the alternate screen under an older server config,
+        // or was freshly spawned — is ~one screenful, and adopting it
+        // would replace whatever scrollback the local grid had: the
+        // scrollbar vanished on the very first scroll. The daemon skips
+        // those fetches at the source; this guard makes shrinkage
+        // impossible regardless of what arrives on the wire.
+        let current_total = t.scrollbar().ok().map(|b| b.total).unwrap_or(0);
+        let Some(mut scratch) = TerminalVt::new() else {
+            return;
+        };
+        scratch.ensure_size(slot.vt.cols, slot.vt.rows);
+        scratch.feed(replay);
+        let rebuilt_total = scratch
+            .terminal
+            .scrollbar()
+            .ok()
+            .map(|b| b.total)
+            .unwrap_or(0);
+        if rebuilt_total <= current_total {
+            return;
+        }
         let preserved: Vec<(u16, bool)> = PRESERVED_DEC_MODES
             .iter()
             .filter_map(|m| t.mode(*m).ok().map(|on| (m.value(), on)))
@@ -5464,6 +5488,46 @@ mod deep_scrollback_tests {
             "capture must open real scrollback: {after:?}"
         );
         assert_eq!(stack.terminals[&TerminalId(1)].last_seq, 9);
+    }
+
+    /// The user-reported shape of the #393 follow-up regression: "the
+    /// scroll bar disappears as soon as I start scrolling". The pane
+    /// sat on the alternate screen (Claude ≥2.1 under a pre-fix server
+    /// config), so tmux retained zero history and the capture was ~one
+    /// screenful — and adopting it REPLACED the client's deeper local
+    /// grid, wiping the scrollback and the scrollbar with it. A rebuild
+    /// that is not strictly deeper than the current grid must be a
+    /// no-op.
+    #[test]
+    fn shallow_capture_never_shrinks_the_grid() {
+        let sk = SessionKey::new("s");
+        let mut stack = agent_stack(TerminalId(1), &sk);
+        let mut lines = String::new();
+        for i in 0..120 {
+            lines.push_str(&format!("local line {i}\r\n"));
+        }
+        feed(&mut stack, TerminalId(1), lines.as_bytes(), 1, 5);
+        let before = scrollbar(&stack, TerminalId(1));
+        assert!(before.total > before.len, "precondition: deep local grid");
+
+        stack.on_event(&Event::TerminalScrollback {
+            terminal_id: TerminalId(1),
+            replay: deep_history(3),
+            seq: 9,
+        });
+
+        let after = scrollbar(&stack, TerminalId(1));
+        assert_eq!(
+            after.total, before.total,
+            "a one-screen capture must never replace a deeper grid \
+             (this is the disappearing-scrollbar regression)"
+        );
+        assert!(after.total > after.len, "scrollback (and its bar) survive");
+        assert_eq!(
+            stack.terminals[&TerminalId(1)].last_seq,
+            5,
+            "a skipped rebuild adopts nothing"
+        );
     }
 
     /// The capture is content-only, so the modes the inner program had

@@ -43,6 +43,16 @@ pub(crate) enum PolicyToggle {
     Info(String),
 }
 
+/// Stash for the `w` multi-agent chooser (`Id::WorkAgentPicker`,
+/// #418): the running agent ids shown (row order matches the picker),
+/// plus the spawn params the pick replays through `push_work_spawn`.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingWorkPicker {
+    pub agents: Vec<String>,
+    pub session_id: Option<lazybox_core::SessionId>,
+    pub model_alias: Option<String>,
+}
+
 /// Build the automation-policies menu rows for `ws`: one `(label,
 /// toggle)` pair per policy, reflecting current state. `opt_out_labels`
 /// is the configured auto-fix opt-out set so a label that disables
@@ -437,6 +447,43 @@ impl<T: TerminalAdapter> Model<T> {
             .title("Automation policies")
             .label(|s: &String| s.clone());
         self.mount_modal(Id::PolicyPicker, modal);
+    }
+
+    /// Mount the `w` multi-agent chooser (#418): the selected workspace
+    /// has SEVERAL distinct running agents, so ask which one to inject
+    /// the work prompt into instead of silently guessing (or worse,
+    /// spawning a fresh default next to them). The pick replays
+    /// `push_work_spawn` for the chosen agent; `session_id` /
+    /// `model_alias` carry the original `w` / `w S` parameters through.
+    pub(crate) fn mount_work_agent_picker(
+        &mut self,
+        agents: Vec<String>,
+        session_id: Option<lazybox_core::SessionId>,
+        model_alias: Option<String>,
+    ) {
+        use crate::realm::components::choice::Choice;
+
+        if matches!(self.modal_stack.last(), Some(Id::WorkAgentPicker)) {
+            return;
+        }
+        // `w` would have nothing to do after the pick — say so now
+        // instead of asking a question whose answer goes nowhere.
+        let workspace = self.sidebar.selected_workspace();
+        let selected = self.right.selected_activity_indices();
+        if crate::intent::classify_work(workspace, &selected).is_none() {
+            self.flash_hint("nothing to work on here");
+            return;
+        }
+        let labels = agents.clone();
+        self.pending_work_picker = Some(PendingWorkPicker {
+            agents,
+            session_id,
+            model_alias,
+        });
+        let modal = Choice::single("Several agents are running — inject into…", labels)
+            .title("Work with which agent?")
+            .label(|s: &String| s.clone());
+        self.mount_modal(Id::WorkAgentPicker, modal);
     }
 
     /// Mount the "assignees" multi-select picker for the workspace's

@@ -1,0 +1,52 @@
+# Nightly integration lane (#410): the real-path tier PR CI can't gate
+# cheaply. Runs the full workspace INCLUDING #[ignore]'d tests, with
+# LAZYBOX_E2E_REQUIRE=1 so a missing prerequisite (tmux) fails instead
+# of silently skipping — a green run here means the restart-scrollback,
+# real-provisioning, and transfer paths actually executed.
+#
+# Live-agent tests (e2e_real_claude_* / e2e_real_codex_*) need an
+# installed, authenticated agent CLI, which hosted runners don't have;
+# they self-skip unless LAZYBOX_E2E_LIVE_AGENTS=1. Set the repo variable
+# of the same name (plus a runner that has the CLIs) to enable them; the
+# tier is also meant to be run locally:
+#
+#   LAZYBOX_E2E_LIVE_AGENTS=1 cargo nextest run -p lazybox-server \
+#     --profile nightly --run-ignored all -E 'test(/^e2e_/)'
+
+name: nightly
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  integration:
+    name: integration (real paths)
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, macos-14]
+    runs-on: ${{ matrix.runner }}
+    env:
+      LAZYBOX_E2E_REQUIRE: "1"
+      LAZYBOX_E2E_LIVE_AGENTS: ${{ vars.LAZYBOX_E2E_LIVE_AGENTS }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/rust-build-env
+
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Full suite with real prerequisites required
+        run: cargo nextest run --workspace --profile nightly
+
+      # Only the e2e_ tier — `--run-ignored all` would also pull in the
+      # live-GitHub-API traces (gh-provider sync_trace), which need a
+      # token + watch config no hosted runner has.
+      - name: Ignored integration tier (real backends / live agents)
+        run: cargo nextest run --workspace --profile nightly --run-ignored only -E 'test(/^e2e_/)'

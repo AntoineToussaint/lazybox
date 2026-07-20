@@ -20,8 +20,23 @@ failure-output = "immediate-final"
 # Run them on demand with `cargo nextest run --run-ignored only`.
 default-filter = "not test(/^ignored_/)"
 
+# Integration tier (#410): `e2e_*` tests run real subprocesses — git
+# provisioning, tmux attach, live agent binaries — and are legitimately
+# seconds-slow. Applies to every profile (overrides in `default` are
+# inherited).
+[[profile.default.overrides]]
+filter = 'test(/^e2e_/)'
+slow-timeout = { period = "150s", terminate-after = 1 }
+
 [profile.ci]
 # CI uses the same bound but retries flaky tests once before failing.
 slow-timeout = { period = "10s", terminate-after = 1 }
 retries = 1
+failure-output = "immediate-final"
+
+# Nightly lane: the full workspace including #[ignore]'d real-backend /
+# live-agent tests (`--run-ignored all` in the workflow). No retries —
+# a flaky real-path test is a signal, not noise to absorb.
+[profile.nightly]
+slow-timeout = { period = "10s", terminate-after = 1 }
 failure-output = "immediate-final"

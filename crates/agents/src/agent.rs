@@ -1,5 +1,6 @@
 //! The `Agent` trait and built-in implementations.
 
+use crate::pty::{EncodedPrompt, PromptIntent, PtyProtocol};
 use lazybox_ipc::AgentState;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -17,7 +18,8 @@ pub struct SpawnCtx {
     /// ("no-permission" / bypass mode). Set for lazybox-spawned autonomous
     /// sessions, and for interactive sessions when the user opts in via
     /// the `agent.skip_permissions` toggle. Honored by agents that
-    /// support a bypass flag (Claude → `--dangerously-skip-permissions`).
+    /// support a bypass flag (Claude → `--dangerously-skip-permissions`,
+    /// Codex → `--dangerously-bypass-approvals-and-sandbox`).
     /// Agents without one ignore it.
     pub skip_permissions: bool,
     /// Path to a lazybox-generated settings file the agent should launch
@@ -71,18 +73,51 @@ impl StructuredAgentProtocol {
     }
 }
 
-/// Shape of the prompt behind an `InputNeeded` reading: whether a bare
-/// chooser keystroke (`1`-`9`, `y`, `n`, Esc) is a complete answer. The
-/// daemon records this alongside the cached state so the optimistic
-/// "user answered the prompt" flip only fires on prompts a single
-/// keystroke can actually answer.
+pub use crate::pty::PromptShape;
+
+/// One semantic observation produced by an agent's PTY detector.
+///
+/// The state and prompt shape travel together so the daemon never has to
+/// infer agent-UI semantics from a bare [`AgentState::InputNeeded`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PromptShape {
-    /// Permission gate / chooser / Y-N dialog — one keystroke answers.
-    Chooser,
-    /// Free-text elicitation — the answer is composed text plus Enter;
-    /// a bare digit is just typing into the field.
-    FreeText,
+pub struct AgentObservation {
+    state: AgentState,
+    prompt_shape: Option<PromptShape>,
+}
+
+impl AgentObservation {
+    /// Wrap a detected state. A legacy `InputNeeded` reading is treated as a
+    /// chooser because PTY detectors historically only surfaced structural
+    /// permission/selection prompts; adapters with free-text prompts should
+    /// use [`AgentObservation::input_needed`].
+    pub const fn from_state(state: AgentState) -> Self {
+        Self {
+            state,
+            prompt_shape: if matches!(state, AgentState::InputNeeded) {
+                Some(PromptShape::Chooser)
+            } else {
+                None
+            },
+        }
+    }
+
+    /// Build an input-needed observation with its exact interaction shape.
+    pub const fn input_needed(prompt_shape: PromptShape) -> Self {
+        Self {
+            state: AgentState::InputNeeded,
+            prompt_shape: Some(prompt_shape),
+        }
+    }
+
+    /// Detected lifecycle state.
+    pub const fn state(self) -> AgentState {
+        self.state
+    }
+
+    /// Shape of the blocking prompt, present only for `InputNeeded`.
+    pub const fn prompt_shape(self) -> Option<PromptShape> {
+        self.prompt_shape
+    }
 }
 
 pub trait Agent: Send + Sync {
@@ -108,6 +143,21 @@ pub trait Agent: Send + Sync {
     /// runs before trying provider-specific flags.
     fn structured_protocol(&self) -> Option<StructuredAgentProtocol> {
         None
+    }
+
+    /// Interactive shell/PTY behavior for this agent. The server owns the
+    /// universal paste/settle/submit transaction; adapters only select a
+    /// protocol. Simple and generic CLIs inherit [`PtyProtocol::LINE_ORIENTED`].
+    fn pty_protocol(&self) -> PtyProtocol {
+        PtyProtocol::default()
+    }
+
+    /// Encode a complete prompt interaction atomically. Most adapters should
+    /// inherit this and declare [`Agent::pty_protocol`]; an unusual CLI may
+    /// override this single method without having to coordinate independent
+    /// prompt and submit hooks.
+    fn encode_prompt(&self, prompt: &str, intent: PromptIntent) -> EncodedPrompt {
+        self.pty_protocol().encode_prompt(prompt, intent)
     }
 
     /// Command + args to spawn a fresh session.
@@ -169,8 +219,8 @@ pub trait Agent: Send + Sync {
     /// Chunk-aware variant of [`Agent::detect_state`]. `last_chunk_start`
     /// is the byte offset within `recent_output` where the most recent
     /// PTY chunk begins. Agents whose detector reasons about marker
-    /// recency (Claude) use it to recognize a full-screen repaint, where
-    /// a live dialog and the bottom status bar arrive in ONE chunk and
+    /// recency (Claude and Codex) use it to recognize a full-screen repaint,
+    /// where a live dialog and the bottom status bar arrive in ONE chunk and
     /// positional ordering alone misreads the dialog as stale. The
     /// default ignores the hint and delegates to `detect_state`.
     fn detect_state_chunked(
@@ -180,6 +230,42 @@ pub trait Agent: Send + Sync {
     ) -> Option<AgentState> {
         let _ = last_chunk_start;
         self.detect_state(recent_output)
+    }
+
+    /// Semantic quiet-screen observation consumed by the daemon.
+    ///
+    /// Existing detectors can keep returning [`AgentState`]; this default
+    /// lifts that result into the shared observation contract. An adapter
+    /// whose PTY detector recognizes free-text input can override this method
+    /// and return [`AgentObservation::input_needed`] with the exact shape.
+    fn detect_observation_chunked(
+        &self,
+        recent_output: &[u8],
+        last_chunk_start: usize,
+    ) -> Option<AgentObservation> {
+        self.detect_state_chunked(recent_output, last_chunk_start)
+            .map(AgentObservation::from_state)
+    }
+
+    /// High-confidence, current-chunk check for a blocking prompt.
+    ///
+    /// The daemon normally waits for the PTY to go quiet before running
+    /// [`Agent::detect_state_chunked`]. That protects a streaming agent
+    /// from stale prompt text in scrollback, but delays notification for
+    /// full-screen approval dialogs and can miss one that keeps repainting.
+    /// Agents with distinctive prompt chrome can opt into this fast path:
+    /// only markers touched by the latest chunk may return their prompt shape.
+    ///
+    /// Default `None` preserves the quiet-only policy for adapters whose
+    /// prompt vocabulary is not strong enough to classify while output is
+    /// flowing.
+    fn detect_input_needed_in_current_chunk(
+        &self,
+        recent_output: &[u8],
+        last_chunk_start: usize,
+    ) -> Option<PromptShape> {
+        let _ = (recent_output, last_chunk_start);
+        None
     }
 
     /// Whether a `Working` PTY reading carries enough on-screen evidence
@@ -215,22 +301,6 @@ pub trait Agent: Send + Sync {
         false
     }
 
-    /// Whether the spawn-time prompt injector must hold off pasting
-    /// until `detect_ready_for_prompt` reports ready. Agents with an
-    /// authoritative readiness detector (Claude — input box drawn AND
-    /// no folder-trust / permission gate up) override to `true`, so
-    /// the time-based settle fallback can never paste the work-context
-    /// prompt into a still-visible trust dialog.
-    ///
-    /// Agents that rely on the default always-false
-    /// `detect_ready_for_prompt` keep `false`: for them the detector
-    /// never reports ready, so gating the injector on it would stall
-    /// every inject to the hard deadline. They keep the first-output +
-    /// settle path instead.
-    fn inject_requires_ready(&self) -> bool {
-        false
-    }
-
     /// Build the settings JSON to launch this agent with so it reports
     /// state through structured lifecycle hooks instead of (or
     /// alongside) PTY screen-scraping. `hook_command` is the shell
@@ -249,36 +319,6 @@ pub trait Agent: Send + Sync {
         user_settings: Option<&serde_json::Value>,
     ) -> Option<serde_json::Value> {
         let _ = (hook_command, user_settings);
-        None
-    }
-
-    /// Encode a prompt as bytes the daemon should write to the PTY.
-    /// Most agents accept plain text + a newline; some need bracketed
-    /// paste or specific control sequences.
-    ///
-    /// ESC (0x1b) is stripped from the (untrusted, third-party-authored)
-    /// prompt text: an agent that enables bracketed paste on its input
-    /// could otherwise be driven by an embedded `ESC[201~` paste-breakout
-    /// or arbitrary escape injection. See `builtins::Claude::inject_prompt`
-    /// for the same guard on the paste-wrapped path.
-    fn inject_prompt(&self, prompt: &str) -> Vec<u8> {
-        let mut bytes: Vec<u8> = prompt.bytes().filter(|&b| b != 0x1b).collect();
-        bytes.push(b'\n');
-        bytes
-    }
-
-    /// Bytes to write AFTER `inject_prompt`, once the terminal's
-    /// output has settled, to commit/submit the prompt. Returns `None` when
-    /// `inject_prompt` already includes the submit keystroke — the
-    /// default, which works for any CLI where Enter both terminates
-    /// the line and submits it.
-    ///
-    /// Required by agents whose input area batches rapid byte
-    /// arrival as a paste (Claude Code): Enter inside a paste blob
-    /// is interpreted as a soft line break in the input buffer, not
-    /// as a submit. Sending Enter separately, after the paste batch
-    /// has settled, triggers the actual submit.
-    fn inject_submit(&self) -> Option<Vec<u8>> {
         None
     }
 }
@@ -360,20 +400,6 @@ pub mod builtins {
         }
     }
 
-    /// Remove ESC (0x1b) bytes from untrusted prompt text before it is
-    /// wrapped in a bracketed paste. Prompt bodies are markdown / plain
-    /// text where a raw ESC never legitimately appears, so dropping it
-    /// neutralizes any embedded escape sequence — most importantly the
-    /// bracketed-paste END marker `ESC[201~`, which would otherwise let
-    /// attacker-authored content break out of the paste into live input.
-    fn scrub_escape_bytes(prompt: &str) -> std::borrow::Cow<'_, str> {
-        if prompt.as_bytes().contains(&0x1b) {
-            std::borrow::Cow::Owned(prompt.replace('\u{1b}', ""))
-        } else {
-            std::borrow::Cow::Borrowed(prompt)
-        }
-    }
-
     #[derive(Default)]
     pub struct Claude;
 
@@ -389,6 +415,9 @@ pub mod builtins {
         }
         fn structured_protocol(&self) -> Option<StructuredAgentProtocol> {
             Some(StructuredAgentProtocol::ClaudeStreamJson)
+        }
+        fn pty_protocol(&self) -> PtyProtocol {
+            PtyProtocol::GUARDED_COMPOSER
         }
         fn spawn(&self, ctx: &SpawnCtx) -> Vec<String> {
             let mut argv = vec!["claude".into()];
@@ -426,48 +455,6 @@ pub mod builtins {
             ))
         }
 
-        /// Claude Code's input area batches rapid byte arrival as a
-        /// paste. The prompt body is wrapped in explicit bracketed-
-        /// paste markers (`ESC[200~` … `ESC[201~`) so Claude's paste
-        /// detection is deterministic — without them it relies on
-        /// arrival timing, and a write that coalesces with the later
-        /// `\r` can swallow the submit as a soft line break. No `\r`
-        /// is included here: the trailing Enter is sent separately by
-        /// `inject_submit` once the terminal's output has quiesced —
-        /// evidence the paste batch settled — so it's unambiguously a
-        /// keystroke.
-        ///
-        /// Any literal `\n` inside the prompt stays a line break in
-        /// Claude's input box, which is what we want for multi-
-        /// paragraph instructions.
-        fn inject_prompt(&self, prompt: &str) -> Vec<u8> {
-            // SECURITY: the prompt body embeds untrusted third-party text
-            // (a PR/issue title + body authored by anyone). A body
-            // containing the literal bracketed-paste END marker
-            // `ESC[201~` would terminate the paste early, and everything
-            // after it would reach Claude's terminal as LIVE keystrokes /
-            // escape sequences — escaping both the paste and the
-            // "untrusted content" fence. ESC (0x1b) never legitimately
-            // appears in prompt text, so strip it: the marker degrades to
-            // inert `[201~` characters inside the paste.
-            let safe = scrub_escape_bytes(prompt);
-            let mut bytes = Vec::with_capacity(safe.len() + 12);
-            bytes.extend_from_slice(b"\x1b[200~");
-            bytes.extend_from_slice(safe.as_bytes());
-            bytes.extend_from_slice(b"\x1b[201~");
-            bytes
-        }
-
-        /// Send `\r` (Enter) separately from the paste body. Without
-        /// the gap, Claude treats the whole blob as a paste and the
-        /// trailing `\r` becomes a soft line break instead of a
-        /// submit — the prompt sits in the input box waiting on a
-        /// keystroke. Sending `\r` after the gap fires Enter as an
-        /// independent keystroke and submits the paste.
-        fn inject_submit(&self) -> Option<Vec<u8>> {
-            Some(vec![b'\r'])
-        }
-
         /// Claude Code's three observable states. Delegates to the pure
         /// [`crate::detect::claude_state`] so the logic is exercisable
         /// against captured real PTY bytes, not just synthetic strings.
@@ -498,14 +485,22 @@ pub mod builtins {
         fn detect_ready_for_prompt(&self, recent_output: &[u8]) -> bool {
             detect::claude_ready_for_prompt(recent_output)
         }
-
-        fn inject_requires_ready(&self) -> bool {
-            true
-        }
     }
 
     #[derive(Default)]
     pub struct Codex;
+
+    /// Build a Codex CLI `-c` override that marks exactly this worktree as
+    /// trusted. Codex's config override parser splits dotted keys literally,
+    /// so a quoted path cannot safely be expressed as
+    /// `projects."/path".trust_level=...`; replacing the `projects` table
+    /// with a one-entry inline table works for paths containing dots too.
+    fn codex_trusted_project_override(worktree: &Path) -> String {
+        let worktree = std::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
+        let path = serde_json::to_string(&worktree.to_string_lossy())
+            .unwrap_or_else(|_| "\"\"".to_string());
+        format!("projects={{{path}={{trust_level=\"trusted\"}}}}")
+    }
 
     impl Agent for Codex {
         fn id(&self) -> &'static str {
@@ -520,8 +515,20 @@ pub mod builtins {
         fn structured_protocol(&self) -> Option<StructuredAgentProtocol> {
             Some(StructuredAgentProtocol::CodexExecJson)
         }
-        fn spawn(&self, _ctx: &SpawnCtx) -> Vec<String> {
-            vec!["codex".into()]
+        fn pty_protocol(&self) -> PtyProtocol {
+            PtyProtocol::GUARDED_COMPOSER
+        }
+        fn spawn(&self, ctx: &SpawnCtx) -> Vec<String> {
+            let mut argv = vec!["codex".into()];
+            if ctx.skip_permissions {
+                argv.push("--dangerously-bypass-approvals-and-sandbox".into());
+                argv.push("--dangerously-bypass-hook-trust".into());
+                argv.push("-c".into());
+                argv.push(codex_trusted_project_override(&ctx.worktree));
+                argv.push("-c".into());
+                argv.push("check_for_update_on_startup=false".into());
+            }
+            argv
         }
 
         /// Suppress Homebrew's implicit self-update inside a spawned Codex
@@ -560,6 +567,18 @@ pub mod builtins {
             last_chunk_start: usize,
         ) -> Option<AgentState> {
             detect::codex_state_chunked(recent_output, last_chunk_start)
+        }
+
+        /// Surface Codex approval and directory-trust dialogs as soon as
+        /// their distinctive modal chrome is painted. The detector only
+        /// accepts a marker touched by the newest PTY chunk, so an answered
+        /// dialog lingering in scrollback cannot pin the session at `?`.
+        fn detect_input_needed_in_current_chunk(
+            &self,
+            recent_output: &[u8],
+            last_chunk_start: usize,
+        ) -> Option<PromptShape> {
+            detect::codex_input_needed_in_current_chunk(recent_output, last_chunk_start)
         }
 
         /// Whether Codex's composer is drawn and no approval / trust

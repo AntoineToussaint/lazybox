@@ -511,8 +511,8 @@ pub enum Command {
     /// a live terminal so `w fix CI` / `w address comments` reuses
     /// the user's running claude tab instead of spawning a second
     /// one. The daemon looks up the agent for `terminal_id` and
-    /// runs `agent.inject_prompt(prompt)` + `agent.inject_submit()`,
-    /// the same paste/submit split used at spawn time.
+    /// asks the agent's PTY protocol for one atomic prompt write sequence,
+    /// the same paste/settle/submit flow used at spawn time.
     ///
     /// `fallback_spawn` covers the race where the TUI cached the
     /// agent's terminal id, the agent died, `TerminalExited` is in

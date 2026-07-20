@@ -263,6 +263,18 @@ impl<T: TerminalAdapter> Model<T> {
             }
             return;
         }
+        // Deep-scrollback reply (#393): like raw output, it only
+        // mutates one terminal's grid — no workspace / layout state —
+        // so it takes the same short-circuit instead of the full
+        // fan-out.
+        if let IpcEvent::TerminalScrollback { terminal_id, .. } = &event {
+            let visible = self.terminals.is_terminal_visible(*terminal_id);
+            self.terminals.on_daemon_event(&event);
+            if visible {
+                self.redraw = true;
+            }
+            return;
+        }
         // Help-assistant run traffic (#302): structured agent JSONL
         // events no pane consumes. Route them into the shared help
         // conversation and stop — this must run before the general
@@ -312,6 +324,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::TerminalOutput { .. }
                 | IpcEvent::TerminalResync { .. }
                 | IpcEvent::TerminalResyncUnavailable { .. }
+                | IpcEvent::TerminalScrollback { .. }
                 | IpcEvent::TerminalExited { .. }
                 | IpcEvent::TerminalFocusRequested { .. }
                 | IpcEvent::TerminalsRebadged { .. }
@@ -778,6 +791,7 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::TerminalOutput { .. }
             | IpcEvent::TerminalResync { .. }
             | IpcEvent::TerminalResyncUnavailable { .. }
+            | IpcEvent::TerminalScrollback { .. }
             | IpcEvent::TerminalExited { .. }
             | IpcEvent::TerminalFocusRequested { .. }
             | IpcEvent::TerminalsRebadged { .. }
@@ -936,6 +950,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::TerminalOutput { .. }
                 | IpcEvent::TerminalResync { .. }
                 | IpcEvent::TerminalResyncUnavailable { .. }
+                | IpcEvent::TerminalScrollback { .. }
                 | IpcEvent::TerminalExited { .. }
                 | IpcEvent::TerminalFocusRequested { .. }
                 | IpcEvent::TerminalsRebadged { .. }

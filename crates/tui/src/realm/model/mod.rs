@@ -2196,9 +2196,10 @@ impl<T: TerminalAdapter> Model<T> {
 
     /// Surface a sticky banner when the daemon we connected to was built
     /// from a different commit than this client. The protocol handshake
-    /// only catches wire-format skew (`PROTOCOL_VERSION`); a stale daemon
-    /// on the same protocol connects silently and re-introduces
-    /// already-fixed bugs, so the operator needs to see the mismatch.
+    /// only catches wire-format skew (`PROTOCOL_FINGERPRINT`); a stale
+    /// daemon with the same fingerprint connects silently and
+    /// re-introduces already-fixed bugs, so the operator needs to see
+    /// the mismatch.
     /// A matching build is the common case and stays quiet.
     pub fn note_daemon_build(&mut self, daemon_build: &str) {
         if daemon_build != lazybox_ipc::BUILD_VERSION {

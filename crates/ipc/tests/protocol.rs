@@ -788,14 +788,14 @@ fn round_trip_corpus_covers_every_wire_variant() {
     let event_tags: std::collections::BTreeSet<_> = all_events().iter().map(event_tag).collect();
 
     assert_eq!(
-        (lazybox_ipc::PROTOCOL_VERSION, command_tags.len()),
-        (13, 52),
-        "Command gained/lost a variant: update the exhaustive tag, add a sample, and bump PROTOCOL_VERSION",
+        command_tags.len(),
+        52,
+        "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(
-        (lazybox_ipc::PROTOCOL_VERSION, event_tags.len()),
-        (13, 51),
-        "Event gained/lost a variant: update the exhaustive tag, add a sample, and bump PROTOCOL_VERSION",
+        event_tags.len(),
+        51,
+        "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }
 
@@ -966,20 +966,20 @@ async fn socket_binary_terminal_output_round_trip() {
 
 // ── Protocol handshake ─────────────────────────────────────────────────
 //
-// The 8-byte preamble (magic + version) is exchanged before any frames.
-// These tests pin the success path, the rejection of version skew in
-// both directions, garbage preambles, and the EOF a pre-handshake
-// daemon produces.
+// The 8-byte preamble (magic + wire fingerprint) is exchanged before
+// any frames. These tests pin the success path, the rejection of
+// fingerprint skew in both directions, garbage preambles, and the EOF
+// a pre-handshake daemon produces.
 
 mod handshake {
     use lazybox_ipc::socket::{HandshakeError, client_handshake, server_handshake};
-    use lazybox_ipc::{BUILD_VERSION, PROTOCOL_MAGIC, PROTOCOL_VERSION};
+    use lazybox_ipc::{BUILD_VERSION, PROTOCOL_FINGERPRINT, PROTOCOL_MAGIC};
     use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 
-    fn preamble(version: u32) -> [u8; 8] {
+    fn preamble(fingerprint: u32) -> [u8; 8] {
         let mut p = [0u8; 8];
         p[..4].copy_from_slice(&PROTOCOL_MAGIC);
-        p[4..].copy_from_slice(&version.to_le_bytes());
+        p[4..].copy_from_slice(&fingerprint.to_le_bytes());
         p
     }
 
@@ -992,7 +992,7 @@ mod handshake {
     }
 
     #[tokio::test]
-    async fn succeeds_when_versions_match() {
+    async fn succeeds_when_fingerprints_match() {
         let (client, server) = duplex(512);
         let (mut crd, mut cwr) = tokio::io::split(client);
         let (mut srd, mut swr) = tokio::io::split(server);
@@ -1007,11 +1007,12 @@ mod handshake {
         assert_eq!(client_seen.build, BUILD_VERSION);
     }
 
-    /// A peer on the same protocol but a different build connects
-    /// successfully — the skew is reported to the caller, not rejected.
-    /// This is the stale-daemon case `PROTOCOL_VERSION` can't catch.
+    /// A peer with the same wire fingerprint but a different build
+    /// connects successfully — the skew is reported to the caller, not
+    /// rejected. This is the stale-daemon case the fingerprint can't
+    /// catch: only non-wire sources changed between the two builds.
     #[tokio::test]
-    async fn same_protocol_different_build_connects_and_reports_skew() {
+    async fn same_fingerprint_different_build_connects_and_reports_skew() {
         let (client, server) = duplex(512);
         let (mut crd, mut cwr) = tokio::io::split(client);
         let (mut srd, mut swr) = tokio::io::split(server);
@@ -1019,8 +1020,8 @@ mod handshake {
         let fake_daemon = tokio::spawn(async move {
             let mut got = [0u8; 8];
             srd.read_exact(&mut got).await.expect("client preamble");
-            assert_eq!(got, preamble(PROTOCOL_VERSION));
-            swr.write_all(&preamble(PROTOCOL_VERSION))
+            assert_eq!(got, preamble(PROTOCOL_FINGERPRINT));
+            swr.write_all(&preamble(PROTOCOL_FINGERPRINT))
                 .await
                 .expect("reply preamble");
             swr.write_all(&build_frame("9.9.9+deadbeef"))
@@ -1047,7 +1048,7 @@ mod handshake {
         let (mut crd, mut cwr) = tokio::io::split(client);
         let (mut srd, mut swr) = tokio::io::split(server);
 
-        cwr.write_all(&preamble(PROTOCOL_VERSION + 1))
+        cwr.write_all(&preamble(PROTOCOL_FINGERPRINT.wrapping_add(1)))
             .await
             .expect("send fake preamble");
         let err = server_handshake(&mut srd, &mut swr)
@@ -1055,19 +1056,19 @@ mod handshake {
             .expect_err("must reject");
         assert!(matches!(
             err,
-            HandshakeError::VersionMismatch { peer, ours }
-                if peer == PROTOCOL_VERSION + 1 && ours == PROTOCOL_VERSION
+            HandshakeError::FingerprintMismatch { peer, ours }
+                if peer == PROTOCOL_FINGERPRINT.wrapping_add(1) && ours == PROTOCOL_FINGERPRINT
         ));
 
         // The server replied with its own preamble before closing, so
-        // the mismatched client can render the clear version error.
+        // the mismatched client can render the clear mismatch error.
         let mut reply = [0u8; 8];
         crd.read_exact(&mut reply).await.expect("server reply");
-        assert_eq!(reply, preamble(PROTOCOL_VERSION));
+        assert_eq!(reply, preamble(PROTOCOL_FINGERPRINT));
     }
 
     #[tokio::test]
-    async fn client_rejects_version_skewed_daemon() {
+    async fn client_rejects_fingerprint_skewed_daemon() {
         let (client, server) = duplex(64);
         let (mut crd, mut cwr) = tokio::io::split(client);
         let (mut srd, mut swr) = tokio::io::split(server);
@@ -1075,8 +1076,8 @@ mod handshake {
         let fake_daemon = tokio::spawn(async move {
             let mut got = [0u8; 8];
             srd.read_exact(&mut got).await.expect("client preamble");
-            assert_eq!(got, preamble(PROTOCOL_VERSION));
-            swr.write_all(&preamble(PROTOCOL_VERSION + 7))
+            assert_eq!(got, preamble(PROTOCOL_FINGERPRINT));
+            swr.write_all(&preamble(PROTOCOL_FINGERPRINT.wrapping_add(7)))
                 .await
                 .expect("reply");
         });
@@ -1085,8 +1086,8 @@ mod handshake {
             .expect_err("must reject");
         assert!(matches!(
             err,
-            HandshakeError::VersionMismatch { peer, ours }
-                if peer == PROTOCOL_VERSION + 7 && ours == PROTOCOL_VERSION
+            HandshakeError::FingerprintMismatch { peer, ours }
+                if peer == PROTOCOL_FINGERPRINT.wrapping_add(7) && ours == PROTOCOL_FINGERPRINT
         ));
         // The message tells the user what to do, not just that bytes
         // disagreed.

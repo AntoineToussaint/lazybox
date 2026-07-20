@@ -3776,6 +3776,38 @@ async fn commit_pty_reading(
     }
 }
 
+/// `Command::FetchScrollback` — hand the requesting client the
+/// terminal's deep history from the backend's own retention (tmux
+/// `capture-pane`), the same seed the restart/reattach path uses. The
+/// reply goes to the requesting connection only: other clients keep
+/// their local scrollback until they ask themselves, so a fetch never
+/// resets a grid nobody asked to rebuild.
+pub async fn handle_fetch_scrollback(
+    config: &ServerConfig,
+    tx: &lazybox_ipc::EventSender,
+    terminal_id: TerminalId,
+) {
+    let Some(key) = config.backend_key_for(terminal_id).await else {
+        tracing::trace!("scrollback fetch for unknown terminal {terminal_id:?}");
+        return;
+    };
+    match config.backend.scrollback(&key).await {
+        Ok(Some((replay, seq))) => {
+            let _ = tx.send(Event::TerminalScrollback {
+                terminal_id,
+                replay,
+                seq,
+            });
+        }
+        // No history source (raw PTY) — the client's ring-fed
+        // scrollback is already everything there is.
+        Ok(None) => {}
+        Err(e) => {
+            tracing::debug!(key = %key, "backend scrollback fetch failed: {e}");
+        }
+    }
+}
+
 pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes: &[u8]) {
     handle_write_batch(config, terminal_id, &[bytes.to_vec()]).await;
 }

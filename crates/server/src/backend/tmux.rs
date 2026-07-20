@@ -945,6 +945,35 @@ impl SessionBackend for TmuxBackend {
         })
     }
 
+    fn scrollback<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<(Vec<u8>, u64)>, BackendError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            // Same seed the restart/reattach path uses — tmux holds
+            // `history-limit` lines for live sessions too, the client
+            // just never read them before (#393).
+            let seed = self.capture_history(key).await;
+            if seed.is_empty() {
+                return Ok(None);
+            }
+            let pty = {
+                let map = self.sessions.lock().await;
+                map.get(key)
+                    .map(|s| s.client.clone())
+                    .ok_or_else(|| BackendError::NotFound(key.into()))?
+            };
+            // Read the high-water mark AFTER capturing: a chunk that
+            // lands in between is covered by neither the capture nor
+            // the resumed live stream and simply waits for the inner
+            // program's next repaint — dropping it beats double-feeding
+            // bytes the capture already rendered.
+            let last_seq = pty.snapshot_only().await.last_seq;
+            Ok(Some((seed, last_seq)))
+        })
+    }
+
     fn wait_exit<'a>(
         &'a self,
         key: &'a str,

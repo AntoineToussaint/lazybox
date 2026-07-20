@@ -6,6 +6,7 @@ expression: rendered
  g ▸ github
   m  merge PR
   g  auto-merge on green
+  p  policies
   r  reviewers
   a  assignees
   l  labels

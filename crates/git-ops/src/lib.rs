@@ -306,8 +306,29 @@ impl WorktreeManager {
         }
         self.report(CheckoutPhase::Cloning);
         let auth = self.network_env().await;
+        // Blobless partial clone (`--filter=blob:none`): fetch every
+        // commit and tree up front, but defer file *contents* (blobs)
+        // until a worktree actually checks them out or a command
+        // (diff/blame) needs them. A full `--bare` clone of a large repo
+        // (`codefly-dev/mind` is ~340 MB) took minutes and wedged "Cloning
+        // repository (one-time)"; blobless finishes in seconds because it
+        // skips the bulk of the object payload. History-dependent agent
+        // operations still work — `git log`, `merge-base` (rebasing onto
+        // main), branch/worktree creation all read commits+trees, which
+        // are present; only blob fetches go lazy over the promisor remote
+        // (`git clone --filter` records `remote.origin.promisor=true` in
+        // the bare repo's config, and worktrees share that object store).
+        // A shallow `--depth=1` clone was rejected: it breaks the history
+        // ops agents rely on (log/blame beyond depth 1, merge-base).
+        // (issue #405)
         run_git(
-            &["clone", "--bare", &url, &partial.to_string_lossy()],
+            &[
+                "clone",
+                "--bare",
+                "--filter=blob:none",
+                &url,
+                &partial.to_string_lossy(),
+            ],
             &auth,
         )
         .await?;

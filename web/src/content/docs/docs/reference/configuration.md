@@ -25,6 +25,7 @@ which is the canonical source of truth for defaults and field names.
 | [`agent`](#agent) | Agent command, args, permission prompts, LLM gateway |
 | [`agents`](#agentsid) | Per-agent overrides — the model-tier menu |
 | [`worktree`](#worktree) | Global mounts, scripts, branch prefix, merged-cleanup |
+| [`scan`](#scan) | Roots and depth for read-only external-checkout discovery |
 | [`terminal`](#terminal) | Terminal escape chord + scrollback behavior |
 | [`ui`](#ui) | View state, key remaps, keymap preset, theme, timings, browser |
 | [`display`](#display) | Sort, filtering, glyphs |
@@ -116,16 +117,24 @@ worktree:
       link_at: .cache
       placement: inside
 
+# ── checkout discovery ──────────────────────────────────────────────
+# Used when `lazybox scan` receives no ROOTS on the command line.
+scan:
+  roots: [~/code, ~/work]
+  max_depth: 4
+
 # ── terminal ─────────────────────────────────────────────────────────
 terminal:
   escape_char: "]"           # press twice to open the terminal command menu
   escape_window_ms: 600      # window between the two presses
   native_scrollback: true    # keep scrollback in the lazybox client
+  agent_dead_on_arrival_ms: 10000 # preserve fast/failed exits for inspection
 
 # ── ui ───────────────────────────────────────────────────────────────
 ui:
   keymap_preset: default     # base keymap layer: default | vim
   theme: Lazybox Dark        # written back by the `t` theme picker
+  terminal_new_layout: split # ordinary new terminals: split | tabs (`]]t` toggles)
   # Remap any catalog action. Keys are snake_case action ids; values are
   # key-spec strings. Unset actions keep their default binding.
   action_keys:
@@ -264,6 +273,17 @@ overrides stacked on top.
 | `auto_cleanup_merged` | bool | `false` | When a tracked PR merges, reap the worktrees backing its sessions — only the ones with no locked / uncommitted / unpushed work and no live terminal |
 | `branch_prefix` | string | `""` | Prefix for branches lazybox cuts itself (issues, blank workspaces). `""` → `issue-42`; `"lazybox"` → `lazybox/issue-42`. Overridable per repo. |
 
+## `scan`
+
+Defaults for the read-only [`lazybox scan`](/docs/reference/cli/#lazybox-scan)
+checkout inventory. Positional roots and `--depth` override `scan.roots` and
+`scan.max_depth` for a single invocation.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `roots` | list of paths | `[]` | Directories to walk when the command receives no roots; leading `~/` is expanded |
+| `max_depth` | int | `4` | Maximum directory levels to descend below each root |
+
 ## `terminal`
 
 How you exit an embedded terminal back to the inbox, and how scrollback works.
@@ -273,6 +293,7 @@ How you exit an embedded terminal back to the inbox, and how scrollback works.
 | `escape_char` | char | `]` | Press twice to open the non-timed terminal command menu (`q` then exits to the sidebar) |
 | `escape_window_ms` | int | `600` | Time window between the two `escape_char` presses |
 | `native_scrollback` | bool | `true` | Keep scrollback local to the lazybox client so the wheel / `Shift-PageUp` scroll instantly. Set `false` to let tmux own the alternate screen. |
+| `agent_dead_on_arrival_ms` | int | `10000` | Grace period in milliseconds: an agent that exits cleanly before engaging is treated as failed-to-start and its final screen stays open with a restart affordance. Non-zero/signal exits are always preserved. |
 
 ## `ui`
 
@@ -329,6 +350,8 @@ action in
 | `mark_all_read` | `m` | Mark the workspace read |
 | `toggle_snooze` | `z` | Snooze (~4h) |
 | `merge_pr` | `g m` | Merge the PR |
+| `toggle_auto_merge` | `g g` | Toggle lazybox's merge-on-green arm |
+| `manage_policies` | `g p` | Open the unified automation-policy menu |
 | `request_reviewers` | `g r` | Request reviewers |
 | `add_assignees` | `g a` | Change assignees |
 | `manage_labels` | `g l` | Edit labels |
@@ -363,6 +386,7 @@ default keymap.
 | `keymap_preset` | `default` \| `vim` | unset | Base keymap layer shipped in-tree; your `action_keys` still layer on top (`vim` moves pane-cycling to `Ctrl-w`) |
 | `theme` | string | unset | Active UI theme by exact name (`"Lazybox Dark"`, `"Lazybox Light"`, `"High Contrast"`, …). Written back by the `t` theme picker (live preview; `Esc` restores); unknown / unset keeps the default theme. Full theme list: [docs/themes.md](https://github.com/AntoineToussaint/lazybox/blob/main/docs/themes.md). |
 | `show_tips` | bool | `true` | Show progressive feature-discovery tips (opt-out) |
+| `terminal_new_layout` | `split` \| `tabs` | `split` | How an ordinary second terminal opens. Explicit `]]\|` / `]]-` splits are unaffected; `]]t` toggles and persists this value. |
 
 Duration values take a unit suffix (`30s`, `15m`, `4h`, `365d`).
 

@@ -14,6 +14,7 @@ use tuirealm::event::{Key, KeyModifiers};
 /// A resolved `]]<key>` command. The Model maps each variant onto its
 /// handler; `None` from [`LeaderCmd::from_key`] means "not a command —
 /// cancel back into the terminal" (the tmux-prefix convention).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LeaderCmd {
     /// `]]<1..9>` — jump to the Nth agent workspace (sidebar order).
     JumpAgent(usize),
@@ -43,6 +44,74 @@ pub(super) enum LeaderCmd {
     ToggleNewLayout,
 }
 
+/// One fixed character command. Dispatch, the runtime which-key popup,
+/// and the generated website reference all read this table; adding a
+/// command in only one of those surfaces is therefore impossible.
+#[derive(Clone, Copy)]
+struct FixedCommandSpec {
+    key: char,
+    command: LeaderCmd,
+    menu_label: &'static str,
+    reference: &'static str,
+}
+
+const FIXED_COMMANDS: &[FixedCommandSpec] = &[
+    FixedCommandSpec {
+        key: 's',
+        command: LeaderCmd::Snippets,
+        menu_label: "snippets",
+        reference: "Open the snippet picker (typing a full key auto-submits — `]]srev`)",
+    },
+    FixedCommandSpec {
+        key: 'r',
+        command: LeaderCmd::RecallPrompt,
+        menu_label: "recall prompt",
+        reference: "Restore the in-flight draft, or the last submitted agent prompt, without sending it",
+    },
+    FixedCommandSpec {
+        key: 'f',
+        command: LeaderCmd::ToggleFocusMode,
+        menu_label: "focus mode",
+        reference: "Toggle focus mode",
+    },
+    FixedCommandSpec {
+        key: 'q',
+        command: LeaderCmd::ExitToSidebar,
+        menu_label: "exit to sidebar",
+        reference: "Exit to the sidebar",
+    },
+    FixedCommandSpec {
+        key: '`',
+        command: LeaderCmd::JumpPicker,
+        menu_label: "jump to workspace",
+        reference: "Open the fuzzy jump-to-workspace picker",
+    },
+    FixedCommandSpec {
+        key: '|',
+        command: LeaderCmd::SplitVertical,
+        menu_label: "split right",
+        reference: "Split the focused tile side-by-side (`]]\\` is an alias)",
+    },
+    FixedCommandSpec {
+        key: '-',
+        command: LeaderCmd::SplitHorizontal,
+        menu_label: "split down",
+        reference: "Split the focused tile stacked",
+    },
+    FixedCommandSpec {
+        key: 'x',
+        command: LeaderCmd::CloseTerminal,
+        menu_label: "close terminal",
+        reference: "Close the focused terminal (tile or active tab)",
+    },
+    FixedCommandSpec {
+        key: 't',
+        command: LeaderCmd::ToggleNewLayout,
+        menu_label: "new shells",
+        reference: "Toggle whether the next terminal opens as a split or a tab; persists `ui.terminal_new_layout`",
+    },
+];
+
 impl LeaderCmd {
     /// Resolve a keystroke arriving while the leader is armed.
     ///
@@ -59,19 +128,17 @@ impl LeaderCmd {
             if !(modifiers.is_empty() || shifted_symbol) {
                 return None;
             }
-            return match c {
-                '1'..='9' => Some(Self::JumpAgent(c.to_digit(10)? as usize)),
-                's' => Some(Self::Snippets),
-                'r' => Some(Self::RecallPrompt),
-                'f' => Some(Self::ToggleFocusMode),
-                'q' => Some(Self::ExitToSidebar),
-                '`' => Some(Self::JumpPicker),
-                '|' | '\\' => Some(Self::SplitVertical),
-                '-' => Some(Self::SplitHorizontal),
-                'x' => Some(Self::CloseTerminal),
-                't' => Some(Self::ToggleNewLayout),
-                _ => None,
-            };
+            if let '1'..='9' = c {
+                return Some(Self::JumpAgent(c.to_digit(10)? as usize));
+            }
+            // `\\` is the easy-to-type alias for `|` on layouts where
+            // the shifted symbol is awkward; both resolve through the
+            // same canonical table row.
+            let canonical = if c == '\\' { '|' } else { c };
+            return FIXED_COMMANDS
+                .iter()
+                .find(|spec| spec.key == canonical)
+                .map(|spec| spec.command);
         }
         if !modifiers.is_empty() {
             return None;
@@ -103,31 +170,53 @@ impl LeaderCmd {
         tab_count: usize,
         new_layout: NewTerminalLayout,
     ) -> Vec<(String, String)> {
-        let mut rows: Vec<(&str, &str)> = vec![
-            ("s", "snippets"),
-            ("r", "recall prompt"),
-            ("f", "focus mode"),
-            ("q", "exit to sidebar"),
-            ("`", "jump to workspace"),
-            ("|", "split right"),
-            ("-", "split down"),
-        ];
-        if splits {
-            rows.push(("←↓↑→", "move tile"));
-        } else if tab_count >= 2 {
-            rows.push(("←→", "switch tab"));
+        let mut rows = Vec::with_capacity(FIXED_COMMANDS.len() + 1);
+        for spec in FIXED_COMMANDS {
+            // Tile/tab navigation sits next to the split controls and
+            // before close, matching the established menu order.
+            if spec.key == 'x' {
+                if splits {
+                    rows.push(("←↓↑→".to_string(), "move tile".to_string()));
+                } else if tab_count >= 2 {
+                    rows.push(("←→".to_string(), "switch tab".to_string()));
+                }
+            }
+            let label = if spec.key == 't' {
+                // Show the current default so this doubles as a status row.
+                match new_layout {
+                    NewTerminalLayout::Split => "new shells: split",
+                    NewTerminalLayout::Tabs => "new shells: tabs",
+                }
+            } else {
+                spec.menu_label
+            };
+            rows.push((spec.key.to_string(), label.to_string()));
         }
-        rows.push(("x", "close terminal"));
-        // The `t` label shows the *current* default so the popup reads
-        // as a status line; pressing it flips to the other.
-        let layout_row = match new_layout {
-            NewTerminalLayout::Split => ("t", "new shells: split"),
-            NewTerminalLayout::Tabs => ("t", "new shells: tabs"),
-        };
-        rows.push(layout_row);
-        rows.into_iter()
-            .map(|(k, l)| (k.to_string(), l.to_string()))
-            .collect()
+        rows
+    }
+
+    /// Complete, layout-independent command list for generated docs.
+    /// Fixed character rows come from [`FIXED_COMMANDS`], the same table
+    /// dispatch and the popup consume; dynamic digit/arrow families are
+    /// included explicitly because they carry runtime operands.
+    pub(super) fn reference_rows() -> Vec<(String, String)> {
+        let mut rows = Vec::with_capacity(FIXED_COMMANDS.len() + 2);
+        for spec in FIXED_COMMANDS {
+            rows.push((spec.key.to_string(), spec.reference.to_string()));
+            if spec.key == '`' {
+                rows.push((
+                    "1…9".to_string(),
+                    "Jump to the Nth agent workspace (sidebar order)".to_string(),
+                ));
+            }
+            if spec.key == '-' {
+                rows.push((
+                    "←↓↑→".to_string(),
+                    "Move tile focus; Left/Right cycles tabs in Tabs mode".to_string(),
+                ));
+            }
+        }
+        rows
     }
 }
 
@@ -153,6 +242,23 @@ mod tests {
                 "menu row `{key}` / `{label}` maps to no command",
             );
         }
+    }
+
+    /// The website reference is runtime-backed: every fixed row resolves
+    /// through the same dispatcher, including commands added after the
+    /// original hand-written appendix (`r` and `t`).
+    #[test]
+    fn every_fixed_reference_row_resolves_to_a_command() {
+        let rows = LeaderCmd::reference_rows();
+        for (key, label) in rows.iter().filter(|(key, _)| key.chars().count() == 1) {
+            let key = key.chars().next().expect("one-character key");
+            assert!(
+                LeaderCmd::from_key(Key::Char(key), KeyModifiers::NONE).is_some(),
+                "reference row `{key}` / `{label}` maps to no command",
+            );
+        }
+        assert!(rows.iter().any(|(key, _)| key == "r"));
+        assert!(rows.iter().any(|(key, _)| key == "t"));
     }
 
     #[test]

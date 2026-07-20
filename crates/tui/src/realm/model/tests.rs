@@ -3468,14 +3468,16 @@ mod merge_focus_follow_tests {
     /// stashed — the wiring the direct `handle_choice_picked` tests skip.
     #[test]
     fn manage_policies_action_mounts_picker() {
-        use lazybox_tui_core::action::Action;
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
         let mut m = build_model();
         let ws = workspace("owner/repo#3", true, Duration::hours(1));
         let ws_key = ws.key.clone();
         m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
         assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
 
-        m.dispatch_action(&Action::ManagePolicies);
+        m.dispatch_key(KeyEvent::new(Key::Char('g'), KeyModifiers::NONE));
+        m.dispatch_key(KeyEvent::new(Key::Char('p'), KeyModifiers::NONE));
         assert_eq!(
             m.modal_stack.last(),
             Some(&Id::PolicyPicker),

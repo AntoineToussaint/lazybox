@@ -1678,6 +1678,7 @@ pub(super) fn action_from_kind(
         ActionKind::NewProject => Action::NewProject,
         ActionKind::MergePr => Action::MergePr,
         ActionKind::ToggleAutoMerge => Action::ToggleAutoMerge,
+        ActionKind::ManagePolicies => Action::ManagePolicies,
         ActionKind::Archive => Action::Archive,
         ActionKind::CloseIssue => Action::CloseIssue,
         ActionKind::ToggleSnooze => Action::ToggleSnooze,

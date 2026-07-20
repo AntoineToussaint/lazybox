@@ -415,6 +415,9 @@ fn all_non_shutdown_commands() -> Vec<Command> {
         Command::CloseIssue {
             workspace_key: wkey(),
         },
+        Command::DeleteOrClose {
+            workspace_key: wkey(),
+        },
         Command::RequestReviewers {
             workspace_key: wkey(),
             logins: vec![],

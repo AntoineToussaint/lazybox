@@ -278,8 +278,11 @@ mod tests {
     async fn primes_from_state_recovered_before_subscribe() {
         let (tx, rx) = broadcast::channel(8);
         drop(tx);
-        let inh = run(rx, working_states(), sleep_argv(), || true).await;
-        assert!(inh.holding(), "priming pass must acquire without any event");
+        let inhibitor = run(rx, working_states(), sleep_argv(), || true).await;
+        assert!(
+            inhibitor.holding(),
+            "priming pass must acquire without any event"
+        );
     }
 
     /// `ui.keep_awake` is re-read on every recompute: flipping it off
@@ -297,11 +300,14 @@ mod tests {
         // First read (priming) sees the flag on; the second (the
         // queued event) sees it off.
         let reads = AtomicUsize::new(0);
-        let inh = run(rx, working_states(), sleep_argv(), move || {
+        let inhibitor = run(rx, working_states(), sleep_argv(), move || {
             reads.fetch_add(1, Ordering::SeqCst) == 0
         })
         .await;
-        assert!(!inh.holding(), "toggle-off must release the inhibitor");
+        assert!(
+            !inhibitor.holding(),
+            "toggle-off must release the inhibitor"
+        );
     }
 
     /// With the flag off nothing is ever spawned, no matter how busy
@@ -310,8 +316,8 @@ mod tests {
     async fn disabled_flag_never_holds() {
         let (tx, rx) = broadcast::channel(8);
         drop(tx);
-        let inh = run(rx, working_states(), sleep_argv(), || false).await;
-        assert!(!inh.holding());
+        let inhibitor = run(rx, working_states(), sleep_argv(), || false).await;
+        assert!(!inhibitor.holding());
     }
 
     /// The full hold/release cycle against a real child process:
@@ -319,44 +325,44 @@ mod tests {
     /// child, release kills and reaps it.
     #[test]
     fn inhibitor_holds_and_releases_a_child() {
-        let mut inh = Inhibitor::new(sleep_argv());
-        assert!(!inh.holding());
+        let mut inhibitor = Inhibitor::new(sleep_argv());
+        assert!(!inhibitor.holding());
 
-        inh.set_active(true);
-        assert!(inh.holding());
-        let pid = inh.child.as_ref().expect("spawned").id();
+        inhibitor.set_active(true);
+        assert!(inhibitor.holding());
+        let pid = inhibitor.child.as_ref().expect("spawned").id();
         assert!(alive(pid));
 
-        inh.set_active(true);
-        assert_eq!(inh.child.as_ref().expect("still held").id(), pid);
+        inhibitor.set_active(true);
+        assert_eq!(inhibitor.child.as_ref().expect("still held").id(), pid);
 
-        inh.set_active(false);
-        assert!(!inh.holding());
+        inhibitor.set_active(false);
+        assert!(!inhibitor.holding());
         assert!(!alive(pid), "release must kill the inhibitor child");
 
-        inh.set_active(false);
+        inhibitor.set_active(false);
     }
 
     /// A dead child (crashed inhibitor binary) must not satisfy
     /// `acquire` forever — the next activation respawns.
     #[test]
     fn acquire_respawns_a_dead_child() {
-        let mut inh = Inhibitor::new(vec!["true".into()]);
-        inh.set_active(true);
-        let first = inh.child.as_mut().expect("spawned");
+        let mut inhibitor = Inhibitor::new(vec!["true".into()]);
+        inhibitor.set_active(true);
+        let first = inhibitor.child.as_mut().expect("spawned");
         first.wait().expect("`true` exits immediately");
-        inh.set_active(true);
-        assert!(inh.holding());
+        inhibitor.set_active(true);
+        assert!(inhibitor.holding());
     }
 
     /// Dropping a holding inhibitor (daemon shutdown path) kills the
     /// child — the assertion can't leak past the watcher task.
     #[test]
     fn drop_releases_a_held_child() {
-        let mut inh = Inhibitor::new(sleep_argv());
-        inh.set_active(true);
-        let pid = inh.child.as_ref().expect("spawned").id();
-        drop(inh);
+        let mut inhibitor = Inhibitor::new(sleep_argv());
+        inhibitor.set_active(true);
+        let pid = inhibitor.child.as_ref().expect("spawned").id();
+        drop(inhibitor);
         assert!(!alive(pid), "drop must kill the inhibitor child");
     }
 
@@ -364,11 +370,11 @@ mod tests {
     /// repeated failures only warn once per healthy spell.
     #[test]
     fn missing_binary_is_not_fatal_and_warns_once() {
-        let mut inh = Inhibitor::new(vec!["lazybox-no-such-inhibitor".into()]);
-        inh.set_active(true);
-        assert!(!inh.holding());
-        assert!(inh.spawn_warned);
-        inh.set_active(true);
-        assert!(!inh.holding());
+        let mut inhibitor = Inhibitor::new(vec!["lazybox-no-such-inhibitor".into()]);
+        inhibitor.set_active(true);
+        assert!(!inhibitor.holding());
+        assert!(inhibitor.spawn_warned);
+        inhibitor.set_active(true);
+        assert!(!inhibitor.holding());
     }
 }

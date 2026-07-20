@@ -612,6 +612,14 @@ impl ServerConfig {
     /// and new worktrees silently branched from a stale local main
     /// (issue #394). Resolved lazily per operation; when no token
     /// resolves, git's native (SSH) behavior is unchanged.
+    /// The filesystem namespace this daemon provisions under —
+    /// `repos/` (bare clones) and worktrees hang off it. Public so
+    /// integration tests can pre-seed a local bare clone and drive the
+    /// real provisioning path without touching the network.
+    pub fn worktree_root_path(&self) -> &Path {
+        &self.worktree_root.path
+    }
+
     pub(crate) fn worktree_manager(&self) -> lazybox_git_ops::WorktreeManager {
         lazybox_git_ops::WorktreeManager::new(self.worktree_root.path.clone()).with_github_token(
             Arc::new(|| {

@@ -6,6 +6,12 @@ contain explicitly documented compatibility changes.
 
 ## [Unreleased]
 
+### Added
+
+- A dismissable startup notice detects newer source commits or published
+  releases, shows the matching manual update command, and stays quiet for a
+  previously dismissed target.
+
 ## [0.1.7] - 2026-07-19
 
 ### Added

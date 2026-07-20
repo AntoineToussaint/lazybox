@@ -14,7 +14,7 @@
 //! `mount_setup_modal`, `unmount_setup_modal`) co-locates here
 //! since it's the same modal-state-mutation shape.
 
-use super::{Id, Model, Msg};
+use super::{DISMISSED_UPDATE_KV_KEY, Id, Model, Msg};
 use crate::realm::UserEvent;
 use lazybox_ipc::Command as IpcCommand;
 use tuirealm::terminal::TerminalAdapter;
@@ -868,6 +868,17 @@ showing keybinding search only",
     /// internally via `handle_runner_step`; tests that drive the
     /// wizard path need to mock at a different layer.
     pub fn handle_modal_dismissed(&mut self) -> Vec<IpcCommand> {
+        if self.modal_stack.last() == Some(&Id::Update) {
+            self.pop_modal();
+            if let Some(target) = self.pending_update_target.take()
+                && let Some(store) = self.update_store.take()
+                && let Err(error) = store.set_kv(DISMISSED_UPDATE_KV_KEY, &target)
+            {
+                tracing::warn!("persist dismissed update target failed: {error}");
+            }
+            self.drain_queued_daemon_prompts();
+            return Vec::new();
+        }
         if let Some(mut runner) = self.setup.runner.take() {
             let step = runner.step_dismissed();
             self.handle_runner_step(runner, step);

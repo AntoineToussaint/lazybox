@@ -144,6 +144,51 @@ mod effects_tests {
         assert_eq!(m.sidebar.outdated_commits_behind(), None);
     }
 
+    #[test]
+    fn update_modal_dismissal_is_persisted_per_available_target() {
+        use lazybox_store::{MemoryStore, Store};
+        use std::sync::Arc;
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let store: Arc<dyn Store> = Arc::new(MemoryStore::new());
+        let update = crate::build_guard::AvailableUpdate::Release {
+            current: "v0.1.7".into(),
+            available: "v0.2.0".into(),
+        };
+
+        let mut m = build_model();
+        m.show_update_if_new(update.clone(), Some(store.clone()));
+        assert_eq!(m.top_modal(), Some(&Id::Update));
+        m.dispatch_modal_key(KeyEvent::new(Key::Enter, KeyModifiers::NONE));
+        assert!(m.top_modal().is_none(), "Enter dismisses the modal");
+        assert_eq!(
+            store.get_kv(DISMISSED_UPDATE_KV_KEY).unwrap().as_deref(),
+            Some("release:v0.2.0")
+        );
+
+        let mut next_launch = build_model();
+        next_launch.show_update_if_new(update, Some(store.clone()));
+        assert!(
+            next_launch.top_modal().is_none(),
+            "the dismissed target stays quiet"
+        );
+
+        next_launch.show_update_if_new(
+            crate::build_guard::AvailableUpdate::Release {
+                current: "v0.1.7".into(),
+                available: "v0.3.0".into(),
+            },
+            Some(store.clone()),
+        );
+        assert_eq!(next_launch.top_modal(), Some(&Id::Update));
+        next_launch.dispatch_modal_key(KeyEvent::new(Key::Esc, KeyModifiers::NONE));
+        assert!(next_launch.top_modal().is_none(), "Esc dismisses the modal");
+        assert_eq!(
+            store.get_kv(DISMISSED_UPDATE_KV_KEY).unwrap().as_deref(),
+            Some("release:v0.3.0")
+        );
+    }
+
     /// Issue #265: a `g m` merge GitHub rejected must surface as a
     /// distinct, persistent error (Permanent severity → never
     /// auto-fades) naming the reason, not a self-fading retryable

@@ -78,6 +78,8 @@ pub enum Id {
     /// remounting.
     HelpAsk,
     Error,
+    /// Startup notice for a newer source commit or published release.
+    Update,
     Polling,
     Reply,
     /// Single-line input prompt for naming a brand-new pre-PR
@@ -918,6 +920,9 @@ pub struct Model<T: TerminalAdapter> {
     /// boot path; `None` on the `--connect` path (which loads no
     /// snippets and owns no local store), where MRU stays session-only.
     recent_snippets_store: Option<std::sync::Arc<dyn lazybox_store::Store>>,
+    /// Persistence retained only while the startup update modal is open.
+    update_store: Option<std::sync::Arc<dyn lazybox_store::Store>>,
+    pending_update_target: Option<String>,
     /// Active broadcast flow (`Shift-B`), if any. Set when the flow
     /// mounts, threaded through the snippet-pick step, consumed by the
     /// compose submit (or dropped on Esc). See [`BroadcastDraft`].
@@ -1070,6 +1075,8 @@ const RECENT_SNIPPETS_MAX: usize = 5;
 /// snooze — not user-authored `snippets.yaml` content.
 const RECENT_SNIPPETS_KV_KEY: &str = "recent_snippets";
 
+const DISMISSED_UPDATE_KV_KEY: &str = "dismissed_update_target";
+
 /// How long the footer must sit idle (no modal, no notice) after
 /// startup before a feature tip (#115) is allowed to surface. Long
 /// enough that the first-run tour and the initial-poll spinner clear
@@ -1207,6 +1214,8 @@ impl<T: TerminalAdapter> Model<T> {
             snippet_choices: Vec::new(),
             recent_snippets: Vec::new(),
             recent_snippets_store: None,
+            update_store: None,
+            pending_update_target: None,
             pending_broadcast: None,
             jump_choices: Vec::new(),
             theme_choices: Vec::new(),
@@ -2221,6 +2230,40 @@ impl<T: TerminalAdapter> Model<T> {
         if let Some(behind) = crate::build_guard::commits_behind() {
             self.note_outdated_build(behind);
         }
+    }
+
+    /// Show a startup update notice unless this exact target was dismissed.
+    pub fn show_update_if_new(
+        &mut self,
+        update: crate::build_guard::AvailableUpdate,
+        store: Option<std::sync::Arc<dyn lazybox_store::Store>>,
+    ) {
+        let target = update.target();
+        let dismissed =
+            store
+                .as_ref()
+                .and_then(|store| match store.get_kv(DISMISSED_UPDATE_KV_KEY) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        tracing::warn!("read dismissed update target failed: {error}");
+                        None
+                    }
+                });
+        if dismissed.as_deref() == Some(&target)
+            || self.modal_stack.iter().any(|id| id == &Id::Update)
+        {
+            return;
+        }
+
+        use crate::realm::components::error::{Accent, ErrorModal};
+        let modal = ErrorModal::new(
+            "Update available",
+            Accent::info("UPDATE"),
+            update.modal_body(),
+        );
+        self.pending_update_target = Some(target);
+        self.update_store = store;
+        self.mount_modal(Id::Update, modal);
     }
 
     /// Surface a stale build `behind` commits back: a header warning the

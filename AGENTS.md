@@ -24,32 +24,29 @@ Logs go to `/tmp/lazybox.log`. State persisted in `~/.lazybox/v2/state.db`.
 
 A uniformly-stale build — daemon *and* client compiled from the same
 old commit — passes every wire check silently and reproduces
-already-fixed bugs. To catch it, the build bakes its commit
-(`LAZYBOX_BUILD_GIT_SHA`) and source checkout
-(`LAZYBOX_BUILD_SOURCE_DIR`) in `crates/ipc/build.rs`; at startup
-`crates/tui/src/build_guard.rs` counts `<sha>..origin/main` and, when
-non-zero, paints a persistent `⚠ N behind · update & restart` warning
-in the sidebar header (plus a startup banner). The check reads the
-local `origin/main` ref (no network), so refresh it first when in
-doubt:
+already-fixed bugs. At startup `crates/tui/src/build_guard.rs` checks
+the channel appropriate to the running build and opens a dismissable
+update modal when something newer exists:
+
+- Dev/source builds compare the baked `LAZYBOX_BUILD_GIT_SHA` with the
+  baked checkout's local `origin/main` ref. This path performs no
+  network request and still runs for dirty builds.
+- Cargo-dist release builds compare `CARGO_PKG_VERSION` with GitHub's
+  latest published release through a bounded API request.
+
+Dismissal is persisted for the available commit/release, so the same
+target does not reappear on the next launch. A newer target is shown
+again. Lazybox never updates itself; the modal only names the command:
 
 ```bash
-git fetch origin main      # update origin/main, then:
-git pull --ff-only         # one-command update path
-cargo run -p lazybox-tui  # rebuild + restart picks up the new build
+brew upgrade lazybox                              # release install
+git pull --ff-only && cargo build --release       # source build
 ```
 
-The running build version is always visible in the sidebar header
-(`lazybox --version` prints it too). Dev/source builds — anything not
-compiled by cargo-dist's `--profile dist` (`LAZYBOX_RELEASE_BUILD`,
-baked in `crates/ipc/build.rs`) — are tagged `vX.Y.Z (dev)` and never
-raise the nudge: a source checkout is normally *ahead* of the latest
-release and is updated with `git pull && cargo build`, not the
-installer swap "update & restart" implies (issue #251). The nudge is
-therefore gated on installer-managed release provenance; wiring the
-release-tag comparison that would let a stale *release* binary count
-how far it trails the channel is still future work, so in practice the
-nudge is currently dormant.
+The running build version remains visible in the sidebar header and
+through `lazybox --version`. The older persistent header nudge stays
+release-provenance gated; source staleness is surfaced by the startup
+modal so a normal ahead-of-release checkout is not mislabeled.
 
 ## Architecture
 

@@ -115,8 +115,13 @@ impl PtyProtocol {
     /// Raw ESC bytes are always removed before framing. PR/issue text is
     /// third-party-authored; without this guard an embedded `ESC[201~` could
     /// end bracketed paste early and turn the remainder into live keystrokes.
+    /// Leading whitespace is omitted so the delivered text starts on the
+    /// composer's prompt row instead of opening with an empty soft line.
     pub fn encode_prompt(self, prompt: &str, intent: PromptIntent) -> EncodedPrompt {
-        let sanitized = prompt.bytes().filter(|&byte| byte != 0x1b);
+        let sanitized = prompt
+            .bytes()
+            .filter(|&byte| byte != 0x1b)
+            .skip_while(|byte| byte.is_ascii_whitespace());
         match self.framing {
             PromptFraming::Line => {
                 let submit = intent == PromptIntent::Submit;

@@ -167,6 +167,21 @@ fn guarded_composer_protocol_is_shared_by_claude_and_codex() {
 }
 
 #[test]
+fn prompt_protocol_trims_leading_whitespace_for_every_framing() {
+    let (guarded, submit) = PtyProtocol::GUARDED_COMPOSER
+        .encode_prompt("\r\n \tadd an issue:", PromptIntent::Submit)
+        .into_writes();
+    assert_eq!(guarded, b"\x1b[200~add an issue:\x1b[201~");
+    assert_eq!(submit, Some(vec![b'\r']));
+
+    let (line, submit) = PtyProtocol::LINE_ORIENTED
+        .encode_prompt("\r\n \tadd an issue:", PromptIntent::Compose)
+        .into_writes();
+    assert_eq!(line, b"add an issue:");
+    assert_eq!(submit, None);
+}
+
+#[test]
 fn prompt_protocol_neutralizes_escape_bytes_once_for_every_agent() {
     // SECURITY: framing is centralized, so both line-oriented agents and
     // guarded composers get the same untrusted-text protection.

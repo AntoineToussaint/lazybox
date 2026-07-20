@@ -847,11 +847,20 @@ impl Config {
     /// block when it defines any tiers, else the built-in preset for a
     /// known agent, else an empty menu (agent's own default model, no
     /// tier chords). A configured block with an empty `tiers` list is
-    /// treated as "unset" so it transparently inherits the built-in.
+    /// treated as "unset" so it transparently inherits the built-in —
+    /// except its `default`, which overlays the inherited menu so
+    /// `agents.<id>.models.default: L` alone (the Settings default-model
+    /// pick) works without copying the whole tier list into YAML.
     pub fn agent_models(&self, agent_id: &str) -> lazybox_core::AgentModels {
         match self.agents.get(agent_id) {
             Some(entry) if !entry.models.tiers.is_empty() => entry.models.clone(),
-            _ => lazybox_core::AgentModels::builtin(agent_id).unwrap_or_default(),
+            entry => {
+                let mut models = lazybox_core::AgentModels::builtin(agent_id).unwrap_or_default();
+                if let Some(default) = entry.and_then(|e| e.models.default.clone()) {
+                    models.default = Some(default);
+                }
+                models
+            }
         }
     }
 
@@ -1884,6 +1893,25 @@ agents:
         );
         // An empty configured block still inherits the built-in preset.
         assert!(!cfg.agent_models("claude").tiers.is_empty());
+    }
+
+    #[test]
+    fn agent_models_default_alone_overlays_the_builtin_menu() {
+        let yaml = r#"
+agents:
+  claude:
+    models:
+      default: L
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse default-only models");
+        let m = cfg.agent_models("claude");
+        assert!(!m.tiers.is_empty(), "builtin tiers are inherited");
+        assert_eq!(m.default.as_deref(), Some("L"));
+        assert_eq!(
+            m.resolve_args(None),
+            vec!["--model".to_string(), "claude-opus-4-8".to_string()],
+            "a bare spawn resolves the persisted default tier"
+        );
     }
 
     #[test]

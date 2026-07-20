@@ -259,6 +259,15 @@ pub enum Id {
     /// persist `setup.default_agent` and update the panes live. Ids
     /// live in `default_agent_choices`.
     DefaultAgentPicker,
+    /// Single-pick `Choice` over the just-picked default agent's model
+    /// tiers (chained after `DefaultAgentPicker` when the agent
+    /// declares any), opened on its current default tier. Pick →
+    /// persist `agents.<id>.models.default` so bare `w` / `Shift-W` /
+    /// auto-work spawns use it; per-spawn tier chords (`w S`) still
+    /// override. Esc keeps the current tier. Aliases live in
+    /// `default_model_choices`, the target agent in
+    /// `default_model_agent`.
+    DefaultModelPicker,
     /// Confirm-with-preview for an action the Ask Lazybox help agent
     /// proposed (#353) — `add_snippet` or `edit_config`. The pending
     /// intent lives in `pending_help_action`; `Msg::Confirmed(true)`
@@ -966,6 +975,13 @@ pub struct Model<T: TerminalAdapter> {
     /// `Msg::ChoicePicked(idx)` resolves the id here to persist. Cleared
     /// on mount/unmount.
     pub(crate) default_agent_choices: Vec<String>,
+    /// Tier aliases backing the active `DefaultModelPicker`, in row
+    /// order — `None` is the "agent default" row (no pinned tier).
+    /// Cleared on mount/unmount.
+    pub(crate) default_model_choices: Vec<Option<String>>,
+    /// Agent id the active `DefaultModelPicker` persists against —
+    /// stashed at mount so a pick can't land on a drifted default.
+    pub(crate) default_model_agent: Option<String>,
     /// Set at startup from `ui.tour_seen` (inverted): `true` means
     /// the feature tour should auto-launch once the panes are
     /// visible. Cleared the moment the tour mounts so it never
@@ -1224,6 +1240,8 @@ impl<T: TerminalAdapter> Model<T> {
             help_run_starting: false,
             help_pending_questions: Vec::new(),
             default_agent_choices: Vec::new(),
+            default_model_choices: Vec::new(),
+            default_model_agent: None,
             auto_tour_pending: false,
             tips_enabled: false,
             tips_seen: Vec::new(),
@@ -1817,6 +1835,43 @@ impl<T: TerminalAdapter> Model<T> {
             .label(|s: &String| s.clone())
             .select_index(start);
         self.mount_modal(Id::DefaultAgentPicker, modal);
+    }
+
+    /// Mount the default-model picker — the second step of the
+    /// default-agent flow, offering `agent_id`'s declared tiers plus an
+    /// "agent default" row, opened on the current default tier. Pick →
+    /// `handle_choice_picked` persists `agents.<id>.models.default` so
+    /// bare spawns use it (per-spawn tier chords still override); Esc
+    /// keeps the current tier. No-op for an agent with no tier menu.
+    pub(crate) fn mount_default_model_picker(&mut self, agent_id: &str) {
+        use crate::realm::components::choice::Choice;
+        if matches!(self.modal_stack.last(), Some(Id::DefaultModelPicker)) {
+            return;
+        }
+        let Some(models) = self.agent_models.get(agent_id) else {
+            return;
+        };
+        if models.tiers.is_empty() {
+            return;
+        }
+        let mut aliases: Vec<Option<String>> = vec![None];
+        let mut labels: Vec<String> = vec!["Agent default  ·  no pinned model".into()];
+        for tier in &models.tiers {
+            aliases.push(Some(tier.alias.clone()));
+            labels.push(format!("{}  ·  {}", tier.label, tier.alias));
+        }
+        let start = models
+            .default
+            .as_ref()
+            .and_then(|d| aliases.iter().position(|a| a.as_ref() == Some(d)))
+            .unwrap_or(0);
+        self.default_model_agent = Some(agent_id.to_string());
+        self.default_model_choices = aliases;
+        let modal = Choice::single("Used by bare spawns · `w S/M/L` still overrides", labels)
+            .title(format!("Default model · {agent_id}"))
+            .label(|s: &String| s.clone())
+            .select_index(start);
+        self.mount_modal(Id::DefaultModelPicker, modal);
     }
 
     /// Update the default agent both panes resolve `w` against, live —
@@ -2799,8 +2854,15 @@ impl<T: TerminalAdapter> Model<T> {
         }
         actions.push(SettingsAction::EditProviders);
         actions.push(SettingsAction::EditAgents);
+        let default_agent = self.sidebar.default_agent().to_string();
+        let default_tier = self
+            .agent_models
+            .get(&default_agent)
+            .and_then(|m| m.default.as_deref().and_then(|a| m.tier(a)))
+            .map(|t| t.label.clone());
         actions.push(SettingsAction::EditDefaultAgent {
-            current: self.sidebar.default_agent().to_string(),
+            current: default_agent,
+            tier: default_tier,
         });
         let skip_permissions = lazybox_config::Config::load()
             .map(|c| c.agent.skip_permissions)

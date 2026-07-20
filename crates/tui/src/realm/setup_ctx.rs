@@ -81,9 +81,14 @@ pub enum SettingsAction {
     /// Re-run the agents picker.
     EditAgents,
     /// Pick the default agent (`setup.default_agent`) — the one `w`
-    /// "work on this" and new-workspace spawns use. Carries the
-    /// current default id for the label.
-    EditDefaultAgent { current: String },
+    /// "work on this" and new-workspace spawns use — then, when that
+    /// agent declares model tiers, its default tier
+    /// (`agents.<id>.models.default`). Carries the current default id
+    /// (and its default-tier label, if one is set) for the label.
+    EditDefaultAgent {
+        current: String,
+        tier: Option<String>,
+    },
     /// Toggle `agent.skip_permissions` — whether interactive Claude
     /// sessions launch with `--dangerously-skip-permissions`. Carries
     /// the current value so the dispatcher knows which way to flip.
@@ -132,9 +137,10 @@ impl SettingsAction {
             Self::EditFilters { label, .. } => format!("Edit roles + filters · {label}"),
             Self::EditProviders => "Edit providers (github / linear / …)".into(),
             Self::EditAgents => "Edit agents (claude / codex / cursor / …)".into(),
-            Self::EditDefaultAgent { current } => {
-                format!("Change default agent · {current}")
-            }
+            Self::EditDefaultAgent { current, tier } => match tier {
+                Some(tier) => format!("Change default agent · {current} · ◆ {tier}"),
+                None => format!("Change default agent · {current}"),
+            },
             Self::ToggleSkipPermissions { enabled } => format!(
                 "Skip permission prompts for your sessions · {}",
                 if *enabled { "on" } else { "off" }
@@ -261,10 +267,23 @@ mod tests {
     fn default_agent_label_names_the_current() {
         assert_eq!(
             SettingsAction::EditDefaultAgent {
-                current: "codex".into()
+                current: "codex".into(),
+                tier: None,
             }
             .label(),
             "Change default agent · codex"
+        );
+    }
+
+    #[test]
+    fn default_agent_label_shows_the_default_tier_badge() {
+        assert_eq!(
+            SettingsAction::EditDefaultAgent {
+                current: "claude".into(),
+                tier: Some("Opus".into()),
+            }
+            .label(),
+            "Change default agent · claude · ◆ Opus"
         );
     }
 

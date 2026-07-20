@@ -3125,6 +3125,7 @@ mod modal_input_responsiveness_tests {
         let mut m = build_model();
         m.dispatch_settings_action(SettingsAction::EditDefaultAgent {
             current: "claude".into(),
+            tier: None,
         });
         assert_eq!(m.modal_stack.last(), Some(&Id::DefaultAgentPicker));
         assert!(
@@ -3134,6 +3135,48 @@ mod modal_input_responsiveness_tests {
         m.dispatch_modal_key(key(Key::Esc));
         assert!(m.top_modal().is_none(), "Esc closes the picker");
         assert!(m.default_agent_choices.is_empty(), "choices are released");
+    }
+
+    /// The default-model picker (second step of the default-agent
+    /// flow) offers an "agent default" row plus every declared tier,
+    /// opens pre-positioned on the current default tier, and stashes
+    /// the aliases + target agent for the pick. Esc releases both
+    /// without changing anything. Disk-free: mounting only reads the
+    /// in-memory tier menus.
+    #[test]
+    fn default_model_picker_offers_tiers_and_cancels_clean() {
+        let mut m = build_model();
+        let mut models = lazybox_core::AgentModels::builtin("claude").unwrap();
+        models.default = Some("L".into());
+        m.set_agent_models([("claude".to_string(), models)].into());
+
+        m.mount_default_model_picker("claude");
+        assert_eq!(m.modal_stack.last(), Some(&Id::DefaultModelPicker));
+        assert_eq!(
+            m.default_model_choices,
+            vec![
+                None,
+                Some("S".to_string()),
+                Some("M".to_string()),
+                Some("L".to_string())
+            ],
+            "row 0 unpins, then the declared tiers in menu order",
+        );
+        assert_eq!(m.default_model_agent.as_deref(), Some("claude"));
+
+        m.dispatch_modal_key(key(Key::Esc));
+        assert!(m.top_modal().is_none(), "Esc closes the picker");
+        assert!(m.default_model_choices.is_empty(), "aliases are released");
+        assert!(m.default_model_agent.is_none(), "agent stash is released");
+    }
+
+    /// An agent with no declared tier menu has nothing to pick — the
+    /// default-model step is skipped entirely (no modal mounts).
+    #[test]
+    fn default_model_picker_skips_agents_without_tiers() {
+        let mut m = build_model();
+        m.mount_default_model_picker("codex");
+        assert!(m.top_modal().is_none(), "no tier menu → no second step");
     }
 
     /// `set_default_agent` updates the agent both panes resolve `w`

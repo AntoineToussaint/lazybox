@@ -634,6 +634,7 @@ async fn run_embedded_realm(
     // app_token}` (or `$SLACK_BOT_TOKEN` / `$SLACK_APP_TOKEN`). No-op
     // when neither token is set.
     if let Ok(yaml) = lazybox_config::Config::load() {
+        let _ = lazybox_server::keep_awake::spawn(config.clone(), yaml.ui.keep_awake);
         let _ = lazybox_server::slack::spawn(config.clone(), yaml.slack);
     }
 
@@ -1182,6 +1183,7 @@ async fn server_start() -> anyhow::Result<()> {
     polling::migrate_legacy_sandbox(&config);
     polling::spawn(config.clone(), resolve_poll_interval());
     if let Ok(yaml) = lazybox_config::Config::load() {
+        let _ = lazybox_server::keep_awake::spawn(config.clone(), yaml.ui.keep_awake);
         let _ = lazybox_server::slack::spawn(config.clone(), yaml.slack);
     }
 

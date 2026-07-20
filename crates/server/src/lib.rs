@@ -33,6 +33,7 @@ pub mod auth;
 pub mod backend;
 pub mod chat;
 pub mod event_forward;
+pub mod keep_awake;
 pub mod lifecycle;
 pub mod metrics;
 pub mod polling;

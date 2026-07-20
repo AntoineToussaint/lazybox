@@ -122,6 +122,19 @@ impl Sidebar {
                 Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
             ));
         }
+        // Sleep-inhibition badge: painted exactly while the daemon's
+        // keep-awake watcher holds its assertion (`ui.keep_awake` on
+        // and ≥1 agent working), so the user can tell at a glance why
+        // the machine isn't sleeping.
+        if self.keep_awake && self.any_agent_working() {
+            if !signal_spans.is_empty() {
+                signal_spans.push(Span::raw("  "));
+            }
+            signal_spans.push(Span::styled(
+                "☕ awake",
+                Style::default().fg(theme.text_dim),
+            ));
+        }
 
         let mut summary_spans: Vec<Span> = Vec::with_capacity(4);
         summary_spans.push(Span::styled(

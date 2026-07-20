@@ -604,8 +604,26 @@ impl ServerConfig {
 
     /// Manager rooted in this daemon's configured filesystem namespace.
     /// All production worktree paths and all test seams must originate here.
+    ///
+    /// Network git operations authenticate with the same GitHub
+    /// credential chain as the API pollers: the daemon usually has no
+    /// usable SSH agent, so without this every base-ref refresh on an
+    /// SSH-origin bare clone failed `Permission denied (publickey)`
+    /// and new worktrees silently branched from a stale local main
+    /// (issue #394). Resolved lazily per operation; when no token
+    /// resolves, git's native (SSH) behavior is unchanged.
     pub(crate) fn worktree_manager(&self) -> lazybox_git_ops::WorktreeManager {
-        lazybox_git_ops::WorktreeManager::new(self.worktree_root.path.clone())
+        lazybox_git_ops::WorktreeManager::new(self.worktree_root.path.clone()).with_github_token(
+            Arc::new(|| {
+                Box::pin(async {
+                    lazybox_gh::credential_chain()
+                        .resolve(lazybox_gh::SOURCE)
+                        .await
+                        .ok()
+                        .map(|c| c.into_token())
+                })
+            }),
+        )
     }
 
     /// Serialize a workspace's load-modify-save cycle. Every mutation

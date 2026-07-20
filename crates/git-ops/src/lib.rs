@@ -4,7 +4,9 @@
 //! creates worktrees per-branch for parallel work.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::process::Command;
 
@@ -112,15 +114,30 @@ pub enum CheckoutPhase {
     /// The base-ref fetch failed (offline / auth / transient network),
     /// so the worktree was branched off a possibly-stale local ref
     /// instead of latest origin. Carries a short human note (`<sha>,
-    /// <relative age>`-style) so the caller can surface the degradation
-    /// in the UI rather than burying it in a log warning (issue #320).
+    /// <relative age>`-style, plus the fetch failure cause) so the
+    /// caller can surface the degradation in the UI rather than
+    /// burying it in a log warning (issue #320).
     BaseRefStale(String),
+    /// Like [`Self::BaseRefStale`], but the degradation is not a blip:
+    /// the bare clone hasn't successfully talked to origin in over a
+    /// day (`PERSISTENT_STALE_AFTER`), so every recent worktree
+    /// branched from an aging ref. Callers should escalate beyond the
+    /// one-off provisioning-checklist note (issue #394).
+    BaseRefStalePersistent(String),
     /// About to run `git worktree add`.
     AddingWorktree,
 }
 
 /// Sink the [`WorktreeManager`] calls at each [`CheckoutPhase`] boundary.
 pub type ProgressSink = dyn Fn(CheckoutPhase) + Send + Sync;
+
+/// Async source of a GitHub token for authenticated network git
+/// operations (clone / fetch / remote set-head). Resolved lazily per
+/// operation so a rotated token is picked up without rebuilding the
+/// manager, and so callers can plug in their own credential chain —
+/// git-ops itself stays auth-agnostic.
+pub type GithubTokenSource =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Option<String>> + Send>> + Send + Sync>;
 
 /// Manages git worktrees under a base directory.
 ///
@@ -135,6 +152,7 @@ pub type ProgressSink = dyn Fn(CheckoutPhase) + Send + Sync;
 pub struct WorktreeManager {
     base_dir: PathBuf,
     progress: Option<Arc<ProgressSink>>,
+    github_token: Option<GithubTokenSource>,
 }
 
 impl WorktreeManager {
@@ -142,6 +160,7 @@ impl WorktreeManager {
         Self {
             base_dir: base_dir.into(),
             progress: None,
+            github_token: None,
         }
     }
 
@@ -151,6 +170,30 @@ impl WorktreeManager {
     pub fn with_progress(mut self, sink: Arc<ProgressSink>) -> Self {
         self.progress = Some(sink);
         self
+    }
+
+    /// Attach a GitHub token source. When it yields a token, network
+    /// git operations rewrite `github.com` SSH remotes to HTTPS and
+    /// authenticate with the token — the daemon usually has no usable
+    /// SSH agent, so an SSH-origin bare clone would otherwise fail
+    /// every base-ref refresh with `Permission denied (publickey)`
+    /// while the GitHub API (same token) works fine (issue #394).
+    pub fn with_github_token(mut self, source: GithubTokenSource) -> Self {
+        self.github_token = Some(source);
+        self
+    }
+
+    /// Extra child-process env for network git operations: the
+    /// HTTPS-rewrite + auth-header config when a token resolves,
+    /// empty (native SSH behavior, unchanged) otherwise.
+    async fn network_env(&self) -> Vec<(String, String)> {
+        match &self.github_token {
+            Some(source) => match source().await {
+                Some(token) if !token.is_empty() => github_auth_env(&token),
+                _ => Vec::new(),
+            },
+            None => Vec::new(),
+        }
     }
 
     fn report(&self, phase: CheckoutPhase) {
@@ -262,7 +305,12 @@ impl WorktreeManager {
             tokio::fs::remove_dir_all(&partial).await?;
         }
         self.report(CheckoutPhase::Cloning);
-        run_git(&["clone", "--bare", &url, &partial.to_string_lossy()]).await?;
+        let auth = self.network_env().await;
+        run_git(
+            &["clone", "--bare", &url, &partial.to_string_lossy()],
+            &auth,
+        )
+        .await?;
         tokio::fs::rename(&partial, &bare_path).await?;
         Ok(bare_path)
     }
@@ -329,12 +377,11 @@ impl WorktreeManager {
         // to a deleted remote branch) also surfaces in the provisioning
         // checklist via a `BaseRefStale` report (issue #320).
         self.report(CheckoutPhase::Fetching);
-        if fetch_origin_ref(&bare_path, owner, repo, branch)
-            .await
-            .is_err()
-            && let Some(note) = stale_base_note(&bare_path, branch).await
+        let auth = self.network_env().await;
+        if let Err(e) = fetch_origin_ref(&bare_path, owner, repo, branch, &auth).await
+            && let Some(phase) = stale_base_phase(&bare_path, branch, &e, !auth.is_empty()).await
         {
-            self.report(CheckoutPhase::BaseRefStale(note));
+            self.report(phase);
         }
 
         if let Some(parent) = wt_path.parent() {
@@ -478,7 +525,8 @@ impl WorktreeManager {
         // guarantee degrading to "branched off a stale local ref" is
         // visible, not buried in the log (issue #320).
         self.report(CheckoutPhase::Fetching);
-        match fetch_origin_ref(&bare_path, owner, repo, base_branch).await {
+        let auth = self.network_env().await;
+        match fetch_origin_ref(&bare_path, owner, repo, base_branch, &auth).await {
             Ok(()) => {
                 if let Err(e) = run_git_in(
                     &bare_path,
@@ -499,9 +547,11 @@ impl WorktreeManager {
                     );
                 }
             }
-            Err(_) => {
-                if let Some(note) = stale_base_note(&bare_path, base_branch).await {
-                    self.report(CheckoutPhase::BaseRefStale(note));
+            Err(e) => {
+                if let Some(phase) =
+                    stale_base_phase(&bare_path, base_branch, &e, !auth.is_empty()).await
+                {
+                    self.report(phase);
                 }
             }
         }
@@ -629,7 +679,13 @@ impl WorktreeManager {
         // Pull origin/HEAD if we don't already have it. Tolerate
         // failure — we still try the local symbolic-ref lookup
         // afterwards, and only fail if that also can't resolve.
-        let _ = run_git_in(&bare_path, &["remote", "set-head", "origin", "--auto"]).await;
+        let auth = self.network_env().await;
+        let _ = run_git_in_env(
+            &bare_path,
+            &["remote", "set-head", "origin", "--auto"],
+            &auth,
+        )
+        .await;
 
         let out = run_git_in(&bare_path, &["symbolic-ref", "refs/remotes/origin/HEAD"]).await;
         if let Ok(ref_str) = out {
@@ -1036,27 +1092,99 @@ fn canonical_or_self(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
+/// Per-invocation git config, encoded as `GIT_CONFIG_*` environment
+/// entries (git ≥ 2.31), that routes `github.com` remotes over HTTPS
+/// with `token` as the credential:
+/// - `url.<https>.insteadOf` rewrites both SSH URL forms at network
+///   time, so existing SSH-origin bare clones work without rewriting
+///   their stored remote (and keep using SSH in environments where
+///   only SSH works and no token resolves);
+/// - `http.<https>.extraheader` carries the token as a Basic auth
+///   header, the same scheme `gh` and Actions use.
+///
+/// Everything is scoped to `github.com` — enterprise hosts, local
+/// mirrors and `file://` origins are untouched. The token rides in
+/// the child environment only, never argv, so it can't leak through
+/// process listings or lazybox's own command logging.
+fn github_auth_env(token: &str) -> Vec<(String, String)> {
+    let basic = base64_std(format!("x-access-token:{token}").as_bytes());
+    git_config_env(&[
+        ("url.https://github.com/.insteadOf", "git@github.com:"),
+        ("url.https://github.com/.insteadOf", "ssh://git@github.com/"),
+        (
+            "http.https://github.com/.extraheader",
+            &format!("AUTHORIZATION: basic {basic}"),
+        ),
+    ])
+}
+
+/// Encode config `pairs` as the `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n`
+/// / `GIT_CONFIG_VALUE_n` environment scheme. Repeated keys append,
+/// like repeated lines in a config file (needed for multi-valued
+/// `insteadOf`).
+fn git_config_env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+    let mut env = vec![("GIT_CONFIG_COUNT".to_string(), pairs.len().to_string())];
+    for (i, (key, value)) in pairs.iter().enumerate() {
+        env.push((format!("GIT_CONFIG_KEY_{i}"), (*key).to_string()));
+        env.push((format!("GIT_CONFIG_VALUE_{i}"), (*value).to_string()));
+    }
+    env
+}
+
+/// Standard-alphabet base64 with padding. Hand-rolled to keep this
+/// crate dependency-free — one header value is the only use.
+fn base64_std(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
+        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
 /// Fetch a single branch from origin into the bare clone, updating
-/// `refs/remotes/origin/<branch>`. On failure, log a warning and
-/// return the error — callers decide whether to propagate or fall
-/// back to a local ref. Centralized so both `checkout_at` and
-/// `checkout_new_branch_at` get identical diagnostics (issue #35).
+/// `refs/remotes/origin/<branch>`. `envs` carries the per-invocation
+/// auth config from [`WorktreeManager::network_env`]. On failure, log
+/// a warning and return the error — callers decide whether to
+/// propagate or fall back to a local ref. Centralized so both
+/// `checkout_at` and `checkout_new_branch_at` get identical
+/// diagnostics (issue #35).
 async fn fetch_origin_ref(
     bare_path: &Path,
     owner: &str,
     repo: &str,
     branch: &str,
+    envs: &[(String, String)],
 ) -> Result<(), GitError> {
-    run_git_in(
+    run_git_in_env(
         bare_path,
         &[
             "fetch",
             "origin",
             &format!("+{branch}:refs/remotes/origin/{branch}"),
         ],
+        envs,
     )
     .await
     .map(|_| ())
+    .inspect(|()| stamp_refresh_ok(bare_path))
     .inspect_err(|e| {
         tracing::warn!(
             owner,
@@ -1068,14 +1196,42 @@ async fn fetch_origin_ref(
     })
 }
 
-/// Build a human-readable note describing the local ref a worktree will
-/// be branched from after an origin fetch failed — the commit lazybox
-/// fell back to instead of latest origin. Mirrors the `start_point`
-/// precedence used at branch time (remote-tracking ref first, then the
-/// local head) so the note names the commit actually checked out.
+/// Marker file recording the last SUCCESSFUL origin fetch. git's own
+/// `FETCH_HEAD` can't serve here: a *failed* fetch still truncates and
+/// touches it, so its mtime records attempts, not contact. Best-effort
+/// (mtime is the datum; the epoch-seconds content is for humans
+/// debugging a bare clone by hand).
+const REFRESH_STAMP: &str = "lazybox-fetch-ok";
+
+fn stamp_refresh_ok(bare: &Path) {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let _ = std::fs::write(bare.join(REFRESH_STAMP), format!("{secs}\n"));
+}
+
+/// A base-ref refresh failure older than this is no longer a blip —
+/// it gets reported as [`CheckoutPhase::BaseRefStalePersistent`] so
+/// callers escalate it instead of re-showing a dismissable note.
+const PERSISTENT_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Build the [`CheckoutPhase`] describing the local ref a worktree
+/// will be branched from after an origin fetch failed — the commit
+/// lazybox fell back to instead of latest origin, plus why the fetch
+/// failed. Mirrors the `start_point` precedence used at branch time
+/// (remote-tracking ref first, then the local head) so the note names
+/// the commit actually checked out. Escalates to
+/// [`CheckoutPhase::BaseRefStalePersistent`] when the clone hasn't
+/// successfully refreshed in over [`PERSISTENT_STALE_AFTER`].
 /// `None` when no usable ref exists (the checkout is about to error
 /// anyway) or the describe probe fails. Best-effort, read-only diagnostics.
-async fn stale_base_note(bare_path: &Path, branch: &str) -> Option<String> {
+async fn stale_base_phase(
+    bare_path: &Path,
+    branch: &str,
+    err: &GitError,
+    authed: bool,
+) -> Option<CheckoutPhase> {
     let start = if ref_exists(bare_path, &format!("refs/remotes/origin/{branch}")).await {
         format!("refs/remotes/origin/{branch}")
     } else if ref_exists(bare_path, &format!("refs/heads/{branch}")).await {
@@ -1092,9 +1248,65 @@ async fn stale_base_note(bare_path: &Path, branch: &str) -> Option<String> {
     if desc.is_empty() {
         return None;
     }
-    Some(format!(
-        "could not refresh {branch} — branched from local ref ({desc})"
-    ))
+    let mut note = format!("could not refresh {branch} — branched from local ref ({desc}); ");
+    note.push_str(&fetch_failure_reason(err, authed));
+    match last_refresh_age(bare_path) {
+        Some(age) if age >= PERSISTENT_STALE_AFTER => {
+            note.push_str(&format!(
+                "; origin has not refreshed in {}",
+                format_age(age)
+            ));
+            Some(CheckoutPhase::BaseRefStalePersistent(note))
+        }
+        _ => Some(CheckoutPhase::BaseRefStale(note)),
+    }
+}
+
+/// One-line cause for a failed base-ref fetch, so the stale note says
+/// *why* instead of a bare "could not refresh" (issue #394). A
+/// publickey failure without a token gets the actionable hint — that
+/// exact state means lazybox fell back to SSH it can't authenticate.
+fn fetch_failure_reason(err: &GitError, authed: bool) -> String {
+    let raw = match err {
+        GitError::Command(stderr) => stderr.clone(),
+        GitError::Io(e) => e.to_string(),
+    };
+    let line = raw
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("unknown error")
+        .trim_start_matches("fatal:")
+        .trim();
+    let line: String = line.chars().take(120).collect();
+    if !authed && line.contains("Permission denied") {
+        format!(
+            "fetch failed: {line} — lazybox cannot reach an SSH agent; \
+             run `gh auth login` so it can fetch over HTTPS"
+        )
+    } else {
+        format!("fetch failed: {line}")
+    }
+}
+
+/// Time since the bare clone last successfully talked to origin: the
+/// [`REFRESH_STAMP`]'s mtime, falling back to `HEAD`'s (written at
+/// clone time, then never again in a bare clone) when no fetch has
+/// succeeded since the stamp was introduced. `None` when neither is
+/// readable.
+fn last_refresh_age(bare: &Path) -> Option<std::time::Duration> {
+    let mtime = |p: PathBuf| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let t = mtime(bare.join(REFRESH_STAMP)).or_else(|| mtime(bare.join("HEAD")))?;
+    std::time::SystemTime::now().duration_since(t).ok()
+}
+
+fn format_age(age: std::time::Duration) -> String {
+    let hours = age.as_secs() / 3600;
+    if hours >= 48 {
+        format!("{} days", hours / 24)
+    } else {
+        format!("{hours} hours")
+    }
 }
 
 /// Whether `path` is the root of a git repository. Cheap: probes for
@@ -1145,7 +1357,7 @@ pub(crate) fn apply_git_env(cmd: &mut Command) -> &mut Command {
         .env_remove("GIT_COMMON_DIR")
 }
 
-async fn run_git(args: &[&str]) -> Result<String, GitError> {
+async fn run_git(args: &[&str], envs: &[(String, String)]) -> Result<String, GitError> {
     // Wall-clock cap. `run_git` is the no-cwd variant used for
     // `git clone --bare` — slow by nature (a big repo over a slow
     // link takes minutes), but it must still be FINITE: a clone
@@ -1159,6 +1371,7 @@ async fn run_git(args: &[&str]) -> Result<String, GitError> {
     let started = std::time::Instant::now();
     tracing::info!("git {}", args.join(" "));
     let fut = apply_git_env(Command::new("git").args(args))
+        .envs(envs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .kill_on_drop(true)
         .output();
     let output = match tokio::time::timeout(GIT_TIMEOUT, fut).await {
@@ -1324,6 +1537,14 @@ async fn apply_inline_script(target: &Path, body: &str) -> Result<(), GitError> 
 }
 
 async fn run_git_in(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
+    run_git_in_env(cwd, args, &[]).await
+}
+
+async fn run_git_in_env(
+    cwd: &Path,
+    args: &[&str],
+    envs: &[(String, String)],
+) -> Result<String, GitError> {
     // Wall-clock cap on every git invocation. Without this, a single
     // hung `git worktree move` (waiting on credentials, an fs lock,
     // a stalled network connection to the remote) wedged the daemon
@@ -1336,6 +1557,7 @@ async fn run_git_in(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
     let started = std::time::Instant::now();
     tracing::info!("git (in {}) {}", cwd.display(), args.join(" "));
     let fut = apply_git_env(Command::new("git").current_dir(cwd).args(args))
+        .envs(envs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .kill_on_drop(true)
         .output();
     let output = match tokio::time::timeout(GIT_TIMEOUT, fut).await {
@@ -1371,6 +1593,175 @@ async fn run_git_in(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
             stderr.trim()
         );
         Err(GitError::Command(stderr))
+    }
+}
+
+#[cfg(test)]
+mod auth_env_tests {
+    use super::*;
+
+    /// RFC 4648 test vectors — the encoder is hand-rolled, so pin it
+    /// to the spec rather than trusting it by inspection.
+    #[test]
+    fn base64_matches_rfc4648_vectors() {
+        for (input, expected) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64_std(input.as_bytes()), expected, "input {input:?}");
+        }
+    }
+
+    /// The auth env must rewrite both github.com SSH URL forms to
+    /// HTTPS and carry the token base64ed in a header value — never
+    /// in plaintext anywhere in the environment.
+    #[test]
+    fn github_auth_env_shape() {
+        let env = github_auth_env("sekret-token");
+        let lookup = |key: &str| -> Vec<&str> {
+            env.iter()
+                .enumerate()
+                .filter(|(i, (k, _))| {
+                    k.starts_with("GIT_CONFIG_KEY_") && env[*i].1 == key && *i % 2 == 1 // keys sit at odd indices after COUNT
+                })
+                .map(|(i, _)| env[i + 1].1.as_str())
+                .collect()
+        };
+        assert_eq!(env[0], ("GIT_CONFIG_COUNT".to_string(), "3".to_string()));
+        let instead_of = lookup("url.https://github.com/.insteadOf");
+        assert_eq!(instead_of, ["git@github.com:", "ssh://git@github.com/"]);
+        let headers = lookup("http.https://github.com/.extraheader");
+        assert_eq!(headers.len(), 1);
+        assert!(headers[0].starts_with("AUTHORIZATION: basic "));
+        assert!(
+            !env.iter().any(|(_, v)| v.contains("sekret-token")),
+            "raw token must never appear in the env values: {env:?}"
+        );
+    }
+
+    /// The env pairs must actually reach the spawned git process:
+    /// with an origin whose SSH-style URL can't resolve at all, an
+    /// env-injected `insteadOf` rewrite to a local path makes the
+    /// base-ref fetch succeed — the same mechanism that routes
+    /// github.com remotes over HTTPS with the gh token (issue #394's
+    /// acceptance shape: SSH unavailable, token path still fetches).
+    #[tokio::test]
+    async fn fetch_succeeds_via_env_injected_rewrite_when_ssh_url_is_dead() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let git = |cwd: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(cwd)
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .output()
+                .expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        let src = tmp.path().join("src");
+        std::fs::create_dir(&src).expect("mkdir src");
+        git(&src, &["init", "-q", "-b", "main"]);
+        git(&src, &["config", "user.email", "t@example.com"]);
+        git(&src, &["config", "user.name", "t"]);
+        git(&src, &["commit", "--allow-empty", "-q", "-m", "init"]);
+        // Mirror the on-disk layout the rewrite must produce:
+        // git@invalid.example:acme/widgets.git → <tmp>/hub/acme/widgets.git
+        let hub_repo = tmp.path().join("hub").join("acme").join("widgets.git");
+        std::fs::create_dir_all(hub_repo.parent().unwrap()).expect("mkdir hub");
+        git(
+            tmp.path(),
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                &src.to_string_lossy(),
+                &hub_repo.to_string_lossy(),
+            ],
+        );
+        let bare = tmp.path().join("bare.git");
+        git(
+            tmp.path(),
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                &src.to_string_lossy(),
+                &bare.to_string_lossy(),
+            ],
+        );
+        git(
+            &bare,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "git@invalid.example:acme/widgets.git",
+            ],
+        );
+
+        assert!(
+            fetch_origin_ref(&bare, "acme", "widgets", "main", &[])
+                .await
+                .is_err(),
+            "sanity: the dead SSH-style URL must not fetch on its own"
+        );
+
+        let hub_base = format!("{}/", tmp.path().join("hub").display());
+        let envs =
+            git_config_env(&[(&format!("url.{hub_base}.insteadOf"), "git@invalid.example:")]);
+        fetch_origin_ref(&bare, "acme", "widgets", "main", &envs)
+            .await
+            .expect("env-injected rewrite makes the same fetch succeed");
+        assert!(
+            ref_exists(&bare, "refs/remotes/origin/main").await,
+            "fetch updated the remote-tracking ref"
+        );
+    }
+
+    /// A publickey failure with no token in play gets the actionable
+    /// HTTPS hint; with a token (HTTPS path already taken) the raw
+    /// cause is reported verbatim.
+    #[test]
+    fn fetch_failure_reason_classifies_publickey() {
+        let err = GitError::Command(
+            "git@github.com: Permission denied (publickey).\r\n\
+             fatal: Could not read from remote repository.\n"
+                .into(),
+        );
+        let unauthed = fetch_failure_reason(&err, false);
+        assert!(
+            unauthed.contains("Permission denied (publickey)"),
+            "{unauthed}"
+        );
+        assert!(unauthed.contains("gh auth login"), "{unauthed}");
+        let authed = fetch_failure_reason(&err, true);
+        assert!(authed.contains("Permission denied (publickey)"), "{authed}");
+        assert!(!authed.contains("gh auth login"), "{authed}");
+
+        let other = GitError::Command("fatal: unable to access 'x': timed out\n".into());
+        assert_eq!(
+            fetch_failure_reason(&other, false),
+            "fetch failed: unable to access 'x': timed out"
+        );
+    }
+
+    #[test]
+    fn format_age_hours_then_days() {
+        use std::time::Duration;
+        assert_eq!(format_age(Duration::from_secs(3 * 3600)), "3 hours");
+        assert_eq!(format_age(Duration::from_secs(30 * 3600)), "30 hours");
+        assert_eq!(format_age(Duration::from_secs(4 * 24 * 3600)), "4 days");
     }
 }
 

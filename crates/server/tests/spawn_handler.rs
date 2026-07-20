@@ -1119,6 +1119,98 @@ async fn spawn_with_initial_prompt_delivers_work_to_agent() {
     .expect("deadline");
 }
 
+/// Codex's TUI also treats a rapid multi-line write as a paste. Its work
+/// prompt must therefore use explicit bracketed-paste markers followed by a
+/// separate carriage-return write; appending `\n` to the prompt body leaves
+/// the text sitting unsubmitted in the composer.
+#[tokio::test]
+async fn codex_initial_prompt_pastes_then_sends_enter_separately() {
+    timeout(TEST_DEADLINE, async {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config).await;
+
+        const WORK: &str = "Implement issue #391.\nRun the focused tests.";
+        client
+            .send(Command::Spawn {
+                model_alias: None,
+                session_key: "test:ws-codex-ingest".into(),
+                session_id: None,
+                kind: TerminalKind::Agent("codex".into()),
+                cwd: test_cwd(),
+                initial_prompt: Some(WORK.into()),
+                on_main: false,
+            })
+            .unwrap();
+        wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalSpawned { .. }),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("TerminalSpawned arrived");
+
+        let key = mock.list().await.unwrap().into_iter().next().unwrap();
+        mock.emit(&key, "› Try something\ngpt-5.4 xhigh · /repo")
+            .await;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let writes = loop {
+            let writes = mock.writes_for(&key).await;
+            if writes.len() >= 2 || tokio::time::Instant::now() >= deadline {
+                break writes;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert!(
+            writes.len() >= 2,
+            "Codex prompt was not followed by a separate Enter; writes = {writes:?}",
+        );
+        let mut expected_paste = b"\x1b[200~".to_vec();
+        expected_paste.extend_from_slice(WORK.as_bytes());
+        expected_paste.extend_from_slice(b"\x1b[201~");
+        assert_eq!(writes[0], expected_paste);
+        assert_eq!(writes[1], b"\r");
+    })
+    .await
+    .expect("deadline");
+}
+
+/// The atomic PTY protocol must honor compose-only recall for line-oriented
+/// agents too. Under the former split API, the line adapter embedded `\n` in
+/// its first write before the server could suppress submission, so recalling a
+/// draft accidentally started a turn.
+#[tokio::test]
+async fn line_oriented_prompt_recall_omits_the_inline_newline() {
+    timeout(TEST_DEADLINE, async {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config).await;
+        let terminal_id =
+            spawn_and_wait(&mut client, TerminalKind::Agent("cursor-agent".into())).await;
+        let key = mock.list().await.unwrap().into_iter().next().unwrap();
+
+        client
+            .send(Command::InjectPrompt {
+                terminal_id,
+                prompt: "edit this draft".into(),
+                fallback_spawn: None,
+                submit: false,
+            })
+            .unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let writes = loop {
+            let writes = mock.writes_for(&key).await;
+            if !writes.is_empty() || tokio::time::Instant::now() >= deadline {
+                break writes;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert_eq!(writes, vec![b"edit this draft".to_vec()]);
+    })
+    .await
+    .expect("deadline");
+}
+
 /// Regression: a prompt-carrying Spawn that collapses onto an existing
 /// singleton must still deliver its prompt. Pre-fix, `handle_spawn`
 /// only broadcast `TerminalFocusRequested` and the `w`-built work

@@ -1002,7 +1002,8 @@ pub async fn handle_spawn(
             // Quiet-classification timer (#289). Re-armed on every chunk;
             // when it fires — PTY_QUIET_CLASSIFY_AFTER with no output —
             // the resting screen is classified. While chunks flow, the
-            // only state reading is `Working` (see `note_pty_activity`).
+            // reading is `Working` unless an adapter recognizes distinctive
+            // prompt chrome in the current chunk (see `note_pty_activity`).
             // Never armed for non-agent terminals (no detector to run).
             let mut quiet_deadline: Option<tokio::time::Instant> = None;
             // Length of the most recent chunk appended to `state_buf` —
@@ -1021,6 +1022,7 @@ pub async fn handle_spawn(
                     &terminal_meta_map,
                     &mut state_machine,
                     &hook_driven_map,
+                    &input_shapes_map,
                 )
                 .await;
                 last_chunk_len = sub.replay.len();
@@ -1123,6 +1125,7 @@ pub async fn handle_spawn(
                         &terminal_meta_map,
                         &mut state_machine,
                         &hook_driven_map,
+                        &input_shapes_map,
                     )
                     .await;
                     last_chunk_len = snapshot.replay.len();
@@ -1178,6 +1181,7 @@ pub async fn handle_spawn(
                     &terminal_meta_map,
                     &mut state_machine,
                     &hook_driven_map,
+                    &input_shapes_map,
                 )
                 .await;
                 last_chunk_len = chunk.bytes.len();
@@ -1240,15 +1244,14 @@ pub async fn handle_spawn(
     // sidebar / activity pane spawn an agent with a pre-built
     // instruction so the user doesn't have to retype it.
     //
-    // Wait for the agent to start `Asking` (its first prompt screen)
-    // before writing. Typing into Claude during its banner boot drops
-    // keystrokes onto the wrong UI surface and the prompt ends up
-    // half-eaten. Timeout after 10s and write anyway — better a
-    // garbled prompt than a silently-lost one.
+    // Wait for the agent's composer before writing. Typing into a full-screen
+    // agent during banner boot drops keystrokes onto the wrong UI surface and
+    // the prompt ends up half-eaten. The PTY protocol declares whether
+    // composer readiness is authoritative or a timed fallback is acceptable.
     if let (Some(prompt), Some(agent)) = (initial_prompt, &agent_for_inject) {
-        let agent = agent.clone();
-        let paste = agent.inject_prompt(&prompt);
-        let submit = agent.inject_submit();
+        let requires_ready = agent.pty_protocol().requires_ready();
+        let encoded_prompt = agent.encode_prompt(&prompt, lazybox_agents::PromptIntent::Submit);
+        let initial_write_len = encoded_prompt.initial_write_len();
         let backend_key = backend_key.clone();
         let id = terminal_id;
         let first_output = first_output_signal_for_inject;
@@ -1257,25 +1260,25 @@ pub async fn handle_spawn(
         let config_for_inject = config.clone();
         tokio::spawn(async move {
             // Wait for the agent's input box to be drawn AND no
-            // permission gate to be up — i.e. "claude is genuinely
+            // permission gate to be up — i.e. "the agent is genuinely
             // ready to receive a pasted prompt." The pump task fires
             // `ready_signal` exactly once when `Agent::
             // detect_ready_for_prompt` first returns true. This is
             // strictly tighter than the previous "wait for not-
             // Asking" approach: the loose Asking detector matched
-            // claude's normal idle screen and made the wait spin
+            // a normal idle screen and made the wait spin
             // the full deadline before every inject.
             //
             // Fallback ladder (each step has its own deadline):
             //   1. ready_signal — preferred path, fires within
-            //      seconds of claude finishing its banner.
+            //      seconds of the agent finishing its banner.
             //   2. first_output + SETTLE — for agents whose
             //      detector never reports ready (default impl),
             //      we still write 600ms past first byte. Agents
             //      with an authoritative readiness detector
-            //      (`inject_requires_ready`) SKIP this rung — a
+            //      (`PtyProtocol::requires_ready`) SKIP this rung — a
             //      blind settle-write would land the paste in
-            //      claude's folder-trust prompt if it's still up.
+            //      a folder-trust prompt if it's still up.
             //   3. HARD_DEADLINE — last resort, inject blindly so
             //      a cold-start hang doesn't silently lose the
             //      user's prompt.
@@ -1283,12 +1286,12 @@ pub async fn handle_spawn(
             const SETTLE: std::time::Duration = std::time::Duration::from_millis(600);
             tracing::info!(
                 terminal_id = ?id,
-                paste_len = paste.len(),
+                initial_write_len,
                 "initial_prompt: waiting for agent ready signal",
             );
 
             let trigger = await_inject_window(
-                agent.inject_requires_ready(),
+                requires_ready,
                 &ready_signal,
                 &first_output,
                 HARD_DEADLINE,
@@ -1297,7 +1300,7 @@ pub async fn handle_spawn(
             .await;
             // The deadline rung means `ready` never fired within
             // HARD_DEADLINE. For an agent with an authoritative readiness
-            // detector (Claude) that does NOT mean "safe to paste": under
+            // detector that does NOT mean "safe to paste": under
             // many concurrent spawns the pump lags behind the deadline, or
             // the agent is still parked on a boot-time gate (folder-trust /
             // login / bypass chooser). A blind paste here lands the
@@ -1311,7 +1314,7 @@ pub async fn handle_spawn(
             // false), whose `ready` signal never fires — losing the prompt
             // to a cold-start hang is worse there than a best-effort paste.
             if trigger == InjectTrigger::Deadline
-                && agent.inject_requires_ready()
+                && requires_ready
                 && !await_pending_ready(id, &ready_signal, &config_for_inject.terminals).await
             {
                 tracing::warn!(
@@ -1326,10 +1329,10 @@ pub async fn handle_spawn(
             }
             tracing::info!(
                 terminal_id = ?id,
-                paste_len = paste.len(),
+                initial_write_len,
                 ?trigger,
                 elapsed_ms = t0_for_inject.elapsed().as_millis(),
-                "initial_prompt: inject window cleared — writing paste to backend",
+                "initial_prompt: inject window cleared — writing prompt sequence to backend",
             );
             let Some(interaction) =
                 terminal_io::acquire_live(&config_for_inject, id, &backend_key).await
@@ -1345,62 +1348,34 @@ pub async fn handle_spawn(
                 });
                 return;
             };
-            // Subscribed before the paste write so the output chunks
-            // the paste triggers are observable by the settle gate.
-            let output_events = submit.is_some().then(|| config_for_inject.bus.subscribe());
-            if let Err(e) =
-                terminal_io::write_locked(&config_for_inject, &backend_key, &paste).await
+            match write_prompt_sequence(
+                &config_for_inject,
+                id,
+                &backend_key,
+                encoded_prompt,
+                interaction,
+            )
+            .await
             {
-                tracing::warn!(
-                    terminal_id = ?id,
-                    "initial_prompt: paste failed: {e}"
-                );
-                let _ = config_for_inject.bus.send(Event::TerminalInputRejected {
-                    terminal_id: id,
-                    message: format!(
-                        "work prompt was not delivered ({e}) — press w again to retry"
-                    ),
-                });
-                return;
-            }
-            // Paste/submit split. Agents like Claude Code batch rapid
-            // byte arrival as a paste; Enter inside that batch is a
-            // soft line break, not a submit. Gate the submit keystroke
-            // on the paste's repaint going quiet so Enter fires as its
-            // own keystroke. Agents that don't need a separate submit
-            // (the default trait impl) return None here and we skip
-            // the second write entirely.
-            if let (Some(submit_bytes), Some(mut output_events)) = (submit, output_events) {
-                await_paste_settled(&mut output_events, id, PASTE_QUIET_WINDOW, PASTE_SETTLE_CAP)
-                    .await;
-                let confirm = prepare_submit_confirmation(&config_for_inject, id).await;
-                if let Err(e) =
-                    terminal_io::write_locked(&config_for_inject, &backend_key, &submit_bytes).await
-                {
-                    tracing::warn!(
-                        terminal_id = ?id,
-                        "initial_prompt: submit failed: {e}"
-                    );
+                Ok(()) => {}
+                Err(PromptWriteError::Initial(e)) => {
+                    tracing::warn!(terminal_id = ?id, "initial_prompt: initial write failed: {e}");
+                    let _ = config_for_inject.bus.send(Event::TerminalInputRejected {
+                        terminal_id: id,
+                        message: format!(
+                            "work prompt was not delivered ({e}) — press w again to retry"
+                        ),
+                    });
+                }
+                Err(PromptWriteError::Submit(e)) => {
+                    tracing::warn!(terminal_id = ?id, "initial_prompt: submit failed: {e}");
                     let _ = config_for_inject.bus.send(Event::TerminalInputRejected {
                         terminal_id: id,
                         message: format!(
                             "work prompt was pasted but could not be submitted ({e}) — open the terminal and press Enter"
                         ),
                     });
-                    return;
                 }
-                // The paste + submit transaction is complete. Confirmation
-                // waits must not monopolize the terminal while the agent
-                // works; any later retry reacquires the same global lock.
-                drop(interaction);
-                confirm_prompt_submission(
-                    confirm,
-                    &config_for_inject,
-                    &backend_key,
-                    &submit_bytes,
-                    SUBMIT_CONFIRM_DEADLINE,
-                )
-                .await;
             }
         });
     }
@@ -3263,20 +3238,19 @@ async fn finish_terminal(
 }
 
 /// Ingest one PTY output chunk for a terminal: append it to the rolling
-/// detection buffer and offer the state machine a `Working` reading.
-/// Bytes flowing IS the working signal (issue #289) — no screen-scrape
-/// classification happens here. A stale prompt marker in the scrollback
-/// of a visibly-streaming session once pinned `InputNeeded`, so the
-/// classifier now runs only after the stream has gone quiet
-/// (`classify_quiet_screen`); mid-stream, the only thing a chunk can
-/// say is "the agent is doing something".
+/// detection buffer and offer the state machine a reading. Bytes flowing is
+/// normally the working signal (issue #289). The only immediate exception is
+/// an adapter's high-confidence current-chunk prompt detector: it may surface
+/// unmistakable modal chrome without waiting for quiet. Inspecting only a
+/// marker touched by the newest chunk preserves the stale-scrollback guard;
+/// the full classifier still runs only in [`classify_quiet_screen`].
 ///
-/// The reading is offered as ambiguous (`clear: false`): a byte-flow
-/// `Working` is inferred, not an affirmative status line, so it can never
-/// clear a parked `?` or a finished `Done` (an incidental repaint — a
-/// click, a focus, a pane resize — must not un-ask or un-finish, #374).
-/// A genuinely resumed stream instead commits `Working` off the next
-/// clear quiet-classification, once it comes to rest.
+/// The ordinary byte-flow `Working` reading is ambiguous (`clear: false`),
+/// so it can never clear a parked `?` or a finished `Done` (an incidental
+/// repaint — a click, a focus, a pane resize — must not un-ask or un-finish,
+/// #374). A positive current-chunk modal match is authoritative
+/// (`InputNeeded`, `clear: true`). A genuinely resumed stream commits
+/// `Working` off the next clear quiet-classification, once it comes to rest.
 pub(crate) async fn note_pty_activity(
     agent: Option<&std::sync::Arc<dyn lazybox_agents::Agent>>,
     buf: &mut Vec<u8>,
@@ -3296,6 +3270,9 @@ pub(crate) async fn note_pty_activity(
     hook_driven: &std::sync::Arc<
         tokio::sync::Mutex<std::collections::HashMap<TerminalId, std::time::Instant>>,
     >,
+    input_shapes: &std::sync::Arc<
+        tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_agents::PromptShape>>,
+    >,
 ) {
     const STATE_BUF_CAP: usize = 32 * 1024;
     let Some(agent) = agent else {
@@ -3313,13 +3290,25 @@ pub(crate) async fn note_pty_activity(
         let drop = buf.len() - STATE_BUF_CAP;
         buf.drain(..drop);
     }
-    let reading = lazybox_agents::Reading {
-        state: lazybox_ipc::AgentState::Working,
-        clear: false,
+    let detect_window = detect_window(buf);
+    let last_chunk_start = detect_window.len().saturating_sub(bytes.len());
+    let immediate_shape =
+        agent.detect_input_needed_in_current_chunk(detect_window, last_chunk_start);
+    let reading = if let Some(shape) = immediate_shape {
+        input_shapes.lock().await.insert(id, shape);
+        lazybox_agents::Reading {
+            state: lazybox_ipc::AgentState::InputNeeded,
+            clear: true,
+        }
+    } else {
+        lazybox_agents::Reading {
+            state: lazybox_ipc::AgentState::Working,
+            clear: false,
+        }
     };
     commit_pty_reading(
         agent,
-        detect_window(buf),
+        detect_window,
         reading,
         false,
         states,
@@ -3388,15 +3377,16 @@ pub(crate) async fn classify_quiet_screen(
         return;
     }
     let last_chunk_start = detect_window.len().saturating_sub(last_chunk_len);
-    let new_state = match agent.detect_state_chunked(detect_window, last_chunk_start) {
-        Some(new_state) => {
+    let new_state = match agent.detect_observation_chunked(detect_window, last_chunk_start) {
+        Some(observation) => {
+            let new_state = observation.state();
             tracing::trace!(
                 terminal_id = ?id,
                 buf_len = buf.len(),
                 detected = ?new_state,
                 "classify_quiet_screen ran",
             );
-            if new_state == lazybox_ipc::AgentState::InputNeeded {
+            if let Some(shape) = observation.prompt_shape() {
                 tracing::debug!(
                     terminal_id = ?id,
                     buf_len = buf.len(),
@@ -3405,17 +3395,10 @@ pub(crate) async fn classify_quiet_screen(
                     ),
                     "classify_quiet_screen → InputNeeded",
                 );
-                // Every InputNeeded the PTY detector raises is
-                // structurally a chooser / permission / consent dialog
-                // (freeform asks are deliberately not flagged), so a
-                // bare chooser keystroke is a complete answer. Hook-
-                // raised elicitations overwrite this with `FreeText` in
-                // `handle_ingest_hook`. Recorded before the dedupe
-                // below so a re-rendered prompt refreshes the shape.
-                input_shapes
-                    .lock()
-                    .await
-                    .insert(id, lazybox_agents::PromptShape::Chooser);
+                // Shape comes from the adapter's semantic observation rather
+                // than being guessed here. Recorded before state dedupe so a
+                // re-rendered prompt can refresh its interaction contract.
+                input_shapes.lock().await.insert(id, shape);
             }
             new_state
         }
@@ -3675,8 +3658,9 @@ pub(crate) async fn handle_write_batch(
     // just typing into the field — flipping the pill on it cleared a
     // real "agent is waiting on you". Enter is exempt: it submits the
     // elicitation answer, so the flip is correct. The shape is recorded
-    // at detection time (PTY triggers are all chooser-shaped) and by
-    // `handle_ingest_hook` (permission → chooser, elicit → free text);
+    // at detection time by the agent observation (including its current-
+    // chunk fast path) and by `handle_ingest_hook` (permission → chooser,
+    // elicit → free text);
     // with no recorded shape we conservatively don't flip on a bare key.
     if !pressed_enter {
         let shape = config
@@ -3764,6 +3748,66 @@ const PASTE_QUIET_WINDOW: Duration = Duration::from_millis(250);
 /// submit is written anyway and the confirm loop's resends carry the
 /// recovery instead.
 const PASTE_SETTLE_CAP: Duration = Duration::from_secs(2);
+
+/// Stage-specific failure from the shared PTY prompt writer. Callers keep
+/// their context-specific user message (initial work vs live injection), while
+/// framing, settle timing, submit ordering, and confirmation live in one path.
+#[derive(Debug, thiserror::Error)]
+enum PromptWriteError {
+    #[error("initial prompt write failed: {0}")]
+    Initial(#[source] terminal_io::TerminalIoFailure),
+    #[error("prompt submit write failed: {0}")]
+    Submit(#[source] terminal_io::TerminalIoFailure),
+}
+
+/// Execute one agent-declared prompt sequence while holding the terminal's
+/// interaction lock. This is the single shell/PTY wrapper used by both
+/// spawn-time work delivery and injection into an existing agent.
+///
+/// For guarded composers the first write is an explicit bracketed paste. The
+/// second write is delayed until its repaint settles, then registered for
+/// confirmation before Enter is sent. The lock is released before the
+/// potentially long confirmation/retry loop; retries reacquire it through the
+/// normal serialized terminal-I/O path.
+async fn write_prompt_sequence(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    backend_key: &str,
+    encoded: lazybox_agents::EncodedPrompt,
+    interaction: tokio::sync::OwnedMutexGuard<()>,
+) -> Result<(), PromptWriteError> {
+    let (initial_write, submit_write) = encoded.into_writes();
+    // Subscribe BEFORE the first write so its repaint chunks cannot race the
+    // settle gate. Line-oriented prompts submit inline and skip this receiver.
+    let output_events = submit_write.is_some().then(|| config.bus.subscribe());
+    terminal_io::write_locked(config, backend_key, &initial_write)
+        .await
+        .map_err(PromptWriteError::Initial)?;
+
+    if let (Some(submit_bytes), Some(mut output_events)) = (submit_write, output_events) {
+        await_paste_settled(
+            &mut output_events,
+            terminal_id,
+            PASTE_QUIET_WINDOW,
+            PASTE_SETTLE_CAP,
+        )
+        .await;
+        let confirm = prepare_submit_confirmation(config, terminal_id).await;
+        terminal_io::write_locked(config, backend_key, &submit_bytes)
+            .await
+            .map_err(PromptWriteError::Submit)?;
+        drop(interaction);
+        confirm_prompt_submission(
+            confirm,
+            config,
+            backend_key,
+            &submit_bytes,
+            SUBMIT_CONFIRM_DEADLINE,
+        )
+        .await;
+    }
+    Ok(())
+}
 
 /// Wait plumbing for [`confirm_prompt_submission`], registered BEFORE
 /// the submit keystroke is written so a fast hook can't race the
@@ -4122,11 +4166,15 @@ pub async fn handle_inject_prompt(
             return;
         }
     };
-    let paste = agent.inject_prompt(prompt);
-    // Recall (`submit == false`) drops the recovered text into the
-    // composer for the user to edit — skip the Enter keystroke and the
-    // settle gate that guards it.
-    let submit = if submit { agent.inject_submit() } else { None };
+    // The PTY protocol owns BOTH framing and submission. In particular,
+    // compose-only recall must omit the inline newline for line-oriented
+    // agents as well as the separate CR used by guarded composers.
+    let intent = if submit {
+        lazybox_agents::PromptIntent::Submit
+    } else {
+        lazybox_agents::PromptIntent::Compose
+    };
+    let encoded_prompt = agent.encode_prompt(prompt, intent);
 
     // An InputNeeded gate may hold the waiter below for 30 seconds. Without a
     // per-terminal reservation every repeated `w` press spawned another
@@ -4205,8 +4253,6 @@ pub async fn handle_inject_prompt(
             blocked =
                 states.lock().await.get(&id).copied() == Some(lazybox_ipc::AgentState::InputNeeded);
         }
-        // Subscribed before the paste write so the output chunks the
-        // paste triggers are observable by the settle gate.
         let Some(interaction) =
             terminal_io::acquire_live(&config_for_confirm, id, &backend_key).await
         else {
@@ -4222,26 +4268,26 @@ pub async fn handle_inject_prompt(
         if let Some(tx) = registered_tx.take() {
             let _ = tx.send(());
         }
-        let output_events = submit.is_some().then(|| bus.subscribe());
-        if let Err(e) = terminal_io::write_locked(&config_for_confirm, &backend_key, &paste).await {
-            tracing::warn!("inject_prompt: paste failed: {e}");
-            let _ = bus.send(Event::TerminalInputRejected {
-                terminal_id: id,
-                message: format!(
-                    "injected prompt was not delivered ({e}) — press w again to retry"
-                ),
-            });
-            return;
-        }
-        // Gate the submit keystroke on the paste's repaint going quiet
-        // (Claude treats rapid bytes as a paste — Enter inside the
-        // paste is a soft line break).
-        if let (Some(submit_bytes), Some(mut output_events)) = (submit, output_events) {
-            await_paste_settled(&mut output_events, id, PASTE_QUIET_WINDOW, PASTE_SETTLE_CAP).await;
-            let confirm = prepare_submit_confirmation(&config_for_confirm, id).await;
-            if let Err(e) =
-                terminal_io::write_locked(&config_for_confirm, &backend_key, &submit_bytes).await
-            {
+        match write_prompt_sequence(
+            &config_for_confirm,
+            id,
+            &backend_key,
+            encoded_prompt,
+            interaction,
+        )
+        .await
+        {
+            Ok(()) => {}
+            Err(PromptWriteError::Initial(e)) => {
+                tracing::warn!("inject_prompt: initial write failed: {e}");
+                let _ = bus.send(Event::TerminalInputRejected {
+                    terminal_id: id,
+                    message: format!(
+                        "injected prompt was not delivered ({e}) — press w again to retry"
+                    ),
+                });
+            }
+            Err(PromptWriteError::Submit(e)) => {
                 tracing::warn!("inject_prompt: submit failed: {e}");
                 let _ = bus.send(Event::TerminalInputRejected {
                     terminal_id: id,
@@ -4249,17 +4295,7 @@ pub async fn handle_inject_prompt(
                         "prompt was pasted but could not be submitted ({e}) — open the terminal and press Enter"
                     ),
                 });
-                return;
             }
-            drop(interaction);
-            confirm_prompt_submission(
-                confirm,
-                &config_for_confirm,
-                &backend_key,
-                &submit_bytes,
-                SUBMIT_CONFIRM_DEADLINE,
-            )
-            .await;
         }
     });
     // A dropped sender means the task ended before it could establish either
@@ -7535,6 +7571,7 @@ mod tests {
                 &self.terminal_meta,
                 &mut self.state_machine,
                 &self.hook_driven,
+                &self.input_shapes,
             )
             .await;
             self.last_chunk_len = bytes.len();
@@ -7757,6 +7794,75 @@ mod tests {
         }
     }
 
+    /// Codex approval chrome is strong enough to bypass the quiet timer.
+    /// This is the exact command-approval shape from the TUI: the sidebar
+    /// must show `?` as soon as the modal paints, even if status repaints
+    /// keep the PTY from ever remaining quiet for five seconds.
+    #[tokio::test]
+    async fn codex_approval_modal_surfaces_input_needed_immediately() {
+        use lazybox_ipc::AgentState::InputNeeded;
+        let agent = lazybox_agents::registry()
+            .get("codex")
+            .expect("codex agent is a built-in");
+        let mut p = PumpDriver::with_agent(agent, Duration::ZERO, Duration::ZERO);
+        let modal = "Would you like to run the following command?\n\
+                     Environment: local\n\
+                     › 1. Yes, proceed (y)\n\
+                       2. Yes, and don't ask again\n\
+                       3. No, and tell Codex what to do differently (esc)\n\
+                     Press enter to confirm or esc to cancel";
+
+        assert_eq!(p.feed(modal.as_bytes()).await, vec![InputNeeded]);
+        assert_eq!(p.state().await, Some(InputNeeded));
+        assert_eq!(
+            p.input_shapes.lock().await.get(&p.id),
+            Some(&lazybox_agents::PromptShape::Chooser),
+        );
+    }
+
+    struct FreeTextPromptAgent;
+
+    impl lazybox_agents::Agent for FreeTextPromptAgent {
+        fn id(&self) -> &'static str {
+            "free-text-test"
+        }
+
+        fn display_name(&self) -> &'static str {
+            "Free-text test agent"
+        }
+
+        fn spawn(&self, _ctx: &lazybox_agents::SpawnCtx) -> Vec<String> {
+            vec!["free-text-test".into()]
+        }
+
+        fn detect_observation_chunked(
+            &self,
+            _recent_output: &[u8],
+            _last_chunk_start: usize,
+        ) -> Option<lazybox_agents::AgentObservation> {
+            Some(lazybox_agents::AgentObservation::input_needed(
+                lazybox_agents::PromptShape::FreeText,
+            ))
+        }
+    }
+
+    /// Prompt shape belongs to the adapter observation; the daemon must
+    /// preserve it instead of collapsing every quiet prompt to a chooser.
+    #[tokio::test]
+    async fn quiet_classifier_preserves_agent_declared_prompt_shape() {
+        use lazybox_ipc::AgentState::{InputNeeded, Working};
+        let agent: std::sync::Arc<dyn lazybox_agents::Agent> =
+            std::sync::Arc::new(FreeTextPromptAgent);
+        let mut p = PumpDriver::with_agent(agent, Duration::ZERO, Duration::ZERO);
+
+        assert_eq!(p.feed(b"Please explain:").await, vec![Working]);
+        assert_eq!(p.quiet().await, vec![InputNeeded]);
+        assert_eq!(
+            p.input_shapes.lock().await.get(&p.id),
+            Some(&lazybox_agents::PromptShape::FreeText),
+        );
+    }
+
     /// The counterpart: once the PTY has been quiet for the classify
     /// window, a permission prompt at rest MUST surface as `?`.
     #[tokio::test]
@@ -7974,6 +8080,7 @@ mod tests {
             &config.terminal_meta,
             &mut state_machine,
             &config.hook_driven_terminals,
+            &config.input_needed_shapes,
         )
         .await;
         assert_eq!(

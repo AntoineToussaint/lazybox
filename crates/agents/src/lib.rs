@@ -9,10 +9,16 @@ pub(crate) mod claude_env;
 pub mod detect;
 pub mod hook;
 pub mod hook_settings;
+pub mod pty;
 pub mod state_machine;
 
-pub use agent::{Agent, LlmProvider, PromptShape, Registry, SpawnCtx, StructuredAgentProtocol};
+pub use agent::{
+    Agent, AgentObservation, LlmProvider, Registry, SpawnCtx, StructuredAgentProtocol,
+};
 pub use lazybox_ipc::AgentState;
+pub use pty::{
+    EncodedPrompt, PromptFraming, PromptIntent, PromptShape, PtyProtocol, ReadinessPolicy,
+};
 pub use state_machine::{AgentStateMachine, Outcome, Reading};
 
 /// Look up a built-in agent by id, or fall back to a `GenericCli`

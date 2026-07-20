@@ -23,6 +23,7 @@
 //! `RUST_LOG=lazybox_agents=trace` to debug a misclassification against
 //! `/tmp/lazybox.log`.
 
+use crate::pty::PromptShape;
 use lazybox_ipc::AgentState;
 
 /// Standard bare yes/no prompt markers. Used by every CLI that doesn't
@@ -1140,6 +1141,60 @@ pub fn codex_state_chunked(recent_output: &[u8], last_chunk_start: usize) -> Opt
     let (s, s_mark) = strip_ansi_lossy_marked(recent_output, mark);
     let (compact, compact_mark) = compact_lower_marked(&s, s_mark);
     Some(codex_state_of(&s, &compact, Some(compact_mark)))
+}
+
+/// Fast-path detector for unmistakable Codex approval chrome painted by the
+/// latest PTY chunk. Unlike [`codex_state_chunked`], this deliberately does
+/// not classify `Working` or `Idle`: it returns the interaction shape only
+/// when a blocking modal marker overlaps the current chunk, so the daemon can
+/// surface `InputNeeded` immediately without re-reading a stale prompt from
+/// scrollback while the agent streams.
+///
+/// A small prefix from the previous chunk is retained so split writes such as
+/// `"Press enter to con"` + `"firm"` still match. Requiring the match to END
+/// after `last_chunk_start` is the stale-marker guard.
+pub fn codex_input_needed_in_current_chunk(
+    recent_output: &[u8],
+    last_chunk_start: usize,
+) -> Option<PromptShape> {
+    let mark = last_chunk_start.min(recent_output.len());
+    let (s, s_mark) = strip_ansi_lossy_marked(recent_output, mark);
+    let (compact, compact_mark) = compact_lower_marked(&s, s_mark);
+
+    let phrase_touched = CODEX_PROMPT_PHRASES.iter().any(|phrase| {
+        let needle: String = phrase
+            .chars()
+            .filter(|c| *c != ' ')
+            .flat_map(char::to_lowercase)
+            .collect();
+        compact
+            .rfind(&needle)
+            .is_some_and(|pos| pos + needle.len() > compact_mark)
+    });
+    if phrase_touched {
+        return Some(PromptShape::Chooser);
+    }
+
+    let arrow_touched = codex_arrow_option_pos(&compact).is_some_and(|pos| {
+        // `›` is three UTF-8 bytes, followed by one ASCII digit and one
+        // ASCII delimiter (`.` or `)`).
+        pos + '›'.len_utf8() + 2 > compact_mark
+    });
+    if arrow_touched {
+        return Some(PromptShape::Chooser);
+    }
+
+    // Bare prompt families do not have Codex's modal chrome. Keep their
+    // existing bottom-of-screen guard and additionally require the latest
+    // chunk to touch the marker.
+    let prompt_zone = last_nonempty_lines(recent_tail(&s, CODEX_PROMPT_TAIL_WINDOW), 5);
+    let bare_prompt_touched = YN_PROMPT_PATTERNS.iter().any(|pattern| {
+        s.rfind(pattern)
+            .is_some_and(|pos| pos + pattern.len() > s_mark && prompt_zone.contains(pattern))
+    }) || s
+        .rfind("approve?")
+        .is_some_and(|pos| pos + "approve?".len() > s_mark && prompt_zone.contains("approve?"));
+    bare_prompt_touched.then_some(PromptShape::Chooser)
 }
 
 /// Whether Codex is ready to receive a pasted prompt: the composer footer is

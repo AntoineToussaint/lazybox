@@ -49,7 +49,7 @@ pub const PROTOCOL_MAGIC: [u8; 4] = *b"LZBX";
 /// order, so adding, removing, or reordering a variant or field makes
 /// an old peer silently misread every subsequent frame. The handshake
 /// turns that garbage into a clear "restart the daemon" error.
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 13;
 
 /// This binary's build identity: the workspace version plus the git
 /// short SHA captured at compile time (`build.rs`). Two binaries built
@@ -773,6 +773,16 @@ pub enum Command {
     CloseIssue {
         workspace_key: lazybox_core::WorkspaceKey,
     },
+    /// Delete or close the workspace's primary upstream item, resolved
+    /// by kind: a PR is closed without merging (`closePullRequest`);
+    /// an issue is hard-deleted (`deleteIssue`) when the token has the
+    /// admin rights GitHub requires, degrading to a NOT_PLANNED close
+    /// otherwise. Fires from the github leader's `g d` chord, after a
+    /// confirm. The next poll's rescope sweep removes the vanished
+    /// item's workspace from the inbox.
+    DeleteOrClose {
+        workspace_key: lazybox_core::WorkspaceKey,
+    },
     /// Request reviews on the workspace's PR from the given GitHub
     /// logins. Adds to the existing reviewer set (no replacement).
     /// Only meaningful when the focused workspace's primary task is
@@ -916,6 +926,23 @@ pub enum Command {
     /// the change mechanical.
     KeepMergedWorkspace {
         session_key: SessionKey,
+    },
+    /// Ask the daemon for the terminal's deep scrollback, rebuilt from
+    /// the backend's own history (tmux `capture-pane`) rather than the
+    /// in-memory replay ring. Sent when the user scrolls a live
+    /// terminal up into local scrollback: a full-screen agent's
+    /// in-place redraws leave almost nothing in the client's
+    /// libghostty scrollback, while tmux has been retaining
+    /// `history-limit` lines the whole time — the same history the
+    /// restart/reattach path already seeds from. The daemon replies on
+    /// this connection with [`Event::TerminalScrollback`]; backends
+    /// without a history source (raw PTY) reply nothing.
+    ///
+    /// Appended last: bincode identifies variants by ordinal, so this
+    /// position (with the accompanying `PROTOCOL_VERSION` bump) keeps
+    /// the change mechanical.
+    FetchScrollback {
+        terminal_id: TerminalId,
     },
 }
 
@@ -1075,6 +1102,32 @@ pub enum Event {
     IssueCloseFailed {
         workspace_key: lazybox_core::WorkspaceKey,
         issue_label: String,
+        reason: String,
+    },
+    /// The PR for `workspace_key` was closed (without merging) via
+    /// `Command::DeleteOrClose`. Same "flash a notice now, poll
+    /// reconciles later" contract as [`Event::PrMerged`].
+    PrClosed {
+        workspace_key: lazybox_core::WorkspaceKey,
+        pr_label: String,
+    },
+    /// The issue for `workspace_key` was removed upstream via
+    /// `Command::DeleteOrClose` — hard-deleted when the token had
+    /// admin rights, otherwise (`fell_back_to_close`) closed as
+    /// NOT_PLANNED because GitHub refused the delete. The TUI names
+    /// the degradation so the user knows the issue still exists.
+    IssueDeleted {
+        workspace_key: lazybox_core::WorkspaceKey,
+        issue_label: String,
+        fell_back_to_close: bool,
+    },
+    /// `Command::DeleteOrClose` failed at the GitHub API — nothing was
+    /// deleted or closed (for an issue, even the close fallback
+    /// failed). Surfaced as a prominent, persistent error naming the
+    /// reason, mirroring `PrMergeFailed` / `IssueCloseFailed`.
+    DeleteOrCloseFailed {
+        workspace_key: lazybox_core::WorkspaceKey,
+        label: String,
         reason: String,
     },
     /// A workspace's primary task reached a terminal state (a PR
@@ -1409,6 +1462,25 @@ pub enum Event {
     CommandRejected {
         command: String,
         message: String,
+    },
+    /// Reply to [`Command::FetchScrollback`]: the terminal's history as
+    /// the backend retains it (tmux `capture-pane -e -S -<limit>`,
+    /// normalized like the restart-recovery seed). Unlike
+    /// [`Event::TerminalResync`] — whose `replay` is the raw ring
+    /// stream and therefore carries the inner program's escape
+    /// sequences — this payload is content-only: the consumer re-feeds
+    /// it for DEEP scrollback but must preserve terminal modes (mouse
+    /// tracking, DECCKM, …) across the rebuild itself, because a
+    /// capture never re-asserts them. `seq` is the ring's high-water
+    /// mark at capture time; live chunks at or below it are covered by
+    /// the capture.
+    ///
+    /// Appended last (bincode ordinal compatibility, see
+    /// `PROTOCOL_VERSION`).
+    TerminalScrollback {
+        terminal_id: TerminalId,
+        replay: Vec<u8>,
+        seq: u64,
     },
 }
 

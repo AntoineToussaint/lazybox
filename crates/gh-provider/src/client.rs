@@ -2643,6 +2643,38 @@ impl GhClient {
         }
         Ok(())
     }
+
+    pub async fn close_pr_node(&self, pull_request_node_id: &str) -> Result<(), GhError> {
+        self.acquire_or_block("closePullRequest mutation")?;
+        let body = graphql::close_pr_body(pull_request_node_id);
+        let response: graphql::GqlMutationResponse = self.post_graphql_with_retry(&body).await?;
+        if let Some(errors) = response.errors {
+            let joined = errors
+                .iter()
+                .map(|e| e.full())
+                .collect::<Vec<_>>()
+                .join("; ");
+            tracing::error!("closePullRequest errors: {joined}");
+            return Err(GhError::Graphql(joined));
+        }
+        Ok(())
+    }
+
+    pub async fn delete_issue_node(&self, issue_node_id: &str) -> Result<(), GhError> {
+        self.acquire_or_block("deleteIssue mutation")?;
+        let body = graphql::delete_issue_body(issue_node_id);
+        let response: graphql::GqlMutationResponse = self.post_graphql_with_retry(&body).await?;
+        if let Some(errors) = response.errors {
+            let joined = errors
+                .iter()
+                .map(|e| e.full())
+                .collect::<Vec<_>>()
+                .join("; ");
+            tracing::error!("deleteIssue errors: {joined}");
+            return Err(GhError::Graphql(joined));
+        }
+        Ok(())
+    }
 }
 
 impl lazybox_core::TaskProvider for GhClient {
@@ -2705,6 +2737,53 @@ impl lazybox_core::TaskProvider for GhClient {
             ));
         };
         self.close_issue_node(node_id)
+            .await
+            .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))
+    }
+
+    /// Close the workspace's PR without merging. Requires
+    /// `workspace.pr.node_id` — the polling cycle fills it in.
+    async fn close_pr(
+        &self,
+        workspace: &lazybox_core::Workspace,
+    ) -> Result<(), lazybox_core::ProviderError> {
+        let Some(pr) = workspace.pr.as_ref() else {
+            return Err(lazybox_core::ProviderError::permanent(
+                "github",
+                format!("workspace {} has no PR", workspace.key),
+            ));
+        };
+        let Some(node_id) = pr.node_id.as_deref() else {
+            return Err(lazybox_core::ProviderError::permanent(
+                "github",
+                "PR has no node_id (poll first)",
+            ));
+        };
+        self.close_pr_node(node_id)
+            .await
+            .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))
+    }
+
+    /// Hard-delete the workspace's GitHub issue. Only repo admins may
+    /// delete — GitHub answers FORBIDDEN otherwise, and the caller is
+    /// expected to fall back to [`close_issue`](Self::close_issue).
+    async fn delete_issue(
+        &self,
+        workspace: &lazybox_core::Workspace,
+    ) -> Result<(), lazybox_core::ProviderError> {
+        let Some(issue) = workspace.gh_issues.first() else {
+            return Err(lazybox_core::ProviderError::permanent(
+                "github",
+                format!("workspace {} has no issue", workspace.key),
+            ));
+        };
+        let Some(node_id) = issue.node_id.as_deref() else {
+            return Err(lazybox_core::ProviderError::permanent(
+                "github",
+                "issue has no node_id (poll first)",
+            ));
+        };
+        self.delete_issue_node(node_id)
             .await
             .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))
     }

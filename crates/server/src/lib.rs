@@ -627,6 +627,14 @@ impl ServerConfig {
     /// and new worktrees silently branched from a stale local main
     /// (issue #394). Resolved lazily per operation; when no token
     /// resolves, git's native (SSH) behavior is unchanged.
+    /// The filesystem namespace this daemon provisions under —
+    /// `repos/` (bare clones) and worktrees hang off it. Public so
+    /// integration tests can pre-seed a local bare clone and drive the
+    /// real provisioning path without touching the network.
+    pub fn worktree_root_path(&self) -> &Path {
+        &self.worktree_root.path
+    }
+
     pub(crate) fn worktree_manager(&self) -> lazybox_git_ops::WorktreeManager {
         lazybox_git_ops::WorktreeManager::new(self.worktree_root.path.clone()).with_github_token(
             Arc::new(|| {
@@ -910,6 +918,7 @@ impl Server {
                         lazybox_ipc::Command::PostReply { .. } => "PostReply",
                         lazybox_ipc::Command::MergePr { .. } => "MergePr",
                         lazybox_ipc::Command::CloseIssue { .. } => "CloseIssue",
+                        lazybox_ipc::Command::DeleteOrClose { .. } => "DeleteOrClose",
                         lazybox_ipc::Command::ConfirmMerge { .. } => "ConfirmMerge",
                         lazybox_ipc::Command::Snooze { .. } => "Snooze",
                         lazybox_ipc::Command::Unsnooze { .. } => "Unsnooze",
@@ -940,6 +949,7 @@ impl Server {
                         lazybox_ipc::Command::CleanWorktrees => "CleanWorktrees",
                         lazybox_ipc::Command::InspectWorktrees => "InspectWorktrees",
                         lazybox_ipc::Command::DeleteOrphanedWorktree { .. } => "DeleteOrphanedWorktree",
+                        lazybox_ipc::Command::FetchScrollback { .. } => "FetchScrollback",
                         lazybox_ipc::Command::Shutdown => "Shutdown",
                     };
                     // `Write` fires on every keystroke — at info it floods
@@ -1356,6 +1366,9 @@ pub async fn dispatch_command(
         lazybox_ipc::Command::Close { terminal_id } => {
             spawn_handler::handle_close(config, terminal_id).await;
         }
+        lazybox_ipc::Command::FetchScrollback { terminal_id } => {
+            spawn_handler::handle_fetch_scrollback(config, tx, terminal_id).await;
+        }
         lazybox_ipc::Command::IngestHook {
             terminal_id,
             hook,
@@ -1562,6 +1575,9 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::CloseIssue { workspace_key } => {
             polling::handle_close_issue(config, workspace_key).await;
+        }
+        lazybox_ipc::Command::DeleteOrClose { workspace_key } => {
+            polling::handle_delete_or_close(config, workspace_key).await;
         }
         lazybox_ipc::Command::FetchPrDetails { workspace_key } => {
             polling::handle_fetch_pr_details(config, workspace_key).await;

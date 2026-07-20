@@ -1049,13 +1049,38 @@ async fn validate_worktree_dir(
                 // below (real content → loud refusal, empty-ish →
                 // reprovision).
                 if tokio::fs::metadata(&gitdir).await.is_ok() {
-                    return Ok(WorktreeDirState::Valid);
+                    // A registered gitdir alone doesn't prove the
+                    // checkout completed: `git worktree add` writes the
+                    // metadata and the `.git` file BEFORE populating
+                    // files, and the index only lands once the checkout
+                    // finishes. A killed add (timeout, Esc-cancel)
+                    // therefore leaves a half-populated tree this used
+                    // to report `Valid` forever. Repair in place with
+                    // `reset --hard` — it completes the checkout while
+                    // preserving untracked files, unlike deleting the
+                    // directory (the tree may hold user work from a
+                    // fallback session spawned after the failed
+                    // provision). Repair failure falls through to the
+                    // content check (loud refusal / empty reprovision).
+                    if tokio::fs::metadata(gitdir.join("index")).await.is_ok() {
+                        return Ok(WorktreeDirState::Valid);
+                    }
+                    tracing::warn!(
+                        path = %wt_path.display(),
+                        gitdir = %gitdir.display(),
+                        "worktree checkout incomplete (no index — interrupted \
+                         `git worktree add`?); repairing with reset --hard"
+                    );
+                    if run_git_in(wt_path, &["reset", "--hard"]).await.is_ok() {
+                        return Ok(WorktreeDirState::Valid);
+                    }
+                } else {
+                    tracing::warn!(
+                        path = %wt_path.display(),
+                        gitdir = %gitdir.display(),
+                        "worktree .git points at a missing gitdir (bare clone deleted?) — not valid"
+                    );
                 }
-                tracing::warn!(
-                    path = %wt_path.display(),
-                    gitdir = %gitdir.display(),
-                    "worktree .git points at a missing gitdir (bare clone deleted?) — not valid"
-                );
             }
         }
     }
@@ -1345,7 +1370,18 @@ async fn ref_exists(bare_path: &Path, ref_name: &str) -> bool {
 ///   until the wall-clock cap, which reads as "forever" from the
 ///   provisioning checklist (issue #403). Only affects the HTTP(S)
 ///   transport — the path network ops take when a gh token resolves
-///   (issue #394); SSH transfers rely on the wall-clock cap.
+///   (issue #394). Skipped when the operator set either variable
+///   themselves (env beats git config, so ours would silently override
+///   their tuning — including a deliberate opt-out).
+/// - `GIT_SSH_COMMAND` with keepalives — over SSH there is no
+///   low-speed knob, and the diagnosed #403 hang was an ssh sitting on
+///   a dead-but-connected socket at 0% CPU. `ServerAliveInterval=15` /
+///   `CountMax=4` fails an unresponsive connection within ~60s (a
+///   server that still answers keepalives but never sends pack data is
+///   only caught by the wall-clock cap). Skipped when the user brings
+///   their own SSH transport — `GIT_SSH`/`GIT_SSH_COMMAND` in the env,
+///   or `core.sshCommand` in their git config (env would silently
+///   override the config, breaking e.g. per-host key setups).
 ///
 /// Removes any inherited `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE`
 /// / `GIT_COMMON_DIR`. Those override `current_dir(cwd)` silently — if
@@ -1356,14 +1392,45 @@ async fn ref_exists(bare_path: &Path, ref_name: &str) -> bool {
 /// `pub(crate)` so the inspector module can apply the same hygienic
 /// env to its read-only probes.
 pub(crate) fn apply_git_env(cmd: &mut Command) -> &mut Command {
+    if std::env::var_os("GIT_HTTP_LOW_SPEED_LIMIT").is_none()
+        && std::env::var_os("GIT_HTTP_LOW_SPEED_TIME").is_none()
+    {
+        cmd.env("GIT_HTTP_LOW_SPEED_LIMIT", "1024")
+            .env("GIT_HTTP_LOW_SPEED_TIME", "30");
+    }
+    if !user_has_own_ssh_transport() {
+        cmd.env(
+            "GIT_SSH_COMMAND",
+            "ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o ConnectTimeout=30",
+        );
+    }
     cmd.env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_FLUSH", "1")
-        .env("GIT_HTTP_LOW_SPEED_LIMIT", "1024")
-        .env("GIT_HTTP_LOW_SPEED_TIME", "30")
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
         .env_remove("GIT_COMMON_DIR")
+}
+
+/// Whether the user routes git-over-SSH through their own transport —
+/// `GIT_SSH`/`GIT_SSH_COMMAND` in the environment, or `core.sshCommand`
+/// in their git config. When they do, lazybox must not inject its
+/// keepalive `GIT_SSH_COMMAND`: the env variable outranks config, so it
+/// would silently replace per-host key setups. The config half is one
+/// `git config` probe, cached for the process lifetime (global/system
+/// config only — lazybox-created bare clones never set it locally).
+fn user_has_own_ssh_transport() -> bool {
+    static CONFIGURED: OnceLock<bool> = OnceLock::new();
+    if std::env::var_os("GIT_SSH_COMMAND").is_some() || std::env::var_os("GIT_SSH").is_some() {
+        return true;
+    }
+    *CONFIGURED.get_or_init(|| {
+        std::process::Command::new("git")
+            .args(["config", "--get", "core.sshCommand"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    })
 }
 
 async fn run_git(args: &[&str], envs: &[(String, String)]) -> Result<String, GitError> {
@@ -1425,7 +1492,13 @@ async fn exec_git_bounded(
         let child = cmd.spawn()?;
         let mut group = KillGroupOnDrop(child.id().map(|id| id as i32));
         let output = child.wait_with_output().await;
-        group.0 = None;
+        // Disarm only on a clean exit: a git that died non-zero (or an
+        // errored wait) may have left transport helpers behind, and
+        // sweeping the dead leader's group costs one syscall that can
+        // only reach processes this spawn created.
+        if matches!(&output, Ok(o) if o.status.success()) {
+            group.0 = None;
+        }
         output
     };
     let output = match tokio::time::timeout(timeout, fut).await {
@@ -1991,6 +2064,49 @@ mod health_probe_tests {
         assert!(
             bare_repo_health(&file).await.is_err(),
             "a probe that couldn't run must propagate an error, not condemn the repo"
+        );
+    }
+
+    /// A `git worktree add` killed mid-checkout (timeout, Esc-cancel)
+    /// leaves registered metadata and a `.git` file but no index — a
+    /// shape that used to validate `Valid` forever, landing every
+    /// later session in a half-populated tree. Validation now repairs
+    /// it in place (`reset --hard`): tracked files come back, and
+    /// untracked user work — possibly created by a fallback session
+    /// spawned after the failed provision — survives.
+    #[tokio::test]
+    async fn half_checked_out_worktree_is_repaired_in_place() {
+        let (tmp, bare) = local_bare_clone();
+        let wt = tmp.path().join("wt");
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                wt.to_str().expect("utf8 path"),
+                "-B",
+                "wt-branch",
+                "HEAD",
+            ],
+        );
+        // Simulate the kill: the index never landed and a tracked file
+        // is missing; an untracked file stands in for user work.
+        let gitdir = bare.join("worktrees").join("wt");
+        std::fs::remove_file(gitdir.join("index")).expect("drop index");
+        std::fs::remove_file(wt.join("f.txt")).expect("drop tracked file");
+        std::fs::write(wt.join("user-notes.md"), "keep me").expect("write untracked");
+
+        assert_eq!(
+            validate_worktree_dir(&wt, &bare).await.unwrap(),
+            WorktreeDirState::Valid,
+            "repair completes the checkout and reuses the worktree"
+        );
+        assert!(wt.join("f.txt").exists(), "repair restores tracked files");
+        assert!(gitdir.join("index").exists(), "repair rebuilds the index");
+        assert_eq!(
+            std::fs::read_to_string(wt.join("user-notes.md")).expect("still readable"),
+            "keep me",
+            "repair must not touch untracked user work"
         );
     }
 

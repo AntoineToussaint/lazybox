@@ -9532,6 +9532,36 @@ mod worktree_progress_dismiss_tests {
         );
     }
 
+    /// The daemon's confirmation of this client's own Esc-cancel (a
+    /// `Failed` carrying `SPAWN_CANCELLED_NOTE`) must read as a plain
+    /// info notice, not an error — the user asked for it.
+    #[test]
+    fn cancel_confirmation_flashes_info_not_error() {
+        use crate::realm::components::footer::NoticeSeverity;
+        let mut m = build_model();
+        let key = SessionKey::from("github:o/r#1");
+
+        m.handle_daemon_event(progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        let _ = m.handle_modal_dismissed();
+
+        m.handle_daemon_event(progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Failed(lazybox_ipc::SPAWN_CANCELLED_NOTE.into()),
+        ));
+        let n = m.status.notice.as_ref().expect("cancel confirmation");
+        assert_eq!(n.severity, NoticeSeverity::Info, "got {:?}", n.message);
+        assert!(n.message.contains("cancelled"), "got {:?}", n.message);
+        assert!(
+            m.worktree_progress_dismissed.is_none(),
+            "the cancelled op must release the dismissal marker so a retry shows its checklist"
+        );
+    }
+
     /// Esc on a checklist frozen on a FAILED step is just an
     /// acknowledgement — the provision already ended, there is nothing
     /// to cancel.

@@ -1486,6 +1486,13 @@ pub enum WorktreeStepStatus {
     Failed(String),
 }
 
+/// The `Failed` message the daemon broadcasts when a provision is
+/// aborted by [`Command::CancelSpawn`]. `Failed` (not `Warned`) so any
+/// client's checklist stops and its Esc-dismissal marker releases —
+/// but clients match on this exact string to frame the notice as a
+/// confirmation of the user's own cancel rather than an error.
+pub const SPAWN_CANCELLED_NOTE: &str = "workspace setup cancelled";
+
 impl Event {
     /// Build a `ProviderError` event with the given source / message
     /// / kind. Replaces ~28 hand-rolled struct literals that all

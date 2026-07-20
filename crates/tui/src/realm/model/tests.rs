@@ -9508,6 +9508,55 @@ mod worktree_progress_dismiss_tests {
         assert!(m.worktree_progress.is_none());
     }
 
+    /// Esc while provisioning is still in flight is a real cancel: it
+    /// must send `CancelSpawn` so the daemon aborts the provision
+    /// (killing a wedged clone and releasing the singleton claim so a
+    /// retry starts fresh — issue #403), not just close the view.
+    #[test]
+    fn esc_mid_provision_sends_cancel_spawn() {
+        let mut m = build_model();
+        let key = SessionKey::from("github:o/r#1");
+
+        m.handle_daemon_event(progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        let cmds = m.handle_modal_dismissed();
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                lazybox_ipc::Command::CancelSpawn { session_key } if session_key == &key
+            )),
+            "Esc mid-provision must cancel the spawn, got {cmds:?}"
+        );
+    }
+
+    /// Esc on a checklist frozen on a FAILED step is just an
+    /// acknowledgement — the provision already ended, there is nothing
+    /// to cancel.
+    #[test]
+    fn esc_on_failed_checklist_does_not_send_cancel_spawn() {
+        let mut m = build_model();
+        let key = SessionKey::from("github:o/r#1");
+
+        m.handle_daemon_event(progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        m.handle_daemon_event(progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Failed("clone exploded".into()),
+        ));
+        let cmds = m.handle_modal_dismissed();
+        assert!(
+            cmds.is_empty(),
+            "a failed provision has nothing to cancel, got {cmds:?}"
+        );
+    }
+
     /// A failed step still surfaces even while dismissed — Esc must
     /// not hide a broken provision.
     #[test]

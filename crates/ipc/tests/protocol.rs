@@ -95,6 +95,9 @@ fn all_commands() -> Vec<Command> {
             on_main: false,
             model_alias: None,
         },
+        Command::CancelSpawn {
+            session_key: key.clone(),
+        },
         Command::CreateSession {
             session_key: key.clone(),
             kind: TerminalKind::Shell,
@@ -656,6 +659,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::Subscribe => "Subscribe",
         Command::CreateSession { .. } => "CreateSession",
         Command::Spawn { .. } => "Spawn",
+        Command::CancelSpawn { .. } => "CancelSpawn",
         Command::Write { .. } => "Write",
         Command::RecordUserMessage { .. } => "RecordUserMessage",
         Command::InjectPrompt { .. } => "InjectPrompt",
@@ -774,12 +778,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         (lazybox_ipc::PROTOCOL_VERSION, command_tags.len()),
-        (11, 51),
+        (12, 52),
         "Command gained/lost a variant: update the exhaustive tag, add a sample, and bump PROTOCOL_VERSION",
     );
     assert_eq!(
         (lazybox_ipc::PROTOCOL_VERSION, event_tags.len()),
-        (11, 50),
+        (12, 50),
         "Event gained/lost a variant: update the exhaustive tag, add a sample, and bump PROTOCOL_VERSION",
     );
 }

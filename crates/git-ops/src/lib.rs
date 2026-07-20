@@ -1339,6 +1339,13 @@ async fn ref_exists(bare_path: &Path, ref_name: &str) -> bool {
 ///   git fail fast with a clean error.
 /// - `GIT_FLUSH=1` — suppress git's progress bar so `.output()`
 ///   doesn't accumulate huge stderr buffers on slow clones.
+/// - `GIT_HTTP_LOW_SPEED_LIMIT/TIME` — abort an HTTP transfer that
+///   moves fewer than 1 KB/s for 30 straight seconds. A clone whose
+///   pack transfer stalls mid-flight otherwise sits connected-but-idle
+///   until the wall-clock cap, which reads as "forever" from the
+///   provisioning checklist (issue #403). Only affects the HTTP(S)
+///   transport — the path network ops take when a gh token resolves
+///   (issue #394); SSH transfers rely on the wall-clock cap.
 ///
 /// Removes any inherited `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE`
 /// / `GIT_COMMON_DIR`. Those override `current_dir(cwd)` silently — if
@@ -1351,6 +1358,8 @@ async fn ref_exists(bare_path: &Path, ref_name: &str) -> bool {
 pub(crate) fn apply_git_env(cmd: &mut Command) -> &mut Command {
     cmd.env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_FLUSH", "1")
+        .env("GIT_HTTP_LOW_SPEED_LIMIT", "1024")
+        .env("GIT_HTTP_LOW_SPEED_TIME", "30")
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
@@ -1364,39 +1373,80 @@ async fn run_git(args: &[&str], envs: &[(String, String)]) -> Result<String, Git
     // wedged on a dead network or a silent credential prompt would
     // otherwise hang its caller forever. 10 minutes is generous for
     // any real clone; `run_git_in` keeps its tighter 30s cap for
-    // the cheap in-repo operations. `kill_on_drop` so the timed-out
-    // child is actually reaped instead of cloning on in the
-    // background.
+    // the cheap in-repo operations.
     const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+    exec_git_bounded(None, args, envs, GIT_TIMEOUT).await
+}
+
+/// Kills the child's whole process group with SIGKILL on drop unless
+/// disarmed. `kill_on_drop` alone only signals the direct `git` child:
+/// git's transport helpers (`ssh … git-upload-pack`, remote helpers)
+/// survive it orphaned, exactly the leftover process issue #403
+/// diagnosed after a stalled clone. The child is spawned as its own
+/// process group leader so one `killpg` reaps the entire tree — on a
+/// timeout, on an Esc-cancel dropping the provisioning future, or on
+/// task abort.
+struct KillGroupOnDrop(Option<i32>);
+
+impl Drop for KillGroupOnDrop {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(pgid) = self.0 {
+            unsafe { libc::killpg(pgid, libc::SIGKILL) };
+        }
+    }
+}
+
+async fn exec_git_bounded(
+    cwd: Option<&Path>,
+    args: &[&str],
+    envs: &[(String, String)],
+    timeout: std::time::Duration,
+) -> Result<String, GitError> {
+    let label = match cwd {
+        Some(cwd) => format!("git (in {}) {}", cwd.display(), args.join(" ")),
+        None => format!("git {}", args.join(" ")),
+    };
     let started = std::time::Instant::now();
-    tracing::info!("git {}", args.join(" "));
-    let fut = apply_git_env(Command::new("git").args(args))
+    tracing::info!("{label}");
+    let mut cmd = Command::new("git");
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
+    apply_git_env(cmd.args(args))
         .envs(envs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-        .kill_on_drop(true)
-        .output();
-    let output = match tokio::time::timeout(GIT_TIMEOUT, fut).await {
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let fut = async {
+        let child = cmd.spawn()?;
+        let mut group = KillGroupOnDrop(child.id().map(|id| id as i32));
+        let output = child.wait_with_output().await;
+        group.0 = None;
+        output
+    };
+    let output = match tokio::time::timeout(timeout, fut).await {
         Ok(res) => res?,
         Err(_) => {
             let elapsed = started.elapsed();
-            tracing::error!("git {} TIMED OUT after {elapsed:?}", args.join(" "));
+            tracing::error!("{label} TIMED OUT after {elapsed:?}");
             return Err(GitError::Command(format!(
                 "`git {}` exceeded {}s wall-clock",
                 args.join(" "),
-                GIT_TIMEOUT.as_secs()
+                timeout.as_secs()
             )));
         }
     };
     let elapsed = started.elapsed();
     if output.status.success() {
-        tracing::info!("git {} ok ({elapsed:?})", args.join(" "));
+        tracing::info!("{label} ok ({elapsed:?})");
         Ok(String::from_utf8_lossy(&output.stdout).into())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        tracing::error!(
-            "git {} failed ({elapsed:?}): {}",
-            args.join(" "),
-            stderr.trim()
-        );
+        tracing::error!("{label} failed ({elapsed:?}): {}", stderr.trim());
         Err(GitError::Command(stderr))
     }
 }
@@ -1554,46 +1604,7 @@ async fn run_git_in_env(
     // complete; short enough that a hung process surfaces as an
     // error rather than silent paralysis.
     const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-    let started = std::time::Instant::now();
-    tracing::info!("git (in {}) {}", cwd.display(), args.join(" "));
-    let fut = apply_git_env(Command::new("git").current_dir(cwd).args(args))
-        .envs(envs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-        .kill_on_drop(true)
-        .output();
-    let output = match tokio::time::timeout(GIT_TIMEOUT, fut).await {
-        Ok(res) => res?,
-        Err(_) => {
-            let elapsed = started.elapsed();
-            tracing::error!(
-                "git (in {}) {} TIMED OUT after {elapsed:?}",
-                cwd.display(),
-                args.join(" ")
-            );
-            return Err(GitError::Command(format!(
-                "`git {}` exceeded {}s wall-clock",
-                args.join(" "),
-                GIT_TIMEOUT.as_secs()
-            )));
-        }
-    };
-    let elapsed = started.elapsed();
-    if output.status.success() {
-        tracing::info!(
-            "git (in {}) {} ok ({elapsed:?})",
-            cwd.display(),
-            args.join(" ")
-        );
-        Ok(String::from_utf8_lossy(&output.stdout).into())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        tracing::error!(
-            "git (in {}) {} failed ({elapsed:?}): {}",
-            cwd.display(),
-            args.join(" "),
-            stderr.trim()
-        );
-        Err(GitError::Command(stderr))
-    }
+    exec_git_bounded(Some(cwd), args, envs, GIT_TIMEOUT).await
 }
 
 #[cfg(test)]
@@ -1762,6 +1773,147 @@ mod auth_env_tests {
         assert_eq!(format_age(Duration::from_secs(3 * 3600)), "3 hours");
         assert_eq!(format_age(Duration::from_secs(30 * 3600)), "30 hours");
         assert_eq!(format_age(Duration::from_secs(4 * 24 * 3600)), "4 days");
+    }
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod stalled_clone_tests {
+    use super::*;
+
+    /// A clone whose transport connects but never transfers must fail
+    /// within the wall-clock deadline AND take its transport helper
+    /// down with it — the diagnosed hang left an `ssh …
+    /// git-upload-pack` orphan running forever (issue #403). The fake
+    /// remote is an `ext::` helper that records its pid and sleeps;
+    /// after the timeout the whole process group must be dead.
+    #[tokio::test]
+    async fn stalled_clone_times_out_and_kills_the_transport_helper() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pidfile = tmp.path().join("helper.pid");
+        let helper = tmp.path().join("stall-remote.sh");
+        std::fs::write(
+            &helper,
+            format!(
+                "#!/bin/sh\necho $$ > {}\nexec sleep 600\n",
+                pidfile.display()
+            ),
+        )
+        .expect("write helper");
+        chmod_executable(&helper).expect("chmod helper");
+
+        let url = format!("ext::{}", helper.display());
+        let dest = tmp.path().join("dest.git");
+        let envs = git_config_env(&[("protocol.ext.allow", "always")]);
+        let started = std::time::Instant::now();
+        // 4s: long enough for git to have spawned the helper even on a
+        // loaded CI machine (so the kill assertion below has a live
+        // victim), short enough to keep the test snappy.
+        let err = exec_git_bounded(
+            None,
+            &["clone", "--bare", &url, &dest.to_string_lossy()],
+            &envs,
+            std::time::Duration::from_secs(4),
+        )
+        .await
+        .expect_err("a stalled clone must fail, not hang");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(30),
+            "timed out far past the deadline: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            err.to_string().contains("exceeded"),
+            "error must name the wall-clock cap: {err}"
+        );
+
+        // The helper starts within milliseconds of the clone, but give
+        // the write a moment on loaded CI machines.
+        let pid_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let pid: i32 = loop {
+            match std::fs::read_to_string(&pidfile) {
+                Ok(s) => break s.trim().parse().expect("pidfile holds a pid"),
+                Err(_) if std::time::Instant::now() < pid_deadline => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(e) => {
+                    let listing: Vec<_> = std::fs::read_dir(tmp.path())
+                        .map(|it| it.filter_map(|e| e.ok().map(|e| e.file_name())).collect())
+                        .unwrap_or_default();
+                    panic!("helper never recorded its pid: {e}; tmp holds {listing:?}");
+                }
+            }
+        };
+        // SIGKILL delivery is immediate but reaping isn't; poll briefly.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let alive = unsafe { libc::kill(pid, 0) } == 0;
+            if !alive {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "transport helper (pid {pid}) survived the timeout — orphaned child"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// The on-disk leftovers of a stalled attempt — a half-written
+    /// `.partial` staging dir plus an unusable directory at the
+    /// canonical path — must not poison the next attempt: a retry
+    /// clears both and re-clones from the recorded origin.
+    #[tokio::test]
+    async fn retry_after_stalled_clone_clears_partial_and_reclones() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(cwd)
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .output()
+                .expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        let src = tmp.path().join("src");
+        std::fs::create_dir(&src).expect("mkdir src");
+        git(&src, &["init", "-q"]);
+        git(&src, &["config", "user.email", "t@example.com"]);
+        git(&src, &["config", "user.name", "t"]);
+        git(&src, &["commit", "--allow-empty", "-q", "-m", "init"]);
+
+        let mgr = WorktreeManager::new(tmp.path().join("base"));
+        let bare = mgr.bare_clone_path("acme", "widgets");
+        std::fs::create_dir_all(&bare).expect("mkdir bare");
+        // The shape a killed clone leaves behind: a config recording the
+        // origin (so the retry re-clones from the same remote) inside a
+        // directory git can't use, plus a stale half-written staging dir.
+        std::fs::write(
+            bare.join("config"),
+            format!("[remote \"origin\"]\n\turl = {}\n", src.display()),
+        )
+        .expect("write config");
+        let partial = partial_clone_path(&bare);
+        std::fs::create_dir_all(&partial).expect("mkdir partial");
+        std::fs::write(partial.join("junk"), "half-written pack").expect("write junk");
+
+        let recloned = mgr
+            .ensure_bare_clone("acme", "widgets")
+            .await
+            .expect("retry re-clones from the recorded origin");
+        assert_eq!(recloned, bare);
+        assert!(
+            bare_repo_health(&bare).await.expect("probe runs"),
+            "retry must leave a healthy bare clone"
+        );
+        assert!(!partial.exists(), "stale partial must be cleared");
     }
 }
 

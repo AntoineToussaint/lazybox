@@ -552,7 +552,7 @@ pub async fn handle_spawn(
     // path: wait for the winner's terminal, deliver the prompt, focus.
     // Held in a drop guard so every exit path — including the failure
     // returns below — releases the claim.
-    let _inflight = match InflightSpawnGuard::try_claim(config, &session_key, &kind, on_main) {
+    let inflight = match InflightSpawnGuard::try_claim(config, &session_key, &kind, on_main) {
         Ok(guard) => guard,
         Err(()) => {
             collapse_onto_inflight_spawn(
@@ -614,7 +614,32 @@ pub async fn handle_spawn(
     ) = if let Some(c) = cwd.as_deref() {
         (Some(PathBuf::from(c)), None, false)
     } else {
-        match resolve_or_create_session(config, &session_key, session_id, &kind, on_main).await {
+        // Race provisioning against a `CancelSpawn` on this claim: Esc
+        // on the setup checklist must abort a wedged cold clone —
+        // dropping the future kills the git child's whole process
+        // group — and release the claim (guard drop at return) so a
+        // retry starts fresh, instead of the clone running on and
+        // every later spawn collapsing onto it (issue #403).
+        let resolve = resolve_or_create_session(config, &session_key, session_id, &kind, on_main);
+        let cancel = inflight.cancel.clone();
+        let resolved = tokio::select! {
+            res = resolve => Some(res),
+            _ = cancel.notified() => None,
+        };
+        let Some(resolved) = resolved else {
+            tracing::info!(%session_key, "handle_spawn: cancelled while provisioning — aborting");
+            // Unstick any client still showing this spawn's checklist
+            // (the canceller's is already dismissed; another attached
+            // client's would otherwise spin forever).
+            emit_worktree_progress(
+                config,
+                &session_key,
+                WorktreeStep::Clone,
+                WorktreeStepStatus::Failed(lazybox_ipc::SPAWN_CANCELLED_NOTE.into()),
+            );
+            return;
+        };
+        match resolved {
             Ok((path, sid, landed)) => (Some(path), Some(sid), landed),
             Err(e) => {
                 let _ = config.bus.send(Event::provider_error_permanent(
@@ -2488,42 +2513,58 @@ pub(crate) async fn find_existing_singleton(
 /// backend failure, panic) — and pings waiters so collapsing duplicates
 /// and `Kill` re-check promptly.
 struct InflightSpawnGuard {
-    set: std::sync::Arc<parking_lot::Mutex<std::collections::HashSet<(String, String)>>>,
+    set: std::sync::Arc<
+        parking_lot::Mutex<
+            std::collections::HashMap<(String, String), std::sync::Arc<tokio::sync::Notify>>,
+        >,
+    >,
     changed: std::sync::Arc<tokio::sync::Notify>,
     key: (String, String),
+    /// Pinged by `handle_cancel_spawn`; the owning `handle_spawn` races
+    /// its provisioning against it and aborts when it fires.
+    cancel: std::sync::Arc<tokio::sync::Notify>,
 }
 
 impl InflightSpawnGuard {
-    /// Claim `(workspace key, singleton kind key)` if free. `Ok(None)`
-    /// for non-singleton kinds (shells spawn freely, no guard);
-    /// `Err(())` when another spawn already holds the identity.
+    /// Claim an in-flight identity. Singleton kinds (agents) claim
+    /// `(workspace key, singleton kind key)`; `Err(())` when another
+    /// spawn already holds it. Non-singleton kinds (shells, log tails)
+    /// spawn freely — they claim a unique key that can never collide,
+    /// so their provision is still cancellable (`CancelSpawn`) and
+    /// `Kill`'s teardown still waits for it, without introducing any
+    /// duplicate-collapse semantics.
     fn try_claim(
         config: &ServerConfig,
         session_key: &SessionKey,
         kind: &TerminalKind,
         on_main: bool,
-    ) -> Result<Option<Self>, ()> {
-        let Some(target) = kind.singleton_key() else {
-            return Ok(None);
-        };
-        // Fold the checkout into the identity so a main-checkout spawn
-        // doesn't race-collapse onto an in-flight isolated spawn of the
-        // same agent (mirrors `find_existing_singleton`).
-        let target = if on_main {
-            format!("{target}:main")
-        } else {
-            target
+    ) -> Result<Self, ()> {
+        let (target, exclusive) = match kind.singleton_key() {
+            // Fold the checkout into the identity so a main-checkout
+            // spawn doesn't race-collapse onto an in-flight isolated
+            // spawn of the same agent (mirrors
+            // `find_existing_singleton`).
+            Some(target) if on_main => (format!("{target}:main"), true),
+            Some(target) => (target, true),
+            None => {
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                (format!("nonsingleton:{n}"), false)
+            }
         };
         let key = (session_key.as_str().to_string(), target);
+        let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
         let mut set = config.inflight_spawns.lock();
-        if !set.insert(key.clone()) {
+        if exclusive && set.contains_key(&key) {
             return Err(());
         }
-        Ok(Some(Self {
+        set.insert(key.clone(), cancel.clone());
+        Ok(Self {
             set: config.inflight_spawns.clone(),
             changed: config.inflight_spawn_changed.clone(),
             key,
-        }))
+            cancel,
+        })
     }
 }
 
@@ -2531,6 +2572,31 @@ impl Drop for InflightSpawnGuard {
     fn drop(&mut self) {
         self.set.lock().remove(&self.key);
         self.changed.notify_waiters();
+    }
+}
+
+/// `Command::CancelSpawn` — the user Esc'd the "Setting up workspace"
+/// checklist. Ping every in-flight spawn claim on the workspace; each
+/// owning `handle_spawn` aborts its provisioning, which drops (and so
+/// kills, process group included) any in-flight `git clone`/`fetch`
+/// child and releases the claim so a retry starts fresh. `notify_one`
+/// stores a permit, so a cancel landing before the winner reaches its
+/// select point is not lost. No-op when nothing is in flight.
+pub(crate) fn handle_cancel_spawn(config: &ServerConfig, session_key: &SessionKey) {
+    let cancels: Vec<_> = config
+        .inflight_spawns
+        .lock()
+        .iter()
+        .filter(|((ws, _), _)| ws == session_key.as_str())
+        .map(|(_, cancel)| cancel.clone())
+        .collect();
+    tracing::info!(
+        %session_key,
+        claims = cancels.len(),
+        "cancel_spawn: signalling in-flight provisions"
+    );
+    for cancel in cancels {
+        cancel.notify_one();
     }
 }
 
@@ -2543,8 +2609,11 @@ const INFLIGHT_COLLAPSE_DEADLINE: Duration = Duration::from_secs(600);
 /// A duplicate `handle_spawn` lost the in-flight claim. Wait for the
 /// winner's terminal, then behave exactly like the existing-singleton
 /// path: deliver the prompt (if any) into it and request focus. When
-/// the winner fails (claim released, no terminal), drop the duplicate —
-/// loudly when a prompt was lost with it.
+/// the winner fails (claim released, no terminal), drop the duplicate
+/// with a retry notice — always, not only when a prompt was lost: an
+/// Esc-cancel followed by an immediate re-press can land the retry
+/// while the cancelled claim is still releasing, and a silently
+/// swallowed key press reads as "lazybox ignored me".
 async fn collapse_onto_inflight_spawn(
     config: &ServerConfig,
     session_key: &SessionKey,
@@ -2565,12 +2634,10 @@ async fn collapse_onto_inflight_spawn(
             ?kind,
             "handle_spawn: in-flight spawn released without producing a terminal — dropping duplicate",
         );
-        if prompt.is_some() {
-            let _ = config.bus.send(Event::provider_error_retryable(
-                "spawn",
-                "an agent spawn was already in flight but failed — press the key again",
-            ));
-        }
+        let _ = config.bus.send(Event::provider_error_retryable(
+            "spawn",
+            "an agent spawn was already in flight but failed — press the key again",
+        ));
         return;
     };
     if let Some(prompt) = prompt {
@@ -2611,7 +2678,7 @@ async fn await_inflight_singleton(
         if let Some(id) = live_singleton(config, session_key, &target, on_main).await {
             return Some(id);
         }
-        let claimed = config.inflight_spawns.lock().contains(&claim);
+        let claimed = config.inflight_spawns.lock().contains_key(&claim);
         if !claimed || tokio::time::Instant::now() >= deadline {
             // Winner released (or we timed out). One final scan closes
             // the insert→release window — the maps are populated before
@@ -2691,7 +2758,7 @@ pub(crate) async fn await_inflight_spawns(config: &ServerConfig, workspace_key: 
         let busy = config
             .inflight_spawns
             .lock()
-            .iter()
+            .keys()
             .any(|(ws, _)| ws == workspace_key);
         if !busy {
             return;
@@ -6009,7 +6076,7 @@ mod tests {
     }
 
     /// The in-flight spawn guard claims a singleton identity exactly
-    /// once, never guards multi-instance kinds (shells), and releases
+    /// once, never blocks multi-instance kinds (shells), and releases
     /// on drop — including the early-return failure paths, which is the
     /// whole point of it being a drop guard.
     #[tokio::test]
@@ -6018,9 +6085,8 @@ mod tests {
         let key: SessionKey = "test:ws-guard".into();
         let kind = TerminalKind::Agent("claude".into());
 
-        let guard = InflightSpawnGuard::try_claim(&config, &key, &kind, false)
-            .expect("first claim wins")
-            .expect("agents are singletons");
+        let guard =
+            InflightSpawnGuard::try_claim(&config, &key, &kind, false).expect("first claim wins");
         // Second claim on the same identity loses.
         assert!(InflightSpawnGuard::try_claim(&config, &key, &kind, false).is_err());
         // A different kind on the same workspace is a separate identity.
@@ -6033,14 +6099,72 @@ mod tests {
             )
             .is_ok()
         );
-        // Shells are never singletons — no guard, never blocked.
-        assert!(matches!(
-            InflightSpawnGuard::try_claim(&config, &key, &TerminalKind::Shell, false),
-            Ok(None)
-        ));
+        // Shells are never singletons: every shell spawn claims its own
+        // unique key (for cancellability + Kill serialization), so two
+        // concurrent shell claims coexist and never collide.
+        let _shell_a = InflightSpawnGuard::try_claim(&config, &key, &TerminalKind::Shell, false)
+            .expect("shells never collide");
+        let _shell_b = InflightSpawnGuard::try_claim(&config, &key, &TerminalKind::Shell, false)
+            .expect("shells never collide");
         drop(guard);
         // Released → claimable again.
         assert!(InflightSpawnGuard::try_claim(&config, &key, &kind, false).is_ok());
+    }
+
+    /// `CancelSpawn` pings the cancel channel of every in-flight claim
+    /// on the target workspace — and only that workspace — so the
+    /// owning `handle_spawn` aborts its provisioning. `notify_one`
+    /// stores a permit, so a cancel that lands before the winner
+    /// reaches its select point still takes effect (issue #403).
+    #[tokio::test]
+    async fn cancel_spawn_pings_only_the_workspaces_inflight_claims() {
+        let config = ServerConfig::in_memory();
+        let key: SessionKey = "test:ws-cancel".into();
+        let other: SessionKey = "test:ws-untouched".into();
+        let kind = TerminalKind::Agent("claude".into());
+
+        let guard = InflightSpawnGuard::try_claim(&config, &key, &kind, false).expect("claim wins");
+        let shell = InflightSpawnGuard::try_claim(&config, &key, &TerminalKind::Shell, false)
+            .expect("shells never collide");
+        let bystander =
+            InflightSpawnGuard::try_claim(&config, &other, &kind, false).expect("claim wins");
+
+        // Cancel fired BEFORE anyone waits: the permit must persist.
+        handle_cancel_spawn(&config, &key);
+        tokio::time::timeout(Duration::from_secs(1), guard.cancel.notified())
+            .await
+            .expect("the claim's cancel channel fires");
+        tokio::time::timeout(Duration::from_secs(1), shell.cancel.notified())
+            .await
+            .expect("a shell provision on the workspace is cancellable too");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), bystander.cancel.notified())
+                .await
+                .is_err(),
+            "a cancel must not leak to another workspace's claim"
+        );
+    }
+
+    /// A duplicate whose in-flight winner dies without producing a
+    /// terminal must surface the retry notice even when it carried no
+    /// prompt — an Esc-cancel followed by an immediate re-press lands
+    /// exactly here, and a silently swallowed key press reads as
+    /// "lazybox ignored me".
+    #[tokio::test]
+    async fn promptless_collapse_on_dead_winner_still_notifies() {
+        let config = ServerConfig::in_memory();
+        let key: SessionKey = "test:ws-collapse-notice".into();
+        let kind = TerminalKind::Agent("claude".into());
+        let mut rx = config.bus.subscribe();
+        // No claim, no terminal: the winner is already gone.
+        collapse_onto_inflight_spawn(&config, &key, &kind, false, None).await;
+        match rx.try_recv().expect("a retry notice is broadcast") {
+            Event::ProviderError { source, kind, .. } => {
+                assert_eq!(source, "spawn");
+                assert_eq!(kind, "retryable");
+            }
+            other => panic!("expected ProviderError, got {other:?}"),
+        }
     }
 
     /// #271: a main-checkout spawn of an agent is a DISTINCT singleton
@@ -6054,14 +6178,12 @@ mod tests {
         let kind = TerminalKind::Agent("claude".into());
 
         let _isolated = InflightSpawnGuard::try_claim(&config, &key, &kind, false)
-            .expect("isolated claim wins")
-            .expect("agents are singletons");
+            .expect("isolated claim wins");
         // The isolated identity is taken…
         assert!(InflightSpawnGuard::try_claim(&config, &key, &kind, false).is_err());
         // …but the on-main identity is still free.
-        let _main = InflightSpawnGuard::try_claim(&config, &key, &kind, true)
-            .expect("main claim wins")
-            .expect("agents are singletons");
+        let _main =
+            InflightSpawnGuard::try_claim(&config, &key, &kind, true).expect("main claim wins");
         // And now the on-main identity is taken too.
         assert!(InflightSpawnGuard::try_claim(&config, &key, &kind, true).is_err());
     }
@@ -6123,9 +6245,7 @@ mod tests {
         let config = ServerConfig::in_memory();
         let key: SessionKey = "test:ws-kill".into();
         let kind = TerminalKind::Agent("claude".into());
-        let guard = InflightSpawnGuard::try_claim(&config, &key, &kind, false)
-            .unwrap()
-            .unwrap();
+        let guard = InflightSpawnGuard::try_claim(&config, &key, &kind, false).unwrap();
 
         let cfg = config.clone();
         let waiter = tokio::spawn(async move {

@@ -49,7 +49,7 @@ pub const PROTOCOL_MAGIC: [u8; 4] = *b"LZBX";
 /// order, so adding, removing, or reordering a variant or field makes
 /// an old peer silently misread every subsequent frame. The handshake
 /// turns that garbage into a clear "restart the daemon" error.
-pub const PROTOCOL_VERSION: u32 = 14;
+pub const PROTOCOL_VERSION: u32 = 15;
 
 /// This binary's build identity: the workspace version plus the git
 /// short SHA captured at compile time (`build.rs`). Two binaries built
@@ -490,6 +490,16 @@ pub enum Command {
         /// default model.
         #[serde(default)]
         model_alias: Option<String>,
+    },
+    /// Cancel an in-flight `Spawn` for this workspace that is still
+    /// provisioning its worktree (cold clone / fetch). The daemon
+    /// aborts the provision — killing the underlying `git`/transport
+    /// child so a stalled clone doesn't linger orphaned — and releases
+    /// the in-flight singleton claim so a retry starts fresh. A no-op
+    /// when nothing is in flight (the spawn already finished or
+    /// failed), so the client can send it unconditionally on Esc.
+    CancelSpawn {
+        session_key: SessionKey,
     },
     Write {
         terminal_id: TerminalId,
@@ -1607,6 +1617,13 @@ pub enum WorktreeStepStatus {
     Warned(String),
     Failed(String),
 }
+
+/// The `Failed` message the daemon broadcasts when a provision is
+/// aborted by [`Command::CancelSpawn`]. `Failed` (not `Warned`) so any
+/// client's checklist stops and its Esc-dismissal marker releases —
+/// but clients match on this exact string to frame the notice as a
+/// confirmation of the user's own cancel rather than an error.
+pub const SPAWN_CANCELLED_NOTE: &str = "workspace setup cancelled";
 
 impl Event {
     /// Build a `ProviderError` event with the given source / message

@@ -2328,8 +2328,8 @@ mod outdated_build_tests {
     /// persistent header banner naming the fix. The header is the
     /// always-visible surface a uniformly-stale install can't scroll
     /// past (#234). Sets the outdated flag directly to test the render
-    /// path — the provenance gate that decides whether the flag is ever
-    /// set lives in `build_guard`/`check_build_freshness` (#251).
+    /// path; the fix wording tracks build provenance, and the test
+    /// binary is a dev/source build, so the fix is "rebuild" (#391).
     #[test]
     fn header_shows_outdated_warning_only_when_behind() {
         let mut sb = Sidebar::new(PaneId::new(1));
@@ -2338,7 +2338,7 @@ mod outdated_build_tests {
         sb.set_outdated_build(Some(89));
         let row = header_row(&mut sb);
         assert!(row.contains("89"), "header row was: {row:?}");
-        assert!(row.contains("update & restart"), "header row was: {row:?}");
+        assert!(row.contains("rebuild & restart"), "header row was: {row:?}");
     }
 
     /// Zero commits behind is current, not stale — normalize it away so

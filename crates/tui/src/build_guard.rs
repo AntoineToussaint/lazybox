@@ -18,37 +18,35 @@
 //! the true remote (a `git fetch` only updates `FETCH_HEAD`), which can
 //! only *under*-report staleness; it never invents a warning.
 //!
-//! The nudge is gated on build provenance ([`is_release_build`], issue
-//! #251): its "update & restart" fix only fits an installer-managed
-//! release binary, so a dev/source build — normally *ahead* of the
-//! latest release, and updated with `git pull && cargo build` — is
-//! tagged `(dev)` in the header and never nudged. That leaves the nudge
-//! dormant until a release build can compare itself against the latest
-//! release tag (future work); a released binary built outside a checkout
-//! has no source ref to count against regardless.
+//! The guard fires for both build kinds, with the fix phrased per
+//! provenance ([`update_action`]): an installer-managed release binary
+//! gets "update & restart", a dev/source build gets "rebuild & restart"
+//! — the exact incident of issue #391 was a dev binary running long
+//! after its checkout was pulled forward, with zero signal because the
+//! guard used to be gated off for dev builds entirely (#251 gated the
+//! *installer* wording, and the gate took the whole check with it). A
+//! released binary built outside a checkout still has no source ref to
+//! count against, so it stays quiet until the release-tag comparison
+//! lands (future work).
 
 use lazybox_ipc::{BUILD_GIT_SHA, BUILD_SOURCE_DIR, IS_RELEASE_BUILD};
 use std::process::Command;
 
 /// Whether the running binary is an installer-managed release build
-/// (cargo-dist) rather than a dev/source build. The outdated-build nudge
-/// is gated on this: its "update & restart" fix only applies to a binary
-/// an installer can swap in place, and a source checkout is normally
-/// *ahead* of the latest release, so nagging it reads as a false alarm.
-/// A dev build is tagged `(dev)` in the header instead (issue #251).
+/// (cargo-dist) rather than a dev/source build. Decides the fix wording
+/// of the outdated-build nudge ([`update_action`]) and the `(dev)`
+/// header tag (issue #251) — a dev build is updated with
+/// `git pull && cargo build`, not an installer swap.
 pub fn is_release_build() -> bool {
     IS_RELEASE_BUILD
 }
 
 /// How many commits the running build trails `origin/main`, when that
 /// can be determined locally and is non-zero. `None` means "current,
-/// or can't tell" — both resolve to no banner. Suppressed entirely on
-/// dev/source builds: only an installer-managed release carries the
-/// "update & restart" affordance the banner implies (issue #251).
+/// or can't tell" — both resolve to no banner. Checked for dev builds
+/// too (issue #391): a stale dev binary running after `git pull` is the
+/// staleness case that actually bites, and it used to get zero signal.
 pub fn commits_behind() -> Option<u32> {
-    if !is_release_build() {
-        return None;
-    }
     commits_behind_in(BUILD_SOURCE_DIR, BUILD_GIT_SHA)
 }
 
@@ -78,12 +76,31 @@ fn parse_commit_count(stdout: &str) -> Option<u32> {
     stdout.trim().parse().ok()
 }
 
+/// The fix the banner tells the user to take, matched to how this
+/// binary is actually updated: an installer swap for a release build,
+/// `git pull && cargo build` for a dev/source build. The binary can't
+/// update itself either way.
+pub fn update_action() -> &'static str {
+    update_action_for(is_release_build())
+}
+
+fn update_action_for(is_release: bool) -> &'static str {
+    if is_release {
+        "update & restart"
+    } else {
+        "rebuild & restart"
+    }
+}
+
 /// The banner text for a build `behind` commits back. Phrased as an
-/// action ("update & restart") because that's the only fix — the
-/// running binary can't update itself.
+/// action because that's the only fix — the running binary can't
+/// update itself.
 pub fn outdated_message(behind: u32) -> String {
     let commits = if behind == 1 { "commit" } else { "commits" };
-    format!("⚠ outdated build — {behind} {commits} behind main; update & restart")
+    format!(
+        "⚠ outdated build — {behind} {commits} behind main; {}",
+        update_action()
+    )
 }
 
 #[cfg(test)]
@@ -113,20 +130,60 @@ mod tests {
     }
 
     #[test]
-    fn dev_builds_never_nudge() {
-        // The test binary is itself a dev/source build, so the guard is
-        // gated off no matter how far the checkout trails main — a source
-        // build is updated with `git pull && cargo build`, not the
-        // installer swap the banner implies (issue #251). `commits_behind`
-        // must short-circuit before shelling out to git.
-        assert!(!is_release_build());
-        assert_eq!(commits_behind(), None);
-    }
-
-    #[test]
     fn message_pluralizes_and_names_the_fix() {
         assert!(outdated_message(1).contains("1 commit behind"));
         assert!(outdated_message(89).contains("89 commits behind"));
-        assert!(outdated_message(5).contains("update & restart"));
+        // The test binary is a dev/source build, so the named fix is the
+        // source-build one (issue #391 — dev builds are checked too).
+        assert!(!is_release_build());
+        assert!(outdated_message(5).contains("rebuild & restart"));
+    }
+
+    #[test]
+    fn fix_wording_matches_build_provenance() {
+        assert_eq!(update_action_for(true), "update & restart");
+        assert_eq!(update_action_for(false), "rebuild & restart");
+    }
+
+    /// Runs the guard's actual git query against a real repository laid
+    /// out like the stale-dev-build incident of #391: the binary was
+    /// built at an old commit and `origin/main` has since moved on.
+    /// Guards the machinery `commits_behind` runs at startup — the toy
+    /// string tests above can't catch a broken `rev-list` invocation.
+    #[test]
+    fn counts_commits_behind_in_a_real_checkout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_str().expect("utf-8 tempdir");
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(["-C", path])
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "one"]);
+        let built_at = git(&["rev-parse", "--short=12", "HEAD"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "two"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "three"]);
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+
+        assert_eq!(commits_behind_in(path, &built_at), Some(2));
+
+        // A binary built at the tip is current — no banner.
+        let tip = git(&["rev-parse", "--short=12", "HEAD"]);
+        assert_eq!(commits_behind_in(path, &tip), None);
     }
 }

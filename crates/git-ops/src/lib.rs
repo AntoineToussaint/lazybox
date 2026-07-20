@@ -1198,12 +1198,23 @@ async fn fetch_origin_ref(
     branch: &str,
     envs: &[(String, String)],
 ) -> Result<(), GitError> {
+    // The source ref must be fully qualified and pruning disabled.
+    // Under a user's global `fetch.prune = true`, a re-fetch with a
+    // short source name ("feat") doesn't reverse-map the existing
+    // `refs/remotes/origin/feat` onto the command-line refspec, so git
+    // PRUNES the very ref this fetch maintains — and exits 0. The next
+    // start-point lookup then finds neither the remote-tracking nor a
+    // local ref, provisioning fails, and the spawn falls back to an
+    // empty non-git dir (issue #404). `refs/heads/` also pins the
+    // source to a branch, so a tag sharing the branch's name can't win
+    // the DWIM lookup.
     run_git_in_env(
         bare_path,
         &[
             "fetch",
+            "--no-prune",
             "origin",
-            &format!("+{branch}:refs/remotes/origin/{branch}"),
+            &format!("+refs/heads/{branch}:refs/remotes/origin/{branch}"),
         ],
         envs,
     )

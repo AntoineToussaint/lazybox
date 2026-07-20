@@ -28,6 +28,7 @@
 
 pub mod agent_runs;
 pub mod agent_stream;
+pub mod agent_updates;
 pub mod api_gateway;
 pub mod auth;
 pub mod backend;
@@ -617,6 +618,14 @@ impl ServerConfig {
     /// and new worktrees silently branched from a stale local main
     /// (issue #394). Resolved lazily per operation; when no token
     /// resolves, git's native (SSH) behavior is unchanged.
+    /// The filesystem namespace this daemon provisions under —
+    /// `repos/` (bare clones) and worktrees hang off it. Public so
+    /// integration tests can pre-seed a local bare clone and drive the
+    /// real provisioning path without touching the network.
+    pub fn worktree_root_path(&self) -> &Path {
+        &self.worktree_root.path
+    }
+
     pub(crate) fn worktree_manager(&self) -> lazybox_git_ops::WorktreeManager {
         lazybox_git_ops::WorktreeManager::new(self.worktree_root.path.clone()).with_github_token(
             Arc::new(|| {
@@ -933,6 +942,8 @@ impl Server {
                         lazybox_ipc::Command::InspectWorktrees => "InspectWorktrees",
                         lazybox_ipc::Command::DeleteOrphanedWorktree { .. } => "DeleteOrphanedWorktree",
                         lazybox_ipc::Command::FetchScrollback { .. } => "FetchScrollback",
+                        lazybox_ipc::Command::CheckAgentCliUpdates => "CheckAgentCliUpdates",
+                        lazybox_ipc::Command::UpdateAgentClis => "UpdateAgentClis",
                         lazybox_ipc::Command::Shutdown => "Shutdown",
                     };
                     // `Write` fires on every keystroke — at info it floods
@@ -1603,6 +1614,12 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::DeleteOrphanedWorktree { path, force } => {
             polling::handle_delete_orphaned_worktree(config, path, force).await;
+        }
+        lazybox_ipc::Command::CheckAgentCliUpdates => {
+            agent_updates::handle_check(config, true).await;
+        }
+        lazybox_ipc::Command::UpdateAgentClis => {
+            agent_updates::handle_update_all(config);
         }
         lazybox_ipc::Command::Shutdown => {
             unreachable!("Shutdown is loop control, intercepted by the serve loop")

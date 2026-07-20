@@ -10985,3 +10985,252 @@ mod settings_window_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod agent_cli_update_tests {
+    //! Lazybox-managed agent-CLI updates (#400): the daemon's check /
+    //! update-finished events become footer notices, and the Settings
+    //! Maintenance rows dispatch the check/update commands.
+    use super::super::*;
+    use crate::realm::components::footer::NoticeSeverity;
+    use crate::realm::setup_ctx::SettingsAction;
+    use lazybox_ipc::{AgentCliUpdateStatus, Client, Event as IpcEvent, channel};
+    use tokio::sync::mpsc;
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn status(
+        id: &str,
+        name: &str,
+        installed: Option<&str>,
+        latest: Option<&str>,
+        error: Option<&str>,
+    ) -> AgentCliUpdateStatus {
+        let update_available = matches!((installed, latest), (Some(i), Some(l)) if i != l);
+        AgentCliUpdateStatus {
+            agent_id: id.into(),
+            display_name: name.into(),
+            installed: installed.map(Into::into),
+            latest: latest.map(Into::into),
+            update_available,
+            error: error.map(Into::into),
+            auto_update: false,
+        }
+    }
+
+    #[test]
+    fn available_update_flashes_even_on_scheduled_checks() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::AgentCliUpdatesChecked {
+            statuses: vec![status(
+                "claude",
+                "Claude Code",
+                Some("2.1.3"),
+                Some("2.1.4"),
+                None,
+            )],
+            manual: false,
+        });
+        let n = m.status.notice.as_ref().expect("availability notice");
+        assert_eq!(n.severity, NoticeSeverity::Info);
+        assert!(
+            n.message.contains("Claude Code 2.1.3 → 2.1.4"),
+            "{}",
+            n.message
+        );
+    }
+
+    #[test]
+    fn scheduled_check_with_nothing_actionable_stays_quiet() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::AgentCliUpdatesChecked {
+            statuses: vec![
+                status("claude", "Claude Code", Some("2.1.4"), Some("2.1.4"), None),
+                status(
+                    "codex",
+                    "Codex",
+                    None,
+                    None,
+                    Some("`codex --version` timed out"),
+                ),
+            ],
+            manual: false,
+        });
+        assert!(
+            m.status.notice.is_none(),
+            "a quiet scheduled sweep must not flash, got {:?}",
+            m.status.notice
+        );
+    }
+
+    /// A scheduled sweep announcing an update the daemon will apply
+    /// itself must say "auto-updating", not send the user to the
+    /// maintenance menu to race the running pass.
+    #[test]
+    fn scheduled_check_words_auto_update_agents_as_auto_updating() {
+        let mut m = build_model();
+        let mut auto = status("claude", "Claude Code", Some("2.1.3"), Some("2.1.4"), None);
+        auto.auto_update = true;
+        m.handle_daemon_event(IpcEvent::AgentCliUpdatesChecked {
+            statuses: vec![auto.clone()],
+            manual: false,
+        });
+        let n = m.status.notice.as_ref().expect("auto-updating notice");
+        assert!(n.message.contains("auto-updating"), "{}", n.message);
+        assert!(
+            !n.message.contains("maintenance"),
+            "must not instruct a manual update: {}",
+            n.message
+        );
+
+        // The same agent on a MANUAL check is the user's to update.
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::AgentCliUpdatesChecked {
+            statuses: vec![auto],
+            manual: true,
+        });
+        let n = m.status.notice.as_ref().expect("availability notice");
+        assert!(n.message.contains("maintenance"), "{}", n.message);
+    }
+
+    /// A manual check must never swallow a broken agent's probe error
+    /// just because another agent has an update available — the sticky
+    /// error wins the footer (both land in the Shift-M log).
+    #[test]
+    fn manual_check_reports_errors_even_when_updates_are_available() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::AgentCliUpdatesChecked {
+            statuses: vec![
+                status("claude", "Claude Code", Some("2.1.3"), Some("2.1.4"), None),
+                status(
+                    "codex",
+                    "Codex",
+                    None,
+                    None,
+                    Some("`codex --version` failed"),
+                ),
+            ],
+            manual: true,
+        });
+        let n = m.status.notice.as_ref().expect("error notice");
+        assert_eq!(n.severity, NoticeSeverity::Permanent);
+        assert!(n.message.contains("Codex"), "{}", n.message);
+    }
+
+    #[test]
+    fn manual_check_answers_up_to_date_with_versions() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::AgentCliUpdatesChecked {
+            statuses: vec![status(
+                "claude",
+                "Claude Code",
+                Some("2.1.4"),
+                Some("2.1.4"),
+                None,
+            )],
+            manual: true,
+        });
+        let n = m.status.notice.as_ref().expect("up-to-date notice");
+        assert_eq!(n.severity, NoticeSeverity::Info);
+        assert!(n.message.contains("up to date"), "{}", n.message);
+        assert!(n.message.contains("Claude Code 2.1.4"), "{}", n.message);
+    }
+
+    #[test]
+    fn manual_check_surfaces_probe_errors() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::AgentCliUpdatesChecked {
+            statuses: vec![status(
+                "codex",
+                "Codex",
+                None,
+                None,
+                Some("`codex --version` failed to start"),
+            )],
+            manual: true,
+        });
+        let n = m.status.notice.as_ref().expect("error notice");
+        assert_eq!(n.severity, NoticeSeverity::Permanent);
+        assert!(n.message.contains("Codex"), "{}", n.message);
+        assert!(n.message.contains("failed to start"), "{}", n.message);
+    }
+
+    #[test]
+    fn update_finished_reports_success_and_failure() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::AgentCliUpdateFinished {
+            agent_id: "claude".into(),
+            display_name: "Claude Code".into(),
+            ok: true,
+            installed_before: Some("2.1.3".into()),
+            installed_after: Some("2.1.4".into()),
+            message: "updated 2.1.3 → 2.1.4".into(),
+        });
+        let n = m.status.notice.as_ref().expect("success notice");
+        assert_eq!(n.severity, NoticeSeverity::Info);
+        assert!(n.message.contains("✓ Claude Code"), "{}", n.message);
+        assert!(n.message.contains("updated 2.1.3 → 2.1.4"), "{}", n.message);
+
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::AgentCliUpdateFinished {
+            agent_id: "codex".into(),
+            display_name: "Codex".into(),
+            ok: false,
+            installed_before: Some("0.46.0".into()),
+            installed_after: None,
+            message: "`brew upgrade --cask codex` exited 1: lock held".into(),
+        });
+        let n = m.status.notice.as_ref().expect("failure notice");
+        assert_eq!(n.severity, NoticeSeverity::Permanent);
+        assert!(n.message.contains("Codex update failed"), "{}", n.message);
+        assert!(n.message.contains("lock held"), "{}", n.message);
+    }
+
+    /// The Settings Maintenance rows exist and fire the daemon
+    /// commands — the manual "update agents now" surface.
+    #[test]
+    fn settings_actions_dispatch_check_and_update_commands() {
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let (_evt_tx, evt_rx) = mpsc::channel(8);
+        let client = Client::from_channels(cmd_tx, evt_rx);
+        let mut m = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+        let mut persisted = lazybox_core::PersistedSetup::default();
+        persisted.enabled_providers.insert("github".into());
+        m.cache_persisted_setup(persisted);
+        m.open_settings();
+        assert!(
+            m.setup
+                .settings_actions
+                .iter()
+                .any(|a| matches!(a, SettingsAction::CheckAgentUpdates)),
+            "maintenance tab must list the check action"
+        );
+        assert!(
+            m.setup
+                .settings_actions
+                .iter()
+                .any(|a| matches!(a, SettingsAction::UpdateAgentClis)),
+            "maintenance tab must list the update action"
+        );
+
+        m.dispatch_settings_action(SettingsAction::CheckAgentUpdates);
+        assert!(matches!(
+            cmd_rx.try_recv().expect("check command sent"),
+            lazybox_ipc::Command::CheckAgentCliUpdates
+        ));
+
+        m.dispatch_settings_action(SettingsAction::UpdateAgentClis);
+        assert!(matches!(
+            cmd_rx.try_recv().expect("update command sent"),
+            lazybox_ipc::Command::UpdateAgentClis
+        ));
+    }
+}

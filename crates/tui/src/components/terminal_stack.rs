@@ -6369,6 +6369,60 @@ mod rebadge_tests {
     }
 
     #[test]
+    fn rebadge_moves_every_issue_terminal_and_spares_other_workspaces() {
+        // A workspace can run several terminals (agent + shell, splits/
+        // tabs); the rebadge must carry all of them, and only them.
+        let issue = SessionKey::new("github:o/r#1");
+        let pr = SessionKey::new("github:o/r#2");
+        let other = SessionKey::new("github:o/r#3");
+        let mut stack = spawned_stack(TerminalId(1), &issue);
+        stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(2),
+            session_key: issue.clone(),
+            kind: TerminalKind::Shell,
+            no_permission: false,
+            on_main: false,
+        });
+        stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(3),
+            session_key: other.clone(),
+            kind: TerminalKind::Shell,
+            no_permission: false,
+            on_main: false,
+        });
+
+        stack.on_event(&Event::TerminalsRebadged {
+            from: issue.clone(),
+            to: pr.clone(),
+        });
+
+        for id in [TerminalId(1), TerminalId(2)] {
+            assert_eq!(
+                stack.terminals.get(&id).map(|s| &s.session_key),
+                Some(&pr),
+                "every issue terminal must follow the move",
+            );
+        }
+        assert_eq!(
+            stack.terminals.get(&TerminalId(3)).map(|s| &s.session_key),
+            Some(&other),
+            "an unrelated workspace's terminal must not be rebadged",
+        );
+
+        stack.on_event(&Event::WorkspaceRemoved(lazybox_core::WorkspaceKey::new(
+            issue.as_str().to_string(),
+        )));
+        for id in [TerminalId(1), TerminalId(2), TerminalId(3)] {
+            assert!(
+                stack.terminals.contains_key(&id),
+                "no live terminal may be dropped by the trailing removal",
+            );
+        }
+    }
+
+    #[test]
     fn without_rebadge_removal_still_drops_the_issue_terminal() {
         // Guards the rebadge's necessity: a removal that ISN'T preceded
         // by a rebadge drops the terminal, exactly as before the fix.

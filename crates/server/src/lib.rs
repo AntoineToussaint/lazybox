@@ -563,6 +563,21 @@ impl ServerConfig {
         Self::with_store_backend_and_root(store, backend, WorktreeRoot::scratch())
     }
 
+    /// Like [`Self::with_store_and_backend`], but rooted at a
+    /// caller-owned worktree directory instead of an unguessable
+    /// scratch dir. The integration tier needs this to exercise REAL
+    /// worktree provisioning: it pre-seeds `<root>/repos/<owner>/<repo>`
+    /// with a bare clone of a local upstream so `provision_worktree`
+    /// runs actual `git worktree add` machinery without the network.
+    /// The caller owns the directory's lifetime.
+    pub fn with_store_backend_and_worktree_root(
+        store: Arc<dyn Store>,
+        backend: Arc<dyn SessionBackend>,
+        worktree_root: PathBuf,
+    ) -> Self {
+        Self::with_store_backend_and_root(store, backend, WorktreeRoot::persistent(worktree_root))
+    }
+
     fn with_store_backend_and_root(
         store: Arc<dyn Store>,
         backend: Arc<dyn SessionBackend>,

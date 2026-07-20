@@ -2221,7 +2221,7 @@ mod getting_started_tests {
     }
 }
 
-mod work_target_agent_tests {
+mod work_target_tests {
     use super::super::*;
 
     fn ws_key(s: &str) -> SessionKey {
@@ -2239,43 +2239,54 @@ mod work_target_agent_tests {
     fn no_running_agent_falls_back_to_default() {
         let sb = Sidebar::new(PaneId::new(1));
         let ws = ws_key("github:o/r#1");
-        assert_eq!(sb.work_target_agent(&ws, "claude"), "claude");
+        assert_eq!(
+            sb.work_target(&ws, "claude"),
+            WorkTarget::Agent("claude".into())
+        );
         assert!(sb.running_agent_ids(&ws).is_empty());
     }
 
     #[test]
     fn single_running_agent_wins_over_default() {
-        // The core bug fix: only Codex is running, so `w w` targets
-        // Codex (which `rewrite_spawn_to_inject` then injects into)
-        // instead of spawning the default Claude.
+        // The core bug fix (#418, regression of #224): only Codex is
+        // running, so `w w` targets Codex (which
+        // `rewrite_spawn_to_inject` then injects into) instead of
+        // spawning the default Claude.
         let mut sb = Sidebar::new(PaneId::new(1));
         let ws = ws_key("github:o/r#1");
         spawn_agent(&mut sb, 1, &ws, "codex");
-        assert_eq!(sb.work_target_agent(&ws, "claude"), "codex");
+        assert_eq!(
+            sb.work_target(&ws, "claude"),
+            WorkTarget::Agent("codex".into())
+        );
         assert_eq!(sb.running_agent_ids(&ws), vec!["codex".to_string()]);
     }
 
     #[test]
-    fn default_agent_wins_when_among_several() {
-        // Tie-break: with several different agents running, prefer the
-        // default if it's one of them.
+    fn several_agents_ask_even_when_default_is_among_them() {
+        // #418: with several DIFFERENT agents running there is no right
+        // guess — not even the default. The model mounts a chooser.
+        // Ids come back sorted for a stable picker order.
         let mut sb = Sidebar::new(PaneId::new(1));
         let ws = ws_key("github:o/r#1");
         spawn_agent(&mut sb, 1, &ws, "codex");
         spawn_agent(&mut sb, 2, &ws, "claude");
-        assert_eq!(sb.work_target_agent(&ws, "claude"), "claude");
+        assert_eq!(
+            sb.work_target(&ws, "claude"),
+            WorkTarget::Choose(vec!["claude".into(), "codex".into()])
+        );
     }
 
     #[test]
-    fn multiple_non_default_agents_fall_back_to_default() {
-        // Tie-break: several non-default agents and no default running →
-        // the `w w` outcome stays predictable (the default, a fresh
-        // spawn). The scoped `w c` / `w x` chords pick a specific one.
+    fn several_non_default_agents_ask_too() {
         let mut sb = Sidebar::new(PaneId::new(1));
         let ws = ws_key("github:o/r#1");
-        spawn_agent(&mut sb, 1, &ws, "codex");
-        spawn_agent(&mut sb, 2, &ws, "cursor");
-        assert_eq!(sb.work_target_agent(&ws, "claude"), "claude");
+        spawn_agent(&mut sb, 1, &ws, "cursor");
+        spawn_agent(&mut sb, 2, &ws, "codex");
+        assert_eq!(
+            sb.work_target(&ws, "claude"),
+            WorkTarget::Choose(vec!["codex".into(), "cursor".into()])
+        );
     }
 
     #[test]
@@ -2284,7 +2295,10 @@ mod work_target_agent_tests {
         let ws = ws_key("github:o/r#1");
         let other = ws_key("github:o/r#2");
         spawn_agent(&mut sb, 1, &other, "codex");
-        assert_eq!(sb.work_target_agent(&ws, "claude"), "claude");
+        assert_eq!(
+            sb.work_target(&ws, "claude"),
+            WorkTarget::Agent("claude".into())
+        );
         assert!(sb.running_agent_ids(&ws).is_empty());
     }
 
@@ -2294,18 +2308,26 @@ mod work_target_agent_tests {
         let ws = ws_key("github:o/r#1");
         sb.running_terminals
             .insert(TerminalId(1), (ws.clone(), TerminalKind::Shell));
-        assert_eq!(sb.work_target_agent(&ws, "claude"), "claude");
+        assert_eq!(
+            sb.work_target(&ws, "claude"),
+            WorkTarget::Agent("claude".into())
+        );
         assert!(sb.running_agent_ids(&ws).is_empty());
     }
 
     #[test]
     fn duplicate_agent_terminals_dedupe_to_one_id() {
+        // Two terminals of the SAME agent are one target — the inject
+        // keys off the agent id, so no chooser is needed.
         let mut sb = Sidebar::new(PaneId::new(1));
         let ws = ws_key("github:o/r#1");
         spawn_agent(&mut sb, 1, &ws, "codex");
         spawn_agent(&mut sb, 2, &ws, "codex");
         assert_eq!(sb.running_agent_ids(&ws), vec!["codex".to_string()]);
-        assert_eq!(sb.work_target_agent(&ws, "claude"), "codex");
+        assert_eq!(
+            sb.work_target(&ws, "claude"),
+            WorkTarget::Agent("codex".into())
+        );
     }
 }
 
@@ -2328,8 +2350,8 @@ mod outdated_build_tests {
     /// persistent header banner naming the fix. The header is the
     /// always-visible surface a uniformly-stale install can't scroll
     /// past (#234). Sets the outdated flag directly to test the render
-    /// path — the provenance gate that decides whether the flag is ever
-    /// set lives in `build_guard`/`check_build_freshness` (#251).
+    /// path; the fix wording tracks build provenance, and the test
+    /// binary is a dev/source build, so the fix is "rebuild" (#391).
     #[test]
     fn header_shows_outdated_warning_only_when_behind() {
         let mut sb = Sidebar::new(PaneId::new(1));
@@ -2338,7 +2360,7 @@ mod outdated_build_tests {
         sb.set_outdated_build(Some(89));
         let row = header_row(&mut sb);
         assert!(row.contains("89"), "header row was: {row:?}");
-        assert!(row.contains("update & restart"), "header row was: {row:?}");
+        assert!(row.contains("rebuild & restart"), "header row was: {row:?}");
     }
 
     /// Zero commits behind is current, not stale — normalize it away so

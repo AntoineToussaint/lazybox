@@ -448,10 +448,18 @@ impl<T: TerminalAdapter> Model<T> {
                 // this workspace (so it injects into an existing Codex /
                 // Cursor session instead of always spawning the default),
                 // falling back to the default agent when none is running.
+                // Several distinct running agents → ask which one (#418).
                 // The scoped `w c` / `w x` chords (Action::WorkWith) force
                 // a specific agent.
-                let target_agent = self.work_target_agent();
-                self.push_work_spawn(&target_agent, session_id, None, &mut cmds);
+                use crate::components::sidebar::WorkTarget;
+                match self.work_target() {
+                    WorkTarget::Agent(agent) => {
+                        self.push_work_spawn(&agent, session_id, None, &mut cmds);
+                    }
+                    WorkTarget::Choose(agents) => {
+                        self.mount_work_agent_picker(agents, session_id, None);
+                    }
+                }
             }
             Action::WorkWith(agent_id) => {
                 // Scoped `w <agent>`: same contextual prompt as `w w`,
@@ -465,8 +473,15 @@ impl<T: TerminalAdapter> Model<T> {
                 // alias is resolved against the target agent's menu daemon-
                 // side, so it degrades to the default model for an agent
                 // that doesn't define the tier.
-                let target_agent = self.work_target_agent();
-                self.push_work_spawn(&target_agent, session_id, Some(alias.clone()), &mut cmds);
+                use crate::components::sidebar::WorkTarget;
+                match self.work_target() {
+                    WorkTarget::Agent(agent) => {
+                        self.push_work_spawn(&agent, session_id, Some(alias.clone()), &mut cmds);
+                    }
+                    WorkTarget::Choose(agents) => {
+                        self.mount_work_agent_picker(agents, session_id, Some(alias.clone()));
+                    }
+                }
             }
             Action::SpawnTier(alias) => {
                 // `a S`: spawn the default agent at the picked tier.
@@ -1002,17 +1017,18 @@ impl<T: TerminalAdapter> Model<T> {
     /// right pane's indices always belong to the selected workspace.
     /// The agent `w w` (or a `w S` tier chord) targets on the
     /// selected workspace: whatever agent is already running there, else
-    /// the configured default. Shared by `Work` and `WorkTier` so both
-    /// pick the same agent before layering a tier on top.
-    fn work_target_agent(&self) -> String {
+    /// the configured default; several running agents → `Choose` (the
+    /// caller mounts the picker). Shared by `Work` and `WorkTier` so
+    /// both pick the same agent before layering a tier on top.
+    fn work_target(&self) -> crate::components::sidebar::WorkTarget {
         let default_agent = self.sidebar.default_agent().to_string();
         match self.sidebar.selected_workspace_key().cloned() {
-            Some(sk) => self.sidebar.work_target_agent(&sk, &default_agent),
-            None => default_agent,
+            Some(sk) => self.sidebar.work_target(&sk, &default_agent),
+            None => crate::components::sidebar::WorkTarget::Agent(default_agent),
         }
     }
 
-    fn push_work_spawn(
+    pub(super) fn push_work_spawn(
         &mut self,
         agent_id: &str,
         session_id: Option<lazybox_core::SessionId>,

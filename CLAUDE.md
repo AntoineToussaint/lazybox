@@ -28,7 +28,7 @@ already-fixed bugs. To catch it, the build bakes its commit
 (`LAZYBOX_BUILD_GIT_SHA`) and source checkout
 (`LAZYBOX_BUILD_SOURCE_DIR`) in `crates/ipc/build.rs`; at startup
 `crates/tui/src/build_guard.rs` counts `<sha>..origin/main` and, when
-non-zero, paints a persistent `⚠ N behind · update & restart` warning
+non-zero, paints a persistent `⚠ N behind · rebuild & restart` warning
 in the sidebar header (plus a startup banner). The check reads the
 local `origin/main` ref (no network), so refresh it first when in
 doubt:
@@ -40,16 +40,16 @@ cargo run -p lazybox-tui  # rebuild + restart picks up the new build
 ```
 
 The running build version is always visible in the sidebar header
-(`lazybox --version` prints it too). Dev/source builds — anything not
-compiled by cargo-dist's `--profile dist` (`LAZYBOX_RELEASE_BUILD`,
-baked in `crates/ipc/build.rs`) — are tagged `vX.Y.Z (dev)` and never
-raise the nudge: a source checkout is normally *ahead* of the latest
-release and is updated with `git pull && cargo build`, not the
-installer swap "update & restart" implies (issue #251). The nudge is
-therefore gated on installer-managed release provenance; wiring the
-release-tag comparison that would let a stale *release* binary count
-how far it trails the channel is still future work, so in practice the
-nudge is currently dormant.
+(`lazybox --version` prints it too). The guard fires for both build
+kinds (#391) — a stale dev binary running after `git pull` was the
+biggest source of false "regressions" — with the fix wording matched
+to provenance: dev/source builds (anything not compiled by
+cargo-dist's `--profile dist`; `LAZYBOX_RELEASE_BUILD`, baked in
+`crates/ipc/build.rs`) are tagged `vX.Y.Z (dev)` and told to
+`rebuild & restart`, while installer-managed release builds get
+`update & restart` (issue #251). A release binary built outside a git
+checkout has no source ref to count against, so it stays quiet until
+the release-tag comparison (future work) lands.
 
 ## Architecture
 

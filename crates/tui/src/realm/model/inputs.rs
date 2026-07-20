@@ -717,6 +717,21 @@ showing keybinding search only",
             }
             return cmds;
         }
+        // `w` multi-agent chooser (Id::WorkAgentPicker, #418) — pick →
+        // replay the same work spawn `w` would have queued, targeted at
+        // the chosen running agent. The Msg::ChoicePicked flush then
+        // rewrites it to an inject into that agent's terminal. Empty /
+        // Esc pick drops the stash without spawning anything.
+        if matches!(self.modal_stack.last(), Some(Id::WorkAgentPicker)) {
+            let stash = self.pending_work_picker.take();
+            self.pop_modal();
+            if let (Some(picker), Some(&idx)) = (stash, picks.first())
+                && let Some(agent) = picker.agents.get(idx).cloned()
+            {
+                self.push_work_spawn(&agent, picker.session_id, picker.model_alias, &mut cmds);
+            }
+            return cmds;
+        }
         // Snooze duration picker (Id::SnoozeDuration) — single-pick.
         // Translate the chosen index into a snooze deadline via the
         // stashed `snooze_choices`. Empty / Esc dismisses without
@@ -978,6 +993,9 @@ showing keybinding search only",
             Some(Id::SnoozeDuration) => {
                 self.pending_snooze_workspace = None;
                 self.snooze_choices.clear();
+            }
+            Some(Id::WorkAgentPicker) => {
+                self.pending_work_picker = None;
             }
             Some(Id::PolicyPicker) => {
                 self.pending_policy_workspace = None;

@@ -516,8 +516,9 @@ impl TmuxBackend {
     /// is the I/O conduit; its lifetime is unrelated to the tmux
     /// session's — `wait_exit` polls tmux directly for that.
     ///
-    /// `seed` pre-loads the DaemonPty's replay ring with reconstructed
-    /// scrollback (see `capture_history`). A plain `tmux attach` only
+    /// `seed` hands the DaemonPty reconstructed scrollback (see
+    /// `capture_history`), held in its durable seed slot and replayed
+    /// ahead of live bytes (#420). A plain `tmux attach` only
     /// repaints the visible pane, so without the seed a client that
     /// reattaches to a session which survived a daemon restart has one
     /// screenful and nothing to scroll back through.
@@ -534,9 +535,10 @@ impl TmuxBackend {
     /// history. The daemon's replay ring lives in memory and dies with
     /// the daemon; tmux, however, keeps `history-limit` lines per pane
     /// across restarts. `capture-pane -e -S -<limit>` dumps that history
-    /// (styled, via `-e`) down to the current bottom line, which we feed
-    /// into the ring ahead of the live attach bytes so the client
-    /// rebuilds the full scrollback instead of a single repainted screen.
+    /// (styled, via `-e`) down to the current bottom line, which we hand
+    /// to the DaemonPty as its durable seed — replayed ahead of the live
+    /// attach bytes on every snapshot (#420) — so the client rebuilds
+    /// the full scrollback instead of a single repainted screen.
     ///
     /// Best-effort: any failure returns an empty seed and the client
     /// simply starts from the live repaint, exactly as before this fix.
@@ -851,7 +853,7 @@ impl SessionBackend for TmuxBackend {
                 // after a daemon restart, or after a freeze/EOF). A fresh
                 // attach client only repaints the visible pane, so
                 // reconstruct scrollback from tmux's surviving history
-                // and seed it into the new client's replay ring. Captured
+                // and hand it to the new client as its durable seed. Captured
                 // WITHOUT the sessions lock held: `capture-pane` is a tmux
                 // round trip, and the hot reuse path above must never wait
                 // on it.

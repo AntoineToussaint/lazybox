@@ -140,6 +140,12 @@ pub enum Action {
     /// in-lazybox UI doesn't carry every affordance yet (mobile-rich
     /// review thread, full diff view, etc.).
     OpenInBrowser,
+    /// Delete or close the workspace's upstream item, resolved by
+    /// kind: a PR is closed without merging; an issue is hard-deleted
+    /// when the token has the admin rights GitHub requires, degrading
+    /// to a close-as-not-planned (with a notice) otherwise.
+    /// Confirm-guarded — destructive and outward-facing.
+    DeleteOrClose,
 
     // ── Sidebar list management ────────────────────────────────────
     // These act on the sidebar's list/view rather than a single
@@ -344,6 +350,7 @@ pub enum ActionKind {
     AddAssignees,
     ManageLabels,
     OpenInBrowser,
+    DeleteOrClose,
     // Sidebar list management
     CycleRoleFilter,
     CycleSort,
@@ -459,6 +466,7 @@ impl Action {
             Action::AddAssignees => ActionKind::AddAssignees,
             Action::ManageLabels => ActionKind::ManageLabels,
             Action::OpenInBrowser => ActionKind::OpenInBrowser,
+            Action::DeleteOrClose => ActionKind::DeleteOrClose,
             Action::CycleRoleFilter => ActionKind::CycleRoleFilter,
             Action::CycleSort => ActionKind::CycleSort,
             Action::CycleMailbox => ActionKind::CycleMailbox,
@@ -843,6 +851,13 @@ impl ActionDef {
                 describe: "Open the focused workspace's PR / issue page in your default web browser.",
                 section: Section::Workspace,
             },
+            ActionKind::DeleteOrClose => &Self {
+                kind: ActionKind::DeleteOrClose,
+                default_keys: "g d",
+                label: "delete / close",
+                describe: "Delete the focused issue (close as not-planned when the token lacks the admin rights a hard delete needs) or close the PR without merging. Confirmed first.",
+                section: Section::Workspace,
+            },
             // ── Sidebar list management ─────────────────────────────
             ActionKind::CycleRoleFilter => &Self {
                 kind: ActionKind::CycleRoleFilter,
@@ -1033,6 +1048,7 @@ impl ActionDef {
             ActionKind::AddAssignees,
             ActionKind::ManageLabels,
             ActionKind::OpenInBrowser,
+            ActionKind::DeleteOrClose,
             ActionKind::Reply,
             // Sidebar list management
             ActionKind::CycleRoleFilter,
@@ -1387,6 +1403,16 @@ impl ActionDef {
                  GitHub to undo.",
                 default_yes: false,
             },
+            // Mutates (or destroys) the upstream item. The static copy
+            // covers both resolutions; the dispatcher overrides with a
+            // prompt naming the focused issue/PR number + title.
+            ActionKind::DeleteOrClose => Guard::Confirm {
+                prompt: "Delete this issue (or close this PR) upstream? \
+                 Deleting an issue is permanent; without admin rights it \
+                 is closed as not-planned instead. A PR is closed without \
+                 merging.",
+                default_yes: false,
+            },
             // Explicitly invoked, but merging mutates the mainline branch
             // immediately and is hard to undo — a reflexive Enter shouldn't merge.
             ActionKind::MergePr => Guard::Confirm {
@@ -1527,6 +1553,7 @@ impl ActionKind {
             ActionKind::AddAssignees => "add_assignees",
             ActionKind::ManageLabels => "manage_labels",
             ActionKind::OpenInBrowser => "open_in_browser",
+            ActionKind::DeleteOrClose => "delete_or_close",
             ActionKind::CycleRoleFilter => "cycle_role_filter",
             ActionKind::CycleSort => "cycle_sort",
             ActionKind::CycleMailbox => "cycle_mailbox",
@@ -1723,7 +1750,8 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::RequestReviewers
         | ActionKind::AddAssignees
         | ActionKind::ManageLabels
-        | ActionKind::OpenInBrowser => Some("github"),
+        | ActionKind::OpenInBrowser
+        | ActionKind::DeleteOrClose => Some("github"),
         ActionKind::SpawnAgent => Some("agent"),
         ActionKind::Work | ActionKind::WorkWith => Some("work"),
         ActionKind::SpawnAgentOnMain | ActionKind::SpawnShellOnMain => Some("main branch"),
@@ -2047,6 +2075,13 @@ pub fn contextual_label(
                 default
             }
         }
+        // Name the resolution the keypress would actually take so the
+        // which-key popup / footer don't advertise an ambiguous verb.
+        Action::DeleteOrClose => match workspace {
+            Some(w) if w.pr.is_some() => "close PR",
+            Some(_) => "delete issue",
+            None => default,
+        },
         _ => default,
     }
 }
@@ -2118,6 +2153,25 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
                     && w.gh_issues
                         .first()
                         .is_some_and(|i| i.state != lazybox_core::TaskState::Closed)
+            })
+            .unwrap_or(false),
+        // Resolves by workspace kind: close the PR while it's still
+        // open (a merged/closed PR has nothing left to close), else
+        // delete the still-open GitHub issue. GitHub-only for now,
+        // like CloseIssue.
+        ActionKind::DeleteOrClose => workspace
+            .map(|w| match w.pr.as_ref() {
+                Some(pr) => matches!(
+                    pr.state,
+                    lazybox_core::TaskState::Open
+                        | lazybox_core::TaskState::InProgress
+                        | lazybox_core::TaskState::InReview
+                        | lazybox_core::TaskState::Draft
+                ),
+                None => w
+                    .gh_issues
+                    .first()
+                    .is_some_and(|i| i.state != lazybox_core::TaskState::Closed),
             })
             .unwrap_or(false),
         ActionKind::SpawnShell => matches!(
@@ -2774,6 +2828,109 @@ mod tests {
     }
 
     #[test]
+    fn delete_or_close_is_a_confirmed_github_leader_action() {
+        // Issue #408: `g d` deletes an issue / closes a PR — always
+        // behind a Confirm modal, advertised as part of the github
+        // leader group.
+        let def = ActionDef::for_kind(ActionKind::DeleteOrClose);
+        assert_eq!(def.section, Section::Workspace);
+        assert!(def.is_destructive(), "delete must route through Confirm");
+        assert!(def.confirm_prompt().is_some());
+        assert_eq!(def.confirm_default_yes(), Some(false));
+        assert_eq!(
+            leader_group_label(ActionKind::DeleteOrClose),
+            Some("github")
+        );
+        assert_eq!(
+            def.default_chord(),
+            Some(Chord::Seq(vec![
+                KeyStroke::new(false, false, false, ChordCode::Char('g')),
+                KeyStroke::new(false, false, false, ChordCode::Char('d')),
+            ])),
+            "delete/close lives under the github leader",
+        );
+    }
+
+    #[test]
+    fn delete_or_close_resolves_by_workspace_kind() {
+        use chrono::Utc;
+        use lazybox_core::{
+            CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace, WorkspaceKey,
+        };
+        let task = |key: &str| Task {
+            id: TaskId {
+                source: "github".into(),
+                key: key.into(),
+            },
+            title: key.into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Author,
+            ci: CiStatus::None,
+            review: ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: String::new(),
+            repo: Some("acme/widget".into()),
+            branch: None,
+            base_branch: None,
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: Some("node".into()),
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        };
+
+        // No workspace → not offered.
+        assert!(!availability(ActionKind::DeleteOrClose, None));
+
+        // An open github issue workspace offers it, labeled as a delete.
+        let mut ws = Workspace::empty(
+            WorkspaceKey("github-acme-widget-7".into()),
+            "main",
+            Utc::now(),
+        );
+        ws.attach_task(task("acme/widget#7"));
+        assert!(availability(ActionKind::DeleteOrClose, Some(&ws)));
+        assert_eq!(
+            contextual_label(&Action::DeleteOrClose, Some(&ws)),
+            "delete issue"
+        );
+
+        // A closed issue → nothing to delete.
+        let mut closed = task("acme/widget#7");
+        closed.state = TaskState::Closed;
+        ws.attach_task(closed);
+        assert!(!availability(ActionKind::DeleteOrClose, Some(&ws)));
+
+        // An open PR resolves to a PR close, whatever the issues say.
+        ws.pr = Some(task("acme/widget#8"));
+        assert!(availability(ActionKind::DeleteOrClose, Some(&ws)));
+        assert_eq!(
+            contextual_label(&Action::DeleteOrClose, Some(&ws)),
+            "close PR"
+        );
+
+        // A merged PR has nothing left to close.
+        let mut merged = task("acme/widget#8");
+        merged.state = TaskState::Merged;
+        ws.pr = Some(merged);
+        assert!(!availability(ActionKind::DeleteOrClose, Some(&ws)));
+    }
+
+    #[test]
     fn close_issue_only_offered_on_github_issue_workspaces() {
         use chrono::Utc;
         use lazybox_core::{
@@ -2868,6 +3025,7 @@ mod tests {
             ActionKind::AddAssignees,
             ActionKind::ManageLabels,
             ActionKind::OpenInBrowser,
+            ActionKind::DeleteOrClose,
         ];
         let mut seconds = Vec::new();
         for kind in github {

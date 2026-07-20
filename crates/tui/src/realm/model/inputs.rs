@@ -473,8 +473,9 @@ showing keybinding search only",
             return cmds;
         }
         // Default-agent picker — pick → persist `setup.default_agent`
-        // and update both panes live (no restart). Empty / Esc drops
-        // the stash without changing anything.
+        // and update both panes live (no restart), then chain the
+        // default-model picker over the picked agent's tiers (#417).
+        // Empty / Esc drops the stash without changing anything.
         if matches!(self.modal_stack.last(), Some(Id::DefaultAgentPicker)) {
             let agent = picks
                 .first()
@@ -490,6 +491,47 @@ showing keybinding search only",
                     Ok(()) => {
                         self.set_default_agent(&agent);
                         self.flash_info(format!("default agent: {agent}"));
+                        self.redraw = true;
+                        // Offer the model-level choice for the new
+                        // default. No-op for a tier-less agent; Esc
+                        // there keeps the current default tier.
+                        self.mount_default_model_picker(&agent);
+                    }
+                    Err(e) => self.flash_info(format!("couldn't save config: {e}")),
+                }
+            }
+            return cmds;
+        }
+        // Default-model picker (#417) — pick → persist the alias as
+        // `agents.<id>.models.default` (the tier bare spawns resolve;
+        // the daemon re-reads config per spawn, so it applies without a
+        // restart) and mirror it into the live menu map so the Settings
+        // row's `◆` badge updates at once. The "agent default" row
+        // persists `None`, clearing any override. Empty / Esc keeps the
+        // current tier — the agent pick already landed.
+        if matches!(self.modal_stack.last(), Some(Id::DefaultModelPicker)) {
+            let pick = picks
+                .first()
+                .and_then(|i| self.default_model_choices.get(*i).cloned());
+            let agent = self.default_model_agent.take();
+            self.default_model_choices.clear();
+            self.pop_modal();
+            if let (Some(alias), Some(agent)) = (pick, agent) {
+                match lazybox_config::Config::save_with(|c| {
+                    c.agents.entry(agent.clone()).or_default().models.default = alias.clone();
+                }) {
+                    Ok(()) => {
+                        let label = self
+                            .agent_models
+                            .get(&agent)
+                            .zip(alias.as_deref())
+                            .and_then(|(m, a)| m.tier(a))
+                            .map(|t| format!("◆ {}", t.label))
+                            .unwrap_or_else(|| "agent default".to_string());
+                        if let Some(models) = self.agent_models.get_mut(&agent) {
+                            models.default = alias.clone();
+                        }
+                        self.flash_info(format!("default model for {agent}: {label}"));
                         self.redraw = true;
                     }
                     Err(e) => self.flash_info(format!("couldn't save config: {e}")),
@@ -991,6 +1033,13 @@ showing keybinding search only",
             }
             Some(Id::DefaultAgentPicker) => {
                 self.default_agent_choices.clear();
+            }
+            // Esc on the default-model step keeps the current tier —
+            // the agent pick already persisted. Drop the stashes so a
+            // later Choice mount can't resolve stale rows.
+            Some(Id::DefaultModelPicker) => {
+                self.default_model_choices.clear();
+                self.default_model_agent = None;
             }
             Some(Id::Setup) => {
                 // Esc on the (non-runner) Settings window — drop the

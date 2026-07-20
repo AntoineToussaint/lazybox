@@ -3111,6 +3111,7 @@ mod modal_input_responsiveness_tests {
         let mut m = build_model();
         m.dispatch_settings_action(SettingsAction::EditDefaultAgent {
             current: "claude".into(),
+            tier: None,
         });
         assert_eq!(m.modal_stack.last(), Some(&Id::DefaultAgentPicker));
         assert!(
@@ -10971,6 +10972,179 @@ mod settings_window_tests {
                 .any(|a| a.label() == format!("Change theme (live preview) · {current}")),
             "theme row must show the active theme"
         );
+    }
+}
+
+#[cfg(test)]
+mod default_model_tier_tests {
+    //! Default model tier for the default agent (#417): the
+    //! default-agent settings flow chains a tier picker whose pick
+    //! persists `agents.<id>.models.default`, so bare spawns (`w`,
+    //! `Shift-W`, auto-work) land on the chosen level. Per-spawn tier
+    //! chords (`w S/M/L`) still override it — they thread an explicit
+    //! `model_alias`, which wins over the default in `resolve_args`.
+    use super::super::{Id, Model};
+    use lazybox_ipc::channel;
+    use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+    use tuirealm::ratatui::layout::Size;
+
+    /// Serializes tests that mutate the process-global `LAZYBOX_HOME`
+    /// so a parallel test can't observe another's temp home (or the
+    /// real one). Held for the whole body of each such test.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn seed_claude_tiers(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>) {
+        let mut models = std::collections::BTreeMap::new();
+        models.insert(
+            "claude".to_string(),
+            lazybox_core::AgentModels::builtin("claude").expect("claude ships tiers"),
+        );
+        m.set_agent_models(models);
+    }
+
+    /// The picker lists an "agent default" row plus the declared tiers
+    /// in menu order, stashes the aliases + target agent, and releases
+    /// both on Esc — which keeps the current tier (the agent pick
+    /// already landed). Disk-free: mounting only reads the live menu.
+    #[test]
+    fn default_model_picker_lists_tiers_and_cancels_clean() {
+        let mut m = build_model();
+        seed_claude_tiers(&mut m);
+
+        m.mount_default_model_picker("claude");
+        assert_eq!(m.modal_stack.last(), Some(&Id::DefaultModelPicker));
+        assert_eq!(m.default_model_agent.as_deref(), Some("claude"));
+        assert_eq!(
+            m.default_model_choices,
+            vec![
+                None,
+                Some("S".to_string()),
+                Some("M".to_string()),
+                Some("L".to_string())
+            ],
+            "row 0 clears the override; the rest are the declared tiers in order",
+        );
+
+        m.dispatch_modal_key(KeyEvent::new(Key::Esc, KeyModifiers::NONE));
+        assert!(m.top_modal().is_none(), "Esc closes the picker");
+        assert!(m.default_model_choices.is_empty(), "choices are released");
+        assert!(m.default_model_agent.is_none(), "agent stash is released");
+    }
+
+    /// An agent with no declared tiers has nothing to pick — the step
+    /// is skipped entirely (its own default model stands).
+    #[test]
+    fn default_model_picker_is_skipped_for_a_tierless_agent() {
+        let mut m = build_model();
+        m.set_agent_models(std::collections::BTreeMap::new());
+        m.mount_default_model_picker("codex");
+        assert!(m.top_modal().is_none(), "no tiers → no picker");
+        assert!(m.default_model_agent.is_none());
+    }
+
+    /// The Settings "Change default agent" row wears the configured
+    /// default tier's label (`· ◆ Opus`), so the chosen level is
+    /// visible next to the default agent.
+    #[test]
+    fn settings_row_shows_the_default_tier_badge() {
+        let mut m = build_model();
+        let mut persisted = lazybox_core::PersistedSetup::default();
+        persisted.enabled_providers.insert("github".into());
+        m.cache_persisted_setup(persisted);
+        let mut models = lazybox_core::AgentModels::builtin("claude").expect("claude ships tiers");
+        models.default = Some("L".into());
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("claude".to_string(), models);
+        m.set_agent_models(map);
+
+        m.open_settings();
+        assert!(
+            m.setup
+                .settings_actions
+                .iter()
+                .any(|a| a.label() == "Change default agent · claude · ◆ Opus"),
+            "default-agent row must show the configured tier badge",
+        );
+    }
+
+    /// End-to-end through the pick handler: choosing the default agent
+    /// chains the tier picker, picking `◆ Opus` persists
+    /// `agents.claude.models.default = L` (which a bare spawn's
+    /// `resolve_args(None)` then lands on) and mirrors it into the
+    /// live menu; the "agent default" row clears the override.
+    #[test]
+    fn default_model_pick_persists_and_updates_live() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home =
+            std::env::temp_dir().join(format!("lazybox-default-model-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator here.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        let mut m = build_model();
+        seed_claude_tiers(&mut m);
+
+        // Pick "claude" in the agent picker → the tier step chains.
+        m.mount_default_agent_picker();
+        let claude_idx = m
+            .default_agent_choices
+            .iter()
+            .position(|id| id == "claude")
+            .expect("claude offered");
+        let _ = m.handle_choice_picked(vec![claude_idx]);
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::DefaultModelPicker),
+            "the agent pick chains into the model-level step",
+        );
+
+        // Pick ◆ Opus (rows: [agent default, S, M, L]).
+        let _ = m.handle_choice_picked(vec![3]);
+        assert!(m.top_modal().is_none(), "pick pops the modal");
+        let cfg =
+            lazybox_config::Config::load_from(&home.join("config.yaml")).expect("config saved");
+        assert_eq!(
+            cfg.agents
+                .get("claude")
+                .and_then(|e| e.models.default.as_deref()),
+            Some("L"),
+        );
+        assert_eq!(
+            cfg.agent_models("claude").resolve_args(None),
+            vec!["--model".to_string(), "claude-opus-4-8".to_string()],
+            "a bare spawn now resolves the picked tier",
+        );
+        assert_eq!(
+            m.agent_models.get("claude").and_then(|x| x.default.clone()),
+            Some("L".to_string()),
+            "the live menu mirrors the write so the Settings badge updates at once",
+        );
+
+        // Re-open: positioned on the current default; row 0 clears it.
+        m.mount_default_model_picker("claude");
+        let _ = m.handle_choice_picked(vec![0]);
+        let cfg =
+            lazybox_config::Config::load_from(&home.join("config.yaml")).expect("config saved");
+        assert_eq!(
+            cfg.agents
+                .get("claude")
+                .and_then(|e| e.models.default.clone()),
+            None,
+            "the agent-default row clears the override",
+        );
+        assert_eq!(
+            m.agent_models.get("claude").and_then(|x| x.default.clone()),
+            None,
+        );
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
     }
 }
 

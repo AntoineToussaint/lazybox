@@ -847,11 +847,21 @@ impl Config {
     /// block when it defines any tiers, else the built-in preset for a
     /// known agent, else an empty menu (agent's own default model, no
     /// tier chords). A configured block with an empty `tiers` list is
-    /// treated as "unset" so it transparently inherits the built-in.
+    /// treated as "unset" so it transparently inherits the built-in —
+    /// but its `default` alias (when set) still overlays the inherited
+    /// menu, so picking a default tier (Settings → default agent, #417)
+    /// persists as `agents.<id>.models.default` alone without freezing
+    /// a copy of the built-in tier list into the user's YAML.
     pub fn agent_models(&self, agent_id: &str) -> lazybox_core::AgentModels {
         match self.agents.get(agent_id) {
             Some(entry) if !entry.models.tiers.is_empty() => entry.models.clone(),
-            _ => lazybox_core::AgentModels::builtin(agent_id).unwrap_or_default(),
+            entry => {
+                let mut models = lazybox_core::AgentModels::builtin(agent_id).unwrap_or_default();
+                if let Some(default) = entry.and_then(|e| e.models.default.clone()) {
+                    models.default = Some(default);
+                }
+                models
+            }
         }
     }
 
@@ -1884,6 +1894,45 @@ agents:
         );
         // An empty configured block still inherits the built-in preset.
         assert!(!cfg.agent_models("claude").tiers.is_empty());
+    }
+
+    /// A tier-less `agents.<id>.models` block that only sets `default`
+    /// overlays that alias onto the built-in menu (#417): the Settings
+    /// default-tier pick persists as one YAML key, and a bare spawn
+    /// (`resolve_args(None)`) lands on that tier's args.
+    #[test]
+    fn agent_models_overlays_configured_default_on_builtin() {
+        let yaml = r#"
+agents:
+  claude:
+    models:
+      default: L
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse default-only models");
+        let m = cfg.agent_models("claude");
+        assert!(
+            !m.tiers.is_empty(),
+            "built-in tier menu is inherited, not shadowed by the default-only block",
+        );
+        assert_eq!(m.default.as_deref(), Some("L"));
+        assert_eq!(
+            m.resolve_args(None),
+            vec!["--model".to_string(), "claude-opus-4-8".to_string()],
+            "a bare spawn resolves the overlaid default tier",
+        );
+        // An agent block with a default but no built-in menu (and no
+        // configured tiers) keeps the default as a dangling alias —
+        // resolve_args falls back to no args (agent's own model).
+        let yaml = r#"
+agents:
+  codex:
+    models:
+      default: M
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse codex default");
+        let m = cfg.agent_models("codex");
+        assert_eq!(m.default.as_deref(), Some("M"));
+        assert!(m.resolve_args(None).is_empty());
     }
 
     #[test]

@@ -113,6 +113,24 @@ impl ProviderHandle {
             Self::Linear(c) => lazybox_core::TaskProvider::close_issue(c, ws).await,
         }
     }
+    pub async fn close_pr(
+        &self,
+        ws: &lazybox_core::Workspace,
+    ) -> Result<(), lazybox_core::ProviderError> {
+        match self {
+            Self::Github(c) => lazybox_core::TaskProvider::close_pr(c, ws).await,
+            Self::Linear(c) => lazybox_core::TaskProvider::close_pr(c, ws).await,
+        }
+    }
+    pub async fn delete_issue(
+        &self,
+        ws: &lazybox_core::Workspace,
+    ) -> Result<(), lazybox_core::ProviderError> {
+        match self {
+            Self::Github(c) => lazybox_core::TaskProvider::delete_issue(c, ws).await,
+            Self::Linear(c) => lazybox_core::TaskProvider::delete_issue(c, ws).await,
+        }
+    }
     pub async fn request_reviewers(
         &self,
         ws: &lazybox_core::Workspace,
@@ -339,6 +357,96 @@ pub async fn handle_close_issue(config: &ServerConfig, workspace_key: WorkspaceK
     });
     // Wake the poll loop so CLOSED state (and the removal prompt) lands
     // in <5s instead of waiting out the full interval.
+    config.poll_wake.notify_one();
+}
+
+/// Handle `Command::DeleteOrClose`: remove the workspace's primary
+/// upstream item, resolved by kind.
+///
+/// - **PR** → close it without merging (`closePullRequest`).
+/// - **Issue** → hard-delete it (`deleteIssue`). GitHub only permits
+///   that for repo admins, so any delete failure degrades to the
+///   NOT_PLANNED close the plain close-issue path uses —
+///   `Event::IssueDeleted { fell_back_to_close: true }` tells the TUI
+///   to say so instead of failing silently.
+///
+/// Success wakes the poll loop; the item no longer matches the open
+/// searches, so the rescope sweep retires the workspace from the inbox
+/// (the same level-triggered path an externally closed item takes).
+/// Failure surfaces as a persistent `Event::DeleteOrCloseFailed`,
+/// mirroring the merge/close paths.
+pub async fn handle_delete_or_close(config: &ServerConfig, workspace_key: WorkspaceKey) {
+    let emit_err = |msg: &str| {
+        let _ = config
+            .bus
+            .send(Event::provider_error_retryable("delete-or-close", msg));
+    };
+
+    let Some(ws) = load_workspace(config, &workspace_key) else {
+        emit_err(&format!(
+            "delete-or-close: workspace {workspace_key} not found"
+        ));
+        return;
+    };
+    let label = ws
+        .primary_task()
+        .map(|t| t.id.key.clone())
+        .filter(|k| !k.is_empty())
+        .unwrap_or_else(|| workspace_key.as_str().to_string());
+
+    let provider = match build_provider_for_workspace(&workspace_key).await {
+        Ok(p) => p,
+        Err(e) => {
+            emit_err(&e);
+            return;
+        }
+    };
+
+    if ws.pr.is_some() {
+        if let Err(e) = provider.close_pr(&ws).await {
+            tracing::warn!("close-pr {workspace_key}: {e:?}");
+            let _ = config.bus.send(Event::DeleteOrCloseFailed {
+                workspace_key: workspace_key.clone(),
+                label,
+                reason: e.to_string(),
+            });
+            return;
+        }
+        tracing::info!("closed PR for workspace {workspace_key}");
+        let _ = config.bus.send(Event::PrClosed {
+            workspace_key: workspace_key.clone(),
+            pr_label: label,
+        });
+    } else {
+        let fell_back_to_close = match provider.delete_issue(&ws).await {
+            Ok(()) => false,
+            Err(delete_err) => {
+                tracing::warn!(
+                    "delete-issue {workspace_key}: {delete_err:?} — falling back to close"
+                );
+                if let Err(close_err) = provider.close_issue(&ws).await {
+                    tracing::warn!("close-issue fallback {workspace_key}: {close_err:?}");
+                    let _ = config.bus.send(Event::DeleteOrCloseFailed {
+                        workspace_key: workspace_key.clone(),
+                        label,
+                        reason: close_err.to_string(),
+                    });
+                    return;
+                }
+                true
+            }
+        };
+        tracing::info!(
+            "deleted issue for workspace {workspace_key} (fell_back_to_close: {fell_back_to_close})"
+        );
+        let _ = config.bus.send(Event::IssueDeleted {
+            workspace_key: workspace_key.clone(),
+            issue_label: label,
+            fell_back_to_close,
+        });
+    }
+    // Wake the poll loop so the vanished/closed state (and the rescope
+    // removal) lands in <5s instead of waiting out the full interval.
     config.poll_wake.notify_one();
 }
 

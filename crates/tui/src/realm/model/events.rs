@@ -263,6 +263,18 @@ impl<T: TerminalAdapter> Model<T> {
             }
             return;
         }
+        // Deep-scrollback reply (#393): like raw output, it only
+        // mutates one terminal's grid — no workspace / layout state —
+        // so it takes the same short-circuit instead of the full
+        // fan-out.
+        if let IpcEvent::TerminalScrollback { terminal_id, .. } = &event {
+            let visible = self.terminals.is_terminal_visible(*terminal_id);
+            self.terminals.on_daemon_event(&event);
+            if visible {
+                self.redraw = true;
+            }
+            return;
+        }
         // Help-assistant run traffic (#302): structured agent JSONL
         // events no pane consumes. Route them into the shared help
         // conversation and stop — this must run before the general
@@ -303,6 +315,9 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::PrMergeFailed { .. }
                 | IpcEvent::IssueClosed { .. }
                 | IpcEvent::IssueCloseFailed { .. }
+                | IpcEvent::PrClosed { .. }
+                | IpcEvent::IssueDeleted { .. }
+                | IpcEvent::DeleteOrCloseFailed { .. }
                 | IpcEvent::MergedPrRemovable { .. }
                 | IpcEvent::RepoLabels { .. }
                 | IpcEvent::SessionCreated(_)
@@ -312,6 +327,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::TerminalOutput { .. }
                 | IpcEvent::TerminalResync { .. }
                 | IpcEvent::TerminalResyncUnavailable { .. }
+                | IpcEvent::TerminalScrollback { .. }
                 | IpcEvent::TerminalExited { .. }
                 | IpcEvent::TerminalFocusRequested { .. }
                 | IpcEvent::TerminalsRebadged { .. }
@@ -608,6 +624,42 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
             return;
         }
+        // `g d` reached GitHub and the PR was closed without merging.
+        // Same "flash now, poll reconciles later" contract as the
+        // merge/close notices; the rescope sweep retires the row.
+        if let IpcEvent::PrClosed { pr_label, .. } = &event {
+            self.flash_info(format!("closed {pr_label}"));
+            self.redraw = true;
+            return;
+        }
+        // `g d` reached GitHub and the issue is gone — hard-deleted, or
+        // (when the token lacked the admin rights a delete needs) closed
+        // as not-planned. Name the degradation so "delete" never
+        // silently means "closed, still exists."
+        if let IpcEvent::IssueDeleted {
+            issue_label,
+            fell_back_to_close,
+            ..
+        } = &event
+        {
+            if *fell_back_to_close {
+                self.flash_error(format!(
+                    "delete not permitted — closed {issue_label} as not-planned instead"
+                ));
+            } else {
+                self.flash_info(format!("deleted {issue_label}"));
+            }
+            self.redraw = true;
+            return;
+        }
+        // `g d` reached GitHub and was rejected — nothing was deleted
+        // or closed. Persistent error naming the reason, mirroring
+        // `PrMergeFailed` / `IssueCloseFailed`.
+        if let IpcEvent::DeleteOrCloseFailed { label, reason, .. } = &event {
+            self.flash_error(format!("✗ delete/close failed — {label}: {reason}"));
+            self.redraw = true;
+            return;
+        }
         // The daemon detected a PR merge or an issue close and wants the
         // user to decide whether to remove the workspace + delete its
         // worktree. Queue it onto the shared removal-prompt machinery
@@ -769,6 +821,9 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::PrMergeFailed { .. }
             | IpcEvent::IssueClosed { .. }
             | IpcEvent::IssueCloseFailed { .. }
+            | IpcEvent::PrClosed { .. }
+            | IpcEvent::IssueDeleted { .. }
+            | IpcEvent::DeleteOrCloseFailed { .. }
             | IpcEvent::MergedPrRemovable { .. }
             | IpcEvent::RepoLabels { .. }
             | IpcEvent::SessionCreated(_)
@@ -778,6 +833,7 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::TerminalOutput { .. }
             | IpcEvent::TerminalResync { .. }
             | IpcEvent::TerminalResyncUnavailable { .. }
+            | IpcEvent::TerminalScrollback { .. }
             | IpcEvent::TerminalExited { .. }
             | IpcEvent::TerminalFocusRequested { .. }
             | IpcEvent::TerminalsRebadged { .. }
@@ -927,6 +983,9 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::PrMergeFailed { .. }
                 | IpcEvent::IssueClosed { .. }
                 | IpcEvent::IssueCloseFailed { .. }
+                | IpcEvent::PrClosed { .. }
+                | IpcEvent::IssueDeleted { .. }
+                | IpcEvent::DeleteOrCloseFailed { .. }
                 | IpcEvent::MergedPrRemovable { .. }
                 | IpcEvent::RepoLabels { .. }
                 | IpcEvent::SessionCreated(_)
@@ -936,6 +995,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::TerminalOutput { .. }
                 | IpcEvent::TerminalResync { .. }
                 | IpcEvent::TerminalResyncUnavailable { .. }
+                | IpcEvent::TerminalScrollback { .. }
                 | IpcEvent::TerminalExited { .. }
                 | IpcEvent::TerminalFocusRequested { .. }
                 | IpcEvent::TerminalsRebadged { .. }

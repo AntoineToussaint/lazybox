@@ -54,6 +54,33 @@ const DEFAULT_ROWS: u16 = 32;
 /// 4 KiB is enough to span any prompt the agents have shipped so far.
 pub const RECENT_OUTPUT_CAP: usize = 4 * 1024;
 
+/// DEC private modes carried across a deep-scrollback rebuild
+/// (`apply_scrollback`). The capture replay is content-only, so any
+/// mode the inner program enabled — Claude Code's mouse tracking, an
+/// app's DECCKM / bracketed paste — would be lost with the parser
+/// reset and never re-asserted (tmux believes the client still has
+/// them). Read before the reset, re-fed as `CSI ? <n> h/l` after.
+/// `GRAPHEME_CLUSTER` matters more than most: programs set it once at
+/// startup and it changes how the parser lays out every subsequent
+/// wide char, so losing it would skew emoji/CJK rendering for the rest
+/// of the session.
+const PRESERVED_DEC_MODES: &[vt::terminal::Mode] = &[
+    vt::terminal::Mode::DECCKM,
+    vt::terminal::Mode::CURSOR_VISIBLE,
+    vt::terminal::Mode::X10_MOUSE,
+    vt::terminal::Mode::NORMAL_MOUSE,
+    vt::terminal::Mode::BUTTON_MOUSE,
+    vt::terminal::Mode::ANY_MOUSE,
+    vt::terminal::Mode::FOCUS_EVENT,
+    vt::terminal::Mode::UTF8_MOUSE,
+    vt::terminal::Mode::SGR_MOUSE,
+    vt::terminal::Mode::ALT_SCROLL,
+    vt::terminal::Mode::URXVT_MOUSE,
+    vt::terminal::Mode::SGR_PIXELS_MOUSE,
+    vt::terminal::Mode::BRACKETED_PASTE,
+    vt::terminal::Mode::GRAPHEME_CLUSTER,
+];
+
 /// Cap on the raw bytes buffered for a terminal that isn't currently
 /// on screen. Off-screen terminals defer the (expensive) VT parse and
 /// just stash bytes here; the parser is fed lazily on the first render
@@ -357,6 +384,23 @@ fn classify_scroll_transition(
     }
 }
 
+/// Whether a scroll outcome leaves the viewport at the live bottom —
+/// the signal that ends a deep-scrollback visit and re-arms the fetch
+/// (#393). An empty scrollback is trivially at the bottom.
+fn at_live_bottom(outcome: ScrollOutcome) -> bool {
+    match outcome {
+        ScrollOutcome::NoScrollback { .. } => true,
+        ScrollOutcome::AtBoundary {
+            boundary: ScrollBoundary::Bottom,
+            ..
+        } => true,
+        ScrollOutcome::Moved {
+            offset, total, len, ..
+        } => offset + len >= total,
+        _ => false,
+    }
+}
+
 /// How a mouse-wheel tick over the focused terminal should be handled.
 /// The wheel always means "scroll", but *who* scrolls depends on which
 /// screen the inner program is on and whether it asked for mouse
@@ -499,6 +543,14 @@ pub struct TerminalStack {
     /// tab strip). Only consulted for the automatic layout on
     /// `TerminalSpawned`; explicit `]]|` / `]]-` splits ignore it.
     terminal_new_layout: lazybox_config::NewTerminalLayout,
+    /// Terminal whose deep scrollback should be fetched from the daemon
+    /// (`Command::FetchScrollback`). Armed by `scroll_terminal` /
+    /// `scroll_to_top` when the user scrolls up into local scrollback —
+    /// the local libghostty history of a live full-screen agent holds
+    /// almost nothing (in-place redraws), while tmux has been retaining
+    /// `history-limit` lines the whole time (#393). Drained by the key /
+    /// wheel handlers into an outgoing command.
+    pending_scrollback_fetch: Option<TerminalId>,
 }
 
 /// Records that a terminal's process has exited. Agent terminals keep
@@ -780,6 +832,12 @@ struct TerminalSlot {
     /// dead-on-arrival window; one that never engaged and exited fast is
     /// treated as a failed launch and kept open with a restart (#367).
     did_work: bool,
+    /// A `Command::FetchScrollback` is in flight (or already served)
+    /// for the current scrollback visit. One fetch per visit: armed on
+    /// the first upward scroll, cleared when the viewport returns to
+    /// the bottom, so parking in scrollback never re-resets the grid
+    /// while a fresh visit still re-captures up-to-date history (#393).
+    deep_scrollback_requested: bool,
 }
 
 impl TerminalSlot {
@@ -1141,6 +1199,7 @@ impl TerminalStack {
             closing: HashSet::new(),
             dead_on_arrival: DEFAULT_DEAD_ON_ARRIVAL,
             terminal_new_layout: lazybox_config::NewTerminalLayout::default(),
+            pending_scrollback_fetch: None,
         }
     }
 
@@ -1607,10 +1666,22 @@ impl TerminalStack {
         let Some(id) = self.focused_terminal_id() else {
             return ScrollOutcome::NoTerminal;
         };
-        match self.terminals.get_mut(&id) {
-            Some(slot) => slot.vt.scroll(ScrollRequest::Top),
-            None => ScrollOutcome::NoTerminal,
+        let Some(slot) = self.terminals.get_mut(&id) else {
+            return ScrollOutcome::NoTerminal;
+        };
+        let outcome = slot.vt.scroll(ScrollRequest::Top);
+        // Same deep-scrollback arming as an upward `scroll_terminal`
+        // (#393) — jumping straight to the top is the strongest
+        // possible "show me the history" signal.
+        let alternate = matches!(
+            slot.vt.terminal.active_screen().ok(),
+            Some(vt::screen::Screen::Alternate)
+        );
+        if !alternate && slot.exited.is_none() && !slot.deep_scrollback_requested {
+            slot.deep_scrollback_requested = true;
+            self.pending_scrollback_fetch = Some(id);
         }
+        outcome
     }
 
     /// Jump the focused terminal's viewport to the live bottom.
@@ -1619,10 +1690,14 @@ impl TerminalStack {
         let Some(id) = self.focused_terminal_id() else {
             return ScrollOutcome::NoTerminal;
         };
-        match self.terminals.get_mut(&id) {
-            Some(slot) => slot.vt.scroll(ScrollRequest::Bottom),
-            None => ScrollOutcome::NoTerminal,
-        }
+        let Some(slot) = self.terminals.get_mut(&id) else {
+            return ScrollOutcome::NoTerminal;
+        };
+        let outcome = slot.vt.scroll(ScrollRequest::Bottom);
+        // Back at the live bottom — this scrollback visit is over; see
+        // `scroll_terminal`.
+        slot.deep_scrollback_requested = false;
+        outcome
     }
 
     /// Did the user click on a terminal-tab label? Returns the tab
@@ -1987,9 +2062,48 @@ impl TerminalStack {
     /// focused-terminal wrapper used by keyboard scroll. A zero delta is
     /// reported as [`ScrollOutcome::Noop`].
     pub fn scroll_terminal(&mut self, id: TerminalId, delta: isize) -> ScrollOutcome {
-        match self.terminals.get_mut(&id) {
-            Some(slot) => slot.vt.scroll(ScrollRequest::By(delta)),
-            None => ScrollOutcome::NoTerminal,
+        let Some(slot) = self.terminals.get_mut(&id) else {
+            return ScrollOutcome::NoTerminal;
+        };
+        let outcome = slot.vt.scroll(ScrollRequest::By(delta));
+        let alternate = matches!(
+            slot.vt.terminal.active_screen().ok(),
+            Some(vt::screen::Screen::Alternate)
+        );
+        // Deep-scrollback fetch, one per scrollback visit (#393): the
+        // local grid was fed from the live byte stream, whose in-place
+        // redraws leave almost no scrollback, while the daemon backend
+        // (tmux) has retained the full pane history the whole time —
+        // the same history a restart already seeds from. Arm on the
+        // first upward scroll — even when the local grid has nothing to
+        // move into yet (`NoScrollback`), which is exactly the case the
+        // fetch exists for — but only for live terminals (an exited
+        // pane's backend session is gone). The key / wheel handlers
+        // drain the armed id into `Command::FetchScrollback` and the
+        // reply rebuilds the grid via `apply_scrollback`.
+        if delta < 0 && !alternate {
+            if slot.exited.is_none() && !slot.deep_scrollback_requested {
+                slot.deep_scrollback_requested = true;
+                self.pending_scrollback_fetch = Some(id);
+            }
+        } else if delta > 0 && at_live_bottom(outcome) {
+            // Back at the live bottom — this scrollback visit is over.
+            // The next visit re-fetches so its history is current.
+            slot.deep_scrollback_requested = false;
+        }
+        outcome
+    }
+
+    /// Take the armed deep-scrollback fetch, if any. The caller ships
+    /// it as a `Command::FetchScrollback`.
+    pub fn take_scrollback_fetch(&mut self) -> Option<TerminalId> {
+        self.pending_scrollback_fetch.take()
+    }
+
+    /// Drain the armed deep-scrollback fetch into an outgoing command.
+    fn drain_scrollback_fetch(&mut self, cmds: &mut Vec<Command>) {
+        if let Some(terminal_id) = self.take_scrollback_fetch() {
+            cmds.push(Command::FetchScrollback { terminal_id });
         }
     }
 
@@ -2149,6 +2263,90 @@ impl TerminalStack {
         slot.last_seq = seq;
         slot.desynced = false;
         slot.resync_request_pending = false;
+        // The raw-stream rebuild just replaced any capture-fed deep
+        // scrollback with the ring's shallow history, so the current
+        // scrollback visit's fetch is spent. Release the latch: the
+        // next upward scroll re-fetches instead of scrolling a grid
+        // the resync silently emptied (#393).
+        slot.deep_scrollback_requested = false;
+    }
+
+    /// Rebuild a terminal's grid from the daemon's deep-scrollback
+    /// capture (`Event::TerminalScrollback`, the reply to
+    /// `Command::FetchScrollback`). Same reset-and-refeed shape as
+    /// [`Self::resync_terminal`], with two differences the payload
+    /// forces:
+    ///
+    /// - The capture is content-only (tmux `capture-pane` never emits
+    ///   DECSET), so terminal modes the inner program enabled — mouse
+    ///   tracking, DECCKM, bracketed paste — would silently die with
+    ///   the reset. They're read off the old parser and re-asserted
+    ///   after the feed. The ring-fed resync path doesn't need this:
+    ///   its replay carries the original escape stream.
+    /// - The user is mid-scroll (that's what triggered the fetch), so
+    ///   the viewport's distance from the bottom is restored instead of
+    ///   snapping to the live tail. Distance-from-bottom is the anchor
+    ///   because the rebuild grows the history above, not below.
+    ///
+    /// Skipped on the alternate screen — the capture is primary-pane
+    /// content and the app owns the alt buffer. A desynced slot (mid
+    /// gap-recovery) keeps its flags: the ring resync it already
+    /// requested still arrives and re-feeds the authoritative stream.
+    fn apply_scrollback(&mut self, id: TerminalId, replay: &[u8], seq: u64) {
+        if replay.is_empty() {
+            return;
+        }
+        let Some(slot) = self.terminals.get_mut(&id) else {
+            return;
+        };
+        let t = &slot.vt.terminal;
+        let on_alt_screen = t.mode(vt::terminal::Mode::ALT_SCREEN).unwrap_or(false)
+            || t.mode(vt::terminal::Mode::ALT_SCREEN_SAVE).unwrap_or(false)
+            || t.mode(vt::terminal::Mode::ALT_SCREEN_LEGACY)
+                .unwrap_or(false);
+        if on_alt_screen {
+            return;
+        }
+        let preserved: Vec<(u16, bool)> = PRESERVED_DEC_MODES
+            .iter()
+            .filter_map(|m| t.mode(*m).ok().map(|on| (m.value(), on)))
+            .collect();
+        let dist_from_bottom = t
+            .scrollbar()
+            .ok()
+            .map(|b| b.total.saturating_sub(b.offset + b.len))
+            .unwrap_or(0);
+        if !slot.vt.reset() {
+            return;
+        }
+        slot.vt.feed(replay);
+        let mut modes = Vec::with_capacity(preserved.len() * 8);
+        for (value, on) in preserved {
+            let flag = if on { 'h' } else { 'l' };
+            modes.extend_from_slice(format!("\x1b[?{value}{flag}").as_bytes());
+        }
+        slot.vt.feed(&modes);
+        if dist_from_bottom > 0 {
+            // Through the single scroll owner; the restore is
+            // best-effort (a capture shallower than the old offset
+            // simply lands at the top).
+            let _ = slot.vt.scroll(ScrollRequest::By(
+                -(dist_from_bottom.min(isize::MAX as u64) as isize),
+            ));
+        }
+        // Same bookkeeping as `resync_terminal`: the capture replaces
+        // everything, including any bytes buffered while hidden, and
+        // it re-renders already-emitted output so OSC 52 must not be
+        // re-forwarded.
+        slot.osc52_carry.clear();
+        slot.pending_feed.clear();
+        slot.recent.clear();
+        let tail_start = replay.len().saturating_sub(RECENT_OUTPUT_CAP);
+        slot.recent.extend_from_slice(&replay[tail_start..]);
+        // The capture may lag chunks the client already applied (the
+        // fetch raced live output) — never move the high-water mark
+        // backwards or those chunks would be double-fed on re-delivery.
+        slot.last_seq = slot.last_seq.max(seq);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2184,6 +2382,7 @@ impl TerminalStack {
             exited: None,
             spawned_at: std::time::Instant::now(),
             did_work: false,
+            deep_scrollback_requested: false,
         }
     }
 
@@ -2390,6 +2589,7 @@ impl TerminalStack {
             match key.code {
                 KeyCode::PageUp => {
                     let _outcome = self.scroll_active(-STEP);
+                    self.drain_scrollback_fetch(cmds);
                     return PaneOutcome::Consumed;
                 }
                 KeyCode::PageDown => {
@@ -2398,6 +2598,7 @@ impl TerminalStack {
                 }
                 KeyCode::Home => {
                     let _outcome = self.scroll_to_top();
+                    self.drain_scrollback_fetch(cmds);
                     return PaneOutcome::Consumed;
                 }
                 KeyCode::End => {
@@ -2698,6 +2899,13 @@ impl TerminalStack {
                     slot.desynced = true;
                     slot.resync_request_pending = false;
                 }
+            }
+            Event::TerminalScrollback {
+                terminal_id,
+                replay,
+                seq,
+            } => {
+                self.apply_scrollback(*terminal_id, replay, *seq);
             }
             Event::TerminalFocusRequested { terminal_id } => {
                 // Daemon-driven focus from the singleton guard.
@@ -5131,6 +5339,303 @@ mod resync_tests {
 }
 
 #[cfg(test)]
+mod deep_scrollback_tests {
+    //! Live sessions share the restart path's tmux-history scrollback
+    //! (#393): the first upward scroll arms a `Command::FetchScrollback`
+    //! and the `Event::TerminalScrollback` reply rebuilds the grid with
+    //! the backend's full retained history — while preserving the
+    //! terminal modes and the user's viewport position, which the
+    //! content-only capture cannot carry itself.
+    use super::*;
+
+    fn agent_stack(id: TerminalId, sk: &SessionKey) -> TerminalStack {
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
+            terminal_id: id,
+            session_key: sk.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        stack.set_active_session(Some(sk.clone()));
+        stack
+    }
+
+    /// Feed one coalesced output event covering chunks
+    /// `first_seq..=seq` (a single chunk when they're equal). Chunks
+    /// must be contiguous with the slot's `last_seq` or the gap
+    /// machinery freezes the grid awaiting a resync.
+    fn feed(stack: &mut TerminalStack, id: TerminalId, bytes: &[u8], first_seq: u64, seq: u64) {
+        stack.on_event(&Event::TerminalOutput {
+            terminal_id: id,
+            bytes: bytes.to_vec(),
+            first_seq,
+            seq,
+        });
+    }
+
+    /// A capture-shaped payload: `lines` CRLF-joined history lines and
+    /// a final line without a trailing newline (`normalize_capture`
+    /// parks the cursor at the end of the last line).
+    fn deep_history(lines: usize) -> Vec<u8> {
+        let mut payload = String::new();
+        for i in 0..lines {
+            payload.push_str(&format!("history line {i}\r\n"));
+        }
+        payload.push_str("live bottom");
+        payload.into_bytes()
+    }
+
+    fn scrollbar(stack: &TerminalStack, id: TerminalId) -> vt::terminal::Scrollbar {
+        stack.terminals[&id].vt.terminal.scrollbar().unwrap()
+    }
+
+    fn mode(stack: &TerminalStack, id: TerminalId, mode: vt::terminal::Mode) -> bool {
+        stack.terminals[&id].vt.terminal.mode(mode).unwrap()
+    }
+
+    /// The trigger fires even when the local grid has NO scrollback yet
+    /// — that's exactly the live-agent case the fetch exists for — and
+    /// fires once per visit, not once per wheel notch.
+    #[test]
+    fn scroll_up_arms_one_fetch_per_visit() {
+        let sk = SessionKey::new("s");
+        let mut stack = agent_stack(TerminalId(1), &sk);
+        feed(&mut stack, TerminalId(1), b"a couple\r\nof lines", 1, 1);
+
+        let _ = stack.scroll_active(-3);
+        assert_eq!(stack.take_scrollback_fetch(), Some(TerminalId(1)));
+        let _ = stack.scroll_active(-3);
+        assert_eq!(
+            stack.take_scrollback_fetch(),
+            None,
+            "still in the same scrollback visit — no second fetch"
+        );
+
+        // Scrolling back down to the live bottom ends the visit; the
+        // next upward scroll re-fetches so its history is current.
+        let _ = stack.scroll_active(3);
+        let _ = stack.scroll_active(-1);
+        assert_eq!(stack.take_scrollback_fetch(), Some(TerminalId(1)));
+    }
+
+    /// `Shift-PageUp` through the real key handler ships the command.
+    #[test]
+    fn shift_pageup_ships_the_fetch_command() {
+        let sk = SessionKey::new("s");
+        let mut stack = agent_stack(TerminalId(7), &sk);
+        feed(&mut stack, TerminalId(7), b"some output", 1, 1);
+
+        let mut cmds = Vec::new();
+        stack.handle_key(
+            KeyEvent::new(KeyCode::PageUp, KeyModifiers::SHIFT),
+            &mut cmds,
+        );
+        assert!(
+            matches!(
+                cmds.as_slice(),
+                [Command::FetchScrollback {
+                    terminal_id: TerminalId(7)
+                }]
+            ),
+            "expected a single FetchScrollback, got {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn apply_scrollback_deepens_history_and_adopts_seq() {
+        let sk = SessionKey::new("s");
+        let mut stack = agent_stack(TerminalId(1), &sk);
+        feed(&mut stack, TerminalId(1), b"shallow", 1, 3);
+        let before = scrollbar(&stack, TerminalId(1));
+        assert!(before.total <= before.len, "precondition: no scrollback");
+
+        stack.on_event(&Event::TerminalScrollback {
+            terminal_id: TerminalId(1),
+            replay: deep_history(200),
+            seq: 9,
+        });
+        let after = scrollbar(&stack, TerminalId(1));
+        assert!(
+            after.total > after.len,
+            "capture must open real scrollback: {after:?}"
+        );
+        assert_eq!(stack.terminals[&TerminalId(1)].last_seq, 9);
+    }
+
+    /// The capture is content-only, so the modes the inner program had
+    /// enabled must survive the rebuild — losing mouse tracking here
+    /// would silently break click forwarding for the rest of the
+    /// session (tmux never re-asserts a mode it believes is still set).
+    #[test]
+    fn apply_scrollback_preserves_dec_modes() {
+        let sk = SessionKey::new("s");
+        let mut stack = agent_stack(TerminalId(1), &sk);
+        feed(
+            &mut stack,
+            TerminalId(1),
+            b"\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?25lagent screen",
+            1,
+            1,
+        );
+        assert!(stack.focused_terminal_tracks_mouse(), "precondition");
+
+        stack.on_event(&Event::TerminalScrollback {
+            terminal_id: TerminalId(1),
+            replay: deep_history(100),
+            seq: 2,
+        });
+        assert!(stack.focused_terminal_tracks_mouse());
+        assert!(mode(
+            &stack,
+            TerminalId(1),
+            vt::terminal::Mode::BUTTON_MOUSE
+        ));
+        assert!(mode(&stack, TerminalId(1), vt::terminal::Mode::SGR_MOUSE));
+        assert!(mode(
+            &stack,
+            TerminalId(1),
+            vt::terminal::Mode::BRACKETED_PASTE
+        ));
+        assert!(!mode(
+            &stack,
+            TerminalId(1),
+            vt::terminal::Mode::CURSOR_VISIBLE
+        ));
+        // A mode that was never set stays off.
+        assert!(!mode(&stack, TerminalId(1), vt::terminal::Mode::ANY_MOUSE));
+    }
+
+    /// Grapheme clustering (DEC 2027) is set once at program startup
+    /// and shapes every subsequent wide-char cell layout — of all the
+    /// preserved modes it's the one whose loss would silently skew
+    /// rendering for the rest of the session.
+    #[test]
+    fn apply_scrollback_preserves_grapheme_clustering() {
+        let sk = SessionKey::new("s");
+        let mut stack = agent_stack(TerminalId(1), &sk);
+        feed(&mut stack, TerminalId(1), b"\x1b[?2027hagent screen", 1, 1);
+        assert!(
+            mode(&stack, TerminalId(1), vt::terminal::Mode::GRAPHEME_CLUSTER),
+            "precondition: the inner program enabled mode 2027"
+        );
+
+        stack.on_event(&Event::TerminalScrollback {
+            terminal_id: TerminalId(1),
+            replay: deep_history(100),
+            seq: 2,
+        });
+        assert!(mode(
+            &stack,
+            TerminalId(1),
+            vt::terminal::Mode::GRAPHEME_CLUSTER
+        ));
+    }
+
+    /// A gap resync rebuilds the grid from the RING — replacing any
+    /// capture-fed deep scrollback with the raw stream's shallow one —
+    /// so it must also release the per-visit latch: without that, the
+    /// user's next scroll-up moved a silently emptied grid and no
+    /// re-fetch fired until they bounced off the live bottom.
+    #[test]
+    fn gap_resync_rearms_the_fetch() {
+        let sk = SessionKey::new("s");
+        let mut stack = agent_stack(TerminalId(1), &sk);
+        feed(&mut stack, TerminalId(1), b"some output", 1, 1);
+
+        // First visit: scroll up, fetch armed and taken.
+        let _ = stack.scroll_active(-3);
+        assert_eq!(stack.take_scrollback_fetch(), Some(TerminalId(1)));
+        let _ = stack.scroll_active(-3);
+        assert_eq!(stack.take_scrollback_fetch(), None, "latch held mid-visit");
+
+        // A dropped-chunk resync replaces the grid from the ring.
+        stack.on_event(&Event::TerminalResync {
+            terminal_id: TerminalId(1),
+            replay: b"ring replay".to_vec(),
+            seq: 5,
+        });
+
+        // The rebuilt grid has no deep history — the next upward scroll
+        // must fetch again instead of riding the spent latch.
+        let _ = stack.scroll_active(-3);
+        assert_eq!(stack.take_scrollback_fetch(), Some(TerminalId(1)));
+    }
+
+    /// The fetch fires mid-scroll, so the rebuild must keep the
+    /// viewport where the user parked it (anchored to the bottom, since
+    /// the new history grows above) instead of snapping to the live
+    /// tail.
+    #[test]
+    fn apply_scrollback_keeps_viewport_distance_from_bottom() {
+        let sk = SessionKey::new("s");
+        let mut stack = agent_stack(TerminalId(1), &sk);
+        feed(&mut stack, TerminalId(1), &deep_history(60), 1, 1);
+        let _ = stack.scroll_active(-5);
+        let before = scrollbar(&stack, TerminalId(1));
+        let dist = before.total - before.offset - before.len;
+        assert_eq!(dist, 5, "precondition: parked 5 rows above the bottom");
+
+        stack.on_event(&Event::TerminalScrollback {
+            terminal_id: TerminalId(1),
+            replay: deep_history(300),
+            seq: 2,
+        });
+        let after = scrollbar(&stack, TerminalId(1));
+        assert_eq!(
+            after.total - after.offset - after.len,
+            5,
+            "viewport must stay anchored to the bottom: {after:?}"
+        );
+    }
+
+    /// The capture is primary-screen content; while the inner program
+    /// owns the alternate screen the rebuild must not touch the grid.
+    #[test]
+    fn apply_scrollback_skips_alt_screen() {
+        let sk = SessionKey::new("s");
+        let mut stack = agent_stack(TerminalId(1), &sk);
+        feed(&mut stack, TerminalId(1), b"\x1b[?1049hvim screen", 1, 1);
+
+        stack.on_event(&Event::TerminalScrollback {
+            terminal_id: TerminalId(1),
+            replay: deep_history(100),
+            seq: 9,
+        });
+        assert!(mode(
+            &stack,
+            TerminalId(1),
+            vt::terminal::Mode::ALT_SCREEN_SAVE
+        ));
+        assert_eq!(
+            stack.terminals[&TerminalId(1)].last_seq,
+            1,
+            "an ignored capture must not move the seq high-water mark"
+        );
+    }
+
+    /// A capture that raced live output (its seq lags what the client
+    /// already applied) still rebuilds the grid but never rewinds the
+    /// high-water mark — that would double-feed the newer chunks.
+    #[test]
+    fn apply_scrollback_never_rewinds_last_seq() {
+        let sk = SessionKey::new("s");
+        let mut stack = agent_stack(TerminalId(1), &sk);
+        feed(&mut stack, TerminalId(1), b"newer output", 1, 9);
+
+        stack.on_event(&Event::TerminalScrollback {
+            terminal_id: TerminalId(1),
+            replay: deep_history(100),
+            seq: 5,
+        });
+        assert_eq!(stack.terminals[&TerminalId(1)].last_seq, 9);
+        let after = scrollbar(&stack, TerminalId(1));
+        assert!(after.total > after.len, "grid still rebuilt: {after:?}");
+    }
+}
+
+#[cfg(test)]
 mod hidden_feed_tests {
     //! Off-screen terminals must not pay the VT-parse cost per chunk.
     //! Output that arrives while a terminal isn't displayed is buffered
@@ -5505,7 +6010,13 @@ mod footer_scroll_independence {
             matches!(outcome, PaneOutcome::Consumed),
             "scroll is consumed"
         );
-        assert!(cmds.is_empty(), "keyboard scroll is a pure in-process move");
+        // The viewport move itself is in-process; the only allowed
+        // side effect is the deep-scrollback fetch (#393) — never a
+        // PTY write.
+        assert!(
+            !cmds.iter().any(|c| matches!(c, Command::Write { .. })),
+            "keyboard scroll must not write to the PTY: {cmds:?}"
+        );
         let scrolled = offset(&stack);
         assert!(
             scrolled < bottom,
@@ -5581,7 +6092,13 @@ mod footer_scroll_independence {
             bottom,
             "Shift-End returns to the live bottom"
         );
-        assert!(cmds.is_empty(), "keyboard scroll is a pure in-process move");
+        // The viewport moves are in-process; the only allowed side
+        // effect is the deep-scrollback fetch (#393) — never a PTY
+        // write.
+        assert!(
+            !cmds.iter().any(|c| matches!(c, Command::Write { .. })),
+            "keyboard scroll must not write to the PTY: {cmds:?}"
+        );
     }
 
     #[test]

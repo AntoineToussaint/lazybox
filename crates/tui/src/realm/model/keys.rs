@@ -1551,6 +1551,14 @@ impl<T: TerminalAdapter> Model<T> {
                             LOCAL_WHEEL_STEP
                         };
                         let _outcome = self.terminals.scroll_terminal(target, delta);
+                        // First upward scroll of a visit arms a deep-
+                        // scrollback fetch — the daemon replies with the
+                        // backend's retained history (tmux capture-pane)
+                        // so a live session scrolls as deep as a
+                        // restarted one (#393).
+                        if let Some(terminal_id) = self.terminals.take_scrollback_fetch() {
+                            self.send_cmd(IpcCommand::FetchScrollback { terminal_id });
+                        }
                         self.redraw = true;
                     }
                 }
@@ -1683,6 +1691,7 @@ pub(super) fn action_from_kind(
         ActionKind::AddAssignees => Action::AddAssignees,
         ActionKind::ManageLabels => Action::ManageLabels,
         ActionKind::OpenInBrowser => Action::OpenInBrowser,
+        ActionKind::DeleteOrClose => Action::DeleteOrClose,
         // Activity-pane cursor jumps (`g` / `Shift-G` under Right
         // focus). Dispatching these through the catalog is what keeps
         // a reflexive `g` in the activity pane from arming the

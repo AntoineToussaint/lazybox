@@ -286,6 +286,9 @@ fn all_commands() -> Vec<Command> {
         Command::CloseIssue {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
         },
+        Command::DeleteOrClose {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
+        },
         Command::RequestReviewers {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
             logins: vec!["octocat".into()],
@@ -398,6 +401,20 @@ fn all_events() -> Vec<Event> {
         Event::IssueCloseFailed {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
             issue_label: "o/r#1".into(),
+            reason: "permission denied".into(),
+        },
+        Event::PrClosed {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            pr_label: "o/r#2".into(),
+        },
+        Event::IssueDeleted {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
+            issue_label: "o/r#1".into(),
+            fell_back_to_close: true,
+        },
+        Event::DeleteOrCloseFailed {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
+            label: "o/r#1".into(),
             reason: "permission denied".into(),
         },
         Event::MergedPrRemovable {
@@ -694,6 +711,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::AdoptSessions { .. } => "AdoptSessions",
         Command::MergePr { .. } => "MergePr",
         Command::CloseIssue { .. } => "CloseIssue",
+        Command::DeleteOrClose { .. } => "DeleteOrClose",
         Command::RequestReviewers { .. } => "RequestReviewers",
         Command::AddAssignees { .. } => "AddAssignees",
         Command::SetAssignees { .. } => "SetAssignees",
@@ -735,6 +753,9 @@ fn event_tag(event: &Event) -> &'static str {
         Event::PrMergeFailed { .. } => "PrMergeFailed",
         Event::IssueClosed { .. } => "IssueClosed",
         Event::IssueCloseFailed { .. } => "IssueCloseFailed",
+        Event::PrClosed { .. } => "PrClosed",
+        Event::IssueDeleted { .. } => "IssueDeleted",
+        Event::DeleteOrCloseFailed { .. } => "DeleteOrCloseFailed",
         Event::MergedPrRemovable { .. } => "MergedPrRemovable",
         Event::RepoLabels { .. } => "RepoLabels",
         Event::SessionCreated(_) => "SessionCreated",
@@ -784,12 +805,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         (lazybox_ipc::PROTOCOL_VERSION, command_tags.len()),
-        (12, 52),
+        (13, 53),
         "Command gained/lost a variant: update the exhaustive tag, add a sample, and bump PROTOCOL_VERSION",
     );
     assert_eq!(
         (lazybox_ipc::PROTOCOL_VERSION, event_tags.len()),
-        (12, 51),
+        (13, 54),
         "Event gained/lost a variant: update the exhaustive tag, add a sample, and bump PROTOCOL_VERSION",
     );
 }

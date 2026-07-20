@@ -1691,6 +1691,7 @@ pub(super) fn action_from_kind(
         ActionKind::AddAssignees => Action::AddAssignees,
         ActionKind::ManageLabels => Action::ManageLabels,
         ActionKind::OpenInBrowser => Action::OpenInBrowser,
+        ActionKind::DeleteOrClose => Action::DeleteOrClose,
         // Activity-pane cursor jumps (`g` / `Shift-G` under Right
         // focus). Dispatching these through the catalog is what keeps
         // a reflexive `g` in the activity pane from arming the

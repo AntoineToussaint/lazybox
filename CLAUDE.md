@@ -255,7 +255,10 @@ own PR, no conflicts, no changes requested; only while lazybox runs),
 listing merge-on-green, per-session auto-fix arm/disarm, and
 GitHub-native auto-merge status for the focused PR/issue, each toggled
 in place; #363), `g v` reviewers, `g a` assignees, `g l` labels,
-`g o` open in browser — leader chords only, the legacy
+`g o` open in browser, `g d` delete issue / close PR (confirmed
+first, naming the target; an issue is hard-deleted when the token
+has admin rights, else closed as not-planned with a notice; a PR is
+closed without merging; #408) — leader chords only, the legacy
 `Shift-{M,V,G,L,O}` direct aliases are gone (#304). Armed policies
 surface as row pills (`ARM` merge-on-green, `FIX` auto-fix); the
 per-session auto-fix arm/disarm overrides the global `no-auto-fix` /

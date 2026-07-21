@@ -77,7 +77,6 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
             input.filters.accepts(&FilterCtx {
                 w,
                 agents: input.agents,
-                now: input.now,
             })
         })
         // Scoped free-text search: only the matching project's rows
@@ -142,9 +141,12 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
     // (daemon-mirrored + scope-synthesized) projects map gets a
     // header in the Inbox mailbox, so an empty project still shows
     // up. Omitted from Inactive / Snoozed (alternate views, not
-    // subscriptions).
+    // subscriptions), and omitted while a filter is active — a
+    // narrowed view listing every subscribed repo as an empty header
+    // buries the few matches behind a wall of chrome, so under a
+    // filter only repos with matching workspaces get a header.
     let mut all_repos: BTreeSet<String> = by_repo.keys().cloned().collect();
-    if input.mailbox == Mailbox::Inbox {
+    if input.mailbox == Mailbox::Inbox && input.filters.is_empty() {
         all_repos.extend(input.projects.values().map(|p| p.display_name()));
     }
 
@@ -280,6 +282,7 @@ fn is_subsequence(haystack: &str, needle: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::components::sidebar::Filter;
     use chrono::{Duration, TimeZone, Utc};
     use lazybox_core::{
         CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace, WorkspaceKey,
@@ -479,6 +482,33 @@ mod tests {
         let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
         assert_eq!(out.visible.len(), 1);
         assert!(matches!(&out.visible[0], VisibleRow::RepoHeader(name) if name == "owner/empty"));
+    }
+
+    /// With a filter active, an empty subscribed project does NOT emit
+    /// a header — a narrowed view shouldn't list every repo as an
+    /// empty header burying the matches (issue #443 review).
+    #[test]
+    fn active_filter_suppresses_empty_project_headers() {
+        let ws = HashMap::new();
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let asking = HashMap::new();
+        let mut projects = BTreeMap::new();
+        let pk = ProjectKey::github("owner", "empty");
+        projects.insert(
+            pk.clone(),
+            Project::new(pk, "owner/empty", chrono::Utc::now()),
+        );
+        let mut filters = FilterSet::default();
+        filters.toggle(Filter::Author);
+        let mut i = inputs(&ws, &sub, &col, &att, &asking, &projects);
+        i.filters = &filters;
+        let out = compute_visible(i);
+        assert!(
+            out.visible.is_empty(),
+            "empty project header suppressed under an active filter"
+        );
     }
 
     /// A project whose stored `name` is the raw key (the legacy

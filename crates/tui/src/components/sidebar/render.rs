@@ -176,8 +176,17 @@ impl Sidebar {
             let key_style = active_style;
 
             let filter_prefix = "f ";
+            // Collapse past two chips to `a, b, +N` so a wide active
+            // set can't push the sort chip off the row or truncate a
+            // label mid-word — the full set is one `f` away.
             let filter_chip = if filter_active {
-                format!("[{}]", self.filters.chips().join(", "))
+                let chips = self.filters.chips();
+                let shown = if chips.len() <= 2 {
+                    chips.join(", ")
+                } else {
+                    format!("{}, +{}", chips[..2].join(", "), chips.len() - 2)
+                };
+                format!("[{shown}]")
             } else {
                 "[filter]".to_string()
             };

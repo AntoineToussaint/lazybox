@@ -1244,7 +1244,6 @@ impl Sidebar {
                         f.matches(&FilterCtx {
                             w,
                             agents: &self.agents,
-                            now,
                         })
                     })
                     .count();

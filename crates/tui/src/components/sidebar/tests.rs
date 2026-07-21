@@ -1006,11 +1006,7 @@ mod filter_tests {
         w: &'a Workspace,
         agents: &'a HashMap<SessionKey, lazybox_ipc::AgentState>,
     ) -> FilterCtx<'a> {
-        FilterCtx {
-            w,
-            agents,
-            now: chrono::Utc::now(),
-        }
+        FilterCtx { w, agents }
     }
 
     #[test]
@@ -1033,6 +1029,28 @@ mod filter_tests {
             let _ = f.axis();
             assert!(!f.label().is_empty());
         }
+    }
+
+    #[test]
+    fn filter_all_groups_axes_into_contiguous_runs() {
+        // The menu prints a section header only when the axis changes
+        // between adjacent rows, so an interleaved ALL would render
+        // duplicate `State`/`Role` headers. Assert each axis forms one
+        // contiguous run: no axis reappears after a different one.
+        let mut runs: Vec<FilterAxis> = Vec::new();
+        for f in Filter::ALL {
+            if runs.last() != Some(&f.axis()) {
+                runs.push(f.axis());
+            }
+        }
+        let mut distinct = runs.clone();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(
+            runs.len(),
+            distinct.len(),
+            "an axis reappears after another — ALL is interleaved: {runs:?}"
+        );
     }
 
     #[test]
@@ -1742,6 +1760,38 @@ mod broadcast_select_tests {
         assert!(
             screen.contains('✓'),
             "selected row must show the ✓ mark:\n{screen}",
+        );
+    }
+
+    /// Three+ active filters collapse to `a, b, +N` in the header so
+    /// the chip can't push the sort chip off the row (issue #443
+    /// review). The sort chip stays visible.
+    #[test]
+    fn many_active_filters_collapse_with_plus_n_and_keep_sort_chip() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut sb = sidebar_with_issues(&[("1", "Alpha"), ("2", "Beta")]);
+        sb.set_filters([Filter::Author, Filter::Reviewer, Filter::Assignee]);
+        let backend = TestBackend::new(60, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| sb.render(f.area(), f, true))
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        let mut screen = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                screen.push_str(buffer[(x, y)].symbol());
+            }
+            screen.push('\n');
+        }
+        assert!(
+            screen.contains("+1"),
+            "3 filters should collapse the 3rd into `+1`:\n{screen}",
+        );
+        assert!(
+            screen.contains("[split]"),
+            "the sort chip must stay on the row:\n{screen}",
         );
     }
 }

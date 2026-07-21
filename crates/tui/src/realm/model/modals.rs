@@ -467,14 +467,15 @@ impl<T: TerminalAdapter> Model<T> {
         let items: Vec<Filter> = Filter::ALL.to_vec();
         self.filter_choices = items.clone();
         let active_for_check = active.clone();
-        let modal = Choice::multi("Space toggles · Enter applies", items)
-            .title("Filters (AND across State/Role/Kind)")
-            .section_for(|f: &Filter| f.axis().label())
-            .label(move |f: &Filter| {
-                format!("{} ({})", f.label(), counts.get(f).copied().unwrap_or(0))
-            })
-            .with_selected_by(move |f: &Filter| active_for_check.contains(f))
-            .allow_empty(true);
+        let modal = Choice::multi(
+            "Space toggles · Enter applies · same section = any (OR), across sections = all (AND)",
+            items,
+        )
+        .title("Filters")
+        .section_for(|f: &Filter| f.axis().label())
+        .label(move |f: &Filter| format!("{} ({})", f.label(), counts.get(f).copied().unwrap_or(0)))
+        .with_selected_by(move |f: &Filter| active_for_check.contains(f))
+        .allow_empty(true);
         self.mount_modal(Id::FilterMenu, modal);
     }
 

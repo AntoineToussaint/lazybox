@@ -46,7 +46,10 @@ impl FilterAxis {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Filter {
     // ── State ──────────────────────────────────────────────────────
-    /// Workspace has a coding-agent session.
+    /// Workspace has a coding-agent session. Matches on the recorded
+    /// session (same source as the `]]<digit>` agent-jump list), not
+    /// on a currently-live PTY — a workspace with a dormant agent
+    /// session still matches even when its runner badge is dark.
     WithAgent,
     /// Primary task's CI is failing or mixed.
     CiFailing,
@@ -164,12 +167,11 @@ impl Filter {
 }
 
 /// Everything [`Filter::matches`] needs beyond the workspace itself:
-/// the sidebar-local agent-state map (for the `asking` predicate) and
-/// the reference clock. Bundled so the predicate stays a pure function.
+/// the sidebar-local agent-state map (for the `asking` predicate).
+/// Bundled so the predicate stays a pure function.
 pub struct FilterCtx<'a> {
     pub w: &'a Workspace,
     pub agents: &'a HashMap<SessionKey, lazybox_ipc::AgentState>,
-    pub now: chrono::DateTime<chrono::Utc>,
 }
 
 /// The active set of filters. Empty (the default) is a no-op that
@@ -198,13 +200,9 @@ impl FilterSet {
         }
     }
 
-    /// Replace the whole set with `filters`.
+    /// Replace the whole set with `filters` (an empty iterator clears).
     pub fn replace(&mut self, filters: impl IntoIterator<Item = Filter>) {
         self.active = filters.into_iter().collect();
-    }
-
-    pub fn clear(&mut self) {
-        self.active.clear();
     }
 
     /// Active filters in [`Filter::ALL`] (menu) order.

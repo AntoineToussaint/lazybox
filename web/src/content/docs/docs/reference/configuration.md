@@ -127,7 +127,6 @@ scan:
 terminal:
   escape_char: "]"           # press twice to open the terminal command menu
   escape_window_ms: 600      # window between the two presses
-  native_scrollback: true    # keep scrollback in the lazybox client
   agent_dead_on_arrival_ms: 10000 # preserve fast/failed exits for inspection
 
 # ── ui ───────────────────────────────────────────────────────────────
@@ -292,7 +291,6 @@ How you exit an embedded terminal back to the inbox, and how scrollback works.
 | --- | --- | --- | --- |
 | `escape_char` | char | `]` | Press twice to open the non-timed terminal command menu (`q` then exits to the sidebar) |
 | `escape_window_ms` | int | `600` | Time window between the two `escape_char` presses |
-| `native_scrollback` | bool | `true` | Keep scrollback local to the lazybox client so the wheel / `Shift-PageUp` scroll instantly. Set `false` to let tmux own the alternate screen. |
 | `agent_dead_on_arrival_ms` | int | `10000` | Grace period in milliseconds: an agent that exits cleanly before engaging is treated as failed-to-start and its final screen stays open with a restart affordance. Non-zero/signal exits are always preserved. |
 
 ## `ui`

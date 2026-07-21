@@ -79,9 +79,7 @@ should move and always returns a typed `ScrollOutcome`:
 
 - `Moved { from, offset, total, len }` — the viewport demonstrably
   moved; `from != offset` is guaranteed by the owner.
-- `NoScrollback { alternate }` — `total <= len`: there is nothing to
-  scroll into. `alternate` flags an alt-screen program that owns its own
-  buffer (its scrollback is intentionally empty).
+- `NoScrollback` — `total <= len`: there is nothing to scroll into.
 - `AtBoundary { boundary, ... }` — the viewport was already at the top
   or live bottom requested.
 - `Noop` — an explicit `By(0)` request.
@@ -109,11 +107,8 @@ the cursor (landed on `main` as #377, this effort absorbs it):
   tab strip, a divider, the accent seam) — where the wheel falls back to
   the focused tile. Recording the real rendered rects avoids re-deriving
   the split geometry and can't drift from what was drawn.
-- The wheel handler routes the primary-vs-alt-screen decision
-  (`wheel_route_for(id)`), the local scroll (`scroll_terminal(id, delta)`),
-  and any SGR/arrow forward (`encode_mouse_for(id, …)`) all at that
-  terminal, so the route, the scroll, and the forwarded report name the
-  same tile.
+- The wheel handler calls `scroll_terminal(id, delta)` for that terminal.
+  Screen mode and mouse tracking never redirect the gesture into the app.
 - The keyboard path stays focus-directed — it has no pointer.
 
 The scroll *mutation* for every one of those still funnels through the
@@ -131,19 +126,15 @@ no-silent-no-op guarantee compose rather than fight.
 - **`\x1b[3J`** (erase-scrollback) from the inner program legitimately
   empties scrollback → the next scroll reports `NoScrollback`. Not a bug.
 
-## Wheel routing (primary vs. alt-screen)
+## Wheel ownership
 
-`wheel_route_for` decides, off the target terminal:
-
-- **Primary screen → `LocalScrollback` always.** A primary-screen program
-  owns no pager, so the wheel is lazybox's scrollback from the first frame
-  of a fresh spawn — even before history accumulates and even if the app
-  tracks the mouse for clicks (Claude Code). Gating this on
-  `total > len`, as an earlier fix did, is what broke fresh agents (#360):
-  an empty scrollback is not a reason to hand the wheel away.
-- **Alt-screen + mouse tracking → `ForwardSgr`** (the app scrolls).
-- **Alt-screen, no mouse tracking → `AlternateScrollArrows`** (synthesised
-  arrow keys, xterm `alternateScroll`).
+The wheel always belongs to lazybox's terminal history. Screen mode and mouse
+tracking affect rendering and clicks, not scrolling. The tmux backend rejects
+alternate-screen requests at the pane boundary so full-screen programs still
+write into retained pane history; its attach client also stays on the primary
+screen so the same output accumulates in libghostty scrollback. An upward wheel
+can fetch the backend's deeper `capture-pane` history, but it never writes SGR
+mouse reports or synthesized keys into the inner program.
 
 ## The regression harness
 
@@ -155,7 +146,7 @@ real entry points:
 - Fresh and reattach reach identical scroll state.
 - Split tiles — scrolling a non-focused tile leaves the focused one put
   (#362); the keyboard scrolls the focused tile.
-- Alt-screen vs. normal screen.
+- Empty local history vs. populated history.
 - No silent no-op: actual before/after offsets for movement, typed
   boundary/empty/no-op reasons, and a `Stalled` result for an unexpected
   unchanged offset.

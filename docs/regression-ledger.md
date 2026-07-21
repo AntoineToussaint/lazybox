@@ -14,7 +14,7 @@ Conventions: *real shape* = real subprocesses / captured real bytes /
 full serve loop; *unit* = mocked or synthetic but structurally honest
 about it.
 
-## Scrolling / scrollback (#306, #321, #360, #362, #371, #393, #420)
+## Scrolling / scrollback (#306, #321, #360, #362, #371, #393, #420, #445)
 
 | guard | shape it covers |
 |---|---|
@@ -37,6 +37,9 @@ about it.
 | `crates/server/tests/tmux_restart.rs::alt_screen_request_is_denied_so_agent_history_is_retained` | the root cause behind "scrollback dead on Claude": Claude ≥2.1 takes the pane to the alternate screen, which retains ZERO tmux history — the conf now denies it (real tmux, Claude-shaped smcup + output) |
 | `crates/server/tests/tmux_restart.rs::alt_screen_pane_serves_no_deep_scrollback` | a pane already on the alt screen (pre-fix server config) must fetch `None`, not a one-screen capture |
 | `crates/tui/src/components/terminal_stack.rs::shallow_capture_never_shrinks_the_grid` | "scrollbar disappears as soon as I start scrolling" — a rebuild that isn't strictly deeper than the current grid is a no-op |
+| `crates/server/tests/tmux_restart.rs::alt_screen_agent_retains_scrollable_history` | #445, **real shape** — an older tmux server is healed before a Claude-shaped spawn, whose smcup request still produces retained, fetchable history |
+| `crates/tui/src/realm/model/tests.rs::wheel_never_forwards_to_alt_screen_mouse_tracking_agent` | #445 — alt-screen and mouse modes cannot turn a wheel into PTY input |
+| `crates/tui/src/realm/model/tests.rs::codex_and_claude_scroll_retained_history_locally` | #445 — primary-screen Codex and reconstructed alt-screen Claude both move the same lazybox viewport |
 
 **Narrowed gap (#393):** live-vs-restart *fidelity equivalence* — the
 capture path drops OSC 8 hyperlinks and flattens soft wraps relative to

@@ -127,6 +127,16 @@ pub struct DaemonPty {
     exit_watch: watch::Receiver<Option<Option<i32>>>,
     /// Latest assigned seq. Reader thread increments.
     last_seq: Arc<AtomicU64>,
+    /// Durable reattach seed (e.g. tmux capture-pane history handed in
+    /// at spawn). Kept OUT of the evictable replay ring: as ring chunk
+    /// 1 it was silently evicted once live churn wrapped the ring, so
+    /// the first resync/snapshot after that rebuilt clients WITHOUT
+    /// their reattach scrollback (#420). `snapshot_only` prepends it to
+    /// every ring snapshot instead, so it survives arbitrary churn.
+    /// Empty when the PTY was spawned unseeded. Bounded by the
+    /// backend's capture (tmux `history-limit` lines) and held for the
+    /// PTY's lifetime.
+    seed: Arc<[u8]>,
     /// Captured at spawn time so `kill()` can SIGTERM the child even
     /// after `child` has been moved into the wait thread. `None` when
     /// portable-pty couldn't read the pid (rare; emits a warn).
@@ -217,9 +227,16 @@ impl ReplayRing {
     /// one contiguous allocation on demand.
     pub fn snapshot(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.buf.len());
+        self.snapshot_into(&mut out);
+        out
+    }
+
+    /// Append everything currently stored, oldest byte first, to `out`
+    /// — the allocation-free form of [`Self::snapshot`] for callers
+    /// assembling a larger replay (the durable seed prefix, #420).
+    pub fn snapshot_into(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&self.buf[self.head..]);
         out.extend_from_slice(&self.buf[..self.head]);
-        out
     }
 
     pub fn len(&self) -> usize {
@@ -258,12 +275,13 @@ impl DaemonPty {
     /// back to degraded or no color (#421). The vendored libghostty-vt
     /// parser handles 24-bit SGR regardless of the hosting terminal.
     ///
-    /// `initial` pre-seeds the replay ring: a (re)attaching client
-    /// rebuilds its VT grid — scrollback included — purely from the
-    /// ring, so a caller with history that predates this PTY (e.g. tmux
-    /// scrollback that survived a daemon restart) hands it in here to be
-    /// replayed ahead of the live stream. Pass `&[]` when there's
-    /// nothing to seed.
+    /// `initial` seeds the replay: a (re)attaching client rebuilds its
+    /// VT grid — scrollback included — purely from the snapshot, so a
+    /// caller with history that predates this PTY (e.g. tmux scrollback
+    /// that survived a daemon restart) hands it in here to be replayed
+    /// ahead of the live stream. Stored in a durable slot outside the
+    /// evictable ring (#420) and prepended to every snapshot. Pass
+    /// `&[]` when there's nothing to seed.
     pub fn spawn(
         cmd: &[String],
         size: PtySize,
@@ -336,17 +354,17 @@ impl DaemonPty {
             .map_err(|e| PtyError::Open(e.to_string()))?;
 
         let (output_tx, _) = broadcast::channel::<OutputChunk>(BROADCAST_CAPACITY);
-        // Seed the ring before wrapping it: the seed becomes chunk seq 1,
-        // so the reader thread's first live chunk is seq 2 and a
-        // subscribe snapshot replays the seed ahead of live bytes. Seeded
-        // directly on the owned ring — no lock, and no risk of a
-        // `blocking_lock` panic on this tokio worker thread.
-        let mut ring_buf = ReplayRing::with_capacity(REPLAY_RING_BYTES);
-        let seeded = !initial.is_empty();
-        if seeded {
-            ring_buf.push(initial);
-        }
-        let ring = Arc::new(Mutex::new(ring_buf));
+        // The seed still counts as chunk seq 1 — the reader thread's
+        // first live chunk is seq 2 and a subscribe snapshot replays the
+        // seed ahead of live bytes — but it does NOT live in the ring:
+        // as ring chunk 1 it consumed the eviction budget and vanished
+        // once live churn wrapped the ring, taking every later
+        // resync/snapshot's reattach scrollback with it (#420). The
+        // durable slot keeps it out of eviction's reach and leaves the
+        // full ring capacity to live output.
+        let seed: Arc<[u8]> = Arc::from(initial);
+        let seeded = !seed.is_empty();
+        let ring = Arc::new(Mutex::new(ReplayRing::with_capacity(REPLAY_RING_BYTES)));
         let finished = Arc::new(AtomicBool::new(false));
         let finished_notify = Arc::new(Notify::new());
         let last_seq = Arc::new(AtomicU64::new(u64::from(seeded)));
@@ -439,6 +457,7 @@ impl DaemonPty {
             finished_notify,
             exit_watch,
             last_seq,
+            seed,
             child_pid,
         })
     }
@@ -520,14 +539,25 @@ impl DaemonPty {
         }
     }
 
-    /// Just the ring snapshot + last_seq, no new broadcast subscriber.
+    /// Just the replay snapshot + last_seq, no new broadcast subscriber.
     /// Used by `Subscribe` snapshot path so reconnecting `--connect`
     /// clients can reconstruct their terminals without leaking a
     /// drainless broadcast receiver + pump task per snapshot call.
+    ///
+    /// The durable reattach seed (when present) is prepended ahead of
+    /// the ring bytes on EVERY call — it sits outside the ring, so no
+    /// amount of live churn evicts it and resyncs never shrink the
+    /// reattach scrollback (#420). `complete` covers only the live
+    /// stream: true while the ring still holds every byte the reader
+    /// emitted since spawn. The seed is that stream's baseline, so
+    /// seed + complete ring remains an authoritative VT reset.
     pub async fn snapshot_only(&self) -> crate::backend::ReplaySnapshot {
         let ring = self.ring.lock().await;
+        let mut replay = Vec::with_capacity(self.seed.len() + ring.len());
+        replay.extend_from_slice(&self.seed);
+        ring.snapshot_into(&mut replay);
         crate::backend::ReplaySnapshot {
-            replay: ring.snapshot(),
+            replay,
             last_seq: self.last_seq.load(Ordering::SeqCst),
             complete: ring.is_complete(),
         }
@@ -923,6 +953,148 @@ mod seed_tests {
             sub.last_seq >= 2,
             "seed is seq 1, live chunks continue from 2 (last_seq={})",
             sub.last_seq
+        );
+    }
+
+    /// Regression for #420: the reattach seed must survive ring churn.
+    /// It used to live only as ring chunk seq 1, so once live output
+    /// wrapped the ring's byte budget the seed was evicted and every
+    /// later resync/snapshot rebuilt clients WITHOUT their reattach
+    /// scrollback ("scroll a bit, then it disappears"). A snapshot
+    /// taken after the child pushed more than the ring's capacity must
+    /// still replay the seed first.
+    #[tokio::test]
+    async fn seed_survives_ring_churn_past_capacity() {
+        // ~2.6 MiB of live output (40k lines × 66 bytes after the PTY's
+        // LF→CRLF translation) — comfortably past REPLAY_RING_BYTES.
+        let line = "x".repeat(64);
+        let pty = DaemonPty::spawn(
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                format!("yes {line} | head -n 40000; printf churn-tail-marker"),
+            ],
+            small(),
+            None,
+            Vec::new(),
+            b"seeded-history\r\n",
+        )
+        .expect("spawn");
+        pty.wait_finished().await;
+
+        let snap = pty.snapshot_only().await;
+        assert!(
+            snap.replay.starts_with(b"seeded-history\r\n"),
+            "the reattach seed must survive live churn past the ring capacity"
+        );
+        assert!(
+            String::from_utf8_lossy(&snap.replay).contains("churn-tail-marker"),
+            "the retained ring tail must still follow the seed"
+        );
+        assert!(
+            !snap.complete,
+            "live bytes were evicted — the snapshot must not claim a complete live stream"
+        );
+    }
+
+    /// Regression for #420 (companion): a large seed must not consume
+    /// the ring's live-byte budget. When the seed was ring chunk 1, a
+    /// capture near the ring capacity left almost no room for live
+    /// output, so the first flurry of bytes evicted the seed and
+    /// flipped every snapshot incomplete — resyncs went unavailable
+    /// moments after reattach. With the durable slot the whole ring
+    /// budget belongs to live output: the snapshot stays complete and
+    /// the seed intact.
+    #[tokio::test]
+    async fn large_seed_leaves_full_ring_budget_for_live_output() {
+        let seed = vec![b'H'; REPLAY_RING_BYTES - 1024];
+        // ~6.6 KiB of live output — trivial for a 2 MiB ring, but more
+        // than the 1 KiB the seed used to leave of it, so this fails if
+        // the seed ever counts against the ring budget again.
+        let line = "x".repeat(64);
+        let pty = DaemonPty::spawn(
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                format!("yes {line} | head -n 100; printf live-bytes"),
+            ],
+            small(),
+            None,
+            Vec::new(),
+            &seed,
+        )
+        .expect("spawn");
+        pty.wait_finished().await;
+
+        let snap = pty.snapshot_only().await;
+        assert!(
+            snap.complete,
+            "live output far under the ring capacity must stay complete \
+             regardless of seed size"
+        );
+        assert!(
+            snap.replay.starts_with(&seed[..]),
+            "the full seed must lead the snapshot"
+        );
+        assert!(
+            String::from_utf8_lossy(&snap.replay).contains("live-bytes"),
+            "live output must follow the seed"
+        );
+    }
+
+    /// Regression for #420's follow-up comment: the durable seed must
+    /// hold while the agent sits on the ALTERNATE screen (full-screen
+    /// TUIs — Claude/Codex). The reported collapse — history paints
+    /// briefly on reattach, then drops to ~2 lines the moment the
+    /// alt-screen VT reasserts — combined the volatile seed with an alt
+    /// screen that owns no primary scrollback. The daemon half fixed
+    /// here is screen-agnostic and must stay that way: with the child
+    /// parked on the alt screen, every snapshot still replays the seed
+    /// first and stays complete (resync-servable), so no interaction
+    /// can rebuild a client without its reattach history. (Pane-level
+    /// alt-screen denial is #393 / PR #427; this pins that no screen
+    /// mode bypasses the durable slot.)
+    #[tokio::test]
+    async fn seed_survives_while_child_holds_the_alt_screen() {
+        let pty = DaemonPty::spawn(
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                // Enter the alternate screen, repaint like a TUI, and
+                // exit while still holding it — the shape reattach sees
+                // when a full-screen agent owns the pane.
+                "printf '\\033[?1049h'; yes 'painting the alt screen' | head -n 200; \
+                 printf alt-screen-tail"
+                    .to_string(),
+            ],
+            small(),
+            None,
+            Vec::new(),
+            b"seeded-history\r\n",
+        )
+        .expect("spawn");
+        pty.wait_finished().await;
+
+        let snap = pty.snapshot_only().await;
+        assert!(
+            snap.replay.starts_with(b"seeded-history\r\n"),
+            "the seed must lead the snapshot even with the child on the alt screen"
+        );
+        let after_seed = &snap.replay[b"seeded-history\r\n".len()..];
+        assert!(
+            after_seed
+                .windows(b"\x1b[?1049h".len())
+                .any(|w| w == b"\x1b[?1049h"),
+            "the alt-screen switch must replay AFTER the seed, so a rebuilt \
+             client keeps the seed as its scrollback baseline"
+        );
+        assert!(
+            String::from_utf8_lossy(&snap.replay).contains("alt-screen-tail"),
+            "live alt-screen output must follow the seed"
+        );
+        assert!(
+            snap.complete,
+            "modest alt-screen churn must leave the snapshot resync-servable"
         );
     }
 

@@ -1,7 +1,14 @@
 //! Bakes the git short SHA of the build into `LAZYBOX_BUILD_SHA` so the
 //! connection handshake can detect a daemon and client compiled from
-//! different commits — a mismatch that `PROTOCOL_VERSION` alone can't
+//! different commits — a mismatch the wire fingerprint alone can't
 //! catch when the wire format hasn't changed.
+//!
+//! Also derives `LAZYBOX_PROTOCOL_FINGERPRINT`: a hash of every
+//! wire-defining input — this crate's sources, `lazybox-core`'s (its
+//! types ride inside events), and the workspace lockfile (the byte
+//! encoding also depends on the serde/bincode versions). The handshake
+//! exchanges it in place of a hand-bumped protocol version, so a wire
+//! change can never slip through under an unchanged number.
 //!
 //! Also bakes the build commit (`LAZYBOX_BUILD_GIT_SHA`, suffix-free)
 //! and the source checkout (`LAZYBOX_BUILD_SOURCE_DIR`) so the running
@@ -11,7 +18,68 @@
 //! which turns the staleness guard into a no-op rather than a false
 //! positive.
 
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// FNV-1a over `bytes`, continuing from `h`. Chosen for zero
+/// dependencies and determinism — this is a change detector, not a
+/// security boundary.
+fn fnv1a(mut h: u64, bytes: &[u8]) -> u64 {
+    for &b in bytes {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    h
+}
+
+/// Every file under `dir`, recursively, in a deterministic order.
+fn files_under(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    let mut entries: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+    entries.sort();
+    for path in entries {
+        if path.is_dir() {
+            out.extend(files_under(&path));
+        } else {
+            out.push(path);
+        }
+    }
+    out
+}
+
+/// Hash the wire-defining inputs into the fingerprint the handshake
+/// negotiates. Over-approximates on purpose (a comment edit in a wire
+/// crate changes it): a spurious "restart the daemon" is cheap, while
+/// a wire change hiding under an unchanged number silently corrupts
+/// every frame.
+fn protocol_fingerprint(manifest_dir: &Path) -> u32 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    let inputs = [
+        manifest_dir.join("src"),
+        manifest_dir.join("../core/src"),
+        manifest_dir.join("../../Cargo.lock"),
+    ];
+    for input in &inputs {
+        println!("cargo:rerun-if-changed={}", input.display());
+        let files = if input.is_dir() {
+            files_under(input)
+        } else {
+            vec![input.clone()]
+        };
+        for file in files {
+            if let Some(name) = file.file_name() {
+                h = fnv1a(h, name.to_string_lossy().as_bytes());
+            }
+            if let Ok(contents) = std::fs::read(&file) {
+                h = fnv1a(h, &contents);
+            }
+        }
+    }
+    (h ^ (h >> 32)) as u32
+}
 
 fn git(args: &[&str]) -> Option<String> {
     let out = Command::new("git").args(args).output().ok()?;
@@ -23,6 +91,12 @@ fn git(args: &[&str]) -> Option<String> {
 }
 
 fn main() {
+    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets this"));
+    println!(
+        "cargo:rustc-env=LAZYBOX_PROTOCOL_FINGERPRINT={}",
+        protocol_fingerprint(&manifest_dir)
+    );
+
     let sha = git(&["rev-parse", "--short=12", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
     let dirty = git(&["status", "--porcelain"]).is_some_and(|s| !s.is_empty());
     let suffix = if dirty { "-dirty" } else { "" };

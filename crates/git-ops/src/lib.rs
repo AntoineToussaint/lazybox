@@ -106,9 +106,16 @@ pub enum ScriptBody {
 /// wire types — the daemon maps these onto `lazybox_ipc::WorktreeStep`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckoutPhase {
-    /// About to run `git clone --bare` (only fired on a real cold clone;
-    /// a cached healthy bare clone is reused without this).
+    /// About to run the one-time bare-clone transfer (only fired on a
+    /// real cold clone; a cached healthy bare clone is reused without
+    /// this).
     Cloning,
+    /// A raw stderr progress line from the in-flight clone transfer
+    /// (`Receiving objects: 42% (1200/2900), 12.00 MiB | 1.20 MiB/s`),
+    /// throttled to a few per second. Lets the caller surface
+    /// bytes/percent under the otherwise-opaque cloning step instead
+    /// of a bare spinner for a multi-hundred-MB repo.
+    CloneProgress(String),
     /// About to refresh the remote-tracking ref.
     Fetching,
     /// The base-ref fetch failed (offline / auth / transient network),
@@ -245,8 +252,17 @@ impl WorktreeManager {
     /// because every later provision saw `exists() == true`, skipped
     /// the clone, and failed on the broken repo. Existing directories
     /// that fail validation (interrupted clones from before this
-    /// scheme, manual tampering) are deleted and re-cloned; stale
-    /// `.partial` leftovers are cleared before cloning.
+    /// scheme, manual tampering) are deleted and re-cloned.
+    ///
+    /// The clone itself is `git init --bare` + a blobless fetch
+    /// (`--filter=blob:none`), not `git clone --bare`: all commits and
+    /// trees transfer up front (log / blame / merge-base / rebase in
+    /// worktrees keep working) while file contents are fetched lazily
+    /// at checkout time, so a multi-hundred-MB repo clones in seconds
+    /// instead of minutes (issue #405). Because the staging dir is a
+    /// valid repo from the first moment, a `.partial` left by an
+    /// interrupted attempt is *resumed* — re-fetched into — rather
+    /// than thrown away, so retries accumulate progress.
     async fn ensure_bare_clone(&self, owner: &str, repo: &str) -> Result<PathBuf, GitError> {
         let bare_path = self.bare_clone_path(owner, repo);
         // Re-clone from the same remote the previous clone used when
@@ -295,43 +311,96 @@ impl WorktreeManager {
             tokio::fs::create_dir_all(parent).await?;
         }
         let partial = partial_clone_path(&bare_path);
+        // The URL a from-scratch attempt would use, captured before a
+        // resumed staging repo can substitute its own origin below —
+        // the escape hatch when that adopted origin turns out dead.
+        let fresh_start_url = url.clone();
+        let mut resuming = false;
         if partial.exists() {
-            tracing::warn!(
-                owner,
-                repo,
-                path = %partial.display(),
-                "removing stale partial clone before re-cloning"
-            );
-            tokio::fs::remove_dir_all(&partial).await?;
+            // Resume when the staging dir is a usable repo: it records
+            // the remote the interrupted attempt was cloning (adopted
+            // for the same rewritten-origin reasons as above), and
+            // fetching into it keeps every object already transferred
+            // instead of restarting from zero on each retry.
+            match resumable_partial_origin(&partial).await {
+                Some(prev) => {
+                    url = prev;
+                    resuming = true;
+                    tracing::info!(
+                        owner,
+                        repo,
+                        path = %partial.display(),
+                        "resuming interrupted bare clone"
+                    );
+                }
+                None => {
+                    tracing::warn!(
+                        owner,
+                        repo,
+                        path = %partial.display(),
+                        "removing unusable partial clone before re-cloning"
+                    );
+                    tokio::fs::remove_dir_all(&partial).await?;
+                }
+            }
+        }
+        if !resuming {
+            run_git(
+                &["init", "--quiet", "--bare", &partial.to_string_lossy()],
+                &[],
+            )
+            .await?;
+            // `config remote.origin.url` rather than `remote add`: the
+            // latter also writes a fetch refspec `git clone --bare`
+            // never had, silently diverging new cache entries from old
+            // ones (a plain `git fetch` in a worktree would start
+            // materializing remote-tracking refs for every branch).
+            run_git_in(&partial, &["config", "remote.origin.url", &url]).await?;
         }
         self.report(CheckoutPhase::Cloning);
         let auth = self.network_env().await;
-        // Blobless partial clone (`--filter=blob:none`): fetch every
-        // commit and tree up front, but defer file *contents* (blobs)
-        // until a worktree actually checks them out or a command
-        // (diff/blame) needs them. A full `--bare` clone of a large repo
-        // (`codefly-dev/mind` is ~340 MB) took minutes and wedged "Cloning
-        // repository (one-time)"; blobless finishes in seconds because it
-        // skips the bulk of the object payload. History-dependent agent
-        // operations still work — `git log`, `merge-base` (rebasing onto
-        // main), branch/worktree creation all read commits+trees, which
-        // are present; only blob fetches go lazy over the promisor remote
-        // (`git clone --filter` records `remote.origin.promisor=true` in
-        // the bare repo's config, and worktrees share that object store).
-        // A shallow `--depth=1` clone was rejected: it breaks the history
-        // ops agents rely on (log/blame beyond depth 1, merge-base).
-        // (issue #405)
-        run_git(
+        let progress = |line: &str| self.report(CheckoutPhase::CloneProgress(line.to_string()));
+        // Blobless partial clone: `--filter=blob:none` transfers every
+        // commit and tree but defers blobs until a checkout / diff
+        // actually reads them. A server without filter support ignores
+        // the flag (git warns and sends everything), so this degrades
+        // to a full clone rather than failing.
+        if let Err(e) = run_git_transfer(
+            &partial,
             &[
-                "clone",
-                "--bare",
+                "fetch",
+                "--progress",
                 "--filter=blob:none",
-                &url,
-                &partial.to_string_lossy(),
+                "origin",
+                "+refs/heads/*:refs/heads/*",
             ],
             &auth,
+            Some(&progress),
         )
-        .await?;
+        .await
+        {
+            // Nothing else ever discards a resumable `.partial`, so a
+            // staging repo aimed at a remote a fresh attempt would not
+            // use must not survive its own failure — it would wedge
+            // every retry forever with no path back to the canonical
+            // URL. When the origins match, resume and restart are
+            // equivalent: keep the accumulated objects.
+            if resuming && url != fresh_start_url {
+                tracing::warn!(
+                    owner,
+                    repo,
+                    path = %partial.display(),
+                    adopted = %url,
+                    canonical = %fresh_start_url,
+                    "resumed clone failed against its adopted origin; \
+                     discarding the partial so the next attempt re-clones \
+                     from the canonical remote"
+                );
+                let _ = tokio::fs::remove_dir_all(&partial).await;
+            }
+            return Err(e);
+        }
+        set_head_to_remote_default(&partial, &auth).await?;
         tokio::fs::rename(&partial, &bare_path).await?;
         Ok(bare_path)
     }
@@ -393,7 +462,11 @@ impl WorktreeManager {
         // branch). Common reasons fetch can fail and that we tolerate:
         // remote branch was deleted post-merge, offline, auth issue.
         // In all cases the start_point lookup below falls back to the
-        // local ref. `fetch_origin_ref` logs a warning so the
+        // local ref. Note the fallback covers *refs* only: from a
+        // blobless clone the worktree add below still needs origin
+        // reachable to download file contents, so a fully offline
+        // provision only succeeds when the tree's blobs are already
+        // local (a legacy full clone, or a tree checked out before). `fetch_origin_ref` logs a warning so the
         // degradation isn't silent; a network/auth failure (as opposed
         // to a deleted remote branch) also surfaces in the provisioning
         // checklist via a `BaseRefStale` report (issue #320).
@@ -422,7 +495,11 @@ impl WorktreeManager {
                 "branch '{branch}' not found locally or on origin"
             )));
         };
-        run_git_in(
+        // From a blobless clone, `worktree add` downloads the checked-
+        // out tree's blobs on demand — a real network transfer, so it
+        // gets the auth env and the transfer-class timeout instead of
+        // the 30s in-repo cap.
+        run_git_transfer(
             &bare_path,
             &[
                 "worktree",
@@ -432,8 +509,11 @@ impl WorktreeManager {
                 branch,
                 &start_point,
             ],
+            &auth,
+            None,
         )
-        .await?;
+        .await
+        .map_err(explain_promisor_failure)?;
 
         // Record the upstream when we branched off the remote-tracking
         // ref. `git worktree add -B` doesn't set it, so without this
@@ -539,12 +619,16 @@ impl WorktreeManager {
         // worktree.
         //
         // Tolerate fetch failure (offline / auth): warn and proceed
-        // from whatever local ref we have. Per the issue's acceptance
-        // criteria, worktree creation must not block on the network — but
-        // a failed refresh is surfaced in the provisioning checklist via
-        // a `BaseRefStale` report so the "branched off latest main"
-        // guarantee degrading to "branched off a stale local ref" is
-        // visible, not buried in the log (issue #320).
+        // from whatever local ref we have, so a stale base never blocks
+        // branching (issue #35) — but a failed refresh is surfaced in
+        // the provisioning checklist via a `BaseRefStale` report so the
+        // "branched off latest main" guarantee degrading to "branched
+        // off a stale local ref" is visible, not buried in the log
+        // (issue #320). The tolerance covers *refs* only: from a
+        // blobless clone the worktree add below still needs origin
+        // reachable for file contents, so a fully offline provision
+        // only succeeds when the tree's blobs are already local (a
+        // legacy full clone, or a tree checked out before).
         self.report(CheckoutPhase::Fetching);
         let auth = self.network_env().await;
         match fetch_origin_ref(&bare_path, owner, repo, base_branch, &auth).await {
@@ -599,7 +683,9 @@ impl WorktreeManager {
         // add. Symptom this prevents: user presses `c` on an issue,
         // mount fails, fixes config, presses `c` again, get "branch
         // already exists" and the spawn falls through to empty dir.
-        run_git_in(
+        // See `checkout_at`: blob download on demand from a blobless
+        // clone makes this a network transfer.
+        run_git_transfer(
             &bare_path,
             &[
                 "worktree",
@@ -609,8 +695,11 @@ impl WorktreeManager {
                 &wt_path.to_string_lossy(),
                 &start_point,
             ],
+            &auth,
+            None,
         )
-        .await?;
+        .await
+        .map_err(explain_promisor_failure)?;
 
         let name = wt_path
             .file_name()
@@ -1025,6 +1114,84 @@ async fn configured_origin_url(bare: &Path) -> Option<String> {
     }
     let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (!url.is_empty()).then_some(url)
+}
+
+/// Whether an existing `.partial` staging directory can be fetched
+/// into instead of discarded: it must be a bare repo with a configured
+/// origin, whose URL is returned so the resume targets the remote the
+/// interrupted attempt was actually cloning. Probe failures count as
+/// not-resumable — unlike the final bare clone, deleting a staging dir
+/// orphans nothing.
+async fn resumable_partial_origin(partial: &Path) -> Option<String> {
+    let is_bare = apply_git_env(
+        Command::new("git")
+            .current_dir(partial)
+            .args(["rev-parse", "--is-bare-repository"]),
+    )
+    .output()
+    .await
+    .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
+    .unwrap_or(false);
+    if !is_bare {
+        return None;
+    }
+    configured_origin_url(partial).await
+}
+
+/// Point the staged clone's HEAD at the remote's default branch.
+/// `git init` leaves HEAD on the local `init.defaultBranch` name,
+/// which only matches the remote's by coincidence — a mismatch would
+/// leave HEAD dangling, which the bare-repo health gate reads as a
+/// broken clone. Resolution order: the remote's advertised symref,
+/// then common defaults, then any fetched head. A remote with zero
+/// branches resolves nothing and keeps the init-time HEAD (the clone
+/// stays unusable for worktrees, same as before).
+async fn set_head_to_remote_default(
+    partial: &Path,
+    envs: &[(String, String)],
+) -> Result<(), GitError> {
+    // `ls-remote --symref origin HEAD` prints e.g.
+    // "ref: refs/heads/main\tHEAD" when the server advertises it.
+    let advertised = run_git_in_env(partial, &["ls-remote", "--symref", "origin", "HEAD"], envs)
+        .await
+        .ok()
+        .and_then(|out| {
+            out.lines().find_map(|l| {
+                l.strip_prefix("ref: ")?
+                    .split_whitespace()
+                    .next()
+                    .filter(|r| r.starts_with("refs/heads/"))
+                    .map(str::to_string)
+            })
+        });
+    let mut head = advertised;
+    if head.is_none() {
+        for guess in ["refs/heads/main", "refs/heads/master"] {
+            if ref_exists(partial, guess).await {
+                head = Some(guess.to_string());
+                break;
+            }
+        }
+    }
+    if head.is_none() {
+        head = run_git_in(
+            partial,
+            &[
+                "for-each-ref",
+                "--count=1",
+                "--format=%(refname)",
+                "refs/heads/",
+            ],
+        )
+        .await
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    }
+    if let Some(head) = head {
+        run_git_in(partial, &["symbolic-ref", "HEAD", &head]).await?;
+    }
+    Ok(())
 }
 
 /// Verdict for a directory that already exists at a worktree path.
@@ -1465,14 +1632,185 @@ fn user_has_own_ssh_transport() -> bool {
     })
 }
 
+/// A transfer-progress stderr line, as opposed to a ref listing,
+/// remote banner, or fatal error. Gates both the `on_progress` sink in
+/// [`run_git_transfer`] and the noise filter on its error tail.
+fn is_transfer_progress(line: &str) -> bool {
+    line.contains('%') || line.ends_with("done.")
+}
+
+/// A blobless clone materializes file contents through origin at
+/// checkout time, so `worktree add` can fail on a *network* problem
+/// even though every ref it needs is local. Reword git's opaque
+/// promisor error ("could not fetch <oid> from promisor remote") into
+/// the actual cause; anything else passes through untouched.
+fn explain_promisor_failure(err: GitError) -> GitError {
+    match err {
+        GitError::Command(msg) if msg.contains("promisor remote") => GitError::Command(format!(
+            "could not download file contents from origin — worktrees \
+                 from a blobless clone need the remote reachable to \
+                 populate files: {msg}"
+        )),
+        other => other,
+    }
+}
+
+/// Run a long, network-heavy git transfer (the initial clone fetch, a
+/// blob-materializing `worktree add`) with the same env hygiene as
+/// [`run_git`] but stderr streamed instead of buffered: git rewrites
+/// progress lines with `\r`, so the stream is split on both `\r` and
+/// `\n`, progress-looking lines (`Receiving objects: 42% …`) are
+/// forwarded to `on_progress` throttled to ~10/s, and a short tail is
+/// kept for error reporting. Shares [`run_git`]'s generous wall-clock
+/// cap — transfers are slow by nature but must stay finite — and
+/// [`exec_git_bounded`]'s process-group sweep, so a timed-out or
+/// cancelled transfer takes its ssh / remote helpers down with it.
+/// Callers hold the repo lock throughout, so the cap is also how long
+/// a hung transfer can stall every other operation on the same repo —
+/// adaptive/timeout tuning is issue #403's territory.
+async fn run_git_transfer(
+    cwd: &Path,
+    args: &[&str],
+    envs: &[(String, String)],
+    on_progress: Option<&(dyn Fn(&str) + Sync)>,
+) -> Result<(), GitError> {
+    use tokio::io::AsyncReadExt;
+    const TRANSFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+    const PROGRESS_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+    const TAIL_LINES: usize = 8;
+    let started = std::time::Instant::now();
+    tracing::info!("git (in {}) {}", cwd.display(), args.join(" "));
+    let mut cmd = Command::new("git");
+    cmd.current_dir(cwd);
+    apply_git_env(cmd.args(args))
+        .envs(envs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    // Same process-group discipline as `exec_git_bounded`: transfers
+    // are the invocations most likely to be sitting on a live ssh /
+    // remote helper when they time out or their future is dropped
+    // (Esc-cancel), and `kill_on_drop` alone orphans those helpers.
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let mut child = cmd.spawn()?;
+    let mut group = KillGroupOnDrop(child.id().map(|id| id as i32));
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| GitError::Command("git transfer: no stderr pipe".into()))?;
+
+    let drain = async {
+        let mut tail: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+        let mut push_tail = |text: String| {
+            if tail.len() == TAIL_LINES {
+                tail.pop_front();
+            }
+            tail.push_back(text);
+        };
+        let mut line = Vec::new();
+        let mut buf = [0u8; 8192];
+        let mut last_emit: Option<std::time::Instant> = None;
+        loop {
+            let n = match stderr.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            for &b in &buf[..n] {
+                if b != b'\r' && b != b'\n' {
+                    line.push(b);
+                    continue;
+                }
+                let text = String::from_utf8_lossy(&line).trim().to_string();
+                line.clear();
+                if text.is_empty() {
+                    continue;
+                }
+                push_tail(text.clone());
+                // Only transfer-progress lines reach the sink — ref
+                // listings and remote banners stay in the log tail.
+                if let Some(cb) = on_progress
+                    && is_transfer_progress(&text)
+                    && last_emit.is_none_or(|t| t.elapsed() >= PROGRESS_MIN_INTERVAL)
+                {
+                    last_emit = Some(std::time::Instant::now());
+                    cb(&text);
+                }
+            }
+        }
+        let text = String::from_utf8_lossy(&line).trim().to_string();
+        if !text.is_empty() {
+            push_tail(text);
+        }
+        tail
+    };
+
+    let result = tokio::time::timeout(TRANSFER_TIMEOUT, async {
+        let tail = drain.await;
+        (tail, child.wait().await)
+    })
+    .await;
+    let elapsed = started.elapsed();
+    match result {
+        Ok((_, Ok(status))) if status.success() => {
+            // Disarm only on a clean exit — a non-zero or timed-out git
+            // may have left transport helpers behind, and sweeping the
+            // dead leader's group costs one syscall that can only reach
+            // processes this spawn created.
+            group.0 = None;
+            tracing::info!(
+                "git (in {}) {} ok ({elapsed:?})",
+                cwd.display(),
+                args.join(" ")
+            );
+            Ok(())
+        }
+        Ok((tail, Ok(_))) => {
+            // Progress fragments in the tail bury the fatal line —
+            // drop them from the surfaced error unless they're all
+            // there is.
+            let causes: Vec<String> = tail
+                .iter()
+                .filter(|l| !is_transfer_progress(l))
+                .cloned()
+                .collect();
+            let lines = if causes.is_empty() {
+                tail.into_iter().collect()
+            } else {
+                causes
+            };
+            let stderr_tail = lines.join("\n");
+            tracing::error!(
+                "git (in {}) {} failed ({elapsed:?}): {}",
+                cwd.display(),
+                args.join(" "),
+                stderr_tail.trim()
+            );
+            Err(GitError::Command(stderr_tail))
+        }
+        Ok((_, Err(e))) => Err(e.into()),
+        Err(_) => {
+            tracing::error!(
+                "git (in {}) {} TIMED OUT after {elapsed:?}",
+                cwd.display(),
+                args.join(" ")
+            );
+            Err(GitError::Command(format!(
+                "`git {}` exceeded {}s wall-clock",
+                args.join(" "),
+                TRANSFER_TIMEOUT.as_secs()
+            )))
+        }
+    }
+}
+
 async fn run_git(args: &[&str], envs: &[(String, String)]) -> Result<String, GitError> {
-    // Wall-clock cap. `run_git` is the no-cwd variant used for
-    // `git clone --bare` — slow by nature (a big repo over a slow
-    // link takes minutes), but it must still be FINITE: a clone
-    // wedged on a dead network or a silent credential prompt would
-    // otherwise hang its caller forever. 10 minutes is generous for
-    // any real clone; `run_git_in` keeps its tighter 30s cap for
-    // the cheap in-repo operations.
+    // Wall-clock cap. `run_git` is the no-cwd variant (today only
+    // `git init --bare` staging a clone); network transfers stream
+    // through `run_git_transfer` instead. Still FINITE: a git process
+    // wedged on a silent credential prompt would otherwise hang its
+    // caller forever.
     const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
     exec_git_bounded(None, args, envs, GIT_TIMEOUT).await
 }
@@ -2139,6 +2477,36 @@ mod health_probe_tests {
             std::fs::read_to_string(wt.join("user-notes.md")).expect("still readable"),
             "keep me",
             "repair must not touch untracked user work"
+        );
+    }
+
+    /// Resume decision for a `.partial` staging dir: a bare repo with
+    /// a configured origin resumes (adopting that origin); a directory
+    /// of junk — or a repo that never got its origin — restarts from
+    /// scratch. This is what keeps a retry from discarding an
+    /// interrupted attempt's already-fetched objects.
+    #[tokio::test]
+    async fn partial_resumability_requires_bare_repo_with_origin() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let junk = tmp.path().join("junk.partial");
+        std::fs::create_dir(&junk).expect("mkdir");
+        std::fs::write(junk.join("half-written"), "x").expect("write");
+        assert_eq!(resumable_partial_origin(&junk).await, None);
+
+        let no_origin = tmp.path().join("no-origin.partial");
+        git(tmp.path(), &["init", "-q", "--bare", "no-origin.partial"]);
+        assert_eq!(resumable_partial_origin(&no_origin).await, None);
+
+        let staged = tmp.path().join("staged.partial");
+        git(tmp.path(), &["init", "-q", "--bare", "staged.partial"]);
+        git(
+            &staged,
+            &["remote", "add", "origin", "git@github.com:acme/widgets.git"],
+        );
+        assert_eq!(
+            resumable_partial_origin(&staged).await,
+            Some("git@github.com:acme/widgets.git".to_string())
         );
     }
 

@@ -36,31 +36,52 @@ pub const MAX_FRAME_BYTES: u32 = 64 * 1024 * 1024;
 pub const MAX_COMMAND_FRAME_BYTES: u32 = 256 * 1024;
 
 /// Magic prefix of the 8-byte connection preamble each side sends
-/// before any frames (`PROTOCOL_MAGIC ++ PROTOCOL_VERSION as u32 LE`).
-/// Lets a peer distinguish "wrong-version lazybox" from "not lazybox
-/// at all" before bincode ever touches the stream.
+/// before any frames (`PROTOCOL_MAGIC ++ PROTOCOL_FINGERPRINT as u32
+/// LE`). Lets a peer distinguish "wire-incompatible lazybox" from "not
+/// lazybox at all" before bincode ever touches the stream.
 pub const PROTOCOL_MAGIC: [u8; 4] = *b"LZBX";
 
-/// Wire protocol version, negotiated by the connection handshake
-/// (`socket::client_handshake` / `socket::server_handshake`).
+/// Wire-compatibility fingerprint, negotiated by the connection
+/// handshake (`socket::client_handshake` / `socket::server_handshake`).
 ///
-/// MUST be bumped on ANY change to the `Command` / `Event` encodings —
-/// bincode identifies enum variants by ordinal and structs by field
-/// order, so adding, removing, or reordering a variant or field makes
-/// an old peer silently misread every subsequent frame. The handshake
-/// turns that garbage into a clear "restart the daemon" error.
-pub const PROTOCOL_VERSION: u32 = 15;
+/// Derived at build time (`build.rs`) from a hash of every
+/// wire-defining input — this crate's sources, `lazybox-core`'s, and
+/// the workspace lockfile — never hand-maintained. bincode identifies
+/// enum variants by ordinal and structs by field order, so any change
+/// to the `Command` / `Event` encodings makes an old peer silently
+/// misread every subsequent frame; two binaries agree on this value
+/// only when built from identical wire sources, and anything else is
+/// rejected at connect with a clear "restart the daemon" error. The
+/// hash over-approximates on purpose: a comment edit in a wire crate
+/// forces a restart, but a wire change can never ride under an
+/// unchanged number (which hand-bumping allowed whenever two branches
+/// picked the same next value).
+pub const PROTOCOL_FINGERPRINT: u32 = parse_u32(env!("LAZYBOX_PROTOCOL_FINGERPRINT"));
+
+/// Const decimal parser for the build-script-emitted fingerprint —
+/// `env!` yields a `&str` and there is no const `str::parse` yet.
+const fn parse_u32(s: &str) -> u32 {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut v: u32 = 0;
+    while i < bytes.len() {
+        v = v * 10 + (bytes[i] - b'0') as u32;
+        i += 1;
+    }
+    v
+}
 
 /// This binary's build identity: the workspace version plus the git
 /// short SHA captured at compile time (`build.rs`). Two binaries built
 /// from the same commit share this string; a stale daemon and a fresh
 /// client differ.
 ///
-/// `PROTOCOL_VERSION` only changes when the wire format does, so two
-/// builds dozens of commits apart can share one protocol version and connect
-/// cleanly while behaving differently. The handshake exchanges this
-/// string so the client can surface a "restart the daemon" banner on a
-/// build skew the protocol version can't see.
+/// [`PROTOCOL_FINGERPRINT`] only changes when a wire-defining input
+/// does, so two builds dozens of commits apart can share one
+/// fingerprint and connect cleanly while behaving differently. The
+/// handshake exchanges this string so the client can surface a
+/// "restart the daemon" banner on a build skew the fingerprint can't
+/// see.
 pub const BUILD_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("LAZYBOX_BUILD_SHA"));
 
 /// The build commit, suffix-free (no `-dirty`), or `"unknown"` when
@@ -97,8 +118,8 @@ pub const IS_RELEASE_BUILD: bool = matches!(env!("LAZYBOX_RELEASE_BUILD").as_byt
 /// self-describing transports (the JSON gateway): bincode is not
 /// self-describing, so on the socket transport an absent field is a
 /// decode error, never a default — mixed-version peers are rejected by
-/// the protocol-version handshake instead, and adding even a trailing
-/// field requires a `PROTOCOL_VERSION` bump.
+/// the wire-fingerprint handshake instead — adding even a trailing
+/// field shifts [`PROTOCOL_FINGERPRINT`] automatically.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TerminalId(pub u64);
 
@@ -433,7 +454,7 @@ pub struct WorktreeInspectionDto {
 /// serde `default` for a JSON `bool` field that must default to `true`.
 /// Bincode is not self-describing and cannot apply this to an older, shorter
 /// command; socket peers with that shape are rejected by
-/// [`PROTOCOL_VERSION`] negotiation.
+/// [`PROTOCOL_FINGERPRINT`] negotiation.
 fn default_true() -> bool {
     true
 }
@@ -590,8 +611,8 @@ pub enum Command {
     /// The `#[serde(default)]` below only takes effect on the JSON
     /// gateway; bincode is not self-describing and never applies
     /// defaults, so appending this field was a wire-format change
-    /// protected by the protocol-version handshake (a
-    /// `PROTOCOL_VERSION` bump), not by the attribute.
+    /// protected by the wire-fingerprint handshake, not by the
+    /// attribute.
     IngestHook {
         terminal_id: TerminalId,
         hook: HookEvent,
@@ -932,8 +953,7 @@ pub enum Command {
     /// same semantics as the issue→PR merge modal.
     ///
     /// Appended last: bincode identifies variants by ordinal, so this
-    /// position (with the accompanying `PROTOCOL_VERSION` bump) keeps
-    /// the change mechanical.
+    /// position keeps the change mechanical.
     KeepMergedWorkspace {
         session_key: SessionKey,
     },
@@ -949,8 +969,7 @@ pub enum Command {
     /// without a history source (raw PTY) reply nothing.
     ///
     /// Appended last: bincode identifies variants by ordinal, so this
-    /// position (with the accompanying `PROTOCOL_VERSION` bump) keeps
-    /// the change mechanical.
+    /// position keeps the change mechanical.
     FetchScrollback {
         terminal_id: TerminalId,
     },
@@ -1007,9 +1026,9 @@ pub enum Event {
         /// self-describing transports (the JSON gateway); it does NOT
         /// make older daemons wire-compatible over the socket —
         /// bincode never applies defaults, so adding this field was a
-        /// wire-format change guarded by the protocol-version
-        /// handshake (`PROTOCOL_VERSION` bump). Any future trailing
-        /// field needs the same bump.
+        /// wire-format change guarded by the wire-fingerprint
+        /// handshake; future trailing fields shift the fingerprint
+        /// the same way.
         #[serde(default)]
         projects: Vec<lazybox_core::Project>,
     },
@@ -1319,9 +1338,9 @@ pub enum Event {
         /// (→ `TerminalId(0)`) only applies on the JSON gateway, where
         /// an older producer can omit the field; over the socket,
         /// bincode never applies defaults — adding this field was a
-        /// wire-format change guarded by the protocol-version
-        /// handshake (`PROTOCOL_VERSION` bump), and mixed-version
-        /// peers are rejected at connect, not papered over.
+        /// wire-format change guarded by the wire-fingerprint
+        /// handshake, and mismatched peers are rejected at connect,
+        /// not papered over.
         #[serde(default)]
         terminal_id: TerminalId,
         state: AgentState,
@@ -1498,7 +1517,7 @@ pub enum Event {
     /// the capture.
     ///
     /// Appended last (bincode ordinal compatibility, see
-    /// `PROTOCOL_VERSION`).
+    /// [`PROTOCOL_FINGERPRINT`]).
     TerminalScrollback {
         terminal_id: TerminalId,
         replay: Vec<u8>,
@@ -1549,7 +1568,7 @@ pub struct AgentCliUpdateStatus {
     /// word the availability notice as "auto-updating" instead of
     /// telling the user to trigger it manually. The `#[serde(default)]`
     /// only matters on the JSON gateway; over the socket this field
-    /// rides the same `PROTOCOL_VERSION` bump as the event itself.
+    /// rides the same wire-fingerprint shift as the event itself.
     #[serde(default)]
     pub auto_update: bool,
 }
@@ -1592,12 +1611,15 @@ impl ProviderErrorKind {
 /// jumps straight to done.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorktreeStep {
-    /// `git clone --bare` — the slow part on a brand-new repo. Skipped
-    /// (instant) when a healthy bare clone is already cached.
+    /// The one-time bare clone (a blobless partial fetch) — the slow
+    /// part on a brand-new repo. Skipped (instant) when a healthy bare
+    /// clone is already cached.
     Clone,
     /// Refreshing the remote-tracking ref before branching off it.
     Fetch,
-    /// `git worktree add` materializing the checkout on disk.
+    /// `git worktree add` materializing the checkout on disk. From a
+    /// blobless clone this includes downloading the checked-out files,
+    /// making it the bulk of a cold provision's wall-clock.
     WorktreeAdd,
     /// Applying configured mounts + setup scripts to the fresh tree.
     Setup,
@@ -1609,13 +1631,17 @@ pub enum WorktreeStep {
 /// completed in a degraded way (e.g. the base-ref fetch failed and the
 /// worktree branched off a possibly-stale local ref) — the step still
 /// counts as done, but the modal surfaces the note instead of hiding it
-/// in the log (issue #320).
+/// in the log (issue #320). `Progress` is a live detail line for a step
+/// already `Started` — e.g. the clone transfer's `Receiving objects:
+/// 42% …` — updating the row's detail text without advancing the
+/// checklist (issue #405).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorktreeStepStatus {
     Started,
     Done,
     Warned(String),
     Failed(String),
+    Progress(String),
 }
 
 /// The `Failed` message the daemon broadcasts when a provision is
@@ -2072,5 +2098,19 @@ mod transport_admission_tests {
             sender.send(notice(2)),
             Err(mpsc::error::TrySendError::Closed(_))
         ));
+    }
+
+    /// The const decimal parser must agree with std's on the actual
+    /// build-script output — a silent mis-parse would put a wrong
+    /// fingerprint in every preamble.
+    #[test]
+    fn fingerprint_const_parser_matches_std() {
+        let emitted = env!("LAZYBOX_PROTOCOL_FINGERPRINT");
+        assert_eq!(
+            PROTOCOL_FINGERPRINT,
+            emitted
+                .parse::<u32>()
+                .expect("build.rs emits a decimal u32"),
+        );
     }
 }

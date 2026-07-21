@@ -10,7 +10,7 @@
 use crate::transport;
 use crate::{
     BUILD_VERSION, COMMAND_CHANNEL_CAPACITY, Client, Command, Connection, EVENT_CHANNEL_CAPACITY,
-    Event, MAX_COMMAND_FRAME_BYTES, MAX_FRAME_BYTES, PROTOCOL_MAGIC, PROTOCOL_VERSION,
+    Event, MAX_COMMAND_FRAME_BYTES, MAX_FRAME_BYTES, PROTOCOL_FINGERPRINT, PROTOCOL_MAGIC,
     event_forward_channel,
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -54,14 +54,16 @@ pub enum HandshakeError {
          from this build"
     )]
     BadMagic([u8; 4]),
-    /// Both sides speak the lazybox protocol but at different versions
-    /// — daemon and client come from different builds.
+    /// Both sides speak the lazybox protocol but their wire
+    /// fingerprints (derived from the wire-defining sources at build
+    /// time) differ — daemon and client come from different builds and
+    /// would misread each other's frames.
     #[error(
-        "protocol version mismatch: the peer is protocol v{peer}, this side \
-         is v{ours} — daemon and client are from different builds; restart \
+        "wire fingerprint mismatch: the peer reports {peer:#010x}, this side \
+         {ours:#010x} — daemon and client are from different builds; restart \
          the daemon so both sides match"
     )]
-    VersionMismatch { peer: u32, ours: u32 },
+    FingerprintMismatch { peer: u32, ours: u32 },
 }
 
 /// What this side learned about the peer during the handshake.
@@ -88,21 +90,21 @@ const MAX_BUILD_BYTES: usize = 256;
 /// without completing the fixed-size protocol/build handshake.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Write this side's 8-byte preamble: magic + version (u32 LE).
+/// Write this side's 8-byte preamble: magic + wire fingerprint (u32 LE).
 async fn write_preamble<W>(w: &mut W) -> std::io::Result<()>
 where
     W: AsyncWrite + Unpin,
 {
     let mut preamble = [0u8; 8];
     preamble[..4].copy_from_slice(&PROTOCOL_MAGIC);
-    preamble[4..].copy_from_slice(&PROTOCOL_VERSION.to_le_bytes());
+    preamble[4..].copy_from_slice(&PROTOCOL_FINGERPRINT.to_le_bytes());
     w.write_all(&preamble).await?;
     w.flush().await
 }
 
 /// Write this side's build version: a u16 LE length followed by UTF-8
-/// bytes. Sent only after the protocol versions are confirmed to match,
-/// so a version-skewed (or pre-handshake) peer never reaches this and
+/// bytes. Sent only after the wire fingerprints are confirmed to match,
+/// so a mismatched (or pre-handshake) peer never reaches this and
 /// can't be desynced by it.
 async fn write_build<W>(w: &mut W) -> std::io::Result<()>
 where
@@ -136,7 +138,7 @@ where
 }
 
 /// Read and validate the peer's 8-byte preamble, returning its
-/// protocol version.
+/// wire fingerprint.
 async fn read_preamble<R>(r: &mut R) -> Result<u32, HandshakeError>
 where
     R: AsyncRead + Unpin,
@@ -164,14 +166,14 @@ where
 {
     write_preamble(wr).await?;
     let peer = read_preamble(rd).await?;
-    if peer != PROTOCOL_VERSION {
-        return Err(HandshakeError::VersionMismatch {
+    if peer != PROTOCOL_FINGERPRINT {
+        return Err(HandshakeError::FingerprintMismatch {
             peer,
-            ours: PROTOCOL_VERSION,
+            ours: PROTOCOL_FINGERPRINT,
         });
     }
-    // Protocol matches; exchange build versions so a same-protocol but
-    // different-commit daemon is still detectable by the caller.
+    // Fingerprints match; exchange build versions so a wire-compatible
+    // but different-commit daemon is still detectable by the caller.
     write_build(wr).await?;
     read_build(rd).await
 }
@@ -179,7 +181,7 @@ where
 /// Server side of the connection handshake: read the client's
 /// preamble before entering the frame loop. A garbage preamble gets
 /// no reply (the peer isn't speaking lazybox); a well-formed preamble
-/// is always answered with our own — even on version mismatch — so
+/// is always answered with our own — even on fingerprint mismatch — so
 /// the client can render the clear "restart the daemon" error instead
 /// of a bincode decode failure.
 pub async fn server_handshake<R, W>(rd: &mut R, wr: &mut W) -> Result<PeerInfo, HandshakeError>
@@ -189,10 +191,10 @@ where
 {
     let peer = read_preamble(rd).await?;
     write_preamble(wr).await?;
-    if peer != PROTOCOL_VERSION {
-        return Err(HandshakeError::VersionMismatch {
+    if peer != PROTOCOL_FINGERPRINT {
+        return Err(HandshakeError::FingerprintMismatch {
             peer,
-            ours: PROTOCOL_VERSION,
+            ours: PROTOCOL_FINGERPRINT,
         });
     }
     write_build(wr).await?;

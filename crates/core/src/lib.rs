@@ -31,7 +31,7 @@ pub use config::{
 pub use issue_links::{IssueLink, extract as extract_issue_links};
 pub use policy::{AutomationPolicies, PolicyArm, auto_fix_permitted, toggled_arm};
 pub use priority::{PriorityTier, resolve_priority_tier};
-pub use project::{Project, ProjectKey};
+pub use project::{Project, ProjectKey, github_owner_repo_from_url};
 pub use provider::{ProviderError, TaskProvider};
 pub use scope::{MockScopeSource, Scope, ScopeKind, ScopeSource};
 pub use session_key::SessionKey;

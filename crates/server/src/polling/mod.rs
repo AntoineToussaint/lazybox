@@ -36,8 +36,8 @@ pub use handlers::{
     ProviderHandle, apply_pr_details, handle_add_assignees, handle_clean_worktrees,
     handle_close_issue, handle_delete_or_close, handle_delete_orphaned_worktree,
     handle_fetch_pr_details, handle_fetch_repo_labels, handle_inspect_worktrees, handle_merge_pr,
-    handle_request_reviewers, handle_set_assignees, handle_set_labels, post_reply,
-    prefetch_top_pr_details, remove_merged_workspace,
+    handle_request_reviewers, handle_scan_checkouts, handle_set_assignees, handle_set_labels,
+    post_reply, prefetch_top_pr_details, remove_merged_workspace,
 };
 pub use mutate::{MutationOutcome, apply_and_commit, fetch_and_apply};
 
@@ -4651,15 +4651,29 @@ pub fn create_empty_workspace(
     name: &str,
     project_key: lazybox_core::ProjectKey,
 ) -> WorkspaceKey {
+    let key = allocate_workspace_key(config, name);
+    let mut workspace = Workspace::empty(key.clone(), "main", Utc::now());
+    if !name.trim().is_empty() {
+        workspace.name = name.trim().to_string();
+    }
+    workspace.project_key = Some(project_key);
+    workspace.local = true;
+    commit_upsert_reported(config, &key, workspace, "create empty workspace");
+    key
+}
+
+/// Allocate a fresh, collision-free workspace key from a display name:
+/// slugify, then try `<base>`, `<base>-2`, … until the store reports no
+/// existing record. Falls back to `workspace` for an empty slug so the
+/// key is always non-empty.
+fn allocate_workspace_key(config: &ServerConfig, name: &str) -> WorkspaceKey {
     let base = lazybox_core::slug::slugify(name);
     let base = if base.is_empty() {
         "workspace".to_string()
     } else {
         base
     };
-    // Collision: try `<base>`, `<base>-2`, `<base>-3`, ... until the
-    // store reports no existing record.
-    let key = (1..)
+    (1..)
         .map(|i| {
             if i == 1 {
                 WorkspaceKey::new(base.clone())
@@ -4676,15 +4690,81 @@ pub fn create_empty_workspace(
                 .and_then(|r| r.workspace_json)
                 .is_none()
         })
-        .expect("infinite range yields a free key");
+        .expect("infinite range yields a free key")
+}
 
-    let mut workspace = Workspace::empty(key.clone(), "main", Utc::now());
+/// Import an on-disk checkout as a **linked (no-worktree) workspace**.
+/// Re-describes `path` read-only to derive its `origin` repo and current
+/// branch, then creates a workspace that points straight at `path` — no
+/// worktree provisioned, no bare clone. A checkout whose `origin` maps to
+/// a GitHub `owner/repo` lands under that repo's project so its
+/// PR/issue/CI activity groups with it; one without a usable origin falls
+/// back to a `local-<dir>` project. Returns the new key, or `None` when
+/// `path` is no longer a git checkout (moved/deleted since the scan).
+pub async fn import_local_checkout(
+    config: &ServerConfig,
+    path: std::path::PathBuf,
+) -> Option<WorkspaceKey> {
+    let Some(checkout) = lazybox_git_ops::describe_checkout_at(path.clone()).await else {
+        let _ = config.bus.send(Event::provider_error_permanent(
+            "import",
+            format!("{} is no longer a git checkout", path.display()),
+        ));
+        return None;
+    };
+
+    let repo = checkout
+        .remote_url
+        .as_deref()
+        .and_then(lazybox_core::github_owner_repo_from_url);
+    let (project_key, name) = match repo {
+        Some((owner, repo)) => (
+            lazybox_core::ProjectKey::github(&owner, &repo),
+            format!("{owner}/{repo}"),
+        ),
+        None => {
+            let dir = path
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "checkout".to_string());
+            (
+                lazybox_core::ProjectKey::local(&lazybox_core::slug::slugify(&dir)),
+                dir,
+            )
+        }
+    };
+    let branch = checkout.branch.unwrap_or_else(|| "main".to_string());
+    Some(create_linked_workspace(
+        config,
+        &name,
+        project_key,
+        path,
+        &branch,
+    ))
+}
+
+/// Create a linked (no-worktree) workspace pointing at `path`. Sibling
+/// of [`create_empty_workspace`]; the difference is `linked_checkout`
+/// set (so the spawn path lands sessions in the existing checkout) and
+/// the workspace's `branch` taken from the checkout's current branch
+/// rather than a fixed `main`. `local = true` protects it from the
+/// reconcile prune, like every hand-created workspace.
+pub fn create_linked_workspace(
+    config: &ServerConfig,
+    name: &str,
+    project_key: lazybox_core::ProjectKey,
+    path: std::path::PathBuf,
+    branch: &str,
+) -> WorkspaceKey {
+    let key = allocate_workspace_key(config, name);
+    let mut workspace = Workspace::empty(key.clone(), branch, Utc::now());
     if !name.trim().is_empty() {
         workspace.name = name.trim().to_string();
     }
     workspace.project_key = Some(project_key);
     workspace.local = true;
-    commit_upsert_reported(config, &key, workspace, "create empty workspace");
+    workspace.linked_checkout = Some(path);
+    commit_upsert_reported(config, &key, workspace, "import linked checkout");
     key
 }
 

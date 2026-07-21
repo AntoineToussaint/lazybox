@@ -61,12 +61,21 @@ pub enum PromptIntent {
 pub struct EncodedPrompt {
     initial_write: Vec<u8>,
     submit_write: Option<Vec<u8>>,
+    echo_probes: Vec<String>,
 }
 
 impl EncodedPrompt {
     /// Number of bytes in the first terminal write, for bounded diagnostics.
     pub fn initial_write_len(&self) -> usize {
         self.initial_write.len()
+    }
+
+    /// Compact probes the paste-settle gate matches against post-paste output
+    /// to recognize the composer echoing the paste (see
+    /// [`crate::detect::paste_echo_observed`]). Empty for line-oriented
+    /// framing, which has no settle gate.
+    pub fn echo_probes(&self) -> &[String] {
+        &self.echo_probes
     }
 
     /// Consume the sequence into the exact writes the server must perform in
@@ -115,8 +124,13 @@ impl PtyProtocol {
     /// Raw ESC bytes are always removed before framing. PR/issue text is
     /// third-party-authored; without this guard an embedded `ESC[201~` could
     /// end bracketed paste early and turn the remainder into live keystrokes.
+    /// A leading blank-line prefix and its padding are omitted so delivered
+    /// text starts on the composer's prompt row. A prompt that begins directly
+    /// with indented content keeps that indentation.
     pub fn encode_prompt(self, prompt: &str, intent: PromptIntent) -> EncodedPrompt {
-        let sanitized = prompt.bytes().filter(|&byte| byte != 0x1b);
+        let sanitized = trim_leading_blank_lines(prompt)
+            .bytes()
+            .filter(|&byte| byte != 0x1b);
         match self.framing {
             PromptFraming::Line => {
                 let submit = intent == PromptIntent::Submit;
@@ -128,6 +142,7 @@ impl PtyProtocol {
                 EncodedPrompt {
                     initial_write,
                     submit_write: None,
+                    echo_probes: Vec::new(),
                 }
             }
             PromptFraming::BracketedPaste => {
@@ -135,9 +150,25 @@ impl PtyProtocol {
                 initial_write.extend_from_slice(b"\x1b[200~");
                 initial_write.extend(sanitized);
                 initial_write.extend_from_slice(b"\x1b[201~");
+                // Probes the paste-settle gate uses to spot the composer
+                // echoing this paste: a compact fragment of the prompt
+                // itself, plus the collapsed-paste placeholder chrome.
+                // Derived from the text as actually framed — post
+                // blank-line trim — so the probe always describes bytes the
+                // composer can echo.
+                let mut echo_probes: Vec<String> =
+                    crate::detect::paste_echo_probe(trim_leading_blank_lines(prompt))
+                        .into_iter()
+                        .collect();
+                echo_probes.extend(
+                    crate::detect::PASTE_PLACEHOLDER_PROBES
+                        .iter()
+                        .map(|p| (*p).to_string()),
+                );
                 EncodedPrompt {
                     initial_write,
                     submit_write: (intent == PromptIntent::Submit).then(|| vec![b'\r']),
+                    echo_probes,
                 }
             }
         }
@@ -146,6 +177,28 @@ impl PtyProtocol {
     /// Whether injection must wait for positive composer-ready detection.
     pub const fn requires_ready(self) -> bool {
         matches!(self.readiness, ReadinessPolicy::Required)
+    }
+}
+
+/// Remove a leading blank-line prefix while preserving indentation when the
+/// prompt begins directly with content. Raw escape bytes are ignored while
+/// examining the prefix because [`PtyProtocol::encode_prompt`] removes them
+/// before delivery.
+pub fn trim_leading_blank_lines(prompt: &str) -> &str {
+    let mut prefix_end = 0;
+    let mut saw_line_break = false;
+    for (index, c) in prompt.char_indices() {
+        if c == '\x1b' || c.is_whitespace() {
+            prefix_end = index + c.len_utf8();
+            saw_line_break |= matches!(c, '\r' | '\n');
+        } else {
+            break;
+        }
+    }
+    if saw_line_break {
+        &prompt[prefix_end..]
+    } else {
+        prompt
     }
 }
 

@@ -78,9 +78,10 @@ pub struct Snippet {
     /// group. Free-form so user files can invent their own groups.
     #[serde(default)]
     pub category: String,
-    /// Snippet body. Sent verbatim to the active agent's PTY,
-    /// followed by a single carriage-return that triggers submit
-    /// on every agent we ship (Claude Code, Codex, Cursor, shell).
+    /// Snippet body. Composer delivery removes a leading blank-line prefix
+    /// and its padding; a body that begins directly with indented content
+    /// preserves that indentation. Submission follows the target terminal's
+    /// PTY protocol.
     pub body: String,
     /// Provenance — which file the entry came from. Hand-set by the
     /// loader; serde ignores it on the way in / out. Used by the

@@ -6,7 +6,7 @@
 use lazybox_agents::agent::builtins::{Claude, Codex, Cursor, GenericCli};
 use lazybox_agents::{
     Agent, AgentObservation, AgentState, PromptFraming, PromptIntent, PromptShape, PtyProtocol,
-    ReadinessPolicy, Registry, SpawnCtx,
+    ReadinessPolicy, Registry, SpawnCtx, trim_leading_blank_lines,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -164,6 +164,159 @@ fn guarded_composer_protocol_is_shared_by_claude_and_codex() {
         assert_eq!(initial, b"\x1b[200~draft\x1b[201~");
         assert_eq!(submit, None, "compose-only recall must not press Enter");
     }
+}
+
+#[test]
+fn prompt_protocol_trims_blank_lines_for_every_framing() {
+    let (guarded, submit) = PtyProtocol::GUARDED_COMPOSER
+        .encode_prompt("\r\n \tadd an issue:", PromptIntent::Submit)
+        .into_writes();
+    assert_eq!(guarded, b"\x1b[200~add an issue:\x1b[201~");
+    assert_eq!(submit, Some(vec![b'\r']));
+
+    let (line, submit) = PtyProtocol::LINE_ORIENTED
+        .encode_prompt("\r\n \tadd an issue:", PromptIntent::Compose)
+        .into_writes();
+    assert_eq!(line, b"add an issue:");
+    assert_eq!(submit, None);
+}
+
+#[test]
+fn prompt_protocol_preserves_first_line_indentation_and_trailing_whitespace() {
+    let prompt = "    indented content\nnext line\n";
+    let (guarded, submit) = PtyProtocol::GUARDED_COMPOSER
+        .encode_prompt(prompt, PromptIntent::Compose)
+        .into_writes();
+    assert_eq!(
+        guarded,
+        b"\x1b[200~    indented content\nnext line\n\x1b[201~"
+    );
+    assert_eq!(submit, None);
+}
+
+#[test]
+fn prompt_protocol_trims_unicode_padding_after_a_blank_line() {
+    let (line, submit) = PtyProtocol::LINE_ORIENTED
+        .encode_prompt(" \x1b\n\u{2003}add an issue:", PromptIntent::Compose)
+        .into_writes();
+    assert_eq!(line, b"add an issue:");
+    assert_eq!(submit, None);
+}
+
+#[test]
+fn leading_blank_line_normalization_is_bounded_and_idempotent() {
+    for (input, expected) in [
+        ("", ""),
+        ("   ", "   "),
+        ("    indented", "    indented"),
+        ("\n\n \ttext", "text"),
+        (" \r\n\u{2003}text\n", "text\n"),
+        ("text\nnext", "text\nnext"),
+    ] {
+        let normalized = trim_leading_blank_lines(input);
+        assert_eq!(normalized, expected, "input {input:?}");
+        assert_eq!(trim_leading_blank_lines(normalized), normalized);
+    }
+}
+
+#[test]
+fn bracketed_paste_prompts_carry_echo_probes_for_the_settle_gate() {
+    // The paste-settle gate matches these probes against post-paste output
+    // to recognize the composer echo, so a repainting TUI (Codex) releases
+    // the submit immediately instead of waiting for a quiet window that
+    // never comes (issue #425).
+    let encoded = PtyProtocol::GUARDED_COMPOSER
+        .encode_prompt("Fix the failing CI job on PR #7", PromptIntent::Submit);
+    let probes = encoded.echo_probes().to_vec();
+    assert!(
+        probes.iter().any(|p| p.contains("failingcijobonpr#7")),
+        "probes must include a compact fragment of the prompt tail: {probes:?}",
+    );
+    assert!(
+        probes.iter().any(|p| p == "pastedtext"),
+        "probes must include the collapsed-paste placeholder chrome: {probes:?}",
+    );
+
+    // The echo matcher sees the probe through ANSI styling, line wraps and
+    // case changes — and ignores unrelated repaint churn.
+    let echo = b"\x1b[2K\x1b[7m>\x1b[0m Fix the\r\n  failing CI job on PR #7";
+    assert!(lazybox_agents::detect::paste_echo_observed(echo, &probes));
+    assert!(!lazybox_agents::detect::paste_echo_observed(
+        b"\x1b[2K\xe2\x80\xa2 spinner tick",
+        &probes,
+    ));
+
+    // Line framing has no settle gate → no probes.
+    let line = PtyProtocol::LINE_ORIENTED.encode_prompt("do it now please", PromptIntent::Submit);
+    assert!(line.echo_probes().is_empty());
+
+    // A too-short prompt is not distinctive enough for a text probe, but the
+    // placeholder probes still ride along.
+    let short = PtyProtocol::GUARDED_COMPOSER.encode_prompt("ok", PromptIntent::Submit);
+    assert!(short.echo_probes().iter().all(|p| !p.contains("ok")));
+    assert!(short.echo_probes().iter().any(|p| p == "pastedcontent"));
+
+    // Probes describe the text as actually framed: the #426 leading
+    // blank-line trim and the ESC sanitizer both apply before probe
+    // derivation, so a probe can never reference bytes the composer will
+    // never echo.
+    let padded = PtyProtocol::GUARDED_COMPOSER.encode_prompt(
+        "\n\n  Fix the failing CI job on PR #7",
+        PromptIntent::Submit,
+    );
+    assert_eq!(padded.echo_probes(), probes.as_slice());
+    let escaped = PtyProtocol::GUARDED_COMPOSER
+        .encode_prompt("Fix the \x1bfailing CI job on PR #7", PromptIntent::Submit);
+    assert!(
+        escaped.echo_probes().iter().all(|p| !p.contains('\x1b')),
+        "probes must never contain raw ESC — the delivered text has none",
+    );
+    assert!(
+        escaped
+            .echo_probes()
+            .iter()
+            .any(|p| p.contains("failingcijobonpr#7")),
+    );
+}
+
+#[test]
+fn chunked_readiness_defaults_to_the_whole_buffer_detector() {
+    // Claude doesn't override the chunk-aware hook: any chunk hint must give
+    // exactly the whole-buffer verdict.
+    let agent = Claude;
+    let idle = "❯ \n? for shortcuts";
+    for hint in [0, 3, idle.len()] {
+        assert_eq!(
+            agent.detect_ready_for_prompt_chunked(idle.as_bytes(), hint),
+            agent.detect_ready_for_prompt(idle.as_bytes()),
+        );
+    }
+}
+
+#[test]
+fn codex_chunked_readiness_fires_on_a_composer_frame_over_stale_working_bytes() {
+    // Synthetic mirror of the fixture-driven #425 test: stale working bytes
+    // pin the positional read, a composer-rotation frame unpins the
+    // chunk-aware one. (The real-byte version lives in codex_fixtures.rs.)
+    let agent = Codex;
+    let stale = "› Try something\ngpt-5.5 xhigh · /repo\n• Working (9s · esc to interrupt)";
+    let mut buf = stale.as_bytes().to_vec();
+    assert!(!agent.detect_ready_for_prompt(&buf));
+    assert!(!agent.detect_ready_for_prompt_chunked(&buf, 0));
+
+    let frame_start = buf.len();
+    buf.extend_from_slice("\n› Summarize recent commits".as_bytes());
+    assert!(
+        !agent.detect_ready_for_prompt(&buf),
+        "whole-buffer read must still be pinned by the stale working line",
+    );
+    assert!(agent.detect_ready_for_prompt_chunked(&buf, frame_start));
+
+    // A chooser frame (`› 1.`) is a modal, not the composer — never ready.
+    let mut modal = stale.as_bytes().to_vec();
+    let modal_start = modal.len();
+    modal.extend_from_slice("\n› 1. Yes, proceed (y)".as_bytes());
+    assert!(!agent.detect_ready_for_prompt_chunked(&modal, modal_start));
 }
 
 #[test]

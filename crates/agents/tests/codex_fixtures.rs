@@ -18,7 +18,8 @@
 //! finished-turn idle screen that must evict a now-stale `esc to interrupt`.
 
 use lazybox_agents::detect::{
-    codex_input_needed_in_current_chunk, codex_ready_for_prompt, codex_state, codex_state_chunked,
+    codex_input_needed_in_current_chunk, codex_ready_for_prompt, codex_ready_for_prompt_chunked,
+    codex_state, codex_state_chunked,
 };
 use lazybox_agents::{AgentState, PromptShape};
 
@@ -242,6 +243,97 @@ fn codex_real_approval_round_trip_drives_the_chunk_detector() {
     buf.extend_from_slice(settled);
     assert_eq!(codex_state(&buf), Some(AgentState::Idle));
     assert!(codex_ready_for_prompt(&buf));
+}
+
+/// The chunk-aware readiness detector fed each capture as one full repaint
+/// (`last_chunk_start = 0`) must agree with the whole corpus's per-fixture
+/// `ready` expectation: the repaint-frame fast path may only accelerate the
+/// verdict, never flip a live modal, a working screen, or the trust gate
+/// into "ready".
+#[test]
+fn codex_chunked_readiness_matches_real_byte_corpus_as_full_repaint() {
+    let mut failures: Vec<String> = Vec::new();
+    for f in FIXTURES {
+        let actual = codex_ready_for_prompt_chunked(f.bytes, 0);
+        if actual != f.ready {
+            failures.push(format!(
+                "fixture `{}` expected chunked ready={} but got {}",
+                f.name, f.ready, actual,
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} real-byte chunked readiness checks failed:\n{}",
+        failures.len(),
+        FIXTURES.len(),
+        failures.join("\n"),
+    );
+}
+
+/// The #425 stall shape, replayed deterministically: Codex's diff renderer
+/// keeps landing status-line fragments after the last full footer paint, so
+/// the whole-buffer positional read stays pinned on Working and the ready
+/// signal never fires — the spawn-time inject then rides its 10s hard
+/// deadline and the unbounded pending-ready park. A placeholder-rotation
+/// frame (`› Summarize recent commits` — composer chrome Codex repaints
+/// every few seconds while the composer is usable) must fire the chunk-aware
+/// readiness on that frame, even though the whole-buffer read is still
+/// pinned.
+#[test]
+fn codex_placeholder_rotation_frame_unpins_readiness_from_stale_working_bytes() {
+    let working = include_bytes!("fixtures/codex_real_working.bin");
+    let mut buf = working.to_vec();
+    // Genuinely busy screen: neither detector may report ready.
+    assert!(!codex_ready_for_prompt(&buf));
+    assert!(!codex_ready_for_prompt_chunked(&buf, 0));
+
+    // Diff-render spinner churn: tiny frames with no composer chrome. The
+    // chunk-aware detector must keep falling back to the (still-pinned)
+    // positional read.
+    for _ in 0..3 {
+        let start = buf.len();
+        buf.extend_from_slice(b"\x1b[2K\xe2\x80\xa2 spin");
+        assert!(!codex_ready_for_prompt_chunked(&buf, start));
+    }
+
+    // The placeholder-rotation frame: composer arrow + prompt text, no
+    // footer repaint (the diff renderer repaints only the changed line).
+    let start = buf.len();
+    buf.extend_from_slice("\x1b[2K\x1b[7m\u{203a}\x1b[0m Summarize recent commits".as_bytes());
+    assert!(
+        !codex_ready_for_prompt(&buf),
+        "the whole-buffer positional read must still be pinned by the stale working bytes \
+         (otherwise this test no longer demonstrates the #425 stall)",
+    );
+    assert!(
+        codex_ready_for_prompt_chunked(&buf, start),
+        "the composer-rotation frame must fire chunk-aware readiness",
+    );
+}
+
+/// The chunk-aware fast path must never become a hole for modals: the trust
+/// gate and a parked approval (paint burst + spinner-only ticks) arriving as
+/// the current frame all stay not-ready.
+#[test]
+fn codex_chunked_readiness_never_fires_off_modal_frames() {
+    let working = include_bytes!("fixtures/codex_real_working.bin");
+    let trust = include_bytes!("fixtures/codex_real_trust.bin");
+    let paint = include_bytes!("fixtures/codex_real_approval_paint_burst.bin");
+    let ticks = include_bytes!("fixtures/codex_real_approval_parked_ticks.bin");
+
+    let mut buf = working.to_vec();
+    let trust_start = buf.len();
+    buf.extend_from_slice(trust);
+    assert!(!codex_ready_for_prompt_chunked(&buf, trust_start));
+
+    let mut buf = working.to_vec();
+    let paint_start = buf.len();
+    buf.extend_from_slice(paint);
+    assert!(!codex_ready_for_prompt_chunked(&buf, paint_start));
+    let ticks_start = buf.len();
+    buf.extend_from_slice(ticks);
+    assert!(!codex_ready_for_prompt_chunked(&buf, ticks_start));
 }
 
 /// The fixtures must actually carry ANSI escape bytes — otherwise this suite

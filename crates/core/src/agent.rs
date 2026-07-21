@@ -74,8 +74,43 @@ mod tests {
 
     #[test]
     fn resolve_args_empty_when_no_default_and_no_alias() {
-        let m = AgentModels::builtin("claude").unwrap();
+        let m = AgentModels {
+            tiers: AgentModels::builtin("claude").unwrap().tiers,
+            ..Default::default()
+        };
         assert!(m.resolve_args(None).is_empty());
+    }
+
+    /// A bare Claude spawn must always carry an explicit `--model` for
+    /// a coding tier — leaving the default unset hands the choice to
+    /// Claude Code's ambient default, which can be Fable.
+    #[test]
+    fn builtin_claude_default_pins_an_explicit_coding_model() {
+        let m = AgentModels::builtin("claude").unwrap();
+        assert_eq!(m.default.as_deref(), Some("L"));
+        assert_eq!(
+            m.resolve_args(None),
+            vec!["--model".to_string(), "claude-opus-4-8".to_string()]
+        );
+        let default_tier = m.tier(m.default.as_deref().unwrap()).unwrap();
+        assert!(!default_tier.excluded_from_default());
+    }
+
+    #[test]
+    fn fable_tiers_are_excluded_from_default() {
+        let fable = ModelTier {
+            alias: "F".into(),
+            label: "Fable".into(),
+            args: vec!["--model".into(), "claude-fable-5".into()],
+        };
+        assert!(fable.excluded_from_default());
+        for tier in &AgentModels::builtin("claude").unwrap().tiers {
+            assert!(
+                !tier.excluded_from_default(),
+                "{} must stay eligible",
+                tier.label
+            );
+        }
     }
 
     #[test]
@@ -181,6 +216,18 @@ pub struct ModelTier {
     pub args: Vec<String>,
 }
 
+impl ModelTier {
+    /// True when this tier pins a creative/writing-class model (Fable)
+    /// that must never be a coding agent's *default*. The tier stays
+    /// spawnable through an explicit chord; only the default-tier
+    /// resolution and the default-model picker exclude it.
+    pub fn excluded_from_default(&self) -> bool {
+        self.args
+            .iter()
+            .any(|a| a.to_ascii_lowercase().contains("fable"))
+    }
+}
+
 /// Which tier alias each declared task priority (`high` / `medium` /
 /// `low`) maps to for an **autonomous** or bare-`w` spawn. This is the
 /// config-driven bridge between the priority a task declares (a label
@@ -260,8 +307,12 @@ impl AgentModels {
     /// name their models differently and are left to per-agent YAML.
     pub fn builtin(agent_id: &str) -> Option<AgentModels> {
         match agent_id {
+            // Claude's default tier is pinned so a bare spawn always
+            // passes an explicit `--model`. With no flag, Claude Code
+            // falls back to its own ambient account/CLI default, which
+            // can resolve to a non-coding model (Fable).
             "claude" => Some(AgentModels {
-                default: None,
+                default: Some("L".into()),
                 tiers: vec![
                     ModelTier {
                         alias: "S".into(),

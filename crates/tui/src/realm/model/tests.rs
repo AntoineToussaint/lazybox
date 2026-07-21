@@ -3362,6 +3362,101 @@ mod modal_input_responsiveness_tests {
             !cfg.agents.contains_key("claude"),
             "no dead stanza for an unpin that changed nothing",
         );
+        assert_eq!(
+            m.agent_models["claude"].default.as_deref(),
+            Some("L"),
+            "unpinning lands on the built-in default tier, never the ambient model",
+        );
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A tier pinning a Fable-class model is never offered as a
+    /// default — the picker lists only default-eligible tiers (the
+    /// tier itself stays spawnable through an explicit chord).
+    #[test]
+    fn default_model_picker_excludes_fable_tiers() {
+        let mut m = build_model();
+        let mut models = lazybox_core::AgentModels::builtin("claude").unwrap();
+        models.tiers.push(lazybox_core::ModelTier {
+            alias: "F".into(),
+            label: "Fable".into(),
+            args: vec!["--model".into(), "claude-fable-5".into()],
+        });
+        m.set_agent_models([("claude".to_string(), models)].into());
+
+        m.mount_default_model_picker("claude");
+        assert_eq!(
+            m.default_model_choices,
+            vec![
+                None,
+                Some("S".to_string()),
+                Some("M".to_string()),
+                Some("L".to_string())
+            ],
+            "the Fable tier is not a pickable default",
+        );
+        m.dispatch_modal_key(key(Key::Esc));
+    }
+
+    /// The per-agent "Default model" settings row opens the tier
+    /// picker for that agent directly — no default-agent step first.
+    #[test]
+    fn edit_default_model_action_mounts_the_picker_for_that_agent() {
+        use crate::realm::setup_ctx::SettingsAction;
+        let mut m = build_model();
+        m.set_agent_models(
+            [(
+                "claude".to_string(),
+                lazybox_core::AgentModels::builtin("claude").unwrap(),
+            )]
+            .into(),
+        );
+        m.dispatch_settings_action(SettingsAction::EditDefaultModel {
+            agent_id: "claude".into(),
+            tier: None,
+        });
+        assert_eq!(m.modal_stack.last(), Some(&Id::DefaultModelPicker));
+        assert_eq!(m.default_model_agent.as_deref(), Some("claude"));
+        m.dispatch_modal_key(key(Key::Esc));
+    }
+
+    /// The Settings palette lists one "Default model" row per enabled
+    /// agent with a tier menu, badged with the current default tier —
+    /// Opus out of the box for Claude.
+    #[test]
+    fn settings_lists_a_default_model_row_per_tiered_agent() {
+        use crate::realm::setup_ctx::SettingsAction;
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("lazybox-model-rows-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator in
+        // this binary, so this single-writer mutation can't race.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        let mut m = build_model();
+        let mut persisted = lazybox_core::PersistedSetup::default();
+        persisted.enabled_providers.insert("github".into());
+        m.cache_persisted_setup(persisted);
+        m.open_settings();
+        let row = m
+            .setup
+            .settings_actions
+            .iter()
+            .find_map(|a| match a {
+                SettingsAction::EditDefaultModel { agent_id, tier } if agent_id == "claude" => {
+                    Some(tier.clone())
+                }
+                _ => None,
+            })
+            .expect("claude gets a direct default-model row");
+        assert_eq!(
+            row.as_deref(),
+            Some("Opus"),
+            "the badge names the pinned built-in default",
+        );
 
         unsafe { std::env::remove_var("LAZYBOX_HOME") };
         let _ = std::fs::remove_dir_all(&home);

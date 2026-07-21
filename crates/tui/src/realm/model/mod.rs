@@ -1888,9 +1888,21 @@ impl<T: TerminalAdapter> Model<T> {
         if models.tiers.is_empty() {
             return;
         }
+        // Row 0 unpins the YAML override. With a built-in default in
+        // play that lands back on the built-in tier, not on the
+        // agent's ambient model — say so in the label.
+        let builtin_label = lazybox_core::AgentModels::builtin(agent_id)
+            .and_then(|b| b.default)
+            .and_then(|a| models.tier(&a))
+            .map(|t| t.label.clone());
         let mut aliases: Vec<Option<String>> = vec![None];
-        let mut labels: Vec<String> = vec!["Agent default  ·  no pinned model".into()];
-        for tier in &models.tiers {
+        let mut labels: Vec<String> = vec![match &builtin_label {
+            Some(label) => format!("Built-in default  ·  {label}"),
+            None => "Agent default  ·  no pinned model".into(),
+        }];
+        // Fable-class tiers stay spawnable via an explicit chord but
+        // are never offered as a default.
+        for tier in models.tiers.iter().filter(|t| !t.excluded_from_default()) {
             aliases.push(Some(tier.alias.clone()));
             labels.push(format!("{}  ·  {}", tier.label, tier.alias));
         }
@@ -2951,6 +2963,24 @@ impl<T: TerminalAdapter> Model<T> {
             current: default_agent,
             tier: default_tier,
         });
+        // One direct default-model row per enabled agent with a tier
+        // menu — picking a default model must not require making that
+        // agent the default first.
+        for agent_id in &self.agents {
+            let models = cfg.agent_models(agent_id);
+            if models.tiers.is_empty() {
+                continue;
+            }
+            let tier = models
+                .default
+                .as_deref()
+                .and_then(|a| models.tier(a))
+                .map(|t| t.label.clone());
+            actions.push(SettingsAction::EditDefaultModel {
+                agent_id: agent_id.clone(),
+                tier,
+            });
+        }
         actions.push(SettingsAction::ToggleSkipPermissions {
             enabled: cfg.agent.skip_permissions,
         });
@@ -3012,6 +3042,13 @@ impl<T: TerminalAdapter> Model<T> {
             self.mount_default_agent_picker();
             return;
         }
+        // Per-agent default-model picker — same modal as the second
+        // step of the default-agent flow, minus the agent switch.
+        if let SettingsAction::EditDefaultModel { agent_id, .. } = &action {
+            let agent_id = agent_id.clone();
+            self.mount_default_model_picker(&agent_id);
+            return;
+        }
         // Agent-CLI update actions are fire-and-forget daemon commands;
         // results come back as AgentCliUpdatesChecked / -UpdateFinished
         // footer notices.
@@ -3055,6 +3092,7 @@ impl<T: TerminalAdapter> Model<T> {
             SettingsAction::EditTheme { .. } => return,
             SettingsAction::EditLlmGateway { .. } => return,
             SettingsAction::EditDefaultAgent { .. } => return,
+            SettingsAction::EditDefaultModel { .. } => return,
         };
         // Pre-seed the accumulator from persisted state so partial
         // flows don't drop the user's other-provider config.

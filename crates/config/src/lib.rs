@@ -837,9 +837,10 @@ impl Config {
     /// menu (each replaced wholesale when set) so
     /// `agents.<id>.models.default: L` alone (the Settings default-model
     /// pick) or a bare `priority:` map works without copying the whole
-    /// tier list into YAML.
+    /// tier list into YAML. A `default` naming a Fable tier is never
+    /// honored — it re-points to the first default-eligible tier.
     pub fn agent_models(&self, agent_id: &str) -> lazybox_core::AgentModels {
-        match self.agents.get(agent_id) {
+        let mut models = match self.agents.get(agent_id) {
             Some(entry) if !entry.models.tiers.is_empty() => entry.models.clone(),
             entry => {
                 let mut models = lazybox_core::AgentModels::builtin(agent_id).unwrap_or_default();
@@ -853,7 +854,23 @@ impl Config {
                 }
                 models
             }
+        };
+        // A default pointing at a Fable tier is re-pointed to the first
+        // eligible tier: creative-class models stay spawnable through an
+        // explicit chord but are never what a bare spawn lands on.
+        if models
+            .default
+            .as_deref()
+            .and_then(|d| models.tier(d))
+            .is_some_and(lazybox_core::ModelTier::excluded_from_default)
+        {
+            models.default = models
+                .tiers
+                .iter()
+                .find(|t| !t.excluded_from_default())
+                .map(|t| t.alias.clone());
         }
+        models
     }
 
     /// Load from `~/.lazybox/config.yaml`, falling back to defaults.
@@ -1881,6 +1898,51 @@ agents:
             m.resolve_args(None),
             vec!["--model".to_string(), "claude-opus-4-8".to_string()],
             "a bare spawn resolves the persisted default tier"
+        );
+    }
+
+    #[test]
+    fn agent_models_builtin_claude_defaults_to_a_pinned_coding_tier() {
+        let cfg = Config::default();
+        let m = cfg.agent_models("claude");
+        assert_eq!(m.default.as_deref(), Some("L"));
+        assert_eq!(
+            m.resolve_args(None),
+            vec!["--model".to_string(), "claude-opus-4-8".to_string()],
+            "a bare spawn always pins an explicit coding model"
+        );
+    }
+
+    #[test]
+    fn agent_models_fable_default_is_repointed_to_an_eligible_tier() {
+        let yaml = r#"
+agents:
+  claude:
+    models:
+      default: F
+      tiers:
+        - alias: F
+          label: "Fable"
+          args: ["--model", "claude-fable-5"]
+        - alias: L
+          label: "Opus"
+          args: ["--model", "claude-opus-4-8"]
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse fable-default models");
+        let m = cfg.agent_models("claude");
+        assert_eq!(
+            m.default.as_deref(),
+            Some("L"),
+            "Fable is never the default"
+        );
+        assert_eq!(
+            m.resolve_args(None),
+            vec!["--model".to_string(), "claude-opus-4-8".to_string()]
+        );
+        // The Fable tier itself stays selectable via an explicit chord.
+        assert_eq!(
+            m.resolve_args(Some("F")),
+            vec!["--model".to_string(), "claude-fable-5".to_string()]
         );
     }
 

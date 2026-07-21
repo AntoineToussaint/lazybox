@@ -56,6 +56,11 @@ brew install AntoineToussaint/lazybox/lazybox
 
 Then `gh auth login` (if you haven't) and run `lazybox`.
 
+Lazybox checks for newer builds at startup and shows an update notice when one
+is available. It never updates itself: the notice identifies Homebrew versus
+shell-installer releases and scopes source rebuild commands to the checkout
+that produced the running binary.
+
 Prefer to build it yourself, or hacking on lazybox? Build from source:
 
 ```sh

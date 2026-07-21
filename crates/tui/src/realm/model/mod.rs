@@ -86,6 +86,8 @@ pub enum Id {
     /// remounting.
     HelpAsk,
     Error,
+    /// Startup notice for a newer source commit or published release.
+    Update,
     Polling,
     Reply,
     /// Single-line input prompt for naming a brand-new pre-PR
@@ -948,6 +950,12 @@ pub struct Model<T: TerminalAdapter> {
     /// boot path; `None` on the `--connect` path (which loads no
     /// snippets and owns no local store), where MRU stays session-only.
     recent_snippets_store: Option<std::sync::Arc<dyn lazybox_store::Store>>,
+    /// Persistence retained only while the startup update modal is open.
+    update_store: Option<std::sync::Arc<dyn lazybox_store::Store>>,
+    pending_update_target: Option<String>,
+    update_dismissal_tx: mpsc::Sender<Result<(), String>>,
+    update_dismissal_rx: mpsc::Receiver<Result<(), String>>,
+    update_dismissals_pending: usize,
     /// Active broadcast flow (`Shift-B`), if any. Set when the flow
     /// mounts, threaded through the snippet-pick step, consumed by the
     /// compose submit (or dropped on Esc). See [`BroadcastDraft`].
@@ -1107,6 +1115,12 @@ const RECENT_SNIPPETS_MAX: usize = 5;
 /// snooze — not user-authored `snippets.yaml` content.
 const RECENT_SNIPPETS_KV_KEY: &str = "recent_snippets";
 
+const DISMISSED_UPDATE_KV_PREFIX: &str = "dismissed_update_target:";
+
+fn dismissed_update_key(target: &str) -> String {
+    format!("{DISMISSED_UPDATE_KV_PREFIX}{target}")
+}
+
 /// How long the footer must sit idle (no modal, no notice) after
 /// startup before a feature tip (#115) is allowed to surface. Long
 /// enough that the first-run tour and the initial-poll spinner clear
@@ -1138,6 +1152,7 @@ impl<T: TerminalAdapter> Model<T> {
         // there's no `crossterm_input_listener` here, so the listener
         // thread doesn't race the main thread for keystrokes.
         let (modal_event_tx, modal_event_rx) = mpsc::channel();
+        let (update_dismissal_tx, update_dismissal_rx) = mpsc::channel();
         let app: Application<Id, Msg, UserEvent> = Application::init(
             EventListenerCfg::default()
                 .add_port(
@@ -1245,6 +1260,11 @@ impl<T: TerminalAdapter> Model<T> {
             snippet_choices: Vec::new(),
             recent_snippets: Vec::new(),
             recent_snippets_store: None,
+            update_store: None,
+            pending_update_target: None,
+            update_dismissal_tx,
+            update_dismissal_rx,
+            update_dismissals_pending: 0,
             pending_broadcast: None,
             jump_choices: Vec::new(),
             theme_choices: Vec::new(),
@@ -2293,26 +2313,70 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
-    /// Compare the running build against `origin/main` and, when behind,
-    /// raise the persistent "outdated build" warning. This catches the
-    /// blind spot [`Self::note_daemon_build`] can't: a *uniformly* stale
-    /// install where daemon and client are the same old build, so no
-    /// mismatch fires while already-fixed bugs quietly reappear. Best
-    /// effort — a current build, a released binary, or an unanswerable
-    /// git query all leave the UI quiet. Called once at startup.
-    pub fn check_build_freshness(&mut self) {
-        if let Some(behind) = crate::build_guard::commits_behind() {
-            self.note_outdated_build(behind);
+    /// Show a startup update notice unless this exact target was dismissed.
+    pub fn show_update_if_new(
+        &mut self,
+        update: crate::build_guard::AvailableUpdate,
+        store: Option<std::sync::Arc<dyn lazybox_store::Store>>,
+    ) {
+        let target = update.target();
+        let dismissal_key = dismissed_update_key(&target);
+        let dismissed = store
+            .as_ref()
+            .is_some_and(|store| match store.get_kv(&dismissal_key) {
+                Ok(value) => value.is_some(),
+                Err(error) => {
+                    tracing::warn!("read dismissed update target failed: {error}");
+                    false
+                }
+            });
+        if dismissed || self.modal_stack.iter().any(|id| id == &Id::Update) {
+            return;
+        }
+
+        use crate::realm::components::error::{Accent, ErrorModal};
+        let modal = ErrorModal::new(
+            "Update available",
+            Accent::info("UPDATE"),
+            update.modal_body(),
+        )
+        .dismiss_on_confirm();
+        self.pending_update_target = Some(target);
+        self.update_store = store;
+        self.mount_modal(Id::Update, modal);
+    }
+
+    pub(super) fn tick_update_dismissal(&mut self) {
+        while let Ok(result) = self.update_dismissal_rx.try_recv() {
+            self.handle_update_dismissal_result(result);
         }
     }
 
-    /// Surface a stale build `behind` commits back: a header warning the
-    /// sidebar repaints every frame (so it never scrolls away) plus a
-    /// startup banner for immediacy. Split from [`Self::check_build_freshness`]
-    /// so the banner logic is testable without a git checkout.
-    pub fn note_outdated_build(&mut self, behind: u32) {
-        self.sidebar.set_outdated_build(Some(behind));
-        self.flash_error(crate::build_guard::outdated_message(behind));
+    pub(super) fn finish_update_dismissal(&mut self) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(6);
+        while self.update_dismissals_pending > 0 {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                tracing::warn!("timed out persisting update dismissal during shutdown");
+                break;
+            }
+            match self.update_dismissal_rx.recv_timeout(remaining) {
+                Ok(result) => self.handle_update_dismissal_result(result),
+                Err(error) => {
+                    tracing::warn!("update dismissal worker ended before persistence: {error}");
+                    break;
+                }
+            }
+        }
+    }
+
+    fn handle_update_dismissal_result(&mut self, result: Result<(), String>) {
+        self.update_dismissals_pending = self.update_dismissals_pending.saturating_sub(1);
+        if let Err(error) = result {
+            self.flash_error(format!(
+                "could not remember update dismissal; it may reappear next launch: {error}"
+            ));
+        }
     }
 
     /// Validate the applied keymap config at startup and surface any

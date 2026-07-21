@@ -2330,50 +2330,6 @@ mod work_target_tests {
         );
     }
 }
-
-#[cfg(test)]
-mod outdated_build_tests {
-    use super::super::*;
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-
-    fn header_row(sb: &mut Sidebar) -> String {
-        let backend = TestBackend::new(80, 20);
-        let mut term = Terminal::new(backend).unwrap();
-        term.draw(|f| sb.render(Rect::new(0, 0, 80, 20), f, true))
-            .unwrap();
-        let buf = term.backend().buffer().clone();
-        (0..80).map(|x| buf[(x, 0)].symbol()).collect::<String>()
-    }
-
-    /// A current build paints no warning; a stale one paints the
-    /// persistent header banner naming the fix. The header is the
-    /// always-visible surface a uniformly-stale install can't scroll
-    /// past (#234). Sets the outdated flag directly to test the render
-    /// path; the fix wording tracks build provenance, and the test
-    /// binary is a dev/source build, so the fix is "rebuild" (#391).
-    #[test]
-    fn header_shows_outdated_warning_only_when_behind() {
-        let mut sb = Sidebar::new(PaneId::new(1));
-        assert!(!header_row(&mut sb).contains("behind"));
-
-        sb.set_outdated_build(Some(89));
-        let row = header_row(&mut sb);
-        assert!(row.contains("89"), "header row was: {row:?}");
-        assert!(row.contains("rebuild & restart"), "header row was: {row:?}");
-    }
-
-    /// Zero commits behind is current, not stale — normalize it away so
-    /// a `Some(0)` from the guard never paints a phantom warning.
-    #[test]
-    fn zero_behind_is_not_outdated() {
-        let mut sb = Sidebar::new(PaneId::new(1));
-        sb.set_outdated_build(Some(0));
-        assert_eq!(sb.outdated_commits_behind(), None);
-        assert!(!header_row(&mut sb).contains("behind"));
-    }
-}
-
 #[cfg(test)]
 mod keep_awake_badge_tests {
     use super::super::*;

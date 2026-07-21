@@ -113,29 +113,119 @@ mod effects_tests {
         assert!(n.message.contains(lazybox_ipc::BUILD_VERSION));
     }
 
-    /// A build that trails `main` raises the persistent outdated-build
-    /// warning: a sticky footer banner naming the fix *and* the sidebar
-    /// flag the header repaints every frame. This is the uniformly-stale
-    /// install the daemon/client mismatch check can't see (#234).
-    ///
-    /// Drives `note_outdated_build` directly to exercise the banner
-    /// render machinery. There is no provenance gate above it any more:
-    /// dev builds are checked too (#391 — the stale-dev-binary case is
-    /// the one that actually bites), and the test binary being a dev
-    /// build is why the named fix here is "rebuild".
     #[test]
-    fn outdated_build_raises_persistent_warning() {
-        use crate::realm::components::footer::NoticeSeverity;
+    fn update_modal_dismissal_is_persisted_per_available_target() {
+        use crate::build_guard::ReleaseInstall;
+        use lazybox_store::{MemoryStore, Store};
+        use std::sync::Arc;
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let store: Arc<dyn Store> = Arc::new(MemoryStore::new());
+        let update = crate::build_guard::AvailableUpdate::Release {
+            current: "v0.1.7".into(),
+            available: "v0.2.0".into(),
+            install: ReleaseInstall::Homebrew,
+        };
+
         let mut m = build_model();
+        m.show_update_if_new(update.clone(), Some(store.clone()));
+        assert_eq!(m.top_modal(), Some(&Id::Update));
+        m.dispatch_modal_key(KeyEvent::new(Key::Enter, KeyModifiers::NONE));
+        assert!(m.top_modal().is_none(), "Enter dismisses the modal");
+        let dismissed_v2 = dismissed_update_key("release:v0.2.0");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while store.get_kv(&dismissed_v2).unwrap().is_none() && std::time::Instant::now() < deadline
+        {
+            std::thread::yield_now();
+        }
+        while m.update_dismissals_pending > 0 && std::time::Instant::now() < deadline {
+            m.tick_update_dismissal();
+            std::thread::yield_now();
+        }
+        assert_eq!(m.update_dismissals_pending, 0);
+        assert_eq!(store.get_kv(&dismissed_v2).unwrap().as_deref(), Some("1"));
 
-        assert!(!crate::build_guard::is_release_build());
-        m.note_outdated_build(89);
+        let mut next_launch = build_model();
+        next_launch.show_update_if_new(update, Some(store.clone()));
+        assert!(
+            next_launch.top_modal().is_none(),
+            "the dismissed target stays quiet"
+        );
 
-        let n = m.status.notice.as_ref().expect("outdated banner set");
-        assert_eq!(n.severity, NoticeSeverity::Permanent);
-        assert!(n.message.contains("89"));
-        assert!(n.message.contains("rebuild & restart"));
-        assert_eq!(m.sidebar.outdated_commits_behind(), Some(89));
+        next_launch.show_update_if_new(
+            crate::build_guard::AvailableUpdate::Release {
+                current: "v0.1.7".into(),
+                available: "v0.3.0".into(),
+                install: ReleaseInstall::Shell,
+            },
+            Some(store.clone()),
+        );
+        assert_eq!(next_launch.top_modal(), Some(&Id::Update));
+        next_launch.dispatch_modal_key(KeyEvent::new(Key::Esc, KeyModifiers::NONE));
+        assert!(next_launch.top_modal().is_none(), "Esc dismisses the modal");
+        let dismissed_v3 = dismissed_update_key("release:v0.3.0");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while store.get_kv(&dismissed_v3).unwrap().is_none() && std::time::Instant::now() < deadline
+        {
+            std::thread::yield_now();
+        }
+        while next_launch.update_dismissals_pending > 0 && std::time::Instant::now() < deadline {
+            next_launch.tick_update_dismissal();
+            std::thread::yield_now();
+        }
+        assert_eq!(next_launch.update_dismissals_pending, 0);
+        assert_eq!(store.get_kv(&dismissed_v3).unwrap().as_deref(), Some("1"));
+        assert_eq!(store.get_kv(&dismissed_v2).unwrap().as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn update_dismissal_without_a_store_is_not_silently_forgotten() {
+        use crate::build_guard::ReleaseInstall;
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let mut m = build_model();
+        m.show_update_if_new(
+            crate::build_guard::AvailableUpdate::Release {
+                current: "v0.1.7".into(),
+                available: "v0.2.0".into(),
+                install: ReleaseInstall::Shell,
+            },
+            None,
+        );
+        m.dispatch_modal_key(KeyEvent::new(Key::Esc, KeyModifiers::NONE));
+
+        let notice = m.status.notice.as_ref().expect("persistence warning");
+        assert!(notice.message.contains("local state is unavailable"));
+    }
+
+    #[test]
+    fn update_dismissal_write_failure_is_reported() {
+        use crate::build_guard::ReleaseInstall;
+        use lazybox_store::{Store, StoreError};
+        use std::sync::Arc;
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        struct FailingStore;
+        impl Store for FailingStore {
+            fn set_kv(&self, _key: &str, _value: &str) -> Result<(), StoreError> {
+                Err(StoreError::Backend("disk is read-only".into()))
+            }
+        }
+
+        let mut m = build_model();
+        m.show_update_if_new(
+            crate::build_guard::AvailableUpdate::Release {
+                current: "v0.1.7".into(),
+                available: "v0.2.0".into(),
+                install: ReleaseInstall::Shell,
+            },
+            Some(Arc::new(FailingStore)),
+        );
+        m.dispatch_modal_key(KeyEvent::new(Key::Esc, KeyModifiers::NONE));
+        m.finish_update_dismissal();
+
+        let notice = m.status.notice.as_ref().expect("persistence warning");
+        assert!(notice.message.contains("disk is read-only"));
     }
 
     /// Issue #265: a `g m` merge GitHub rejected must surface as a

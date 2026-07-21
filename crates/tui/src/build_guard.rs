@@ -1,189 +1,623 @@
-//! Outdated-build guard.
+//! Startup check for a newer lazybox build.
 //!
-//! A uniformly-stale install — daemon *and* client built from the same
-//! old commit — passes the protocol handshake and the daemon/client
-//! build-match check silently, then reproduces already-fixed bugs (the
-//! issue→PR session loss of #78/#161/#167 being the worst). The build
-//! version is exchanged on the wire, but nothing compares the *running*
-//! build against "latest", so a 89-commits-behind binary runs with no
-//! warning at all.
-//!
-//! The binary remembers the git checkout it was built from
-//! ([`BUILD_SOURCE_DIR`]) and its commit ([`BUILD_GIT_SHA`]), and at
-//! startup counts how many commits that build trails `origin/main`. A
-//! non-zero count raises the persistent "outdated build" banner.
-//!
-//! The count is read from the existing `origin/main` remote-tracking
-//! ref — no network, so startup pays nothing. That ref can itself lag
-//! the true remote (a `git fetch` only updates `FETCH_HEAD`), which can
-//! only *under*-report staleness; it never invents a warning.
-//!
-//! The guard fires for both build kinds, with the fix phrased per
-//! provenance ([`update_action`]): an installer-managed release binary
-//! gets "update & restart", a dev/source build gets "rebuild & restart"
-//! — the exact incident of issue #391 was a dev binary running long
-//! after its checkout was pulled forward, with zero signal because the
-//! guard used to be gated off for dev builds entirely (#251 gated the
-//! *installer* wording, and the gate took the whole check with it). A
-//! released binary built outside a checkout still has no source ref to
-//! count against, so it stays quiet until the release-tag comparison
-//! lands (future work).
+//! Source builds compare their baked commit with the baked checkout's current
+//! branch and upstream. Cargo-dist builds compare their package version with
+//! GitHub's latest published release. Neither path changes the installation.
 
 use lazybox_ipc::{BUILD_GIT_SHA, BUILD_SOURCE_DIR, IS_RELEASE_BUILD};
-use std::process::Command;
+use lazybox_store::Store;
+use semver::Version;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Whether the running binary is an installer-managed release build
-/// (cargo-dist) rather than a dev/source build. Decides the fix wording
-/// of the outdated-build nudge ([`update_action`]) and the `(dev)`
-/// header tag (issue #251) — a dev build is updated with
-/// `git pull && cargo build`, not an installer swap.
+const RELEASE_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
+const CREDENTIAL_TIMEOUT: Duration = Duration::from_secs(1);
+const SOURCE_CHECK_TIMEOUT: Duration = Duration::from_secs(4);
+const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
+const BREW_CHECK_TIMEOUT: Duration = Duration::from_secs(1);
+const CACHE_READ_TIMEOUT: Duration = Duration::from_millis(250);
+const RELEASE_CACHE_MAX_AGE: Duration = Duration::from_secs(15 * 60);
+const RELEASE_CACHE_KV_KEY: &str = "latest_release_cache";
+const SHELL_INSTALLER_COMMAND: &str = "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/AntoineToussaint/lazybox/releases/latest/download/lazybox-tui-installer.sh | sh";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleaseInstall {
+    Homebrew,
+    Shell,
+}
+
+impl ReleaseInstall {
+    fn update_command(self) -> &'static str {
+        match self {
+            Self::Homebrew => "brew upgrade lazybox",
+            Self::Shell => SHELL_INSTALLER_COMMAND,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AvailableUpdate {
+    Source {
+        current: String,
+        available: String,
+        commits_behind: u32,
+        source_dir: String,
+        pull_before_build: bool,
+    },
+    Release {
+        current: String,
+        available: String,
+        install: ReleaseInstall,
+    },
+}
+
+impl AvailableUpdate {
+    pub(crate) fn target(&self) -> String {
+        match self {
+            Self::Source { available, .. } => format!("source:{available}"),
+            Self::Release { available, .. } => format!("release:{available}"),
+        }
+    }
+
+    pub(crate) fn modal_body(&self) -> String {
+        match self {
+            Self::Source {
+                current,
+                available,
+                commits_behind,
+                source_dir,
+                pull_before_build,
+            } => {
+                let commits = if *commits_behind == 1 {
+                    "commit"
+                } else {
+                    "commits"
+                };
+                let source = shell_quote(source_dir);
+                let command = if *pull_before_build {
+                    format!("cd -- {source} && git pull --ff-only && cargo build --release")
+                } else {
+                    format!("cd -- {source} && cargo build --release")
+                };
+                format!(
+                    "Your lazybox source is {commits_behind} {commits} ahead of this binary — \
+                     {current} → {available}.\n\nUpdate with:\n  {command}\n\n\
+                     Lazybox will not run this command or update itself."
+                )
+            }
+            Self::Release {
+                current,
+                available,
+                install,
+            } => format!(
+                "A newer release is available — {current} → {available}.\n\n\
+                 Update with:\n  {}\n\n\
+                 Lazybox will not run this command or update itself.",
+                install.update_command()
+            ),
+        }
+    }
+}
+
 pub fn is_release_build() -> bool {
     IS_RELEASE_BUILD
 }
 
-/// How many commits the running build trails `origin/main`, when that
-/// can be determined locally and is non-zero. `None` means "current,
-/// or can't tell" — both resolve to no banner. Checked for dev builds
-/// too (issue #391): a stale dev binary running after `git pull` is the
-/// staleness case that actually bites, and it used to get zero signal.
-pub fn commits_behind() -> Option<u32> {
-    commits_behind_in(BUILD_SOURCE_DIR, BUILD_GIT_SHA)
+/// Check the channel appropriate to this build's provenance.
+pub async fn available_update(store: Option<Arc<dyn Store>>) -> Option<AvailableUpdate> {
+    if is_release_build() {
+        latest_release_update(store).await
+    } else {
+        match tokio::time::timeout(
+            SOURCE_CHECK_TIMEOUT,
+            source_update_in(BUILD_SOURCE_DIR, BUILD_GIT_SHA),
+        )
+        .await
+        {
+            Ok(update) => update,
+            Err(_) => {
+                tracing::debug!("source update check timed out");
+                None
+            }
+        }
+    }
 }
 
-/// Testable core of [`commits_behind`]: count `sha..origin/main` in the
-/// checkout at `source_dir`. Returns `None` when the build carries no
-/// usable provenance (released tarball, `unknown` SHA) or when git can't
-/// answer (no `origin/main`, detached source, missing checkout).
-fn commits_behind_in(source_dir: &str, sha: &str) -> Option<u32> {
+async fn source_update_in(source_dir: &str, sha: &str) -> Option<AvailableUpdate> {
     if source_dir.is_empty() || sha.is_empty() || sha == "unknown" {
         return None;
     }
-    let out = Command::new("git")
-        .args(["-C", source_dir, "rev-list", "--count"])
-        .arg(format!("{sha}..origin/main"))
-        .output()
-        .ok()?;
-    if !out.status.success() {
+
+    let build_ref = format!("{sha}^{{commit}}");
+    let built = git_stdout(source_dir, &["rev-parse", "--verify", &build_ref]).await?;
+    let head = git_stdout(source_dir, &["rev-parse", "--verify", "HEAD^{commit}"]).await?;
+
+    let upstream = git_stdout(
+        source_dir,
+        &["rev-parse", "--verify", "@{upstream}^{commit}"],
+    )
+    .await
+    .filter(|commit| commit != &head);
+    let upstream_is_ahead = match upstream.as_deref() {
+        Some(commit) => git_is_ancestor(source_dir, &head, commit).await == Some(true),
+        None => false,
+    };
+    let (available_commit, pull_before_build) = if upstream_is_ahead {
+        (upstream.as_deref()?, true)
+    } else {
+        (head.as_str(), false)
+    };
+
+    if built == available_commit
+        || git_is_ancestor(source_dir, &built, available_commit).await != Some(true)
+    {
         return None;
     }
-    let count = parse_commit_count(&String::from_utf8_lossy(&out.stdout))?;
-    (count > 0).then_some(count)
+
+    let range = format!("{built}..{available_commit}");
+    let commits_behind = git_stdout(source_dir, &["rev-list", "--count", &range])
+        .await?
+        .parse()
+        .ok()?;
+    if commits_behind == 0 {
+        return None;
+    }
+    let available = git_stdout(source_dir, &["rev-parse", "--short=12", available_commit]).await?;
+
+    Some(AvailableUpdate::Source {
+        current: sha.to_string(),
+        available,
+        commits_behind,
+        source_dir: source_dir.to_string(),
+        pull_before_build,
+    })
 }
 
-/// Parse the single integer `git rev-list --count` prints. Tolerant of
-/// surrounding whitespace; rejects anything else.
-fn parse_commit_count(stdout: &str) -> Option<u32> {
-    stdout.trim().parse().ok()
-}
-
-/// The fix the banner tells the user to take, matched to how this
-/// binary is actually updated: an installer swap for a release build,
-/// `git pull && cargo build` for a dev/source build. The binary can't
-/// update itself either way.
-pub fn update_action() -> &'static str {
-    update_action_for(is_release_build())
-}
-
-fn update_action_for(is_release: bool) -> &'static str {
-    if is_release {
-        "update & restart"
-    } else {
-        "rebuild & restart"
+async fn git_is_ancestor(source_dir: &str, ancestor: &str, descendant: &str) -> Option<bool> {
+    let output = git_output(
+        source_dir,
+        &["merge-base", "--is-ancestor", ancestor, descendant],
+    )
+    .await?;
+    match output.status.code() {
+        Some(0) => Some(true),
+        Some(1) => Some(false),
+        _ => None,
     }
 }
 
-/// The banner text for a build `behind` commits back. Phrased as an
-/// action because that's the only fix — the running binary can't
-/// update itself.
-pub fn outdated_message(behind: u32) -> String {
-    let commits = if behind == 1 { "commit" } else { "commits" };
-    format!(
-        "⚠ outdated build — {behind} {commits} behind main; {}",
-        update_action()
+async fn git_stdout(source_dir: &str, args: &[&str]) -> Option<String> {
+    let output = git_output(source_dir, args).await?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+async fn git_output(source_dir: &str, args: &[&str]) -> Option<std::process::Output> {
+    let mut command = tokio::process::Command::new("git");
+    command
+        .arg("-C")
+        .arg(source_dir)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    match tokio::time::timeout(GIT_COMMAND_TIMEOUT, command.output()).await {
+        Ok(Ok(output)) => Some(output),
+        Ok(Err(error)) => {
+            tracing::debug!("git update check failed: {error}");
+            None
+        }
+        Err(_) => {
+            tracing::debug!("git update check command timed out");
+            None
+        }
+    }
+}
+
+async fn latest_release_update(store: Option<Arc<dyn Store>>) -> Option<AvailableUpdate> {
+    let now = unix_timestamp();
+    let cached = load_release_cache(store.clone()).await;
+    let latest_tag = if cached.as_ref().is_some_and(|cache| cache.is_fresh(now)) {
+        cached.as_ref()?.tag.clone()
+    } else {
+        match fetch_latest_release_tag().await {
+            Some(tag) => {
+                if let Some(store) = store {
+                    persist_release_cache(store, ReleaseCache::new(now, tag.clone()));
+                }
+                tag
+            }
+            None => cached?.tag,
+        }
+    };
+
+    let install = release_install().await;
+    release_update(env!("CARGO_PKG_VERSION"), &latest_tag, install)
+}
+
+async fn fetch_latest_release_tag() -> Option<String> {
+    let credential = tokio::time::timeout(
+        CREDENTIAL_TIMEOUT,
+        lazybox_gh::credential_chain().resolve(lazybox_gh::SOURCE),
     )
+    .await
+    .ok()
+    .and_then(Result::ok);
+
+    let client = {
+        let mut builder = octocrab::Octocrab::builder()
+            .add_retry_config(octocrab::service::middleware::retry::RetryConfig::None)
+            .set_connect_timeout(Some(RELEASE_CHECK_TIMEOUT))
+            .set_read_timeout(Some(RELEASE_CHECK_TIMEOUT));
+        if let Some(credential) = credential {
+            builder = builder.personal_token(credential.into_token());
+        }
+        builder.build().ok()?
+    };
+    let repository = client.repos("AntoineToussaint", "lazybox");
+    let releases = repository.releases();
+    let request = releases.get_latest();
+    match tokio::time::timeout(RELEASE_CHECK_TIMEOUT, request).await {
+        Ok(Ok(release)) => Some(release.tag_name),
+        Ok(Err(error)) => {
+            tracing::debug!("latest release check failed: {error}");
+            None
+        }
+        Err(_) => {
+            tracing::debug!("latest release check timed out");
+            None
+        }
+    }
+}
+
+fn release_update(
+    current: &str,
+    latest_tag: &str,
+    install: ReleaseInstall,
+) -> Option<AvailableUpdate> {
+    let current_version = Version::parse(current).ok()?;
+    let latest_version = Version::parse(latest_tag.strip_prefix('v').unwrap_or(latest_tag)).ok()?;
+    (latest_version > current_version).then(|| AvailableUpdate::Release {
+        current: format!("v{current_version}"),
+        available: format!("v{latest_version}"),
+        install,
+    })
+}
+
+async fn release_install() -> ReleaseInstall {
+    let Some(executable) = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.canonicalize().ok())
+    else {
+        return ReleaseInstall::Shell;
+    };
+    let mut command = tokio::process::Command::new("brew");
+    command
+        .args(["--prefix", "lazybox"])
+        .env("HOMEBREW_NO_AUTO_UPDATE", "1")
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let prefix = match tokio::time::timeout(BREW_CHECK_TIMEOUT, command.output()).await {
+        Ok(Ok(output)) if output.status.success() => String::from_utf8(output.stdout)
+            .ok()
+            .map(|value| PathBuf::from(value.trim()))
+            .and_then(|path| path.canonicalize().ok()),
+        _ => None,
+    };
+    release_install_for_paths(&executable, prefix.as_deref())
+}
+
+fn release_install_for_paths(executable: &Path, brew_prefix: Option<&Path>) -> ReleaseInstall {
+    let components: Vec<_> = executable
+        .components()
+        .map(|component| component.as_os_str())
+        .collect();
+    let is_cellar_install = components.windows(2).any(|pair| {
+        pair == [
+            std::ffi::OsStr::new("Cellar"),
+            std::ffi::OsStr::new("lazybox"),
+        ]
+    });
+    if is_cellar_install || brew_prefix.is_some_and(|prefix| executable.starts_with(prefix)) {
+        ReleaseInstall::Homebrew
+    } else {
+        ReleaseInstall::Shell
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReleaseCache {
+    checked_at: u64,
+    tag: String,
+}
+
+impl ReleaseCache {
+    fn new(checked_at: u64, tag: String) -> Self {
+        Self { checked_at, tag }
+    }
+
+    fn parse(raw: &str) -> Option<Self> {
+        let (checked_at, tag) = raw.split_once('\n')?;
+        let checked_at = checked_at.parse().ok()?;
+        Version::parse(tag.strip_prefix('v').unwrap_or(tag)).ok()?;
+        Some(Self::new(checked_at, tag.to_string()))
+    }
+
+    fn encode(&self) -> String {
+        format!("{}\n{}", self.checked_at, self.tag)
+    }
+
+    fn is_fresh(&self, now: u64) -> bool {
+        now.checked_sub(self.checked_at)
+            .is_some_and(|age| age <= RELEASE_CACHE_MAX_AGE.as_secs())
+    }
+}
+
+async fn load_release_cache(store: Option<Arc<dyn Store>>) -> Option<ReleaseCache> {
+    let store = store?;
+    let read = tokio::task::spawn_blocking(move || store.get_kv(RELEASE_CACHE_KV_KEY));
+    match tokio::time::timeout(CACHE_READ_TIMEOUT, read).await {
+        Ok(Ok(Ok(Some(raw)))) => ReleaseCache::parse(&raw),
+        Ok(Ok(Err(error))) => {
+            tracing::debug!("read latest release cache failed: {error}");
+            None
+        }
+        Ok(Err(error)) => {
+            tracing::debug!("latest release cache task failed: {error}");
+            None
+        }
+        Err(_) => {
+            tracing::debug!("latest release cache read timed out");
+            None
+        }
+        Ok(Ok(Ok(None))) => None,
+    }
+}
+
+fn persist_release_cache(store: Arc<dyn Store>, cache: ReleaseCache) {
+    let raw = cache.encode();
+    let _handle = tokio::task::spawn_blocking(move || {
+        if let Err(error) = store.set_kv(RELEASE_CACHE_KV_KEY, &raw) {
+            tracing::debug!("persist latest release cache failed: {error}");
+        }
+    });
+}
+
+fn unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::disallowed_methods)]
+
     use super::*;
+    use std::process::Command;
 
-    #[test]
-    fn parses_a_clean_count() {
-        assert_eq!(parse_commit_count("89\n"), Some(89));
-        assert_eq!(parse_commit_count("  0 "), Some(0));
+    fn git(repo: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    fn init_repo() -> tempfile::TempDir {
+        let repo = tempfile::tempdir().unwrap();
+        git(repo.path(), &["init", "-q"]);
+        git(
+            repo.path(),
+            &["config", "user.email", "lazybox@example.com"],
+        );
+        git(repo.path(), &["config", "user.name", "Lazybox Test"]);
+        git(repo.path(), &["config", "commit.gpgsign", "false"]);
+        git(repo.path(), &["branch", "-M", "main"]);
+        repo
+    }
+
+    fn commit(repo: &Path, value: &str) -> String {
+        std::fs::write(repo.join("version"), value).unwrap();
+        git(repo, &["add", "version"]);
+        git(repo, &["commit", "-qm", value]);
+        git(repo, &["rev-parse", "--short=12", "HEAD"])
+    }
+
+    #[tokio::test]
+    async fn source_build_detects_a_newer_checkout_head() {
+        let repo = init_repo();
+        let old = commit(repo.path(), "old");
+        let latest = commit(repo.path(), "new");
+
+        assert_eq!(
+            source_update_in(repo.path().to_str().unwrap(), &old).await,
+            Some(AvailableUpdate::Source {
+                current: old,
+                available: latest,
+                commits_behind: 1,
+                source_dir: repo.path().to_string_lossy().into_owned(),
+                pull_before_build: false,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn source_build_uses_ahead_tracking_upstream() {
+        let repo = init_repo();
+        let old = commit(repo.path(), "old");
+        let latest = commit(repo.path(), "new");
+        git(repo.path(), &["remote", "add", "origin", "."]);
+        git(
+            repo.path(),
+            &["update-ref", "refs/remotes/origin/main", "HEAD"],
+        );
+        git(repo.path(), &["reset", "--hard", "HEAD^"]);
+        git(
+            repo.path(),
+            &["branch", "--set-upstream-to=origin/main", "main"],
+        );
+
+        assert_eq!(
+            source_update_in(repo.path().to_str().unwrap(), &old).await,
+            Some(AvailableUpdate::Source {
+                current: old,
+                available: latest,
+                commits_behind: 1,
+                source_dir: repo.path().to_string_lossy().into_owned(),
+                pull_before_build: true,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn divergent_main_does_not_mark_a_feature_build_stale() {
+        let repo = init_repo();
+        commit(repo.path(), "base");
+        git(repo.path(), &["switch", "-qc", "feature"]);
+        let feature = commit(repo.path(), "feature");
+        git(repo.path(), &["update-ref", "refs/heads/main", "HEAD^"]);
+        git(repo.path(), &["switch", "-q", "main"]);
+        commit(repo.path(), "main");
+        git(
+            repo.path(),
+            &["update-ref", "refs/remotes/origin/main", "HEAD"],
+        );
+        git(repo.path(), &["switch", "-q", "feature"]);
+
+        assert_eq!(
+            source_update_in(repo.path().to_str().unwrap(), &feature).await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn current_source_and_missing_provenance_stay_quiet() {
+        let repo = init_repo();
+        let current = commit(repo.path(), "current");
+        assert_eq!(
+            source_update_in(repo.path().to_str().unwrap(), &current).await,
+            None
+        );
+        assert_eq!(source_update_in("", "abc123").await, None);
+        assert_eq!(source_update_in("/some/repo", "").await, None);
+        assert_eq!(source_update_in("/some/repo", "unknown").await, None);
     }
 
     #[test]
-    fn rejects_non_numeric_output() {
-        assert_eq!(parse_commit_count(""), None);
-        assert_eq!(parse_commit_count("fatal: bad revision"), None);
+    fn release_comparison_only_reports_newer_semver() {
+        assert_eq!(
+            release_update("0.1.7", "v0.2.0", ReleaseInstall::Homebrew),
+            Some(AvailableUpdate::Release {
+                current: "v0.1.7".into(),
+                available: "v0.2.0".into(),
+                install: ReleaseInstall::Homebrew,
+            })
+        );
+        assert_eq!(
+            release_update("0.1.7", "v0.1.7", ReleaseInstall::Shell),
+            None
+        );
+        assert_eq!(
+            release_update("0.1.7", "v0.1.6", ReleaseInstall::Shell),
+            None
+        );
+        assert_eq!(
+            release_update("0.1.7", "not-a-version", ReleaseInstall::Shell),
+            None
+        );
     }
 
     #[test]
-    fn no_provenance_means_no_check() {
-        // Released tarball (empty source dir) or an `unknown` SHA must
-        // never shell out or warn — that would be a false positive on
-        // every launch of a legitimately-current release binary.
-        assert_eq!(commits_behind_in("", "abc123"), None);
-        assert_eq!(commits_behind_in("/some/repo", ""), None);
-        assert_eq!(commits_behind_in("/some/repo", "unknown"), None);
+    fn release_install_tracks_the_executable_location() {
+        assert_eq!(
+            release_install_for_paths(
+                Path::new("/opt/homebrew/Cellar/lazybox/0.2.0/bin/lazybox"),
+                Some(Path::new("/opt/homebrew/Cellar/lazybox/0.2.0")),
+            ),
+            ReleaseInstall::Homebrew
+        );
+        assert_eq!(
+            release_install_for_paths(
+                Path::new("/Users/me/.cargo/bin/lazybox"),
+                Some(Path::new("/opt/homebrew/Cellar/lazybox/0.2.0")),
+            ),
+            ReleaseInstall::Shell
+        );
+        assert_eq!(
+            release_install_for_paths(Path::new("/custom/Cellar/lazybox/0.2.0/bin/lazybox"), None,),
+            ReleaseInstall::Homebrew
+        );
+        assert_eq!(
+            release_install_for_paths(Path::new("/Users/me/.cargo/bin/lazybox"), None),
+            ReleaseInstall::Shell
+        );
     }
 
     #[test]
-    fn message_pluralizes_and_names_the_fix() {
-        assert!(outdated_message(1).contains("1 commit behind"));
-        assert!(outdated_message(89).contains("89 commits behind"));
-        // The test binary is a dev/source build, so the named fix is the
-        // source-build one (issue #391 — dev builds are checked too).
+    fn release_cache_is_validated_and_bounded() {
+        let cache = ReleaseCache::new(1_000, "v0.2.0".into());
+        assert_eq!(ReleaseCache::parse(&cache.encode()), Some(cache.clone()));
+        assert!(cache.is_fresh(1_000 + RELEASE_CACHE_MAX_AGE.as_secs()));
+        assert!(!cache.is_fresh(999));
+        assert!(!cache.is_fresh(1_001 + RELEASE_CACHE_MAX_AGE.as_secs()));
+        assert_eq!(ReleaseCache::parse("1000\nnot-a-version"), None);
+    }
+
+    #[tokio::test]
+    async fn dev_check_uses_the_source_channel() {
         assert!(!is_release_build());
-        assert!(outdated_message(5).contains("rebuild & restart"));
+        assert_eq!(
+            available_update(None).await,
+            source_update_in(BUILD_SOURCE_DIR, BUILD_GIT_SHA).await
+        );
     }
 
     #[test]
-    fn fix_wording_matches_build_provenance() {
-        assert_eq!(update_action_for(true), "update & restart");
-        assert_eq!(update_action_for(false), "rebuild & restart");
-    }
+    fn modal_copy_scopes_commands_and_names_the_install_channel() {
+        let source = AvailableUpdate::Source {
+            current: "abc123".into(),
+            available: "def456".into(),
+            commits_behind: 2,
+            source_dir: "/tmp/lazybox source/it's-here".into(),
+            pull_before_build: true,
+        }
+        .modal_body();
+        assert!(source.contains("2 commits ahead of this binary — abc123 → def456"));
+        assert!(source.contains(
+            "cd -- '/tmp/lazybox source/it'\"'\"'s-here' && git pull --ff-only && cargo build --release"
+        ));
+        assert!(source.contains("will not run this command"));
 
-    /// Runs the guard's actual git query against a real repository laid
-    /// out like the stale-dev-build incident of #391: the binary was
-    /// built at an old commit and `origin/main` has since moved on.
-    /// Guards the machinery `commits_behind` runs at startup — the toy
-    /// string tests above can't catch a broken `rev-list` invocation.
-    #[test]
-    fn counts_commits_behind_in_a_real_checkout() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().to_str().expect("utf-8 tempdir");
-        let git = |args: &[&str]| {
-            let out = Command::new("git")
-                .args(["-C", path])
-                .args(args)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .env("GIT_AUTHOR_NAME", "t")
-                .env("GIT_AUTHOR_EMAIL", "t@t")
-                .env("GIT_COMMITTER_NAME", "t")
-                .env("GIT_COMMITTER_EMAIL", "t@t")
-                .output()
-                .expect("git runs");
-            assert!(
-                out.status.success(),
-                "git {args:?}: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-            String::from_utf8_lossy(&out.stdout).trim().to_string()
-        };
-        git(&["init", "-q", "-b", "main"]);
-        git(&["commit", "-q", "--allow-empty", "-m", "one"]);
-        let built_at = git(&["rev-parse", "--short=12", "HEAD"]);
-        git(&["commit", "-q", "--allow-empty", "-m", "two"]);
-        git(&["commit", "-q", "--allow-empty", "-m", "three"]);
-        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        let brew = AvailableUpdate::Release {
+            current: "v0.1.7".into(),
+            available: "v0.2.0".into(),
+            install: ReleaseInstall::Homebrew,
+        }
+        .modal_body();
+        assert!(brew.contains("brew upgrade lazybox"));
 
-        assert_eq!(commits_behind_in(path, &built_at), Some(2));
-
-        // A binary built at the tip is current — no banner.
-        let tip = git(&["rev-parse", "--short=12", "HEAD"]);
-        assert_eq!(commits_behind_in(path, &tip), None);
+        let shell = AvailableUpdate::Release {
+            current: "v0.1.7".into(),
+            available: "v0.2.0".into(),
+            install: ReleaseInstall::Shell,
+        }
+        .modal_body();
+        assert!(shell.contains("lazybox-tui-installer.sh | sh"));
     }
 }

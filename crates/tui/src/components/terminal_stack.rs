@@ -2403,9 +2403,9 @@ impl TerminalStack {
     /// that text; `None` when the focused terminal isn't an agent or has
     /// nothing to recall. Both sources are restored from the daemon
     /// snapshot, so this works after a full restart (issue #373).
-    pub fn recall_prompt(&self) -> Option<(TerminalId, String)> {
+    pub fn recall_prompt(&mut self) -> Option<(TerminalId, String)> {
         let id = self.focused_terminal_id()?;
-        let slot = self.terminals.get(&id)?;
+        let slot = self.terminals.get_mut(&id)?;
         if !matches!(slot.kind, TerminalKind::Agent(_)) {
             return None;
         }
@@ -2414,6 +2414,8 @@ impl TerminalStack {
         } else {
             slot.last_user_message.clone()?
         };
+        let text = lazybox_agents::trim_leading_blank_lines(&text).to_string();
+        slot.composing = text.clone();
         Some((id, text))
     }
 
@@ -5837,6 +5839,57 @@ mod hidden_feed_tests {
         assert_eq!(row0(&mut stack), "visible");
     }
 
+    #[test]
+    fn reattached_agent_keeps_composer_text_on_the_prompt_row_after_refocus() {
+        let agent_key = SessionKey::new("agent");
+        let shell_key = SessionKey::new("shell");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        stack.set_active_session(Some(agent_key.clone()));
+        let snapshot = |id: u64, session_key: &SessionKey, kind: TerminalKind, replay: &[u8]| {
+            lazybox_ipc::TerminalSnapshot {
+                terminal_id: TerminalId(id),
+                session_key: session_key.clone(),
+                kind,
+                replay: replay.to_vec(),
+                last_seq: 1,
+                replay_available: true,
+                no_permission: false,
+                on_main: false,
+                model_label: None,
+                last_user_message: None,
+                composing_buffer: None,
+            }
+        };
+        stack.on_event(&Event::Snapshot {
+            workspaces: vec![],
+            terminals: vec![
+                snapshot(
+                    1,
+                    &agent_key,
+                    TerminalKind::Agent("claude".into()),
+                    "❯ add an issue:".as_bytes(),
+                ),
+                snapshot(2, &shell_key, TerminalKind::Shell, b"shell prompt"),
+            ],
+            projects: vec![],
+        });
+
+        let rows = screen_rows(&mut stack);
+        assert!(
+            rows.iter().any(|row| row.contains("❯ add an issue:")),
+            "reattach must keep prompt and text on one row: {rows:?}",
+        );
+
+        stack.set_active_session(Some(shell_key));
+        render(&mut stack);
+        stack.set_active_session(Some(agent_key));
+        let rows = screen_rows(&mut stack);
+        assert!(
+            rows.iter().any(|row| row.contains("❯ add an issue:")),
+            "refocus must not insert a row before composer text: {rows:?}",
+        );
+    }
+
     /// A resync replaces any bytes buffered while hidden — the ring is
     /// authoritative, so the stale buffer is dropped.
     #[test]
@@ -7190,6 +7243,17 @@ mod terminal_availability_tests {
             Some((TerminalId(1), "previous prompt".into())),
             "falls back to the last submitted message",
         );
+        assert_eq!(
+            stack.composing_of(TerminalId(1)),
+            Some("previous prompt"),
+            "recalled text becomes the mirrored in-flight draft",
+        );
+        stack
+            .terminals
+            .get_mut(&TerminalId(1))
+            .unwrap()
+            .composing
+            .clear();
 
         let mut cmds = Vec::new();
         type_chars(&mut stack, "new draft", &mut cmds);
@@ -7198,6 +7262,24 @@ mod terminal_availability_tests {
             Some((TerminalId(1), "new draft".into())),
             "an in-flight draft wins over the last message",
         );
+    }
+
+    #[test]
+    fn recall_canonicalizes_a_restored_draft_without_dropping_indentation() {
+        let mut stack = stack_with_agent();
+        stack.terminals.get_mut(&TerminalId(1)).unwrap().composing = "\n\t  restored draft".into();
+        assert_eq!(
+            stack.recall_prompt(),
+            Some((TerminalId(1), "restored draft".into())),
+        );
+        assert_eq!(stack.composing_of(TerminalId(1)), Some("restored draft"));
+
+        stack.terminals.get_mut(&TerminalId(1)).unwrap().composing = "    code block".into();
+        assert_eq!(
+            stack.recall_prompt(),
+            Some((TerminalId(1), "    code block".into())),
+        );
+        assert_eq!(stack.composing_of(TerminalId(1)), Some("    code block"));
     }
 
     /// Recall is agent-only: a shell has no meaningful "last prompt".

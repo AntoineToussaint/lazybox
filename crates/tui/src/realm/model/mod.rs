@@ -259,12 +259,29 @@ pub enum Id {
     /// persist `setup.default_agent` and update the panes live. Ids
     /// live in `default_agent_choices`.
     DefaultAgentPicker,
+    /// Single-pick `Choice` over the just-picked default agent's model
+    /// tiers (chained after `DefaultAgentPicker` when the agent
+    /// declares any), opened on its current default tier. Pick →
+    /// persist `agents.<id>.models.default` so bare `w` / `Shift-W` /
+    /// auto-work spawns use it; per-spawn tier chords (`w S`) still
+    /// override. Esc keeps the current tier. Aliases live in
+    /// `default_model_choices`, the target agent in
+    /// `default_model_agent`.
+    DefaultModelPicker,
     /// Confirm-with-preview for an action the Ask Lazybox help agent
     /// proposed (#353) — `add_snippet` or `edit_config`. The pending
     /// intent lives in `pending_help_action`; `Msg::Confirmed(true)`
     /// applies it natively (write + hot-reload / persist + live-apply).
     /// Esc / No drops the stash and changes nothing.
     HelpActionConfirm,
+    /// Single-pick `Choice` mounted when `w` ("work on this") lands on
+    /// a workspace with SEVERAL distinct running agents (#418) —
+    /// injecting must not silently guess between them. The listed
+    /// agent ids + the spawn params to replay live in
+    /// `pending_work_picker`; `Msg::ChoicePicked` resolves the index
+    /// and fires the same work spawn `w` would have, targeted at the
+    /// chosen agent.
+    WorkAgentPicker,
 }
 
 impl Id {
@@ -675,6 +692,11 @@ pub struct Model<T: TerminalAdapter> {
     /// The duration each picker option maps to. Order MUST match
     /// the labels rendered in `mount_snooze_picker`.
     snooze_choices: Vec<std::time::Duration>,
+    /// Stash for the `w` multi-agent chooser (`Id::WorkAgentPicker`,
+    /// #418): the running agent ids listed (row order) plus the spawn
+    /// params the pick replays through `push_work_spawn`. Cleared on
+    /// submit / dismiss.
+    pending_work_picker: Option<crate::realm::model::modals::PendingWorkPicker>,
     /// Workspace the `PolicyPicker` (`g p`, issue #363) is targeting.
     /// `Msg::ChoicePicked` reads it + `policy_choices` to turn the
     /// picked index into a toggle command. Cleared on dismiss.
@@ -966,6 +988,13 @@ pub struct Model<T: TerminalAdapter> {
     /// `Msg::ChoicePicked(idx)` resolves the id here to persist. Cleared
     /// on mount/unmount.
     pub(crate) default_agent_choices: Vec<String>,
+    /// Tier aliases backing the active `DefaultModelPicker`, in row
+    /// order — `None` is the "agent default" row (no pinned tier).
+    /// Cleared on mount/unmount.
+    pub(crate) default_model_choices: Vec<Option<String>>,
+    /// Agent id the active `DefaultModelPicker` persists against —
+    /// stashed at mount so a pick can't land on a drifted default.
+    pub(crate) default_model_agent: Option<String>,
     /// Set at startup from `ui.tour_seen` (inverted): `true` means
     /// the feature tour should auto-launch once the panes are
     /// visible. Cleared the moment the tour mounts so it never
@@ -1163,6 +1192,7 @@ impl<T: TerminalAdapter> Model<T> {
             labels_choices: Vec::new(),
             pending_snooze_workspace: None,
             snooze_choices: Vec::new(),
+            pending_work_picker: None,
             pending_policy_workspace: None,
             policy_choices: Vec::new(),
             pending_removal_prompts: std::collections::VecDeque::new(),
@@ -1224,6 +1254,8 @@ impl<T: TerminalAdapter> Model<T> {
             help_run_starting: false,
             help_pending_questions: Vec::new(),
             default_agent_choices: Vec::new(),
+            default_model_choices: Vec::new(),
+            default_model_agent: None,
             auto_tour_pending: false,
             tips_enabled: false,
             tips_seen: Vec::new(),
@@ -1819,11 +1851,52 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::DefaultAgentPicker, modal);
     }
 
+    /// Mount the default-model picker — the second step of the
+    /// default-agent flow, offering `agent_id`'s declared tiers plus an
+    /// "agent default" row, opened on the current default tier. Pick →
+    /// `handle_choice_picked` persists `agents.<id>.models.default` so
+    /// bare spawns use it (per-spawn tier chords still override); Esc
+    /// keeps the current tier. No-op for an agent with no tier menu.
+    pub(crate) fn mount_default_model_picker(&mut self, agent_id: &str) {
+        use crate::realm::components::choice::Choice;
+        if matches!(self.modal_stack.last(), Some(Id::DefaultModelPicker)) {
+            return;
+        }
+        let Some(models) = self.agent_models.get(agent_id) else {
+            return;
+        };
+        if models.tiers.is_empty() {
+            return;
+        }
+        let mut aliases: Vec<Option<String>> = vec![None];
+        let mut labels: Vec<String> = vec!["Agent default  ·  no pinned model".into()];
+        for tier in &models.tiers {
+            aliases.push(Some(tier.alias.clone()));
+            labels.push(format!("{}  ·  {}", tier.label, tier.alias));
+        }
+        let start = models
+            .default
+            .as_ref()
+            .and_then(|d| aliases.iter().position(|a| a.as_ref() == Some(d)))
+            .unwrap_or(0);
+        self.default_model_agent = Some(agent_id.to_string());
+        self.default_model_choices = aliases;
+        let modal = Choice::single("Used by bare spawns · `w S/M/L` still overrides", labels)
+            .title(format!("Default model · {agent_id}"))
+            .label(|s: &String| s.clone())
+            .select_index(start);
+        self.mount_modal(Id::DefaultModelPicker, modal);
+    }
+
     /// Update the default agent both panes resolve `w` against, live —
     /// no restart. Mirrors the startup wiring in `apply_sidebar_config`.
+    /// Also rebuilds the action catalog: the `w S` / `a S` tier chords
+    /// key off the default agent's menu, so they must re-key to the new
+    /// agent's tiers (or disappear when it declares none).
     pub(crate) fn set_default_agent(&mut self, agent: &str) {
         self.sidebar.set_default_agent(agent);
         self.right.set_default_agent(agent);
+        self.rebuild_catalog();
     }
 
     /// Land the cursor on `key` and follow it with the panes: show its
@@ -2800,23 +2873,30 @@ impl<T: TerminalAdapter> Model<T> {
         }
         actions.push(SettingsAction::EditProviders);
         actions.push(SettingsAction::EditAgents);
+        // One fresh load feeds every config-backed row below, so even a
+        // hand-edited YAML shows its current values without a restart.
+        let cfg = lazybox_config::Config::load().unwrap_or_default();
+        let default_agent = self.sidebar.default_agent().to_string();
+        let models = cfg.agent_models(&default_agent);
+        let default_tier = models
+            .default
+            .as_deref()
+            .and_then(|a| models.tier(a))
+            .map(|t| t.label.clone());
         actions.push(SettingsAction::EditDefaultAgent {
-            current: self.sidebar.default_agent().to_string(),
+            current: default_agent,
+            tier: default_tier,
         });
-        let skip_permissions = lazybox_config::Config::load()
-            .map(|c| c.agent.skip_permissions)
-            .unwrap_or(false);
         actions.push(SettingsAction::ToggleSkipPermissions {
-            enabled: skip_permissions,
+            enabled: cfg.agent.skip_permissions,
         });
         actions.push(SettingsAction::EditSnippets);
         actions.push(SettingsAction::EditTheme {
             current: crate::theme::current().name.to_string(),
         });
-        let gateway_set = lazybox_config::Config::load()
-            .map(|c| c.agent.gateway_url().is_some())
-            .unwrap_or(false);
-        actions.push(SettingsAction::EditLlmGateway { set: gateway_set });
+        actions.push(SettingsAction::EditLlmGateway {
+            set: cfg.agent.gateway_url().is_some(),
+        });
         actions.push(SettingsAction::CheckAgentUpdates);
         actions.push(SettingsAction::UpdateAgentClis);
         actions.push(SettingsAction::InspectWorktrees);
@@ -3314,7 +3394,12 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Msg::ChoicePicked(picks) => {
                 let cmds = self.handle_choice_picked(picks);
-                self.dispatch_cmds(cmds);
+                // Flush (not raw-dispatch) so a pick that resolves to a
+                // work spawn gets the same spawn-spinner + spawn→inject
+                // rewrite the keyboard path gets — the `w` multi-agent
+                // chooser (#418) and the sidebar context menu both emit
+                // Spawns that must fold into a running agent.
+                self.flush_dispatched_cmds(cmds);
             }
             Msg::ChoiceRefresh => {
                 if let Some(mut runner) = self.setup.runner.take() {

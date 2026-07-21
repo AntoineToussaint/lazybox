@@ -2,6 +2,14 @@
 // crate-wide blocking-call ban in clippy.toml targets the run loop.
 #![allow(clippy::disallowed_methods)]
 
+/// Serializes tests that mutate the process-global `LAZYBOX_HOME` so a
+/// parallel test can't observe another's temp home (or the real one).
+/// Shared across every test module in this binary — a per-module lock
+/// would let two modules' mutators race. Held for the whole body of
+/// each such test.
+#[cfg(test)]
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod effects_tests {
     //! Handler effect-contract tests.
@@ -1212,10 +1220,10 @@ snippets:
         );
     }
 
-    /// A multi-line body injects verbatim too — the embedded newlines
-    /// reach the agent as-is, and the reliable submit is the daemon's
-    /// separate Enter, so nothing in the TUI has to pre-rewrite the
-    /// body into a bracketed paste (that's the shell-only encoding).
+    /// A multi-line body preserves its content and trailing newline;
+    /// the reliable submit is the daemon's separate Enter, so nothing
+    /// in the TUI has to pre-rewrite the body into a bracketed paste
+    /// (that's the shell-only encoding).
     #[test]
     fn snippet_into_agent_terminal_injects_multiline_body_verbatim() {
         let mut m = model_with_active_terminal_and_snippet(
@@ -1920,6 +1928,18 @@ snippets:
         assert!(
             bytes.ends_with(b"\x1b[201~\r"),
             "submit CR must land after the close marker, not inside the paste"
+        );
+    }
+
+    #[test]
+    fn encode_snippet_trims_blank_prefix_but_preserves_first_line_indentation() {
+        assert_eq!(
+            super::super::inputs::encode_snippet_for_pty("\n \tcommand"),
+            b"command\r",
+        );
+        assert_eq!(
+            super::super::inputs::encode_snippet_for_pty("    indented command"),
+            b"    indented command\r",
         );
     }
 
@@ -3111,6 +3131,7 @@ mod modal_input_responsiveness_tests {
         let mut m = build_model();
         m.dispatch_settings_action(SettingsAction::EditDefaultAgent {
             current: "claude".into(),
+            tier: None,
         });
         assert_eq!(m.modal_stack.last(), Some(&Id::DefaultAgentPicker));
         assert!(
@@ -3120,6 +3141,191 @@ mod modal_input_responsiveness_tests {
         m.dispatch_modal_key(key(Key::Esc));
         assert!(m.top_modal().is_none(), "Esc closes the picker");
         assert!(m.default_agent_choices.is_empty(), "choices are released");
+    }
+
+    /// The default-model picker (second step of the default-agent
+    /// flow) offers an "agent default" row plus every declared tier,
+    /// opens pre-positioned on the current default tier, and stashes
+    /// the aliases + target agent for the pick. Esc releases both
+    /// without changing anything. Disk-free: mounting only reads the
+    /// in-memory tier menus.
+    #[test]
+    fn default_model_picker_offers_tiers_and_cancels_clean() {
+        let mut m = build_model();
+        let mut models = lazybox_core::AgentModels::builtin("claude").unwrap();
+        models.default = Some("L".into());
+        m.set_agent_models([("claude".to_string(), models)].into());
+
+        m.mount_default_model_picker("claude");
+        assert_eq!(m.modal_stack.last(), Some(&Id::DefaultModelPicker));
+        assert_eq!(
+            m.default_model_choices,
+            vec![
+                None,
+                Some("S".to_string()),
+                Some("M".to_string()),
+                Some("L".to_string())
+            ],
+            "row 0 unpins, then the declared tiers in menu order",
+        );
+        assert_eq!(m.default_model_agent.as_deref(), Some("claude"));
+
+        m.dispatch_modal_key(key(Key::Esc));
+        assert!(m.top_modal().is_none(), "Esc closes the picker");
+        assert!(m.default_model_choices.is_empty(), "aliases are released");
+        assert!(m.default_model_agent.is_none(), "agent stash is released");
+    }
+
+    /// An agent with no declared tier menu has nothing to pick — the
+    /// default-model step is skipped entirely (no modal mounts).
+    #[test]
+    fn default_model_picker_skips_agents_without_tiers() {
+        let mut m = build_model();
+        m.mount_default_model_picker("codex");
+        assert!(m.top_modal().is_none(), "no tier menu → no second step");
+    }
+
+    /// End-to-end settings flow on a temp `LAZYBOX_HOME`: picking the
+    /// default agent persists `setup.default_agent` and chains into the
+    /// tier picker; picking a tier persists
+    /// `agents.<id>.models.default` and mirrors it into the in-memory
+    /// menu so the Settings badge and the next picker open reflect it
+    /// without a restart.
+    #[test]
+    fn default_agent_pick_chains_into_tier_pick_and_persists_both() {
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home =
+            std::env::temp_dir().join(format!("lazybox-default-tier-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator in
+        // this binary, so this single-writer mutation can't race.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        let mut m = build_model();
+        m.set_agent_models(
+            [(
+                "claude".to_string(),
+                lazybox_core::AgentModels::builtin("claude").unwrap(),
+            )]
+            .into(),
+        );
+        m.mount_default_agent_picker();
+        let claude = m
+            .default_agent_choices
+            .iter()
+            .position(|id| id == "claude")
+            .expect("claude is an enabled agent");
+        let _ = m.handle_choice_picked(vec![claude]);
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::DefaultModelPicker),
+            "agent pick chains into the tier picker",
+        );
+
+        let opus = m
+            .default_model_choices
+            .iter()
+            .position(|a| a.as_deref() == Some("L"))
+            .expect("Opus row offered");
+        let _ = m.handle_choice_picked(vec![opus]);
+        assert!(m.top_modal().is_none(), "tier pick ends the flow");
+
+        let cfg = lazybox_config::Config::load_from(&home.join("config.yaml")).expect("config");
+        assert_eq!(cfg.setup.default_agent.as_deref(), Some("claude"));
+        assert_eq!(cfg.agent_models("claude").default.as_deref(), Some("L"));
+        assert_eq!(
+            m.agent_models["claude"].default.as_deref(),
+            Some("L"),
+            "mirrored into the in-memory menu",
+        );
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Unpinning ("Agent default") for an agent with no YAML block is
+    /// already a no-op — no dead `agents.<id>` stanza is serialized.
+    #[test]
+    fn unpinning_an_unconfigured_agent_writes_no_agents_stanza() {
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("lazybox-unpin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator in
+        // this binary, so this single-writer mutation can't race.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        let mut m = build_model();
+        m.set_agent_models(
+            [(
+                "claude".to_string(),
+                lazybox_core::AgentModels::builtin("claude").unwrap(),
+            )]
+            .into(),
+        );
+        m.mount_default_model_picker("claude");
+        let _ = m.handle_choice_picked(vec![0]);
+
+        let cfg = lazybox_config::Config::load_from(&home.join("config.yaml")).expect("config");
+        assert!(
+            !cfg.agents.contains_key("claude"),
+            "no dead stanza for an unpin that changed nothing",
+        );
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Switching the default agent re-keys the `w S` / `a S` tier
+    /// chords to the new agent's menu live — the catalog must not keep
+    /// serving the previous agent's tier labels until a restart.
+    #[test]
+    fn switching_default_agent_rekeys_tier_chords_live() {
+        use lazybox_tui_core::action::Param;
+        let mut m = build_model();
+        m.set_agent_models(
+            [
+                (
+                    "claude".to_string(),
+                    lazybox_core::AgentModels::builtin("claude").unwrap(),
+                ),
+                (
+                    "codex".to_string(),
+                    lazybox_core::AgentModels {
+                        tiers: vec![lazybox_core::ModelTier {
+                            alias: "M".into(),
+                            label: "GPT-5".into(),
+                            args: vec![],
+                        }],
+                        ..Default::default()
+                    },
+                ),
+            ]
+            .into(),
+        );
+        let tier_labels = |m: &Model<tuirealm::terminal::TestTerminalAdapter>| -> Vec<String> {
+            m.catalog()
+                .iter()
+                .filter(|e| matches!(&e.param, Some(Param::Tier(_))))
+                .map(|e| e.label.to_string())
+                .collect()
+        };
+        assert!(
+            tier_labels(&m).contains(&"Opus".to_string()),
+            "claude (the startup default) drives the chords",
+        );
+
+        m.set_default_agent("codex");
+        let labels = tier_labels(&m);
+        assert!(
+            labels.contains(&"GPT-5".to_string()),
+            "codex's menu drives the chords after the switch",
+        );
+        assert!(
+            !labels.contains(&"Opus".to_string()),
+            "claude's rows are gone",
+        );
     }
 
     /// `set_default_agent` updates the agent both panes resolve `w`
@@ -3785,6 +3991,230 @@ mod merge_focus_follow_tests {
             agent.as_deref(),
             Some("codex"),
             "`w w` targets the running Codex, not the default Claude",
+        );
+    }
+
+    /// Issue #418: with SEVERAL distinct agents running, `w w` must ask
+    /// which one to inject into (a chooser modal) instead of silently
+    /// picking the default; the pick replays the work spawn against the
+    /// chosen agent.
+    #[test]
+    fn bare_w_with_several_agents_mounts_chooser_and_pick_targets_it() {
+        use lazybox_ipc::{Command, TerminalId, TerminalKind};
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        let pr = workspace("owner/repo#1", true, Duration::hours(1));
+        let sk: SessionKey = (&pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        for (tid, agent) in [(3, "codex"), (4, "claude")] {
+            m.handle_daemon_event(IpcEvent::TerminalSpawned {
+                model_label: None,
+                terminal_id: TerminalId(tid),
+                session_key: sk.clone(),
+                kind: TerminalKind::Agent(agent.into()),
+                no_permission: false,
+                on_main: false,
+            });
+        }
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        assert!(m.sidebar.focus_workspace_key(&sk));
+
+        let cmds = m.dispatch_action(&Action::Work);
+        assert!(
+            cmds.is_empty(),
+            "several running agents must not silently spawn/inject: {cmds:?}",
+        );
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::WorkAgentPicker),
+            "the multi-agent chooser is up",
+        );
+        let agents = m
+            .pending_work_picker
+            .as_ref()
+            .map(|p| p.agents.clone())
+            .expect("picker stash armed");
+        assert_eq!(
+            agents,
+            vec!["claude".to_string(), "codex".to_string()],
+            "rows list every running agent, sorted",
+        );
+
+        // Pick Codex (row 1) → the same work spawn `w` would have
+        // queued, targeted at Codex, prompt included.
+        let cmds = m.handle_choice_picked(vec![1]);
+        match cmds.as_slice() {
+            [
+                Command::Spawn {
+                    kind: TerminalKind::Agent(id),
+                    initial_prompt: Some(_),
+                    ..
+                },
+            ] => assert_eq!(id, "codex"),
+            other => panic!("expected one Spawn(Agent(codex), prompt), got {other:?}"),
+        }
+        assert!(m.pending_work_picker.is_none(), "stash consumed");
+    }
+
+    /// Issue #418: the chooser's pick rides the same spawn→inject
+    /// rewrite as the keyboard path, so picking a running Codex injects
+    /// into its terminal instead of spawning a second Codex.
+    #[test]
+    fn work_chooser_pick_injects_into_the_chosen_agent() {
+        use lazybox_ipc::{Client, Command, EVENT_CHANNEL_CAPACITY, TerminalId, TerminalKind};
+        use lazybox_tui_core::action::Action;
+        use tokio::sync::mpsc;
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let (_evt_tx, evt_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let client = Client::from_channels(cmd_tx, evt_rx);
+        let mut m = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+
+        let pr = workspace("owner/repo#1", true, Duration::hours(1));
+        let sk: SessionKey = (&pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        for (tid, agent) in [(3, "codex"), (4, "claude")] {
+            m.handle_daemon_event(IpcEvent::TerminalSpawned {
+                model_label: None,
+                terminal_id: TerminalId(tid),
+                session_key: sk.clone(),
+                kind: TerminalKind::Agent(agent.into()),
+                no_permission: false,
+                on_main: false,
+            });
+        }
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        assert!(m.sidebar.focus_workspace_key(&sk));
+        assert!(m.dispatch_action(&Action::Work).is_empty());
+        while cmd_rx.try_recv().is_ok() {} // drop setup traffic
+
+        // Pick Codex (row 1), flushed the way Msg::ChoicePicked flushes.
+        let cmds = m.handle_choice_picked(vec![1]);
+        m.flush_dispatched_cmds(cmds);
+        let inject = std::iter::from_fn(|| cmd_rx.try_recv().ok()).find_map(|c| match c {
+            Command::InjectPrompt { terminal_id, .. } => Some(terminal_id),
+            _ => None,
+        });
+        assert_eq!(
+            inject,
+            Some(TerminalId(3)),
+            "the pick injects into the running Codex terminal",
+        );
+    }
+
+    /// Issue #418: Esc on the multi-agent chooser cancels cleanly —
+    /// stash dropped, nothing spawned.
+    #[test]
+    fn work_chooser_dismiss_drops_the_stash() {
+        use lazybox_ipc::{TerminalId, TerminalKind};
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        let pr = workspace("owner/repo#1", true, Duration::hours(1));
+        let sk: SessionKey = (&pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        for (tid, agent) in [(3, "codex"), (4, "cursor")] {
+            m.handle_daemon_event(IpcEvent::TerminalSpawned {
+                model_label: None,
+                terminal_id: TerminalId(tid),
+                session_key: sk.clone(),
+                kind: TerminalKind::Agent(agent.into()),
+                no_permission: false,
+                on_main: false,
+            });
+        }
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        assert!(m.sidebar.focus_workspace_key(&sk));
+        assert!(m.dispatch_action(&Action::Work).is_empty());
+        assert!(m.pending_work_picker.is_some());
+
+        let cmds = m.handle_modal_dismissed();
+        assert!(cmds.is_empty(), "Esc fires nothing: {cmds:?}");
+        assert!(m.pending_work_picker.is_none(), "stash dropped on Esc");
+    }
+
+    /// Issue #418: a `w S` tier chord that lands on several running
+    /// agents routes through the same chooser, and the picked spawn
+    /// still carries the tier alias.
+    #[test]
+    fn work_tier_chooser_carries_model_alias_through_the_pick() {
+        use lazybox_ipc::{Command, TerminalId, TerminalKind};
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        let pr = workspace("owner/repo#1", true, Duration::hours(1));
+        let sk: SessionKey = (&pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        for (tid, agent) in [(3, "codex"), (4, "claude")] {
+            m.handle_daemon_event(IpcEvent::TerminalSpawned {
+                model_label: None,
+                terminal_id: TerminalId(tid),
+                session_key: sk.clone(),
+                kind: TerminalKind::Agent(agent.into()),
+                no_permission: false,
+                on_main: false,
+            });
+        }
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        assert!(m.sidebar.focus_workspace_key(&sk));
+
+        assert!(m.dispatch_action(&Action::WorkTier("M".into())).is_empty());
+        assert_eq!(m.modal_stack.last(), Some(&Id::WorkAgentPicker));
+
+        let cmds = m.handle_choice_picked(vec![1]);
+        match cmds.as_slice() {
+            [
+                Command::Spawn {
+                    kind: TerminalKind::Agent(id),
+                    model_alias,
+                    ..
+                },
+            ] => {
+                assert_eq!(id, "codex");
+                assert_eq!(
+                    model_alias.as_deref(),
+                    Some("M"),
+                    "tier alias survives the pick"
+                );
+            }
+            other => panic!("expected one tiered Spawn, got {other:?}"),
+        }
+    }
+
+    /// Issue #418: the default agent is the target only when NOTHING is
+    /// running on the workspace.
+    #[test]
+    fn bare_w_with_no_running_agent_spawns_the_default() {
+        use lazybox_ipc::{Command, TerminalKind};
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        let pr = workspace("owner/repo#1", true, Duration::hours(1));
+        let sk: SessionKey = (&pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        assert!(m.sidebar.focus_workspace_key(&sk));
+
+        let cmds = m.dispatch_action(&Action::Work);
+        let agent = cmds.iter().find_map(|c| match c {
+            Command::Spawn {
+                kind: TerminalKind::Agent(id),
+                ..
+            } => Some(id.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            agent.as_deref(),
+            Some(m.sidebar.default_agent()),
+            "no running agent → the configured default spawns",
         );
     }
 
@@ -5365,7 +5795,7 @@ mod leader_tile_tests {
                 on_main: false,
                 model_label: None,
                 last_user_message: None,
-                composing_buffer: Some("recover me".into()),
+                composing_buffer: Some("\n  recover me".into()),
             }],
         });
         m.focus = PaneFocus::Terminals;
@@ -5392,6 +5822,14 @@ mod leader_tile_tests {
             }
             None => panic!("`]]r` must emit an InjectPrompt"),
         }
+        assert!(
+            std::iter::from_fn(|| server.rx.try_recv().ok()).any(|command| matches!(
+                command,
+                IpcCommand::RecordComposingBuffer { terminal_id, buffer }
+                    if terminal_id == TerminalId(1) && buffer == "recover me"
+            )),
+            "recall must persist the canonical draft mirrored by the client",
+        );
     }
 }
 
@@ -8621,10 +9059,7 @@ mod help_ask_tests {
 
     // ── Ask Lazybox actions (#353) ──────────────────────────────────
 
-    /// Serializes tests that mutate the process-global `LAZYBOX_HOME`
-    /// so a parallel test can't observe another's temp home (or the
-    /// real one). Held for the whole body of each such test.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use super::ENV_LOCK;
 
     /// A finished answer carrying an `add_snippet` block.
     fn add_snippet_answer(key: &str) -> String {

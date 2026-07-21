@@ -301,6 +301,23 @@ pub trait Agent: Send + Sync {
         false
     }
 
+    /// Chunk-aware readiness — [`Agent::detect_ready_for_prompt`] with the
+    /// daemon's chunk-boundary hint. Agents whose TUIs repaint continuously
+    /// (Codex) override this to recognize composer chrome painted by the
+    /// latest repaint frame itself, so spawn-time readiness fires in
+    /// hundreds of milliseconds instead of riding the inject hard deadline
+    /// while stale status-line bytes pin the whole-buffer positional read
+    /// (issue #425). Default: ignore the hint and defer to the whole-buffer
+    /// detector.
+    fn detect_ready_for_prompt_chunked(
+        &self,
+        recent_output: &[u8],
+        last_chunk_start: usize,
+    ) -> bool {
+        let _ = last_chunk_start;
+        self.detect_ready_for_prompt(recent_output)
+    }
+
     /// How lazybox keeps this agent's CLI current, out of band. The
     /// daemon runs the channel's commands in plain bounded
     /// subprocesses — never inside a live session PTY, where the
@@ -604,6 +621,18 @@ pub mod builtins {
         /// modal is up. Delegates to [`crate::detect::codex_ready_for_prompt`].
         fn detect_ready_for_prompt(&self, recent_output: &[u8]) -> bool {
             detect::codex_ready_for_prompt(recent_output)
+        }
+
+        /// Repaint-frame readiness — Codex's diff renderer never lets the
+        /// whole-buffer positional read settle, so readiness is judged from
+        /// composer chrome painted by the latest chunk. Delegates to
+        /// [`crate::detect::codex_ready_for_prompt_chunked`].
+        fn detect_ready_for_prompt_chunked(
+            &self,
+            recent_output: &[u8],
+            last_chunk_start: usize,
+        ) -> bool {
+            detect::codex_ready_for_prompt_chunked(recent_output, last_chunk_start)
         }
     }
 

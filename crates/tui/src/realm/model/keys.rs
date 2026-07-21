@@ -1083,8 +1083,8 @@ impl<T: TerminalAdapter> Model<T> {
     ///   subsequent Drag events until Up).
     /// - Down anywhere else → focus the pane the click landed in.
     /// - Up → end the active drag.
-    /// - ScrollUp/Down over the terminal pane → forward to the
-    ///   terminal's scrollback (libghostty handles the actual move).
+    /// - ScrollUp/Down over the terminal pane → move the terminal's
+    ///   lazybox scrollback (libghostty handles the actual move).
     pub fn handle_mouse(&mut self, m: crossterm::event::MouseEvent) {
         use crossterm::event::MouseEventKind;
 
@@ -1098,11 +1098,11 @@ impl<T: TerminalAdapter> Model<T> {
         // In focus mode the sidebar + activity pane aren't drawn, so
         // their hit rects collapse to empty (no point can land in
         // them) and the terminal owns everything below the slim event
-        // header — clicks and wheel events all route to the PTY. Keep
+        // header. Keep
         // this split in lockstep with `view`'s focus-mode layout.
         // Outside focus mode, `effective_pane_rects` accounts for a
         // hidden Activity pane: when hidden, `right_top` is zero-height
-        // so clicks there route to the terminal stack (and the
+        // so mouse events there target the terminal stack (and the
         // horizontal splitter disappears).
         let (sidebar_rect, right_top_rect, right_bottom_rect) = if self.focus_mode {
             let (pane_area, _) = super::split_for_footer(self.layout.last_area);
@@ -1214,14 +1214,10 @@ impl<T: TerminalAdapter> Model<T> {
                 // only when we're NOT claiming for selection — i.e.,
                 // non-left buttons. Left clicks are deferred.
                 //
-                // NOTE: clicks forward to any mouse-tracking app
-                // regardless of screen, but the WHEEL only forwards on
-                // the alt-screen (see `wheel_route`). The asymmetry is
-                // deliberate: a click has no lazybox-side meaning so it
-                // belongs to the app, whereas a primary-screen wheel is
-                // "scroll the pane history", which is lazybox's (#321).
-                // Don't "harmonize" these by gating clicks on the
-                // alt-screen — that breaks clicking Claude's in-TUI UI.
+                // A click has no lazybox-side meaning once selection
+                // declines it, so it belongs to any app that requested
+                // mouse tracking. Wheels are different: they always
+                // scroll lazybox's terminal history.
                 if !claim_for_selection
                     && rect_contains(right_bottom_rect, m.column, m.row)
                     && self.focus == PaneFocus::Terminals
@@ -1406,13 +1402,11 @@ impl<T: TerminalAdapter> Model<T> {
                     // terminal stack, and focus — a trackpad flick
                     // must not yank the user to another workspace,
                     // #290), so no `sync_panes` here. Moving the
-                    // offset is a pure in-process mutation — no daemon
-                    // round trip — so, like the local-scrollback path
-                    // below (and unlike the daemon-bound
-                    // activity/terminal paths above), it moves a fixed
-                    // small step per wheel event and stops when the
-                    // events stop, rather than riding the inertia
-                    // damper.
+                    // offset is a pure in-process mutation, so, like
+                    // the terminal-scrollback path below, it moves a
+                    // fixed small step per wheel event and stops when
+                    // the events stop rather than riding the activity
+                    // pane's inertia damper.
                     const SIDEBAR_WHEEL_STEP: isize = 3;
                     let delta = if raw_up {
                         -SIDEBAR_WHEEL_STEP
@@ -1457,115 +1451,25 @@ impl<T: TerminalAdapter> Model<T> {
                 else {
                     return;
                 };
-                // Who scrolls depends on which screen the target
-                // program is on (see `WheelRoute`). The whole decision
-                // is one lookup so the branches can't disagree.
-                // Once tmux stopped setting `mouse on` (#306),
-                // `is_mouse_tracking` began reflecting the inner app.
-                // A primary-screen wheel is always lazybox's scrollback,
-                // from the first frame of a fresh spawn (#321, #360);
-                // only an alt-screen app that asked for the mouse gets
-                // the wheel forwarded.
-                use crate::components::terminal_stack::WheelRoute;
-                match self.terminals.wheel_route_for(target) {
-                    WheelRoute::ForwardSgr => {
-                        // Damped: every wheel event on this path is a
-                        // daemon round trip + inner-program repaint, so
-                        // the momentum tail must decay and hard-stop.
-                        let scaled = self.dampen_scroll_step(raw_up);
-                        if scaled == 0 {
-                            return;
-                        }
-                        let cell = self.terminals.cell_in_tile(target, m.column, m.row);
-                        let encoded = cell.and_then(|(cell_col, cell_row)| {
-                            let button = if raw_up {
-                                libghostty_vt::mouse::Button::Four
-                            } else {
-                                libghostty_vt::mouse::Button::Five
-                            };
-                            self.terminals.encode_mouse_for(
-                                target,
-                                libghostty_vt::mouse::Action::Press,
-                                Some(button),
-                                cell_col,
-                                cell_row,
-                            )
-                        });
-                        if let Some((terminal_id, bytes)) = encoded {
-                            // One wheel notch encodes one line for the
-                            // inner program, but the damper computed a
-                            // multi-line step. Repeat the encoding
-                            // `scaled` times in a SINGLE Write so the
-                            // gesture moves the full step in one daemon
-                            // round trip instead of N writes of one
-                            // notch each.
-                            let payload = bytes.repeat(scaled.max(1) as usize);
-                            self.send_cmd(IpcCommand::Write {
-                                terminal_id,
-                                bytes: payload,
-                            });
-                            self.redraw = true;
-                        }
-                        // Over pane chrome (`encoded` is None) there is
-                        // nothing to forward — the alt-screen has no
-                        // lazybox scrollback either, so drop the event.
-                    }
-                    WheelRoute::AlternateScrollArrows { app_cursor } => {
-                        // xterm alternateScroll: an alt-screen app that
-                        // never enabled mouse reporting (less, man, the
-                        // git pager, vim without `mouse`) still scrolls on
-                        // arrow keys. Only fire over the grid — a wheel on
-                        // the tab strip / chrome is not a scroll target.
-                        if self
-                            .terminals
-                            .cell_in_tile(target, m.column, m.row)
-                            .is_none()
-                        {
-                            return;
-                        }
-                        let scaled = self.dampen_scroll_step(raw_up);
-                        if scaled == 0 {
-                            return;
-                        }
-                        let terminal_id = target;
-                        let arrow: &[u8] = match (raw_up, app_cursor) {
-                            (true, false) => b"\x1b[A",
-                            (false, false) => b"\x1b[B",
-                            (true, true) => b"\x1bOA",
-                            (false, true) => b"\x1bOB",
-                        };
-                        let payload = arrow.repeat(scaled.max(1) as usize);
-                        self.send_cmd(IpcCommand::Write {
-                            terminal_id,
-                            bytes: payload,
-                        });
-                        self.redraw = true;
-                    }
-                    WheelRoute::LocalScrollback => {
-                        // Primary screen — the pane history is lazybox's.
-                        // The viewport move is a pure in-process libghostty
-                        // call, no daemon round trip, so no damper: every
-                        // OS wheel event moves a fixed small step and the
-                        // view stops exactly when the events stop, like a
-                        // native terminal.
-                        const LOCAL_WHEEL_STEP: isize = 3;
-                        let delta = if raw_up {
-                            -LOCAL_WHEEL_STEP
-                        } else {
-                            LOCAL_WHEEL_STEP
-                        };
-                        let _outcome = self.terminals.scroll_terminal(target, delta);
-                        // First upward scroll of a visit arms a deep-
-                        // scrollback fetch — the daemon replies with the
-                        // backend's retained history (tmux capture-pane)
-                        // so a live session scrolls as deep as a
-                        // restarted one (#393).
-                        if let Some(terminal_id) = self.terminals.take_scrollback_fetch() {
-                            self.send_cmd(IpcCommand::FetchScrollback { terminal_id });
-                        }
-                        self.redraw = true;
-                    }
+                // The wheel always belongs to lazybox's terminal
+                // history. Agent screen modes and mouse tracking only
+                // affect rendering and clicks; neither can redirect a
+                // scroll into an app that may ignore it.
+                const LOCAL_WHEEL_STEP: isize = 3;
+                let delta = if raw_up {
+                    -LOCAL_WHEEL_STEP
+                } else {
+                    LOCAL_WHEEL_STEP
+                };
+                let _outcome = self.terminals.scroll_terminal(target, delta);
+                // First upward scroll of a visit arms a deep-scrollback
+                // fetch — the daemon replies with the backend's retained
+                // history (tmux capture-pane) so a live session scrolls
+                // as deep as a restarted one (#393).
+                if let Some(terminal_id) = self.terminals.take_scrollback_fetch() {
+                    self.send_cmd(IpcCommand::FetchScrollback { terminal_id });
                 }
+                self.redraw = true;
             }
             _ => {}
         }

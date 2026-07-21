@@ -306,11 +306,8 @@ pub enum ScrollOutcome {
     /// empty session).
     NoTerminal,
     /// `total <= len`: the terminal hasn't produced enough output to
-    /// fill the active area + spill into scrollback yet. `alternate`
-    /// flags the special case where the inner program is on the
-    /// alternate screen (claude/vim/less) — by design those have no
-    /// scrollback, so it's the *program's* responsibility to paginate.
-    NoScrollback { alternate: bool },
+    /// fill the active area + spill into scrollback yet.
+    NoScrollback,
     /// The request deliberately asked for no movement (`By(0)`).
     Noop,
     /// The viewport was already at the requested edge.
@@ -389,7 +386,7 @@ fn classify_scroll_transition(
 /// (#393). An empty scrollback is trivially at the bottom.
 fn at_live_bottom(outcome: ScrollOutcome) -> bool {
     match outcome {
-        ScrollOutcome::NoScrollback { .. } => true,
+        ScrollOutcome::NoScrollback => true,
         ScrollOutcome::AtBoundary {
             boundary: ScrollBoundary::Bottom,
             ..
@@ -399,34 +396,6 @@ fn at_live_bottom(outcome: ScrollOutcome) -> bool {
         } => offset + len >= total,
         _ => false,
     }
-}
-
-/// How a mouse-wheel tick over the focused terminal should be handled.
-/// The wheel always means "scroll", but *who* scrolls depends on which
-/// screen the inner program is on and whether it asked for mouse
-/// reporting — so the orchestrator resolves the whole decision in one
-/// focused-terminal lookup rather than probing several booleans.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WheelRoute {
-    /// Primary screen: the pane history is lazybox's, so scroll the
-    /// local libghostty scrollback in-process (no daemon round trip).
-    /// Covers plain shells AND primary-screen apps that track the mouse
-    /// only for clicks (Claude Code) — they own no pager, so the wheel
-    /// is always lazybox's, from the first frame of a fresh spawn
-    /// (#321, #360).
-    LocalScrollback,
-    /// Alt-screen app that enabled mouse reporting (vim `mouse=a`,
-    /// htop, less `--mouse`): it owns the only scrollable buffer, so
-    /// forward the wheel as an SGR mouse report and let the app scroll.
-    ForwardSgr,
-    /// Alt-screen app that did NOT enable mouse reporting (less, man,
-    /// the git pager, vim without `mouse`): it owns the visible buffer
-    /// but there is no lazybox scrollback to move into and no mouse
-    /// protocol to speak, so synthesize arrow-key presses — xterm's
-    /// `alternateScroll`, which every terminal-in-terminal implements.
-    /// `app_cursor` selects the SS3 (`ESC O A`) vs CSI (`ESC [ A`) form
-    /// from the terminal's DECCKM (application-cursor-keys) mode.
-    AlternateScrollArrows { app_cursor: bool },
 }
 
 /// What the user right-clicked on inside the terminal grid. Returned
@@ -509,14 +478,10 @@ pub struct TerminalStack {
     /// don't leave stale hit targets.
     tab_strip_hits: Vec<(usize, std::ops::Range<u16>, u16)>,
     /// Per-tile hover targets, populated each render — one entry per
-    /// visible terminal. `tile` is the tile's on-screen rect (used to
-    /// hit-test which pane the mouse cursor is over); `grid` is the
-    /// cell grid inside it (used to translate a wheel/mouse event into
-    /// 0-based cell coordinates for the inner program). Lets the wheel
-    /// handler scroll the tile *under the cursor* rather than the
-    /// focused one. Cleared at the start of every render so a closed
-    /// tile leaves no stale target.
-    tile_hits: Vec<(TerminalId, Rect, Rect)>,
+    /// visible terminal. Lets the wheel handler scroll the tile *under
+    /// the cursor* rather than the focused one. Cleared at the start of
+    /// every render so a closed tile leaves no stale target.
+    tile_hits: Vec<(TerminalId, Rect)>,
     /// Last-focused terminal per session. Recorded when we leave a
     /// session so returning restores the pane the user was last on
     /// instead of snapping back to the first. Keyed by terminal id
@@ -1073,25 +1038,21 @@ impl TerminalVt {
     /// calls `scroll_viewport` — a grep for it must return exactly the
     /// three lines below. A request either moves the viewport or the
     /// returned [`ScrollOutcome`] explains why it could not
-    /// (`NoScrollback` when `total <= len`, `alternate` when the inner
-    /// program owns the buffer), so a scroll can never silently no-op.
+    /// (`NoScrollback` when `total <= len`), so a scroll can never
+    /// silently no-op.
     /// That single choke point is the #42/#371 encapsulation: one owner
     /// of scroll state, and it cannot fail quietly.
     fn scroll(&mut self, request: ScrollRequest) -> ScrollOutcome {
         if matches!(request, ScrollRequest::By(0)) {
             return ScrollOutcome::Noop;
         }
-        let alternate = matches!(
-            self.terminal.active_screen().ok(),
-            Some(vt::screen::Screen::Alternate)
-        );
         let Ok(before) = self.terminal.scrollbar() else {
             tracing::error!(?request, "terminal scroll state unavailable before request");
             return ScrollOutcome::StateUnavailable;
         };
 
         if before.total <= before.len {
-            return ScrollOutcome::NoScrollback { alternate };
+            return ScrollOutcome::NoScrollback;
         }
 
         let max_offset = before.total.saturating_sub(before.len);
@@ -1507,9 +1468,8 @@ impl TerminalStack {
     /// True when the focused terminal's inner program (libghostty
     /// has parsed CSI ?1000h / ?1002h / ?1003h / ?1006h SGR) wants
     /// raw mouse events forwarded. Claude Code, vim, less, etc. all
-    /// turn this on while running. The orchestrator's mouse handler
-    /// uses this signal to choose between "scroll the scrollback"
-    /// and "encode + send to PTY".
+    /// turn this on while running. The orchestrator uses this signal
+    /// for clicks; wheels always scroll lazybox's own history.
     pub fn focused_terminal_tracks_mouse(&self) -> bool {
         let Some(id) = self.focused_terminal_id() else {
             return false;
@@ -1518,57 +1478,6 @@ impl TerminalStack {
             .get(&id)
             .and_then(|s| s.vt.terminal.is_mouse_tracking().ok())
             .unwrap_or(false)
-    }
-
-    /// Decide how a mouse-wheel tick over the focused terminal should
-    /// be handled — see [`WheelRoute`]. Resolved in a single
-    /// focused-terminal lookup: the primary/alt-screen split and the
-    /// mouse-tracking probe all read the same VT, so the whole routing
-    /// decision is one place instead of the handler probing several
-    /// booleans that could disagree if the focus moved between them.
-    pub fn wheel_route(&self) -> WheelRoute {
-        match self.focused_terminal_id() {
-            Some(id) => self.wheel_route_for(id),
-            None => WheelRoute::LocalScrollback,
-        }
-    }
-
-    /// Same routing decision as [`Self::wheel_route`] but for an
-    /// explicit terminal — the tile under the mouse cursor. The wheel
-    /// scrolls the hovered pane, not the focused one (#362), so the
-    /// route must be resolved against whichever terminal the pointer
-    /// is over.
-    pub fn wheel_route_for(&self, id: TerminalId) -> WheelRoute {
-        let Some(slot) = self.terminals.get(&id) else {
-            return WheelRoute::LocalScrollback;
-        };
-        let t = &slot.vt.terminal;
-        let on_alt_screen = t.mode(vt::terminal::Mode::ALT_SCREEN).unwrap_or(false)
-            || t.mode(vt::terminal::Mode::ALT_SCREEN_SAVE).unwrap_or(false)
-            || t.mode(vt::terminal::Mode::ALT_SCREEN_LEGACY)
-                .unwrap_or(false);
-        let tracks_mouse = t.is_mouse_tracking().unwrap_or(false);
-        // Primary screen → the pane history is lazybox's, so scroll it
-        // in-process, ALWAYS — even for a Claude Code that tracks the
-        // mouse for clicks, and even before the client has accumulated
-        // any scrollback (#321, #360). Gating this on
-        // `total > len` (as an earlier fix did) made brand-new agents
-        // silently forward the wheel to an app that ignores it: a
-        // primary-screen agent owns no pager, so forwarding scrolls
-        // nothing, while the local viewport starts moving the instant
-        // real history exists. Any `total == len` frame is simply an
-        // empty scrollback, not a reason to hand the wheel away.
-        if !on_alt_screen {
-            return WheelRoute::LocalScrollback;
-        }
-        // Alt-screen: the app owns the buffer. If it speaks mouse,
-        // forward SGR; otherwise fall back to xterm alternateScroll.
-        if tracks_mouse {
-            WheelRoute::ForwardSgr
-        } else {
-            let app_cursor = t.mode(vt::terminal::Mode::DECCKM).unwrap_or(false);
-            WheelRoute::AlternateScrollArrows { app_cursor }
-        }
     }
 
     /// Encode a mouse event for the focused terminal using its
@@ -1590,9 +1499,7 @@ impl TerminalStack {
     }
 
     /// Same as [`Self::encode_mouse_for_focused`] but for an explicit
-    /// terminal — the tile under the mouse cursor. Lets the wheel
-    /// handler forward a scroll to the hovered pane's inner program
-    /// rather than the focused one (#362).
+    /// terminal id.
     pub fn encode_mouse_for(
         &mut self,
         id: TerminalId,
@@ -1673,11 +1580,7 @@ impl TerminalStack {
         // Same deep-scrollback arming as an upward `scroll_terminal`
         // (#393) — jumping straight to the top is the strongest
         // possible "show me the history" signal.
-        let alternate = matches!(
-            slot.vt.terminal.active_screen().ok(),
-            Some(vt::screen::Screen::Alternate)
-        );
-        if !alternate && slot.exited.is_none() && !slot.deep_scrollback_requested {
+        if slot.exited.is_none() && !slot.deep_scrollback_requested {
             slot.deep_scrollback_requested = true;
             self.pending_scrollback_fetch = Some(id);
         }
@@ -1723,8 +1626,8 @@ impl TerminalStack {
     pub fn terminal_at(&self, col: u16, row: u16) -> Option<TerminalId> {
         self.tile_hits
             .iter()
-            .find(|(_, tile, _)| Self::rect_contains(*tile, col, row))
-            .map(|(id, _, _)| *id)
+            .find(|(_, tile)| Self::rect_contains(*tile, col, row))
+            .map(|(id, _)| *id)
     }
 
     fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
@@ -1732,22 +1635,6 @@ impl TerminalStack {
             && col < rect.x.saturating_add(rect.width)
             && row >= rect.y
             && row < rect.y.saturating_add(rect.height)
-    }
-
-    /// Frame-space `(col, row)` → 0-based cell coordinates inside the
-    /// tile owned by `id`, using the grid rect recorded during render —
-    /// correct even when tiles are split. Mirrors [`Self::screen_to_cell`]
-    /// but keyed on a specific tile so the wheel handler can forward an
-    /// event to the hovered pane's inner program (#362). `None` when the
-    /// point is outside that tile's cell grid (chrome, gutter, or the
-    /// tile was never rendered).
-    pub fn cell_in_tile(&self, id: TerminalId, col: u16, row: u16) -> Option<(u32, u32)> {
-        let (_, _, grid) = self.tile_hits.iter().find(|(t, _, _)| *t == id)?;
-        if Self::rect_contains(*grid, col, row) {
-            Some(((col - grid.x) as u32, (row - grid.y) as u32))
-        } else {
-            None
-        }
     }
 
     /// Set the active tab by index. Called from the mouse handler
@@ -2011,7 +1898,7 @@ impl TerminalStack {
     /// recap rows. This is the coordinate space `encode_mouse_for_focused`
     /// expects. Returns `None` when the point falls in the border / tab
     /// strip / recap (left of or above the grid) so callers forwarding a
-    /// click or wheel to a mouse-tracking inner program never feed it a
+    /// click to a mouse-tracking inner program never feed it a
     /// cell the renderer never drew there. Mirrors `target_at` /
     /// `extract_text`, which previously were the ONLY paths that undid
     /// this offset — the forward path used the raw pane origin and so
@@ -2066,10 +1953,6 @@ impl TerminalStack {
             return ScrollOutcome::NoTerminal;
         };
         let outcome = slot.vt.scroll(ScrollRequest::By(delta));
-        let alternate = matches!(
-            slot.vt.terminal.active_screen().ok(),
-            Some(vt::screen::Screen::Alternate)
-        );
         // Deep-scrollback fetch, one per scrollback visit (#393): the
         // local grid was fed from the live byte stream, whose in-place
         // redraws leave almost no scrollback, while the daemon backend
@@ -2081,7 +1964,7 @@ impl TerminalStack {
         // pane's backend session is gone). The key / wheel handlers
         // drain the armed id into `Command::FetchScrollback` and the
         // reply rebuilds the grid via `apply_scrollback`.
-        if delta < 0 && !alternate {
+        if delta < 0 {
             if slot.exited.is_none() && !slot.deep_scrollback_requested {
                 slot.deep_scrollback_requested = true;
                 self.pending_scrollback_fetch = Some(id);
@@ -2288,9 +2171,9 @@ impl TerminalStack {
     ///   snapping to the live tail. Distance-from-bottom is the anchor
     ///   because the rebuild grows the history above, not below.
     ///
-    /// Skipped on the alternate screen — the capture is primary-pane
-    /// content and the app owns the alt buffer. A desynced slot (mid
-    /// gap-recovery) keeps its flags: the ring resync it already
+    /// A capture also normalizes an unexpected alternate-screen client
+    /// back onto the history-bearing primary screen. A desynced slot
+    /// (mid gap-recovery) keeps its flags: the ring resync it already
     /// requested still arrives and re-feeds the authoritative stream.
     fn apply_scrollback(&mut self, id: TerminalId, replay: &[u8], seq: u64) {
         if replay.is_empty() {
@@ -2300,13 +2183,6 @@ impl TerminalStack {
             return;
         };
         let t = &slot.vt.terminal;
-        let on_alt_screen = t.mode(vt::terminal::Mode::ALT_SCREEN).unwrap_or(false)
-            || t.mode(vt::terminal::Mode::ALT_SCREEN_SAVE).unwrap_or(false)
-            || t.mode(vt::terminal::Mode::ALT_SCREEN_LEGACY)
-                .unwrap_or(false);
-        if on_alt_screen {
-            return;
-        }
         // Pre-flight the rebuild in a scratch parser at the same width
         // and only adopt it when it is actually DEEPER than the current
         // grid. A capture from a pane with no retained history — the
@@ -3722,7 +3598,7 @@ impl TerminalStack {
             // can route a scroll to the pane under the cursor. `rect` is
             // the full tile (hover hit-test); `grid` is the cell grid
             // (event → cell coordinates for a mouse-tracking program).
-            self.tile_hits.push((id, rect, grid));
+            self.tile_hits.push((id, rect));
             slot.vt.ensure_size(grid.width, grid.height);
             // Backend PTY also needs to know the new size — otherwise
             // the shell process keeps writing at its spawn dimensions
@@ -5656,10 +5532,11 @@ mod deep_scrollback_tests {
         );
     }
 
-    /// The capture is primary-screen content; while the inner program
-    /// owns the alternate screen the rebuild must not touch the grid.
+    /// Deep history is the scrolling source of truth, so adopting it
+    /// also brings an unexpected alternate-screen client back to the
+    /// history-bearing primary screen.
     #[test]
-    fn apply_scrollback_skips_alt_screen() {
+    fn apply_scrollback_normalizes_alt_screen_to_history() {
         let sk = SessionKey::new("s");
         let mut stack = agent_stack(TerminalId(1), &sk);
         feed(&mut stack, TerminalId(1), b"\x1b[?1049hvim screen", 1, 1);
@@ -5669,16 +5546,18 @@ mod deep_scrollback_tests {
             replay: deep_history(100),
             seq: 9,
         });
-        assert!(mode(
+        assert!(!mode(
             &stack,
             TerminalId(1),
             vt::terminal::Mode::ALT_SCREEN_SAVE
         ));
         assert_eq!(
             stack.terminals[&TerminalId(1)].last_seq,
-            1,
-            "an ignored capture must not move the seq high-water mark"
+            9,
+            "the adopted history advances the seq high-water mark"
         );
+        let bar = scrollbar(&stack, TerminalId(1));
+        assert!(bar.total > bar.len, "the capture provides local scrollback");
     }
 
     /// A capture that raced live output (its seq lags what the client

@@ -84,7 +84,7 @@ const HISTORY_LIMIT: u32 = 10_000;
 /// host is silently dead (seen on Ubuntu 22.04 LTS, tmux 3.2a).
 pub const MIN_TMUX_VERSION: (u32, u32) = (3, 3);
 
-/// Clipboard passthrough options, independent of the scrollback flavor.
+/// Clipboard passthrough options, independent of scrollback handling.
 /// `set-clipboard on` forwards an inner program's OSC 52 to the attach
 /// client; `allow-passthrough on` (off by default since tmux 3.3a) lets
 /// a DCS-wrapped escape through. Without these tmux eats the clipboard
@@ -105,37 +105,22 @@ const HYPERLINK_TERMINAL_FEATURES: &str = "set -as terminal-features 'xterm*:hyp
 /// `TmuxBackend::new` time so we don't depend on the user's
 /// `~/.tmux.conf`.
 ///
-/// Two flavors, keyed on `terminal.native_scrollback`:
-///
-/// - **native scrollback (default)** — `mouse off` plus the
-///   smcup@/rmcup@ override above. The lazybox client keeps the
-///   relayed output on libghostty's PRIMARY screen, so wheel /
-///   Shift-PageUp scroll the local 10k-line scrollback instantly with
-///   no daemon round trip. tmux's `mouse off` also means a DECSET
-///   mouse-mode request from the INNER program (vim, htop, …) passes
-///   through to the client untouched, so `is_mouse_tracking()` on the
-///   client reflects the inner app and the wheel routes to it when —
-///   and only when — it asked for the mouse.
-///
-/// - **legacy** — `mouse on`: tmux owns the alt-screen, receives the
-///   wheel via our encoded SGR sequence and enters copy-mode
-///   automatically, scrolling its own history one line per notch
-///   (a daemon round trip + pane repaint per notch).
+/// tmux mouse handling stays off and both sides of the conduit reject
+/// alternate screens. The pane therefore retains output in tmux history,
+/// while the lazybox client accumulates the relayed output in its local
+/// 10k-line scrollback. Inner mouse modes still pass through for clicks;
+/// wheel events never leave the client.
 ///
 /// Every option here may assume [`MIN_TMUX_VERSION`] — `detect()`
 /// refuses older tmux, because a single unknown option in this conf
 /// breaks every attach (see the constant's doc). Raising an option's
 /// floor means raising `MIN_TMUX_VERSION` with it.
-fn transparent_conf(native_scrollback: bool) -> String {
+fn transparent_conf() -> String {
     let mut conf = String::from(
         "set -g prefix None\n\
-         set -g status off\n",
+         set -g status off\n\
+         set -g mouse off\n",
     );
-    if native_scrollback {
-        conf.push_str("set -g mouse off\n");
-    } else {
-        conf.push_str("set -g mouse on\n");
-    }
     conf.push_str(&format!("set -g history-limit {HISTORY_LIMIT}\n"));
     // Lazybox scrollback exists ONLY for pane content that scrolls into
     // tmux history — the restart seed, the live deep-scrollback fetch,
@@ -171,27 +156,10 @@ fn transparent_conf(native_scrollback: bool) -> String {
     // libghostty's VT parser. The `xterm*` pattern matches the forced
     // client TERM, same as `terminal-overrides` above.
     conf.push_str(HYPERLINK_TERMINAL_FEATURES);
-    if native_scrollback {
-        conf.push_str("set -g terminal-overrides '");
-        conf.push_str(SCROLLBACK_TERMINAL_OVERRIDES);
-        conf.push_str("'\n");
-    }
+    conf.push_str("set -g terminal-overrides '");
+    conf.push_str(SCROLLBACK_TERMINAL_OVERRIDES);
+    conf.push_str("'\n");
     conf.push_str("unbind-key -a\n");
-    if !native_scrollback {
-        conf.push_str(
-            "# Wheel scrolls ONE line per notch. macOS trackpad already fires\n\
-             # ~30 events per gesture, so 30 × 1 = ~30 lines per swipe — about\n\
-             # what a native terminal feels like. The earlier `-N 10` bump\n\
-             # (intended to compensate for slow-feeling scroll) compounded with\n\
-             # the per-gesture event count to give ~300 lines per swipe, which\n\
-             # the user described as \"moving 10 lines at a time\" — each\n\
-             # trackpad tick teleported.\n\
-             bind-key -T copy-mode-vi WheelUpPane send-keys -X scroll-up\n\
-             bind-key -T copy-mode-vi WheelDownPane send-keys -X scroll-down\n\
-             bind-key -T copy-mode WheelUpPane send-keys -X scroll-up\n\
-             bind-key -T copy-mode WheelDownPane send-keys -X scroll-down\n",
-        );
-    }
     conf
 }
 
@@ -218,15 +186,15 @@ fn normalize_capture(stdout: &[u8]) -> Vec<u8> {
 }
 
 /// `set-option` invocations that bring an ALREADY-RUNNING tmux server
-/// (started by an older lazybox with the other conf flavor) in line
-/// with `native_scrollback`. The `-f` conf only applies at tmux server
+/// (started by an older lazybox) in line with lazybox's scrollback model.
+/// The `-f` conf only applies at tmux server
 /// start, so sessions that survived a lazybox upgrade would otherwise
 /// keep the old mouse / alt-screen behavior forever. Applied once per
 /// backend process, before the first attach, so re-attached clients
 /// pick the overrides up (terminal-overrides is consulted at client
 /// attach time).
-fn server_option_cmds(native_scrollback: bool) -> Vec<Vec<&'static str>> {
-    // Clipboard passthrough is independent of the scrollback flavor, so
+fn server_option_cmds() -> Vec<Vec<&'static str>> {
+    // Clipboard passthrough is independent of scrollback handling, so
     // an already-running server picks it up either way.
     let clipboard = [
         vec!["set-option", "-g", "set-clipboard", "on"],
@@ -242,7 +210,7 @@ fn server_option_cmds(native_scrollback: bool) -> Vec<Vec<&'static str>> {
     // sessions spawned after the push (a pane already inside the alt
     // screen stays there until its program leaves it).
     let no_alt_screen = vec!["set-option", "-g", "alternate-screen", "off"];
-    // `terminal-features` is independent of the scrollback flavor — an
+    // `terminal-features` is independent of scrollback handling — an
     // already-running server must learn the client speaks OSC 8 either
     // way, else surviving sessions keep stripping hyperlinks.
     let hyperlinks = vec![
@@ -251,24 +219,16 @@ fn server_option_cmds(native_scrollback: bool) -> Vec<Vec<&'static str>> {
         "terminal-features",
         HYPERLINK_TERMINAL_FEATURES_VALUE,
     ];
-    let mut cmds = if native_scrollback {
+    let mut cmds = vec![
+        vec!["set-option", "-g", "mouse", "off"],
         vec![
-            vec!["set-option", "-g", "mouse", "off"],
-            vec![
-                "set-option",
-                "-g",
-                "terminal-overrides",
-                SCROLLBACK_TERMINAL_OVERRIDES,
-            ],
-            hyperlinks,
-        ]
-    } else {
-        vec![
-            vec!["set-option", "-g", "mouse", "on"],
-            vec!["set-option", "-gu", "terminal-overrides"],
-            hyperlinks,
-        ]
-    };
+            "set-option",
+            "-g",
+            "terminal-overrides",
+            SCROLLBACK_TERMINAL_OVERRIDES,
+        ],
+        hyperlinks,
+    ];
     cmds.extend(clipboard);
     cmds.push(focus_events);
     cmds.push(no_alt_screen);
@@ -301,14 +261,9 @@ pub struct TmuxBackend {
     /// Path to the transparent-tmux config dropped on first call.
     /// Persists for the process lifetime; cleaned up on Drop.
     config_path: PathBuf,
-    /// Rendered conf contents — `transparent_conf(native_scrollback)`.
-    /// Kept so the self-heal rewrite in `tmux()` reproduces the same
-    /// flavor the backend was built with.
+    /// Rendered conf contents. Kept so the self-heal rewrite in `tmux()`
+    /// reproduces the same configuration.
     conf: String,
-    /// `terminal.native_scrollback` — local client scrollback (mouse
-    /// off + no alt-screen on the attach client) vs legacy tmux
-    /// copy-mode scrolling.
-    native_scrollback: bool,
     /// Whether `server_option_cmds` has been applied to the (possibly
     /// pre-existing) tmux server this process talks to. Once per
     /// process, before the first attach. A `OnceCell` (not an
@@ -380,35 +335,21 @@ impl TmuxBackend {
         // dev profile (`LAZYBOX_HOME=~/.lazybox-dev`) gets "lazybox-dev"
         // so two lazybox daemons don't share session state.
         let socket = lazybox_core::paths::tmux_socket_name();
-        // `terminal.native_scrollback` from the user config; the
-        // load failure path (corrupt YAML) falls back to the default
-        // (on) rather than silently flipping the scroll model.
-        let native_scrollback = lazybox_config::Config::load()
-            .map(|c| c.terminal.native_scrollback)
-            .unwrap_or(true);
-        Self::with_socket_scrollback(&socket, native_scrollback).ok()
+        Self::with_socket(&socket).ok()
     }
 
-    /// Build a backend pinned to a specific tmux socket name with the
-    /// default (native) scrollback mode. Useful for tests so
-    /// concurrent runs don't share state.
+    /// Build a backend pinned to a specific tmux socket name. Useful for
+    /// tests so concurrent runs don't share state.
     pub fn with_socket(socket: &str) -> std::io::Result<Self> {
-        Self::with_socket_scrollback(socket, true)
-    }
-
-    /// `with_socket` with an explicit `terminal.native_scrollback`
-    /// value.
-    pub fn with_socket_scrollback(socket: &str, native_scrollback: bool) -> std::io::Result<Self> {
         let dir = std::env::temp_dir().join("lazybox-tmux");
         std::fs::create_dir_all(&dir)?;
         let config_path = dir.join(format!("{socket}.conf"));
-        let conf = transparent_conf(native_scrollback);
+        let conf = transparent_conf();
         std::fs::write(&config_path, &conf)?;
         Ok(Self {
             socket: socket.into(),
             config_path,
             conf,
-            native_scrollback,
             options_applied: tokio::sync::OnceCell::new(),
             sessions: Mutex::new(HashMap::new()),
             next_key: AtomicU64::new(1),
@@ -494,8 +435,8 @@ impl TmuxBackend {
     /// Apply `server_option_cmds` to the tmux server once per backend
     /// process. The `-f` conf only takes effect when a tmux command
     /// STARTS the server, so a server left running by an older lazybox
-    /// (old conf flavor) keeps its options across our restarts — this
-    /// pushes the current flavor onto it explicitly so both freshly
+    /// keeps its options across our restarts — this pushes the current
+    /// settings onto it explicitly so both freshly
     /// spawned and recovered sessions behave the same. Best-effort:
     /// a failure degrades scrolling, it must not block the spawn.
     async fn ensure_server_options(&self) {
@@ -504,7 +445,7 @@ impl TmuxBackend {
         // against a half-configured server.
         self.options_applied
             .get_or_init(|| async {
-                for cmd in server_option_cmds(self.native_scrollback) {
+                for cmd in server_option_cmds() {
                     if let Err(e) = self.tmux(&cmd).await {
                         tracing::warn!("tmux server option setup failed: {e}");
                     }
@@ -548,21 +489,8 @@ impl TmuxBackend {
         })
     }
 
-    /// Reconstruct a reattaching client's scrollback from tmux's own
-    /// history. The daemon's replay ring lives in memory and dies with
-    /// the daemon; tmux, however, keeps `history-limit` lines per pane
-    /// across restarts. `capture-pane -e -S -<limit>` dumps that history
-    /// (styled, via `-e`) down to the current bottom line, which we hand
-    /// to the DaemonPty as its durable seed — replayed ahead of the live
-    /// attach bytes on every snapshot (#420) — so the client rebuilds
-    /// the full scrollback instead of a single repainted screen.
-    ///
-    /// Best-effort: any failure returns an empty seed and the client
-    /// simply starts from the live repaint, exactly as before this fix.
-    /// Whether `key`'s pane is on the alternate screen, and how many
-    /// history lines tmux retains for it. `None` when tmux can't answer
-    /// (dead session, wedged server) — callers treat that as "don't
-    /// know" rather than "no history".
+    /// Whether the pane is alternate and how many history lines tmux
+    /// currently retains. `None` when tmux cannot report the state.
     async fn pane_history_state(&self, key: &str) -> Option<(bool, u64)> {
         let out = self
             .tmux(&[
@@ -576,11 +504,20 @@ impl TmuxBackend {
             .ok()?;
         let text = String::from_utf8_lossy(&out.stdout);
         let mut parts = text.trim().split('\t');
-        let alternate_on = parts.next()? == "1";
-        let history_size = parts.next()?.parse().ok()?;
-        Some((alternate_on, history_size))
+        Some((parts.next()? == "1", parts.next()?.parse().ok()?))
     }
 
+    /// Reconstruct a reattaching client's scrollback from tmux's own
+    /// history. The daemon's replay ring lives in memory and dies with
+    /// the daemon; tmux, however, keeps `history-limit` lines per pane
+    /// across restarts. `capture-pane -e -S -<limit>` dumps that history
+    /// (styled, via `-e`) down to the current bottom line, which we hand
+    /// to the DaemonPty as its durable seed — replayed ahead of the live
+    /// attach bytes on every snapshot (#420) — so the client rebuilds
+    /// the full scrollback instead of a single repainted screen.
+    ///
+    /// Best-effort: any failure returns an empty seed and the client
+    /// simply starts from the live repaint.
     async fn capture_history(&self, key: &str) -> Vec<u8> {
         let start = format!("-{HISTORY_LIMIT}");
         let out = match self
@@ -677,6 +614,14 @@ impl SessionBackend for TmuxBackend {
                 return Err(BackendError::Spawn("empty argv".into()));
             }
             let key = self.alloc_key(hint);
+
+            // A server that survived an older lazybox still has its old
+            // global options. Push the history-preserving settings before
+            // the new program can request an alternate screen. With no
+            // running server, `new-session` below starts one from `conf`.
+            if self.tmux(&["list-sessions"]).await.is_ok() {
+                self.ensure_server_options().await;
+            }
 
             let cmd_args = new_session_args(&key, cwd, env, argv);
             let arg_refs: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
@@ -887,7 +832,7 @@ impl SessionBackend for TmuxBackend {
             // If this is a session that survived restart and we
             // haven't bound a client yet, open one lazily. Recovered
             // sessions ride a tmux server an OLDER lazybox started —
-            // push the current option flavor before attaching so they
+            // push the current options before attaching so they
             // pick up the scrollback behavior too.
             self.ensure_server_options().await;
             // Reuse the cached client only if it's still ALIVE. A
@@ -1076,16 +1021,17 @@ impl SessionBackend for TmuxBackend {
 mod tests {
     use super::*;
 
-    /// Native mode keeps the attach client off the alternate screen
+    /// The config keeps the attach client off the alternate screen
     /// (smcup@/rmcup@ for the `xterm*` TERM the daemon PTY advertises)
     /// and leaves tmux's blanket mouse capture off so inner-program
     /// DECSET requests pass through to the client.
     #[test]
-    fn native_conf_disables_mouse_and_alt_screen() {
-        let conf = transparent_conf(true);
+    fn conf_disables_mouse_and_alt_screen() {
+        let conf = transparent_conf();
         assert!(conf.contains("set -g mouse off\n"));
         assert!(!conf.contains("mouse on"));
         assert!(conf.contains("set -g terminal-overrides ',xterm*:smcup@:rmcup@'\n"));
+        assert!(conf.contains("set -g alternate-screen off\n"));
         // No copy-mode wheel bindings — the wheel never reaches tmux.
         assert!(!conf.contains("WheelUpPane"));
         // The transparent-client basics stay.
@@ -1098,23 +1044,10 @@ mod tests {
         assert!(conf.contains("set -g window-size latest\n"));
     }
 
-    /// Legacy mode (`terminal.native_scrollback: false`) reproduces the
-    /// previous behavior byte-for-byte in spirit: tmux owns the mouse,
-    /// the alt-screen, and copy-mode wheel scrolling.
-    #[test]
-    fn legacy_conf_keeps_tmux_mouse_and_copy_mode() {
-        let conf = transparent_conf(false);
-        assert!(conf.contains("set -g mouse on\n"));
-        assert!(!conf.contains("terminal-overrides"));
-        assert!(conf.contains("bind-key -T copy-mode-vi WheelUpPane send-keys -X scroll-up\n"));
-        assert!(conf.contains("bind-key -T copy-mode WheelDownPane send-keys -X scroll-down\n"));
-        assert!(conf.contains("unbind-key -a"));
-    }
-
     /// The option pushes for a pre-existing tmux server mirror the
-    /// conf flavors, so recovered sessions behave like fresh ones.
+    /// config, so recovered sessions behave like fresh ones.
     #[test]
-    fn server_option_cmds_match_conf_flavors() {
+    fn server_option_cmds_match_conf() {
         let clipboard = [
             vec!["set-option", "-g", "set-clipboard", "on"],
             vec!["set-option", "-g", "allow-passthrough", "on"],
@@ -1127,9 +1060,8 @@ mod tests {
         ];
         let focus_events = vec!["set-option", "-g", "focus-events", "on"];
         let no_alt_screen = vec!["set-option", "-g", "alternate-screen", "off"];
-        let native = server_option_cmds(true);
         assert_eq!(
-            native,
+            server_option_cmds(),
             vec![
                 vec!["set-option", "-g", "mouse", "off"],
                 vec![
@@ -1138,19 +1070,6 @@ mod tests {
                     "terminal-overrides",
                     ",xterm*:smcup@:rmcup@",
                 ],
-                hyperlinks.clone(),
-                clipboard[0].clone(),
-                clipboard[1].clone(),
-                focus_events.clone(),
-                no_alt_screen.clone(),
-            ]
-        );
-        let legacy = server_option_cmds(false);
-        assert_eq!(
-            legacy,
-            vec![
-                vec!["set-option", "-g", "mouse", "on"],
-                vec!["set-option", "-gu", "terminal-overrides"],
                 hyperlinks,
                 clipboard[0].clone(),
                 clipboard[1].clone(),
@@ -1160,84 +1079,42 @@ mod tests {
         );
     }
 
-    /// Scrollback only exists for content that reaches tmux's pane
-    /// history, and a pane on the alternate screen retains NONE — a
-    /// Claude ≥2.1 session under the old config scrolled back through
-    /// nothing, live and after restart alike. Both conf flavors (and
-    /// the option push for pre-existing servers, above) must deny the
-    /// alt screen at the pane level.
+    /// The config enables clipboard passthrough so an inner program's
+    /// OSC 52 reaches the host.
     #[test]
-    fn both_conf_flavors_deny_the_pane_alternate_screen() {
-        for native in [true, false] {
-            let conf = transparent_conf(native);
-            assert!(
-                conf.contains("set -g alternate-screen off\n"),
-                "native={native}"
-            );
-        }
+    fn conf_enables_clipboard_passthrough() {
+        let conf = transparent_conf();
+        assert!(conf.contains("set -g set-clipboard on\n"));
+        assert!(conf.contains("set -g allow-passthrough on\n"));
     }
 
-    /// Both conf flavors enable clipboard passthrough so an inner
-    /// program's OSC 52 reaches the host. Regression for "copy from the
-    /// agent silently fails under the tmux backend".
-    #[test]
-    fn both_conf_flavors_enable_clipboard_passthrough() {
-        for native in [true, false] {
-            let conf = transparent_conf(native);
-            assert!(
-                conf.contains("set -g set-clipboard on\n"),
-                "native={native}"
-            );
-            assert!(
-                conf.contains("set -g allow-passthrough on\n"),
-                "native={native}"
-            );
-        }
-    }
-
-    /// Both conf flavors advertise OSC 8 hyperlink support to the attach
+    /// The config advertises OSC 8 hyperlink support to the attach
     /// client. Without this tmux strips hyperlinks (the forced
     /// `TERM=xterm-256color` has no `Hls` capability), so right-click on
     /// an agent's titled link finds no URI to open. Regression for the
     /// "right-click never opens URLs under the tmux backend" report.
     #[test]
-    fn both_conf_flavors_advertise_hyperlinks() {
-        assert!(transparent_conf(true).contains("set -as terminal-features 'xterm*:hyperlinks'\n"));
-        assert!(
-            transparent_conf(false).contains("set -as terminal-features 'xterm*:hyperlinks'\n")
-        );
+    fn conf_advertises_hyperlinks() {
+        assert!(transparent_conf().contains("set -as terminal-features 'xterm*:hyperlinks'\n"));
     }
 
-    /// Both conf flavors and both server-option paths enable focus-events
+    /// Both config and server-option paths enable focus-events
     /// so agents (e.g. Claude Code) running inside the tmux backend stop
     /// nagging "focus-events off". Regression for the focus-events warning.
     #[test]
     fn both_paths_enable_focus_events() {
-        for native in [true, false] {
-            assert!(
-                transparent_conf(native).contains("set -g focus-events on\n"),
-                "native={native}"
-            );
-            assert!(
-                server_option_cmds(native).contains(&vec![
-                    "set-option",
-                    "-g",
-                    "focus-events",
-                    "on"
-                ]),
-                "native={native}"
-            );
-        }
+        assert!(transparent_conf().contains("set -g focus-events on\n"));
+        assert!(server_option_cmds().contains(&vec!["set-option", "-g", "focus-events", "on"]));
     }
 
-    /// `with_socket` drops the native-flavor conf to disk and the
+    /// `with_socket` drops the config to disk and the
     /// attach argv routes every client through it via `-f`.
     #[test]
-    fn with_socket_writes_native_conf_and_attach_uses_it() {
+    fn with_socket_writes_conf_and_attach_uses_it() {
         let socket = format!("lazybox-test-conf-{}", std::process::id());
         let backend = TmuxBackend::with_socket(&socket).expect("conf written");
         let on_disk = std::fs::read_to_string(&backend.config_path).expect("conf readable");
-        assert_eq!(on_disk, transparent_conf(true));
+        assert_eq!(on_disk, transparent_conf());
         assert!(on_disk.contains("smcup@:rmcup@"));
 
         let argv = backend.attach_argv("lazybox-some-key");
@@ -1331,21 +1208,6 @@ mod tests {
     /// tmux was told to keep.
     #[test]
     fn capture_depth_matches_history_limit() {
-        assert!(
-            transparent_conf(true).contains(&format!("set -g history-limit {HISTORY_LIMIT}\n"))
-        );
-    }
-
-    /// The escape hatch writes the legacy conf.
-    #[test]
-    fn with_socket_scrollback_off_writes_legacy_conf() {
-        let socket = format!("lazybox-test-legacy-{}", std::process::id());
-        let backend = TmuxBackend::with_socket_scrollback(&socket, false).expect("conf written");
-        let on_disk = std::fs::read_to_string(&backend.config_path).expect("conf readable");
-        assert_eq!(on_disk, transparent_conf(false));
-        assert!(on_disk.contains("set -g mouse on"));
-        assert!(!on_disk.contains("terminal-overrides"));
-
-        let _ = std::fs::remove_file(&backend.config_path);
+        assert!(transparent_conf().contains(&format!("set -g history-limit {HISTORY_LIMIT}\n")));
     }
 }

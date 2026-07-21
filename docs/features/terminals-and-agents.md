@@ -370,11 +370,10 @@ leaving, splitting, scrolling, and copying.
 - `]]` then `|`/`\` (split vertical), `-` (split horizontal), arrows (move tile focus / cycle tabs), `x` (close the focused terminal). `Ctrl-w` is not a lazybox prefix — it reaches the inner program (readline word-erase).
 - By default a second terminal in a workspace opens side-by-side (a split tile). Set `ui.terminal_new_layout: tabs` to have ordinary `s`/agent spawns stack behind the tab strip instead — the existing tile keeps its full size. Explicit `]]|` / `]]-` splits are unaffected.
 - `]]t` toggles that default live (split ⇄ tabs), persisting it to `ui.terminal_new_layout` so it survives restart; the `]]` popup's `t` row shows the current setting. The change affects the *next* spawn, not terminals already open.
-- Mouse wheel scrolls local history (3 rows/notch) whenever the inner program
-  is on the primary screen — including a brand-new agent, from its first frame.
-  In a split, the wheel scrolls the tile **under the cursor**, not the focused
-  one (#362). Only an alternate-screen program that enabled mouse tracking (vim,
-  htop, less) gets the wheel forwarded, since it owns the only scrollable buffer.
+- Mouse wheel always scrolls lazybox's local history (3 rows/notch), including
+  mouse-tracking and full-screen agents. In a split, the wheel scrolls the tile
+  **under the cursor**, not the focused one (#362). Mouse tracking still applies
+  to clicks, but never redirects a wheel event into the inner program.
 - Left-click + drag does pane-scoped selection; release copies via OSC 52 (footer shows `copied N lines`). For host-native selection across the whole screen, press `F8` to flip mouse capture off, drag, then `F8` back.
 - `Shift-PageUp/PageDown` and `Shift-Home/End` move through scrollback (focused tile).
 
@@ -397,7 +396,7 @@ are documented in [`docs/terminal-scrolling.md`](../terminal-scrolling.md).
 - [ ] Old/recovered sessions with local history scroll in-process.
 - [ ] A freshly spawned agent scrolls its scrollback in-process (wheel / `Shift-PageUp` / `Shift-Home`) from the first frame — no forward to the app.
 - [ ] In a split, the wheel scrolls the tile under the cursor, not the focused one (#362).
-- [ ] Alternate-screen programs with mouse tracking receive wheel events.
+- [ ] Full-screen and mouse-tracking programs scroll lazybox history without receiving wheel input.
 - [ ] Drag-select copies via OSC 52 and the footer confirms the line count.
 - [ ] `F8` toggles mouse capture for host-native selection.
 

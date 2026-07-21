@@ -15,7 +15,7 @@
 //!     go through the same init).
 //!   - Split tiles — scrolling a non-focused tile leaves the focused one
 //!     put (#362), read at the `TerminalStack` seam.
-//!   - Alternate-screen program (no local scrollback) vs. normal screen.
+//!   - Empty local history vs. populated history.
 //!   - A no-op is never silent: whenever scrollback exists, a scroll
 //!     returns `Moved`; when it genuinely can't, a typed reason.
 //!   - The scroll owner is the ONLY caller of `scroll_viewport`
@@ -26,7 +26,7 @@ use lazybox_core::{SessionKey, SessionLayout, TileTree};
 use lazybox_ipc::{Event, TerminalId, TerminalKind, TerminalSnapshot};
 use lazybox_tui::PaneId;
 use lazybox_tui::components::TerminalStack;
-use lazybox_tui::components::terminal_stack::{ScrollBoundary, ScrollOutcome, WheelRoute};
+use lazybox_tui::components::terminal_stack::{ScrollBoundary, ScrollOutcome};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
@@ -153,13 +153,6 @@ fn fresh_agent_wheel_moves_the_viewport() {
     assert!(
         bottom > 0,
         "80 lines of fresh output must produce scrollback"
-    );
-
-    // A primary-screen agent's wheel is always lazybox's scrollback.
-    assert_eq!(
-        stack.wheel_route(),
-        WheelRoute::LocalScrollback,
-        "a fresh primary-screen agent scrolls locally on the wheel (#360)",
     );
 
     // The wheel path scrolls the tile it resolves; over a single agent
@@ -325,44 +318,6 @@ fn keyboard_scroll_targets_the_focused_tile() {
     );
 }
 
-// ── Alternate vs normal screen ──────────────────────────────────────
-
-#[test]
-fn alternate_screen_reports_no_local_scrollback() {
-    // An alt-screen app owns its buffer; libghostty keeps no scrollback
-    // for it, so a local scroll is a TYPED no-op (not a silent one) and
-    // the wheel routes away from local scrollback.
-    let mut stack = TerminalStack::new(PaneId::new(0));
-    stack.on_event(&Event::TerminalSpawned {
-        terminal_id: TerminalId(1),
-        session_key: sk("s"),
-        kind: TerminalKind::Agent("claude".into()),
-        no_permission: false,
-        on_main: false,
-        model_label: None,
-    });
-    stack.set_active_session(Some(sk("s")));
-    render(&mut stack);
-    // Enter alt-screen and enable mouse reporting (vim `mouse=a`, htop…).
-    stack.on_event(&Event::TerminalOutput {
-        terminal_id: TerminalId(1),
-        bytes: b"\x1b[?1049h\x1b[?1006h\x1b[?1002hhello".to_vec(),
-        first_seq: 1,
-        seq: 1,
-    });
-    render(&mut stack);
-
-    assert_ne!(
-        stack.wheel_route(),
-        WheelRoute::LocalScrollback,
-        "an alt-screen mouse-tracking app owns the wheel, not lazybox",
-    );
-    match stack.scroll_active(-3) {
-        ScrollOutcome::NoScrollback { alternate: true } => {}
-        other => panic!("alt-screen scroll must report NoScrollback{{alternate}}, got {other:?}"),
-    }
-}
-
 // ── The core invariant: no silent no-op ─────────────────────────────
 
 #[test]
@@ -443,10 +398,7 @@ fn empty_terminal_scroll_is_a_typed_reason_not_a_move() {
     });
     stack.set_active_session(Some(sk("s")));
     render(&mut stack);
-    match stack.scroll_active(-3) {
-        ScrollOutcome::NoScrollback { alternate: false } => {}
-        other => panic!("an empty primary-screen terminal must report NoScrollback, got {other:?}"),
-    }
+    assert_eq!(stack.scroll_active(-3), ScrollOutcome::NoScrollback);
 }
 
 // ── Source-level encapsulation guard ────────────────────────────────

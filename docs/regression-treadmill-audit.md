@@ -81,11 +81,26 @@ viewport to the bottom). Remaining divergence, deliberately accepted
 for now: capture fidelity (OSC 8 hyperlinks, soft-wrap geometry) and
 byte↔line budget parity are not equivalence-tested — depth is.
 
-**Operational note:** #395 merged the same day this audit closed. Any
-"scrolling is STILL broken" report should first check the running
-binary's build (`lazybox --version` vs `git log`) — the dormant
-dev-build staleness guard this PR fixes is exactly why a pre-#395
-binary could run for days with zero signal.
+**Post-#395 regression, root-caused live (2026-07-20):** with #395 in
+the running build, scrolling a Claude session made the scrollbar
+*disappear on the first scroll*. Cause, confirmed against the live
+tmux server: **Claude Code ≥2.1 switches its pane to the alternate
+screen** (`alternate_on=1, history_size=0` on every Claude pane; codex
+panes were `alt=0` with ~1k lines — hence "sometimes works, sometimes
+not"). The alt screen retains no tmux history, so every lazybox
+scrollback mechanism — live fetch, restart seed, attach accumulation —
+had nothing to read, and the #395 fetch then *adopted* the one-screen
+alt capture, replacing the client's deeper local grid. Fixed in three
+layers, all in this PR: `alternate-screen off` at the pane level (conf
++ option push for pre-existing servers — the pane-side counterpart of
+the attach-side `smcup@` stripping, i.e. the design invariant finally
+enforced where it was being violated); the backend refuses to serve a
+fetch for a no-history pane; and the client never adopts a rebuild
+that isn't strictly deeper than its current grid.
+
+**Operational note:** panes already inside the alt screen under the old
+config stay there until their agent restarts — existing Claude
+terminals need a respawn to pick up retained history.
 
 ---
 

@@ -791,20 +791,6 @@ pub struct TerminalSection {
     /// to count toward the same run. After this window the run
     /// resets and the buffered chars flush to the agent.
     pub escape_window_ms: u64,
-    /// Keep scrollback local to the lazybox client (default on).
-    ///
-    /// When on, the tmux backend keeps the attach client off the
-    /// alternate screen (`terminal-overrides ',xterm*:smcup@:rmcup@'`)
-    /// and leaves tmux's own `mouse` option off, so terminal output
-    /// accumulates in the client's libghostty scrollback and the
-    /// wheel / Shift-PageUp scroll instantly without a daemon round
-    /// trip. Inner programs that request mouse tracking themselves
-    /// (vim, htop, …) still get wheel events forwarded.
-    ///
-    /// Escape hatch: set to `false` to restore the previous
-    /// behavior (tmux owns the alternate screen + copy-mode wheel
-    /// scrolling) if an inner-app regression shows up.
-    pub native_scrollback: bool,
     /// Grace window (ms) after an agent terminal spawns during which a
     /// clean (`code 0`) exit that never engaged is treated as
     /// dead-on-arrival — kept open with a restart affordance instead
@@ -820,7 +806,6 @@ impl Default for TerminalSection {
         Self {
             escape_char: ']',
             escape_window_ms: 600,
-            native_scrollback: true,
             agent_dead_on_arrival_ms: 10_000,
         }
     }
@@ -1424,28 +1409,6 @@ repos:
         let reentry = reparsed.repos.get("acme/widget").unwrap();
         assert_eq!(reentry.env, entry.env);
         assert_eq!(reentry.mounts.len(), entry.mounts.len());
-    }
-
-    /// `terminal.native_scrollback` defaults on (local scrollback in
-    /// the client) and the escape hatch round-trips so a user hit by
-    /// an inner-app regression can flip it off.
-    #[test]
-    fn native_scrollback_defaults_on_and_round_trips() {
-        let cfg: Config = serde_yaml::from_str("{}").expect("parse");
-        assert!(
-            cfg.terminal.native_scrollback,
-            "default is local scrollback"
-        );
-
-        let yaml = "terminal:\n  native_scrollback: false\n";
-        let cfg: Config = serde_yaml::from_str(yaml).expect("parse");
-        assert!(!cfg.terminal.native_scrollback, "escape hatch parses");
-        // Other terminal knobs keep their defaults alongside the flag.
-        assert_eq!(cfg.terminal.escape_char, ']');
-
-        let written = serde_yaml::to_string(&cfg).expect("serialize");
-        let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
-        assert!(!reparsed.terminal.native_scrollback, "survives round-trip");
     }
 
     /// `ui.terminal_new_layout` defaults to `split` (unchanged

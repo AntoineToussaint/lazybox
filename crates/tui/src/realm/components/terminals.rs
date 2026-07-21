@@ -231,13 +231,6 @@ impl Terminals {
         self.inner.terminal_at(col, row)
     }
 
-    /// Frame-space `(col, row)` → 0-based cell coords inside `id`'s
-    /// tile, or `None` outside its grid. Used to forward a wheel event
-    /// to the hovered tile's mouse-tracking program.
-    pub fn cell_in_tile(&self, id: TerminalId, col: u16, row: u16) -> Option<(u32, u32)> {
-        self.inner.cell_in_tile(id, col, row)
-    }
-
     /// Take the deep-scrollback fetch an upward scroll armed, if any.
     /// The orchestrator ships it as a `Command::FetchScrollback`.
     pub fn take_scrollback_fetch(&mut self) -> Option<TerminalId> {
@@ -272,7 +265,7 @@ impl Terminals {
 
     /// Screen `(col, row)` → 0-based grid cell coords inside the focused
     /// terminal body, or `None` when the point is in the pane chrome.
-    /// Used before forwarding a click/wheel to a mouse-tracking inner
+    /// Used before forwarding a click to a mouse-tracking inner
     /// program so the coordinate matches what the renderer drew.
     pub fn screen_to_cell(
         &self,
@@ -332,31 +325,12 @@ impl Terminals {
 
     /// True when the focused terminal's inner program has enabled
     /// mouse tracking (CSI ?1000h / ?1002h / ?1003h / ?1006h SGR).
-    /// Drives the "forward to PTY vs scroll the scrollback"
-    /// decision in `Model::handle_mouse`.
+    /// Used to forward clicks; wheels stay in lazybox scrollback.
     pub fn focused_terminal_tracks_mouse(&self) -> bool {
         self.inner.focused_terminal_tracks_mouse()
     }
 
-    /// How a mouse-wheel tick over the focused terminal routes —
-    /// local scrollback, SGR forward, or synthesized arrow keys. See
-    /// [`crate::components::terminal_stack::WheelRoute`]. Drives the
-    /// wheel branch in `Model::handle_mouse`.
-    pub fn wheel_route(&self) -> crate::components::terminal_stack::WheelRoute {
-        self.inner.wheel_route()
-    }
-
-    /// Wheel route for a specific terminal — the tile under the cursor
-    /// (#362). Resolves the local-scrollback vs SGR-forward vs
-    /// arrow-key decision against the hovered pane so the wheel behaves
-    /// like every tiling terminal.
-    pub fn wheel_route_for(&self, id: TerminalId) -> crate::components::terminal_stack::WheelRoute {
-        self.inner.wheel_route_for(id)
-    }
-
-    /// Wire id of the currently focused terminal, if any. Needed by
-    /// the wheel handler so it can address its synthetic arrow-key
-    /// `Write` at the right pane.
+    /// Wire id of the currently focused terminal, if any.
     pub fn focused_terminal_id(&self) -> Option<lazybox_ipc::TerminalId> {
         self.inner.focused_terminal_id()
     }
@@ -409,21 +383,6 @@ impl Terminals {
     ) -> Option<(lazybox_ipc::TerminalId, Vec<u8>)> {
         self.inner
             .encode_mouse_for_focused(action, button, cell_col, cell_row)
-    }
-
-    /// Encode a mouse event for a specific terminal — the tile under
-    /// the cursor (#362). Lets the wheel handler forward an SGR scroll
-    /// to the hovered pane's inner program instead of the focused one.
-    pub fn encode_mouse_for(
-        &mut self,
-        id: TerminalId,
-        action: libghostty_vt::mouse::Action,
-        button: Option<libghostty_vt::mouse::Button>,
-        cell_col: u32,
-        cell_row: u32,
-    ) -> Option<(TerminalId, Vec<u8>)> {
-        self.inner
-            .encode_mouse_for(id, action, button, cell_col, cell_row)
     }
 }
 

@@ -195,6 +195,11 @@ async fn worktree_branches_off_latest_origin_main() {
     drop(upstream);
 }
 
+// NOTE: this fixture's bare clone is a legacy FULL clone (blobs local),
+// which is what makes a fully offline provision possible. A blobless
+// clone's checkout still needs origin for file contents — that contract
+// is pinned by `blobless_checkout_fails_clearly_when_origin_unreachable`
+// in tests/bare_clone.rs.
 #[tokio::test]
 async fn worktree_creation_succeeds_when_fetch_fails() {
     let (upstream, base, bare) = setup("acme", "gizmo");

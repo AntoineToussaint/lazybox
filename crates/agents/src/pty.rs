@@ -115,8 +115,13 @@ impl PtyProtocol {
     /// Raw ESC bytes are always removed before framing. PR/issue text is
     /// third-party-authored; without this guard an embedded `ESC[201~` could
     /// end bracketed paste early and turn the remainder into live keystrokes.
+    /// A leading blank-line prefix and its padding are omitted so delivered
+    /// text starts on the composer's prompt row. A prompt that begins directly
+    /// with indented content keeps that indentation.
     pub fn encode_prompt(self, prompt: &str, intent: PromptIntent) -> EncodedPrompt {
-        let sanitized = prompt.bytes().filter(|&byte| byte != 0x1b);
+        let sanitized = trim_leading_blank_lines(prompt)
+            .bytes()
+            .filter(|&byte| byte != 0x1b);
         match self.framing {
             PromptFraming::Line => {
                 let submit = intent == PromptIntent::Submit;
@@ -146,6 +151,28 @@ impl PtyProtocol {
     /// Whether injection must wait for positive composer-ready detection.
     pub const fn requires_ready(self) -> bool {
         matches!(self.readiness, ReadinessPolicy::Required)
+    }
+}
+
+/// Remove a leading blank-line prefix while preserving indentation when the
+/// prompt begins directly with content. Raw escape bytes are ignored while
+/// examining the prefix because [`PtyProtocol::encode_prompt`] removes them
+/// before delivery.
+pub fn trim_leading_blank_lines(prompt: &str) -> &str {
+    let mut prefix_end = 0;
+    let mut saw_line_break = false;
+    for (index, c) in prompt.char_indices() {
+        if c == '\x1b' || c.is_whitespace() {
+            prefix_end = index + c.len_utf8();
+            saw_line_break |= matches!(c, '\r' | '\n');
+        } else {
+            break;
+        }
+    }
+    if saw_line_break {
+        &prompt[prefix_end..]
+    } else {
+        prompt
     }
 }
 

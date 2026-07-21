@@ -65,22 +65,6 @@ pub enum Mailbox {
     Snoozed,
 }
 
-/// Quick role-based filter layered on top of the mailbox. Default
-/// `All` shows everything the mailbox would normally show; the other
-/// variants drop workspaces whose primary task carries a different
-/// `TaskRole`. Cycled with `f` in the sidebar. Workspaces with no
-/// primary task fail any non-`All` filter (role lives on the task,
-/// so there's nothing to compare).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum RoleFilter {
-    #[default]
-    All,
-    Author,
-    Reviewer,
-    Assignee,
-    Mentioned,
-}
-
 /// How the sidebar orders workspaces within each repo group.
 /// `Recent` is the legacy `updated_at desc` order; `ByRole` puts
 /// authored PRs first then reviews-requested etc.; `ByRoleSplit`
@@ -183,45 +167,6 @@ pub fn role_rank(role: Option<lazybox_core::TaskRole>) -> u8 {
         Some(lazybox_core::TaskRole::Assignee) => 2,
         Some(lazybox_core::TaskRole::Mentioned) => 3,
         None => 4,
-    }
-}
-
-impl RoleFilter {
-    /// Cycle order matches the `f`-key rotation.
-    pub fn next(self) -> Self {
-        match self {
-            RoleFilter::All => RoleFilter::Author,
-            RoleFilter::Author => RoleFilter::Reviewer,
-            RoleFilter::Reviewer => RoleFilter::Assignee,
-            RoleFilter::Assignee => RoleFilter::Mentioned,
-            RoleFilter::Mentioned => RoleFilter::All,
-        }
-    }
-
-    /// Short label for the title chip.
-    pub fn chip_label(self) -> &'static str {
-        match self {
-            RoleFilter::All => "all",
-            RoleFilter::Author => "author",
-            RoleFilter::Reviewer => "reviewer",
-            RoleFilter::Assignee => "assignee",
-            RoleFilter::Mentioned => "mentioned",
-        }
-    }
-
-    /// Decide whether a workspace passes this filter. `None` means
-    /// "no primary task" — only `All` accepts it.
-    pub fn accepts(self, role: Option<lazybox_core::TaskRole>) -> bool {
-        let Some(role) = role else {
-            return matches!(self, RoleFilter::All);
-        };
-        match self {
-            RoleFilter::All => true,
-            RoleFilter::Author => role == lazybox_core::TaskRole::Author,
-            RoleFilter::Reviewer => role == lazybox_core::TaskRole::Reviewer,
-            RoleFilter::Assignee => role == lazybox_core::TaskRole::Assignee,
-            RoleFilter::Mentioned => role == lazybox_core::TaskRole::Mentioned,
-        }
     }
 }
 
@@ -375,10 +320,10 @@ pub struct Sidebar {
     /// a click must land on the row the user saw.
     rendered_scroll: usize,
     mailbox: Mailbox,
-    /// Live filter on top of the mailbox. Cycles via `f`. Default
-    /// `All` is a no-op; the other variants restrict the visible
-    /// list to workspaces whose primary task role matches.
-    role_filter: RoleFilter,
+    /// Live, composable filter on top of the mailbox. Opened via `f`
+    /// (a multi-select menu). Empty is a no-op; active filters narrow
+    /// the visible list — see [`FilterSet`].
+    filters: FilterSet,
     /// Sort order within each repo group. Default is recency; `o`
     /// cycles to `ByRole` and `ByRoleSplit`. See [`SortMode`].
     sort_mode: SortMode,
@@ -505,7 +450,7 @@ impl Sidebar {
             last_viewport: 0,
             rendered_scroll: 0,
             mailbox: Mailbox::Inbox,
-            role_filter: RoleFilter::default(),
+            filters: FilterSet::default(),
             sort_mode: SortMode::default(),
             running_terminals: HashMap::new(),
             attention: lazybox_config::AttentionConfig::default(),
@@ -935,18 +880,15 @@ impl Sidebar {
     /// landed on a selectable row (not a repo header / outside the
     /// content area). Header rows + clicks above the content area
     /// are ignored.
-    /// Click on the role-filter chip cycles it — same effect as
-    /// pressing `f`. Returns true on a hit so the caller knows the
-    /// click was consumed and a redraw is needed.
-    pub fn click_to_cycle_filter(&mut self, col: u16, row: u16) -> bool {
+    /// True when `(col, row)` falls on the header filter chip — a hit
+    /// opens the filter menu (same effect as pressing `f`). Pure hit
+    /// test: the menu is mounted by the model, which owns the modal
+    /// stack.
+    pub fn filter_chip_hit(&self, col: u16, row: u16) -> bool {
         let Some(rect) = self.filter_chip_rect else {
             return false;
         };
-        if row != rect.y || col < rect.x || col >= rect.x + rect.width {
-            return false;
-        }
-        self.cycle_role_filter();
-        true
+        row == rect.y && col >= rect.x && col < rect.x + rect.width
     }
 
     /// Click on the sort chip cycles it — same effect as `o`.
@@ -1254,8 +1196,10 @@ impl Sidebar {
             .and_then(|k| self.workspaces.get(k))
     }
 
-    pub fn role_filter(&self) -> RoleFilter {
-        self.role_filter
+    /// The active filter set — read by the header renderer for its
+    /// chips and by the model to pre-check the filter menu.
+    pub fn filters(&self) -> &FilterSet {
+        &self.filters
     }
 
     pub fn sort_mode(&self) -> SortMode {
@@ -1271,16 +1215,42 @@ impl Sidebar {
         self.sort_mode
     }
 
-    /// Cycle the role filter (`All → Author → … → All`) and rebuild
-    /// the visible list. Returns the new filter so the caller can
-    /// surface a footer notice if it wants. Cursor is reset because
-    /// the row the user was parked on may have just been filtered
-    /// out — landing on the new top is less surprising than landing
-    /// off-screen.
-    pub fn cycle_role_filter(&mut self) -> RoleFilter {
-        self.role_filter = self.role_filter.next();
+    /// Replace the active filter set and rebuild the visible list.
+    /// Cursor is reset because the row the user was parked on may have
+    /// just been filtered out — landing on the new top is less
+    /// surprising than landing off-screen.
+    pub fn set_filters(&mut self, filters: impl IntoIterator<Item = Filter>) {
+        self.filters.replace(filters);
         self.reset_cursor_and_recompute();
-        self.role_filter
+    }
+
+    /// Per-filter match counts over the workspaces the current mailbox
+    /// admits (before the active filters narrow further). Drives the
+    /// `(N)` counts in the filter menu so the user can see what each
+    /// toggle would surface. Order matches [`Filter::ALL`].
+    pub fn filter_counts(&self) -> Vec<(Filter, usize)> {
+        let now = self.now();
+        let candidates: Vec<&Workspace> = self
+            .workspaces
+            .values()
+            .filter(|w| mailbox_membership(w, self.mailbox, now, self.show_inactive_in_inbox))
+            .collect();
+        Filter::ALL
+            .into_iter()
+            .map(|f| {
+                let n = candidates
+                    .iter()
+                    .filter(|w| {
+                        f.matches(&FilterCtx {
+                            w,
+                            agents: &self.agents,
+                            now,
+                        })
+                    })
+                    .count();
+                (f, n)
+            })
+            .collect()
     }
 
     pub fn mailbox(&self) -> Mailbox {
@@ -1321,13 +1291,13 @@ impl Sidebar {
     /// default, unfiltered Inbox view, with no search narrowing it.
     /// A first-run user with little/no GitHub data lands here, so the
     /// renderer swaps the blank list for a getting-started panel that
-    /// teaches the next actions (issue #100). A list emptied by a
-    /// role filter, a non-Inbox mailbox, or a search query is NOT
+    /// teaches the next actions (issue #100). A list emptied by an
+    /// active filter, a non-Inbox mailbox, or a search query is NOT
     /// this case — those are user-driven narrowings, not first-run.
     pub fn is_getting_started(&self) -> bool {
         self.visible.is_empty()
             && self.mailbox == Mailbox::Inbox
-            && self.role_filter == RoleFilter::All
+            && self.filters.is_empty()
             && self.search.as_ref().is_none_or(|s| s.query.is_empty())
     }
 
@@ -1803,7 +1773,7 @@ impl Sidebar {
             crate::components::visible_rows::ComputeInputs {
                 workspaces: &self.workspaces,
                 mailbox: self.mailbox,
-                role_filter: self.role_filter,
+                filters: &self.filters,
                 sort_mode: self.sort_mode,
                 show_inactive_in_inbox: self.show_inactive_in_inbox,
                 projects: &self.projects,
@@ -2054,12 +2024,15 @@ impl Sidebar {
     }
 }
 
+mod filter;
 mod handlers;
 mod pills;
 mod render;
 
 #[cfg(test)]
 mod tests;
+
+pub use filter::{Filter, FilterAxis, FilterCtx, FilterSet};
 
 // Re-export pills.rs items so callers in the rest of the crate
 // keep their `crate::components::sidebar::*` import paths.

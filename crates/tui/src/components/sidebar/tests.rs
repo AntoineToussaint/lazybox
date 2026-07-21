@@ -988,10 +988,11 @@ mod attention_signal_tests {
 }
 
 #[cfg(test)]
-mod role_filter_tests {
+mod filter_tests {
     use super::super::*;
     use super::status_pill_tests::base_task;
-    use lazybox_core::{TaskRole, Workspace};
+    use lazybox_core::{CiStatus, TaskRole, Workspace};
+    use std::collections::HashMap;
 
     fn ws_with_role(key: &str, role: TaskRole) -> Workspace {
         let mut t = base_task();
@@ -1001,56 +1002,87 @@ mod role_filter_tests {
         Workspace::from_task(t, chrono::Utc::now())
     }
 
-    #[test]
-    fn role_filter_default_is_all() {
-        assert_eq!(RoleFilter::default(), RoleFilter::All);
-    }
-
-    #[test]
-    fn role_filter_cycles_through_every_variant_and_wraps() {
-        // Five variants: All → Author → Reviewer → Assignee →
-        // Mentioned → All. Walk the full loop to lock the order in.
-        let order = [
-            RoleFilter::All,
-            RoleFilter::Author,
-            RoleFilter::Reviewer,
-            RoleFilter::Assignee,
-            RoleFilter::Mentioned,
-            RoleFilter::All,
-        ];
-        let mut cur = RoleFilter::All;
-        for expected_next in &order[1..] {
-            cur = cur.next();
-            assert_eq!(cur, *expected_next);
+    fn ctx<'a>(
+        w: &'a Workspace,
+        agents: &'a HashMap<SessionKey, lazybox_ipc::AgentState>,
+    ) -> FilterCtx<'a> {
+        FilterCtx {
+            w,
+            agents,
+            now: chrono::Utc::now(),
         }
     }
 
     #[test]
-    fn all_filter_accepts_every_role_and_orphans() {
-        for role in [
-            Some(TaskRole::Author),
-            Some(TaskRole::Reviewer),
-            Some(TaskRole::Assignee),
-            Some(TaskRole::Mentioned),
-            None,
-        ] {
-            assert!(RoleFilter::All.accepts(role));
+    fn empty_filter_set_accepts_everything() {
+        let set = FilterSet::default();
+        assert!(set.is_empty());
+        let w = ws_with_role("1", TaskRole::Author);
+        let agents = HashMap::new();
+        assert!(set.accepts(&ctx(&w, &agents)));
+    }
+
+    #[test]
+    fn every_filter_has_an_axis_and_appears_in_all() {
+        // ALL must list each variant exactly once; drives the menu.
+        assert_eq!(Filter::ALL.len(), 14);
+        let mut seen = std::collections::BTreeSet::new();
+        for f in Filter::ALL {
+            assert!(seen.insert(f), "{f:?} listed twice in Filter::ALL");
+            // axis() is total — just call it.
+            let _ = f.axis();
+            assert!(!f.label().is_empty());
         }
     }
 
     #[test]
-    fn author_filter_only_accepts_author_role() {
-        assert!(RoleFilter::Author.accepts(Some(TaskRole::Author)));
-        assert!(!RoleFilter::Author.accepts(Some(TaskRole::Reviewer)));
-        assert!(!RoleFilter::Author.accepts(Some(TaskRole::Assignee)));
-        assert!(!RoleFilter::Author.accepts(Some(TaskRole::Mentioned)));
-        // Orphan workspaces (no primary task) fail any non-All filter
-        // — role lives on the task and there's nothing to compare.
-        assert!(!RoleFilter::Author.accepts(None));
+    fn role_filter_matches_only_its_role() {
+        let agents = HashMap::new();
+        let author = ws_with_role("1", TaskRole::Author);
+        let reviewer = ws_with_role("2", TaskRole::Reviewer);
+        assert!(Filter::Author.matches(&ctx(&author, &agents)));
+        assert!(!Filter::Author.matches(&ctx(&reviewer, &agents)));
     }
 
     #[test]
-    fn cycle_role_filter_drops_unrelated_workspaces_from_visible_list() {
+    fn same_axis_filters_or_across_axes_and() {
+        let agents = HashMap::new();
+        let author = ws_with_role("1", TaskRole::Author);
+        let reviewer = ws_with_role("2", TaskRole::Reviewer);
+
+        // Two Role filters OR: both an author and a reviewer pass.
+        let mut role_or = FilterSet::default();
+        role_or.toggle(Filter::Author);
+        role_or.toggle(Filter::Reviewer);
+        assert!(role_or.accepts(&ctx(&author, &agents)));
+        assert!(role_or.accepts(&ctx(&reviewer, &agents)));
+
+        // Adding a Kind filter ANDs: base_task PRs are `Pr`, so the
+        // author (a PR) still passes but an `Issue`-kind wouldn't.
+        let mut role_and_kind = role_or.clone();
+        role_and_kind.toggle(Filter::Pr);
+        assert!(role_and_kind.accepts(&ctx(&author, &agents)));
+        role_and_kind.toggle(Filter::Pr);
+        role_and_kind.toggle(Filter::Issue);
+        // author is a PR, not an issue → Kind axis now fails.
+        assert!(!role_and_kind.accepts(&ctx(&author, &agents)));
+    }
+
+    #[test]
+    fn ci_failing_state_filter_matches_failing_ci() {
+        let agents = HashMap::new();
+        // A PR (pull URL routes to the `pr` slot) with failing CI.
+        let mut t = base_task();
+        t.url = "https://github.com/o/r/pull/1".into();
+        t.ci = CiStatus::Failure;
+        let failing = Workspace::from_task(t, chrono::Utc::now());
+        let healthy = ws_with_role("2", TaskRole::Author);
+        assert!(Filter::CiFailing.matches(&ctx(&failing, &agents)));
+        assert!(!Filter::CiFailing.matches(&ctx(&healthy, &agents)));
+    }
+
+    #[test]
+    fn set_filters_narrows_visible_list_and_chips_reflect_active() {
         let mut sb = Sidebar::new(PaneId::new(1));
         for (key, role) in [
             ("1", TaskRole::Author),
@@ -1063,21 +1095,34 @@ mod role_filter_tests {
             sb.workspaces.insert(sk, w);
         }
         sb.recompute_visible();
-        assert_eq!(sb.workspace_count(), 4, "all four show under `all`");
+        assert_eq!(sb.workspace_count(), 4, "no filters → all four show");
 
-        sb.cycle_role_filter(); // All → Author
-        assert_eq!(sb.role_filter(), RoleFilter::Author);
+        sb.set_filters([Filter::Author]);
         assert_eq!(sb.workspace_count(), 1, "author filter → 1 row");
+        assert_eq!(sb.filters().chips(), vec!["author"]);
 
-        sb.cycle_role_filter(); // Author → Reviewer
-        assert_eq!(sb.workspace_count(), 1);
+        // Author OR Reviewer → two rows.
+        sb.set_filters([Filter::Author, Filter::Reviewer]);
+        assert_eq!(sb.workspace_count(), 2);
 
-        // Walk all the way back to All.
-        for _ in 0..3 {
-            sb.cycle_role_filter();
-        }
-        assert_eq!(sb.role_filter(), RoleFilter::All);
+        sb.set_filters([]);
+        assert!(sb.filters().is_empty());
         assert_eq!(sb.workspace_count(), 4);
+    }
+
+    #[test]
+    fn filter_counts_cover_every_filter_in_menu_order() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let w = ws_with_role("1", TaskRole::Author);
+        sb.workspaces.insert(SessionKey::from(&w.key), w);
+        sb.recompute_visible();
+        let counts = sb.filter_counts();
+        assert_eq!(counts.len(), Filter::ALL.len());
+        // The single authored PR is counted under Author and PR.
+        let by: std::collections::HashMap<Filter, usize> = counts.into_iter().collect();
+        assert_eq!(by[&Filter::Author], 1);
+        assert_eq!(by[&Filter::Pr], 1);
+        assert_eq!(by[&Filter::Reviewer], 0);
     }
 
     #[test]
@@ -1406,21 +1451,15 @@ mod role_filter_tests {
     }
 
     #[test]
-    fn chip_label_is_short_enough_for_the_header_row() {
-        // The chip renders into row 1 alongside the `f ` prefix and a
-        // dim cycle hint. Cap each label at 10 cells so layout never
+    fn filter_labels_are_short_enough_for_a_header_chip() {
+        // Each filter label may render as a chip in row 1 of the
+        // header. Cap each at 16 cells so a single active chip never
         // overflows the typical 30-column sidebar.
-        for f in [
-            RoleFilter::All,
-            RoleFilter::Author,
-            RoleFilter::Reviewer,
-            RoleFilter::Assignee,
-            RoleFilter::Mentioned,
-        ] {
+        for f in Filter::ALL {
             assert!(
-                f.chip_label().chars().count() <= 10,
-                "chip label `{}` exceeds 10 cells",
-                f.chip_label()
+                f.label().chars().count() <= 16,
+                "filter label `{}` exceeds 16 cells",
+                f.label()
             );
         }
     }
@@ -2194,11 +2233,11 @@ mod getting_started_tests {
     }
 
     #[test]
-    fn role_filtered_empty_view_is_not_getting_started() {
-        // An empty list because a role filter hid everything is a
+    fn filtered_empty_view_is_not_getting_started() {
+        // An empty list because an active filter hid everything is a
         // user-driven narrowing, not first-run — no panel.
         let mut sb = Sidebar::new(PaneId::new(1));
-        sb.role_filter = RoleFilter::Author;
+        sb.set_filters([Filter::Author]);
         assert!(!sb.is_getting_started());
     }
 

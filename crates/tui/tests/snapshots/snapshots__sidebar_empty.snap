@@ -3,6 +3,6 @@ source: crates/tui/tests/snapshots.rs
 expression: rendered
 ---
  LAZYBOX v0.1.7 (dev)       0 items  7d
- f [all]  o [split]
+ f [filter]  o [split]
 
  ──────────────────────────────────────

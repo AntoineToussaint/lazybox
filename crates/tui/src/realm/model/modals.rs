@@ -449,6 +449,35 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::PolicyPicker, modal);
     }
 
+    /// Mount the composable filter menu (`f`, `OpenFilterMenu`). A
+    /// multi-select `Choice` over every filter, grouped by axis
+    /// (State / Role / Kind), each row carrying its match count and
+    /// pre-checked when already active. Space toggles, Enter replaces
+    /// the sidebar's active set (an empty submit clears all filters).
+    pub(crate) fn mount_filter_menu(&mut self) {
+        use crate::components::sidebar::Filter;
+        use crate::realm::components::choice::Choice;
+        use std::collections::HashMap;
+
+        if matches!(self.modal_stack.last(), Some(Id::FilterMenu)) {
+            return;
+        }
+        let counts: HashMap<Filter, usize> = self.sidebar.filter_counts().into_iter().collect();
+        let active: std::collections::HashSet<Filter> = self.sidebar.filters().iter().collect();
+        let items: Vec<Filter> = Filter::ALL.to_vec();
+        self.filter_choices = items.clone();
+        let active_for_check = active.clone();
+        let modal = Choice::multi("Space toggles · Enter applies", items)
+            .title("Filters (AND across State/Role/Kind)")
+            .section_for(|f: &Filter| f.axis().label())
+            .label(move |f: &Filter| {
+                format!("{} ({})", f.label(), counts.get(f).copied().unwrap_or(0))
+            })
+            .with_selected_by(move |f: &Filter| active_for_check.contains(f))
+            .allow_empty(true);
+        self.mount_modal(Id::FilterMenu, modal);
+    }
+
     /// Mount the `w` multi-agent chooser (#418): the selected workspace
     /// has SEVERAL distinct running agents, so ask which one to inject
     /// the work prompt into instead of silently guessing (or worse,

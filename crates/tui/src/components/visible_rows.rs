@@ -14,7 +14,7 @@
 //! this function is purely the rebuild half.
 
 use crate::components::sidebar::{
-    Mailbox, RepoSummary, RoleFilter, SearchState, SortMode, VisibleRow, WorkspaceKind,
+    FilterCtx, FilterSet, Mailbox, RepoSummary, SearchState, SortMode, VisibleRow, WorkspaceKind,
     mailbox_membership, role_rank,
 };
 use lazybox_core::{Project, ProjectKey, SessionKey, Workspace};
@@ -33,9 +33,9 @@ pub struct ComputeOutcome {
 pub struct ComputeInputs<'a> {
     pub workspaces: &'a HashMap<SessionKey, Workspace>,
     pub mailbox: Mailbox,
-    /// Quick role-based filter layered on top of the mailbox. `All`
-    /// (default) is the no-op identity. See `RoleFilter::accepts`.
-    pub role_filter: RoleFilter,
+    /// Composable predicate filter layered on top of the mailbox. An
+    /// empty set is the no-op identity. See [`FilterSet::accepts`].
+    pub filters: &'a FilterSet,
     /// How to order workspaces within each repo group. `Default`
     /// (recency) is the legacy behavior; `ByRole` / `ByRoleSplit`
     /// promote Author rows then Reviewer etc. See [`SortMode`].
@@ -73,7 +73,13 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
         .filter(|(_, w)| {
             mailbox_membership(w, input.mailbox, input.now, input.show_inactive_in_inbox)
         })
-        .filter(|(_, w)| input.role_filter.accepts(w.primary_task().map(|t| t.role)))
+        .filter(|(_, w)| {
+            input.filters.accepts(&FilterCtx {
+                w,
+                agents: input.agents,
+                now: input.now,
+            })
+        })
         // Scoped free-text search: only the matching project's rows
         // are filtered; every other project stays fully visible.
         .filter(|(_, w)| match input.search {
@@ -225,12 +231,13 @@ fn group_label(w: &Workspace, projects: &BTreeMap<ProjectKey, Project>) -> Strin
     NO_REPO.to_string()
 }
 
-/// Does `query` match `w`? Case-insensitive fuzzy (subsequence) match
-/// on the workspace's displayed title, OR a substring match on its
-/// PR/issue number. A leading `#` on the query is ignored so both
-/// `100` and `#100` find issue #100. An empty query (after trimming)
-/// matches everything — callers guard against that, but it keeps the
-/// function total.
+/// Does `query` match `w`? Matches when the query is a case-insensitive
+/// fuzzy (subsequence) match on the workspace's displayed title, OR a
+/// substring match on any of its searchable metadata: PR/issue number,
+/// repo, labels, or requested reviewers / assignees. A leading `#` on
+/// the query is ignored so both `100` and `#100` find issue #100. An
+/// empty query (after trimming) matches everything — callers guard
+/// against that, but it keeps the function total.
 pub fn search_matches(query: &str, w: &Workspace) -> bool {
     let q = query.trim().trim_start_matches('#').to_lowercase();
     if q.is_empty() {
@@ -241,6 +248,19 @@ pub fn search_matches(query: &str, w: &Workspace) -> bool {
         && n.to_string().contains(&q)
     {
         return true;
+    }
+    if let Some(t) = task {
+        // Substring matches on metadata: repo, labels, and the people
+        // requested on the task (reviewers / assignees).
+        if t.repo
+            .as_deref()
+            .is_some_and(|r| r.to_lowercase().contains(&q))
+            || t.labels.iter().any(|l| l.name.to_lowercase().contains(&q))
+            || t.reviewers.iter().any(|r| r.to_lowercase().contains(&q))
+            || t.assignees.iter().any(|a| a.to_lowercase().contains(&q))
+        {
+            return true;
+        }
     }
     // Same title the workspace row renders: task title, else the
     // workspace's own name.
@@ -318,10 +338,11 @@ mod tests {
         asking: &'a HashMap<SessionKey, lazybox_ipc::AgentState>,
         projects: &'a BTreeMap<ProjectKey, Project>,
     ) -> ComputeInputs<'a> {
+        static NO_FILTERS: FilterSet = FilterSet::new();
         ComputeInputs {
             workspaces,
             mailbox: Mailbox::Inbox,
-            role_filter: RoleFilter::All,
+            filters: &NO_FILTERS,
             sort_mode: SortMode::Recent,
             show_inactive_in_inbox: false,
             projects,
@@ -711,5 +732,23 @@ mod tests {
         assert!(search_matches("sfb", &w)); // subsequence across words
         assert!(search_matches("FILTER", &w)); // case-insensitive
         assert!(!search_matches("zzz", &w));
+    }
+
+    #[test]
+    fn search_matches_repo_labels_and_people() {
+        let mut w = titled("k1", "octo/widget", 1, "Unrelated title");
+        if let Some(t) = w.gh_issues.get_mut(0) {
+            t.labels = vec![lazybox_core::Label {
+                name: "bug".into(),
+                color: String::new(),
+            }];
+            t.reviewers = vec!["alice".into()];
+            t.assignees = vec!["bob".into()];
+        }
+        assert!(search_matches("widget", &w), "repo substring");
+        assert!(search_matches("bug", &w), "label substring");
+        assert!(search_matches("alice", &w), "reviewer substring");
+        assert!(search_matches("bob", &w), "assignee substring");
+        assert!(!search_matches("nobody", &w));
     }
 }

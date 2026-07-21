@@ -67,7 +67,7 @@ Manage the sidebar list itself — only while the sidebar has focus.
 
 | Key | Action | What it does |
 | --- | --- | --- |
-| `f` | filter | Cycle the role filter (All → Author → Reviewer → Assignee → Mentioned). |
+| `f` | filter | Open the filter menu — toggle state (with-agent, CI-failing, conflict, unread, asking, …), role, and kind predicates. |
 | `o` | order | Cycle the sort order (recency → by-role → by-role with section headers). |
 | `Shift-S` | switch mailbox | Cycle the mailbox view (Inbox → Inactive → Snoozed). |
 | `/` | search | Open the incremental search bar scoped to the focused project. |

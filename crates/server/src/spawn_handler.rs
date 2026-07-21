@@ -5802,7 +5802,14 @@ mod tests {
         // Claude / Cursor don't self-update through `brew`, so suppressing
         // auto-update would only risk staling an unrelated `brew install`.
         let claude = lazybox_agents::agent::builtins::Claude;
-        assert!(with_agent_spawn_defaults(Vec::new(), Some(&claude)).is_empty());
+        let out = with_agent_spawn_defaults(Vec::new(), Some(&claude));
+        let map: std::collections::BTreeMap<_, _> = out.into_iter().collect();
+        assert!(!map.contains_key("HOMEBREW_NO_AUTO_UPDATE"));
+        assert_eq!(
+            map.get("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN")
+                .map(String::as_str),
+            Some("1")
+        );
     }
 
     #[test]

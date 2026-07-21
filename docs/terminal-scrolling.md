@@ -130,11 +130,13 @@ no-silent-no-op guarantee compose rather than fight.
 
 The wheel always belongs to lazybox's terminal history. Screen mode and mouse
 tracking affect rendering and clicks, not scrolling. The tmux backend rejects
-alternate-screen requests at the pane boundary so full-screen programs still
-write into retained pane history; its attach client also stays on the primary
-screen so the same output accumulates in libghostty scrollback. An upward wheel
-can fetch the backend's deeper `capture-pane` history, but it never writes SGR
-mouse reports or synthesized keys into the inner program.
+alternate-screen requests at the pane boundary, and Claude launches with
+`CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1`; the latter selects Claude's inline
+renderer instead of its bounded full-screen repaint loop so the conversation
+actually flows into retained pane history. The attach client also stays on the
+primary screen so the same output accumulates in libghostty scrollback. An
+upward wheel can fetch the backend's deeper `capture-pane` history, but it never
+writes SGR mouse reports or synthesized keys into the inner program.
 
 ## The regression harness
 

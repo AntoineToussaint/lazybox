@@ -460,6 +460,13 @@ pub mod builtins {
             argv
         }
 
+        fn spawn_env(&self) -> Vec<(String, String)> {
+            vec![(
+                "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_string(),
+                "1".to_string(),
+            )]
+        }
+
         fn prepare_unattended(&self, worktree: &Path) {
             if let Err(e) = crate::claude_env::seed_unattended_env(worktree) {
                 tracing::warn!(
@@ -892,8 +899,18 @@ mod tests {
     }
 
     #[test]
+    fn claude_seeds_inline_renderer_for_scrollback() {
+        assert_eq!(
+            Claude.spawn_env(),
+            vec![(
+                "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_string(),
+                "1".to_string(),
+            )]
+        );
+    }
+
+    #[test]
     fn other_agents_seed_no_spawn_env() {
-        assert!(Claude.spawn_env().is_empty());
         assert!(super::builtins::Cursor.spawn_env().is_empty());
         let generic = super::builtins::GenericCli {
             id: "custom",

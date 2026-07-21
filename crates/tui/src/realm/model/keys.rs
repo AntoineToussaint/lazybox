@@ -500,9 +500,23 @@ impl<T: TerminalAdapter> Model<T> {
             }
         }
         self.flush_dispatched_cmds(cmds);
+        // A `d` on an overflowing description preview asks to read the
+        // whole thing in the reader modal (#448) — the pane can't mount
+        // it, so drain the request here.
+        if self.right.take_open_description() {
+            self.open_focused_description();
+        }
         // Sidebar j/k changes selection — propagate to right + terminals.
         self.sync_panes();
         self.redraw = true;
+    }
+
+    /// Mount the full-description reader modal (#448) for whatever the
+    /// activity pane is focused on. No-op when there's no body.
+    pub(super) fn open_focused_description(&mut self) {
+        if let (Some(title), Some(body)) = (self.right.task_body_title(), self.right.task_body()) {
+            self.mount_description_modal(title, body);
+        }
     }
 
     /// Send the commands a key dispatch produced: arm the spawn
@@ -1329,6 +1343,9 @@ impl<T: TerminalAdapter> Model<T> {
                         };
                         if handled {
                             self.redraw = true;
+                        }
+                        if self.right.take_open_description() {
+                            self.open_focused_description();
                         }
                         if let Some(msg) = self.right.drain_selection_notice() {
                             self.flash_hint(msg);

@@ -5,6 +5,7 @@
 pub mod activity_feed;
 pub mod comment_render;
 pub mod icons;
+pub mod markdown_doc;
 pub mod right_pane;
 pub mod scrollbar;
 pub mod sidebar;

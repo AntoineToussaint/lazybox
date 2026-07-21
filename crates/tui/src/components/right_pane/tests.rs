@@ -193,7 +193,7 @@ mod click_dispatch_tests {
     }
 
     #[test]
-    fn body_header_row_click_cycles_view() {
+    fn body_header_row_click_toggles_view() {
         use super::super::TaskBodyView;
         let mut pane = RightPane::new(PaneId::new(0));
         pane.click_hits.body_header_row = Some(5);
@@ -202,10 +202,7 @@ mod click_dispatch_tests {
         // Click: Collapsed → Preview.
         assert!(pane.handle_mouse_click(0, 5));
         assert_eq!(pane.task_body_view, TaskBodyView::Preview);
-        // Click: Preview → Full.
-        assert!(pane.handle_mouse_click(0, 5));
-        assert_eq!(pane.task_body_view, TaskBodyView::Full);
-        // Click: Full → Collapsed (wraps).
+        // Click again (nothing overflowing): Preview → Collapsed.
         assert!(pane.handle_mouse_click(0, 5));
         assert_eq!(pane.task_body_view, TaskBodyView::Collapsed);
     }
@@ -874,9 +871,10 @@ mod mark_workspace_merged_tests {
 
 #[cfg(test)]
 mod description_expand_tests {
-    //! Issue #344: the `+N more lines` trailer closing a capped Preview
-    //! is a click target that jumps straight to Full, and it spells out
-    //! the affordance so it stops reading as a dead end.
+    //! Issue #344 / #448: the `+N more lines` trailer closing a capped
+    //! Preview is a click target that opens the full body in the reader
+    //! modal, and it spells out the affordance so it stops reading as a
+    //! dead end.
     use super::super::{PaneId, RightPane, TaskBodyView, more_lines_trailer};
     use chrono::Utc;
     use lazybox_core::{Task, TaskId, Workspace};
@@ -941,7 +939,7 @@ mod description_expand_tests {
     }
 
     #[test]
-    fn preview_trailer_is_a_clickable_jump_to_full() {
+    fn preview_trailer_click_opens_reader_modal() {
         let mut pane = pane_showing(&long_body());
         pane.toggle_task_body(); // Collapsed → Preview
         assert_eq!(pane.task_body_view, TaskBodyView::Preview);
@@ -954,43 +952,52 @@ mod description_expand_tests {
             .body_more_row
             .expect("a capped preview registers the trailer as a click target");
         assert!(pane.handle_mouse_click(0, row));
+        assert!(
+            pane.take_open_description(),
+            "clicking the trailer requests the full-description modal",
+        );
         assert_eq!(
             pane.task_body_view,
-            TaskBodyView::Full,
-            "clicking the trailer jumps straight to Full, not one cycle step",
+            TaskBodyView::Collapsed,
+            "opening the reader folds the inline teaser away",
         );
     }
 
     #[test]
-    fn full_view_trailer_is_not_a_click_target() {
-        // Full is already uncapped; if a short pane still truncates,
-        // the trailer must not offer a jump (there's nowhere to go).
+    fn second_d_on_overflowing_preview_opens_reader_modal() {
+        // `d` on an overflowing Preview reads the whole thing in the
+        // modal rather than collapsing.
         let mut pane = pane_showing(&long_body());
-        pane.toggle_task_body();
-        pane.toggle_task_body(); // → Full
-        assert_eq!(pane.task_body_view, TaskBodyView::Full);
-
+        pane.toggle_task_body(); // Collapsed → Preview
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
         draw(&mut pane, &mut term);
-        assert!(pane.click_hits.body_more_row.is_none());
+        assert!(pane.click_hits.body_more_row.is_some());
+
+        pane.toggle_task_body(); // Preview + overflow → open modal
+        assert!(pane.take_open_description());
+        assert_eq!(pane.task_body_view, TaskBodyView::Collapsed);
     }
 
     #[test]
-    fn short_body_has_no_trailer() {
+    fn short_body_toggles_without_opening_modal() {
         let mut pane = pane_showing("one line only");
-        pane.toggle_task_body(); // Preview — but nothing to truncate
+        pane.toggle_task_body(); // Collapsed → Preview (nothing to truncate)
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
         draw(&mut pane, &mut term);
         assert!(pane.click_hits.body_more_row.is_none());
+        // A second toggle collapses (no modal, since it all fits).
+        pane.toggle_task_body();
+        assert!(!pane.take_open_description());
+        assert_eq!(pane.task_body_view, TaskBodyView::Collapsed);
     }
 
     #[test]
     fn click_row_matches_the_trailer_even_when_the_header_would_wrap() {
-        // A pane narrower than the `▼ Description  (d · full)` header:
-        // a wrapping Paragraph would push the trailer down a row and
-        // desync the recorded click target from where the trailer
+        // A pane narrower than the `▼ Description  (d · collapse)`
+        // header: a wrapping Paragraph would push the trailer down a row
+        // and desync the recorded click target from where the trailer
         // actually paints. The recorded row must equal the trailer's
-        // real screen row, and clicking it must still reach Full.
+        // real screen row, and clicking it must still open the modal.
         let mut pane = pane_showing(&long_body());
         pane.toggle_task_body(); // Collapsed → Preview
         let w = 24u16;
@@ -1016,26 +1023,18 @@ mod description_expand_tests {
             "click target must match the trailer's real screen row",
         );
         assert!(pane.handle_mouse_click(0, recorded));
-        assert_eq!(pane.task_body_view, TaskBodyView::Full);
+        assert!(pane.take_open_description());
     }
 
     #[test]
-    fn trailer_spells_out_the_expand_affordance() {
+    fn trailer_spells_out_the_read_full_affordance() {
         let theme = crate::theme::current();
-        let expandable = more_lines_trailer(44, true, theme);
-        let text: String = expandable
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
+        let trailer = more_lines_trailer(44, theme);
+        let text: String = trailer.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.starts_with("+44 more lines"));
         assert!(
-            text.contains("expand"),
-            "an expandable trailer names the affordance: {text}",
+            text.contains("read full"),
+            "the trailer names the read-full affordance: {text}",
         );
-        // Full's trailer is inert — just the count, no false promise.
-        let inert = more_lines_trailer(44, false, theme);
-        let inert_text: String = inert.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(inert_text, "+44 more lines");
     }
 }

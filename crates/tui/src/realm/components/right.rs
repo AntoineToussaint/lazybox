@@ -141,6 +141,23 @@ impl Right {
         self.inner.scroll_activity(delta)
     }
 
+    /// Drain a queued "open the full description" request (#448) — set
+    /// by a second `d` or a `+N more lines` click. The orchestrator
+    /// mounts the reader modal when this is true.
+    pub fn take_open_description(&mut self) -> bool {
+        self.inner.take_open_description()
+    }
+
+    /// The focused task's raw markdown body, for the reader modal.
+    pub fn task_body(&self) -> Option<String> {
+        self.inner.task_body()
+    }
+
+    /// A concise reader-modal title for the focused task.
+    pub fn task_body_title(&self) -> Option<String> {
+        self.inner.task_body_title()
+    }
+
     /// Drain the queued click-to-select notice, if any. Forwarded
     /// to the footer by the orchestrator's mouse-up handler.
     pub fn drain_selection_notice(&mut self) -> Option<String> {

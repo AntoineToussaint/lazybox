@@ -129,6 +129,11 @@ pub struct RightPane {
     /// this after dispatching the click and surfaces it as a
     /// footer Hint — pure `✓` visual was too subtle on its own.
     pending_selection_notice: Option<String>,
+    /// Set when the user asks to read the full description (a second
+    /// `d`, or a click on the `+N more lines` trailer). The orchestrator
+    /// drains it after dispatching the key/click and mounts the reader
+    /// modal (#448) — the pane can't reach `Model::modal_stack` itself.
+    pending_open_description: bool,
     /// Memoized activity virtual-line buffer. Rebuilt only when an input
     /// that actually affects the rendered cards changes; scrolling
     /// (which only moves `comment_scroll`) reuses it untouched. See
@@ -216,30 +221,29 @@ struct ActivityBuffer {
 /// tests pin every truth-table cell (focused × workspace ×
 /// cursor-unread) directly without going through the rest of the
 /// pane's state.
-/// Three-state visibility for the PR/issue description section.
-/// `b` cycles forward: Collapsed → Preview → Full → Collapsed.
-/// Stored on `RightPane::task_body_view`; the renderer + constraint
-/// math fan out from this single field.
+/// Two-state visibility for the PR/issue description *teaser* (#448).
+/// `d` toggles Collapsed ⇄ Preview; a genuinely long body is read in
+/// the scrollable [`markdown_modal`](crate::realm::components::markdown_modal)
+/// (opened from the `+N more lines` trailer or a second `d`), not by
+/// growing the pane. Stored on `RightPane::task_body_view`; the renderer
+/// + constraint math fan out from this single field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TaskBodyView {
     /// Header-only row, body hidden. Default for fresh workspaces.
     #[default]
     Collapsed,
     /// Body visible but capped at `task_body_max_rows`. The trailer
-    /// shows `+N more lines` when content exceeds the cap.
+    /// shows `+N more lines` when content exceeds the cap; opening the
+    /// reader modal is the way to see the rest.
     Preview,
-    /// Body visible with no cap — the description gets as many rows
-    /// as it needs. The activity feed shrinks to fit underneath.
-    Full,
 }
 
 impl TaskBodyView {
-    /// Next state on `b` keypress.
+    /// Toggle between collapsed and the teaser preview.
     pub fn cycle(self) -> Self {
         match self {
             Self::Collapsed => Self::Preview,
-            Self::Preview => Self::Full,
-            Self::Full => Self::Collapsed,
+            Self::Preview => Self::Collapsed,
         }
     }
 
@@ -248,34 +252,23 @@ impl TaskBodyView {
     }
 }
 
-/// The trailer row that closes a truncated description body. `dropped`
-/// is the number of hidden lines; `can_expand` is true in Preview
-/// (there's a `Full` to jump to) and false in Full (already uncapped —
-/// the pane is just too short). When expandable it spells out the
-/// affordance so the previously-dead-end `+N more lines` reads as a
-/// live control.
-fn more_lines_trailer(
-    dropped: usize,
-    can_expand: bool,
-    theme: &crate::theme::Theme,
-) -> Line<'static> {
-    let count = Span::styled(
-        format!("+{dropped} more lines"),
-        Style::default()
-            .fg(theme.text_dim)
-            .add_modifier(Modifier::ITALIC),
-    );
-    if can_expand {
-        Line::from(vec![
-            count,
-            Span::styled(
-                "  —  click or press d to expand",
-                Style::default().fg(theme.accent),
-            ),
-        ])
-    } else {
-        Line::from(count)
-    }
+/// The trailer row that closes a truncated description preview. `dropped`
+/// is the number of hidden lines; the affordance spells out that the
+/// full body opens in the reader modal, so the previously-dead-end
+/// `+N more lines` reads as a live control.
+fn more_lines_trailer(dropped: usize, theme: &crate::theme::Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("+{dropped} more lines"),
+            Style::default()
+                .fg(theme.text_dim)
+                .add_modifier(Modifier::ITALIC),
+        ),
+        Span::styled(
+            "  —  click or press d to read full",
+            Style::default().fg(theme.accent),
+        ),
+    ])
 }
 
 /// Stable enough identifier for one activity row, used by the `z`
@@ -382,6 +375,7 @@ impl RightPane {
             auto_mark_delay: lazybox_config::UiDefaults::default().auto_mark_delay,
             click_hits: ClickHits::default(),
             pending_selection_notice: None,
+            pending_open_description: false,
             activity_buffer: None,
             activity_rev: 0,
             activity_identity: 0,
@@ -837,17 +831,16 @@ impl RightPane {
             "right_pane.handle_mouse_click",
         );
         if Some(row) == self.click_hits.body_header_row {
-            // Click the description header to advance the cycle —
-            // same effect as pressing `b`. Three taps cycles back
-            // to collapsed.
-            self.task_body_view = self.task_body_view.cycle();
+            // Click the description header to toggle the teaser — same
+            // effect as pressing `d`.
+            self.toggle_task_body();
             return true;
         }
         if Some(row) == self.click_hits.body_more_row {
-            // The `+N more lines` trailer is a direct jump to the
-            // whole body — clicking the thing that says "there's
-            // more" should reveal all of it, not advance one step.
-            self.task_body_view = TaskBodyView::Full;
+            // The `+N more lines` trailer opens the whole body in the
+            // reader modal — clicking the thing that says "there's more"
+            // should reveal all of it (#448).
+            self.request_open_description();
             return true;
         }
         if Some(row) == self.click_hits.activity_header_row {
@@ -1929,15 +1922,11 @@ impl RightPane {
         let Some(body) = self.task_body_str() else {
             return 0;
         };
-        // Preview caps at `task_body_max_rows`; Full drops the cap
-        // entirely (uses `usize::MAX` → `render_body` treats that as
-        // "no truncation"). Layout solver still bounds the upper
-        // height via `Constraint::Max(...)`, so a 500-line body
-        // won't actually push everything off-screen.
+        // Preview caps at `task_body_max_rows`; a longer body is read
+        // in the modal, not by growing the pane.
         let cap = match self.task_body_view {
             TaskBodyView::Collapsed => 0,
             TaskBodyView::Preview => self.task_body_max_rows as usize,
-            TaskBodyView::Full => usize::MAX,
         };
         if cap == 0 {
             return 0;
@@ -1946,13 +1935,7 @@ impl RightPane {
         // conservative default — actual render uses `area.width`,
         // which is always ≥ this for any practical terminal.
         let rendered = crate::components::comment_render::render_body(body, 80, cap);
-        let len = rendered.len() as u16;
-        // For Preview, cap to max_rows; Full lets the layout solver
-        // bound it.
-        match self.task_body_view {
-            TaskBodyView::Preview => len.min(self.task_body_max_rows),
-            _ => len,
-        }
+        (rendered.len() as u16).min(self.task_body_max_rows)
     }
 
     fn has_task_body(&self) -> bool {
@@ -1987,17 +1970,15 @@ impl RightPane {
             }
         };
         // First row of the section is the toggle header — clicks
-        // here advance `task_body_view` through the 3-state cycle.
+        // here toggle `task_body_view` (Collapsed ⇄ Preview).
         self.click_hits.body_header_row = if area.height > 0 { Some(area.y) } else { None };
         let body = body.as_str();
-        // Three-state glyph: ▶ collapsed, ▼ preview-capped, ▽ full.
-        // The downward-pointing open triangle for Full is just a
-        // visual hint that "this isn't capped anymore" — the (d)
-        // suffix below tells the user which key cycles forward.
+        // Two-state glyph: ▶ collapsed, ▼ preview. The reader modal is
+        // the "read it all" path (via the `+N more` trailer or a second
+        // `d`), so there's no inline "full" state.
         let (glyph, suffix) = match self.task_body_view {
             TaskBodyView::Collapsed => ("▶", "  (d · expand)"),
-            TaskBodyView::Preview => ("▼", "  (d · full)"),
-            TaskBodyView::Full => ("▽", "  (d · collapse)"),
+            TaskBodyView::Preview => ("▼", "  (d · collapse)"),
         };
         let header = Line::from(vec![
             Span::styled(
@@ -2014,13 +1995,11 @@ impl RightPane {
         if self.task_body_view.is_visible() {
             // Render at most `area.height - 1` body rows — anything
             // more would overflow the rect ratatui carved out for us.
-            // In Full mode the layout solver already gave us a tall
-            // rect, so this produces as many lines as the area allows.
             let body_rows = area.height.saturating_sub(1) as usize;
             if body_rows > 0 {
                 // Render uncapped, then truncate here so we control
                 // the trailer — `render_body`'s own `+N more lines`
-                // row is inert; ours carries the expand affordance
+                // row is inert; ours carries the read-full affordance
                 // and gets registered as a click target. (The cap
                 // only trims the tail, so rendering uncapped costs
                 // no more work.)
@@ -2033,14 +2012,10 @@ impl RightPane {
                     let kept = body_rows.saturating_sub(1);
                     let dropped = rendered.len() - kept;
                     lines.extend(rendered.into_iter().take(kept));
-                    // The trailer is the next row. In Full the click
-                    // has nowhere further to go, so only Preview gets
-                    // the jump-to-Full affordance and hit target.
-                    let can_expand = self.task_body_view != TaskBodyView::Full;
-                    if can_expand {
-                        self.click_hits.body_more_row = Some(area.y + lines.len() as u16);
-                    }
-                    lines.push(more_lines_trailer(dropped, can_expand, theme));
+                    // The trailer is the next row — clicking it (or a
+                    // second `d`) opens the full body in the reader modal.
+                    self.click_hits.body_more_row = Some(area.y + lines.len() as u16);
+                    lines.push(more_lines_trailer(dropped, theme));
                 } else {
                     lines.extend(rendered);
                 }
@@ -2068,11 +2043,54 @@ impl RightPane {
         frame.render_widget(para, inner);
     }
 
-    /// Advance the description view cycle: Collapsed → Preview →
-    /// Full → Collapsed. Bound to `b` in the right pane's handler
-    /// + the description-header click target.
+    /// Toggle the description teaser (Collapsed ⇄ Preview), bound to
+    /// `d` and the description-header click. From an overflowing Preview
+    /// this instead opens the full body in the reader modal (#448): a
+    /// second `d` reads the whole thing rather than collapsing, and the
+    /// preview folds away behind it. A Preview that fits entirely just
+    /// collapses.
     pub fn toggle_task_body(&mut self) {
+        if self.task_body_view == TaskBodyView::Preview && self.click_hits.body_more_row.is_some() {
+            self.request_open_description();
+            return;
+        }
         self.task_body_view = self.task_body_view.cycle();
+    }
+
+    /// Queue the reader modal for the focused body and fold the inline
+    /// teaser away — after the modal closes, the pane reads compact.
+    fn request_open_description(&mut self) {
+        if self.task_body_str().is_none() {
+            return;
+        }
+        self.pending_open_description = true;
+        self.task_body_view = TaskBodyView::Collapsed;
+    }
+
+    /// Drain a queued "open the full description" request. The
+    /// orchestrator calls this after dispatching a key/click and, when
+    /// set, mounts the reader modal with [`Self::task_body`] /
+    /// [`Self::task_body_title`].
+    pub fn take_open_description(&mut self) -> bool {
+        std::mem::take(&mut self.pending_open_description)
+    }
+
+    /// The focused task's raw markdown body, for the reader modal.
+    pub fn task_body(&self) -> Option<String> {
+        self.task_body_str().map(str::to_string)
+    }
+
+    /// A concise title for the reader modal: the task key (e.g.
+    /// `owner/repo#123`) plus its title when they differ.
+    pub fn task_body_title(&self) -> Option<String> {
+        let task = self.workspace.as_ref()?.primary_task()?;
+        let key = task.id.key.as_str();
+        let title = task.title.trim();
+        if title.is_empty() || title == key {
+            Some(key.to_string())
+        } else {
+            Some(format!("{key} · {title}"))
+        }
     }
 }
 

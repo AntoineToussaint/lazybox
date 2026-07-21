@@ -1570,6 +1570,11 @@ fn crossterm_mouse_to_realm(
         CMK::Down(CMB::Left) => RMK::Down(RMB::Left),
         CMK::Down(CMB::Right) => RMK::Down(RMB::Right),
         CMK::Down(CMB::Middle) => RMK::Down(RMB::Middle),
+        // Wheel scroll is forwarded so a scrollable modal (the
+        // description reader, #448) responds to the wheel. Other modals
+        // ignore mouse events, so this is inert for them.
+        CMK::ScrollUp => RMK::ScrollUp,
+        CMK::ScrollDown => RMK::ScrollDown,
         _ => return None,
     };
     Some(tuirealm::event::MouseEvent {

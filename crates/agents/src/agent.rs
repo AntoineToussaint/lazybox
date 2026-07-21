@@ -179,6 +179,23 @@ pub trait Agent: Send + Sync {
         Vec::new()
     }
 
+    /// Environment variables required by this agent's interactive PTY UI.
+    /// These are applied after user-configured repository environment values,
+    /// because they preserve terminal integration invariants rather than act
+    /// as user-facing defaults. Structured runs do not receive them.
+    fn pty_spawn_env(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
+    /// Compatibility generation for the interactive PTY launch contract.
+    /// A non-zero generation is persisted with a live backend session so a
+    /// newer daemon can identify an older surviving process whose environment
+    /// cannot be repaired in place. Bump this when `pty_spawn_env` changes in
+    /// a way that requires restarting an already-running process.
+    fn pty_launch_generation(&self) -> u32 {
+        0
+    }
+
     /// Prepare the environment so an UNATTENDED launch in `worktree`
     /// can't stall on a one-time interactive consent dialog. Called
     /// before spawning an autonomous session (the `w` / address-comments
@@ -460,11 +477,15 @@ pub mod builtins {
             argv
         }
 
-        fn spawn_env(&self) -> Vec<(String, String)> {
+        fn pty_spawn_env(&self) -> Vec<(String, String)> {
             vec![(
                 "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_string(),
                 "1".to_string(),
             )]
+        }
+
+        fn pty_launch_generation(&self) -> u32 {
+            1
         }
 
         fn prepare_unattended(&self, worktree: &Path) {
@@ -899,19 +920,22 @@ mod tests {
     }
 
     #[test]
-    fn claude_seeds_inline_renderer_for_scrollback() {
+    fn claude_requires_inline_renderer_for_pty_scrollback() {
         assert_eq!(
-            Claude.spawn_env(),
+            Claude.pty_spawn_env(),
             vec![(
                 "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_string(),
                 "1".to_string(),
             )]
         );
+        assert_eq!(Claude.pty_launch_generation(), 1);
+        assert!(Claude.spawn_env().is_empty());
     }
 
     #[test]
     fn other_agents_seed_no_spawn_env() {
         assert!(super::builtins::Cursor.spawn_env().is_empty());
+        assert!(super::builtins::Cursor.pty_spawn_env().is_empty());
         let generic = super::builtins::GenericCli {
             id: "custom",
             display_name: "Custom",

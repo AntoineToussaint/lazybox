@@ -332,6 +332,10 @@ pub struct ServerConfig {
     /// client re-renders the tier badge. Cleaned on `TerminalExited`
     /// alongside the other per-terminal maps.
     pub terminal_models: Arc<Mutex<HashMap<TerminalId, String>>>,
+    /// Recovered agent processes launched under an older PTY compatibility
+    /// generation. Their inherited environment cannot be changed in place;
+    /// Subscribe reports an actionable restart notice until they exit.
+    pub outdated_agent_terminals: Arc<Mutex<HashSet<TerminalId>>>,
     /// Per-backend-key serialization between prompt-state persistence and
     /// terminal teardown. Draft/user-message writes run on a background lane;
     /// without this boundary a delayed write could finish after teardown's
@@ -597,6 +601,7 @@ impl ServerConfig {
             no_permission_terminals: Arc::new(Mutex::new(HashSet::new())),
             on_main_terminals: Arc::new(Mutex::new(HashSet::new())),
             terminal_models: Arc::new(Mutex::new(HashMap::new())),
+            outdated_agent_terminals: Arc::new(Mutex::new(HashSet::new())),
             terminal_persistence_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             terminal_io_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             agent_detect_resets: Arc::new(Mutex::new(HashSet::new())),
@@ -1277,6 +1282,20 @@ pub async fn dispatch_command(
             });
             if load_errors > 0 {
                 let _ = tx.send(storage_recovery_event(load_errors));
+            }
+            let outdated_agents = config.outdated_agent_terminals.lock().await.len();
+            if outdated_agents > 0 {
+                let noun = if outdated_agents == 1 {
+                    "Claude session was"
+                } else {
+                    "Claude sessions were"
+                };
+                let _ = tx.send(Event::provider_error_permanent(
+                    "spawn:recovered-agent",
+                    format!(
+                        "{outdated_agents} recovered {noun} started by an older lazybox build; close and reopen the terminal to enable scrolling"
+                    ),
+                ));
             }
             // A fresh subscriber may have missed removal prompts emitted
             // before it connected (broadcast is fire-and-forget) — reset

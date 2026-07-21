@@ -7731,6 +7731,34 @@ mod spawn_spinner_projection_tests {
             "spinner cleared by its own terminal"
         );
     }
+
+    #[test]
+    fn recovered_agent_restart_warning_does_not_impersonate_a_spawn_failure() {
+        let mut m = build_model();
+        let target = SessionKey::new("github:o/r#1");
+        m.status
+            .note_spawning("codex", target, TerminalKind::Agent("codex".into()), 0);
+
+        m.handle_daemon_event(IpcEvent::ProviderError {
+            source: "spawn:recovered-agent".into(),
+            message: "1 recovered Claude session was started by an older build; close and reopen"
+                .into(),
+            detail: String::new(),
+            kind: "permanent".into(),
+        });
+
+        assert!(
+            m.status.spawning.is_some(),
+            "a recovery warning must not cancel an unrelated active spawn"
+        );
+        let notice = m.status.notice.as_ref().expect("restart notice");
+        assert!(notice.message.contains("restart required"));
+        assert!(!notice.message.contains("spawn failed"));
+        assert_eq!(
+            notice.severity,
+            crate::realm::components::footer::NoticeSeverity::Permanent
+        );
+    }
 }
 
 #[cfg(test)]

@@ -133,10 +133,19 @@ tracking affect rendering and clicks, not scrolling. The tmux backend rejects
 alternate-screen requests at the pane boundary, and Claude launches with
 `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1`; the latter selects Claude's inline
 renderer instead of its bounded full-screen repaint loop so the conversation
-actually flows into retained pane history. The attach client also stays on the
-primary screen so the same output accumulates in libghostty scrollback. An
-upward wheel can fetch the backend's deeper `capture-pane` history, but it never
-writes SGR mouse reports or synthesized keys into the inner program.
+actually flows into retained pane history. This is a PTY correctness override,
+so a colliding per-repository environment value cannot disable it. The attach
+client also stays on the primary screen so the same output accumulates in
+libghostty scrollback. An upward wheel can fetch the backend's deeper
+`capture-pane -J` history; tmux joins soft-wrapped screen rows before replay so
+display wrapping does not become hard line breaks. The wheel never writes SGR
+mouse reports or synthesized keys into the inner program.
+
+A daemon cannot replace the inherited environment of a Claude process that
+survived an upgrade. PTY launch generations are persisted with new sessions;
+when recovery finds an older generation, each client receives a persistent
+notice to close and reopen that terminal. The session stays attached until the
+user chooses to restart it, so an upgrade never kills in-flight agent work.
 
 ## The regression harness
 

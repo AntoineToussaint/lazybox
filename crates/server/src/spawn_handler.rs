@@ -79,14 +79,16 @@ enum TerminalPersistedField {
     NoPermission,
     UserMessage,
     Draft,
+    PtyLaunchGeneration,
 }
 
 impl TerminalPersistedField {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::Metadata,
         Self::NoPermission,
         Self::UserMessage,
         Self::Draft,
+        Self::PtyLaunchGeneration,
     ];
 
     fn key(self, backend_key: &str) -> String {
@@ -95,6 +97,7 @@ impl TerminalPersistedField {
             Self::NoPermission => "terminal-noperm",
             Self::UserMessage => "terminal-msg",
             Self::Draft => "terminal-draft",
+            Self::PtyLaunchGeneration => "terminal-pty-generation",
         };
         format!("{prefix}:{backend_key}")
     }
@@ -785,6 +788,7 @@ pub async fn handle_spawn(
         }
     }
     let env = with_agent_spawn_defaults(env, agent_for_env.as_deref());
+    let env = with_agent_pty_spawn_env(env, agent_for_env.as_deref());
     let env = with_worktree_cargo_target(env, cwd_path.as_deref());
     tracing::info!(
         program = argv.first().map(String::as_str).unwrap_or("<empty>"),
@@ -878,6 +882,10 @@ pub async fn handle_spawn(
         terminal_meta.insert(terminal_id, (session_key.clone(), kind.clone()));
         terminals.insert(terminal_id, backend_key.clone());
         persist_terminal_meta(config, &backend_key, &session_key, &kind).await;
+        if let Some(agent) = agent_for_env.as_deref() {
+            persist_pty_launch_generation(config, &backend_key, agent.pty_launch_generation())
+                .await;
+        }
     }
     drop(workspace_registration_guard);
     // The persisted backend_key → session ownership pairing lets the next
@@ -2495,6 +2503,27 @@ pub(crate) fn with_agent_spawn_defaults(
     env
 }
 
+/// Apply environment required by an agent's interactive terminal UI. Unlike
+/// [`lazybox_agents::Agent::spawn_env`], these values are correctness
+/// constraints and replace a colliding repository value. Structured runs
+/// intentionally do not call this helper.
+pub(crate) fn with_agent_pty_spawn_env(
+    mut env: Vec<(String, String)>,
+    agent: Option<&dyn lazybox_agents::Agent>,
+) -> Vec<(String, String)> {
+    let Some(agent) = agent else {
+        return env;
+    };
+    for (key, value) in agent.pty_spawn_env() {
+        if let Some((_, existing)) = env.iter_mut().find(|(existing, _)| existing == &key) {
+            *existing = value;
+        } else {
+            env.push((key, value));
+        }
+    }
+    env
+}
+
 /// Pure-data lookup so tests don't need a real YAML on disk.
 pub(crate) fn env_for_repo(cfg: &lazybox_config::Config, repo: &str) -> Vec<(String, String)> {
     cfg.repos
@@ -3286,8 +3315,8 @@ fn strip_ansi(input: &str) -> String {
 /// later inserted for a recovered terminal (agent_states,
 /// hook_driven_terminals, input_needed_shapes, prompt_submit_signals)
 /// outlived it, and its `terminal:*`/`terminal-noperm:*`/
-/// `terminal-msg:*`/`terminal-draft:*` kv rows accumulated in state.db
-/// forever.
+/// `terminal-msg:*`/`terminal-draft:*`/`terminal-pty-generation:*` kv rows
+/// accumulated in state.db forever.
 pub(crate) async fn teardown_exited_terminal(
     config: &ServerConfig,
     terminal_id: TerminalId,
@@ -3477,6 +3506,11 @@ async fn finish_terminal(
         .remove(&terminal_id);
     config.on_main_terminals.lock().await.remove(&terminal_id);
     config.terminal_models.lock().await.remove(&terminal_id);
+    config
+        .outdated_agent_terminals
+        .lock()
+        .await
+        .remove(&terminal_id);
     for field in TerminalPersistedField::ALL {
         let key = field.key(backend_key);
         if let Err(error) = config.store.delete_kv(&key) {
@@ -4949,6 +4983,16 @@ pub async fn recover_sessions(config: &ServerConfig) {
             .await
             .unwrap_or_else(|| (SessionKey::from(""), TerminalKind::Shell));
         let no_permission = load_no_permission(config, &key).await;
+        let required_generation = match &kind {
+            TerminalKind::Agent(agent_id) => config
+                .agents
+                .get(agent_id)
+                .map(|agent| agent.pty_launch_generation())
+                .unwrap_or(0),
+            _ => 0,
+        };
+        let outdated_launch = required_generation > 0
+            && load_pty_launch_generation(config, &key).await != Some(required_generation);
         let terminal_id = alloc_terminal_id(&*config.store);
         // Recover the primary maps as one visible registration, under the
         // same canonical lock pair as a fresh spawn. This prevents snapshot
@@ -4963,6 +5007,13 @@ pub async fn recover_sessions(config: &ServerConfig) {
         if no_permission {
             config
                 .no_permission_terminals
+                .lock()
+                .await
+                .insert(terminal_id);
+        }
+        if outdated_launch {
+            config
+                .outdated_agent_terminals
                 .lock()
                 .await
                 .insert(terminal_id);
@@ -5151,6 +5202,33 @@ async fn load_no_permission(config: &ServerConfig, backend_key: &str) -> bool {
         .and_then(Result::ok)
         .flatten()
         .is_some()
+}
+
+async fn persist_pty_launch_generation(config: &ServerConfig, backend_key: &str, generation: u32) {
+    if generation == 0 {
+        return;
+    }
+    let store = config.store.clone();
+    let kv_key = TerminalPersistedField::PtyLaunchGeneration.key(backend_key);
+    let value = generation.to_string();
+    match tokio::task::spawn_blocking(move || store.set_kv(&kv_key, &value)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "persist terminal PTY launch generation failed")
+        }
+        Err(error) => tracing::warn!(%error, "persist terminal PTY generation task failed"),
+    }
+}
+
+async fn load_pty_launch_generation(config: &ServerConfig, backend_key: &str) -> Option<u32> {
+    let store = config.store.clone();
+    let kv_key = TerminalPersistedField::PtyLaunchGeneration.key(backend_key);
+    tokio::task::spawn_blocking(move || store.get_kv(&kv_key))
+        .await
+        .ok()?
+        .ok()??
+        .parse()
+        .ok()
 }
 
 /// Persist the latest prompt the user submitted to an agent terminal,
@@ -5643,6 +5721,7 @@ mod tests {
                 "terminal-noperm:backend".to_string(),
                 "terminal-msg:backend".to_string(),
                 "terminal-draft:backend".to_string(),
+                "terminal-pty-generation:backend".to_string(),
             ]
             .into(),
             "every persisted terminal field must live in the teardown inventory",
@@ -5798,17 +5877,36 @@ mod tests {
     }
 
     #[test]
-    fn non_codex_agent_leaves_homebrew_alone() {
+    fn claude_pty_spawn_requires_inline_renderer_without_homebrew_changes() {
         // Claude / Cursor don't self-update through `brew`, so suppressing
         // auto-update would only risk staling an unrelated `brew install`.
         let claude = lazybox_agents::agent::builtins::Claude;
-        let out = with_agent_spawn_defaults(Vec::new(), Some(&claude));
+        let defaults = with_agent_spawn_defaults(Vec::new(), Some(&claude));
+        assert!(defaults.is_empty());
+        let out = with_agent_pty_spawn_env(defaults, Some(&claude));
         let map: std::collections::BTreeMap<_, _> = out.into_iter().collect();
         assert!(!map.contains_key("HOMEBREW_NO_AUTO_UPDATE"));
         assert_eq!(
             map.get("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN")
                 .map(String::as_str),
             Some("1")
+        );
+    }
+
+    #[test]
+    fn claude_pty_renderer_overrides_a_colliding_repo_value() {
+        let claude = lazybox_agents::agent::builtins::Claude;
+        let env = vec![(
+            "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_string(),
+            "0".to_string(),
+        )];
+        let out = with_agent_pty_spawn_env(env, Some(&claude));
+        assert_eq!(
+            out,
+            vec![(
+                "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_string(),
+                "1".to_string(),
+            )]
         );
     }
 

@@ -107,6 +107,60 @@ async fn live_backend_serves_deep_scrollback_without_restart() {
 }
 
 #[tokio::test]
+async fn capture_history_preserves_soft_wrapped_logical_lines() {
+    if modern_tmux_version().is_none() {
+        eprintln!("tmux missing or too old — skipping soft-wrap capture test");
+        return;
+    }
+    let socket = format!("lazybox-test-soft-wrap-{}", std::process::id());
+    let result = timeout(TEST_DEADLINE, async {
+        let backend = TmuxBackend::with_socket(&socket).expect("conf written");
+        let key = backend
+            .spawn(
+                &[
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "printf 'WRAP-START'; printf '%*s' 220 '' | tr ' ' x; \
+                     printf 'WRAP-END\\n'; for i in $(seq 1 100); do echo line-$i; done; \
+                     exec sleep 300"
+                        .to_string(),
+                ],
+                None,
+                &[],
+                "soft-wrap-test",
+            )
+            .await
+            .expect("tmux spawn");
+
+        let mut ticker = tokio::time::interval(Duration::from_millis(100));
+        for attempt in 0.. {
+            ticker.tick().await;
+            let sub = backend.subscribe(&key).await.expect("subscribe");
+            if String::from_utf8_lossy(&sub.replay).contains("line-100") {
+                break;
+            }
+            assert!(attempt < 100, "pane output never completed");
+        }
+
+        let (capture, _) = backend
+            .scrollback(&key)
+            .await
+            .expect("scrollback")
+            .expect("history source");
+        let expected = format!("WRAP-START{}WRAP-END", "x".repeat(220));
+        assert!(
+            String::from_utf8_lossy(&capture).contains(&expected),
+            "capture-pane must join soft-wrapped rows back into one logical line"
+        );
+
+        let _ = backend.kill(&key).await;
+    })
+    .await;
+    kill_test_server(&socket);
+    result.expect("test timed out");
+}
+
+#[tokio::test]
 async fn restarted_backend_seeds_scrollback_from_tmux_history() {
     if modern_tmux_version().is_none() {
         // Skip-as-pass is how this path could go silently unexercised on

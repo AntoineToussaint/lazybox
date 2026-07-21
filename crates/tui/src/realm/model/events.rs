@@ -911,7 +911,12 @@ impl<T: TerminalAdapter> Model<T> {
                     // arrive, so clear the spinner now instead of
                     // leaving it to time out on the guard, and surface
                     // why so the user isn't left guessing.
-                    if source.starts_with("spawn") {
+                    if source == "spawn:recovered-agent" {
+                        self.flash(
+                            format!("⚠ restart required — {message}"),
+                            crate::realm::components::footer::NoticeSeverity::Permanent,
+                        );
+                    } else if source.starts_with("spawn") {
                         if self.status.clear_spawning() {
                             self.redraw = true;
                         }

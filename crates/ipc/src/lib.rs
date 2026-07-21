@@ -1505,7 +1505,7 @@ pub enum Event {
         message: String,
     },
     /// Reply to [`Command::FetchScrollback`]: the terminal's history as
-    /// the backend retains it (tmux `capture-pane -e -S -<limit>`,
+    /// the backend retains it (tmux `capture-pane -e -J -S -<limit>`,
     /// normalized like the restart-recovery seed). Unlike
     /// [`Event::TerminalResync`] — whose `replay` is the raw ring
     /// stream and therefore carries the inner program's escape

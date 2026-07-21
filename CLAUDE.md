@@ -280,11 +280,13 @@ scope.
 `g/G` top/bottom, `→/l` expand row, `←/h` collapse row, `Enter`
 toggle the section, `Space`/`v` multi-select rows, `w` work on
 selection, `d` toggle the PR/issue description teaser (Collapsed ⇄
-Preview); a second `d` on an overflowing preview — or clicking
-`+N more lines` — opens the full body in a scrollable markdown reader
-modal (#448: proper headings/lists/code/links/tables, `j/k`·PgUp/PgDn·
-wheel to scroll, click a link to open it, `Esc` to close), `m` mark
-the focused row read, `z` undo mark-read, `r` reply.
+Preview); a second `d` on a long — or richly-formatted (tables, fenced
+code, images) — preview, or clicking `+N more lines`, opens the full
+body in a scrollable markdown reader modal (#448: proper
+headings/lists/code/links/tables, `j/k`·PgUp/PgDn·wheel to scroll,
+click a link to open it, `Esc` to close; the header hint reads
+`d · read full` when `d` will open it, `d · collapse` otherwise),
+`m` mark the focused row read, `z` undo mark-read, `r` reply.
 
 **TerminalStack**: all keys forward to the PTY. `]]` (configurable
 escape sequence) is a *non-timed* leader (#252) that opens a small

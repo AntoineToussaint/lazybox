@@ -134,6 +134,12 @@ pub struct RightPane {
     /// drains it after dispatching the key/click and mounts the reader
     /// modal (#448) — the pane can't reach `Model::modal_stack` itself.
     pending_open_description: bool,
+    /// Whether the last Preview render truncated the body (there's more
+    /// than the pane shows). Refreshed every `render_task_body`; the `d`
+    /// / header-click path reads it to decide "read full vs. collapse".
+    /// Reaching that decision always follows a render (you can't be in
+    /// Preview without one), so the flag is current when it's consulted.
+    body_overflows: bool,
     /// Memoized activity virtual-line buffer. Rebuilt only when an input
     /// that actually affects the rendered cards changes; scrolling
     /// (which only moves `comment_scroll`) reuses it untouched. See
@@ -376,6 +382,7 @@ impl RightPane {
             click_hits: ClickHits::default(),
             pending_selection_notice: None,
             pending_open_description: false,
+            body_overflows: false,
             activity_buffer: None,
             activity_rev: 0,
             activity_identity: 0,
@@ -1966,6 +1973,7 @@ impl RightPane {
             None => {
                 self.click_hits.body_header_row = None;
                 self.click_hits.body_more_row = None;
+                self.body_overflows = false;
                 return;
             }
         };
@@ -1973,25 +1981,14 @@ impl RightPane {
         // here toggle `task_body_view` (Collapsed ⇄ Preview).
         self.click_hits.body_header_row = if area.height > 0 { Some(area.y) } else { None };
         let body = body.as_str();
-        // Two-state glyph: ▶ collapsed, ▼ preview. The reader modal is
-        // the "read it all" path (via the `+N more` trailer or a second
-        // `d`), so there's no inline "full" state.
-        let (glyph, suffix) = match self.task_body_view {
-            TaskBodyView::Collapsed => ("▶", "  (d · expand)"),
-            TaskBodyView::Preview => ("▼", "  (d · collapse)"),
-        };
-        let header = Line::from(vec![
-            Span::styled(
-                format!("{glyph} Description"),
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(suffix.to_string(), Style::default().fg(theme.text_dim)),
-        ]);
-        let mut lines = vec![header];
-        // No trailer until we find the body overflows the rect below.
+
+        // Build the body rows first so we know whether the reader modal
+        // is the right next action *before* labelling the header — the
+        // header's `(d · read full)` vs. `(d · collapse)` hint must match
+        // what `d` actually does this frame.
         self.click_hits.body_more_row = None;
+        self.body_overflows = false;
+        let mut body_lines: Vec<Line<'static>> = Vec::new();
         if self.task_body_view.is_visible() {
             // Render at most `area.height - 1` body rows — anything
             // more would overflow the rect ratatui carved out for us.
@@ -2009,18 +2006,42 @@ impl RightPane {
                     usize::MAX,
                 );
                 if rendered.len() > body_rows {
+                    self.body_overflows = true;
                     let kept = body_rows.saturating_sub(1);
                     let dropped = rendered.len() - kept;
-                    lines.extend(rendered.into_iter().take(kept));
-                    // The trailer is the next row — clicking it (or a
-                    // second `d`) opens the full body in the reader modal.
-                    self.click_hits.body_more_row = Some(area.y + lines.len() as u16);
-                    lines.push(more_lines_trailer(dropped, theme));
+                    body_lines.extend(rendered.into_iter().take(kept));
+                    // The trailer is the next row (header + body so far) —
+                    // clicking it (or a second `d`) opens the reader modal.
+                    self.click_hits.body_more_row = Some(area.y + 1 + body_lines.len() as u16);
+                    body_lines.push(more_lines_trailer(dropped, theme));
                 } else {
-                    lines.extend(rendered);
+                    body_lines.extend(rendered);
                 }
             }
         }
+
+        // Two-state glyph: ▶ collapsed, ▼ preview. The reader modal is
+        // the "read it all" path (via the `+N more` trailer or a second
+        // `d`), so there's no inline "full" state. In Preview the `d`
+        // hint reflects whether `d` will open the reader (body truncated,
+        // or rich markdown the teaser degrades) or simply collapse.
+        let reader = self.wants_full_modal();
+        let (glyph, suffix) = match self.task_body_view {
+            TaskBodyView::Collapsed => ("▶", "  (d · expand)"),
+            TaskBodyView::Preview if reader => ("▼", "  (d · read full)"),
+            TaskBodyView::Preview => ("▼", "  (d · collapse)"),
+        };
+        let header = Line::from(vec![
+            Span::styled(
+                format!("{glyph} Description"),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(suffix.to_string(), Style::default().fg(theme.text_dim)),
+        ]);
+        let mut lines = vec![header];
+        lines.extend(body_lines);
         // No `Wrap`: `render_body` already wrapped every body line to
         // `area.width - 2`, so each `Line` maps to exactly one screen
         // row. That 1:1 mapping is what makes `body_more_row` above a
@@ -2044,17 +2065,55 @@ impl RightPane {
     }
 
     /// Toggle the description teaser (Collapsed ⇄ Preview), bound to
-    /// `d` and the description-header click. From an overflowing Preview
-    /// this instead opens the full body in the reader modal (#448): a
-    /// second `d` reads the whole thing rather than collapsing, and the
-    /// preview folds away behind it. A Preview that fits entirely just
-    /// collapses.
+    /// `d` and the description-header click. From a Preview where the
+    /// reader is the right next step — the body is truncated, or it's
+    /// rich markdown the one-line teaser degrades — this instead opens
+    /// the full body in the reader modal (#448) and folds the teaser
+    /// away. A short, plain Preview that's fully shown just collapses.
     pub fn toggle_task_body(&mut self) {
-        if self.task_body_view == TaskBodyView::Preview && self.click_hits.body_more_row.is_some() {
+        if self.task_body_view == TaskBodyView::Preview && self.wants_full_modal() {
             self.request_open_description();
             return;
         }
         self.task_body_view = self.task_body_view.cycle();
+    }
+
+    /// Whether the reader modal is the right action for the current body:
+    /// it overflows the inline preview, or it contains block markdown the
+    /// teaser renders poorly (fenced code, tables, images) and is worth
+    /// reading in the full renderer even when it isn't truncated.
+    ///
+    /// `body_overflows` is render-derived (last frame); the richness scan
+    /// is a pure function of the body, so a rich body is offered the
+    /// reader even before a truncating render has run.
+    fn wants_full_modal(&self) -> bool {
+        self.body_overflows || self.body_wants_rich_modal()
+    }
+
+    /// Cheap scan for markdown the inline teaser degrades badly enough
+    /// that the full reader is worth offering even for a short body:
+    /// fenced code blocks, GFM tables, and images.
+    fn body_wants_rich_modal(&self) -> bool {
+        let Some(body) = self.task_body_str() else {
+            return false;
+        };
+        if body.contains("![") {
+            return true; // markdown image
+        }
+        for line in body.lines() {
+            let t = line.trim_start();
+            if t.starts_with("```") || t.starts_with("~~~") {
+                return true; // fenced code block
+            }
+        }
+        // A GFM table delimiter row — `| --- | :--: |` — is unambiguous
+        // and is what the teaser flattens into an unreadable single line.
+        body.lines().any(|line| {
+            let t = line.trim();
+            t.contains('|')
+                && t.contains('-')
+                && t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
+        })
     }
 
     /// Queue the reader modal for the focused body and fold the inline

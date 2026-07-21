@@ -254,10 +254,29 @@ impl<'t> Renderer<'t> {
                     Style::default().fg(self.theme.accent),
                 )));
             }
-            // Raw HTML / footnotes: render nothing structural. Inline
-            // HTML text is dropped (the teaser strips it too); block
-            // HTML is ignored.
-            Event::Html(_) | Event::InlineHtml(_) | Event::FootnoteReference(_) => {}
+            // Raw HTML: GitHub descriptions lean on it (`<details>` /
+            // `<summary>`, `<img>`, `<sub>`). Strip the tags but keep the
+            // human-visible text — a `<summary>` caption or an `<img>`
+            // alt would otherwise vanish (the teaser's tag-stripper keeps
+            // them, so the reader must not be worse). Block-level HTML on
+            // its own line becomes its own line; inline HTML flows into
+            // the current run.
+            Event::Html(s) => {
+                let text = html_visible_text(&s);
+                if !text.is_empty() {
+                    self.flush_inline();
+                    self.push_text(&text);
+                    self.flush_inline();
+                }
+            }
+            Event::InlineHtml(s) => {
+                let text = html_visible_text(&s);
+                if !text.is_empty() {
+                    self.push_text(&text);
+                }
+            }
+            // Footnotes aren't enabled; drop the reference marker.
+            Event::FootnoteReference(_) => {}
             // Math extensions are not enabled; ignore defensively.
             _ => {}
         }
@@ -792,6 +811,75 @@ fn line_is_blank(line: &Line<'_>) -> bool {
     line.spans.iter().all(|s| s.content.trim().is_empty())
 }
 
+/// Human-visible text from a raw-HTML chunk: strip tags but keep their
+/// content, and surface an `<img>`'s `alt` (prefixed with the picture
+/// glyph) since the bitmap can't render. Whitespace is collapsed.
+fn html_visible_text(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '<' {
+            out.push(c);
+            continue;
+        }
+        // Consume up to the matching `>` (or end of chunk).
+        let mut tag = String::new();
+        for tc in chars.by_ref() {
+            if tc == '>' {
+                break;
+            }
+            tag.push(tc);
+        }
+        let name = tag
+            .trim_start_matches('/')
+            .split(|c: char| c.is_whitespace() || c == '/' || c == '>')
+            .next()
+            .unwrap_or("");
+        if name.eq_ignore_ascii_case("img") {
+            if let Some(alt) = html_attr(&tag, "alt").filter(|a| !a.trim().is_empty()) {
+                if !out.is_empty() && !out.ends_with(char::is_whitespace) {
+                    out.push(' ');
+                }
+                out.push_str("🖼 ");
+                out.push_str(alt.trim());
+            }
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Read a quoted (or bare) HTML attribute value out of a tag body.
+/// Case-insensitive on the attribute name; returns `None` if absent.
+fn html_attr(tag: &str, attr: &str) -> Option<String> {
+    let lower = tag.to_ascii_lowercase();
+    let mut from = 0;
+    while let Some(rel) = lower[from..].find(attr) {
+        let idx = from + rel;
+        let boundary = idx == 0 || !lower.as_bytes()[idx - 1].is_ascii_alphanumeric();
+        let rest = tag[idx + attr.len()..].trim_start();
+        if boundary && let Some(after_eq) = rest.strip_prefix('=') {
+            let val = after_eq.trim_start();
+            let mut vc = val.chars();
+            return match vc.next() {
+                Some(q @ ('"' | '\'')) => {
+                    let body = &val[q.len_utf8()..];
+                    let end = body.find(q).unwrap_or(body.len());
+                    Some(body[..end].to_string())
+                }
+                Some(_) => {
+                    let end = val
+                        .find(|c: char| c.is_whitespace() || c == '>')
+                        .unwrap_or(val.len());
+                    Some(val[..end].to_string())
+                }
+                None => None,
+            };
+        }
+        from = idx + attr.len();
+    }
+    None
+}
+
 fn clip(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
@@ -993,5 +1081,39 @@ mod tests {
         let doc = render("", 40);
         assert!(doc.lines.is_empty());
         assert!(doc.links.is_empty());
+    }
+
+    #[test]
+    fn html_summary_and_img_alt_are_kept() {
+        // GitHub descriptions lean on `<details><summary>` and `<img>`.
+        // The tags go, but the caption and alt text must survive.
+        let src = "<details>\n<summary>Click to expand</summary>\n\n\
+                   Inside content.\n\n</details>\n\n\
+                   <img src=\"x.png\" alt=\"a diagram\">";
+        let doc = render(src, 60);
+        let text = flat(&doc).join("\n");
+        assert!(text.contains("Click to expand"), "{text}");
+        assert!(text.contains("Inside content."), "{text}");
+        assert!(text.contains("a diagram"), "{text}");
+    }
+
+    #[test]
+    fn inline_html_tags_stripped_text_kept() {
+        let doc = render("Text with <sub>subscript</sub> inline.", 60);
+        let text = flat(&doc).join("\n");
+        assert!(text.contains("Text with subscript inline."), "{text}");
+    }
+
+    #[test]
+    fn html_attr_reads_quoted_and_bare_values() {
+        assert_eq!(
+            html_attr("img src=x alt=\"hi there\"", "alt").as_deref(),
+            Some("hi there")
+        );
+        assert_eq!(
+            html_attr("img alt='single' src=y", "alt").as_deref(),
+            Some("single")
+        );
+        assert_eq!(html_attr("img src=y", "alt"), None);
     }
 }

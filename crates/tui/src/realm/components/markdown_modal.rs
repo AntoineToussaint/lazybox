@@ -89,9 +89,14 @@ impl MarkdownModal {
 impl Component for MarkdownModal {
     fn view(&mut self, frame: &mut Frame, area: Rect) {
         let theme = crate::theme::current();
-        // Generous: most of the pane, with a small margin.
-        let modal_w = area.width.saturating_sub(6).clamp(20, 120);
-        let modal_h = area.height.saturating_sub(4).max(6);
+        // Generous: most of the pane, with a small margin — but never
+        // taller/wider than the pane itself (tiny terminals).
+        let modal_w = area.width.saturating_sub(6).clamp(20, 120).min(area.width);
+        let modal_h = if area.height <= 6 {
+            area.height
+        } else {
+            area.height.saturating_sub(4).max(6)
+        };
         let x = area.x + area.width.saturating_sub(modal_w) / 2;
         let y = area.y + area.height.saturating_sub(modal_h) / 2;
         let modal = Rect::new(x, y, modal_w, modal_h);
@@ -363,6 +368,16 @@ mod tests {
             comp.on(&click),
             Some(Msg::OpenUrl("https://example.com/x".to_string()))
         );
+    }
+
+    #[test]
+    fn tiny_terminal_stays_within_bounds() {
+        // A pane shorter than the modal's minimum must not paint outside
+        // the screen (the modal height is capped to the area).
+        let mut comp = MarkdownModal::new("t", "one\n\ntwo\n\nthree\n\nfour");
+        let out = render(&mut comp, 30, 4);
+        assert!(out.lines().count() <= 4, "modal must fit the 4-row pane");
+        assert!(comp.modal_rect.height <= 4);
     }
 
     #[test]

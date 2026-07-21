@@ -340,6 +340,15 @@ impl Id {
                 | Id::SnippetBrowser
         )
     }
+
+    /// Whether this modal reacts to the mouse wheel. Only these get
+    /// forwarded scroll events; for every other modal a wheel notch is
+    /// dropped at the router rather than pushed through the event
+    /// channel to be ignored (#448). Today only the description reader
+    /// scrolls on the wheel.
+    pub(crate) fn consumes_scroll(&self) -> bool {
+        matches!(self, Id::DescriptionModal)
+    }
 }
 
 /// Why a workspace-removal confirm prompt is being shown. Both

@@ -992,6 +992,55 @@ mod description_expand_tests {
     }
 
     #[test]
+    fn short_rich_body_opens_reader_modal() {
+        // A tiny table fits inline (no `+N more` trailer) but the teaser
+        // flattens it — so the reader is still offered on a second `d`.
+        let mut pane = pane_showing("| A | B |\n| - | - |");
+        pane.toggle_task_body(); // Collapsed → Preview
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        draw(&mut pane, &mut term);
+        assert!(
+            pane.click_hits.body_more_row.is_none(),
+            "the table isn't truncated — this is the rich, not overflow, path",
+        );
+        pane.toggle_task_body(); // d again → open modal (rich), not collapse
+        assert!(pane.take_open_description());
+        assert_eq!(pane.task_body_view, TaskBodyView::Collapsed);
+    }
+
+    fn description_header_text(pane: &mut RightPane, w: u16, h: u16) -> String {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| pane.render(Rect::new(0, 0, w, h), f, true))
+            .unwrap();
+        let buf = term.backend().buffer();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .find(|row| row.contains("Description"))
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn preview_header_hint_matches_what_d_does() {
+        // Plain short body: `d` collapses, so the hint must say collapse.
+        let mut plain = pane_showing("just one short line");
+        plain.toggle_task_body();
+        let header = description_header_text(&mut plain, 80, 24);
+        assert!(
+            header.contains("collapse") && !header.contains("read full"),
+            "plain preview hint: {header}",
+        );
+
+        // Overflowing body: `d` opens the reader, so the hint must say so.
+        let mut long = pane_showing(&long_body());
+        long.toggle_task_body();
+        let header = description_header_text(&mut long, 80, 24);
+        assert!(
+            header.contains("read full"),
+            "overflow preview hint: {header}"
+        );
+    }
+
+    #[test]
     fn click_row_matches_the_trailer_even_when_the_header_would_wrap() {
         // A pane narrower than the `▼ Description  (d · collapse)`
         // header: a wrapping Paragraph would push the trailer down a row

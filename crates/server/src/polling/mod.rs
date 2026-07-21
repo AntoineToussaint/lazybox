@@ -3868,6 +3868,11 @@ struct PendingIssueMerge {
     issue_key: WorkspaceKey,
     issue_label: String,
     pr_label: String,
+    /// Ids of the sessions the absorb carried over from this issue —
+    /// the checkouts the collapse must never lose. `commit_merge` uses
+    /// them to tell carried sessions apart from ones the PR minted for
+    /// itself beforehand (stub-retirement candidates).
+    moved_session_ids: Vec<lazybox_core::SessionId>,
 }
 
 /// Issue id a lazybox-named branch implies. Issue spawns check out
@@ -4045,11 +4050,12 @@ async fn merge_closing_issue_workspaces(
         // transaction, then its commit owner publishes removal.
         let issue_label = workspace_label_for(&issue_ws, &issue_key);
         let pr_label = workspace_label_for(workspace, &workspace.key);
-        absorb_issue_workspace(workspace, issue_ws);
+        let moved_session_ids = absorb_issue_workspace(workspace, issue_ws);
         pending.push(PendingIssueMerge {
             issue_key: issue_key.clone(),
             issue_label,
             pr_label,
+            moved_session_ids,
         });
 
         tracing::info!(
@@ -4106,6 +4112,11 @@ async fn commit_merge(
     pending: Vec<PendingIssueMerge>,
     workspace_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
 ) {
+    let moved: std::collections::HashSet<lazybox_core::SessionId> = pending
+        .iter()
+        .flat_map(|merge| merge.moved_session_ids.iter().copied())
+        .collect();
+    retire_pr_stub_sessions(config, &mut pr_ws, &moved).await;
     crate::spawn_handler::migrate_session_paths_if_needed(&mut pr_ws).await;
     let pr_key = pr_ws.key.clone();
     let deletes = pending
@@ -4132,6 +4143,106 @@ async fn commit_merge(
     .await
     {
         report_commit_error(config, "merge issue workspace into PR", &error);
+    }
+}
+
+/// The worktree half of the issue→PR collapse (#446). A PR workspace
+/// can mint a session for itself before the collapse runs — its
+/// `closes_issues` backfills lazily, so the row is spawnable while the
+/// issue's checkout (often carrying uncommitted WIP) still lives under
+/// the issue slug. Once the absorb carries that real checkout across,
+/// such a pre-existing PR session is usually a pristine
+/// just-provisioned stub; left alone it wins `default_session` (newest
+/// `created_at`) and every later spawn lands in the stub while the
+/// carried WIP sits stranded in a sibling directory.
+///
+/// Retire those stubs: drop the session record and remove its
+/// worktree. Anything that might hold work is kept — a live terminal,
+/// uncommitted or unpushed state, or a non-worktree directory with
+/// contents. No-op unless the absorb carried at least one session
+/// whose worktree exists on disk (retiring a healthy checkout in favor
+/// of nothing would only force a re-provision).
+async fn retire_pr_stub_sessions(
+    config: &ServerConfig,
+    pr_ws: &mut Workspace,
+    moved: &std::collections::HashSet<lazybox_core::SessionId>,
+) {
+    if moved.is_empty() {
+        return;
+    }
+    let mut carried_real_checkout = false;
+    for session in &pr_ws.sessions {
+        if moved.contains(&session.id) && tokio::fs::metadata(&session.worktree_path).await.is_ok()
+        {
+            carried_real_checkout = true;
+            break;
+        }
+    }
+    if !carried_real_checkout {
+        return;
+    }
+
+    let live: std::collections::HashSet<lazybox_core::SessionId> = config
+        .terminal_sessions
+        .lock()
+        .await
+        .values()
+        .copied()
+        .collect();
+    let mgr = config.worktree_manager();
+    let bare = pr_ws
+        .primary_task()
+        .and_then(|task| task.repo.as_deref())
+        .and_then(|repo| repo.split_once('/'))
+        .map(|(owner, name)| mgr.bare_path(owner, name));
+
+    let mut idx = 0;
+    while idx < pr_ws.sessions.len() {
+        let session = &pr_ws.sessions[idx];
+        if moved.contains(&session.id) || live.contains(&session.id) {
+            idx += 1;
+            continue;
+        }
+        let path = session.worktree_path.clone();
+        let session_id = session.id;
+        let on_disk = tokio::fs::metadata(&path).await.is_ok();
+        let retire = if !on_disk {
+            true
+        } else if tokio::fs::metadata(path.join(".git")).await.is_ok() {
+            lazybox_git_ops::worktree_is_pristine(&path, bare.as_deref()).await
+        } else {
+            // A provisioning fallback leaves a plain empty dir; one
+            // with contents could be anything the user put there.
+            dir_is_empty(&path).await
+        };
+        if !retire {
+            idx += 1;
+            continue;
+        }
+        tracing::info!(
+            workspace = %pr_ws.key,
+            session = %session_id.0,
+            worktree = %path.display(),
+            "collapse: retiring pristine PR stub session; the absorbed checkout takes over",
+        );
+        if on_disk {
+            match bare.as_ref() {
+                Some(bare) => {
+                    let _ = mgr.remove_by_path(bare, &path).await;
+                }
+                None => {
+                    let _ = tokio::fs::remove_dir_all(&path).await;
+                }
+            }
+        }
+        pr_ws.sessions.remove(idx);
+    }
+}
+
+async fn dir_is_empty(path: &std::path::Path) -> bool {
+    match tokio::fs::read_dir(path).await {
+        Ok(mut entries) => matches!(entries.next_entry().await, Ok(None)),
+        Err(_) => false,
     }
 }
 
@@ -4224,7 +4335,7 @@ pub async fn handle_confirm_merge(
     let issue_label = workspace_label_for(&issue_ws, &issue_workspace_key);
     let pr_label = workspace_label_for(&pr_ws, &pr_workspace_key);
 
-    absorb_issue_workspace(&mut pr_ws, issue_ws);
+    let moved_session_ids = absorb_issue_workspace(&mut pr_ws, issue_ws);
 
     // Hand off to the single merge owner: it migrates paths, commits
     // the PR (now carrying the moved sessions) BEFORE deleting the issue
@@ -4237,6 +4348,7 @@ pub async fn handle_confirm_merge(
             issue_key: issue_workspace_key,
             issue_label,
             pr_label,
+            moved_session_ids,
         }],
         workspace_guards,
     )
@@ -4376,15 +4488,21 @@ pub async fn handle_adopt_sessions(
     }
 }
 
-/// Move `issue_ws`'s sessions and linked tasks onto `pr_workspace`.
+/// Move `issue_ws`'s sessions and linked tasks onto `pr_workspace`,
+/// returning the moved session ids.
 /// Terminal metadata is planned and committed later by `commit_merge`, in
 /// the same transaction as these workspace rows. Caller is responsible
 /// for deleting the issue workspace from the store and broadcasting
 /// the `WorkspaceRemoved` / `WorkspaceUpserted` / `WorkspaceMerged`
 /// events around the call.
-fn absorb_issue_workspace(pr_workspace: &mut Workspace, issue_ws: Workspace) {
+fn absorb_issue_workspace(
+    pr_workspace: &mut Workspace,
+    issue_ws: Workspace,
+) -> Vec<lazybox_core::SessionId> {
+    let mut moved = Vec::with_capacity(issue_ws.sessions.len());
     for mut session in issue_ws.sessions {
         session.workspace_key = pr_workspace.key.clone();
+        moved.push(session.id);
         pr_workspace.add_session(session);
     }
     for issue_task in &issue_ws.gh_issues {
@@ -4393,6 +4511,7 @@ fn absorb_issue_workspace(pr_workspace: &mut Workspace, issue_ws: Workspace) {
     for issue_task in &issue_ws.linear_issues {
         pr_workspace.attach_task(issue_task.clone());
     }
+    moved
 }
 
 /// Synthesize the workspace key an issue TaskId would have produced

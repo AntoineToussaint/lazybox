@@ -765,6 +765,16 @@ async fn ref_exists(bare: &Path, ref_name: &str) -> bool {
     .unwrap_or(false)
 }
 
+/// True when the worktree holds nothing that exists only locally — no
+/// uncommitted changes and no unpushed commits. `bare` feeds the
+/// upstream fallbacks of the unpushed-commit probe; when it can't be
+/// resolved an upstream-less checkout is conservatively reported
+/// non-pristine.
+pub async fn worktree_is_pristine(worktree: &Path, bare: Option<&Path>) -> bool {
+    let (dirty, ahead) = tokio::join!(uncommitted(worktree), unpushed(worktree, bare));
+    !dirty && !ahead
+}
+
 async fn uncommitted(worktree: &Path) -> bool {
     let Ok(output) = apply_git_env(
         Command::new("git")

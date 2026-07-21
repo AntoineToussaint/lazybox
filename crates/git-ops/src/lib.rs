@@ -13,6 +13,7 @@ use tokio::process::Command;
 mod inspect;
 pub use inspect::{
     DiscoveredCheckout, OrphanReason, TrackedSession, WorktreeInspection, scan_external_checkouts,
+    worktree_is_pristine,
 };
 
 /// Process-wide per-repo serialization. Keyed by the bare-clone path:

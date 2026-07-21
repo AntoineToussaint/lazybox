@@ -75,6 +75,8 @@ parity is not.
 | `crates/server/tests/polling.rs::codex_terminal_survives_issue_to_pr_collapse` | #404 — the **hookless codex** terminal shape every prior transfer test skipped |
 | `crates/server/tests/polling.rs::pr_arriving_after_live_spawn_prompts_then_confirmed_merge_rebadges` | #404 — the natural lifecycle: live spawn on a bare issue, PR arrives on a *later* poll, gate prompts, confirm rebadges |
 | `crates/server/tests/e2e_real_paths.rs::e2e_spawn_provisions_a_real_worktree_and_collapse_carries_it_to_the_pr` | #404, **real shape** — spawn runs REAL provisioning (`git worktree add` off a local upstream), collapse migrates that real worktree |
+| `crates/server/tests/issue_pr_transfer.rs::collapse_retires_pristine_pr_stub_and_carries_wip_worktree` | #446, the worktree half — a pre-collapse PR stub session (real worktrees, dead records) is retired so the issue's WIP checkout becomes the PR's default session and a later spawn lands in it |
+| `crates/server/tests/issue_pr_transfer.rs::collapse_keeps_pr_session_with_uncommitted_work` | #446 guard-rail — a PR-side worktree holding local work is NOT a stub; the collapse keeps both sessions and touches neither checkout |
 
 ## Worktree provisioning (#403, #405)
 

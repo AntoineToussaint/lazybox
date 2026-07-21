@@ -641,3 +641,20 @@ async fn bulk_safe_skips_unsafe_entries() {
     assert!(!safe.exists(), "safe wt removed");
     assert!(dirty.exists(), "dirty wt preserved");
 }
+
+/// `worktree_is_pristine` — true only when a checkout carries nothing
+/// that exists solely on disk: uncommitted changes and unpushed
+/// commits each flip it false.
+#[tokio::test]
+async fn pristine_worktree_detection() {
+    let fx = setup_fixture().await;
+    let wt = add_wt(&fx, "stub", "main", "main").await;
+    assert!(lazybox_git_ops::worktree_is_pristine(&wt, Some(&fx.bare)).await);
+
+    std::fs::write(wt.join("wip.txt"), "wip").unwrap();
+    assert!(!lazybox_git_ops::worktree_is_pristine(&wt, Some(&fx.bare)).await);
+
+    run(&wt, &["add", "."]).await;
+    run(&wt, &["commit", "-q", "-m", "local only"]).await;
+    assert!(!lazybox_git_ops::worktree_is_pristine(&wt, Some(&fx.bare)).await);
+}

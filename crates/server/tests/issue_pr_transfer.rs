@@ -8,7 +8,9 @@
 //! (local bare clone, no network), multiple terminals (agent + shell),
 //! and the confirm-prompt (`WorkspaceMergePending` → `ConfirmMerge`)
 //! transfer next to the manual one — plus the silent-absorb path for
-//! dead-but-recoverable session records.
+//! dead-but-recoverable session records and the worktree half (#446):
+//! a pre-collapse PR stub session retired in favor of the issue's WIP
+//! checkout, and a PR session with local work surviving untouched.
 //!
 //! Every case asserts the #78/#90 invariant end to end:
 //!   (a) `TerminalsRebadged issue→PR` is broadcast,
@@ -835,6 +837,241 @@ async fn silent_absorb_moves_dead_session_and_real_worktree_to_the_pr() {
             "the spawn must reuse the moved session record, not mint a second",
         );
         assert_eq!(pr_after.sessions[0].id, session_id);
+    })
+    .await
+    .expect("deadline");
+}
+
+/// The worktree half of the collapse (#446): the PR row minted its own
+/// session before the collapse ran (the closes-issues backfill window),
+/// so a pristine just-provisioned stub sits at the PR slug while the
+/// issue's checkout carries uncommitted WIP. The collapse must retire
+/// the stub — record dropped, directory removed — leaving the carried
+/// WIP checkout as the PR's only (and therefore default) session, so a
+/// later spawn lands in the real checkout, never the empty stub.
+#[tokio::test]
+async fn collapse_retires_pristine_pr_stub_and_carries_wip_worktree() {
+    timeout(TEST_DEADLINE, async {
+        let _home = IsolatedConfigHome::new();
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let _upstream = seed_local_remote(&config, "o", "r");
+        let bare = config.worktree_root_path().join("repos/o/r.git");
+
+        // Issue side: dead session on a real worktree with uncommitted WIP.
+        let issue_task = gh_task("o/r#50", false, None, vec![]);
+        let issue_task_id = issue_task.id.clone();
+        let mut issue = Workspace::from_task(issue_task, chrono::Utc::now());
+        let issue_key = issue.key.clone();
+        let issue_dir = tempfile::TempDir::new().unwrap();
+        let wip_path = issue_dir.path().join("issue-50");
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-B",
+                "issue-50",
+                &wip_path.to_string_lossy(),
+                "main",
+            ],
+        );
+        std::fs::write(wip_path.join("WIP.txt"), "uncommitted work\n").unwrap();
+        issue.add_session(lazybox_core::WorkspaceSession::new(
+            issue_key.clone(),
+            SessionKind::Agent {
+                agent_id: "codex".into(),
+            },
+            wip_path.clone(),
+            chrono::Utc::now(),
+        ));
+        let issue_session_id = issue.sessions[0].id;
+        save_workspace(&config, &issue);
+
+        // PR side: a NEWER dead session on a clean provisioned stub —
+        // exactly what a pre-collapse spawn on the fresh PR row leaves
+        // behind. Newest `created_at` means it would win
+        // `default_session` if it survived.
+        let pr_task = gh_task("o/r#51", true, Some("feat"), vec![issue_task_id]);
+        let mut pr = Workspace::from_task(pr_task, chrono::Utc::now());
+        let pr_key = pr.key.clone();
+        let stub_dir = tempfile::TempDir::new().unwrap();
+        let stub_path = stub_dir.path().join("PR-51-t");
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-B",
+                "feat",
+                &stub_path.to_string_lossy(),
+                "main",
+            ],
+        );
+        pr.add_session(lazybox_core::WorkspaceSession::new(
+            pr_key.clone(),
+            SessionKind::Agent {
+                agent_id: "codex".into(),
+            },
+            stub_path.clone(),
+            chrono::Utc::now(),
+        ));
+        save_workspace(&config, &pr);
+
+        let mut client = subscribed(config.clone()).await;
+        client
+            .send(Command::CollapseIntoPr {
+                issue_workspace_key: issue_key.as_str().into(),
+            })
+            .unwrap();
+        wait_for(
+            &mut client,
+            |e| matches!(e, Event::WorkspaceMerged { .. }),
+            EVENT_BUDGET,
+        )
+        .await
+        .expect("WorkspaceMerged");
+
+        assert!(load_workspace(&config, &issue_key).is_none());
+        let pr_ws = load_workspace(&config, &pr_key).expect("PR row present");
+        assert_eq!(
+            pr_ws.sessions.len(),
+            1,
+            "the pristine stub session must be retired by the collapse",
+        );
+        assert_eq!(pr_ws.sessions[0].id, issue_session_id);
+        assert_eq!(
+            pr_ws.sessions[0].worktree_path, wip_path,
+            "the PR's worktree must BE the issue's original checkout",
+        );
+        assert!(
+            wip_path.join("WIP.txt").exists(),
+            "uncommitted WIP must survive the transfer",
+        );
+        assert!(
+            !stub_path.exists(),
+            "the empty stub worktree must be removed, not left as an orphan sibling",
+        );
+
+        // A spawn on the collapsed PR lands in the carried checkout.
+        client
+            .send(Command::Spawn {
+                model_alias: None,
+                session_key: pr_key.as_str().into(),
+                session_id: None,
+                kind: TerminalKind::Agent("codex".into()),
+                cwd: None,
+                initial_prompt: None,
+                on_main: false,
+            })
+            .unwrap();
+        wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalSpawned { .. }),
+            EVENT_BUDGET,
+        )
+        .await
+        .expect("spawn on the collapsed PR");
+        assert_eq!(mock.list().await.unwrap().len(), 1);
+        let pr_after = load_workspace(&config, &pr_key).unwrap();
+        assert_eq!(pr_after.sessions.len(), 1);
+        assert_eq!(
+            pr_after.sessions[0].worktree_path, wip_path,
+            "the agent must open in the real checkout with the WIP",
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
+/// A PR-side session whose worktree holds local work is NOT a stub:
+/// the collapse must keep both it and the carried issue session.
+#[tokio::test]
+async fn collapse_keeps_pr_session_with_uncommitted_work() {
+    timeout(TEST_DEADLINE, async {
+        let _home = IsolatedConfigHome::new();
+        let (config, _mock) = ServerConfig::in_memory_with_mock();
+        let _upstream = seed_local_remote(&config, "o", "r");
+        let bare = config.worktree_root_path().join("repos/o/r.git");
+
+        let issue_task = gh_task("o/r#50", false, None, vec![]);
+        let issue_task_id = issue_task.id.clone();
+        let mut issue = Workspace::from_task(issue_task, chrono::Utc::now());
+        let issue_key = issue.key.clone();
+        let issue_dir = tempfile::TempDir::new().unwrap();
+        let issue_wt = issue_dir.path().join("issue-50");
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-B",
+                "issue-50",
+                &issue_wt.to_string_lossy(),
+                "main",
+            ],
+        );
+        issue.add_session(lazybox_core::WorkspaceSession::new(
+            issue_key.clone(),
+            SessionKind::Agent {
+                agent_id: "codex".into(),
+            },
+            issue_wt.clone(),
+            chrono::Utc::now(),
+        ));
+        save_workspace(&config, &issue);
+
+        let pr_task = gh_task("o/r#51", true, Some("feat"), vec![issue_task_id]);
+        let mut pr = Workspace::from_task(pr_task, chrono::Utc::now());
+        let pr_key = pr.key.clone();
+        let pr_dir = tempfile::TempDir::new().unwrap();
+        let pr_wt = pr_dir.path().join("PR-51-t");
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-B",
+                "feat",
+                &pr_wt.to_string_lossy(),
+                "main",
+            ],
+        );
+        std::fs::write(pr_wt.join("local.txt"), "local work\n").unwrap();
+        pr.add_session(lazybox_core::WorkspaceSession::new(
+            pr_key.clone(),
+            SessionKind::Agent {
+                agent_id: "codex".into(),
+            },
+            pr_wt.clone(),
+            chrono::Utc::now(),
+        ));
+        save_workspace(&config, &pr);
+
+        let mut client = subscribed(config.clone()).await;
+        client
+            .send(Command::CollapseIntoPr {
+                issue_workspace_key: issue_key.as_str().into(),
+            })
+            .unwrap();
+        wait_for(
+            &mut client,
+            |e| matches!(e, Event::WorkspaceMerged { .. }),
+            EVENT_BUDGET,
+        )
+        .await
+        .expect("WorkspaceMerged");
+
+        let pr_ws = load_workspace(&config, &pr_key).expect("PR row present");
+        assert_eq!(
+            pr_ws.sessions.len(),
+            2,
+            "a PR session with local work must survive the collapse",
+        );
+        assert!(
+            pr_wt.join("local.txt").exists(),
+            "local work in the PR worktree must be untouched",
+        );
+        assert!(issue_wt.join(".git").exists());
     })
     .await
     .expect("deadline");

@@ -522,16 +522,22 @@ showing keybinding search only",
                     Ok(()) => {
                         // Mirror the write into the in-memory menu so
                         // the Settings row badge and the next picker
-                        // open reflect it without a restart.
-                        let label = if let Some(models) = self.agent_models.get_mut(&agent) {
-                            models.default = alias.clone();
-                            alias
-                                .as_deref()
-                                .and_then(|a| models.tier(a))
-                                .map(|t| t.label.clone())
-                        } else {
-                            None
-                        };
+                        // open reflect it without a restart. Re-derive
+                        // the merged menu from disk rather than storing
+                        // the raw pick: unpinning falls back to the
+                        // built-in default (Opus for Claude), and that
+                        // fallback must apply live too — a bare spawn
+                        // never runs without an explicit model in
+                        // between.
+                        let merged = lazybox_config::Config::load()
+                            .unwrap_or_default()
+                            .agent_models(&agent);
+                        let label = merged
+                            .default
+                            .as_deref()
+                            .and_then(|a| merged.tier(a))
+                            .map(|t| t.label.clone());
+                        self.agent_models.insert(agent.clone(), merged);
                         self.flash_info(match label {
                             Some(label) => format!("default model: {label}"),
                             None => "default model: agent default".to_string(),

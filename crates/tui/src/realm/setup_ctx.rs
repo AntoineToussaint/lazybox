@@ -89,6 +89,15 @@ pub enum SettingsAction {
         current: String,
         tier: Option<String>,
     },
+    /// Pick one agent's default model tier
+    /// (`agents.<id>.models.default`) directly — without routing
+    /// through the default-agent flow. One row per enabled agent that
+    /// declares a tier menu. Carries the current default-tier label
+    /// for the row badge.
+    EditDefaultModel {
+        agent_id: String,
+        tier: Option<String>,
+    },
     /// Toggle `agent.skip_permissions` — whether interactive Claude
     /// sessions launch with `--dangerously-skip-permissions`. Carries
     /// the current value so the dispatcher knows which way to flip.
@@ -141,6 +150,10 @@ impl SettingsAction {
                 Some(tier) => format!("Change default agent · {current} · ◆ {tier}"),
                 None => format!("Change default agent · {current}"),
             },
+            Self::EditDefaultModel { agent_id, tier } => match tier {
+                Some(tier) => format!("Default model · {agent_id} · ◆ {tier}"),
+                None => format!("Default model · {agent_id}"),
+            },
             Self::ToggleSkipPermissions { enabled } => format!(
                 "Skip permission prompts for your sessions · {}",
                 if *enabled { "on" } else { "off" }
@@ -169,6 +182,7 @@ impl SettingsAction {
             }
             Self::EditAgents
             | Self::EditDefaultAgent { .. }
+            | Self::EditDefaultModel { .. }
             | Self::ToggleSkipPermissions { .. }
             | Self::EditLlmGateway { .. } => SettingsSection::Agents,
             Self::EditTheme { .. } | Self::EditSnippets => SettingsSection::Appearance,
@@ -284,6 +298,26 @@ mod tests {
             }
             .label(),
             "Change default agent · claude · ◆ Opus"
+        );
+    }
+
+    #[test]
+    fn default_model_label_names_agent_and_tier() {
+        assert_eq!(
+            SettingsAction::EditDefaultModel {
+                agent_id: "claude".into(),
+                tier: Some("Opus".into()),
+            }
+            .label(),
+            "Default model · claude · ◆ Opus"
+        );
+        assert_eq!(
+            SettingsAction::EditDefaultModel {
+                agent_id: "codex".into(),
+                tier: None,
+            }
+            .label(),
+            "Default model · codex"
         );
     }
 

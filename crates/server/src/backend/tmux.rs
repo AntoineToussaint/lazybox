@@ -516,8 +516,9 @@ impl TmuxBackend {
     /// is the I/O conduit; its lifetime is unrelated to the tmux
     /// session's — `wait_exit` polls tmux directly for that.
     ///
-    /// `seed` pre-loads the DaemonPty's replay ring with reconstructed
-    /// scrollback (see `capture_history`). A plain `tmux attach` only
+    /// `seed` hands the DaemonPty reconstructed scrollback (see
+    /// `capture_history`), held in its durable seed slot and replayed
+    /// ahead of live bytes (#420). A plain `tmux attach` only
     /// repaints the visible pane, so without the seed a client that
     /// reattaches to a session which survived a daemon restart has one
     /// screenful and nothing to scroll back through.
@@ -534,9 +535,10 @@ impl TmuxBackend {
     /// history. The daemon's replay ring lives in memory and dies with
     /// the daemon; tmux, however, keeps `history-limit` lines per pane
     /// across restarts. `capture-pane -e -S -<limit>` dumps that history
-    /// (styled, via `-e`) down to the current bottom line, which we feed
-    /// into the ring ahead of the live attach bytes so the client
-    /// rebuilds the full scrollback instead of a single repainted screen.
+    /// (styled, via `-e`) down to the current bottom line, which we hand
+    /// to the DaemonPty as its durable seed — replayed ahead of the live
+    /// attach bytes on every snapshot (#420) — so the client rebuilds
+    /// the full scrollback instead of a single repainted screen.
     ///
     /// Best-effort: any failure returns an empty seed and the client
     /// simply starts from the live repaint, exactly as before this fix.
@@ -575,6 +577,50 @@ impl Drop for TmuxBackend {
     }
 }
 
+/// Build `tmux new-session -d -s <key> -x <cols> -y <rows> [-c <cwd>]
+/// [-e K=V ...] -- <argv...>`. Detached session — the caller attaches
+/// its own client afterwards.
+///
+/// Besides the caller's env, `-e COLORTERM=truecolor` is always seeded
+/// into the session environment. `TERM` inside the session comes from
+/// the conf's `default-terminal "xterm-256color"`, but tmux does not
+/// propagate the attach client's `COLORTERM`, so without this the
+/// inner program (Codex among them) fails its truecolor probe and
+/// renders degraded/monochrome (#421). Seeded after the caller's env,
+/// mirroring how `DaemonPty::spawn` forces the pair.
+fn new_session_args(
+    key: &str,
+    cwd: Option<&Path>,
+    env: &[(String, String)],
+    argv: &[String],
+) -> Vec<String> {
+    let mut cmd_args: Vec<String> = vec![
+        "new-session".into(),
+        "-d".into(),
+        "-s".into(),
+        key.to_string(),
+        "-x".into(),
+        DEFAULT_COLS.to_string(),
+        "-y".into(),
+        DEFAULT_ROWS.to_string(),
+    ];
+    if let Some(dir) = cwd {
+        cmd_args.push("-c".into());
+        cmd_args.push(dir.to_string_lossy().into_owned());
+    }
+    for (k, v) in env {
+        cmd_args.push("-e".into());
+        cmd_args.push(format!("{k}={v}"));
+    }
+    cmd_args.push("-e".into());
+    cmd_args.push("COLORTERM=truecolor".into());
+    // `--` separator so argv elements starting with `-` are
+    // treated as command tokens, not tmux flags.
+    cmd_args.push("--".into());
+    cmd_args.extend(argv.iter().cloned());
+    cmd_args
+}
+
 impl SessionBackend for TmuxBackend {
     fn id(&self) -> &'static str {
         "tmux"
@@ -593,33 +639,7 @@ impl SessionBackend for TmuxBackend {
             }
             let key = self.alloc_key(hint);
 
-            // Build `tmux new-session -d -s <key> -x <cols> -y <rows> [-c <cwd>] -- <argv...>`.
-            // Detached session — we attach our own client below.
-            let cols = DEFAULT_COLS.to_string();
-            let rows = DEFAULT_ROWS.to_string();
-            let mut cmd_args: Vec<String> = vec![
-                "new-session".into(),
-                "-d".into(),
-                "-s".into(),
-                key.clone(),
-                "-x".into(),
-                cols,
-                "-y".into(),
-                rows,
-            ];
-            if let Some(dir) = cwd {
-                cmd_args.push("-c".into());
-                cmd_args.push(dir.to_string_lossy().into_owned());
-            }
-            for (k, v) in env {
-                cmd_args.push("-e".into());
-                cmd_args.push(format!("{k}={v}"));
-            }
-            // `--` separator so argv elements starting with `-` are
-            // treated as command tokens, not tmux flags.
-            cmd_args.push("--".into());
-            cmd_args.extend(argv.iter().cloned());
-
+            let cmd_args = new_session_args(&key, cwd, env, argv);
             let arg_refs: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
             self.tmux(&arg_refs).await?;
 
@@ -851,7 +871,7 @@ impl SessionBackend for TmuxBackend {
                 // after a daemon restart, or after a freeze/EOF). A fresh
                 // attach client only repaints the visible pane, so
                 // reconstruct scrollback from tmux's surviving history
-                // and seed it into the new client's replay ring. Captured
+                // and hand it to the new client as its durable seed. Captured
                 // WITHOUT the sessions lock held: `capture-pane` is a tmux
                 // round trip, and the hot reuse path above must never wait
                 // on it.
@@ -1172,6 +1192,38 @@ mod tests {
         assert!(parse_tmux_version("tmux 3.2a").unwrap() < MIN_TMUX_VERSION);
         assert!(parse_tmux_version("tmux 3.3a").unwrap() >= MIN_TMUX_VERSION);
         assert!(parse_tmux_version("tmux 4.0").unwrap() >= MIN_TMUX_VERSION);
+    }
+
+    /// The spawn's `new-session` argv seeds `COLORTERM=truecolor` into
+    /// the tmux session environment. `default-terminal` covers `TERM`,
+    /// but tmux doesn't propagate the attach client's `COLORTERM`, so
+    /// without the `-e` the inner agent fails its truecolor probe and
+    /// renders without colors. Regression for #421 (Codex monochrome
+    /// under the tmux backend).
+    #[test]
+    fn new_session_args_seed_colorterm_truecolor() {
+        let env = vec![("FOO".to_string(), "bar".to_string())];
+        let argv = vec!["codex".to_string(), "--flag".to_string()];
+        let args = new_session_args("lazybox-codex-1", None, &env, &argv);
+
+        let e_vals: Vec<&str> = args
+            .windows(2)
+            .filter(|w| w[0] == "-e")
+            .map(|w| w[1].as_str())
+            .collect();
+        assert!(
+            e_vals.contains(&"COLORTERM=truecolor"),
+            "COLORTERM must be seeded into the session env: {args:?}"
+        );
+        // Caller env still rides along, and ours is seeded after it so
+        // the forced value wins (mirrors DaemonPty forcing TERM last).
+        assert_eq!(e_vals, ["FOO=bar", "COLORTERM=truecolor"]);
+        // All `-e` pairs sit before the `--` separator, i.e. they are
+        // tmux flags, not command tokens.
+        let sep = args.iter().position(|a| a == "--").expect("-- present");
+        let last_e = args.iter().rposition(|a| a == "-e").expect("-e present");
+        assert!(last_e + 1 < sep, "env flags precede the -- separator");
+        assert_eq!(&args[sep + 1..], &argv[..], "argv follows the separator");
     }
 
     /// capture-pane joins lines with bare `\n`; the seed must carriage-

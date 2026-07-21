@@ -45,10 +45,13 @@ storage:
   broadcast; the client's libghostty grid (10 000-row scrollback) is
   the render surface. tmux is kept off the alt screen (`smcup@/rmcup@`)
   so scrolled-out lines land in the client grid.
-- **Restart path** — after a daemon restart, `TmuxBackend` re-seeds the
-  ring from `tmux capture-pane -e -S -10000`
+- **Restart path** — after a daemon restart, `TmuxBackend` reconstructs
+  history from `tmux capture-pane -e -S -10000`
   (`crates/server/src/backend/tmux.rs`), i.e. *rendered cells with
-  re-synthesized SGR*, not the original byte stream.
+  re-synthesized SGR*, not the original byte stream. Since #420 the
+  capture is held in a durable seed slot on `DaemonPty` — outside the
+  evictable ring, prepended to every snapshot — so live churn can
+  neither evict it nor let it eat the ring's live-byte budget.
 
 **Where they diverge** (#393's finding, confirmed): escape fidelity
 (OSC 8 hyperlinks survive live, are dropped by capture), soft-wrap

@@ -663,9 +663,13 @@ impl<T: TerminalAdapter> Model<T> {
             Some((terminal_id, prompt)) => {
                 cmds.push(IpcCommand::InjectPrompt {
                     terminal_id,
-                    prompt,
+                    prompt: prompt.clone(),
                     fallback_spawn: None,
                     submit: false,
+                });
+                cmds.push(IpcCommand::RecordComposingBuffer {
+                    terminal_id,
+                    buffer: prompt,
                 });
             }
             None => self.flash_info("nothing to recall"),

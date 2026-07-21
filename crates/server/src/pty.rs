@@ -1003,6 +1003,62 @@ mod seed_tests {
         );
     }
 
+    /// Regression for #420's follow-up comment: the durable seed must
+    /// hold while the agent sits on the ALTERNATE screen (full-screen
+    /// TUIs — Claude/Codex). The reported collapse — history paints
+    /// briefly on reattach, then drops to ~2 lines the moment the
+    /// alt-screen VT reasserts — combined the volatile seed with an alt
+    /// screen that owns no primary scrollback. The daemon half fixed
+    /// here is screen-agnostic and must stay that way: with the child
+    /// parked on the alt screen, every snapshot still replays the seed
+    /// first and stays complete (resync-servable), so no interaction
+    /// can rebuild a client without its reattach history. (Pane-level
+    /// alt-screen denial is #393 / PR #427; this pins that no screen
+    /// mode bypasses the durable slot.)
+    #[tokio::test]
+    async fn seed_survives_while_child_holds_the_alt_screen() {
+        let pty = DaemonPty::spawn(
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                // Enter the alternate screen, repaint like a TUI, and
+                // exit while still holding it — the shape reattach sees
+                // when a full-screen agent owns the pane.
+                "printf '\\033[?1049h'; yes 'painting the alt screen' | head -n 200; \
+                 printf alt-screen-tail"
+                    .to_string(),
+            ],
+            small(),
+            None,
+            Vec::new(),
+            b"seeded-history\r\n",
+        )
+        .expect("spawn");
+        pty.wait_finished().await;
+
+        let snap = pty.snapshot_only().await;
+        assert!(
+            snap.replay.starts_with(b"seeded-history\r\n"),
+            "the seed must lead the snapshot even with the child on the alt screen"
+        );
+        let after_seed = &snap.replay[b"seeded-history\r\n".len()..];
+        assert!(
+            after_seed
+                .windows(b"\x1b[?1049h".len())
+                .any(|w| w == b"\x1b[?1049h"),
+            "the alt-screen switch must replay AFTER the seed, so a rebuilt \
+             client keeps the seed as its scrollback baseline"
+        );
+        assert!(
+            String::from_utf8_lossy(&snap.replay).contains("alt-screen-tail"),
+            "live alt-screen output must follow the seed"
+        );
+        assert!(
+            snap.complete,
+            "modest alt-screen churn must leave the snapshot resync-servable"
+        );
+    }
+
     /// An empty seed changes nothing: seq numbering starts at 0 and the
     /// replay holds only what the child wrote.
     #[tokio::test]

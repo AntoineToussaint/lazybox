@@ -33,6 +33,7 @@ about it.
 | `crates/libghostty-vt/tests/feed_while_scrolled.rs::viewport_stays_anchored_while_output_streams_in` | the invariant that makes live deep scrollback usable at all: streamed output must not snap a scrolled-up viewport to the bottom |
 | `crates/server/src/pty.rs::seed_survives_ring_churn_past_capacity` | #420 — the reattach seed lives outside the evictable replay ring; a snapshot taken after live churn wraps the ring capacity must still replay the seed first (unit, real PTY child) |
 | `crates/server/src/pty.rs::large_seed_leaves_full_ring_budget_for_live_output` | #420 — a near-capacity seed can't consume the ring's live-byte budget: snapshots stay `complete` (resync-servable) with the full seed leading |
+| `crates/server/src/pty.rs::seed_survives_while_child_holds_the_alt_screen` | #420 follow-up — no screen mode bypasses the durable slot: with the child parked on the **alternate screen** the seed still leads every snapshot and it stays resync-servable (pane-level alt-screen denial is #393/PR #427) |
 
 **Narrowed gap (#393):** live-vs-restart *fidelity equivalence* — the
 capture path drops OSC 8 hyperlinks and flattens soft wraps relative to

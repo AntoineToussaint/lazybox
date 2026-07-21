@@ -73,31 +73,12 @@ impl Sidebar {
                 Style::default().fg(theme.text_dim),
             ));
             // Neutral build-provenance tag on dev/source builds: it marks
-            // the binary as one you update with `git pull && cargo build`
-            // (not an installer swap), which is also why the warning below
-            // says "rebuild" rather than "update" for it (issues #251,
-            // #391).
+            // the binary as one rebuilt from its source checkout rather
+            // than replaced by an installer.
             if !crate::build_guard::is_release_build() {
                 header_left.push(Span::styled(" (dev)", Style::default().fg(theme.text_dim)));
             }
         }
-        // Persistent outdated-build warning, shown on every mailbox so a
-        // uniformly-stale install can't quietly reproduce already-fixed
-        // bugs. Painted into the always-on header (never scrolls away)
-        // rather than a transient footer flash.
-        if let Some(behind) = self.outdated_commits_behind {
-            header_left.push(Span::raw("  "));
-            header_left.push(Span::styled(
-                format!(
-                    "⚠ {behind} behind · {}",
-                    crate::build_guard::update_action()
-                ),
-                Style::default()
-                    .fg(theme.error)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
-
         let mut signal_spans: Vec<Span> = Vec::with_capacity(8);
         if unread > 0 {
             signal_spans.push(Span::styled(

@@ -1,15 +1,15 @@
 //! `ErrorModal` — diagnostic with a colored severity pill. tuirealm
 //! port of `tui_kit::widgets::ErrorModal`.
 //!
-//! Any key dismisses (Esc, Enter, Space, Ctrl-C). Returns
-//! `Msg::ModalDismissed`.
+//! Diagnostics dismiss on any key by default. Callers that require an explicit
+//! acknowledgement can restrict dismissal to Esc or Enter.
 
 use crate::realm::Msg;
 use crate::realm::UserEvent;
 use ratatui::style::Color;
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
-use tuirealm::event::Event;
+use tuirealm::event::{Event, Key, KeyEvent};
 use tuirealm::props::{AttrValue, Attribute, QueryResult};
 use tuirealm::ratatui::Frame;
 use tuirealm::ratatui::layout::Rect;
@@ -57,6 +57,7 @@ pub struct ErrorModal {
     source: String,
     accent: Accent,
     detail: String,
+    dismiss_on_confirm: bool,
 }
 
 impl ErrorModal {
@@ -68,12 +69,19 @@ impl ErrorModal {
             source: source.into(),
             accent,
             detail: detail.into(),
+            dismiss_on_confirm: false,
         }
     }
 
     /// Override the title.
     pub fn title(mut self, title: impl Into<String>) -> Self {
         self.title = title.into();
+        self
+    }
+
+    /// Require Esc or Enter instead of dismissing on any keyboard input.
+    pub fn dismiss_on_confirm(mut self) -> Self {
+        self.dismiss_on_confirm = true;
         self
     }
 }
@@ -123,7 +131,11 @@ impl Component for ErrorModal {
         }
         lines.push(Line::raw(""));
         lines.push(Line::from(vec![Span::styled(
-            "Press any key to dismiss",
+            if self.dismiss_on_confirm {
+                "Press Esc or Enter to dismiss"
+            } else {
+                "Press any key to dismiss"
+            },
             theme.hint(),
         )]));
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
@@ -143,11 +155,39 @@ impl Component for ErrorModal {
 
 impl AppComponent<Msg, UserEvent> for ErrorModal {
     fn on(&mut self, ev: &Event<UserEvent>) -> Option<Msg> {
-        // Any keyboard event dismisses.
-        if matches!(ev, Event::Keyboard(_)) {
-            Some(Msg::ModalDismissed)
-        } else {
-            None
+        match ev {
+            Event::Keyboard(KeyEvent {
+                code: Key::Esc | Key::Enter,
+                ..
+            }) => Some(Msg::ModalDismissed),
+            Event::Keyboard(_) if !self.dismiss_on_confirm => Some(Msg::ModalDismissed),
+            _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tuirealm::event::KeyModifiers;
+
+    fn key(code: Key) -> Event<UserEvent> {
+        Event::Keyboard(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    #[test]
+    fn explicit_dismissal_ignores_unrelated_keys() {
+        let mut modal =
+            ErrorModal::new("Update", Accent::info("UPDATE"), "detail").dismiss_on_confirm();
+
+        assert_eq!(modal.on(&key(Key::Char('j'))), None);
+        assert_eq!(modal.on(&key(Key::Esc)), Some(Msg::ModalDismissed));
+        assert_eq!(modal.on(&key(Key::Enter)), Some(Msg::ModalDismissed));
+    }
+
+    #[test]
+    fn diagnostic_default_still_dismisses_on_any_key() {
+        let mut modal = ErrorModal::new("Error", Accent::error("ERROR"), "detail");
+        assert_eq!(modal.on(&key(Key::Char('j'))), Some(Msg::ModalDismissed));
     }
 }

@@ -88,12 +88,12 @@ land with the #403/#405 fixes, against the e2e success contract above.
 
 | guard | shape it covers |
 |---|---|
-| `crates/tui/src/build_guard.rs::counts_commits_behind_in_a_real_checkout` | the guard's actual `rev-list` query against a **real repository** laid out like the #391 incident |
-| `crates/tui/src/build_guard.rs::message_pluralizes_and_names_the_fix` | dev builds name the dev fix (`rebuild & restart`) |
-| `crates/tui/src/realm/model/tests.rs::outdated_build_raises_persistent_warning` | the persistent banner + sidebar flag, no longer provenance-gated |
-
-**Remaining #391 scope** (startup modal, release-tag comparison for
-installed builds, dismiss memory) is tracked in #391 itself.
+| `crates/tui/src/build_guard.rs::source_build_detects_a_newer_checkout_head` | the source guard's git queries against a **real repository** laid out like the #391 incident |
+| `crates/tui/src/build_guard.rs::source_build_uses_ahead_tracking_upstream` | a safely fast-forwardable tracking branch is named as the available source target |
+| `crates/tui/src/build_guard.rs::divergent_main_does_not_mark_a_feature_build_stale` | divergent feature work does not produce a false stale-build warning |
+| `crates/tui/src/build_guard.rs::release_comparison_only_reports_newer_semver` | installed releases only notify for a strictly newer published semantic version |
+| `crates/tui/src/build_guard.rs::modal_copy_scopes_commands_and_names_the_install_channel` | source commands run in the baked checkout and release commands match Homebrew versus the shell installer |
+| `crates/tui/src/realm/model/tests.rs::update_modal_dismissal_is_persisted_per_available_target` | explicit dismissal is remembered for one target while a later target is shown again |
 
 ## `w` targets the running agent (#224, #418)
 

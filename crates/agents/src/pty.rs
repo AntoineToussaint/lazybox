@@ -61,12 +61,21 @@ pub enum PromptIntent {
 pub struct EncodedPrompt {
     initial_write: Vec<u8>,
     submit_write: Option<Vec<u8>>,
+    echo_probes: Vec<String>,
 }
 
 impl EncodedPrompt {
     /// Number of bytes in the first terminal write, for bounded diagnostics.
     pub fn initial_write_len(&self) -> usize {
         self.initial_write.len()
+    }
+
+    /// Compact probes the paste-settle gate matches against post-paste output
+    /// to recognize the composer echoing the paste (see
+    /// [`crate::detect::paste_echo_observed`]). Empty for line-oriented
+    /// framing, which has no settle gate.
+    pub fn echo_probes(&self) -> &[String] {
+        &self.echo_probes
     }
 
     /// Consume the sequence into the exact writes the server must perform in
@@ -133,6 +142,7 @@ impl PtyProtocol {
                 EncodedPrompt {
                     initial_write,
                     submit_write: None,
+                    echo_probes: Vec::new(),
                 }
             }
             PromptFraming::BracketedPaste => {
@@ -140,9 +150,25 @@ impl PtyProtocol {
                 initial_write.extend_from_slice(b"\x1b[200~");
                 initial_write.extend(sanitized);
                 initial_write.extend_from_slice(b"\x1b[201~");
+                // Probes the paste-settle gate uses to spot the composer
+                // echoing this paste: a compact fragment of the prompt
+                // itself, plus the collapsed-paste placeholder chrome.
+                // Derived from the text as actually framed — post
+                // blank-line trim — so the probe always describes bytes the
+                // composer can echo.
+                let mut echo_probes: Vec<String> =
+                    crate::detect::paste_echo_probe(trim_leading_blank_lines(prompt))
+                        .into_iter()
+                        .collect();
+                echo_probes.extend(
+                    crate::detect::PASTE_PLACEHOLDER_PROBES
+                        .iter()
+                        .map(|p| (*p).to_string()),
+                );
                 EncodedPrompt {
                     initial_write,
                     submit_write: (intent == PromptIntent::Submit).then(|| vec![b'\r']),
+                    echo_probes,
                 }
             }
         }

@@ -1235,6 +1235,90 @@ pub fn codex_ready_for_prompt(recent_output: &[u8]) -> bool {
     footer_pos.is_some() && codex_state_from(&s, &compact, None, footer_pos) == AgentState::Idle
 }
 
+/// Chunk-aware companion to [`codex_ready_for_prompt`] (issue #425).
+///
+/// [`codex_ready_for_prompt`] reads readiness *positionally* over the whole
+/// append-only detect window: the composer footer must be the byte-most-recent
+/// marker. Codex's diff renderer defeats that against a live session — spinner
+/// ticks and status-line fragments keep landing *after* the last full footer
+/// paint, and the compacted (whitespace-free) buffer can even reconstruct a
+/// stale `esc to interrupt` from unrelated fragments. The positional read then
+/// stays pinned on `Working` long after Codex is resting at its composer, and
+/// the spawn-time injector rides its hard deadline instead of firing in
+/// hundreds of milliseconds.
+///
+/// This variant judges the *current repaint frame* — the bytes of the latest
+/// PTY chunk (`last_chunk_start`) — the same way
+/// [`codex_input_needed_in_current_chunk`] does for approvals. Codex is ready
+/// when the frame itself paints composer chrome:
+///
+/// - the composer footer (`<model> <effort> · <cwd>`), or
+/// - the composer arrow (`›` followed by prompt text — a chooser's `› 1.`
+///   never matches), which Codex repaints on every placeholder rotation while
+///   the composer is usable,
+///
+/// AND the frame carries no approval/consent marker, no working status line
+/// painted after that composer chrome, and no bare `[y/n]` prompt parked in
+/// the visible tail. The footer must additionally have been painted at least
+/// once somewhere in the buffer — a lone arrow on a half-drawn boot screen is
+/// not proof the composer exists yet.
+///
+/// Frames without composer evidence fall back to the whole-buffer positional
+/// read, so this is strictly an acceleration: a live approval modal or trust
+/// gate (whose frames carry their own chrome, and which never rotate
+/// placeholders while parked) can never become ready through it.
+pub fn codex_ready_for_prompt_chunked(recent_output: &[u8], last_chunk_start: usize) -> bool {
+    let mark = last_chunk_start.min(recent_output.len());
+    let (s, s_mark) = strip_ansi_lossy_marked(recent_output, mark);
+    let (compact, compact_mark) = compact_lower_marked(&s, s_mark);
+
+    let frame = &compact[compact_mark.min(compact.len())..];
+    let frame_working = codex_working_pos(frame);
+    // Composer evidence painted by THIS frame, most-conservative first:
+    // - footer: trust it unless the same frame painted a working status
+    //   line after it (mirrors the whole-buffer positional rule);
+    // - arrow: a placeholder-rotation frame is tiny and carries no
+    //   footer, so accept it only when the frame shows no working status
+    //   line at all — a busy full repaint (status line + composer) must
+    //   keep falling through to the positional read.
+    let composer_painted = codex_footer_pos(frame)
+        .is_some_and(|fp| !frame_working.is_some_and(|wp| wp > fp))
+        || (codex_composer_arrow_pos(frame).is_some() && frame_working.is_none());
+    if composer_painted
+        && codex_footer_pos(&compact).is_some()
+        && codex_prompt_pos(frame).is_none()
+        && !codex_bare_prompt_in_tail(&s)
+    {
+        return true;
+    }
+
+    codex_ready_for_prompt(recent_output)
+}
+
+/// Byte offset of the most recent Codex *composer* arrow in `compact` — `›`
+/// followed by prompt text (the rotating placeholder or the user's typed
+/// draft). The complement of [`codex_arrow_option_pos`]: only the LAST arrow
+/// is classified, and an arrow sitting on a numbered chooser option
+/// (`›1.` / `›1)`) is rejected, so a modal's selection arrow never reads as
+/// composer chrome.
+fn codex_composer_arrow_pos(compact: &str) -> Option<usize> {
+    let (i, _) = compact.match_indices('\u{203a}').next_back()?;
+    let mut chars = compact[i + '\u{203a}'.len_utf8()..].chars();
+    match chars.next() {
+        Some(c) if c.is_alphabetic() => Some(i),
+        _ => None,
+    }
+}
+
+/// Bare yes/no family parked at the bottom of the visible screen — Codex
+/// prompts (or a GenericCli-style bare prompt) with no distinctive chrome.
+/// Scoped to the visible tail so a `[y/n]` echoed earlier in scrollback
+/// doesn't false-fire.
+fn codex_bare_prompt_in_tail(s: &str) -> bool {
+    let prompt_zone = last_nonempty_lines(recent_tail(s, CODEX_PROMPT_TAIL_WINDOW), 5);
+    contains_any(&prompt_zone, YN_PROMPT_PATTERNS) || prompt_zone.contains("approve?")
+}
+
 /// Classify Codex's state from the stripped buffer `s` and its space-free
 /// form `compact`. `last_chunk_start` is the chunk-boundary hint in
 /// `compact`'s offset space (`None` keeps the pure positional rules).
@@ -1267,11 +1351,8 @@ fn codex_state_from(
     }
 
     // Bare yes/no family at the bottom of the screen — Codex prompts (or a
-    // GenericCli-style bare prompt) that carry no distinctive chrome. Scoped
-    // to the visible tail so a `[y/n]` echoed earlier in scrollback doesn't
-    // false-fire.
-    let prompt_zone = last_nonempty_lines(recent_tail(s, CODEX_PROMPT_TAIL_WINDOW), 5);
-    if contains_any(&prompt_zone, YN_PROMPT_PATTERNS) || prompt_zone.contains("approve?") {
+    // GenericCli-style bare prompt) that carry no distinctive chrome.
+    if codex_bare_prompt_in_tail(s) {
         return AgentState::InputNeeded;
     }
 
@@ -1344,6 +1425,66 @@ fn codex_arrow_option_pos(compact: &str) -> Option<usize> {
         )
         .then_some(i)
     })
+}
+
+/// Compact fragment length taken from the pasted prompt for echo matching.
+/// Long enough to be unmistakable in a repaint, short enough to fit the
+/// visible composer even on a narrow terminal.
+const PASTE_ECHO_PROBE_LEN: usize = 32;
+
+/// Minimum probe length — a shorter fragment ("ok", "fix it") is too likely
+/// to occur in unrelated repaint output to serve as paste evidence.
+const PASTE_ECHO_PROBE_MIN: usize = 8;
+
+/// Composer placeholder chrome agents render when a large paste is collapsed
+/// instead of echoed verbatim (Claude: `[Pasted text #1 +12 lines]`, Codex:
+/// `[Pasted Content …]`). Compact-lowercase, like every probe.
+pub const PASTE_PLACEHOLDER_PROBES: &[&str] = &["pastedtext", "pastedcontent"];
+
+/// Build the compact (lowercased, whitespace-free) probe that recognizes the
+/// paste's echo in the composer: the TAIL of the prompt, because a composer
+/// keeps its cursor at the end of the inserted text, so for a paste larger
+/// than the visible box it's the tail that stays on screen. `None` when the
+/// prompt is too short to be distinctive — the caller then relies on the
+/// placeholder probes and the quiet-window fallback.
+pub fn paste_echo_probe(prompt: &str) -> Option<String> {
+    // Raw ESC bytes are dropped to mirror the framing sanitizer — the
+    // delivered (and therefore echoed) text never contains them.
+    let compact: Vec<char> = prompt
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '\x1b')
+        .flat_map(char::to_lowercase)
+        .collect();
+    (compact.len() >= PASTE_ECHO_PROBE_MIN).then(|| {
+        compact[compact.len().saturating_sub(PASTE_ECHO_PROBE_LEN)..]
+            .iter()
+            .collect()
+    })
+}
+
+/// Whether the output produced since a bracketed paste already echoes that
+/// paste — the composer re-rendered with the pasted text (or its collapsed
+/// placeholder). This is the content-based settle signal for TUIs that never
+/// go output-quiet (issue #425): once the echo is visible, the paste has been
+/// processed and the submit keystroke can be sent immediately, without
+/// waiting for a global quiet window a repainting status line never allows.
+pub fn paste_echo_observed(output: &[u8], probes: &[String]) -> bool {
+    if probes.is_empty() {
+        return false;
+    }
+    // Full whitespace removal — NOT `compact_lower`, which preserves
+    // newlines: a composer soft-wraps the echoed paste at the terminal
+    // width, so the echo of a single-line prompt can arrive split across
+    // rendered lines. Probes are built with the same normalization
+    // ([`paste_echo_probe`]).
+    let compact: String = strip_ansi_lossy(output)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect();
+    probes
+        .iter()
+        .any(|p| !p.is_empty() && compact.contains(p.as_str()))
 }
 
 #[cfg(test)]

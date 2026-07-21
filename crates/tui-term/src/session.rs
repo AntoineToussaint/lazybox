@@ -74,6 +74,9 @@ impl TermSession {
             command.env(k, v);
         }
         command.env("TERM", "xterm-256color");
+        // Modern TUIs gate full color on `COLORTERM=truecolor`; with
+        // `TERM` alone many degrade to limited or no color (#421).
+        command.env("COLORTERM", "truecolor");
 
         let _child = pair
             .slave

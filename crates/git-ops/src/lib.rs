@@ -1336,11 +1336,19 @@ async fn validate_worktree_dir(
 /// is deleting user work.
 ///
 /// Any probe failure returns `false`: without a confident "pristine"
-/// verdict the caller refuses rather than risk clobbering. The caller
-/// holds the repo lock, so the fixed-name throwaway index can't collide.
+/// verdict the caller refuses rather than risk clobbering.
 async fn leftover_is_pristine_checkout(bare: &Path, wt: &Path) -> bool {
-    let index = bare.join("lazybox-recover.index");
-    let _ = tokio::fs::remove_file(&index).await;
+    // A per-call throwaway index. The name is process-and-sequence
+    // unique so two probes on the same bare can never share it — the
+    // one shared-state hazard of this otherwise read-only inspection,
+    // and the interleaving that could corrupt it is exactly the one
+    // that would mislabel a dirty leftover as pristine and delete it.
+    static PROBE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = PROBE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let index = bare.join(format!(
+        "lazybox-recover-{}-{seq}.index",
+        std::process::id()
+    ));
     let index_env = vec![(
         "GIT_INDEX_FILE".to_string(),
         index.to_string_lossy().into_owned(),
@@ -1374,9 +1382,23 @@ async fn leftover_is_pristine_checkout(bare: &Path, wt: &Path) -> bool {
         return false;
     }
 
-    // Peel every ref to its tree in one `rev-parse`. A pristine
+    // Peel every branch tip to its tree in one `rev-parse`. A pristine
     // checkout's tree is among these; anything else carries real work.
-    let Ok(specs) = run_git_in(bare, &["for-each-ref", "--format=%(objectname)^{tree}"]).await
+    // Only `refs/heads` and `refs/remotes` — a worktree checkout always
+    // derives from a branch, never a tag, so tags add no legitimate
+    // match while a single non-peelable tag (e.g. git.git's blob-valued
+    // `refs/tags/junio-gpg-pub`) would fail the whole batched
+    // `rev-parse` and disable recovery for the entire repo.
+    let Ok(specs) = run_git_in(
+        bare,
+        &[
+            "for-each-ref",
+            "--format=%(objectname)^{tree}",
+            "refs/heads",
+            "refs/remotes",
+        ],
+    )
+    .await
     else {
         return false;
     };
@@ -2721,6 +2743,51 @@ mod health_probe_tests {
             validate_worktree_dir(&wt, &bare).await.unwrap(),
             WorktreeDirState::Reprovision,
             "only-ignored-debris leftover is pristine and reclaimable"
+        );
+    }
+
+    /// A ref that doesn't peel to a tree — a blob-valued tag, as
+    /// git.git's own `refs/tags/junio-gpg-pub` — must not disable
+    /// recovery. The pristine probe peels only `refs/heads` /
+    /// `refs/remotes`, so such a ref is never in the batch that would
+    /// otherwise fail wholesale and refuse every pristine leftover.
+    #[tokio::test]
+    async fn blob_valued_tag_does_not_break_recovery() {
+        let (tmp, bare) = local_bare_clone();
+        // A tag pointing straight at a blob (no commit to peel through).
+        let blob = {
+            let out = std::process::Command::new("git")
+                .current_dir(&bare)
+                .args(["hash-object", "-w", "--stdin"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .expect("spawn hash-object");
+            use std::io::Write;
+            out.stdin.as_ref().unwrap().write_all(b"gpg key").unwrap();
+            let out = out.wait_with_output().expect("hash-object");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&bare, &["update-ref", "refs/tags/blob-tag", &blob]);
+
+        let wt = tmp.path().join("wt");
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                wt.to_str().expect("utf8 path"),
+                "-B",
+                "wt-branch",
+                "HEAD",
+            ],
+        );
+        std::fs::remove_dir_all(bare.join("worktrees")).expect("nuke worktree metadata");
+
+        assert_eq!(
+            validate_worktree_dir(&wt, &bare).await.unwrap(),
+            WorktreeDirState::Reprovision,
+            "a non-peelable tag must not wedge recovery of a pristine leftover"
         );
     }
 }

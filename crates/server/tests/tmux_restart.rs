@@ -12,6 +12,7 @@
 
 use lazybox_server::backend::tmux::modern_tmux_version;
 use lazybox_server::backend::{SessionBackend, TmuxBackend};
+use libghostty_vt::{Terminal, TerminalOptions, screen::Screen};
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -364,6 +365,124 @@ async fn alt_screen_pane_serves_no_deep_scrollback() {
                 .is_none(),
             "an alt-screen pane has no retained history — the fetch must \
              serve nothing rather than a grid-wiping one-screen capture"
+        );
+
+        let _ = backend.kill(&key).await;
+    })
+    .await;
+    kill_test_server(&socket);
+    result.expect("test timed out");
+}
+
+/// A full-screen agent may request the alternate screen, but lazybox's
+/// transcript must remain on tmux's history-bearing primary pane. The
+/// replay consumed by the TUI must therefore stay on the primary screen,
+/// and an on-demand capture must expose lines above the visible screen.
+#[tokio::test]
+async fn alt_screen_agent_retains_scrollable_history() {
+    if modern_tmux_version().is_none() {
+        eprintln!("tmux missing or too old — skipping alt-screen history test");
+        return;
+    }
+    let socket = format!("lazybox-test-alt-history-{}", std::process::id());
+    let result = timeout(TEST_DEADLINE, async {
+        let old_server = std::process::Command::new("tmux")
+            .args([
+                "-L",
+                &socket,
+                "-f",
+                "/dev/null",
+                "new-session",
+                "-d",
+                "-s",
+                "pre-upgrade",
+                "sleep",
+                "300",
+            ])
+            .output()
+            .expect("start pre-upgrade tmux server");
+        assert!(old_server.status.success(), "pre-upgrade server failed");
+
+        let backend = TmuxBackend::with_socket(&socket).expect("conf written");
+        let key = backend
+            .spawn(
+                &[
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "printf '\\033[?1049h'; for i in $(seq 1 200); do echo line-$i; done; \
+                     exec sleep 300"
+                        .to_string(),
+                ],
+                None,
+                &[],
+                "alt-history-test",
+            )
+            .await
+            .expect("tmux spawn");
+
+        let replay = {
+            let mut ticker = tokio::time::interval(Duration::from_millis(100));
+            loop {
+                ticker.tick().await;
+                let sub = backend.subscribe(&key).await.expect("subscribe");
+                if String::from_utf8_lossy(&sub.replay).contains("line-200") {
+                    break sub.replay;
+                }
+            }
+        };
+
+        let state = std::process::Command::new("tmux")
+            .args([
+                "-L",
+                &socket,
+                "display-message",
+                "-p",
+                "-t",
+                &key,
+                "#{alternate_on} #{history_size}",
+            ])
+            .output()
+            .expect("display-message");
+        let state = String::from_utf8_lossy(&state.stdout);
+        let mut parts = state.split_whitespace();
+        assert_eq!(parts.next(), Some("0"), "pane state: {state}");
+        let history: u64 = parts.next().expect("history size").parse().expect("number");
+        assert!(
+            history > 100,
+            "expected retained history, got {history} lines"
+        );
+
+        let mut terminal = Terminal::new(TerminalOptions {
+            cols: 120,
+            rows: 32,
+            max_scrollback: 10_000,
+        })
+        .expect("terminal");
+        terminal.vt_write(&replay);
+        assert_eq!(
+            terminal.active_screen().expect("active screen"),
+            Screen::Primary
+        );
+
+        let (capture, _) = backend
+            .scrollback(&key)
+            .await
+            .expect("scrollback")
+            .expect("history source");
+        assert!(
+            String::from_utf8_lossy(&capture).contains("line-5\r"),
+            "deep capture must include lines above the visible screen"
+        );
+        let mut history = Terminal::new(TerminalOptions {
+            cols: 120,
+            rows: 32,
+            max_scrollback: 10_000,
+        })
+        .expect("history terminal");
+        history.vt_write(&capture);
+        assert!(
+            history.scrollback_rows().expect("scrollback rows") > 100,
+            "the first-wheel capture must reconstruct scrollable agent history"
         );
 
         let _ = backend.kill(&key).await;

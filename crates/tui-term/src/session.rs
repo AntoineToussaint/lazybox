@@ -239,11 +239,8 @@ impl TermSession {
     }
 
     /// True when the inner app has enabled any mouse tracking mode.
-    /// When this is on, we should forward scroll wheel events as raw
-    /// SGR mouse escape sequences so tmux/vim/less/Claude Code can
-    /// drive their own scroll behavior. When off, forwarding mouse as
-    /// *anything* (including arrow keys — don't!) corrupts the input
-    /// stream, so we fall back to libghostty's scrollback instead.
+    /// Callers use this to forward clicks in the app's requested mouse
+    /// protocol. Wheel events remain in the outer terminal's scrollback.
     pub fn is_mouse_tracking(&self) -> bool {
         self.terminal.is_mouse_tracking().unwrap_or(false)
     }

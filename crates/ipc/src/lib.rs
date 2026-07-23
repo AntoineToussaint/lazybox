@@ -1025,6 +1025,16 @@ pub enum Command {
     /// `Event::AgentCliUpdateFinished`. Appended last; see
     /// `KeepMergedWorkspace`.
     UpdateAgentClis,
+    /// Persist the workspace's free-form local note (issue #458). The
+    /// note is a lazybox-only scratchpad — never synced to a provider.
+    /// The daemon loads the workspace, replaces its `notes`, and
+    /// re-broadcasts `WorkspaceUpserted` (like `Snooze`), so no
+    /// dedicated read command is needed — the note rides the existing
+    /// workspace snapshot. Appended last; see `KeepMergedWorkspace`.
+    SetNotes {
+        session_key: SessionKey,
+        notes: String,
+    },
 }
 
 /// The terminal state a removable workspace's primary task reached,

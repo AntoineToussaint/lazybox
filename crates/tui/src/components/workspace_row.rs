@@ -87,6 +87,10 @@ pub struct WorkspaceRowCtx<'a> {
     /// (`Workspace::policies` — issue #363). Renders a ` FIX ` pill so an
     /// explicit per-session auto-fix arm is visible, never invisible.
     pub auto_fix_armed: bool,
+    /// This workspace carries a non-empty local note
+    /// (`Workspace::has_notes` — issue #458). Renders a small ` ✎ ` pill
+    /// so the user can see, at a glance, which rows have a scratchpad.
+    pub has_notes: bool,
 }
 
 impl<'a> WorkspaceRowCtx<'a> {
@@ -605,6 +609,10 @@ fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // linked row, so it must be computed before the `task`-required
     // status pills below.
     let linked = ctx.workspace.is_some_and(|w| w.is_linked());
+    // CI/review pills only exist for a workspace with an upstream task;
+    // the notes pill (issue #458) can also ride a task-less local
+    // workspace, so status is derived conditionally rather than
+    // early-returning on a missing task.
     let (primary, secondary) = match ctx.task {
         Some(task) => status_pills(task),
         None => (None, None),
@@ -619,6 +627,7 @@ fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         && !ctx.auto_merge_armed
         && !ctx.auto_fix_armed
         && !linked
+        && !ctx.has_notes
     {
         return Cell::empty();
     }
@@ -639,6 +648,16 @@ fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
                 .add_modifier(Modifier::BOLD)
         };
         spans.push(Span::styled(" ⎇ local", linked_style));
+    }
+    if ctx.has_notes {
+        // Passive info, not an urgent arm — a dim fg-only glyph rather
+        // than the filled ARM/FIX blocks.
+        let notes_style = if ctx.is_cursor {
+            ctx.row_style()
+        } else {
+            Style::default().fg(ctx.theme.text_dim)
+        };
+        spans.push(Span::styled(" ✎ ", notes_style));
     }
     if ctx.auto_merge_armed {
         let arm_style = if ctx.is_cursor {
@@ -780,6 +799,7 @@ mod tests {
             ascii_glyphs: false,
             auto_merge_armed: false,
             auto_fix_armed: false,
+            has_notes: false,
         }
     }
 
@@ -1097,6 +1117,7 @@ mod tests {
             ascii_glyphs: false,
             auto_merge_armed: false,
             auto_fix_armed: false,
+            has_notes: false,
         };
         assert_eq!(cell_type(&ctx).width(), 0);
     }
@@ -1278,6 +1299,7 @@ mod tests {
             ascii_glyphs: false,
             auto_merge_armed: false,
             auto_fix_armed: false,
+            has_notes: false,
         };
         assert_eq!(cell_title(&ctx).spans[0].content.as_ref(), "lonely");
     }
@@ -1350,6 +1372,31 @@ mod tests {
         assert!(
             cell.spans.iter().any(|s| s.content.as_ref() == " FIX "),
             "FIX marker present"
+        );
+    }
+
+    /// A workspace carrying a local note surfaces a ` ✎ ` pill (issue
+    /// #458) even when it has no CI/review pill and no task at all — a
+    /// session-less scratchpad still reads as noted.
+    #[test]
+    fn cell_status_shows_notes_pill_without_task() {
+        let ws = Workspace::empty(
+            lazybox_core::WorkspaceKey("scratch".into()),
+            "main",
+            fixed_time(),
+        );
+        let theme = theme();
+        let placeholder = make_task("owner/repo#1", "x");
+        let mut ctx = ctx_for(&ws, &placeholder, &theme);
+        // Task-less workspace: no CI/review pills possible.
+        ctx.task = None;
+        assert_eq!(cell_status(&ctx).width(), 0, "no note, no pill");
+        ctx.has_notes = true;
+        let cell = cell_status(&ctx);
+        assert!(cell.width() > 0, "noted row renders a status cell");
+        assert!(
+            cell.spans.iter().any(|s| s.content.as_ref() == " ✎ "),
+            "notes marker present"
         );
     }
 
@@ -2077,6 +2124,7 @@ mod tests {
             ascii_glyphs: false,
             auto_merge_armed: false,
             auto_fix_armed: false,
+            has_notes: false,
         };
         let columns = build_columns(4);
         let rows = vec![build_row(&ctx_task), build_row(&ctx_scratch)];

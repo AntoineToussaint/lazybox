@@ -324,6 +324,31 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::Reply, modal);
     }
 
+    /// Mount the notes editor for `workspace_key`, pre-filled with the
+    /// workspace's current local note (issue #458). Submit →
+    /// `Msg::TextareaSubmitted(body)` → orchestrator builds a
+    /// `Command::SetNotes { session_key, notes }`.
+    pub(super) fn mount_notes(&mut self, workspace_key: lazybox_core::SessionKey) {
+        use crate::realm::components::textarea::Textarea;
+
+        if matches!(self.modal_stack.last(), Some(Id::Notes)) {
+            return;
+        }
+
+        let existing = self
+            .sidebar
+            .workspace_by_key(&workspace_key)
+            .map(|w| w.notes.clone())
+            .unwrap_or_default();
+        let label = workspace_key.to_string();
+        let modal = Textarea::new("Notes")
+            .with_header(format!("local scratchpad — {label} (never synced)"))
+            .with_body(existing)
+            .allow_empty();
+        self.pending_notes = Some(workspace_key);
+        self.mount_modal(Id::Notes, modal);
+    }
+
     /// Mount the "New workspace" name prompt under a specific
     /// Project. Submit → `Msg::InputSubmitted(name)` while
     /// `Id::NewWorkspace` is on top → `Command::CreateWorkspace

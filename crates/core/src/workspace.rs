@@ -165,6 +165,13 @@ pub struct Workspace {
     /// pre-#363 records read back as all-`Default` and behave unchanged.
     #[serde(default)]
     pub policies: crate::AutomationPolicies,
+    /// Free-form local scratchpad the user attaches to this workspace
+    /// (issue #458). Purely a lazybox concept — never synced to a
+    /// provider. Persisted in the workspace JSON blob alongside the
+    /// other user-owned fields above, so providers overwrite only
+    /// upstream-derived state and leave this intact across polls.
+    #[serde(default)]
+    pub notes: String,
     pub created_at: DateTime<Utc>,
     pub last_viewed_at: Option<DateTime<Utc>>,
 }
@@ -191,9 +198,16 @@ impl Workspace {
             snoozed_until: None,
             auto_merge_on_green: false,
             policies: crate::AutomationPolicies::default(),
+            notes: String::new(),
             created_at: now,
             last_viewed_at: None,
         }
+    }
+
+    /// Whether this workspace carries a non-empty local note. Drives the
+    /// sidebar's notes indicator; whitespace-only notes don't count.
+    pub fn has_notes(&self) -> bool {
+        !self.notes.trim().is_empty()
     }
 
     /// Append a fresh session and return its id. Sessions own a
@@ -2055,5 +2069,32 @@ mod tests {
         let mut w = Workspace::empty(crate::WorkspaceKey::new("scratch"), "main", now());
         w.name = "Scratch".into();
         assert_eq!(w.worktree_scope(), None);
+    }
+
+    #[test]
+    fn has_notes_ignores_blank_and_whitespace() {
+        let mut w = Workspace::from_task(pr("o/r#1"), now());
+        assert!(!w.has_notes());
+        w.notes = "   \n\t".into();
+        assert!(!w.has_notes());
+        w.notes = "check the flaky test".into();
+        assert!(w.has_notes());
+    }
+
+    #[test]
+    fn notes_default_when_absent_from_json() {
+        // Records written before #458 have no `notes` key; they must
+        // deserialize to an empty scratchpad rather than fail.
+        let mut w = Workspace::from_task(pr("o/r#1"), now());
+        w.notes = "keep me".into();
+        let json = serde_json::to_string(&w).unwrap();
+        let back: Workspace = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.notes, "keep me");
+
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        value.as_object_mut().unwrap().remove("notes");
+        let legacy: Workspace = serde_json::from_value(value).unwrap();
+        assert_eq!(legacy.notes, "");
+        assert!(!legacy.has_notes());
     }
 }

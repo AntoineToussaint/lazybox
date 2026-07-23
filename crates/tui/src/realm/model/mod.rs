@@ -90,6 +90,12 @@ pub enum Id {
     Update,
     Polling,
     Reply,
+    /// Textarea editing the focused workspace's local notes scratchpad
+    /// (issue #458). Pre-filled with the current note; submit →
+    /// `Command::SetNotes`. Shares the `Textarea` component with
+    /// `Reply`/`BroadcastText`, so `handle_textarea_submitted` routes
+    /// on this id. Target key lives in `Model::pending_notes`.
+    Notes,
     /// Single-line input prompt for naming a brand-new pre-PR
     /// workspace. Submit → `Command::CreateWorkspace { name }`.
     NewWorkspace,
@@ -674,6 +680,10 @@ pub struct Model<T: TerminalAdapter> {
     /// Set by `mount_reply`; consumed by `Msg::TextareaSubmitted` to
     /// build the `Command::PostReply` payload.
     pending_reply: Option<lazybox_core::SessionKey>,
+    /// Workspace key the notes textarea (if mounted) is targeting. Set
+    /// by `mount_notes`; consumed by `Msg::TextareaSubmitted` to build
+    /// the `Command::SetNotes` payload (issue #458).
+    pending_notes: Option<lazybox_core::SessionKey>,
     /// Body of the most recently submitted reply, kept until the next
     /// reply is composed. If the daemon later reports the post failed
     /// (`ProviderError { source: "reply" }`), the composed text would
@@ -1226,6 +1236,7 @@ impl<T: TerminalAdapter> Model<T> {
             preselect: None,
             layout: LayoutCtx::new(),
             pending_reply: None,
+            pending_notes: None,
             last_reply_body: None,
             pending_review_request: None,
             review_choices: Vec::new(),

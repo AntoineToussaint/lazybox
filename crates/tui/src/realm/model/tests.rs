@@ -8693,6 +8693,62 @@ mod click_outside_modal_dismiss_tests {
         );
     }
 
+    /// Regression: clicking away from the checklist *backgrounds* an
+    /// in-flight worktree provision — it must NOT abort the spawn. Esc is
+    /// the deliberate cancel gesture (#403, see
+    /// `worktree_progress_dismiss_tests::esc_mid_provision_sends_cancel_spawn`);
+    /// clicking a sidebar row to go do something else while the spawn is
+    /// still provisioning previously killed it, because outside-click
+    /// reused Esc's `CancelSpawn`-emitting dismiss path.
+    #[test]
+    fn outside_click_backgrounds_provision_without_cancelling_spawn() {
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![empty_ws("github:o/r#1"), empty_ws("github:o/r#2")],
+            terminals: vec![],
+            projects: vec![],
+        });
+        let a = key_of("github:o/r#1");
+        let b = key_of("github:o/r#2");
+
+        let area = Rect::new(0, 0, 120, 40);
+        let (sidebar_rect, _, _) = m.effective_pane_rects(area);
+        let row_b = row_of(&mut m, sidebar_rect, &b);
+        assert!(m.__test_sidebar_mut().focus_workspace_key(&a));
+
+        // Provisioning is genuinely in flight (a Started step — not
+        // failed/warned), i.e. exactly the state where an Esc WOULD
+        // cancel the spawn.
+        m.handle_daemon_event(IpcEvent::WorktreeProgress {
+            session_key: a.clone(),
+            step: WorktreeStep::Fetch,
+            status: WorktreeStepStatus::Started,
+        });
+        assert!(m.modal_stack.contains(&Id::WorktreeProgress));
+
+        // Drop setup traffic (Subscribe, focus hints, …) before the click.
+        while server.rx.try_recv().is_ok() {}
+
+        m.layout.last_area = area;
+        assert!(m.dismiss_modal_on_outside_click(left_down(sidebar_rect.x + 1, row_b)));
+
+        assert!(
+            !m.modal_stack.contains(&Id::WorktreeProgress),
+            "the checklist still closes on the outside click",
+        );
+        let cancelled = std::iter::from_fn(|| server.rx.try_recv().ok()).any(|c| {
+            matches!(
+                c,
+                lazybox_ipc::Command::CancelSpawn { session_key } if session_key == a
+            )
+        });
+        assert!(
+            !cancelled,
+            "an outside click must background the provision, not cancel the spawn",
+        );
+    }
+
     /// A destructive confirm must ignore the outside click — it keeps
     /// owning input so a stray click can't dismiss or trigger data loss.
     #[test]

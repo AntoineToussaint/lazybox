@@ -1118,9 +1118,21 @@ impl<T: TerminalAdapter> Model<T> {
         if !dismissable {
             return false;
         }
-        // Close it the same way Esc does (per-modal cleanup +
-        // draining any queued daemon prompt).
-        let cmds = self.handle_modal_dismissed();
+        // Close it the same way Esc does (per-modal cleanup + draining
+        // any queued daemon prompt) — with one exception: an outside
+        // click *backgrounds* an in-flight worktree provision, it does
+        // not abort it. Esc on the checklist is a deliberate "cancel
+        // this wedged clone" gesture (#403); clicking a sidebar row to
+        // go do something else is not, and must never kill the spawn the
+        // user just started. Drop the `CancelSpawn` the shared dismiss
+        // path queues for that case — the provision keeps running and
+        // its later progress events are absorbed silently (the checklist
+        // state is already recorded as dismissed).
+        let cmds = self
+            .handle_modal_dismissed()
+            .into_iter()
+            .filter(|c| !matches!(c, IpcCommand::CancelSpawn { .. }))
+            .collect();
         self.dispatch_cmds(cmds);
         // Fall through to normal pane hit-testing only when nothing is
         // left on the stack — a dismissable overlay stacked over

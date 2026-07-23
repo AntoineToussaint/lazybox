@@ -1,21 +1,25 @@
 //! `Choice<T>` — single- or multi-select picker. tuirealm port of
 //! `tui_kit::widgets::ChoiceModal`.
 //!
-//! The big API change vs tui-kit: the picked-`Vec<T>` doesn't fit
-//! cleanly inside `Msg` (which must be `PartialEq + Clone`). So this
-//! port reports the picked **indices** as `Msg::ChoicePicked(Vec<usize>)`;
-//! the calling flow already owns the source `Vec<T>` and indexes back
-//! into it.
+//! Each picked row reports a typed [`ChoicePayload`] rather than a bare
+//! positional index. A `.payload_for(|item| …)` closure derives the
+//! payload from the *same* `T` the row displays, so the value the
+//! `ChoicePicked` handler resolves always matches the row the user saw
+//! — even when the caller sorts or groups the list (issue #512). When
+//! no `payload_for` is set the row falls back to
+//! [`ChoicePayload::Index`] (its position in `items`), which pickers
+//! that resolve positionally into a component-local list still rely on.
 //!
 //! Modes:
 //! - `Choice::single(prompt, items)` — Enter picks one, returns
-//!   `ChoicePicked(vec![i])`.
+//!   `ChoicePicked(vec![payload])`.
 //! - `Choice::multi(prompt, items)` — Space toggles, Enter confirms,
-//!   returns `ChoicePicked(vec![i, j, ...])`.
+//!   returns `ChoicePicked(vec![payload, …])`.
 //!
 //! `with_back(true)` enables Backspace → `Msg::ChoiceBack`.
 //! `with_refresh(true)` enables `r` → `Msg::ChoiceRefresh`.
 
+use crate::realm::ChoicePayload;
 use crate::realm::Msg;
 use crate::realm::UserEvent;
 use tuirealm::command::{Cmd, CmdResult};
@@ -38,6 +42,7 @@ type LabelFn<T> = Box<dyn Fn(&T) -> String + Send>;
 type SectionFn<T> = Box<dyn Fn(&T) -> &'static str + Send>;
 type SelectableFn<T> = Box<dyn Fn(&T) -> bool + Send>;
 type HighlightFn<T> = Box<dyn Fn(&T) + Send>;
+type PayloadFn<T> = Box<dyn Fn(&T) -> ChoicePayload + Send>;
 
 /// Single- or multi-select picker.
 pub struct Choice<T: Clone + 'static + Send> {
@@ -48,6 +53,12 @@ pub struct Choice<T: Clone + 'static + Send> {
     cursor: usize,
     mode: Mode,
     label_for: LabelFn<T>,
+    /// Derives the typed [`ChoicePayload`] reported for a picked row
+    /// from the row's own `T`. `None` falls back to
+    /// [`ChoicePayload::Index`] (the row's position in `items`). Because
+    /// it reads the same `T` the row displays, the payload can never
+    /// drift out of step with the rendered order (issue #512).
+    payload_for: Option<PayloadFn<T>>,
     can_back: bool,
     section_for: Option<SectionFn<T>>,
     selectable: Option<SelectableFn<T>>,
@@ -84,6 +95,7 @@ impl<T: Clone + 'static + Send> Choice<T> {
             cursor: 0,
             mode: Mode::Single,
             label_for: Box::new(|_| String::new()),
+            payload_for: None,
             can_back: false,
             section_for: None,
             selectable: None,
@@ -107,6 +119,7 @@ impl<T: Clone + 'static + Send> Choice<T> {
             cursor: 0,
             mode: Mode::Multi,
             label_for: Box::new(|_| String::new()),
+            payload_for: None,
             can_back: false,
             section_for: None,
             selectable: None,
@@ -131,6 +144,21 @@ impl<T: Clone + 'static + Send> Choice<T> {
         F: Fn(&T) -> String + Send + 'static,
     {
         self.label_for = Box::new(f);
+        self
+    }
+
+    /// Derive the typed [`ChoicePayload`] each picked row reports, from
+    /// the row's own `T`. Set this so the `ChoicePicked` handler
+    /// resolves the pick from the value that travelled *with* the
+    /// displayed row instead of indexing back into a parallel Vec —
+    /// which is what let a re-ordered / grouped list resolve to the
+    /// wrong item (issue #512). Without it, rows report
+    /// [`ChoicePayload::Index`].
+    pub fn payload_for<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&T) -> ChoicePayload + Send + 'static,
+    {
+        self.payload_for = Some(Box::new(f));
         self
     }
 
@@ -284,6 +312,16 @@ impl<T: Clone + 'static + Send> Choice<T> {
         }
     }
 
+    /// Resolve the payload reported for the row at `idx`: the
+    /// `payload_for` closure applied to that exact item, or the
+    /// positional [`ChoicePayload::Index`] fallback.
+    fn payload_at(&self, idx: usize) -> ChoicePayload {
+        match (self.payload_for.as_ref(), self.items.get(idx)) {
+            (Some(f), Some(item)) => f(item),
+            _ => ChoicePayload::Index(idx),
+        }
+    }
+
     fn confirm_picks(&mut self) -> ConfirmResult {
         // An empty list has nothing to confirm — Enter dismisses
         // instead of latching the "pick at least one" hint, which a
@@ -313,7 +351,10 @@ impl<T: Clone + 'static + Send> Choice<T> {
             self.show_empty_hint = true;
             return ConfirmResult::Stay;
         }
-        ConfirmResult::Picked(picked)
+        // Map each picked row index through `payload_at` so the reported
+        // value derives from the row itself, not its position.
+        let payloads = picked.into_iter().map(|i| self.payload_at(i)).collect();
+        ConfirmResult::Picked(payloads)
     }
 
     /// Returns the laid-out lines plus the line index of the cursor
@@ -417,7 +458,7 @@ impl<T: Clone + 'static + Send> Choice<T> {
 enum ConfirmResult {
     Stay,
     Cancel,
-    Picked(Vec<usize>),
+    Picked(Vec<ChoicePayload>),
 }
 
 impl<T: Clone + 'static + Send> Component for Choice<T> {

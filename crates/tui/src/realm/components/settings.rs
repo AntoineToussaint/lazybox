@@ -17,7 +17,7 @@
 //! settings space stays visible.
 
 use crate::realm::setup_ctx::SettingsSection;
-use crate::realm::{Msg, UserEvent};
+use crate::realm::{ChoicePayload, Msg, UserEvent};
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
 use tuirealm::event::{Event, Key};
@@ -264,7 +264,7 @@ impl AppComponent<Msg, UserEvent> for Settings {
             Key::Enter => self
                 .active_rows()
                 .get(self.cursor)
-                .map(|(_, flat_idx)| Msg::ChoicePicked(vec![*flat_idx])),
+                .map(|(_, flat_idx)| Msg::ChoicePicked(vec![ChoicePayload::Index(*flat_idx)])),
             Key::Esc | Key::Char('q') => Some(Msg::ModalDismissed),
             _ => None,
         }
@@ -372,7 +372,7 @@ mod tests {
         assert_eq!(comp.on(&key(Key::Char('j'))), None);
         assert_eq!(
             comp.on(&key(Key::Enter)),
-            Some(Msg::ChoicePicked(vec![4])),
+            Some(Msg::ChoicePicked(vec![ChoicePayload::Index(4)])),
             "Enter must emit the model's flat settings_actions index"
         );
     }

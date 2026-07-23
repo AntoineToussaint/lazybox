@@ -942,6 +942,15 @@ pub enum Command {
     FetchPrDetails {
         workspace_key: lazybox_core::WorkspaceKey,
     },
+    /// Targeted re-poll of a single workspace's own GitHub entities (its
+    /// PR and any linked issues) instead of the global `Refresh` sweep —
+    /// the "sync this" action. The daemon deep-fetches each entity by
+    /// `(owner, repo, number)` and upserts the result, so read markers
+    /// and state update just for that row. Cheap next to a full sweep;
+    /// no-op for a workspace with no GitHub PR/issue.
+    SyncWorkspace {
+        workspace_key: lazybox_core::WorkspaceKey,
+    },
     /// Start an agent runtime using a structured protocol surface. This
     /// does not replace `Spawn`; terminal clients can keep using PTY
     /// bytes while structured clients subscribe to run events.

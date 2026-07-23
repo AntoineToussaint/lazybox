@@ -658,6 +658,96 @@ pub async fn handle_fetch_repo_labels(config: &ServerConfig, workspace_key: Work
     }
 }
 
+/// Clone the persistent `GhClient` out of the cache, building one on
+/// a cold cache. The std-lock is released before any `.await` so a
+/// cold build never holds it across the `from_credential` network
+/// call (issue #92); the cache lives outside `poll_state` so this
+/// never contends with a running poll tick. `None` means credentials
+/// or client init failed — the caller skips the user-triggered fetch.
+async fn resolve_gh_client(config: &ServerConfig) -> Option<GhClient> {
+    if let Some(client) = config.gh_client_cache.lock().clone() {
+        return Some(client);
+    }
+    let cred = match lazybox_gh::credential_chain()
+        .resolve(lazybox_gh::SOURCE)
+        .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("gh client credentials: {e}");
+            return None;
+        }
+    };
+    match GhClient::from_credential(cred).await {
+        Ok(client) => {
+            *config.gh_client_cache.lock() = Some(client.clone());
+            Some(client)
+        }
+        Err(e) => {
+            tracing::warn!("gh client init: {e}");
+            None
+        }
+    }
+}
+
+/// Recover `(owner, repo, number)` for a GitHub task from its `repo`
+/// (`"owner/repo"`) and the trailing `#N` of its `TaskId` key. `None`
+/// for a task that isn't GitHub-shaped — no repo, or an unparseable
+/// number.
+fn github_target(task: &lazybox_core::Task) -> Option<(String, String, u64)> {
+    let (owner, name) = task.repo.as_deref()?.split_once('/')?;
+    let number = task
+        .id
+        .key
+        .rsplit_once('#')
+        .and_then(|(_, n)| n.parse::<u64>().ok())?;
+    Some((owner.to_string(), name.to_string(), number))
+}
+
+/// Handle `Command::SyncWorkspace`: a targeted re-poll of one
+/// workspace's own GitHub entities — the "sync this" action. Instead
+/// of the global `Refresh` sweep, deep-fetch the workspace's PR and
+/// each linked GitHub issue by `(owner, repo, number)` and upsert the
+/// fresh `Task`, so exactly that row's state and read markers refresh
+/// at a fraction of a full sweep's cost.
+///
+/// Reuses the shared [`upsert`](super::upsert) ingestion path (merge +
+/// persist + `WorkspaceUpserted` broadcast), so read state is
+/// preserved just as it is on a normal poll. No-op for a workspace
+/// with no GitHub PR/issue; per-entity fetch failures are logged and
+/// skipped so one bad entity never poisons the rest.
+pub async fn handle_sync_workspace(config: &ServerConfig, workspace_key: WorkspaceKey) {
+    let Some(client) = resolve_gh_client(config).await else {
+        return;
+    };
+    let Some(workspace) = load_workspace(config, &workspace_key) else {
+        return;
+    };
+
+    if let Some(pr) = workspace.pr.as_ref()
+        && let Some((owner, repo, number)) = github_target(pr)
+    {
+        match client.fetch_single_pr(&owner, &repo, number).await {
+            Ok(Some(task)) => super::upsert(config, task).await,
+            Ok(None) => {}
+            Err(e) => tracing::warn!("sync_workspace {owner}/{repo}#{number} (pr): {e}"),
+        }
+    }
+
+    for issue in &workspace.gh_issues {
+        let Some((owner, repo, number)) = github_target(issue) else {
+            continue;
+        };
+        match client.fetch_single_issue(&owner, &repo, number).await {
+            Ok(Some(task)) => super::upsert(config, task).await,
+            Ok(None) => {}
+            Err(e) => tracing::warn!("sync_workspace {owner}/{repo}#{number} (issue): {e}"),
+        }
+    }
+
+    tracing::info!(workspace = %workspace_key, "sync_workspace: targeted re-poll complete");
+}
+
 /// Handle `Command::FetchPrDetails`: pull the workspace's PR
 /// review-thread activity from GitHub (the field the inbox-scan
 /// query deliberately omits), merge it into the workspace's
@@ -674,40 +764,12 @@ pub async fn handle_fetch_repo_labels(config: &ServerConfig, workspace_key: Work
 /// failure shouldn't pop a modal. The diagnostic still lands in
 /// `/tmp/lazybox.log`.
 pub async fn handle_fetch_pr_details(config: &ServerConfig, workspace_key: WorkspaceKey) {
-    // Use the persistent client from TickState so the rate budget
-    // and observations carry across calls — same logic as the
-    // long-lived poll loop. Without this we'd build a fresh client
-    // for every user-triggered fetch.
-    // Clone the cached client out under a brief std-lock. The lock is
-    // released before any `.await` — building a fresh client on a cold
-    // cache must not hold a lock across the `from_credential` network
-    // call (issue #92). The cache lives outside `poll_state` so this
-    // never contends with a running poll tick.
-    let cached = config.gh_client_cache.lock().clone();
-    let client = match cached {
-        Some(c) => c,
-        None => {
-            let cred = match lazybox_gh::credential_chain()
-                .resolve(lazybox_gh::SOURCE)
-                .await
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!("fetch_pr_details credentials: {e}");
-                    return;
-                }
-            };
-            match GhClient::from_credential(cred).await {
-                Ok(c) => {
-                    *config.gh_client_cache.lock() = Some(c.clone());
-                    c
-                }
-                Err(e) => {
-                    tracing::warn!("fetch_pr_details client init: {e}");
-                    return;
-                }
-            }
-        }
+    // Use the persistent client from TickState so the rate budget and
+    // observations carry across calls — same logic as the long-lived
+    // poll loop. Without this we'd build a fresh client for every
+    // user-triggered fetch.
+    let Some(client) = resolve_gh_client(config).await else {
+        return;
     };
 
     // The node id comes from the workspace snapshot at call time; the
@@ -1725,6 +1787,71 @@ pub async fn prefetch_top_pr_details(
         "prefetch_top_pr_details: {total} PRs prefetched in {}ms, {merged} activities merged",
         started.elapsed().as_millis()
     );
+}
+
+#[cfg(test)]
+mod github_target_tests {
+    use super::github_target;
+    use lazybox_core::{CiStatus, Mergeable, ReviewStatus, Task, TaskId, TaskRole, TaskState};
+
+    fn task(repo: Option<&str>, key: &str) -> Task {
+        Task {
+            id: TaskId {
+                source: "github".into(),
+                key: key.into(),
+            },
+            title: "t".into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Author,
+            ci: CiStatus::None,
+            review: ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: "https://github.com/o/r/pull/42".into(),
+            repo: repo.map(Into::into),
+            branch: None,
+            base_branch: None,
+            updated_at: chrono::Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        }
+    }
+
+    #[test]
+    fn recovers_owner_repo_number_from_a_github_task() {
+        let t = task(Some("octo/widgets"), "octo/widgets#42");
+        assert_eq!(
+            github_target(&t),
+            Some(("octo".into(), "widgets".into(), 42))
+        );
+    }
+
+    #[test]
+    fn none_without_a_repo() {
+        let t = task(None, "octo/widgets#42");
+        assert_eq!(github_target(&t), None);
+    }
+
+    #[test]
+    fn none_when_the_key_has_no_parseable_number() {
+        let t = task(Some("octo/widgets"), "octo/widgets");
+        assert_eq!(github_target(&t), None);
+    }
 }
 
 #[cfg(test)]

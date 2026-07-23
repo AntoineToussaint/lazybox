@@ -931,6 +931,7 @@ impl Server {
                         lazybox_ipc::Command::SyncWorkspace { .. } => "SyncWorkspace",
                         lazybox_ipc::Command::PostReply { .. } => "PostReply",
                         lazybox_ipc::Command::MergePr { .. } => "MergePr",
+                        lazybox_ipc::Command::UpdateBranch { .. } => "UpdateBranch",
                         lazybox_ipc::Command::CloseIssue { .. } => "CloseIssue",
                         lazybox_ipc::Command::DeleteOrClose { .. } => "DeleteOrClose",
                         lazybox_ipc::Command::ConfirmMerge { .. } => "ConfirmMerge",
@@ -1621,6 +1622,9 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::MergePr { workspace_key } => {
             polling::handle_merge_pr(config, workspace_key).await;
+        }
+        lazybox_ipc::Command::UpdateBranch { workspace_key } => {
+            polling::handle_update_branch(config, workspace_key).await;
         }
         lazybox_ipc::Command::CloseIssue { workspace_key } => {
             polling::handle_close_issue(config, workspace_key).await;

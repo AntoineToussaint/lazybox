@@ -3834,6 +3834,76 @@ mod merge_focus_follow_tests {
         )
     }
 
+    /// `Shift-U` on a multi-select fans out one `UpdateBranch` per
+    /// selected PR that's actually behind its base; up-to-date PRs are
+    /// skipped, and the selection clears afterward.
+    #[test]
+    fn bulk_update_branch_fans_out_over_behind_prs_only() {
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+
+        let mut behind_a = workspace("owner/repo#1", true, Duration::hours(1));
+        behind_a.pr.as_mut().unwrap().is_behind_base = true;
+        let up_to_date = workspace("owner/repo#2", true, Duration::hours(2));
+        let mut behind_b = workspace("owner/repo#3", true, Duration::hours(3));
+        behind_b.pr.as_mut().unwrap().is_behind_base = true;
+
+        let key_a = behind_a.key.clone();
+        let key_b = behind_b.key.clone();
+
+        for ws in [behind_a, up_to_date.clone(), behind_b] {
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        }
+
+        // Mark all three rows.
+        for key in [&key_a, &up_to_date.key, &key_b] {
+            assert!(m.sidebar.focus_workspace_key(&SessionKey::from(key)));
+            m.sidebar.toggle_broadcast_select();
+        }
+        assert_eq!(m.sidebar.broadcast_selected_count(), 3);
+
+        let cmds = m.dispatch_action(&Action::UpdateBranchSelected);
+
+        let targets: Vec<lazybox_core::WorkspaceKey> = cmds
+            .into_iter()
+            .map(|c| match c {
+                IpcCommand::UpdateBranch { workspace_key } => workspace_key,
+                other => panic!("expected UpdateBranch, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(targets.len(), 2, "only the two behind PRs fan out");
+        assert!(targets.contains(&key_a));
+        assert!(targets.contains(&key_b));
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "selection clears after the bulk fire",
+        );
+    }
+
+    /// `Shift-U` with no behind-base PR selected fires nothing and
+    /// leaves the selection intact for another action.
+    #[test]
+    fn bulk_update_branch_with_no_behind_pr_is_noop() {
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        let up_to_date = workspace("owner/repo#2", true, Duration::hours(2));
+        let key = up_to_date.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(up_to_date)));
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&key)));
+        m.sidebar.toggle_broadcast_select();
+
+        let cmds = m.dispatch_action(&Action::UpdateBranchSelected);
+        assert!(cmds.is_empty(), "no behind PR → no command");
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            1,
+            "selection survives a no-op bulk update",
+        );
+    }
+
     #[test]
     fn merge_while_viewing_issue_follows_focus_to_pr() {
         let mut m = build_model();

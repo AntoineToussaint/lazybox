@@ -5,6 +5,7 @@ expression: rendered
 
  g ▸ github
   m  merge PR
+  u  update branch
   g  auto-merge on green
   p  policies
   r  reviewers

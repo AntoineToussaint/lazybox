@@ -313,6 +313,8 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::WorkspaceMerged { .. }
                 | IpcEvent::PrMerged { .. }
                 | IpcEvent::PrMergeFailed { .. }
+                | IpcEvent::BranchUpdated { .. }
+                | IpcEvent::BranchUpdateFailed { .. }
                 | IpcEvent::IssueClosed { .. }
                 | IpcEvent::IssueCloseFailed { .. }
                 | IpcEvent::PrClosed { .. }
@@ -609,6 +611,25 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
             return;
         }
+        // `g u` / `Shift-U` reached GitHub and the branch was updated.
+        // The BEHIND tag clears on the next poll (which the handler
+        // woke), so flash a notice now so the keypress reads as done.
+        if let IpcEvent::BranchUpdated { pr_label, .. } = &event {
+            self.flash_info(format!("updated branch {pr_label}"));
+            self.redraw = true;
+            return;
+        }
+        // `g u` reached GitHub and was rejected (conflict, permissions)
+        // — the update did NOT happen. Persistent error naming the
+        // reason, mirroring `PrMergeFailed`. The PR stays actionable.
+        if let IpcEvent::BranchUpdateFailed {
+            pr_label, reason, ..
+        } = &event
+        {
+            self.flash_error(format!("✗ update branch failed — {pr_label}: {reason}"));
+            self.redraw = true;
+            return;
+        }
         // `x c` reached GitHub and the issue was closed. The local
         // Task still reads `Open` until the next poll, so flash a notice
         // now; the daemon's open→closed detection (which the close
@@ -833,6 +854,8 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::WorkspaceMerged { .. }
             | IpcEvent::PrMerged { .. }
             | IpcEvent::PrMergeFailed { .. }
+            | IpcEvent::BranchUpdated { .. }
+            | IpcEvent::BranchUpdateFailed { .. }
             | IpcEvent::IssueClosed { .. }
             | IpcEvent::IssueCloseFailed { .. }
             | IpcEvent::PrClosed { .. }
@@ -1015,6 +1038,8 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::WorkspaceMerged { .. }
                 | IpcEvent::PrMerged { .. }
                 | IpcEvent::PrMergeFailed { .. }
+                | IpcEvent::BranchUpdated { .. }
+                | IpcEvent::BranchUpdateFailed { .. }
                 | IpcEvent::IssueClosed { .. }
                 | IpcEvent::IssueCloseFailed { .. }
                 | IpcEvent::PrClosed { .. }

@@ -104,6 +104,15 @@ impl ProviderHandle {
             Self::Linear(c) => lazybox_core::TaskProvider::merge(c, ws).await,
         }
     }
+    pub async fn update_branch(
+        &self,
+        ws: &lazybox_core::Workspace,
+    ) -> Result<(), lazybox_core::ProviderError> {
+        match self {
+            Self::Github(c) => lazybox_core::TaskProvider::update_branch(c, ws).await,
+            Self::Linear(c) => lazybox_core::TaskProvider::update_branch(c, ws).await,
+        }
+    }
     pub async fn close_issue(
         &self,
         ws: &lazybox_core::Workspace,
@@ -298,6 +307,64 @@ pub async fn handle_merge_pr(config: &ServerConfig, workspace_key: WorkspaceKey)
         });
     }
     // Wake the poll loop so MERGED state lands in <5s instead of
+    // waiting out the full interval.
+    config.poll_wake.notify_one();
+}
+
+/// Handle `Command::UpdateBranch`: load the workspace, recover the PR's
+/// GraphQL node id from its primary task, and ship an
+/// `updatePullRequestBranch` mutation — the "Update branch" button on
+/// github.com. On success the next poll cycle picks up the fresh
+/// `mergeStateStatus` and the `BEHIND` tag clears.
+///
+/// Errors surface as a distinct, persistent `Event::BranchUpdateFailed`
+/// (mirroring the merge path) so a rejected update can't be mistaken for
+/// "the keypress did nothing." The PR stays actionable.
+pub async fn handle_update_branch(config: &ServerConfig, workspace_key: WorkspaceKey) {
+    let emit_err = |msg: &str| {
+        let _ = config
+            .bus
+            .send(Event::provider_error_retryable("update-branch", msg));
+    };
+
+    let Some(ws) = load_workspace(config, &workspace_key) else {
+        emit_err(&format!(
+            "update-branch: workspace {workspace_key} not found"
+        ));
+        return;
+    };
+    let pr_label = ws
+        .pr
+        .as_ref()
+        .map(|p| p.id.key.clone())
+        .unwrap_or_else(|| workspace_key.as_str().to_string());
+
+    let provider = match build_provider_for_workspace(&workspace_key).await {
+        Ok(p) => p,
+        Err(e) => {
+            emit_err(&e);
+            return;
+        }
+    };
+    if let Err(e) = provider.update_branch(&ws).await {
+        tracing::warn!("update-branch {workspace_key}: {e:?}");
+        let _ = config.bus.send(Event::BranchUpdateFailed {
+            workspace_key: workspace_key.clone(),
+            pr_label,
+            reason: e.to_string(),
+        });
+        return;
+    }
+    tracing::info!("updated branch for workspace {workspace_key}");
+
+    // The BEHIND tag won't clear until the next poll re-reads
+    // `mergeStateStatus`. Broadcast `BranchUpdated` so the TUI flashes a
+    // footer notice and the user doesn't think the keypress did nothing.
+    let _ = config.bus.send(Event::BranchUpdated {
+        workspace_key: workspace_key.clone(),
+        pr_label,
+    });
+    // Wake the poll loop so the refreshed state lands in <5s instead of
     // waiting out the full interval.
     config.poll_wake.notify_one();
 }

@@ -2740,6 +2740,30 @@ impl lazybox_core::TaskProvider for GhClient {
             .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))
     }
 
+    /// Update the workspace's PR branch against its base — the "Update
+    /// branch" button on github.com. Requires `workspace.pr.node_id`
+    /// (the polling cycle fills it in).
+    async fn update_branch(
+        &self,
+        workspace: &lazybox_core::Workspace,
+    ) -> Result<(), lazybox_core::ProviderError> {
+        let Some(pr) = workspace.pr.as_ref() else {
+            return Err(lazybox_core::ProviderError::permanent(
+                "github",
+                format!("workspace {} has no PR", workspace.key),
+            ));
+        };
+        let Some(node_id) = pr.node_id.as_deref() else {
+            return Err(lazybox_core::ProviderError::permanent(
+                "github",
+                "PR has no node_id (poll first)",
+            ));
+        };
+        self.update_branch(node_id)
+            .await
+            .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))
+    }
+
     /// Close the workspace's GitHub issue (as `NOT_PLANNED`). GitHub
     /// exposes no non-admin issue *delete* over the API, so this is
     /// lazybox's "delete issue." Requires the issue's `node_id` — the
@@ -3674,6 +3698,36 @@ mod tests {
             .merge_pr("PR_kwDO")
             .await
             .expect("merging a squash-only repo must succeed");
+    }
+
+    /// `updatePullRequestBranch` success reply is mutation-shaped (no
+    /// `search` field), like `merge_pr` — it must parse cleanly and
+    /// return `Ok` rather than leak the raw body as a false error.
+    #[tokio::test(flavor = "current_thread")]
+    async fn update_branch_success_reports_ok() {
+        const BODY: &str =
+            r#"{"data":{"updatePullRequestBranch":{"pullRequest":{"id":"PR_kwDO"}}}}"#;
+        let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
+        let client = make_client(&base_uri);
+        client
+            .update_branch("PR_kwDO")
+            .await
+            .expect("update-branch success must not report a false failure");
+    }
+
+    /// A branch already up to date comes back as a GraphQL error that
+    /// matches the idempotence markers — the caller asked for "up to
+    /// date," which it is, so this must resolve to `Ok`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn update_branch_already_up_to_date_is_ok() {
+        const BODY: &str =
+            r#"{"data":null,"errors":[{"message":"No new commits on the base branch."}]}"#;
+        let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
+        let client = make_client(&base_uri);
+        client
+            .update_branch("PR_kwDO")
+            .await
+            .expect("an already-updated branch is success, not failure");
     }
 
     /// Same class of bug for the label mutation — its `data` node is

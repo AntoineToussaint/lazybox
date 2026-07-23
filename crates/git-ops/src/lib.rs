@@ -1801,21 +1801,22 @@ async fn add_worktree_resilient(
     )))
 }
 
-/// Parse git's "'<branch>' is already used by worktree at '<path>'"
-/// refusal (older gits phrase it "is already checked out at '<path>'")
-/// out of a failed `worktree add`, returning the holding worktree's
-/// path. `None` for any other failure — the caller then treats the
-/// error as fatal.
+/// Parse the holding worktree's path out of a failed `worktree add`
+/// where the branch is checked out elsewhere, returning `None` for any
+/// other failure (the caller then treats the error as fatal). git
+/// phrases this collision three ways across versions and add flags, all
+/// carrying the path in trailing single quotes: `'<b>' is already used
+/// by worktree at '<path>'` (modern `-B`) and `cannot force update the
+/// branch '<b>' used by worktree at '<path>'` (the branch-reset guard)
+/// both match `used by worktree at`; older gits say `'<b>' is already
+/// checked out at '<path>'`.
 fn branch_already_checked_out_at(err: &GitError) -> Option<PathBuf> {
     let GitError::Command(msg) = err else {
         return None;
     };
-    let after_marker = [
-        "is already used by worktree at",
-        "is already checked out at",
-    ]
-    .into_iter()
-    .find_map(|m| msg.find(m).map(|i| i + m.len()))?;
+    let after_marker = ["used by worktree at", "is already checked out at"]
+        .into_iter()
+        .find_map(|m| msg.find(m).map(|i| i + m.len()))?;
     let rest = &msg[after_marker..];
     let start = rest.find('\'')? + 1;
     let end = rest[start..].find('\'')? + start;
@@ -2920,6 +2921,19 @@ mod resilient_add_tests {
         assert_eq!(
             branch_already_checked_out_at(&older),
             Some(PathBuf::from("/some/other/tree"))
+        );
+        // The branch-reset guard's distinct wording — note the branch
+        // name is itself quoted before the path, so the parser must
+        // anchor on the marker, not the first quote in the message.
+        let reset_guard = GitError::Command(
+            "Preparing worktree (resetting branch 'feat'; was at 6790fc7)\n\
+             fatal: cannot force update the branch 'feat' used by worktree at \
+             '/repo.git/.claude/worktrees/agent-abc'\n"
+                .into(),
+        );
+        assert_eq!(
+            branch_already_checked_out_at(&reset_guard),
+            Some(PathBuf::from("/repo.git/.claude/worktrees/agent-abc"))
         );
         let unrelated = GitError::Command("fatal: invalid reference: refs/heads/feat\n".into());
         assert_eq!(branch_already_checked_out_at(&unrelated), None);

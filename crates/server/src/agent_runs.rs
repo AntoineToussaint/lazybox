@@ -615,16 +615,25 @@ impl StreamEventMapper {
                 error,
                 ..
             } => {
-                let call_id = id
-                    .or_else(|| index.and_then(|i| self.tool_ids_by_index.get(&i).cloned()))
-                    .or_else(|| index.map(|i| format!("tool-index-{i}")))
-                    .unwrap_or_else(|| "tool-unknown".into());
-                events.push(Event::AgentToolCallFinished {
-                    run_id,
-                    call_id,
-                    output_json: output.map(|value| value.to_string()),
-                    error,
-                });
+                // Claude emits `content_block_stop` for EVERY content block
+                // — text, thinking, and tool_use alike — but only a
+                // `tool_use` block recorded a start (`tool_ids_by_index`).
+                // Resolve the call id from an explicit id (Codex) or a
+                // recorded tool start only; a stop matching neither is a
+                // non-tool block, so emit nothing rather than fabricating a
+                // phantom `tool-index-N` finished-call in every client.
+                // `remove` consumes the mapping — Claude resets block
+                // indices per message, so a reused index in a later message
+                // must not re-resolve a prior turn's tool.
+                let call_id = id.or_else(|| index.and_then(|i| self.tool_ids_by_index.remove(&i)));
+                if let Some(call_id) = call_id {
+                    events.push(Event::AgentToolCallFinished {
+                        run_id,
+                        call_id,
+                        output_json: output.map(|value| value.to_string()),
+                        error,
+                    });
+                }
             }
             ParsedAgentEvent::Usage {
                 input_tokens,
@@ -765,4 +774,92 @@ fn question_choices(raw: &Value) -> Vec<String> {
                 .map(str::to_string)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn tool_finished_ids(events: &[Event]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                Event::AgentToolCallFinished { call_id, .. } => Some(call_id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Claude emits `content_block_stop` for every content block. Only a
+    /// tool_use block records a `ToolUseStart`, so a text/thinking block's
+    /// stop must NOT fabricate a phantom finished tool-call (the old
+    /// `tool-index-N` fallback did exactly that in every JSON-API client).
+    #[test]
+    fn non_tool_block_stop_emits_no_finished_call() {
+        let run = AgentRunId(1);
+        let mut m = StreamEventMapper::default();
+
+        // A real tool at index 0: start then stop → one finished call.
+        let started = m.map(
+            run,
+            ParsedAgentEvent::ToolUseStart {
+                index: Some(0),
+                id: Some("toolu_abc".into()),
+                name: Some("Bash".into()),
+                input: None,
+                raw: json!({}),
+            },
+        );
+        assert!(matches!(
+            started.as_slice(),
+            [
+                Event::AgentRawJson { .. },
+                Event::AgentToolCallStarted { .. }
+            ]
+        ));
+        let stopped = m.map(run, tool_stop(0));
+        assert_eq!(tool_finished_ids(&stopped), vec!["toolu_abc".to_string()]);
+
+        // A plain text block at index 1 only ever emits a stop (no start).
+        // It must produce no finished tool-call — just the raw passthrough.
+        let text_stop = m.map(run, tool_stop(1));
+        assert!(tool_finished_ids(&text_stop).is_empty());
+        assert!(matches!(text_stop.as_slice(), [Event::AgentRawJson { .. }]));
+    }
+
+    /// Claude resets block indices per assistant message. A tool at index 0
+    /// in message 1, then a text block at index 0 in message 2, must not
+    /// re-resolve the message-1 tool: the stop consumes its mapping.
+    #[test]
+    fn reused_block_index_does_not_refinish_a_prior_tool() {
+        let run = AgentRunId(1);
+        let mut m = StreamEventMapper::default();
+        m.map(
+            run,
+            ParsedAgentEvent::ToolUseStart {
+                index: Some(0),
+                id: Some("toolu_first".into()),
+                name: Some("Bash".into()),
+                input: None,
+                raw: json!({}),
+            },
+        );
+        assert_eq!(
+            tool_finished_ids(&m.map(run, tool_stop(0))),
+            vec!["toolu_first".to_string()]
+        );
+        // Message 2's text block reuses index 0 — its stop resolves nothing.
+        assert!(tool_finished_ids(&m.map(run, tool_stop(0))).is_empty());
+    }
+
+    fn tool_stop(index: u64) -> ParsedAgentEvent {
+        ParsedAgentEvent::ToolUseStop {
+            index: Some(index),
+            id: None,
+            output: None,
+            error: None,
+            raw: json!({}),
+        }
+    }
 }

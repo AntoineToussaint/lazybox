@@ -105,14 +105,14 @@ pub struct RightPane {
     /// Agent the `f` (fix) shortcut spawns. Configurable via YAML
     /// (`setup.default_agent`); defaults to `"claude"`.
     default_agent: String,
-    /// Visibility cycle for the task-body / description section.
+    /// Visibility of the task-body / description teaser.
     /// Default `Collapsed`: the activity feed is what users come to
     /// the inbox for; the body is reference material they can pop
-    /// open with `b`. `b` cycles
-    /// `Collapsed → Preview → Full → Collapsed`. Preview caps the
-    /// height at `task_body_max_rows`; Full drops the cap entirely
-    /// so a long PR description is fully readable (the activity
-    /// feed shrinks accordingly).
+    /// open with `d`. `d` toggles `Collapsed ⇄ Preview`, where Preview
+    /// caps the inline height at `task_body_max_rows`. A body longer
+    /// than the cap (or rich markdown the teaser degrades) is read in
+    /// the scrollable reader modal (#448), not by growing the pane —
+    /// see [`TaskBodyView`] and [`Self::toggle_task_body`].
     task_body_view: TaskBodyView,
     /// Resolved cap on the task-body expanded height, sourced from
     /// `~/.lazybox/config.yaml::ui.task_body_max_rows` (default 8).
@@ -2115,7 +2115,14 @@ impl RightPane {
         }
         // A GFM table delimiter row — `| --- | :--: |` — is unambiguous
         // and is what the teaser flattens into an unreadable single line.
+        // Skip lines indented into an (unfenced) code block: 4+ leading
+        // spaces or a leading tab makes it indented code, where a
+        // `| --- |`-shaped line is literal text, not a table delimiter.
         body.lines().any(|line| {
+            let indent = line.len() - line.trim_start_matches(' ').len();
+            if indent >= 4 || line.starts_with('\t') {
+                return false;
+            }
             let t = line.trim();
             t.contains('|')
                 && t.contains('-')

@@ -1008,6 +1008,28 @@ mod description_expand_tests {
         assert_eq!(pane.task_body_view, TaskBodyView::Collapsed);
     }
 
+    #[test]
+    fn table_shaped_line_in_indented_code_is_not_treated_as_a_table() {
+        // A `| --- |`-shaped line indented into a code block (4 spaces)
+        // is literal text the teaser handles fine — it must NOT trip the
+        // rich-modal heuristic, so a short body like this just collapses
+        // on a second `d` rather than opening the reader.
+        let mut pane = pane_showing("run this:\n\n    | --- | :--: |\n\ndone");
+        pane.toggle_task_body(); // Collapsed → Preview
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        draw(&mut pane, &mut term);
+        assert!(
+            pane.click_hits.body_more_row.is_none(),
+            "the short body isn't truncated",
+        );
+        pane.toggle_task_body(); // d again → collapse (not a real table)
+        assert!(
+            !pane.take_open_description(),
+            "an indented code line must not be mistaken for a table",
+        );
+        assert_eq!(pane.task_body_view, TaskBodyView::Collapsed);
+    }
+
     fn description_header_text(pane: &mut RightPane, w: u16, h: u16) -> String {
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
         term.draw(|f| pane.render(Rect::new(0, 0, w, h), f, true))

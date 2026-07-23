@@ -729,19 +729,45 @@ fn pack_words(
         }
         if cur.is_empty() && ww > avail(on_first) {
             // A single word longer than the line: hard-split by chars.
-            for chunk in hard_split(w, avail(on_first)) {
-                if chunk_width(&chunk) >= avail(on_first) {
-                    lines.push(chunk);
-                    on_first = false;
-                } else {
+            // `hard_split` fills every chunk to capacity except the
+            // last, so all but the final chunk are complete lines; only
+            // the final (possibly short) chunk carries over into `cur`.
+            // Assigning `cur` from just the last chunk (rather than any
+            // sub-capacity chunk) keeps this correct even if the first-
+            // vs. continuation-line width ever diverged — an earlier
+            // chunk can no longer clobber a carried-over one.
+            let chunks = hard_split(w, avail(on_first));
+            let last = chunks.len().saturating_sub(1);
+            for (i, chunk) in chunks.into_iter().enumerate() {
+                if i == last && chunk_width(&chunk) < avail(on_first) {
                     cur = chunk;
                     cur_cols = chunk_width(&cur);
+                } else {
+                    lines.push(chunk);
+                    on_first = false;
                 }
             }
             continue;
         }
         if !cur.is_empty() {
-            cur.push(Tok::new(" ", Style::default()));
+            // Bridge the inter-word space. When the words on both sides
+            // belong to the same link, the space sits *inside* the link
+            // text — carry the url (and link style) onto it so the
+            // click-map stays contiguous and a click landing on the
+            // space still opens the link, rather than falling into a
+            // one-column dead zone between the two words' hit spans.
+            let prev_url = cur.last().and_then(|t| t.url.clone());
+            let (space_style, space_url) = match (prev_url, w.first()) {
+                (Some(p), Some(first)) if first.url.as_deref() == Some(p.as_str()) => {
+                    (first.style, Some(p))
+                }
+                _ => (Style::default(), None),
+            };
+            cur.push(Tok {
+                text: " ".to_string(),
+                style: space_style,
+                url: space_url,
+            });
             cur_cols += 1;
         }
         cur.extend(w.iter().cloned());
@@ -1031,6 +1057,69 @@ mod tests {
             .map(|s| s.content.as_ref())
             .collect();
         assert!(text.contains("docs"), "{text}");
+    }
+
+    #[test]
+    fn multi_word_link_click_map_has_no_interior_gap() {
+        // A link whose text spans several words must resolve at every
+        // column from its first char through its last — including the
+        // spaces *between* the words, which sit inside the link.
+        let doc = render("go to [the read me file](https://example.com/z) now", 60);
+        let hit = doc.links.first().expect("a link recorded");
+        assert_eq!(hit.url, "https://example.com/z");
+        let line = hit.line;
+        // Find the full span of the link text on that line: from the
+        // earliest link-start to the latest link-end recorded for it.
+        let start = doc
+            .links
+            .iter()
+            .filter(|l| l.line == line && l.url == hit.url)
+            .map(|l| l.start)
+            .min()
+            .unwrap();
+        let end = doc
+            .links
+            .iter()
+            .filter(|l| l.line == line && l.url == hit.url)
+            .map(|l| l.end)
+            .max()
+            .unwrap();
+        for col in start..end {
+            assert_eq!(
+                doc.link_at(line, col),
+                Some("https://example.com/z"),
+                "col {col} inside the multi-word link must resolve",
+            );
+        }
+        // And the link text (including its spaces) is intact.
+        let text: String = doc.lines[line]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.contains("the read me file"), "{text}");
+    }
+
+    #[test]
+    fn over_long_word_hard_splits_without_dropping_chars() {
+        // A single word far wider than the line must wrap by chars with
+        // no content lost — every character of the original survives in
+        // order across the produced lines.
+        let word = "abcdefghijklmnopqrstuvwxyz0123456789".repeat(3);
+        let doc = render(&word, 10);
+        let joined: String = doc
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<String>()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert_eq!(joined, word, "no characters may be dropped on hard-split");
+        for l in &doc.lines {
+            let w: usize = l.spans.iter().map(|s| s.content.chars().count()).sum();
+            assert!(w <= 10, "hard-split line exceeds width: {w}");
+        }
     }
 
     #[test]

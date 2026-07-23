@@ -1680,6 +1680,7 @@ pub async fn dispatch_command(
                     false,
                     false,
                     None,
+                    false,
                 )
                 .await;
             }

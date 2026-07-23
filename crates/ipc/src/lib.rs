@@ -1562,7 +1562,7 @@ pub enum Event {
         message: String,
     },
     /// Reply to [`Command::FetchScrollback`]: the terminal's history as
-    /// the backend retains it (tmux `capture-pane -e -S -<limit>`,
+    /// the backend retains it (tmux `capture-pane -e -J -S -<limit>`,
     /// normalized like the restart-recovery seed). Unlike
     /// [`Event::TerminalResync`] — whose `replay` is the raw ring
     /// stream and therefore carries the inner program's escape
@@ -1593,7 +1593,6 @@ pub enum Event {
     },
     /// One agent's lazybox-managed CLI update finished. `message`
     /// carries the actionable failure detail when `ok` is false.
-    /// Appended last; see `KeepMergedWorkspace`.
     AgentCliUpdateFinished {
         agent_id: String,
         display_name: String,
@@ -1601,6 +1600,18 @@ pub enum Event {
         installed_before: Option<String>,
         installed_after: Option<String>,
         message: String,
+    },
+    /// Recovered interactive agents whose persisted PTY launch contract
+    /// predates the running daemon's requirement. The ids are guaranteed to
+    /// be a subset of the [`Event::Snapshot`] sent by the same Subscribe
+    /// response, so a client never warns about a terminal it was not given.
+    /// The processes remain attached; clients ask the user to close and reopen
+    /// them.
+    ///
+    /// Appended last for bincode ordinal compatibility; see
+    /// [`PROTOCOL_FINGERPRINT`].
+    RecoveredTerminalsRequireRestart {
+        terminal_ids: Vec<TerminalId>,
     },
 }
 

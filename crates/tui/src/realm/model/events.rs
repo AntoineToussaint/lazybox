@@ -358,7 +358,8 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::TerminalInputRejected { .. }
                 | IpcEvent::CommandRejected { .. }
                 | IpcEvent::AgentCliUpdatesChecked { .. }
-                | IpcEvent::AgentCliUpdateFinished { .. } => {}
+                | IpcEvent::AgentCliUpdateFinished { .. }
+                | IpcEvent::RecoveredTerminalsRequireRestart { .. } => {}
             }
         }
         // Agent-state pings repeat at the detector's cadence while an
@@ -865,7 +866,8 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::TerminalInputRejected { .. }
             | IpcEvent::CommandRejected { .. }
             | IpcEvent::AgentCliUpdatesChecked { .. }
-            | IpcEvent::AgentCliUpdateFinished { .. } => {}
+            | IpcEvent::AgentCliUpdateFinished { .. }
+            | IpcEvent::RecoveredTerminalsRequireRestart { .. } => {}
         }
         // Background-poll indicator. Lights up whenever the daemon
         // emits PollProgress (any cycle, initial or not); clears on
@@ -1029,7 +1031,8 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::TerminalInputRejected { .. }
                 | IpcEvent::CommandRejected { .. }
                 | IpcEvent::AgentCliUpdatesChecked { .. }
-                | IpcEvent::AgentCliUpdateFinished { .. } => {}
+                | IpcEvent::AgentCliUpdateFinished { .. }
+                | IpcEvent::RecoveredTerminalsRequireRestart { .. } => {}
             }
         }
         // CleanWorktrees finished — replace the "cleaning…" notice
@@ -1061,6 +1064,27 @@ impl<T: TerminalAdapter> Model<T> {
             self.flash(
                 format!("⚠ {command} was not accepted — {message}"),
                 crate::realm::components::footer::NoticeSeverity::Retryable,
+            );
+        }
+        // A recovered process cannot inherit a newer PTY launch environment.
+        // This is terminal lifecycle state, not a provider failure: keep it
+        // out of first-poll termination, sync history, and manual-refresh
+        // acknowledgement handling.
+        if let IpcEvent::RecoveredTerminalsRequireRestart { terminal_ids } = &event
+            && !terminal_ids.is_empty()
+        {
+            let count = terminal_ids.len();
+            let noun = if count == 1 {
+                "agent session was"
+            } else {
+                "agent sessions were"
+            };
+            self.flash(
+                format!(
+                    "⚠ restart required — {count} recovered {noun} started by an older \
+                     lazybox build; close and reopen the terminal to enable scrolling"
+                ),
+                crate::realm::components::footer::NoticeSeverity::Permanent,
             );
         }
         // Out-of-band agent-CLI version check. A scheduled sweep stays

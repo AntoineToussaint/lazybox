@@ -7810,6 +7810,52 @@ mod spawn_spinner_projection_tests {
             "spinner cleared by its own terminal"
         );
     }
+
+    #[test]
+    fn recovered_agent_restart_warning_isolated_from_polling_refresh_and_spawns() {
+        let mut m = build_model();
+        let target = SessionKey::new("github:o/r#1");
+        m.status
+            .note_spawning("codex", target, TerminalKind::Agent("codex".into()), 0);
+        m.show_polling(vec!["github".into()]);
+
+        m.handle_daemon_event(IpcEvent::RecoveredTerminalsRequireRestart {
+            terminal_ids: vec![TerminalId(7)],
+        });
+
+        assert!(
+            m.status.spawning.is_some(),
+            "a recovery warning must not cancel an unrelated active spawn"
+        );
+        assert!(
+            m.status.polling.is_some(),
+            "terminal compatibility must not terminate first-poll feedback"
+        );
+        m.status.polling_last_tick =
+            std::time::Instant::now() - std::time::Duration::from_millis(100);
+        assert!(
+            m.polling_tick().is_none(),
+            "terminal compatibility must not queue a delayed polling failure"
+        );
+        assert!(m.status.dismiss_polling());
+
+        m.pending_refresh_ack = true;
+        m.handle_daemon_event(IpcEvent::RecoveredTerminalsRequireRestart {
+            terminal_ids: vec![TerminalId(7)],
+        });
+        assert!(
+            m.pending_refresh_ack,
+            "terminal compatibility must not consume a manual refresh acknowledgement"
+        );
+        let notice = m.status.notice.as_ref().expect("restart notice");
+        assert!(notice.message.contains("restart required"));
+        assert!(!notice.message.contains("spawn failed"));
+        assert!(!notice.message.contains("sync failed"));
+        assert_eq!(
+            notice.severity,
+            crate::realm::components::footer::NoticeSeverity::Permanent
+        );
+    }
 }
 
 #[cfg(test)]

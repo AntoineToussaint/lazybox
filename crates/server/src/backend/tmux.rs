@@ -590,18 +590,18 @@ impl TmuxBackend {
     /// Reconstruct a reattaching client's scrollback from tmux's own
     /// history. The daemon's replay ring lives in memory and dies with
     /// the daemon; tmux, however, keeps `history-limit` lines per pane
-    /// across restarts. `capture-pane -e -S -<limit>` dumps that history
-    /// (styled, via `-e`) down to the current bottom line, which we hand
-    /// to the DaemonPty as its durable seed — replayed ahead of the live
-    /// attach bytes on every snapshot (#420) — so the client rebuilds
-    /// the full scrollback instead of a single repainted screen.
+    /// across restarts. `capture-pane -e -J -S -<limit>` dumps that history
+    /// (styled, via `-e`) and joins tmux's soft-wrapped screen rows back into
+    /// logical lines (`-J`) before we hand it to the DaemonPty as its durable
+    /// seed. The seed is replayed ahead of live attach bytes on every snapshot
+    /// (#420), so the client rebuilds full scrollback without hardening wraps.
     ///
     /// Best-effort: any failure returns an empty seed and the client
     /// simply starts from the live repaint.
     async fn capture_history(&self, key: &str) -> Vec<u8> {
         let start = format!("-{HISTORY_LIMIT}");
         let out = match self
-            .tmux(&["capture-pane", "-p", "-e", "-S", &start, "-t", key])
+            .tmux(&["capture-pane", "-p", "-e", "-J", "-S", &start, "-t", key])
             .await
         {
             Ok(out) => out.stdout,

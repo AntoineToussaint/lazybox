@@ -7,7 +7,7 @@
 use lazybox_ipc::{Command, Event, TerminalKind, channel};
 use lazybox_server::backend::{MockBackend, SessionBackend};
 use lazybox_server::{Server, ServerConfig};
-use lazybox_store::MemoryStore;
+use lazybox_store::{MemoryStore, Store};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -695,6 +695,12 @@ async fn interactive_claude_spawn_keeps_permission_prompts() {
             argv.iter().any(|a| a == "--settings"),
             "claude must launch with --settings for hook injection: {argv:?}",
         );
+        let env = mock.env_for(&key).await.expect("captured spawn env");
+        assert!(
+            env.iter()
+                .any(|(key, value)| key == "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN" && value == "1"),
+            "the interactive spawn boundary must receive Claude's inline renderer env: {env:?}",
+        );
     })
     .await
     .expect("deadline");
@@ -735,6 +741,15 @@ async fn autonomous_spawn_wires_no_permission_consistently() {
         let event_flag = event_flag.expect("TerminalSpawned broadcast");
 
         let key = mock.list().await.unwrap().into_iter().next().unwrap();
+        assert_eq!(
+            config
+                .store
+                .get_kv(&format!("terminal-pty-generation:{key}"))
+                .expect("launch generation read")
+                .as_deref(),
+            Some("1"),
+            "fresh Claude PTYs persist the renderer compatibility generation"
+        );
         let argv_flag = mock
             .argv_for(&key)
             .await
@@ -1033,6 +1048,106 @@ async fn recover_sessions_reattaches_survivors() {
             .expect("bus event")
             .expect("not closed");
         assert!(matches!(evt, Event::TerminalSpawned { .. }));
+    })
+    .await
+    .expect("deadline");
+}
+
+#[tokio::test]
+async fn recovered_pre_generation_claude_requires_an_explicit_restart() {
+    timeout(TEST_DEADLINE, async {
+        let backend = MockBackend::new();
+        let backend_key = backend
+            .spawn(&["claude".into()], None, &[], "legacy-claude")
+            .await
+            .expect("pre-existing backend session");
+        let store = Arc::new(MemoryStore::new());
+        let metadata =
+            serde_json::to_string(&("test:legacy-claude", TerminalKind::Agent("claude".into())))
+                .expect("metadata");
+        store
+            .set_kv(&format!("terminal:{backend_key}"), &metadata)
+            .expect("persist legacy metadata");
+
+        let config = ServerConfig::with_store_and_backend(store, Arc::new(backend));
+        lazybox_server::spawn_handler::recover_sessions(&config).await;
+        assert_eq!(config.outdated_agent_terminals.lock().await.len(), 1);
+
+        let mut client = subscribed(config).await;
+        let warning = timeout(Duration::from_secs(1), client.recv())
+            .await
+            .expect("restart warning deadline")
+            .expect("restart warning event");
+        assert!(matches!(
+            warning,
+            Event::RecoveredTerminalsRequireRestart { terminal_ids }
+                if terminal_ids.len() == 1
+        ));
+    })
+    .await
+    .expect("deadline");
+}
+
+#[tokio::test]
+async fn subscribe_does_not_warn_for_an_outdated_terminal_absent_from_its_snapshot() {
+    timeout(TEST_DEADLINE, async {
+        let config = ServerConfig::in_memory();
+        config
+            .outdated_agent_terminals
+            .lock()
+            .await
+            .insert(lazybox_ipc::TerminalId(404));
+
+        let mut client = subscribed(config).await;
+        assert!(
+            timeout(Duration::from_millis(100), client.recv())
+                .await
+                .is_err(),
+            "an auxiliary teardown marker without a snapshotted terminal must not emit a warning"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
+#[tokio::test]
+async fn recovered_claude_at_current_or_newer_generation_needs_no_restart() {
+    timeout(TEST_DEADLINE, async {
+        let backend = MockBackend::new();
+        let store = Arc::new(MemoryStore::new());
+        for generation in [1, 2] {
+            let backend_key = backend
+                .spawn(
+                    &["claude".into()],
+                    None,
+                    &[],
+                    &format!("claude-generation-{generation}"),
+                )
+                .await
+                .expect("pre-existing backend session");
+            let metadata = serde_json::to_string(&(
+                format!("test:claude-generation-{generation}"),
+                TerminalKind::Agent("claude".into()),
+            ))
+            .expect("metadata");
+            store
+                .set_kv(&format!("terminal:{backend_key}"), &metadata)
+                .expect("persist terminal metadata");
+            store
+                .set_kv(
+                    &format!("terminal-pty-generation:{backend_key}"),
+                    &generation.to_string(),
+                )
+                .expect("persist launch generation");
+        }
+
+        let config = ServerConfig::with_store_and_backend(store, Arc::new(backend));
+        lazybox_server::spawn_handler::recover_sessions(&config).await;
+
+        assert!(
+            config.outdated_agent_terminals.lock().await.is_empty(),
+            "a recovered process at least as new as this daemon's PTY contract is compatible"
+        );
     })
     .await
     .expect("deadline");

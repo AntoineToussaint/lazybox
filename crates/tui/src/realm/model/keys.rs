@@ -1218,6 +1218,17 @@ impl<T: TerminalAdapter> Model<T> {
                     self.redraw = true;
                 }
 
+                // A click landing in the terminal pane (or nowhere)
+                // breaks any pending sidebar / activity double-click
+                // sequence, so the next click there starts fresh. This
+                // keeps the #182 escape hatch — click into a terminal,
+                // then click that workspace's row to step back out to
+                // the sidebar — from being read as a sidebar
+                // double-click-to-enter gesture (#441).
+                if !matches!(target, Some(PaneFocus::Sidebar) | Some(PaneFocus::Right)) {
+                    self.last_click = None;
+                }
+
                 // A left-click in the terminal pane ALWAYS starts a
                 // potential lazybox selection — we commit to that
                 // even when the inner program is mouse-tracking.
@@ -1278,10 +1289,10 @@ impl<T: TerminalAdapter> Model<T> {
                         if handled {
                             // Double-click on a repo header → toggle
                             // its collapsed state (same effect as
-                            // Space). Cursor already moved via
-                            // click_to_select above so
-                            // `toggle_repo_at_cursor` operates on
-                            // the just-clicked header.
+                            // Space); on a workspace row → jump into
+                            // its live agent terminal (#441). Cursor
+                            // already moved via click_to_select above,
+                            // so both operate on the just-clicked row.
                             let is_double = matches!(button, crossterm::event::MouseButton::Left)
                                 && self
                                     .last_click
@@ -1291,23 +1302,34 @@ impl<T: TerminalAdapter> Model<T> {
                                             && t.elapsed() <= crate::realm::DOUBLE_CLICK_WINDOW
                                     })
                                     .unwrap_or(false);
-                            if is_double && self.sidebar.cursor_on_repo_header() {
-                                self.last_click = None;
-                                self.sidebar.toggle_repo_at_cursor();
+                            let double_on_workspace =
+                                is_double && !self.sidebar.cursor_on_repo_header();
+                            if is_double {
+                                self.last_click = None; // consume the pair
+                                if self.sidebar.cursor_on_repo_header() {
+                                    self.sidebar.toggle_repo_at_cursor();
+                                }
                             } else {
                                 self.last_click =
                                     Some((m.column, m.row, std::time::Instant::now()));
                             }
                             self.sync_panes();
-                            // Clicking onto a *different* workspace restores
-                            // the pane it was last focused in — so clicking
-                            // back to a workspace whose agent you were typing
-                            // into returns focus to that terminal instead of
-                            // stranding it on the sidebar (#182). A click on
-                            // the already-selected row keeps the sidebar
-                            // focus the click just set, leaving an explicit
-                            // way to step out of the terminal.
-                            if self.sidebar.selected_workspace_key() != prev_key.as_ref() {
+                            // A double-click drops focus straight into
+                            // the workspace's live terminal — "select
+                            // and enter the agent" in one gesture
+                            // (#441). A single click instead restores
+                            // the pane the workspace was last focused
+                            // in whenever the selection changes — so
+                            // clicking back to a workspace whose agent
+                            // you were typing into returns focus to
+                            // that terminal instead of stranding it on
+                            // the sidebar (#182). A click on the
+                            // already-selected row keeps the sidebar
+                            // focus the click just set, leaving an
+                            // explicit way to step out of the terminal.
+                            if double_on_workspace {
+                                self.enter_selected_workspace_terminal();
+                            } else if self.sidebar.selected_workspace_key() != prev_key.as_ref() {
                                 self.restore_workspace_focus();
                             }
                             self.redraw = true;

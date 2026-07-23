@@ -71,6 +71,7 @@ serde_json       = { workspace = true }
 serde_yaml       = { workspace = true }
 semver           = { workspace = true }
 octocrab         = { workspace = true }
+pulldown-cmark   = { workspace = true }
 tempfile         = "3"
 which            = "8"
 uuid             = { version = "1", features = ["v4"] }

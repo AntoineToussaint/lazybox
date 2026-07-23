@@ -500,9 +500,23 @@ impl<T: TerminalAdapter> Model<T> {
             }
         }
         self.flush_dispatched_cmds(cmds);
+        // A `d` on an overflowing description preview asks to read the
+        // whole thing in the reader modal (#448) — the pane can't mount
+        // it, so drain the request here.
+        if self.right.take_open_description() {
+            self.open_focused_description();
+        }
         // Sidebar j/k changes selection — propagate to right + terminals.
         self.sync_panes();
         self.redraw = true;
+    }
+
+    /// Mount the full-description reader modal (#448) for whatever the
+    /// activity pane is focused on. No-op when there's no body.
+    pub(super) fn open_focused_description(&mut self) {
+        if let (Some(title), Some(body)) = (self.right.task_body_title(), self.right.task_body()) {
+            self.mount_description_modal(title, body);
+        }
     }
 
     /// Send the commands a key dispatch produced: arm the spawn
@@ -1048,10 +1062,11 @@ impl<T: TerminalAdapter> Model<T> {
     /// click.
     ///
     /// Returns whether it handled the event. Only left/right/middle
-    /// *presses* qualify — scroll and drag over a dismissable overlay
-    /// still forward to it (so e.g. the sync-status window scrolls).
-    /// A blocking modal, or no modal, returns `false` so the caller
-    /// forwards to the modal / pane as before.
+    /// *presses* qualify — scroll and drag fall through to the normal
+    /// forwarding path (where the wheel-gate in `dispatch_event` decides
+    /// whether the top modal actually consumes the notch; today only the
+    /// description reader does). A blocking modal, or no modal, returns
+    /// `false` so the caller forwards to the modal / pane as before.
     pub fn dismiss_modal_on_outside_click(&mut self, m: crossterm::event::MouseEvent) -> bool {
         use crossterm::event::MouseEventKind;
         if !matches!(m.kind, MouseEventKind::Down(_)) {
@@ -1352,6 +1367,9 @@ impl<T: TerminalAdapter> Model<T> {
                         if handled {
                             self.redraw = true;
                         }
+                        if self.right.take_open_description() {
+                            self.open_focused_description();
+                        }
                         if let Some(msg) = self.right.drain_selection_notice() {
                             self.flash_hint(msg);
                         }
@@ -1612,6 +1630,7 @@ pub(super) fn action_from_kind(
         ActionKind::OpenEditor => Action::OpenEditor,
         ActionKind::NewWorkspace => Action::NewWorkspace,
         ActionKind::NewProject => Action::NewProject,
+        ActionKind::ImportCheckout => Action::ImportCheckout,
         ActionKind::MergePr => Action::MergePr,
         ActionKind::ToggleAutoMerge => Action::ToggleAutoMerge,
         ActionKind::ManagePolicies => Action::ManagePolicies,
@@ -1624,9 +1643,11 @@ pub(super) fn action_from_kind(
         ActionKind::AdoptSessions => Action::AdoptSessions,
         ActionKind::CollapseIntoPr => Action::CollapseIntoPr,
         ActionKind::Reply => Action::Reply,
+        ActionKind::EditNotes => Action::EditNotes,
         ActionKind::RequestReviewers => Action::RequestReviewers,
         ActionKind::AddAssignees => Action::AddAssignees,
         ActionKind::ManageLabels => Action::ManageLabels,
+        ActionKind::SyncWorkspace => Action::SyncWorkspace,
         ActionKind::OpenInBrowser => Action::OpenInBrowser,
         ActionKind::DeleteOrClose => Action::DeleteOrClose,
         // Activity-pane cursor jumps (`g` / `Shift-G` under Right

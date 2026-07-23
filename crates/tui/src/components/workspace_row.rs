@@ -87,6 +87,10 @@ pub struct WorkspaceRowCtx<'a> {
     /// (`Workspace::policies` — issue #363). Renders a ` FIX ` pill so an
     /// explicit per-session auto-fix arm is visible, never invisible.
     pub auto_fix_armed: bool,
+    /// This workspace carries a non-empty local note
+    /// (`Workspace::has_notes` — issue #458). Renders a small ` ✎ ` pill
+    /// so the user can see, at a glance, which rows have a scratchpad.
+    pub has_notes: bool,
 }
 
 impl<'a> WorkspaceRowCtx<'a> {
@@ -598,16 +602,33 @@ fn badge_slot_cell(ctx: &WorkspaceRowCtx<'_>, badge: Option<(char, usize)>) -> C
 }
 
 fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    let Some(task) = ctx.task else {
-        return Cell::empty();
+    // A linked (no-worktree) checkout carries a `⎇ local` badge — the
+    // sidebar counterpart of the `⎇ main` tab badge — so the user is
+    // always reminded this workspace's sessions run in their real
+    // checkout, not an isolated worktree. It renders even on a task-less
+    // linked row, so it must be computed before the `task`-required
+    // status pills below.
+    let linked = ctx.workspace.is_some_and(|w| w.is_linked());
+    // CI/review pills only exist for a workspace with an upstream task;
+    // the notes pill (issue #458) can also ride a task-less local
+    // workspace, so status is derived conditionally rather than
+    // early-returning on a missing task.
+    let (primary, secondary) = match ctx.task {
+        Some(task) => status_pills(task),
+        None => (None, None),
     };
-    let (primary, secondary) = status_pills(task);
     // Empty cell when there's nothing to show — `Column::max(0)`
     // collapses the column across the whole table when NO row has a
     // pill, handing the slack back to the title flex. An armed row
     // always shows its ` ARM ` marker even when no CI/review pill
     // applies yet (e.g. armed before CI runs).
-    if primary.is_none() && secondary.is_none() && !ctx.auto_merge_armed && !ctx.auto_fix_armed {
+    if primary.is_none()
+        && secondary.is_none()
+        && !ctx.auto_merge_armed
+        && !ctx.auto_fix_armed
+        && !linked
+        && !ctx.has_notes
+    {
         return Cell::empty();
     }
     // Emit only the pills that are actually present, each trimmed to
@@ -618,6 +639,26 @@ fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // gap off the duration — its block's trailing space plus the time
     // cell's leading space, nothing more.
     let mut spans = Vec::with_capacity(4);
+    if linked {
+        let linked_style = if ctx.is_cursor {
+            ctx.row_style()
+        } else {
+            Style::default()
+                .fg(ctx.theme.warn)
+                .add_modifier(Modifier::BOLD)
+        };
+        spans.push(Span::styled(" ⎇ local", linked_style));
+    }
+    if ctx.has_notes {
+        // Passive info, not an urgent arm — a dim fg-only glyph rather
+        // than the filled ARM/FIX blocks.
+        let notes_style = if ctx.is_cursor {
+            ctx.row_style()
+        } else {
+            Style::default().fg(ctx.theme.text_dim)
+        };
+        spans.push(Span::styled(" ✎ ", notes_style));
+    }
     if ctx.auto_merge_armed {
         let arm_style = if ctx.is_cursor {
             ctx.row_style()
@@ -758,6 +799,7 @@ mod tests {
             ascii_glyphs: false,
             auto_merge_armed: false,
             auto_fix_armed: false,
+            has_notes: false,
         }
     }
 
@@ -1075,6 +1117,7 @@ mod tests {
             ascii_glyphs: false,
             auto_merge_armed: false,
             auto_fix_armed: false,
+            has_notes: false,
         };
         assert_eq!(cell_type(&ctx).width(), 0);
     }
@@ -1128,6 +1171,40 @@ mod tests {
         ctx.focused = false;
         let row = build_row(&ctx);
         assert_eq!(row.fill_style, Some(theme.row_unfocused()));
+    }
+
+    /// A linked (no-worktree) workspace shows the `⎇ local` badge in
+    /// the status cell even when it has no task, so the user always
+    /// sees it points at their real checkout.
+    #[test]
+    fn cell_status_shows_local_badge_for_linked_workspace() {
+        let theme = theme();
+        let mut ws = Workspace::empty(
+            lazybox_core::WorkspaceKey::new("acme-widget"),
+            "main",
+            fixed_time(),
+        );
+        ws.linked_checkout = Some(std::path::PathBuf::from("/home/dev/code/acme/widget"));
+        let task = make_task("owner/repo#1", "x");
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.task = None; // linked tracking row, no attached task
+        let cell = cell_status(&ctx);
+        assert!(
+            cell.width() > 0,
+            "linked workspace must render a non-empty status cell"
+        );
+        let text: String = cell.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("⎇ local"), "got {text:?}");
+
+        // A plain workspace with no task renders nothing there.
+        let plain = Workspace::empty(
+            lazybox_core::WorkspaceKey::new("plain"),
+            "main",
+            fixed_time(),
+        );
+        let mut plain_ctx = ctx_for(&plain, &task, &theme);
+        plain_ctx.task = None;
+        assert_eq!(cell_status(&plain_ctx).width(), 0);
     }
 
     /// No badges, no agent cell content.
@@ -1222,6 +1299,7 @@ mod tests {
             ascii_glyphs: false,
             auto_merge_armed: false,
             auto_fix_armed: false,
+            has_notes: false,
         };
         assert_eq!(cell_title(&ctx).spans[0].content.as_ref(), "lonely");
     }
@@ -1294,6 +1372,31 @@ mod tests {
         assert!(
             cell.spans.iter().any(|s| s.content.as_ref() == " FIX "),
             "FIX marker present"
+        );
+    }
+
+    /// A workspace carrying a local note surfaces a ` ✎ ` pill (issue
+    /// #458) even when it has no CI/review pill and no task at all — a
+    /// session-less scratchpad still reads as noted.
+    #[test]
+    fn cell_status_shows_notes_pill_without_task() {
+        let ws = Workspace::empty(
+            lazybox_core::WorkspaceKey("scratch".into()),
+            "main",
+            fixed_time(),
+        );
+        let theme = theme();
+        let placeholder = make_task("owner/repo#1", "x");
+        let mut ctx = ctx_for(&ws, &placeholder, &theme);
+        // Task-less workspace: no CI/review pills possible.
+        ctx.task = None;
+        assert_eq!(cell_status(&ctx).width(), 0, "no note, no pill");
+        ctx.has_notes = true;
+        let cell = cell_status(&ctx);
+        assert!(cell.width() > 0, "noted row renders a status cell");
+        assert!(
+            cell.spans.iter().any(|s| s.content.as_ref() == " ✎ "),
+            "notes marker present"
         );
     }
 
@@ -2021,6 +2124,7 @@ mod tests {
             ascii_glyphs: false,
             auto_merge_armed: false,
             auto_fix_armed: false,
+            has_notes: false,
         };
         let columns = build_columns(4);
         let rows = vec![build_row(&ctx_task), build_row(&ctx_scratch)];

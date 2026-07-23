@@ -1809,10 +1809,15 @@ pub struct TerminalSnapshot {
     /// this into its libghostty-vt to reconstruct the screen.
     pub replay: Vec<u8>,
     pub last_seq: u64,
-    /// Whether `replay` is a complete stream from a clean terminal
-    /// baseline and can authoritatively initialize/reset a VT parser.
-    /// False on backend failure/timeout or after the bounded raw replay
-    /// ring has overwritten its prefix.
+    /// Whether `replay` is a VT-safe reset seed the client can feed into a
+    /// ground-state parser to authoritatively initialize the screen. True for
+    /// both a complete ring and a wrapped one: the daemon's `replay_snapshot`
+    /// starts on a clean line boundary even after the ring overwrites its
+    /// prefix (`ReplayRing::replay_snapshot_into`), so a wrapped ring is a
+    /// correct, if shorter-history, reset. False ONLY when there is no
+    /// authoritative replay to adopt — a backend snapshot failure/timeout, or
+    /// a replay dropped by the snapshot byte budget; the client then preserves
+    /// its last coherent screen and requests a resync.
     #[serde(default)]
     pub replay_available: bool,
     /// Launched in no-permission / bypass mode. Lets a reconnecting

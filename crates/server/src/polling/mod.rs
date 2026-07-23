@@ -1867,6 +1867,11 @@ pub struct MergePromptMemory {
 /// disconnected, or not yet started lost it forever and the merged
 /// workspace sat unprompted (issue #292). Same self-heal contract and
 /// same own-lock reasoning as [`MergePromptMemory`].
+///
+/// This is now purely the emit-cadence throttle. The user's "keep"
+/// answer lives on the workspace itself as [`CleanupPrompt::Declined`]
+/// (issue #499), so it survives a restart instead of being a
+/// per-process pin.
 #[derive(Default)]
 pub struct RemovalPromptMemory {
     /// Workspace keys we've broadcast `MergedPrRemovable` for, with
@@ -1876,10 +1881,6 @@ pub struct RemovalPromptMemory {
     /// heals on its own. Cleared wholesale on client (re)connect so a
     /// fresh subscriber is prompted on the next tick, not in 5 min.
     pub(crate) prompted: std::collections::HashMap<String, std::time::Instant>,
-    /// Workspace keys the user answered "keep" for
-    /// (`Command::KeepMergedWorkspace`). Not re-prompted this session;
-    /// a daemon restart clears the pin, mirroring `rejected` merges.
-    pub(crate) kept: std::collections::HashSet<String>,
 }
 
 pub async fn tick_with_state(
@@ -3742,13 +3743,20 @@ fn pr_workspace_claiming_issue(
 /// The terminal state that makes `workspace` a removal candidate:
 /// a merged PR, or a closed issue no PR workspace claims (the PR's
 /// own prompt owns that cleanup — same deferral as the upsert path).
-/// `None` for open work, task-less rows, and session-less workspaces
-/// (nothing to reap; dropping the bare row is `x x` territory).
+/// `None` for open work, task-less rows, and workspaces the user
+/// already answered "keep" for ([`CleanupPrompt::Declined`]).
+///
+/// A **merged PR** qualifies even with no sessions (issue #499): its
+/// tracking row should be offered for cleanup even when it never had a
+/// worktree — removal just drops the row, but the user shouldn't have to
+/// discover `x x` to be rid of it. A **closed issue** still requires a
+/// session (a worktree to reap); a bare closed-issue row remains `x x`
+/// territory to avoid nagging on every externally-closed tracked issue.
 fn removal_candidate_state(
     config: &ServerConfig,
     workspace: &Workspace,
 ) -> Option<lazybox_ipc::RemovableTerminalState> {
-    if workspace.sessions.is_empty() {
+    if workspace.cleanup_prompt == lazybox_core::CleanupPrompt::Declined {
         return None;
     }
     let task = workspace.primary_task()?;
@@ -3756,7 +3764,8 @@ fn removal_candidate_state(
         return (task.state == lazybox_core::TaskState::Merged)
             .then_some(lazybox_ipc::RemovableTerminalState::Merged);
     }
-    if task.state != lazybox_core::TaskState::Closed
+    if workspace.sessions.is_empty()
+        || task.state != lazybox_core::TaskState::Closed
         || pr_workspace_claiming_issue(config, &task.id).is_some()
     {
         return None;
@@ -3816,13 +3825,25 @@ pub(crate) async fn reprompt_unresolved_removals_with(
 }
 
 /// Handle `Command::KeepMergedWorkspace`: the user answered "no" on
-/// the removal modal. Pin the workspace so the reprompt sweep stops
-/// asking this session; the row stays until removed explicitly.
+/// the removal modal. Persist [`CleanupPrompt::Declined`] on the row so
+/// the reprompt sweep stops asking — across restarts, not just this
+/// session (issue #499). The row stays until removed explicitly.
 pub async fn keep_merged_workspace(config: &ServerConfig, key: &WorkspaceKey) {
-    let mut prompts = config.removal_prompts.lock().await;
-    prompts.prompted.remove(key.as_str());
-    prompts.kept.insert(key.as_str().to_string());
-    tracing::info!(workspace = %key, "user kept terminal-state workspace; removal prompt pinned for this session");
+    config
+        .removal_prompts
+        .lock()
+        .await
+        .prompted
+        .remove(key.as_str());
+    let outcome = apply_and_commit(config, key, |ws| {
+        ws.cleanup_prompt = lazybox_core::CleanupPrompt::Declined;
+    })
+    .await;
+    tracing::info!(
+        workspace = %key,
+        ?outcome,
+        "user kept terminal-state workspace; cleanup prompt declined (persisted)"
+    );
 }
 
 /// A client just (re)connected: forget the per-workspace emit
@@ -6020,7 +6041,7 @@ mod rescope_collapse_tests {
     }
 
     /// The reprompt sweep's candidate filter: merged PR workspaces
-    /// with sessions qualify; session-less rows and open work don't.
+    /// qualify with OR without sessions (issue #499); open work doesn't.
     #[tokio::test]
     async fn removal_candidate_state_matches_merged_pr_with_sessions() {
         let store = Arc::new(lazybox_store::MemoryStore::new());
@@ -6044,8 +6065,18 @@ mod rescope_collapse_tests {
             Some(lazybox_ipc::RemovableTerminalState::Merged)
         );
 
-        let session_less = Workspace::from_task(merged, Utc::now());
-        assert_eq!(removal_candidate_state(&config, &session_less), None);
+        // Issue #499: a session-less merged PR is still a candidate — its
+        // tracking row should be offered for cleanup regardless.
+        let session_less = Workspace::from_task(merged.clone(), Utc::now());
+        assert_eq!(
+            removal_candidate_state(&config, &session_less),
+            Some(lazybox_ipc::RemovableTerminalState::Merged)
+        );
+
+        // ...unless the user already answered "keep" (durable decline).
+        let mut declined = Workspace::from_task(merged, Utc::now());
+        declined.cleanup_prompt = lazybox_core::CleanupPrompt::Declined;
+        assert_eq!(removal_candidate_state(&config, &declined), None);
 
         let open = gh_task(
             "o/r#8",

@@ -271,7 +271,14 @@ impl ReplayRing {
     /// leading line, starting the replay on a clean line boundary. An
     /// escape/UTF-8 sequence never spans a raw `\n`, so the byte after the
     /// first newline is never mid-sequence. This is the same clean-baseline
-    /// guard [`read_scrollback_tail`] applies to the on-disk seed.
+    /// guard `read_scrollback_tail` applies to the on-disk seed.
+    ///
+    /// The retained bytes carry no marker for where a line began, so an
+    /// eviction that happened to land exactly on a boundary is
+    /// indistinguishable from one mid-line: both drop up to the first
+    /// newline, costing one already-recovered line in the aligned case.
+    /// That one-line trade buys never replaying a corrupt partial, and
+    /// matches `read_scrollback_tail`'s behavior byte-for-byte.
     pub fn replay_snapshot_into(&self, out: &mut Vec<u8>) {
         let start = out.len();
         self.snapshot_into(out);
@@ -762,6 +769,14 @@ impl DaemonPty {
     /// stream: true while the ring still holds every byte the reader
     /// emitted since spawn. The seed is that stream's baseline, so
     /// seed + complete ring remains an authoritative VT reset.
+    ///
+    /// The ring portion goes through [`ReplayRing::replay_snapshot_into`],
+    /// so once the ring has wrapped the replay starts on a clean line
+    /// boundary rather than in the middle of an evicted escape sequence
+    /// (#498). Every consumer feeds this to a ground-state VT — the resync
+    /// path resets first, the fresh-attach path stashes it into an empty
+    /// grid — so a boundary-clean start is what keeps the first
+    /// reconstructed rows faithful.
     pub async fn snapshot_only(&self) -> crate::backend::ReplaySnapshot {
         let ring = self.ring.lock().await;
         let mut replay = Vec::with_capacity(self.seed.len() + ring.len());

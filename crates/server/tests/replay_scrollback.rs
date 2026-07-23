@@ -98,6 +98,11 @@ fn recovered_session_retains_meaningful_scrollback() {
 /// retained byte deterministically — see `truncated_replay_is_grid_faithful`.
 const FIDELITY_LINE_BYTES: usize = 104;
 
+/// Byte length of the fixed-width SGR introducer each fidelity line opens
+/// with (`\x1b[38;5;CCCm`). The truncation must land *inside* this span for
+/// the raw replay to begin mid-escape.
+const SGR_INTRODUCER_BYTES: usize = "\x1b[38;5;000m".len();
+
 fn colored_line(i: usize) -> Vec<u8> {
     let color = 16 + (i % 216); // 016..=231, zero-padded to a fixed 3 digits
     let body = format!("line {i:06} ");
@@ -179,11 +184,27 @@ fn reconstructed_rows(stream: &[u8]) -> Vec<String> {
 ///     byte-faithful contiguous tail of the true live history.
 #[test]
 fn truncated_replay_is_grid_faithful() {
-    // 25 000 lines × 104 B ≈ 2.48 MiB > REPLAY_RING_BYTES, so the ring
-    // wraps. With a 104-byte line and a 2 MiB ring the oldest retained
-    // byte lands at line offset 8 — the second colour digit of the SGR
-    // introducer — regardless of line count (see the constant's note).
-    let lines = 25_000;
+    // The ring keeps its last REPLAY_RING_BYTES, so its oldest retained byte
+    // sits at stream offset `total - REPLAY_RING_BYTES`; within a fixed-width
+    // line that is `(-REPLAY_RING_BYTES) mod FIDELITY_LINE_BYTES`, independent
+    // of the line count. This test only bites when that offset lands inside
+    // the SGR introducer (a mid-escape start) — assert the precondition up
+    // front so a future retune of either constant fails here, loudly and with
+    // a fix, rather than silently reconstructing from a benign boundary.
+    let landing =
+        (FIDELITY_LINE_BYTES - (REPLAY_RING_BYTES % FIDELITY_LINE_BYTES)) % FIDELITY_LINE_BYTES;
+    assert!(
+        (1..SGR_INTRODUCER_BYTES).contains(&landing),
+        "test precondition: REPLAY_RING_BYTES={REPLAY_RING_BYTES} against a \
+         {FIDELITY_LINE_BYTES}-byte line truncates at line offset {landing}, \
+         which is not inside the {SGR_INTRODUCER_BYTES}-byte SGR introducer — \
+         adjust FIDELITY_LINE_BYTES so truncation starts mid-escape"
+    );
+
+    // Enough lines to overrun the ring with a comfortable margin, derived
+    // from the ring size so this holds if REPLAY_RING_BYTES changes.
+    let ring_lines = REPLAY_RING_BYTES / FIDELITY_LINE_BYTES;
+    let lines = ring_lines + 5_000;
     let mut stream = Vec::new();
     for i in 0..lines {
         stream.extend_from_slice(&colored_line(i));
@@ -221,10 +242,13 @@ fn truncated_replay_is_grid_faithful() {
         "every guarded row must be a clean history line; found {:?}",
         guarded.iter().find(|l| !l.starts_with("line "))
     );
+    // The guard drops at most the single partial leading line, so recovered
+    // depth stays within one line of everything the ring retained.
     assert!(
-        guarded.len() > 10_000,
-        "the guard must not gut recovered depth, got {} rows",
-        guarded.len()
+        guarded.len() >= ring_lines - 1,
+        "the guard must not gut recovered depth: got {} rows, ring held ~{}",
+        guarded.len(),
+        ring_lines
     );
 
     // ...and those rows are a byte-faithful contiguous tail of the true

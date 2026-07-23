@@ -3927,35 +3927,49 @@ pub(crate) async fn watchdog_escape_working(
     if states.lock().await.get(&id).copied() != Some(lazybox_ipc::AgentState::Working) {
         return;
     }
-    if detect_resets.lock().await.contains(&id) {
-        return;
-    }
-    classify_quiet_screen(
-        Some(agent),
-        buf,
-        last_chunk_len,
-        // The watchdog fires on content-stability, not byte-silence: a
-        // ticking counter can keep the stream alive. So this classification
-        // is `Stalled`, not `Silent` — it stays subordinate to a fresh
-        // hook (a long silent tool call looks identical).
-        lazybox_agents::Liveness::Stalled,
-        states,
-        bus,
-        id,
-        session_key,
-        terminal_meta,
-        state_machine,
-        hook_driven,
-        input_shapes,
-        detect_resets,
-    )
-    .await;
-    if states.lock().await.get(&id).copied() != Some(lazybox_ipc::AgentState::Working) {
-        return;
+    // A pending answer reset normally vetoes the whole tick: the buffer
+    // predates the user's answer, so classifying it would re-raise the
+    // just-answered `?`. But that reset is cleared only by the pump's NEXT
+    // live chunk — so if it is STILL latched a full watchdog window after
+    // the answer, the optimistic `Working` flip has seen zero PTY output:
+    // the answer started no work, and nothing will arrive to clear the
+    // reset or settle the turn. Skipping the tick then pins `Working`
+    // forever (the quiet timer disarms itself and only a chunk re-arms it).
+    // So skip only the stale-buffer classify (which would re-raise the
+    // answered prompt) and force the turn closed directly. Leave the reset
+    // latched — a late chunk still clears the buffer via the chunk arm, and
+    // by then the state is `Done`, so the watchdog no-ops.
+    let answered = detect_resets.lock().await.contains(&id);
+    if !answered {
+        classify_quiet_screen(
+            Some(agent),
+            buf,
+            last_chunk_len,
+            // The watchdog fires on content-stability, not byte-silence: a
+            // ticking counter can keep the stream alive. So this
+            // classification is `Stalled`, not `Silent` — it stays
+            // subordinate to a fresh hook (a long silent tool call looks
+            // identical).
+            lazybox_agents::Liveness::Stalled,
+            states,
+            bus,
+            id,
+            session_key,
+            terminal_meta,
+            state_machine,
+            hook_driven,
+            input_shapes,
+            detect_resets,
+        )
+        .await;
+        if states.lock().await.get(&id).copied() != Some(lazybox_ipc::AgentState::Working) {
+            return;
+        }
     }
     tracing::info!(
         terminal_id = ?id,
-        "working watchdog: no meaningful output change; forcing the turn closed",
+        answered,
+        "working watchdog: forcing the turn closed",
     );
     commit_pty_reading(
         agent,
@@ -9305,25 +9319,32 @@ mod tests {
         assert_eq!(p.states.lock().await.get(&p.id), Some(&Done));
     }
 
-    /// The watchdog tick is inert when there is nothing to escape: a
-    /// pending answer reset (the buffer predates the user's answer) and
-    /// a terminal that isn't `Working` both veto it.
+    /// A pending answer reset still latched a full watchdog window after
+    /// the answer means the optimistic `Working` flip saw zero PTY output —
+    /// the answer started no work, and nothing will arrive to clear the
+    /// reset or settle the turn. The watchdog must force it closed rather
+    /// than pin `Working` forever, WITHOUT classifying the stale buffer
+    /// (which would re-raise the just-answered `?`). Out of `Working` the
+    /// tick stays a no-op.
     #[tokio::test]
-    async fn watchdog_is_inert_after_an_answer_or_out_of_working() {
+    async fn watchdog_settles_a_zero_output_answer_instead_of_pinning_working() {
         use lazybox_ipc::AgentState::{Done, Working};
         let working = include_bytes!("../../agents/tests/fixtures/working_status_line.bin");
 
         let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
         assert_eq!(p.feed(working).await, vec![Working]);
+        // The user answered, but no chunk has arrived to clear the reset.
         p.detect_resets.lock().await.insert(p.id);
         assert_eq!(
             p.watchdog().await,
-            Vec::<lazybox_ipc::AgentState>::new(),
-            "a pending answer reset must veto the watchdog tick",
+            vec![Done],
+            "a zero-output answer must settle to Done, not pin Working",
         );
-        assert_eq!(p.states.lock().await.get(&p.id), Some(&Working));
-        p.detect_resets.lock().await.remove(&p.id);
-        p.states.lock().await.insert(p.id, Done);
+        assert_eq!(p.states.lock().await.get(&p.id), Some(&Done));
+        // The reset is left latched so a late chunk still clears the buffer
+        // via the pump's chunk arm — but the terminal is `Done` now, so a
+        // further watchdog tick is a plain no-op.
+        assert!(p.detect_resets.lock().await.contains(&p.id));
         assert_eq!(
             p.watchdog().await,
             Vec::<lazybox_ipc::AgentState>::new(),

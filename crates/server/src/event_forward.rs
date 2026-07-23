@@ -374,10 +374,15 @@ impl ForwardState {
 ///
 /// A `TerminalResync` REPLACES the client's grid with the replay, and the
 /// backend's `snapshot` returns the ring's line-boundary-clean
-/// `replay_snapshot` (`ReplayRing::replay_snapshot_into`) — the same VT-safe
-/// seed a fresh attach reconstructs from. So an *incomplete* (wrapped) ring
-/// is a perfectly good resync source: the client adopts a correct, if
-/// shorter-history, screen. Rejecting `!complete` here instead froze every
+/// `replay_snapshot` (`ReplayRing::replay_snapshot_into`) — VT-safe even after
+/// the ring has wrapped, because it drops the partial leading line so the
+/// replay starts on a clean boundary. So an *incomplete* (wrapped) ring is a
+/// perfectly good resync source: the client adopts a correct, if
+/// shorter-history, screen. This is the SAME seed every other consumer of a
+/// wrapped ring now serves — fresh attach (`snapshot_terminals`), a
+/// client-requested resync (`handle_terminal_resync_request`), and the pump's
+/// gap recovery (`resync_replay_after_gap`) — so completeness never gates
+/// reconstruction anywhere. Rejecting `!complete` here instead froze every
 /// terminal that had ever produced more than the ring capacity — once
 /// wrapped, `is_complete()` is false forever, so the first channel overflow
 /// scheduled a resync that could never succeed and `route` then dropped all

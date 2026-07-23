@@ -702,6 +702,26 @@ impl RightPane {
         self.activity_collapsed
     }
 
+    /// Collapse the cursor's activity row if it's currently expanded.
+    /// Returns `true` when a row was actually collapsed — the caller
+    /// (directional `←`/`h` focus movement) treats `false` as "nothing
+    /// left to collapse" and steps focus back to the sidebar instead.
+    pub fn collapse_focused_row(&mut self) -> bool {
+        let Some(workspace) = &self.workspace else {
+            return false;
+        };
+        if self.activity_collapsed || workspace.activity.is_empty() {
+            return false;
+        }
+        let cursor = self.feed.cursor;
+        if self.feed.is_expanded(cursor) {
+            self.feed.set_expanded(cursor, false);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Whether the pane has anything worth showing for the current
     /// workspace: a non-empty activity feed, or a PR / issue
     /// description body. Drives the orchestrator's decision to hide

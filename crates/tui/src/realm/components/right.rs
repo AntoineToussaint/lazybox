@@ -184,6 +184,14 @@ impl Right {
         self.inner.comment_cursor()
     }
 
+    /// Collapse the focused activity row if it's expanded — the
+    /// catalog's `FocusPaneLeft` dispatch (`←`/`h` under Right focus).
+    /// Returns `true` when a row was collapsed; `false` (nothing to
+    /// collapse) tells the caller to step focus back to the sidebar.
+    pub fn collapse_focused_row(&mut self) -> bool {
+        self.inner.collapse_focused_row()
+    }
+
     /// Jump the activity cursor to the first row — the catalog's
     /// `ActivityTop` dispatch (`g` under Right focus).
     pub fn activity_cursor_top(&mut self) {

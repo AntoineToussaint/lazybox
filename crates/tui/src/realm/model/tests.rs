@@ -7172,6 +7172,104 @@ mod activity_pane_visibility_tests {
             "with activity present, Enter focuses the Activity pane to read it",
         );
     }
+
+    // ── Directional pane focus (#492) ──────────────────────────────
+
+    #[test]
+    fn sidebar_right_arrow_focuses_the_activity_pane() {
+        let mut m = build_model();
+        seed(&mut m, vec![ws_with_activity("github:o/r#1")]);
+        m.sync_panes();
+        assert_eq!(m.focus(), PaneFocus::Sidebar);
+        m.dispatch_key(KeyEvent::new(Key::Right, KeyModifiers::NONE));
+        assert_eq!(
+            m.focus(),
+            PaneFocus::Right,
+            "Right from the sidebar steps focus into the activity pane",
+        );
+    }
+
+    #[test]
+    fn sidebar_vim_l_focuses_the_activity_pane() {
+        let mut m = build_model();
+        seed(&mut m, vec![ws_with_activity("github:o/r#1")]);
+        m.sync_panes();
+        m.dispatch_key(KeyEvent::new(Key::Char('l'), KeyModifiers::NONE));
+        assert_eq!(
+            m.focus(),
+            PaneFocus::Right,
+            "vim `l` mirrors the Right arrow from the sidebar",
+        );
+    }
+
+    #[test]
+    fn sidebar_right_skips_a_hidden_activity_pane() {
+        let mut m = build_model();
+        seed(&mut m, vec![empty_ws("github:o/r#1")]);
+        m.sync_panes();
+        assert!(!m.activity_pane_visible());
+        m.dispatch_key(KeyEvent::new(Key::Right, KeyModifiers::NONE));
+        assert_eq!(
+            m.focus(),
+            PaneFocus::Terminals,
+            "Right skips straight to the terminal when the activity pane is hidden",
+        );
+    }
+
+    #[test]
+    fn activity_left_with_nothing_expanded_returns_to_the_sidebar() {
+        let mut m = build_model();
+        seed(&mut m, vec![ws_with_activity("github:o/r#1")]);
+        m.sync_panes();
+        m.focus = PaneFocus::Right;
+        m.set_focus_attr();
+        m.dispatch_key(KeyEvent::new(Key::Left, KeyModifiers::NONE));
+        assert_eq!(
+            m.focus(),
+            PaneFocus::Sidebar,
+            "Left with no expanded row steps focus back to the sidebar",
+        );
+    }
+
+    #[test]
+    fn activity_left_collapses_an_expanded_row_before_leaving() {
+        let mut m = build_model();
+        seed(&mut m, vec![ws_with_activity("github:o/r#1")]);
+        m.sync_panes();
+        m.focus = PaneFocus::Right;
+        m.set_focus_attr();
+        // Right expands the focused row (pane-local meaning); the first
+        // Left then collapses it and stays put, only the second Left
+        // leaves — so collapse is never clobbered by focus movement.
+        m.dispatch_key(KeyEvent::new(Key::Right, KeyModifiers::NONE));
+        m.dispatch_key(KeyEvent::new(Key::Left, KeyModifiers::NONE));
+        assert_eq!(
+            m.focus(),
+            PaneFocus::Right,
+            "the first Left collapses the expanded row and keeps focus",
+        );
+        m.dispatch_key(KeyEvent::new(Key::Left, KeyModifiers::NONE));
+        assert_eq!(
+            m.focus(),
+            PaneFocus::Sidebar,
+            "a second Left, with nothing left to collapse, returns to the sidebar",
+        );
+    }
+
+    #[test]
+    fn activity_vim_h_returns_to_the_sidebar() {
+        let mut m = build_model();
+        seed(&mut m, vec![ws_with_activity("github:o/r#1")]);
+        m.sync_panes();
+        m.focus = PaneFocus::Right;
+        m.set_focus_attr();
+        m.dispatch_key(KeyEvent::new(Key::Char('h'), KeyModifiers::NONE));
+        assert_eq!(
+            m.focus(),
+            PaneFocus::Sidebar,
+            "vim `h` mirrors the Left arrow from the activity pane",
+        );
+    }
 }
 
 #[cfg(test)]

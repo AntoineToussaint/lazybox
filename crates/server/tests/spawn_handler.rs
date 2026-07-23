@@ -1397,6 +1397,86 @@ async fn spawn_onto_existing_singleton_injects_the_prompt() {
     .expect("deadline");
 }
 
+/// A linked (no-worktree) workspace lands every session in its on-disk
+/// checkout AND enforces the agent singleton: a second `a c` on the same
+/// linked workspace reuses the first agent (focus, not a duplicate),
+/// even though the client sends `on_main: false`. Regression guard for
+/// the request/landed on-main mismatch that would otherwise launch two
+/// Claudes into the user's real tree.
+#[tokio::test]
+async fn linked_workspace_agent_spawn_is_a_singleton() {
+    timeout(TEST_DEADLINE, async {
+        let _home = IsolatedConfigHome::new();
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+
+        // Persist a linked workspace pointing at a real on-disk dir.
+        let checkout = tempfile::tempdir().unwrap();
+        let mut ws = lazybox_core::Workspace::empty(
+            lazybox_core::WorkspaceKey::new("acme-widget"),
+            "feature-x",
+            chrono::Utc::now(),
+        );
+        ws.local = true;
+        ws.linked_checkout = Some(checkout.path().to_path_buf());
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: ws.key.as_str().to_string(),
+                created_at: ws.created_at,
+                workspace_json: Some(serde_json::to_string(&ws).unwrap()),
+            })
+            .unwrap();
+
+        let mut client = subscribed(config.clone()).await;
+        let spawn = |c: &mut lazybox_ipc::Client| {
+            c.send(Command::Spawn {
+                model_alias: None,
+                session_key: "acme-widget".into(),
+                session_id: None,
+                kind: TerminalKind::Agent("claude".into()),
+                cwd: None,
+                initial_prompt: None,
+                on_main: false,
+            })
+            .unwrap();
+        };
+
+        // First spawn: an agent starts, rooted in the real checkout.
+        spawn(&mut client);
+        let first = wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalSpawned { .. }),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("first agent spawns");
+        let backend_key = mock.list().await.unwrap().into_iter().next().unwrap();
+        assert_eq!(
+            mock.cwd_for(&backend_key).await.as_deref(),
+            Some(checkout.path()),
+            "the agent runs in the linked checkout, not a worktree",
+        );
+
+        // Second spawn: reuse, not a duplicate.
+        spawn(&mut client);
+        let focused = wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalFocusRequested { .. }),
+            Duration::from_secs(2),
+        )
+        .await;
+        assert!(focused.is_some(), "second spawn must request focus");
+        assert_eq!(
+            mock.list().await.unwrap().len(),
+            1,
+            "a linked workspace must run one Claude, not two, in the real tree",
+        );
+        let _ = first;
+    })
+    .await
+    .expect("deadline");
+}
+
 /// Regression: stale `terminal_id` in `InjectPrompt` falls back to
 /// Spawn when `fallback_spawn` is supplied. Symptom pre-fix: user
 /// presses `w` (work) right after the agent crashed, the TUI's

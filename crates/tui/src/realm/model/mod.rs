@@ -199,6 +199,15 @@ pub enum Id {
     /// The target row lives in `pending_inspect_target`;
     /// `Msg::Confirmed(true)` dispatches `DeleteOrphanedWorktree`.
     InspectConfirm,
+    /// Choice modal listing every on-disk checkout the dev-folder scan
+    /// discovered. Picking a row routes through `pending_import_rows` →
+    /// `ImportCheckoutConfirm` before the linked workspace is created.
+    ImportCheckoutList,
+    /// Confirm modal in front of an actual import — warns that sessions
+    /// run in the user's real checkout (not an isolated worktree). The
+    /// target row lives in `pending_import_target`; `Msg::Confirmed(true)`
+    /// dispatches `ImportLocalCheckout`.
+    ImportCheckoutConfirm,
     /// Unified confirm modal for any destructive catalog action.
     /// `Model::dispatch_action` routes here when
     /// `ActionDef::is_destructive()` is true; the pending `Action`
@@ -908,6 +917,13 @@ pub struct Model<T: TerminalAdapter> {
     /// Row picked from `InspectList`, waiting on the `InspectConfirm`
     /// confirm modal. Consumed by `Msg::Confirmed(true)`.
     pending_inspect_target: Option<lazybox_ipc::WorktreeInspectionDto>,
+    /// Latest dev-folder scan result driving the `ImportCheckoutList`
+    /// picker. `Msg::ChoicePicked` reads the picked index out of this
+    /// to mount the import confirm.
+    pending_import_rows: Vec<lazybox_ipc::DiscoveredCheckoutDto>,
+    /// Checkout picked from `ImportCheckoutList`, waiting on the
+    /// `ImportCheckoutConfirm` modal. Consumed by `Msg::Confirmed(true)`.
+    pending_import_target: Option<lazybox_ipc::DiscoveredCheckoutDto>,
     /// Project the next `Id::NewWorkspace` submit should land the
     /// new workspace under. Set by `mount_new_workspace_input(pk)`
     /// from the focused-project resolver, consumed by
@@ -1263,6 +1279,8 @@ impl<T: TerminalAdapter> Model<T> {
             pending_action_confirm: None,
             pending_help_action: None,
             pending_inspect_rows: Vec::new(),
+            pending_import_rows: Vec::new(),
+            pending_import_target: None,
             pending_inspect_target: None,
             pending_new_workspace_project: None,
             pending_focus_project_name: None,

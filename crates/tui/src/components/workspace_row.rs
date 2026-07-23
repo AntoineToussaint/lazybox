@@ -598,16 +598,28 @@ fn badge_slot_cell(ctx: &WorkspaceRowCtx<'_>, badge: Option<(char, usize)>) -> C
 }
 
 fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    let Some(task) = ctx.task else {
-        return Cell::empty();
+    // A linked (no-worktree) checkout carries a `⎇ local` badge — the
+    // sidebar counterpart of the `⎇ main` tab badge — so the user is
+    // always reminded this workspace's sessions run in their real
+    // checkout, not an isolated worktree. It renders even on a task-less
+    // linked row, so it must be computed before the `task`-required
+    // status pills below.
+    let linked = ctx.workspace.is_some_and(|w| w.is_linked());
+    let (primary, secondary) = match ctx.task {
+        Some(task) => status_pills(task),
+        None => (None, None),
     };
-    let (primary, secondary) = status_pills(task);
     // Empty cell when there's nothing to show — `Column::max(0)`
     // collapses the column across the whole table when NO row has a
     // pill, handing the slack back to the title flex. An armed row
     // always shows its ` ARM ` marker even when no CI/review pill
     // applies yet (e.g. armed before CI runs).
-    if primary.is_none() && secondary.is_none() && !ctx.auto_merge_armed && !ctx.auto_fix_armed {
+    if primary.is_none()
+        && secondary.is_none()
+        && !ctx.auto_merge_armed
+        && !ctx.auto_fix_armed
+        && !linked
+    {
         return Cell::empty();
     }
     // Emit only the pills that are actually present, each trimmed to
@@ -618,6 +630,16 @@ fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // gap off the duration — its block's trailing space plus the time
     // cell's leading space, nothing more.
     let mut spans = Vec::with_capacity(4);
+    if linked {
+        let linked_style = if ctx.is_cursor {
+            ctx.row_style()
+        } else {
+            Style::default()
+                .fg(ctx.theme.warn)
+                .add_modifier(Modifier::BOLD)
+        };
+        spans.push(Span::styled(" ⎇ local", linked_style));
+    }
     if ctx.auto_merge_armed {
         let arm_style = if ctx.is_cursor {
             ctx.row_style()
@@ -1128,6 +1150,40 @@ mod tests {
         ctx.focused = false;
         let row = build_row(&ctx);
         assert_eq!(row.fill_style, Some(theme.row_unfocused()));
+    }
+
+    /// A linked (no-worktree) workspace shows the `⎇ local` badge in
+    /// the status cell even when it has no task, so the user always
+    /// sees it points at their real checkout.
+    #[test]
+    fn cell_status_shows_local_badge_for_linked_workspace() {
+        let theme = theme();
+        let mut ws = Workspace::empty(
+            lazybox_core::WorkspaceKey::new("acme-widget"),
+            "main",
+            fixed_time(),
+        );
+        ws.linked_checkout = Some(std::path::PathBuf::from("/home/dev/code/acme/widget"));
+        let task = make_task("owner/repo#1", "x");
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.task = None; // linked tracking row, no attached task
+        let cell = cell_status(&ctx);
+        assert!(
+            cell.width() > 0,
+            "linked workspace must render a non-empty status cell"
+        );
+        let text: String = cell.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("⎇ local"), "got {text:?}");
+
+        // A plain workspace with no task renders nothing there.
+        let plain = Workspace::empty(
+            lazybox_core::WorkspaceKey::new("plain"),
+            "main",
+            fixed_time(),
+        );
+        let mut plain_ctx = ctx_for(&plain, &task, &theme);
+        plain_ctx.task = None;
+        assert_eq!(cell_status(&plain_ctx).width(), 0);
     }
 
     /// No badges, no agent cell content.

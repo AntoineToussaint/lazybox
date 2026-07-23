@@ -545,6 +545,19 @@ pub async fn handle_spawn(
         skip_permissions,
         "handle_spawn: entry"
     );
+    // A linked (no-worktree) workspace runs every session in the user's
+    // existing on-disk checkout — the same "shared checkout, not an
+    // isolated worktree" shape as an on-main spawn. Treat it as on-main
+    // from the very top so the inflight-singleton identity, the
+    // duplicate-singleton check, and the resolver all agree it landed on
+    // the shared checkout. Otherwise a normal `a c` (request
+    // on_main=false) would land on the checkout yet claim the *non*-main
+    // singleton, and a second press would spawn a DUPLICATE agent into
+    // the real tree instead of reusing the first. The on-main path also
+    // persists NO session, so no worktree-cleanup path can ever
+    // `rm -rf` the user's real checkout. A `cwd` override is an ad-hoc
+    // spawn with no workspace to inspect, so it's left untouched.
+    let on_main = on_main || (cwd.is_none() && workspace_is_linked(config, &session_key));
     // In-flight guard — claim the singleton identity BEFORE the
     // duplicate check below. That check reads maps populated only after
     // worktree provisioning + `backend.spawn` (minutes on a cold
@@ -1743,6 +1756,20 @@ async fn resolve_or_create_session(
             return Err(error);
         }
     };
+
+    // Linked (no-worktree) workspace: every session lands directly in
+    // the user's existing checkout on whatever branch it already sits
+    // on. No worktree is provisioned (the checkout already exists on
+    // disk), no bare clone, and the branch is never switched. Reported
+    // as "on main" so it reuses the shared-checkout machinery — one
+    // agent singleton per checkout, shells share it, the auto-fix guard
+    // tracks it — matching the "one checkout, multiple tasks share it"
+    // contract. Takes precedence over the `on_main` request flag and an
+    // explicit `session_id`, since a linked workspace has no isolated
+    // per-session worktrees to target.
+    if let Some(path) = workspace.linked_checkout.clone() {
+        return Ok((path, SessionId::new(), true));
+    }
 
     // Main-checkout spawn: skip the isolated per-session worktree and
     // land in the repo's shared checkout on its default branch. The
@@ -3054,6 +3081,18 @@ pub fn main_worktree_path(workspace: &Workspace) -> Option<PathBuf> {
     workspace
         .worktree_scope()
         .map(|scope| worktree_root().join(scope).join("_main"))
+}
+
+/// Whether the workspace behind `session_key` is a linked (no-worktree)
+/// checkout — its sessions run in the user's existing clone on disk.
+/// Best-effort synchronous store read: a missing / unreadable record
+/// reports `false`, so a spawn degrades to normal handling rather than
+/// failing on a lookup error.
+fn workspace_is_linked(config: &ServerConfig, session_key: &SessionKey) -> bool {
+    let key = WorkspaceKey::new(session_key.as_str());
+    load_workspace(config, &key)
+        .map(|w| w.is_linked())
+        .unwrap_or(false)
 }
 
 /// Explicit session creation. Always provisions a fresh worktree
@@ -7969,6 +8008,54 @@ mod tests {
             main_worktree_path(&named_main),
             Some(worktree_path_for_session(&named_main, 0)),
             "shared main checkout must not collide with a `main`-named workspace's tree",
+        );
+    }
+
+    /// A linked (no-worktree) workspace resolves every spawn straight to
+    /// its on-disk checkout: the returned cwd is the linked path, it's
+    /// reported as landed-on-main (so it reuses the shared-checkout
+    /// singleton + auto-fix machinery), and NO worktree is provisioned
+    /// under the state root. The `on_main` request flag and an explicit
+    /// `session_id` don't change the landing — a linked workspace has no
+    /// isolated per-session trees.
+    #[tokio::test]
+    async fn linked_workspace_spawns_directly_in_the_checkout() {
+        let config = ServerConfig::in_memory();
+        let tmp = tempfile::tempdir().unwrap();
+        let checkout = tmp.path().join("acme").join("widget");
+        std::fs::create_dir_all(&checkout).unwrap();
+
+        let mut ws = Workspace::empty(WorkspaceKey::new("acme-widget"), "feature-x", Utc::now());
+        ws.project_key = Some(lazybox_core::ProjectKey::github("acme", "widget"));
+        ws.local = true;
+        ws.linked_checkout = Some(checkout.clone());
+        config
+            .store
+            .save_workspace(&WorkspaceRecord {
+                key: ws.key.as_str().to_string(),
+                created_at: ws.created_at,
+                workspace_json: Some(serde_json::to_string(&ws).unwrap()),
+            })
+            .unwrap();
+
+        let session_key = SessionKey::new("acme-widget");
+        let kind = TerminalKind::Agent("claude".into());
+        // Even with on_main=false and a bogus session_id, the linked
+        // branch wins.
+        let (path, _id, landed_on_main) =
+            resolve_or_create_session(&config, &session_key, Some(SessionId::new()), &kind, false)
+                .await
+                .expect("linked spawn resolves");
+
+        assert_eq!(path, checkout, "sessions land in the real checkout");
+        assert!(
+            landed_on_main,
+            "linked spawns reuse the shared-checkout path"
+        );
+        // No worktree provisioned anywhere under the managed root.
+        assert!(
+            !main_worktree_path(&ws).is_some_and(|p| p.exists()),
+            "a linked workspace must not provision a `_main` worktree",
         );
     }
 

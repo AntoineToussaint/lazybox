@@ -218,9 +218,15 @@ resize.
 
 **Sidebar**: `j/k` or arrows navigate, `Enter` open (focus activity),
 `w` work on this (contextual agent prompt), `s` shell, `e` editor,
-`m` mark read, `z` snooze, `f` cycle role
-filter, `o` cycle sort, `Space` collapse/expand repo group, `Shift-S`
-cycle mailbox (Inbox → Inactive → Snoozed), `/` search. `x` is a
+`m` mark read, `z` snooze, `f` open the filter
+menu (a multi-select over state / role / kind predicates — with-agent,
+CI-failing, conflict, unread, asking, review-requested, auto-merge,
+author/reviewer/assignee/mentioned, PR/issue — combined AND-across /
+OR-within-axis, shown with match counts and as removable header chips),
+`o` cycle sort, `Space` collapse/expand repo group, `Shift-S`
+cycle mailbox (Inbox → Inactive → Snoozed), `/` search (composes with
+the active filters; matches title, number, repo, labels, reviewers /
+assignees). `x` is a
 leader for the **workspace** group (which-key popup): `x n` new
 workspace, `x p` new project, `x a` adopt sessions, `x j` join issue
 into PR, `x z` long snooze, `x x` archive, `x c` close issue

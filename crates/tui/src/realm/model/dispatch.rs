@@ -934,8 +934,8 @@ impl<T: TerminalAdapter> Model<T> {
                 self.right.activity_cursor_bottom();
                 self.redraw = true;
             }
-            Action::CycleRoleFilter => {
-                self.sidebar.cycle_role_filter();
+            Action::OpenFilterMenu => {
+                self.mount_filter_menu();
             }
             Action::CycleSort => {
                 self.sidebar.cycle_sort();

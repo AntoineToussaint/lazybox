@@ -440,6 +440,43 @@ mod effects_tests {
         );
     }
 
+    /// `f` mounts the composable filter menu with a row per filter,
+    /// and picking rows replaces the sidebar's active set (no IPC —
+    /// filtering is client-local).
+    #[test]
+    fn filter_menu_pick_sets_the_active_filter_set() {
+        use crate::components::sidebar::Filter;
+        use lazybox_tui_core::action::Action;
+        let mut m = build_model();
+        m.dispatch_action(&Action::OpenFilterMenu);
+        assert_eq!(m.modal_stack.last(), Some(&Id::FilterMenu));
+        assert_eq!(m.filter_choices, Filter::ALL.to_vec());
+
+        let author = Filter::ALL
+            .iter()
+            .position(|f| *f == Filter::Author)
+            .unwrap();
+        let pr = Filter::ALL.iter().position(|f| *f == Filter::Pr).unwrap();
+        let cmds = m.handle_choice_picked(vec![author, pr]);
+        assert!(cmds.is_empty(), "filtering sends no IPC");
+        assert!(m.modal_stack.is_empty(), "menu closes on pick");
+        assert!(m.filter_choices.is_empty(), "choices drained after pick");
+        let active: Vec<Filter> = m.sidebar.filters().iter().collect();
+        assert_eq!(active, vec![Filter::Author, Filter::Pr]);
+    }
+
+    /// An empty pick clears every active filter.
+    #[test]
+    fn filter_menu_empty_pick_clears_filters() {
+        use crate::components::sidebar::Filter;
+        let mut m = build_model();
+        m.sidebar.set_filters([Filter::Unread]);
+        m.mount_filter_menu();
+        let cmds = m.handle_choice_picked(vec![]);
+        assert!(cmds.is_empty());
+        assert!(m.sidebar.filters().is_empty(), "empty pick clears filters");
+    }
+
     /// `x p` with no tracked repos has nothing to pick, so it
     /// skips the picker and drops straight into the new-project input
     /// — the only way to bootstrap a brand-new, empty inbox.

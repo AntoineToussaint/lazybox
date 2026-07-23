@@ -4991,8 +4991,8 @@ pub async fn recover_sessions(config: &ServerConfig) {
                 .unwrap_or(0),
             _ => 0,
         };
-        let outdated_launch = required_generation > 0
-            && load_pty_launch_generation(config, &key).await != Some(required_generation);
+        let persisted_generation = load_pty_launch_generation(config, &key).await.unwrap_or(0);
+        let outdated_launch = required_generation > 0 && persisted_generation < required_generation;
         let terminal_id = alloc_terminal_id(&*config.store);
         // Recover the primary maps as one visible registration, under the
         // same canonical lock pair as a fresh spawn. This prevents snapshot

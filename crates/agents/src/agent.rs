@@ -190,8 +190,9 @@ pub trait Agent: Send + Sync {
     /// Compatibility generation for the interactive PTY launch contract.
     /// A non-zero generation is persisted with a live backend session so a
     /// newer daemon can identify an older surviving process whose environment
-    /// cannot be repaired in place. Bump this when `pty_spawn_env` changes in
-    /// a way that requires restarting an already-running process.
+    /// cannot be repaired in place. Generations are monotonic: bump this when
+    /// `pty_spawn_env` changes in a way that requires restarting an
+    /// already-running process.
     fn pty_launch_generation(&self) -> u32 {
         0
     }

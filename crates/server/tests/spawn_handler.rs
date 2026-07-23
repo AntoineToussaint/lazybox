@@ -1095,6 +1095,49 @@ async fn recovered_pre_generation_claude_requires_an_explicit_restart() {
     .expect("deadline");
 }
 
+#[tokio::test]
+async fn recovered_claude_at_current_or_newer_generation_needs_no_restart() {
+    timeout(TEST_DEADLINE, async {
+        let backend = MockBackend::new();
+        let store = Arc::new(MemoryStore::new());
+        for generation in [1, 2] {
+            let backend_key = backend
+                .spawn(
+                    &["claude".into()],
+                    None,
+                    &[],
+                    &format!("claude-generation-{generation}"),
+                )
+                .await
+                .expect("pre-existing backend session");
+            let metadata = serde_json::to_string(&(
+                format!("test:claude-generation-{generation}"),
+                TerminalKind::Agent("claude".into()),
+            ))
+            .expect("metadata");
+            store
+                .set_kv(&format!("terminal:{backend_key}"), &metadata)
+                .expect("persist terminal metadata");
+            store
+                .set_kv(
+                    &format!("terminal-pty-generation:{backend_key}"),
+                    &generation.to_string(),
+                )
+                .expect("persist launch generation");
+        }
+
+        let config = ServerConfig::with_store_and_backend(store, Arc::new(backend));
+        lazybox_server::spawn_handler::recover_sessions(&config).await;
+
+        assert!(
+            config.outdated_agent_terminals.lock().await.is_empty(),
+            "a recovered process at least as new as this daemon's PTY contract is compatible"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
 /// Regression / smoke check for the **ingest-into-agent** path
 /// (issue #50). When work is handed to an agent — either by the user
 /// pressing `w` or by the `@lazybox`-mention auto-spawn — the agent is

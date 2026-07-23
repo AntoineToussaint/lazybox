@@ -1919,6 +1919,78 @@ impl RightPane {
         let _ = self.render_activity(chunks[3], frame, focused);
     }
 
+    /// Render the collapsed one-line summary shown in the pane's
+    /// `Summary` mode: a slim count of the signals worth keeping in
+    /// view (new activity, failing CI) plus how recently the task
+    /// moved. The rest of the pane's rows go to the terminal below.
+    pub fn render_summary(
+        &self,
+        area: Rect,
+        frame: &mut Frame,
+        now: chrono::DateTime<chrono::Utc>,
+    ) {
+        let line = self.summary_line(now);
+        let para = Paragraph::new(crate::components::table::truncate_line(
+            line,
+            area.width as usize,
+        ));
+        frame.render_widget(para, area);
+    }
+
+    /// Build the `Summary`-mode line. Pure (takes `now`) so a render
+    /// test can pin the clock and assert the text without a `Frame`.
+    /// The leading `▸` echoes the collapsed-section glyph — it reads
+    /// as "expand me". Counts come straight off the workspace; the
+    /// relative-time trailer reuses the sidebar's `relative_time`.
+    fn summary_line(&self, now: chrono::DateTime<chrono::Utc>) -> Line<'static> {
+        use crate::components::sidebar::pills::relative_time;
+        let theme = crate::theme::current();
+        let sep = Span::styled("  ·  ", Style::default().fg(theme.chrome));
+        let mut spans: Vec<Span<'static>> =
+            vec![Span::styled("▸ ", Style::default().fg(theme.text_dim))];
+        let Some(workspace) = self.workspace.as_ref() else {
+            spans.push(Span::styled("no activity", theme.hint()));
+            return Line::from(spans);
+        };
+        let unread = workspace.unread_count();
+        if unread > 0 {
+            spans.push(Span::styled(
+                format!("{unread} new"),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            spans.push(Span::styled(
+                "no new activity",
+                Style::default().fg(theme.text_dim),
+            ));
+        }
+        if let Some(task) = workspace.primary_task() {
+            if matches!(
+                task.ci,
+                lazybox_core::CiStatus::Failure | lazybox_core::CiStatus::Mixed
+            ) {
+                spans.push(sep.clone());
+                spans.push(Span::styled(
+                    "CI failing",
+                    Style::default()
+                        .fg(theme.error)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+            let rel = relative_time(task.updated_at, now);
+            let trailer = if rel == "now" {
+                "updated just now".to_string()
+            } else {
+                format!("updated {rel} ago")
+            };
+            spans.push(sep);
+            spans.push(Span::styled(trailer, Style::default().fg(theme.text_dim)));
+        }
+        Line::from(spans)
+    }
+
     /// Layout constraint for the task-body section. Three cases:
     /// - no body on the focused task → 0 rows.
     /// - body collapsed → 1 row (the `▶ Description` toggle hint).

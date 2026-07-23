@@ -134,6 +134,7 @@ ui:
   keymap_preset: default     # base keymap layer: default | vim
   theme: Lazybox Dark        # written back by the `t` theme picker
   terminal_new_layout: split # ordinary new terminals: split | tabs (`]]t` toggles)
+  activity_pane_default: full # right pane start mode: full | summary | hidden (`Shift-P` cycles)
   # Remap any catalog action. Keys are snake_case action ids; values are
   # key-spec strings. Unset actions keep their default binding.
   action_keys:
@@ -385,6 +386,7 @@ default keymap.
 | `theme` | string | unset | Active UI theme by exact name (`"Lazybox Dark"`, `"Lazybox Light"`, `"High Contrast"`, …). Written back by the `t` theme picker (live preview; `Esc` restores); unknown / unset keeps the default theme. Full theme list: [docs/themes.md](https://github.com/AntoineToussaint/lazybox/blob/main/docs/themes.md). |
 | `show_tips` | bool | `true` | Show progressive feature-discovery tips (opt-out) |
 | `terminal_new_layout` | `split` \| `tabs` | `split` | How an ordinary second terminal opens. Explicit `]]\|` / `]]-` splits are unaffected; `]]t` toggles and persists this value. |
+| `activity_pane_default` | `full` \| `summary` \| `hidden` | `full` | Where the right (activity) pane starts for a workspace you haven't toggled. `summary` shows a one-line count of new activity / failing CI; `hidden` folds it away. `Shift-P` cycles the three per workspace; a workspace with nothing to show still auto-hides. |
 
 Duration values take a unit suffix (`30s`, `15m`, `4h`, `365d`).
 

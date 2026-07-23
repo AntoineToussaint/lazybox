@@ -89,6 +89,13 @@ impl Right {
         self.inner.render(area, frame, self.focused);
     }
 
+    /// Render the collapsed one-line summary (`Summary` mode) instead
+    /// of the full feed — a slim count of new activity / failing CI
+    /// that keeps the signal while handing the rows to the terminal.
+    pub fn view_summary_in(&mut self, area: Rect, frame: &mut Frame) {
+        self.inner.render_summary(area, frame, chrono::Utc::now());
+    }
+
     /// Direct key dispatch.
     pub fn handle_key_direct(
         &mut self,

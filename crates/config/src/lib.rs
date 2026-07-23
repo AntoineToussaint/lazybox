@@ -206,6 +206,43 @@ where
     })
 }
 
+/// How the Activity (right) pane opens for a workspace: the whole
+/// description + activity feed (`Full`), a single-line summary of the
+/// counts that matter (`Summary`), or folded away entirely (`Hidden`,
+/// its space handed to the terminal). The `Shift-P` shortcut cycles
+/// `Full → Summary → Hidden` per workspace; `ui.activity_pane_default`
+/// sets where a workspace starts before the user touches it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ActivityPaneMode {
+    #[default]
+    Full,
+    Summary,
+    Hidden,
+}
+
+/// Lenient field deserializer for `ui.activity_pane_default`: an
+/// unrecognized value warns and falls back to `full` rather than
+/// sinking the whole config load — same policy as
+/// [`de_lenient_new_terminal_layout`].
+fn de_lenient_activity_pane_mode<'de, D>(de: D) -> Result<ActivityPaneMode, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(de)?;
+    Ok(match raw.trim().to_ascii_lowercase().as_str() {
+        "full" => ActivityPaneMode::Full,
+        "summary" => ActivityPaneMode::Summary,
+        "hidden" => ActivityPaneMode::Hidden,
+        other => {
+            tracing::warn!(
+                "unknown ui.activity_pane_default {other:?}; expected `full`, `summary`, or `hidden`, using `full`"
+            );
+            ActivityPaneMode::Full
+        }
+    })
+}
+
 /// `ui:` block — user-facing view state lazybox writes back so UI
 /// preferences survive restart.
 ///
@@ -314,6 +351,14 @@ pub struct UiSection {
     /// here.
     #[serde(default, deserialize_with = "de_lenient_new_terminal_layout")]
     pub terminal_new_layout: NewTerminalLayout,
+    /// Where the Activity (right) pane starts for a workspace the user
+    /// hasn't toggled yet: `full` (the whole feed, default), `summary`
+    /// (a one-line count of new activity / failing CI), or `hidden`
+    /// (folded away, its space given to the terminal). `Shift-P` cycles
+    /// the three per workspace; this only sets the initial mode. A
+    /// workspace with nothing to show still auto-hides regardless.
+    #[serde(default, deserialize_with = "de_lenient_activity_pane_mode")]
+    pub activity_pane_default: ActivityPaneMode,
     /// Keep the machine awake while any agent is actively working.
     /// When `true`, the daemon holds an OS sleep inhibitor
     /// (`caffeinate` on macOS, `systemd-inhibit` on Linux — a
@@ -357,6 +402,7 @@ impl Default for UiSection {
             show_tips: true,
             tips_seen: Vec::new(),
             terminal_new_layout: NewTerminalLayout::default(),
+            activity_pane_default: ActivityPaneMode::default(),
             keep_awake: false,
         }
     }
@@ -389,6 +435,9 @@ pub struct UiDefaults {
     /// Layout for an auto-spawned second-or-later terminal. See
     /// [`UiSection::terminal_new_layout`].
     pub terminal_new_layout: NewTerminalLayout,
+    /// Initial Activity-pane mode for an un-toggled workspace. See
+    /// [`UiSection::activity_pane_default`].
+    pub activity_pane_default: ActivityPaneMode,
     /// Hold an OS sleep inhibitor while agents work. See
     /// [`UiSection::keep_awake`].
     pub keep_awake: bool,
@@ -409,6 +458,7 @@ impl Default for UiDefaults {
             browser: None,
             agent_dead_on_arrival: Duration::from_millis(10_000),
             terminal_new_layout: NewTerminalLayout::default(),
+            activity_pane_default: ActivityPaneMode::default(),
             keep_awake: false,
         }
     }
@@ -442,6 +492,7 @@ impl UiSection {
             // override is applied.
             agent_dead_on_arrival: d.agent_dead_on_arrival,
             terminal_new_layout: self.terminal_new_layout,
+            activity_pane_default: self.activity_pane_default,
             keep_awake: self.keep_awake,
         }
     }
@@ -1460,6 +1511,49 @@ repos:
         assert_eq!(
             cfg.ui.resolved().terminal_new_layout,
             NewTerminalLayout::Split,
+            "unknown value falls back to the default"
+        );
+    }
+
+    /// `ui.activity_pane_default` defaults to `full`, accepts
+    /// `summary` / `hidden`, and round-trips.
+    #[test]
+    fn activity_pane_default_parses_all_modes() {
+        let cfg: Config = serde_yaml::from_str("{}").expect("parse");
+        assert_eq!(
+            cfg.ui.resolved().activity_pane_default,
+            ActivityPaneMode::Full,
+            "absent → the full-feed default"
+        );
+
+        for (raw, want) in [
+            ("summary", ActivityPaneMode::Summary),
+            ("hidden", ActivityPaneMode::Hidden),
+            ("full", ActivityPaneMode::Full),
+        ] {
+            let cfg: Config =
+                serde_yaml::from_str(&format!("ui:\n  activity_pane_default: {raw}\n"))
+                    .expect("parse");
+            assert_eq!(cfg.ui.resolved().activity_pane_default, want);
+            let written = serde_yaml::to_string(&cfg).expect("serialize");
+            let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
+            assert_eq!(
+                reparsed.ui.resolved().activity_pane_default,
+                want,
+                "{raw} survives round-trip"
+            );
+        }
+    }
+
+    /// A typo'd `ui.activity_pane_default` warns and falls back to
+    /// `full` rather than sinking the whole config load.
+    #[test]
+    fn activity_pane_default_tolerates_a_bad_value() {
+        let cfg: Config = serde_yaml::from_str("ui:\n  activity_pane_default: slim\n")
+            .expect("a bad mode value must not fail the whole parse");
+        assert_eq!(
+            cfg.ui.resolved().activity_pane_default,
+            ActivityPaneMode::Full,
             "unknown value falls back to the default"
         );
     }

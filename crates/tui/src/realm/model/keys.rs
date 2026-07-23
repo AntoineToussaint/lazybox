@@ -1144,6 +1144,23 @@ impl<T: TerminalAdapter> Model<T> {
                     self.redraw = true;
                     return;
                 }
+                // Left-click on the slim summary line (Summary mode) →
+                // expand the pane back to the full feed. The summary is
+                // a non-focusable header, so a plain focus change would
+                // just bounce off `enforce_pane_focus`; instead treat
+                // the click as "expand me" and record the Full override.
+                if matches!(button, crossterm::event::MouseButton::Left)
+                    && self.activity_pane_mode() == lazybox_config::ActivityPaneMode::Summary
+                    && rect_contains(right_top_rect, m.column, m.row)
+                    && let Some(ws_key) = self.sidebar.selected_workspace().map(|w| w.key.clone())
+                {
+                    self.activity_pane_overrides
+                        .insert(ws_key, lazybox_config::ActivityPaneMode::Full);
+                    self.focus = PaneFocus::Right;
+                    self.set_focus_attr();
+                    self.redraw = true;
+                    return;
+                }
                 // Right-click in the sidebar → open the workspace
                 // context menu. Move the cursor to the clicked row
                 // first (same as left-click) so the menu acts on

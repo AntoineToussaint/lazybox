@@ -2066,7 +2066,7 @@ impl Sidebar {
 
 mod filter;
 mod handlers;
-mod pills;
+pub(crate) mod pills;
 mod render;
 
 #[cfg(test)]

@@ -6,6 +6,7 @@
 //! behavior stays consistent across surfaces.
 
 use super::{ActionConfirmTarget, Model, PaneFocus};
+use lazybox_config::ActivityPaneMode;
 use lazybox_ipc::Command as IpcCommand;
 use tuirealm::terminal::TerminalAdapter;
 
@@ -873,14 +874,17 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Action::ToggleActivityPane => {
-                // Flip the Activity pane's visibility for the focused
-                // workspace and remember the choice (so navigating away
-                // and back keeps it). The recorded value is the desired
-                // visibility — the negation of what's currently shown.
+                // Cycle the Activity pane through Full → Summary →
+                // Hidden → Full for the focused workspace and remember
+                // the choice (so navigating away and back keeps it).
                 if let Some(ws_key) = self.sidebar.selected_workspace().map(|w| w.key.clone()) {
-                    let now_visible = self.activity_pane_visible();
-                    self.activity_pane_overrides.insert(ws_key, !now_visible);
-                    // Don't strand focus on a pane we just hid.
+                    let next = match self.activity_pane_mode() {
+                        ActivityPaneMode::Full => ActivityPaneMode::Summary,
+                        ActivityPaneMode::Summary => ActivityPaneMode::Hidden,
+                        ActivityPaneMode::Hidden => ActivityPaneMode::Full,
+                    };
+                    self.activity_pane_overrides.insert(ws_key, next);
+                    // Don't strand focus on a pane we just collapsed.
                     self.enforce_pane_focus();
                     self.redraw = true;
                 }

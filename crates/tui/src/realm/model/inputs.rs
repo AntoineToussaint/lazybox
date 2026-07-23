@@ -14,7 +14,7 @@
 //! `mount_setup_modal`, `unmount_setup_modal`) co-locates here
 //! since it's the same modal-state-mutation shape.
 
-use super::{Id, Model, Msg, dismissed_update_key};
+use super::{ChoicePayload, Id, Model, Msg, dismissed_update_key};
 use crate::realm::UserEvent;
 use lazybox_ipc::{Command as IpcCommand, TerminalId};
 use tuirealm::terminal::TerminalAdapter;
@@ -467,7 +467,7 @@ showing keybinding search only",
     /// commands internally via helper methods (`launch_editor`,
     /// `dispatch_settings_action`, `handle_runner_step`); only
     /// the directly-visible IPC commands land in the Vec.
-    pub fn handle_choice_picked(&mut self, picks: Vec<usize>) -> Vec<IpcCommand> {
+    pub fn handle_choice_picked(&mut self, picks: Vec<ChoicePayload>) -> Vec<IpcCommand> {
         let cmds = self.choice_picked_inner(picks);
         // The inner handler has many early-return arms; drain queued
         // daemon prompts HERE so every one of them gets the "modal
@@ -477,17 +477,14 @@ showing keybinding search only",
         cmds
     }
 
-    fn choice_picked_inner(&mut self, picks: Vec<usize>) -> Vec<IpcCommand> {
+    fn choice_picked_inner(&mut self, picks: Vec<ChoicePayload>) -> Vec<IpcCommand> {
         let mut cmds = Vec::new();
         // Broadcast snippet step — the pick doesn't send anything yet:
         // it seeds the compose textarea with the snippet's body. An
         // empty pick is the picker's `Ctrl-F` "free text only" escape,
         // which skips straight to an empty compose buffer.
         if matches!(self.modal_stack.last(), Some(Id::BroadcastSnippet)) {
-            let key = picks
-                .first()
-                .and_then(|i| self.snippet_choices.get(*i).cloned());
-            self.snippet_choices.clear();
+            let key = picks.first().and_then(|p| p.as_text()).map(str::to_string);
             self.pop_modal();
             if self.pending_broadcast.is_none() {
                 return cmds;
@@ -511,10 +508,7 @@ showing keybinding search only",
         // intermediate "review then send" step. How the submit lands
         // depends on the terminal — see the agent vs shell split below.
         if matches!(self.modal_stack.last(), Some(Id::SnippetPicker)) {
-            let key = picks
-                .first()
-                .and_then(|i| self.snippet_choices.get(*i).cloned());
-            self.snippet_choices.clear();
+            let key = picks.first().and_then(|p| p.as_text()).map(str::to_string);
             self.pop_modal();
             let Some(key) = key else {
                 return cmds;
@@ -563,11 +557,8 @@ showing keybinding search only",
         // provenance stays on the historical entry). Empty / Esc drops
         // the stash without sending.
         if matches!(self.modal_stack.last(), Some(Id::PromptHistoryPicker)) {
-            let text = picks
-                .first()
-                .and_then(|i| self.prompt_history_choices.get(*i).cloned());
+            let text = picks.first().and_then(|p| p.as_text()).map(str::to_string);
             let target = self.prompt_history_target.take();
-            self.prompt_history_choices.clear();
             self.pop_modal();
             // The target is always an agent at mount (history is
             // agent-only); if it exited while the picker was open, don't
@@ -593,9 +584,9 @@ showing keybinding search only",
         // one). Empty / Esc pick drops the stash without moving.
         if matches!(self.modal_stack.last(), Some(Id::JumpPicker)) {
             let target = picks
-                .first()
-                .and_then(|i| self.jump_choices.get(*i).cloned());
-            self.jump_choices.clear();
+                .into_iter()
+                .next()
+                .and_then(ChoicePayload::into_session);
             self.pop_modal();
             if let Some(key) = target {
                 self.jump_to_workspace_key(&key);
@@ -607,10 +598,7 @@ showing keybinding search only",
         // keep it and persist to `ui.theme`; the prev-theme stash is
         // dropped so a later Esc on another modal can't revert it.
         if matches!(self.modal_stack.last(), Some(Id::ThemePicker)) {
-            let name = picks
-                .first()
-                .and_then(|i| self.theme_choices.get(*i).cloned());
-            self.theme_choices.clear();
+            let name = picks.first().and_then(|p| p.as_text()).map(str::to_string);
             self.theme_picker_prev = None;
             self.pop_modal();
             if let Some(name) = name {
@@ -628,10 +616,7 @@ showing keybinding search only",
         // default-model picker when the agent declares tiers. Empty /
         // Esc drops the stash without changing anything.
         if matches!(self.modal_stack.last(), Some(Id::DefaultAgentPicker)) {
-            let agent = picks
-                .first()
-                .and_then(|i| self.default_agent_choices.get(*i).cloned());
-            self.default_agent_choices.clear();
+            let agent = picks.first().and_then(|p| p.as_text()).map(str::to_string);
             self.pop_modal();
             if let Some(agent) = agent {
                 // Persist first; only apply live once the write lands so
@@ -656,9 +641,9 @@ showing keybinding search only",
         // model). Empty / Esc keeps the current tier.
         if matches!(self.modal_stack.last(), Some(Id::DefaultModelPicker)) {
             let alias = picks
-                .first()
-                .and_then(|i| self.default_model_choices.get(*i).cloned());
-            self.default_model_choices.clear();
+                .into_iter()
+                .next()
+                .and_then(ChoicePayload::into_opt_text);
             let agent = self.default_model_agent.take();
             self.pop_modal();
             if let (Some(agent), Some(alias)) = (agent, alias) {
@@ -710,7 +695,8 @@ showing keybinding search only",
         if matches!(self.modal_stack.last(), Some(Id::SidebarContext)) {
             let stash = self.pending_sidebar_context.take();
             self.pop_modal();
-            if let (Some((session_key, actions)), Some(&idx)) = (stash.as_ref(), picks.first())
+            let idx = picks.first().and_then(|p| p.as_index());
+            if let (Some((session_key, actions)), Some(idx)) = (stash.as_ref(), idx)
                 && let Some(action) = actions.get(idx).cloned()
             {
                 // Re-aim the sidebar at the row the menu was raised
@@ -734,9 +720,9 @@ showing keybinding search only",
         // the stash without firing.
         if matches!(self.modal_stack.last(), Some(Id::AdoptTarget)) {
             let target = picks
-                .first()
-                .and_then(|i| self.adopt_choices.get(*i).cloned());
-            self.adopt_choices.clear();
+                .into_iter()
+                .next()
+                .and_then(ChoicePayload::into_workspace);
             self.pop_modal();
             let source = self.pending_adopt_source.take();
             if let (Some(source_key), Some(target_key)) = (source, target) {
@@ -754,9 +740,9 @@ showing keybinding search only",
         // agent's captured output. Empty pick (Esc) drops the stash.
         if matches!(self.modal_stack.last(), Some(Id::HandoffTarget)) {
             let target = picks
-                .first()
-                .and_then(|i| self.handoff_choices.get(*i).cloned());
-            self.handoff_choices.clear();
+                .into_iter()
+                .next()
+                .and_then(ChoicePayload::into_session);
             self.pop_modal();
             match (target, self.pending_handoff.as_mut()) {
                 (Some(target), Some(draft)) => {
@@ -776,9 +762,9 @@ showing keybinding search only",
         // pick drops the stash without advancing.
         if matches!(self.modal_stack.last(), Some(Id::StartAgentProject)) {
             let project = picks
-                .first()
-                .and_then(|i| self.start_agent_project_choices.get(*i).cloned());
-            self.start_agent_project_choices.clear();
+                .into_iter()
+                .next()
+                .and_then(ChoicePayload::into_project);
             self.pop_modal();
             if let Some(project_key) = project {
                 self.mount_new_workspace_input(project_key);
@@ -792,19 +778,17 @@ showing keybinding search only",
         // falls back to creating a new local project. Empty / Esc
         // pick drops the stash without advancing.
         if matches!(self.modal_stack.last(), Some(Id::NewWorkspaceRepo)) {
-            // `.get` is `None` exactly at the trailing escape-hatch row
-            // (index == list length), so a picked repo → name input and
-            // the escape hatch → new-project input. An empty pick (Esc)
-            // just closes the picker.
-            let picked = picks
-                .first()
-                .map(|i| self.new_workspace_repo_choices.get(*i).cloned());
-            self.new_workspace_repo_choices.clear();
+            // A picked repo → name input; the trailing escape-hatch row
+            // (`NewLocalProject`) → new-project input. An empty pick
+            // (Esc) just closes the picker.
+            let picked = picks.into_iter().next();
             self.pop_modal();
             match picked {
-                Some(Some(project_key)) => self.mount_new_workspace_input(project_key),
-                Some(None) => self.mount_new_project_input(),
-                None => {}
+                Some(ChoicePayload::Project(project_key)) => {
+                    self.mount_new_workspace_input(project_key)
+                }
+                Some(ChoicePayload::NewLocalProject) => self.mount_new_project_input(),
+                _ => {}
             }
             return cmds;
         }
@@ -813,9 +797,8 @@ showing keybinding search only",
         if matches!(self.modal_stack.last(), Some(Id::RequestReviewers)) {
             let logins: Vec<String> = picks
                 .iter()
-                .filter_map(|i| self.review_choices.get(*i).cloned())
+                .filter_map(|p| p.as_text().map(str::to_string))
                 .collect();
-            self.review_choices.clear();
             self.pop_modal();
             let workspace_key = self.pending_review_request.take();
             if let (Some(workspace_key), false) = (workspace_key, logins.is_empty()) {
@@ -849,10 +832,10 @@ showing keybinding search only",
         if matches!(self.modal_stack.last(), Some(Id::PolicyPicker)) {
             use crate::realm::model::modals::PolicyToggle;
             let toggle = picks
-                .first()
-                .and_then(|i| self.policy_choices.get(*i).cloned());
+                .into_iter()
+                .next()
+                .and_then(ChoicePayload::into_policy);
             let workspace_key = self.pending_policy_workspace.take();
-            self.policy_choices.clear();
             self.pop_modal();
             let (Some(toggle), Some(workspace_key)) = (toggle, workspace_key) else {
                 return cmds;
@@ -916,7 +899,8 @@ showing keybinding search only",
         if matches!(self.modal_stack.last(), Some(Id::WorkAgentPicker)) {
             let stash = self.pending_work_picker.take();
             self.pop_modal();
-            if let (Some(picker), Some(&idx)) = (stash, picks.first())
+            let idx = picks.first().and_then(|p| p.as_index());
+            if let (Some(picker), Some(idx)) = (stash, idx)
                 && let Some(agent) = picker.agents.get(idx).cloned()
             {
                 self.push_work_spawn(&agent, picker.session_id, picker.model_alias, &mut cmds);
@@ -928,11 +912,8 @@ showing keybinding search only",
         // stashed `snooze_choices`. Empty / Esc dismisses without
         // snoozing.
         if matches!(self.modal_stack.last(), Some(Id::SnoozeDuration)) {
-            let duration = picks
-                .first()
-                .and_then(|i| self.snooze_choices.get(*i).copied());
+            let duration = picks.first().and_then(|p| p.as_duration());
             let workspace_key = self.pending_snooze_workspace.take();
-            self.snooze_choices.clear();
             self.pop_modal();
             if let (Some(session_key), Some(duration)) = (workspace_key, duration) {
                 let until = chrono::Utc::now()
@@ -957,9 +938,8 @@ showing keybinding search only",
         if matches!(self.modal_stack.last(), Some(Id::ManageLabels)) {
             let names: Vec<String> = picks
                 .iter()
-                .filter_map(|i| self.labels_choices.get(*i).cloned())
+                .filter_map(|p| p.as_text().map(str::to_string))
                 .collect();
-            self.labels_choices.clear();
             self.pop_modal();
             if let Some(workspace_key) = self.pending_labels_request.take() {
                 let count = names.len();
@@ -1016,9 +996,8 @@ showing keybinding search only",
         if matches!(self.modal_stack.last(), Some(Id::AddAssignees)) {
             let logins: Vec<String> = picks
                 .iter()
-                .filter_map(|i| self.assignees_choices.get(*i).cloned())
+                .filter_map(|p| p.as_text().map(str::to_string))
                 .collect();
-            self.assignees_choices.clear();
             self.pop_modal();
             if let Some(workspace_key) = self.pending_assignees_request.take() {
                 let count = logins.len();
@@ -1050,7 +1029,11 @@ showing keybinding search only",
         if matches!(self.modal_stack.last(), Some(Id::ImportCheckoutList)) {
             self.pop_modal();
             let rows = std::mem::take(&mut self.pending_import_rows);
-            if let Some(target) = picks.first().and_then(|&i| rows.get(i).cloned()) {
+            if let Some(target) = picks
+                .first()
+                .and_then(|p| p.as_index())
+                .and_then(|i| rows.get(i).cloned())
+            {
                 self.mount_import_checkout_confirm(target);
             }
             return cmds;
@@ -1059,11 +1042,8 @@ showing keybinding search only",
         // the active filters, so the submitted selection IS the new
         // full set. An empty pick is meaningful ("clear all filters").
         if matches!(self.modal_stack.last(), Some(Id::FilterMenu)) {
-            let filters: Vec<crate::components::sidebar::Filter> = picks
-                .iter()
-                .filter_map(|i| self.filter_choices.get(*i).copied())
-                .collect();
-            self.filter_choices.clear();
+            let filters: Vec<crate::components::sidebar::Filter> =
+                picks.iter().filter_map(|p| p.as_filter()).collect();
             self.pop_modal();
             let count = filters.len();
             self.sidebar.set_filters(filters);
@@ -1080,7 +1060,7 @@ showing keybinding search only",
             // Drop the picker first so the confirm modal lands on
             // top of a clean stack.
             self.pop_modal();
-            let Some(&idx) = picks.first() else {
+            let Some(idx) = picks.first().and_then(|p| p.as_index()) else {
                 self.pending_inspect_rows.clear();
                 return cmds;
             };
@@ -1123,7 +1103,8 @@ showing keybinding search only",
         if matches!(self.modal_stack.last(), Some(Id::Editor)) {
             let editor = picks
                 .first()
-                .and_then(|i| self.setup.editor_choices.get(*i).cloned());
+                .and_then(|p| p.as_index())
+                .and_then(|i| self.setup.editor_choices.get(i).cloned());
             self.setup.editor_choices.clear();
             self.pop_modal();
             let Some(editor) = editor else { return cmds };
@@ -1163,7 +1144,8 @@ showing keybinding search only",
         {
             let action = picks
                 .first()
-                .and_then(|i| self.setup.settings_actions.get(*i).cloned());
+                .and_then(|p| p.as_index())
+                .and_then(|i| self.setup.settings_actions.get(i).cloned());
             self.setup.settings_actions.clear();
             self.pop_modal();
             if let Some(action) = action {
@@ -1172,7 +1154,10 @@ showing keybinding search only",
             return cmds;
         }
         if let Some(mut runner) = self.setup.runner.take() {
-            let step = runner.step_choice_picked(picks);
+            // The setup wizard resolves positionally into the runner's
+            // own stashed item list — keep passing plain indices.
+            let indices = picks.iter().filter_map(|p| p.as_index()).collect();
+            let step = runner.step_choice_picked(indices);
             self.handle_runner_step(runner, step);
         } else {
             self.pop_modal();
@@ -1272,34 +1257,29 @@ showing keybinding search only",
                 self.pending_help_action = None;
             }
             Some(Id::RequestReviewers) => {
-                // Esc cancels; drop the stashed workspace key +
-                // candidate list so a later mount on a *different*
-                // workspace doesn't pick up the wrong target.
+                // Esc cancels; drop the stashed workspace key so a later
+                // mount on a *different* workspace doesn't pick up the
+                // wrong target. (Candidate logins now ride the picker
+                // rows, so there's no separate stash to release.)
                 self.pending_review_request = None;
-                self.review_choices.clear();
             }
             Some(Id::AddAssignees) => {
                 self.pending_assignees_request = None;
-                self.assignees_choices.clear();
             }
             Some(Id::ManageLabels) => {
                 self.pending_labels_request = None;
-                self.labels_choices.clear();
             }
             Some(Id::SnoozeDuration) => {
                 self.pending_snooze_workspace = None;
-                self.snooze_choices.clear();
             }
             Some(Id::WorkAgentPicker) => {
                 self.pending_work_picker = None;
             }
             Some(Id::PolicyPicker) => {
                 self.pending_policy_workspace = None;
-                self.policy_choices.clear();
             }
             Some(Id::FilterMenu) => {
                 // Esc = leave the active filters untouched.
-                self.filter_choices.clear();
             }
             Some(Id::WorktreeProgress) => {
                 // Esc on the checklist — remember WHICH provisioning op
@@ -1330,19 +1310,16 @@ showing keybinding search only",
                     .map(|s| s.session_key.clone());
                 self.worktree_progress = None;
             }
-            Some(Id::JumpPicker) => {
-                self.jump_choices.clear();
-            }
             Some(Id::PromptHistoryPicker) => {
-                self.prompt_history_choices.clear();
+                // The prompt text rode on the picked row, so there's no
+                // text stash to release — just drop the resend target.
                 self.prompt_history_target = None;
             }
             // Esc anywhere in the broadcast flow cancels the whole
-            // thing — drop the stashed targets + picked snippet so a
-            // later flow starts clean. The sidebar selection survives:
-            // the user only backed out of composing, not of selecting.
+            // thing — drop the stashed targets so a later flow starts
+            // clean. The sidebar selection survives: the user only
+            // backed out of composing, not of selecting.
             Some(Id::BroadcastSnippet) => {
-                self.snippet_choices.clear();
                 self.pending_broadcast = None;
             }
             Some(Id::BroadcastText) => {
@@ -1352,7 +1329,6 @@ showing keybinding search only",
             // the target candidates and the stashed source/seed so a
             // later handoff starts clean.
             Some(Id::HandoffTarget) => {
-                self.handoff_choices.clear();
                 self.pending_handoff = None;
             }
             Some(Id::HandoffText) => {
@@ -1360,18 +1336,13 @@ showing keybinding search only",
             }
             Some(Id::ThemePicker) => {
                 // Esc cancels the preview: restore the palette that was
-                // active when the picker opened and drop the stashes.
+                // active when the picker opened.
                 if let Some(prev) = self.theme_picker_prev.take() {
                     crate::theme::set_by_name(&prev);
                 }
-                self.theme_choices.clear();
                 self.redraw = true;
             }
-            Some(Id::DefaultAgentPicker) => {
-                self.default_agent_choices.clear();
-            }
             Some(Id::DefaultModelPicker) => {
-                self.default_model_choices.clear();
                 self.default_model_agent = None;
             }
             Some(Id::Setup) => {

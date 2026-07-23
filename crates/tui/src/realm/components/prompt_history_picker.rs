@@ -9,14 +9,17 @@
 //! prompt into the session.
 //!
 //! Modal returns:
-//! - `Msg::ChoicePicked(vec![idx])` — index into the picker's row vec;
-//!   the model holds the parallel `prompt_history_choices` texts.
+//! - `Msg::ChoicePicked(vec![ChoicePayload::Text(text)])` — the full
+//!   prompt text to re-send, carried on the row itself so a filtered /
+//!   re-ordered display can't resolve to the wrong prompt (issue #512).
+//!   No parallel model-side stash.
 //! - `Msg::ModalDismissed` — Esc or Ctrl-C.
 //!
 //! Like the jump picker (and unlike the snippet picker) this never
 //! auto-submits: re-sending a prompt is a deliberate act, so the user
 //! always confirms with Enter.
 
+use crate::realm::ChoicePayload;
 use crate::realm::Msg;
 use crate::realm::UserEvent;
 use tuirealm::command::{Cmd, CmdResult};
@@ -57,9 +60,14 @@ fn subsequence_icase(haystack: &str, needle: &str) -> bool {
 }
 
 pub struct PromptHistoryPicker {
-    /// Display rows, in the order the model stashed the parallel prompt
-    /// texts. A picked index maps straight back to a text.
+    /// Display rows, index-aligned with [`Self::texts`]. Built together
+    /// and never re-ordered, so the filtered display can't desync them.
     rows: Vec<PromptRow>,
+    /// The full prompt text each row re-sends (same length / order as
+    /// `rows`). The display `PromptRow::text` is a truncated summary, so
+    /// the resend value must travel separately; the picked row reports it
+    /// as its [`ChoicePayload::Text`].
+    texts: Vec<String>,
     /// Current filter string.
     filter: String,
     /// Cursor index into `visible_indices`. `None` when empty.
@@ -69,9 +77,14 @@ pub struct PromptHistoryPicker {
 }
 
 impl PromptHistoryPicker {
-    pub fn new(rows: Vec<PromptRow>) -> Self {
+    /// `rows` pairs each display row with the full prompt text it
+    /// re-sends. The pairing travels through the picker so Enter always
+    /// resolves to the full text of the row the user highlighted.
+    pub fn new(rows: Vec<(PromptRow, String)>) -> Self {
+        let (rows, texts): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
         let mut picker = Self {
             rows,
+            texts,
             filter: String::new(),
             cursor: None,
             visible_indices: Vec::new(),
@@ -137,7 +150,8 @@ impl PromptHistoryPicker {
             Key::Enter => {
                 let c = self.cursor?;
                 let row_idx = *self.visible_indices.get(c)?;
-                Some(Msg::ChoicePicked(vec![row_idx]))
+                let text = self.texts.get(row_idx)?.clone();
+                Some(Msg::ChoicePicked(vec![ChoicePayload::Text(text)]))
             }
             Key::Backspace => {
                 self.filter.pop();
@@ -317,23 +331,34 @@ mod tests {
     fn key(code: Key) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
-    fn rows() -> Vec<PromptRow> {
+    fn rows() -> Vec<(PromptRow, String)> {
         vec![
-            PromptRow {
-                when: "just now".into(),
-                tag: Some("]rev".into()),
-                text: "review the diff".into(),
-            },
-            PromptRow {
-                when: "2m ago".into(),
-                tag: None,
-                text: "rebase onto main".into(),
-            },
-            PromptRow {
-                when: "5m ago".into(),
-                tag: None,
-                text: "run the tests".into(),
-            },
+            (
+                PromptRow {
+                    when: "just now".into(),
+                    tag: Some("]rev".into()),
+                    text: "review the diff".into(),
+                },
+                "review the diff".into(),
+            ),
+            (
+                PromptRow {
+                    when: "2m ago".into(),
+                    tag: None,
+                    // Display summary is truncated; the full resend text
+                    // differs, so the payload must carry the full text.
+                    text: "rebase onto main".into(),
+                },
+                "rebase onto main and force-push with lease".into(),
+            ),
+            (
+                PromptRow {
+                    when: "5m ago".into(),
+                    tag: None,
+                    text: "run the tests".into(),
+                },
+                "run the tests".into(),
+            ),
         ]
     }
 
@@ -355,11 +380,18 @@ mod tests {
     }
 
     #[test]
-    fn enter_submits_the_cursor_row() {
+    fn enter_submits_the_cursor_rows_full_text() {
         let mut p = PromptHistoryPicker::new(rows());
         let _ = p.on_key(&key(Key::Down));
         match p.on_key(&key(Key::Enter)) {
-            Some(Msg::ChoicePicked(v)) => assert_eq!(v, vec![1]),
+            // Row 1's *full* resend text — not its truncated summary,
+            // and not a bare index.
+            Some(Msg::ChoicePicked(v)) => assert_eq!(
+                v,
+                vec![ChoicePayload::Text(
+                    "rebase onto main and force-push with lease".into()
+                )]
+            ),
             other => panic!("expected ChoicePicked, got {other:?}"),
         }
     }

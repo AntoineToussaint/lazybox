@@ -11,7 +11,7 @@
 //! `handle_choice_picked` / `handle_confirmed` arms (in mod.rs or
 //! events.rs) read the stashed state and execute on submit.
 
-use super::{HandoffDraft, Id, Model};
+use super::{ChoicePayload, HandoffDraft, Id, Model};
 use tuirealm::terminal::TerminalAdapter;
 
 /// Choice-modal item wrapper for the worktree inspector. Picker
@@ -32,7 +32,7 @@ pub(super) enum InspectRow {
 /// #363) does. The `ChoicePicked` handler resolves the index into this
 /// against the live workspace so the toggle reads current state.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PolicyToggle {
+pub enum PolicyToggle {
     /// Flip the workspace's client-side merge-on-green arm.
     MergeOnGreen,
     /// Flip the per-session auto-fix arm for one failure kind.
@@ -420,16 +420,23 @@ impl<T: TerminalAdapter> Model<T> {
             self.mount_new_project_input();
             return;
         }
-        // Trailing escape-hatch row sits at index == projects.len(),
-        // so `handle_choice_picked` reads any out-of-range pick as
-        // "create a new local project".
-        let mut labels: Vec<String> = projects.iter().map(|(_, name)| name.clone()).collect();
-        labels.push("＋ Create a new local project…".to_string());
-        self.new_workspace_repo_choices = projects.into_iter().map(|(k, _)| k).collect();
+        // Each row carries its project key (or `None` for the trailing
+        // "new local project" escape hatch) so the pick resolves to the
+        // right repo regardless of row order (#512).
+        type RepoRow = (String, Option<lazybox_core::ProjectKey>);
+        let mut items: Vec<RepoRow> = projects
+            .into_iter()
+            .map(|(k, name)| (name, Some(k)))
+            .collect();
+        items.push(("＋ Create a new local project…".to_string(), None));
 
-        let modal = Choice::single("Start a workspace on which repo?", labels)
+        let modal = Choice::single("Start a workspace on which repo?", items)
             .title("New workspace")
-            .label(|s: &String| s.clone());
+            .label(|(name, _): &RepoRow| name.clone())
+            .payload_for(|(_, key): &RepoRow| match key {
+                Some(k) => ChoicePayload::Project(k.clone()),
+                None => ChoicePayload::NewLocalProject,
+            });
         self.mount_modal(Id::NewWorkspaceRepo, modal);
     }
 
@@ -459,11 +466,12 @@ impl<T: TerminalAdapter> Model<T> {
             .title("Add reviewers")
             .label(|s: &String| s.clone())
         } else {
-            let labels: Vec<String> = candidates.iter().map(|l| format!("@{l}")).collect();
-            self.review_choices = candidates;
-            Choice::multi("Request review from", labels)
+            // Items are the bare logins; the `@` prefix is display-only
+            // and the payload carries the login itself (#512).
+            Choice::multi("Request review from", candidates)
                 .title("Add reviewers")
-                .label(|s: &String| s.clone())
+                .label(|l: &String| format!("@{l}"))
+                .payload_for(|l: &String| ChoicePayload::Text(l.clone()))
         };
         self.pending_review_request = Some(workspace_key);
         self.mount_modal(Id::RequestReviewers, modal);
@@ -491,11 +499,14 @@ impl<T: TerminalAdapter> Model<T> {
         };
         let (labels, toggles) =
             build_policy_rows(ws, self.auto_fix_enabled, &self.auto_fix_opt_out_labels);
-        self.policy_choices = toggles;
+        // Pair each label with the toggle it fires so the pick carries
+        // its own `PolicyToggle` (#512).
+        let items: Vec<(String, PolicyToggle)> = labels.into_iter().zip(toggles).collect();
         self.pending_policy_workspace = Some(workspace_key);
-        let modal = Choice::single("● armed · ○ off — Enter toggles", labels)
+        let modal = Choice::single("● armed · ○ off — Enter toggles", items)
             .title("Automation policies")
-            .label(|s: &String| s.clone());
+            .label(|(l, _): &(String, PolicyToggle)| l.clone())
+            .payload_for(|(_, t): &(String, PolicyToggle)| ChoicePayload::Policy(t.clone()));
         self.mount_modal(Id::PolicyPicker, modal);
     }
 
@@ -515,7 +526,6 @@ impl<T: TerminalAdapter> Model<T> {
         let counts: HashMap<Filter, usize> = self.sidebar.filter_counts().into_iter().collect();
         let active: std::collections::HashSet<Filter> = self.sidebar.filters().iter().collect();
         let items: Vec<Filter> = Filter::ALL.to_vec();
-        self.filter_choices = items.clone();
         let active_for_check = active.clone();
         let modal = Choice::multi(
             "Space toggles · Enter applies · same section = any (OR), across sections = all (AND)",
@@ -524,6 +534,9 @@ impl<T: TerminalAdapter> Model<T> {
         .title("Filters")
         .section_for(|f: &Filter| f.axis().label())
         .label(move |f: &Filter| format!("{} ({})", f.label(), counts.get(f).copied().unwrap_or(0)))
+        // Each row carries its own filter, so the grouped display can't
+        // resolve to the wrong predicate (#512).
+        .payload_for(|f: &Filter| ChoicePayload::Filter(*f))
         .with_selected_by(move |f: &Filter| active_for_check.contains(f))
         .allow_empty(true);
         self.mount_modal(Id::FilterMenu, modal);
@@ -596,16 +609,14 @@ impl<T: TerminalAdapter> Model<T> {
             .unwrap_or_default()
             .into_iter()
             .collect();
-        let labels: Vec<String> = candidates.iter().map(|l| format!("@{l}")).collect();
-        self.assignees_choices = candidates.clone();
         self.pending_assignees_request = Some(workspace_key);
-        let modal = Choice::multi("Assign to", labels)
+        // Items are bare logins; `@` is display-only, the payload is the
+        // login (#512).
+        let modal = Choice::multi("Assign to", candidates)
             .title("Assignees (toggle to add/remove)")
-            .label(|s: &String| s.clone())
-            .with_selected_by(move |label: &String| {
-                let login = label.strip_prefix('@').unwrap_or(label);
-                existing.contains(login)
-            });
+            .label(|l: &String| format!("@{l}"))
+            .payload_for(|l: &String| ChoicePayload::Text(l.clone()))
+            .with_selected_by(move |login: &String| existing.contains(login));
         self.mount_modal(Id::AddAssignees, modal);
     }
 
@@ -666,27 +677,16 @@ impl<T: TerminalAdapter> Model<T> {
                 set
             })
             .unwrap_or_default();
-        // Each row reads `[name]` so the user gets the same chip
-        // framing the sidebar uses — keeps mental model consistent.
-        // `labels_choices` stays as the bare names (what the picker
-        // submits back upstream); the bracketed form only lives in
-        // the picker's display labels.
-        let labels_for_picker: Vec<String> = repo_labels
-            .iter()
-            .map(|l| format!("[{}]", l.name))
-            .collect();
-        self.labels_choices = repo_labels.into_iter().map(|l| l.name).collect();
+        // Items are the bare label names (what the picker submits back
+        // upstream); each row renders `[name]` to match the sidebar's
+        // chip framing, and carries its bare name as the payload (#512).
+        let names: Vec<String> = repo_labels.into_iter().map(|l| l.name).collect();
         self.pending_labels_request = Some(workspace_key);
-        let modal = Choice::multi("Apply labels", labels_for_picker)
+        let modal = Choice::multi("Apply labels", names)
             .title("Labels (toggle to add/remove)")
-            .label(|s: &String| s.clone())
-            .with_selected_by(move |label: &String| {
-                let trimmed = label
-                    .strip_prefix('[')
-                    .and_then(|s| s.strip_suffix(']'))
-                    .unwrap_or(label);
-                existing.contains(trimmed)
-            });
+            .label(|name: &String| format!("[{name}]"))
+            .payload_for(|name: &String| ChoicePayload::Text(name.clone()))
+            .with_selected_by(move |name: &String| existing.contains(name));
         self.mount_modal(Id::ManageLabels, modal);
     }
 
@@ -753,12 +753,12 @@ impl<T: TerminalAdapter> Model<T> {
             ("1 month", Duration::from_secs(30 * 24 * 3600)),
             ("Forever (1 year)", Duration::from_secs(365 * 24 * 3600)),
         ];
-        let labels: Vec<String> = options.iter().map(|(l, _)| (*l).to_string()).collect();
-        self.snooze_choices = options.into_iter().map(|(_, d)| d).collect();
         self.pending_snooze_workspace = Some(session_key);
-        let modal = Choice::single("Snooze for…", labels)
+        // Each row carries its own duration (#512).
+        let modal = Choice::single("Snooze for…", options)
             .title("Snooze duration")
-            .label(|s: &String| s.clone());
+            .label(|(l, _): &(&'static str, Duration)| (*l).to_string())
+            .payload_for(|(_, d): &(&'static str, Duration)| ChoicePayload::Duration(*d));
         self.mount_modal(Id::SnoozeDuration, modal);
     }
 
@@ -1445,13 +1445,14 @@ impl<T: TerminalAdapter> Model<T> {
             self.flash_info("no other workspace to adopt sessions into");
             return;
         }
-        let labels: Vec<String> = items.iter().map(|(_, l)| l.clone()).collect();
-        self.adopt_choices = items.into_iter().map(|(k, _)| k).collect();
         self.pending_adopt_source = Some(source_key);
 
-        let modal = Choice::single("Move sessions to which workspace?", labels)
+        // Each row carries its workspace key (#512).
+        type AdoptRow = (lazybox_core::WorkspaceKey, String);
+        let modal = Choice::single("Move sessions to which workspace?", items)
             .title("Adopt sessions")
-            .label(|s: &String| s.clone());
+            .label(|(_, l): &AdoptRow| l.clone())
+            .payload_for(|(k, _): &AdoptRow| ChoicePayload::Workspace(k.clone()));
         self.mount_modal(Id::AdoptTarget, modal);
     }
 
@@ -1491,8 +1492,6 @@ impl<T: TerminalAdapter> Model<T> {
             self.flash_info("no other running agent to hand off to");
             return;
         }
-        let labels: Vec<String> = items.iter().map(|(_, l)| l.clone()).collect();
-        self.handoff_choices = items.into_iter().map(|(k, _)| k).collect();
         self.pending_handoff = Some(HandoffDraft {
             source: source_key.clone(),
             source_name,
@@ -1500,9 +1499,12 @@ impl<T: TerminalAdapter> Model<T> {
             target: None,
         });
 
-        let modal = Choice::single("Send this agent's output to which session?", labels)
+        // Each row carries its session key (#512).
+        type HandoffRow = (lazybox_core::SessionKey, String);
+        let modal = Choice::single("Send this agent's output to which session?", items)
             .title("Send to session")
-            .label(|s: &String| s.clone());
+            .label(|(_, l): &HandoffRow| l.clone())
+            .payload_for(|(k, _): &HandoffRow| ChoicePayload::Session(k.clone()));
         self.mount_modal(Id::HandoffTarget, modal);
     }
 
@@ -1566,12 +1568,12 @@ impl<T: TerminalAdapter> Model<T> {
     fn mount_start_agent_picker(&mut self, projects: Vec<(lazybox_core::ProjectKey, String)>) {
         use crate::realm::components::choice::Choice;
 
-        let labels: Vec<String> = projects.iter().map(|(_, name)| name.clone()).collect();
-        self.start_agent_project_choices = projects.into_iter().map(|(k, _)| k).collect();
-
-        let modal = Choice::single("Start agent in which project?", labels)
+        // Each row carries its project key (#512).
+        type ProjectRow = (lazybox_core::ProjectKey, String);
+        let modal = Choice::single("Start agent in which project?", projects)
             .title("Start agent")
-            .label(|s: &String| s.clone());
+            .label(|(_, name): &ProjectRow| name.clone())
+            .payload_for(|(k, _): &ProjectRow| ChoicePayload::Project(k.clone()));
         self.mount_modal(Id::StartAgentProject, modal);
     }
 

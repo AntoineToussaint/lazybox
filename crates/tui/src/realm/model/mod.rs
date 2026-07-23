@@ -258,9 +258,9 @@ pub enum Id {
     JumpPicker,
     /// Per-session prompt-history picker (`]]h`, issue #523). Lists the
     /// prompts sent to the focused agent, newest-first, snippet entries
-    /// tagged; the parallel prompt texts live in `prompt_history_choices`
-    /// and `Msg::ChoicePicked` re-sends the chosen one. See
-    /// `realm::components::prompt_history_picker`.
+    /// tagged; each row carries the full prompt text it re-sends as a
+    /// [`ChoicePayload::Text`], and `Msg::ChoicePicked` re-sends the
+    /// chosen one. See `realm::components::prompt_history_picker`.
     PromptHistoryPicker,
     /// Theme picker (`t`, or the `,` Settings palette). Single-pick
     /// `Choice` over `theme::list()` with live preview on highlight:
@@ -476,7 +476,13 @@ pub enum Msg {
     Confirmed(bool),
     InputSubmitted(String),
     TextareaSubmitted(String),
-    ChoicePicked(Vec<usize>),
+    /// A picker (`Choice`, jump/snippet picker, settings palette)
+    /// resolved. Each entry is the *typed value* of a picked row —
+    /// never a bare positional index into a parallel "shadow Vec" —
+    /// so resolution can't land on the wrong item when the rendered
+    /// order differs from insertion order (issue #512). See
+    /// [`ChoicePayload`].
+    ChoicePicked(Vec<ChoicePayload>),
     ChoiceRefresh,
     ChoiceBack,
     /// `?` pressed on the Shortcuts panel — return to Ask Lazybox.
@@ -534,6 +540,133 @@ impl std::fmt::Debug for PayloadCarrier {
 impl PayloadCarrier {
     pub fn take(&self) -> Option<Box<dyn std::any::Any + Send>> {
         self.0.lock().ok().and_then(|mut g| g.take())
+    }
+}
+
+/// Typed result of a picker selection, replacing the bare positional
+/// index the modal used to report.
+///
+/// Every picker row now carries its own payload — the actual value the
+/// user is choosing — so the `ChoicePicked` handler resolves the pick
+/// from that value instead of indexing back into a separate,
+/// hand-synced "shadow Vec" kept on the [`Model`]. That parallel Vec
+/// was the source of a whole bug class (issue #512): if a picker's
+/// rendered rows were ever ordered / filtered / grouped differently
+/// from the stash, the index resolved to the WRONG item and lazybox
+/// silently acted on the wrong target (archive / snooze / merge the
+/// wrong workspace). With the value travelling on the row, a picker
+/// whose display order differs from insertion still resolves to the
+/// exact item the user saw.
+///
+/// The modal currently on top of `modal_stack` disambiguates which
+/// flow a payload belongs to, so string-shaped pickers (logins, theme
+/// names, agent ids, snippet keys, labels) all share [`Self::Text`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChoicePayload {
+    /// Positional fallback: the row's index within the picker's own
+    /// item list. Used only by pickers whose resolution is genuinely
+    /// index-based into a component-local or lockstep-built list (the
+    /// settings palette, the setup-wizard runner, the editor picker,
+    /// and the transient `pending_*` action/row stashes) — never a
+    /// cross-struct shadow Vec that could drift from the rendered
+    /// order.
+    Index(usize),
+    /// A stable string value — a login, theme name, agent id, snippet
+    /// key, or label. The top modal disambiguates its meaning.
+    Text(String),
+    /// Optional string — the default-model tier alias, where `None` is
+    /// the "agent default / no pinned tier" row.
+    OptText(Option<String>),
+    /// A snooze duration (the `z` duration picker).
+    Duration(std::time::Duration),
+    /// A sidebar filter predicate (the `f` filter menu).
+    Filter(crate::components::sidebar::Filter),
+    /// An automation-policy toggle (the `g p` policies menu).
+    Policy(crate::realm::model::modals::PolicyToggle),
+    /// A workspace key (the `x a` adopt-target picker).
+    Workspace(lazybox_core::WorkspaceKey),
+    /// A project key (the `Shift-W` start-agent and `x p`
+    /// new-workspace repo pickers).
+    Project(lazybox_core::ProjectKey),
+    /// The trailing "create a new local project" escape-hatch row of
+    /// the new-workspace repo picker.
+    NewLocalProject,
+    /// A session key (the handoff-target and jump-to-workspace pickers).
+    Session(lazybox_core::SessionKey),
+}
+
+impl ChoicePayload {
+    /// The positional index for an [`Self::Index`] row.
+    pub(crate) fn as_index(&self) -> Option<usize> {
+        match self {
+            Self::Index(i) => Some(*i),
+            _ => None,
+        }
+    }
+
+    /// The string value for a [`Self::Text`] row.
+    pub(crate) fn as_text(&self) -> Option<&str> {
+        match self {
+            Self::Text(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    /// The optional-string value for a [`Self::OptText`] row (the outer
+    /// `Option` reports whether the payload was an `OptText` at all).
+    pub(crate) fn into_opt_text(self) -> Option<Option<String>> {
+        match self {
+            Self::OptText(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// The duration for a [`Self::Duration`] row.
+    pub(crate) fn as_duration(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::Duration(d) => Some(*d),
+            _ => None,
+        }
+    }
+
+    /// The filter for a [`Self::Filter`] row.
+    pub(crate) fn as_filter(&self) -> Option<crate::components::sidebar::Filter> {
+        match self {
+            Self::Filter(f) => Some(*f),
+            _ => None,
+        }
+    }
+
+    /// The policy toggle for a [`Self::Policy`] row.
+    pub(crate) fn into_policy(self) -> Option<crate::realm::model::modals::PolicyToggle> {
+        match self {
+            Self::Policy(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// The workspace key for a [`Self::Workspace`] row.
+    pub(crate) fn into_workspace(self) -> Option<lazybox_core::WorkspaceKey> {
+        match self {
+            Self::Workspace(k) => Some(k),
+            _ => None,
+        }
+    }
+
+    /// The project key for a [`Self::Project`] row.
+    pub(crate) fn into_project(self) -> Option<lazybox_core::ProjectKey> {
+        match self {
+            Self::Project(k) => Some(k),
+            _ => None,
+        }
+    }
+
+    /// The session key for a [`Self::Session`] row.
+    pub(crate) fn into_session(self) -> Option<lazybox_core::SessionKey> {
+        match self {
+            Self::Session(k) => Some(k),
+            _ => None,
+        }
     }
 }
 
@@ -779,23 +912,13 @@ pub struct Model<T: TerminalAdapter> {
     /// top modal. Holds the workspace whose PR we'll request
     /// reviewers on.
     pending_review_request: Option<lazybox_core::WorkspaceKey>,
-    /// Candidate logins shown in the `RequestReviewers` picker.
-    /// Indices from `Msg::ChoicePicked` index back into this Vec.
-    /// Cleared after the picker dispatches.
-    review_choices: Vec<String>,
     /// Same shape but for the add-assignees flow.
     pending_assignees_request: Option<lazybox_core::WorkspaceKey>,
-    /// Candidate logins shown in the `AddAssignees` picker.
-    assignees_choices: Vec<String>,
     /// Workspace key the `ManageLabels` picker is targeting. Stashed
     /// at mount time so when `Event::RepoLabels` lands the picker
     /// can re-mount with the repo's labels. Cleared on submit /
     /// dismiss.
     pending_labels_request: Option<lazybox_core::WorkspaceKey>,
-    /// Repo-label names rendered in the `ManageLabels` picker. Order
-    /// matches the picker's row indices so `Msg::ChoicePicked(indices)`
-    /// indexes back into this list. Cleared on submit / dismiss.
-    labels_choices: Vec<String>,
     /// Optimistic mutations applied locally and awaiting the daemon's
     /// echo (#476). Each carries the prior rows so a rejected
     /// round-trip rolls back; the success echo drops the entry. See
@@ -805,9 +928,6 @@ pub struct Model<T: TerminalAdapter> {
     /// result. `Msg::ChoicePicked` reads this + `snooze_choices` to
     /// turn the picked index into a `Command::Snooze`.
     pending_snooze_workspace: Option<lazybox_core::SessionKey>,
-    /// The duration each picker option maps to. Order MUST match
-    /// the labels rendered in `mount_snooze_picker`.
-    snooze_choices: Vec<std::time::Duration>,
     /// Stash for the `w` multi-agent chooser (`Id::WorkAgentPicker`,
     /// #418): the running agent ids listed (row order) plus the spawn
     /// params the pick replays through `push_work_spawn`. Cleared on
@@ -817,14 +937,6 @@ pub struct Model<T: TerminalAdapter> {
     /// `Msg::ChoicePicked` reads it + `policy_choices` to turn the
     /// picked index into a toggle command. Cleared on dismiss.
     pending_policy_workspace: Option<lazybox_core::WorkspaceKey>,
-    /// The toggle each policy-menu row maps to, in row order. Order
-    /// MUST match the labels rendered in `mount_policy_picker`.
-    policy_choices: Vec<crate::realm::model::modals::PolicyToggle>,
-    /// The filter each `FilterMenu` row maps to, in row order. Order
-    /// MUST match the labels rendered in `mount_filter_menu` so
-    /// `Msg::ChoicePicked(indices)` resolves back to the picked
-    /// filters. Cleared on submit / dismiss.
-    filter_choices: Vec<crate::components::sidebar::Filter>,
     /// Queued workspace-removal prompts — either out-of-scope
     /// workspaces with running terminals (`WorkspaceOutOfScope`) or
     /// merged PRs (`MergedPrRemovable`). The daemon won't auto-remove
@@ -871,20 +983,6 @@ pub struct Model<T: TerminalAdapter> {
     /// a target for. Set when the picker mounts; consumed when the
     /// user picks (or dismisses).
     pending_adopt_source: Option<lazybox_core::WorkspaceKey>,
-    /// Candidate target workspaces for the active adopt picker,
-    /// in the same order as the picker's row indices. `Msg::ChoicePicked`
-    /// indexes into this to recover the chosen `WorkspaceKey`.
-    adopt_choices: Vec<lazybox_core::WorkspaceKey>,
-    /// Candidate projects for the active "start agent" (`Shift-W`)
-    /// picker, in row order. `Msg::ChoicePicked` indexes into this to
-    /// recover the chosen `ProjectKey`, then mounts the name input.
-    start_agent_project_choices: Vec<lazybox_core::ProjectKey>,
-    /// Candidate repos for the active `x p` new-workspace picker,
-    /// in row order. The picker shows one extra trailing row (the
-    /// "create a new local project" escape hatch), so a pick index
-    /// equal to this vec's length means "make a new project" rather
-    /// than indexing it.
-    new_workspace_repo_choices: Vec<lazybox_core::ProjectKey>,
     /// Transient UI status (polling spinner + footer notice). See
     /// `StatusCtx`.
     status: StatusCtx,
@@ -1068,12 +1166,6 @@ pub struct Model<T: TerminalAdapter> {
     /// decide whether to mount the picker. Empty when neither file
     /// exists (the typical first-run state).
     pub(crate) snippets: lazybox_config::Snippets,
-    /// Snapshot of the snippet keys the active SnippetPicker is
-    /// showing — indexed by `Msg::ChoicePicked` to recover the
-    /// underlying entry via `self.snippets.get(...)`. Cleared on
-    /// mount/unmount. Storing keys (not full rows) avoids cloning
-    /// the snippet body twice on every picker mount.
-    pub(crate) snippet_choices: Vec<String>,
     /// Snippet keys sent, most-recent first (capped at
     /// `RECENT_SNIPPETS_MAX`). Passed to each picker as its "Recent"
     /// group so a repeated snippet is one `]]s` + `Enter` away (#252).
@@ -1099,24 +1191,12 @@ pub struct Model<T: TerminalAdapter> {
     /// target picker mounts, threaded through the pick step, consumed by
     /// the compose submit. See [`HandoffDraft`].
     pub(crate) pending_handoff: Option<HandoffDraft>,
-    /// Session keys backing the active handoff `HandoffTarget` picker,
-    /// in row order — `Msg::ChoicePicked(idx)` resolves to a key here.
-    pub(crate) handoff_choices: Vec<lazybox_core::SessionKey>,
-    /// Session keys backing the active `JumpPicker`, in the same order
-    /// as its rows — `Msg::ChoicePicked(idx)` resolves to a key here.
-    /// Cleared on mount/unmount.
-    pub(crate) jump_choices: Vec<lazybox_core::SessionKey>,
-    /// Prompt texts backing the active `PromptHistoryPicker`, in the same
-    /// order as its rows — `Msg::ChoicePicked(idx)` resolves to the text
-    /// to re-send (issue #523). Cleared on mount/unmount.
-    pub(crate) prompt_history_choices: Vec<String>,
     /// Terminal the active `PromptHistoryPicker` re-sends into (the agent
     /// focused when it was opened), so a resend targets the right session.
+    /// The prompt text itself rides on the picked row as a
+    /// [`ChoicePayload::Text`] (issue #512), so there's no parallel
+    /// text stash. Cleared on mount/unmount.
     pub(crate) prompt_history_target: Option<lazybox_ipc::TerminalId>,
-    /// Theme names backing the active `ThemePicker`, in the same order
-    /// as `theme::list()` — `Msg::ChoicePicked(idx)` resolves the name
-    /// here to persist. Cleared on mount/unmount.
-    pub(crate) theme_choices: Vec<String>,
     /// Theme name active when the picker opened. Live preview mutates
     /// the global theme as the cursor moves; Esc restores this so a
     /// cancelled picker leaves the palette untouched. `None` while no
@@ -1141,14 +1221,6 @@ pub struct Model<T: TerminalAdapter> {
     /// the run.
     help_run_starting: bool,
     help_pending_questions: Vec<String>,
-    /// Agent ids backing the active `DefaultAgentPicker`, in row order —
-    /// `Msg::ChoicePicked(idx)` resolves the id here to persist. Cleared
-    /// on mount/unmount.
-    pub(crate) default_agent_choices: Vec<String>,
-    /// Tier aliases backing the active `DefaultModelPicker`, in row
-    /// order — `None` is the "agent default" row (no pinned tier).
-    /// Cleared on mount/unmount.
-    pub(crate) default_model_choices: Vec<Option<String>>,
     /// Agent id the active `DefaultModelPicker` persists against —
     /// stashed at mount so a pick can't land on a drifted default.
     pub(crate) default_model_agent: Option<String>,
@@ -1379,18 +1451,12 @@ impl<T: TerminalAdapter> Model<T> {
             pending_notes: None,
             last_reply_body: None,
             pending_review_request: None,
-            review_choices: Vec::new(),
             pending_assignees_request: None,
-            assignees_choices: Vec::new(),
             pending_labels_request: None,
-            labels_choices: Vec::new(),
             pending_mutations: Vec::new(),
             pending_snooze_workspace: None,
-            snooze_choices: Vec::new(),
             pending_work_picker: None,
             pending_policy_workspace: None,
-            policy_choices: Vec::new(),
-            filter_choices: Vec::new(),
             pending_removal_prompts: std::collections::VecDeque::new(),
             active_removal_prompt: None,
             pending_merge_prompts: std::collections::VecDeque::new(),
@@ -1398,9 +1464,6 @@ impl<T: TerminalAdapter> Model<T> {
             worktree_progress: None,
             worktree_progress_dismissed: None,
             pending_adopt_source: None,
-            adopt_choices: Vec::new(),
-            start_agent_project_choices: Vec::new(),
-            new_workspace_repo_choices: Vec::new(),
             status: StatusCtx::new(),
             ui_defaults: lazybox_config::UiDefaults::default(),
             auto_fix_opt_out_labels: lazybox_core::AutoFixSettings::default().opt_out_labels,
@@ -1441,7 +1504,6 @@ impl<T: TerminalAdapter> Model<T> {
             spawn_follow_to: None,
             pending_focus_terminal: None,
             snippets: lazybox_config::Snippets::default(),
-            snippet_choices: Vec::new(),
             recent_snippets: Vec::new(),
             recent_snippets_store: None,
             update_store: None,
@@ -1451,18 +1513,12 @@ impl<T: TerminalAdapter> Model<T> {
             update_dismissals_pending: 0,
             pending_broadcast: None,
             pending_handoff: None,
-            handoff_choices: Vec::new(),
-            jump_choices: Vec::new(),
-            prompt_history_choices: Vec::new(),
             prompt_history_target: None,
-            theme_choices: Vec::new(),
             theme_picker_prev: None,
             help_convo: Default::default(),
             help_run: None,
             help_run_starting: false,
             help_pending_questions: Vec::new(),
-            default_agent_choices: Vec::new(),
-            default_model_choices: Vec::new(),
             default_model_agent: None,
             auto_tour_pending: false,
             tips_enabled: false,
@@ -1784,12 +1840,9 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         }
         let mut rows = Vec::with_capacity(self.snippets.len());
-        let mut keys = Vec::with_capacity(self.snippets.len());
         for (k, v) in self.snippets.all() {
             rows.push(PickerRow::new(k, v));
-            keys.push(k.to_string());
         }
-        self.snippet_choices = keys;
         let picker =
             SnippetPicker::new(rows, initial_filter).with_recent(self.recent_snippets.clone());
         self.mount_modal(Id::SnippetPicker, picker);
@@ -1815,12 +1868,9 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         }
         let mut rows = Vec::with_capacity(self.snippets.len());
-        let mut keys = Vec::with_capacity(self.snippets.len());
         for (k, v) in self.snippets.all() {
             rows.push(PickerRow::new(k, v));
-            keys.push(k.to_string());
         }
-        self.snippet_choices = keys;
         let picker = SnippetPicker::new(rows, String::new())
             .with_recent(self.recent_snippets.clone())
             .with_title(self.broadcast_header())
@@ -1984,8 +2034,8 @@ impl<T: TerminalAdapter> Model<T> {
 
     /// Mount the fuzzy workspace switcher (`JumpToWorkspace`). Rows are
     /// every tracked workspace across repos, attention-needing ones
-    /// first; the parallel session keys are stashed in `jump_choices`
-    /// so `handle_choice_picked` can land the cursor on the chosen one.
+    /// first; each row carries its session key so the pick resolves to
+    /// the highlighted workspace regardless of filter order (#512).
     /// No-op (with a footer hint) when there's nothing to jump to.
     pub(crate) fn mount_jump_picker(&mut self) {
         use crate::realm::components::jump_picker::JumpPicker;
@@ -1997,16 +2047,19 @@ impl<T: TerminalAdapter> Model<T> {
             self.flash_info("no workspaces to jump to yet");
             return;
         }
-        let (keys, labels): (Vec<_>, Vec<_>) = targets.into_iter().unzip();
-        self.jump_choices = keys;
-        self.mount_modal(Id::JumpPicker, JumpPicker::new(labels));
+        // `jump_targets` yields (key, label); the picker wants
+        // (label, key) rows so each label travels with its key.
+        let rows: Vec<(String, lazybox_core::SessionKey)> =
+            targets.into_iter().map(|(k, l)| (l, k)).collect();
+        self.mount_modal(Id::JumpPicker, JumpPicker::new(rows));
     }
 
     /// Mount the per-session prompt-history picker (`]]h`, issue #523).
     /// Rows are every prompt sent to the focused agent, newest-first and
     /// timestamped, with snippet-sourced entries tagged; the parallel
-    /// prompt texts are stashed in `prompt_history_choices` so
-    /// `handle_choice_picked` can re-send the chosen one. No-op (with a
+    /// each picker row carries the full prompt text it re-sends as its
+    /// own [`ChoicePayload::Text`], so `handle_choice_picked` resolves
+    /// the resend straight off the picked row (issue #512). No-op (with a
     /// footer hint) when the focused terminal isn't an agent or has no
     /// history yet.
     pub(crate) fn mount_prompt_history_picker(&mut self) {
@@ -2019,21 +2072,24 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         };
         let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
-        let mut rows = Vec::with_capacity(history.len());
-        let mut texts = Vec::with_capacity(history.len());
-        for prompt in history {
-            let tag = match &prompt.source {
-                lazybox_ipc::PromptSource::Snippet { key, .. } => Some(format!("]{key}")),
-                lazybox_ipc::PromptSource::Typed => None,
-            };
-            rows.push(PromptRow {
-                when: relative_age(prompt.timestamp_ms, now),
-                tag,
-                text: summarize_prompt(&prompt.text),
-            });
-            texts.push(prompt.text);
-        }
-        self.prompt_history_choices = texts;
+        // Each row pairs its display summary with the *full* prompt text
+        // it re-sends — the summary is truncated for display, so the
+        // full text must travel with the row rather than a display label.
+        let rows: Vec<(PromptRow, String)> = history
+            .into_iter()
+            .map(|prompt| {
+                let tag = match &prompt.source {
+                    lazybox_ipc::PromptSource::Snippet { key, .. } => Some(format!("]{key}")),
+                    lazybox_ipc::PromptSource::Typed => None,
+                };
+                let row = PromptRow {
+                    when: relative_age(prompt.timestamp_ms, now),
+                    tag,
+                    text: summarize_prompt(&prompt.text),
+                };
+                (row, prompt.text)
+            })
+            .collect();
         self.prompt_history_target = Some(terminal_id);
         self.mount_modal(Id::PromptHistoryPicker, PromptHistoryPicker::new(rows));
     }
@@ -2057,10 +2113,11 @@ impl<T: TerminalAdapter> Model<T> {
         let current = crate::theme::current().name;
         let start = names.iter().position(|n| n == current).unwrap_or(0);
         self.theme_picker_prev = Some(current.to_string());
-        self.theme_choices = names.clone();
         let modal = Choice::single("Preview as you move · Enter keeps it", names)
             .title("Theme")
             .label(|s: &String| s.clone())
+            // Each row carries its theme name (#512).
+            .payload_for(|name: &String| ChoicePayload::Text(name.clone()))
             .select_index(start)
             .on_highlight(|name: &String| {
                 crate::theme::set_by_name(name);
@@ -2080,19 +2137,25 @@ impl<T: TerminalAdapter> Model<T> {
         }
         let registry = lazybox_agents::registry();
         let ids: Vec<String> = self.agents.clone();
-        let labels: Vec<String> = ids
-            .iter()
-            .map(|id| match registry.get(id) {
-                Some(agent) => format!("{}  ·  {id}", agent.display_name()),
-                None => id.clone(),
-            })
-            .collect();
         let current = self.sidebar.default_agent();
         let start = ids.iter().position(|id| id == current).unwrap_or(0);
-        self.default_agent_choices = ids;
-        let modal = Choice::single("Used by `w` work-on-this + new-workspace spawns", labels)
+        // Each row pairs its display label with the agent id it selects,
+        // so the pick carries the id itself (#512).
+        type AgentRow = (String, String);
+        let items: Vec<AgentRow> = ids
+            .into_iter()
+            .map(|id| {
+                let label = match registry.get(&id) {
+                    Some(agent) => format!("{}  ·  {id}", agent.display_name()),
+                    None => id.clone(),
+                };
+                (label, id)
+            })
+            .collect();
+        let modal = Choice::single("Used by `w` work-on-this + new-workspace spawns", items)
             .title("Default agent")
-            .label(|s: &String| s.clone())
+            .label(|(label, _): &AgentRow| label.clone())
+            .payload_for(|(_, id): &AgentRow| ChoicePayload::Text(id.clone()))
             .select_index(start);
         self.mount_modal(Id::DefaultAgentPicker, modal);
     }
@@ -2121,27 +2184,34 @@ impl<T: TerminalAdapter> Model<T> {
             .and_then(|b| b.default)
             .and_then(|a| models.tier(&a))
             .map(|t| t.label.clone());
-        let mut aliases: Vec<Option<String>> = vec![None];
-        let mut labels: Vec<String> = vec![match &builtin_label {
-            Some(label) => format!("Built-in default  ·  {label}"),
-            None => "Agent default  ·  no pinned model".into(),
-        }];
+        // Each row pairs its label with the tier alias it pins (`None`
+        // = agent default), carried as the payload (#512).
+        type ModelRow = (String, Option<String>);
+        let mut items: Vec<ModelRow> = vec![(
+            match &builtin_label {
+                Some(label) => format!("Built-in default  ·  {label}"),
+                None => "Agent default  ·  no pinned model".into(),
+            },
+            None,
+        )];
         // Fable-class tiers stay spawnable via an explicit chord but
         // are never offered as a default.
         for tier in models.tiers.iter().filter(|t| !t.excluded_from_default()) {
-            aliases.push(Some(tier.alias.clone()));
-            labels.push(format!("{}  ·  {}", tier.label, tier.alias));
+            items.push((
+                format!("{}  ·  {}", tier.label, tier.alias),
+                Some(tier.alias.clone()),
+            ));
         }
         let start = models
             .default
             .as_ref()
-            .and_then(|d| aliases.iter().position(|a| a.as_ref() == Some(d)))
+            .and_then(|d| items.iter().position(|(_, a)| a.as_ref() == Some(d)))
             .unwrap_or(0);
         self.default_model_agent = Some(agent_id.to_string());
-        self.default_model_choices = aliases;
-        let modal = Choice::single("Used by bare spawns · `w S/M/L` still overrides", labels)
+        let modal = Choice::single("Used by bare spawns · `w S/M/L` still overrides", items)
             .title(format!("Default model · {agent_id}"))
-            .label(|s: &String| s.clone())
+            .label(|(label, _): &ModelRow| label.clone())
+            .payload_for(|(_, alias): &ModelRow| ChoicePayload::OptText(alias.clone()))
             .select_index(start);
         self.mount_modal(Id::DefaultModelPicker, modal);
     }

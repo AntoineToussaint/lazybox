@@ -44,7 +44,7 @@ pub(crate) mod setup_screen;
 pub(crate) mod status_ctx;
 pub mod user_event;
 
-pub use model::{Id, Model, Msg};
+pub use model::{ChoicePayload, Id, Model, Msg};
 pub use setup_ctx::{SetupCompleteHook, SetupSaveResult};
 pub use user_event::UserEvent;
 

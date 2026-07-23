@@ -29,6 +29,20 @@ impl Default for MemoryStore {
 
 impl Store for MemoryStore {
     fn apply_batch(&self, mutations: &[StoreMutation]) -> Result<(), StoreError> {
+        // Validate every save payload up front so a bad record aborts the
+        // whole batch before any mutation lands — the same all-or-nothing
+        // contract `SqliteStore` gets from its transaction.
+        for mutation in mutations {
+            match mutation {
+                StoreMutation::SaveWorkspace(record) => {
+                    record.require_json()?;
+                }
+                StoreMutation::SaveProject(record) => {
+                    record.require_json()?;
+                }
+                _ => {}
+            }
+        }
         let mut kv = self.kv_lock();
         for mutation in mutations {
             match mutation {
@@ -41,7 +55,7 @@ impl Store for MemoryStore {
                 StoreMutation::SaveWorkspace(record) => {
                     kv.insert(
                         format!("workspace:{}", record.key),
-                        record.workspace_json.clone().unwrap_or_default(),
+                        record.require_json()?.to_string(),
                     );
                 }
                 StoreMutation::DeleteWorkspace(key) => {
@@ -50,7 +64,7 @@ impl Store for MemoryStore {
                 StoreMutation::SaveProject(record) => {
                     kv.insert(
                         format!("project:{}", record.key),
-                        record.project_json.clone().unwrap_or_default(),
+                        record.require_json()?.to_string(),
                     );
                 }
                 StoreMutation::DeleteProject(key) => {
@@ -87,7 +101,7 @@ impl Store for MemoryStore {
             if let Some(stripped) = key.strip_prefix("workspace:") {
                 out.push(crate::WorkspaceRecord {
                     key: stripped.to_string(),
-                    created_at: crate::traits::created_at_from_json(value),
+                    created_at: crate::traits::created_at_or_oldest(value),
                     workspace_json: Some(value.clone()),
                 });
             }
@@ -107,7 +121,7 @@ impl Store for MemoryStore {
             if let Some(stripped) = key.strip_prefix("project:") {
                 out.push(crate::ProjectRecord {
                     key: stripped.to_string(),
-                    created_at: crate::traits::created_at_from_json(value),
+                    created_at: crate::traits::created_at_or_oldest(value),
                     project_json: Some(value.clone()),
                 });
             }

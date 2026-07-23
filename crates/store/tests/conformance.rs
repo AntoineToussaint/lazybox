@@ -161,21 +161,74 @@ fn workspace_contract(store: &dyn Store) {
         .delete_workspace(&WorkspaceKey::new("conf-ws-never"))
         .unwrap();
 
-    // A record saved with `workspace_json: None` still produces a row
-    // on read (stored as an empty payload) — both backends must agree.
+    // A record with no JSON payload is REJECTED at the write boundary
+    // rather than silently stored as `""` — which a later read surfaced
+    // as a `Some("")` phantom that deserialization then choked on. Both
+    // backends must reject, and neither may create a row.
     let none_json = WorkspaceRecord {
         key: "conf-ws-none".into(),
         created_at: created,
         workspace_json: None,
     };
-    store.save_workspace(&none_json).unwrap();
-    let got = store
-        .get_workspace(&WorkspaceKey::new("conf-ws-none"))
-        .unwrap()
-        .expect("row exists even when saved without json");
-    assert_eq!(got.workspace_json.as_deref(), Some(""));
+    assert!(
+        store.save_workspace(&none_json).is_err(),
+        "saving a workspace with no JSON payload must be rejected"
+    );
+    assert!(
+        store
+            .get_workspace(&WorkspaceKey::new("conf-ws-none"))
+            .unwrap()
+            .is_none(),
+        "a rejected save must not leave a phantom row"
+    );
+    // An empty-string payload is refused on the same grounds.
+    let empty_json = WorkspaceRecord {
+        key: "conf-ws-empty".into(),
+        created_at: created,
+        workspace_json: Some(String::new()),
+    };
+    assert!(
+        store.save_workspace(&empty_json).is_err(),
+        "saving a workspace with an empty JSON payload must be rejected"
+    );
+
+    // A JSON blob with no parseable `created_at` (corrupt/legacy) must
+    // collapse to the OLDEST instant, never `Utc::now()` — a fabricated
+    // now() sorted the broken row newest and let it dodge staleness.
     store
-        .delete_workspace(&WorkspaceKey::new("conf-ws-none"))
+        .save_workspace(&WorkspaceRecord {
+            key: "conf-ws-nocreated".into(),
+            created_at: created,
+            workspace_json: Some(r#"{"key":"conf-ws-nocreated"}"#.into()),
+        })
+        .unwrap();
+    let got = store
+        .get_workspace(&WorkspaceKey::new("conf-ws-nocreated"))
+        .unwrap()
+        .expect("row saved with a valid, non-empty blob");
+    assert_eq!(
+        got.created_at,
+        DateTime::<Utc>::UNIX_EPOCH,
+        "a missing created_at must read as the oldest instant, not now()"
+    );
+    store
+        .delete_workspace(&WorkspaceKey::new("conf-ws-nocreated"))
+        .unwrap();
+
+    // A workspace key that itself begins `workspace:` round-trips through
+    // list_workspaces with the store prefix stripped exactly ONCE — this
+    // caught SqliteStore's `trim_start_matches` (strips repeatedly)
+    // diverging from MemoryStore's single strip.
+    store
+        .save_workspace(&workspace_record("workspace:nested", created, "nested"))
+        .unwrap();
+    let listed = store.list_workspaces().unwrap();
+    assert!(
+        listed.iter().any(|r| r.key == "workspace:nested"),
+        "a `workspace:`-prefixed key must strip only the store prefix, once"
+    );
+    store
+        .delete_workspace(&WorkspaceKey::new("workspace:nested"))
         .unwrap();
 }
 
@@ -221,6 +274,23 @@ fn project_contract(store: &dyn Store) {
         listed.iter().all(|r| r.key != "conf-ws-noise"),
         "workspace rows must not leak into list_projects"
     );
+
+    // A `project:`-prefixed key strips only the store prefix, once —
+    // same divergence guard as the workspace path.
+    store
+        .save_project(&project_record("project:nested", created, "nested"))
+        .unwrap();
+    assert!(
+        store
+            .list_projects()
+            .unwrap()
+            .iter()
+            .any(|r| r.key == "project:nested"),
+        "a `project:`-prefixed key must strip only the store prefix, once"
+    );
+    store
+        .delete_project(&ProjectKey::new("project:nested"))
+        .unwrap();
 
     // Delete + idempotence.
     store.delete_project(&key_a).unwrap();

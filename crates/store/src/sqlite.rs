@@ -95,11 +95,13 @@ impl Store for SqliteStore {
                 }
                 StoreMutation::SaveWorkspace(record) => {
                     let key = format!("workspace:{}", record.key);
-                    let value = record.workspace_json.clone().unwrap_or_default();
+                    // Refuse an empty/None payload — an early return here
+                    // drops the transaction, rolling the whole batch back.
+                    let value = record.require_json()?;
                     tx.execute(
                         "INSERT INTO kv (key, value) VALUES (?1, ?2)
                          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                        (&key, &value),
+                        (&key, value),
                     )
                     .map_err(|e| StoreError::Backend(e.to_string()))?;
                 }
@@ -110,11 +112,11 @@ impl Store for SqliteStore {
                 }
                 StoreMutation::SaveProject(record) => {
                     let key = format!("project:{}", record.key);
-                    let value = record.project_json.clone().unwrap_or_default();
+                    let value = record.require_json()?;
                     tx.execute(
                         "INSERT INTO kv (key, value) VALUES (?1, ?2)
                          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                        (&key, &value),
+                        (&key, value),
                     )
                     .map_err(|e| StoreError::Backend(e.to_string()))?;
                 }
@@ -174,11 +176,14 @@ impl Store for SqliteStore {
         let mut out = Vec::new();
         for row in rows {
             let (key, value) = row.map_err(|e| StoreError::Backend(e.to_string()))?;
-            // Strip the `workspace:` prefix so consumers see clean keys.
-            let key = key.trim_start_matches("workspace:").to_string();
+            // Strip the `workspace:` prefix ONCE so consumers see clean
+            // keys. `strip_prefix` (not `trim_start_matches`, which
+            // strips the prefix repeatedly) keeps this identical to
+            // `MemoryStore` for a key that itself begins `workspace:`.
+            let key = key.strip_prefix("workspace:").unwrap_or(&key).to_string();
             out.push(crate::WorkspaceRecord {
                 key,
-                created_at: crate::traits::created_at_from_json(&value),
+                created_at: crate::traits::created_at_or_oldest(&value),
                 workspace_json: Some(value),
             });
         }
@@ -204,10 +209,10 @@ impl Store for SqliteStore {
         let mut out = Vec::new();
         for row in rows {
             let (key, value) = row.map_err(|e| StoreError::Backend(e.to_string()))?;
-            let key = key.trim_start_matches("project:").to_string();
+            let key = key.strip_prefix("project:").unwrap_or(&key).to_string();
             out.push(crate::ProjectRecord {
                 key,
-                created_at: crate::traits::created_at_from_json(&value),
+                created_at: crate::traits::created_at_or_oldest(&value),
                 project_json: Some(value),
             });
         }

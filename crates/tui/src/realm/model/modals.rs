@@ -931,6 +931,19 @@ impl<T: TerminalAdapter> Model<T> {
         );
     }
 
+    /// Build + mount the scrollable full-description reader (#448) for a
+    /// raw markdown `body` under `title`. Idempotent: re-triggering
+    /// while it's up is a no-op. The modal renders proper markdown and
+    /// owns no pending model state, so dismiss just pops it.
+    pub(crate) fn mount_description_modal(&mut self, title: String, body: String) {
+        use crate::realm::components::markdown_modal::MarkdownModal;
+
+        if self.modal_stack.last() == Some(&Id::DescriptionModal) {
+            return;
+        }
+        self.mount_modal(Id::DescriptionModal, MarkdownModal::new(title, body));
+    }
+
     /// Build + mount the notices-log window from the current
     /// `MessageLog` snapshot (#309). Idempotent: re-pressing the key
     /// while it's up is a no-op. Re-mounting after a `c` clear is

@@ -122,6 +122,11 @@ crossterm          = { version = "0.29", features = ["event-stream"] }
 ratatui            = "0.30"
 tuirealm           = "4.1"
 tui-markdown       = "0.3"
+# Markdown parser (CommonMark + GFM tables/strikethrough/tasklists),
+# scoped to the description-reader modal's renderer. Parser-only — no
+# ratatui coupling, so it stays compatible with the workspace's ratatui
+# pin. default-features off drops the unused HTML-writer + CLI.
+pulldown-cmark     = { version = "0.13", default-features = false }
 chrono             = { version = "0.4", features = ["serde"] }
 portable-pty       = "0.9"
 # 0.40's libsqlite3 build script requires Rust 1.91; 0.39 is the

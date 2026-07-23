@@ -14,9 +14,11 @@
 //!   lazybox slack init              interactive Slack token setup wizard
 //!   lazybox slack doctor            read-only validation of an existing setup
 //!   lazybox slack prune             archive stale per-(session, agent) channels
-//!   lazybox hook-ingest --backend-key K  forward a Claude lifecycle hook
+//!   lazybox hook-ingest --backend-key K  forward an agent lifecycle hook
 //!                                  payload (stdin JSON) to the daemon;
-//!                                  injected into Claude via --settings
+//!                                  injected into Claude via --settings,
+//!                                  into Codex via -c hooks.* overrides
+//!                                  (which pass --backend-key-file instead)
 //!
 //! All arg parsing is intentionally stupid — see `take_flag`.
 
@@ -290,8 +292,9 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// `lazybox hook-ingest --backend-key <key>` — the command Claude Code
-/// runs on each lifecycle hook (lazybox injects it via `--settings` at
-/// spawn). Reads the hook's JSON payload from stdin, normalizes it, and
+/// (and Codex, via `--backend-key-file`) runs on each lifecycle hook
+/// (lazybox injects it via `--settings` / `-c hooks.*` at spawn). Reads
+/// the hook's JSON payload from stdin, normalizes it, and
 /// forwards it to the running daemon over the IPC socket so the daemon
 /// can map it to an `AgentState` transition. The backend key (the tmux
 /// session name) is the correlation handle: it stays stable across
@@ -305,7 +308,17 @@ async fn main() -> anyhow::Result<()> {
 /// command that errored or hung would stall Claude's turn.
 async fn hook_ingest_subcommand(args: &[String]) -> anyhow::Result<()> {
     let mut args = args.to_vec();
-    let backend_key = take_value(&mut args, "--backend-key").filter(|k| !k.is_empty());
+    // `--backend-key <key>` (Claude, key rewritten into its settings file)
+    // or `--backend-key-file <path>` (Codex, whose baked spawn argv can't
+    // embed the key, so the daemon drops it in a file the command reads).
+    // Both resolve to the same correlation handle.
+    let backend_key = take_value(&mut args, "--backend-key")
+        .or_else(|| {
+            take_value(&mut args, "--backend-key-file")
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .map(|s| s.trim().to_string())
+        })
+        .filter(|k| !k.is_empty());
     let terminal_id = take_value(&mut args, "--terminal").and_then(|s| s.parse::<u64>().ok());
     if backend_key.is_none() && terminal_id.is_none() {
         // Nothing to correlate by. Drain stdin so Claude's write

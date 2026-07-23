@@ -559,8 +559,7 @@ async fn capture_seed_trims_grid_padding_below_the_cursor() {
         let raw = String::from_utf8_lossy(&raw.stdout);
         assert!(
             raw.ends_with("\n\n"),
-            "raw capture should end in blank grid padding: {:?}",
-            &raw[raw.len().saturating_sub(80)..]
+            "raw capture should end in blank grid padding: {raw:?}"
         );
 
         // The backend's seed (same `normalize_capture` the reattach path
@@ -574,8 +573,7 @@ async fn capture_seed_trims_grid_padding_below_the_cursor() {
         let seed = String::from_utf8_lossy(&seed);
         assert!(
             seed.ends_with("MIDMARKER"),
-            "seed must end at the last content row, not grid padding: {:?}",
-            &seed[seed.len().saturating_sub(80)..]
+            "seed must end at the last content row, not grid padding: {seed:?}"
         );
         // Deep history above the padding survives — the trim is trailing
         // only, never the whole capture.

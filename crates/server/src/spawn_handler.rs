@@ -811,9 +811,25 @@ pub async fn handle_spawn(
         env_count = env.len(),
         "handle_spawn: calling backend.spawn"
     );
+    // Persist this terminal's scrollback keyed by its session id — stable
+    // across restarts, unlike the backend key a respawn reallocates — so
+    // restart replay reconstructs real history (#468). Only sessions the
+    // restart path actually respawns are worth persisting: a `cwd`
+    // override carries no session, and a main-checkout terminal is never
+    // restored, so both skip it (and its GC-able orphan file).
+    let persist_key = match owning_session {
+        Some(sid) if !landed_on_main => Some(sid.to_string()),
+        _ => None,
+    };
     let backend_key = match config
         .backend
-        .spawn(&argv, cwd_path.as_deref(), &env, &hint)
+        .spawn_persistent(
+            &argv,
+            cwd_path.as_deref(),
+            &env,
+            &hint,
+            persist_key.as_deref(),
+        )
         .await
     {
         Ok(k) => k,
@@ -5564,6 +5580,11 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
         }
     };
 
+    // Reclaim scrollback files for sessions that no longer exist (a
+    // workspace archived via `x x`, a session removed) before restoring —
+    // the durable history has no other GC hook (#468).
+    gc_scrollback_files(&workspaces, &lazybox_core::paths::scrollback_dir());
+
     // Snapshot live (session_key, kind) pairs so we can dedupe.
     let live: std::collections::HashSet<(String, String)> = {
         let meta = config.terminal_meta.lock().await;
@@ -5619,6 +5640,53 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
                 None,
             )
             .await;
+        }
+    }
+}
+
+/// Delete durable scrollback files whose owning session is gone —
+/// archived workspaces, removed sessions (#468). The persisted files are
+/// keyed by session id (see `handle_spawn`), so the set of ids reachable
+/// from every persisted workspace's `sessions` list is exactly what to
+/// keep; any other `scrollback/*` file is an orphan.
+///
+/// Conservative: if any workspace record is unreadable we can't build a
+/// complete keep-set, so we skip the sweep entirely rather than risk
+/// deleting a live session's history. Best-effort IO throughout — a
+/// failed unlink just leaves a bounded file to be retried next start.
+fn gc_scrollback_files(workspaces: &[lazybox_store::WorkspaceRecord], dir: &std::path::Path) {
+    let mut keep: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for record in workspaces {
+        let Some(json) = &record.workspace_json else {
+            return;
+        };
+        let Ok(workspace) = serde_json::from_str::<Workspace>(json) else {
+            return;
+        };
+        for session in &workspace.sessions {
+            keep.insert(session.id.to_string());
+        }
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        // Missing dir = nothing persisted yet; anything else is logged
+        // and skipped.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            tracing::warn!("scrollback gc: read_dir {} failed: {e}", dir.display());
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // File names are the session id (plus a `.tmp` compaction
+        // scratch file); keep only files for a live session.
+        let is_orphan = match path.file_stem().and_then(|s| s.to_str()) {
+            Some(stem) => !keep.contains(stem),
+            None => true,
+        };
+        if is_orphan && let Err(e) = std::fs::remove_file(&path) {
+            tracing::warn!("scrollback gc: remove {} failed: {e}", path.display());
         }
     }
 }
@@ -5757,6 +5825,77 @@ mod tests {
         })
         .await
         .expect("test deadline exceeded");
+    }
+
+    fn workspace_record_with_sessions(
+        key: &str,
+        ids: &[SessionId],
+    ) -> lazybox_store::WorkspaceRecord {
+        let mut ws = Workspace::empty(WorkspaceKey::new(key), "main", Utc::now());
+        for id in ids {
+            let mut session = Session::new(
+                WorkspaceKey::new(key),
+                SessionKind::Shell,
+                std::path::PathBuf::from("/tmp/x"),
+                Utc::now(),
+            );
+            session.id = *id;
+            ws.add_session(session);
+        }
+        lazybox_store::WorkspaceRecord {
+            key: key.to_string(),
+            created_at: Utc::now(),
+            workspace_json: Some(serde_json::to_string(&ws).unwrap()),
+        }
+    }
+
+    /// GC keeps files whose session is still present in a workspace and
+    /// deletes the orphans — including the `.tmp` compaction scratch file,
+    /// which shares the session-id stem (#468).
+    #[test]
+    fn gc_scrollback_removes_only_orphans() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let live = SessionId::new();
+        let orphan = SessionId::new();
+        let live_file = dir.path().join(live.to_string());
+        let live_tmp = dir.path().join(format!("{live}.tmp"));
+        let orphan_file = dir.path().join(orphan.to_string());
+        for f in [&live_file, &live_tmp, &orphan_file] {
+            std::fs::write(f, b"bytes").unwrap();
+        }
+
+        let record = workspace_record_with_sessions("ws-1", &[live]);
+        gc_scrollback_files(&[record], dir.path());
+
+        assert!(live_file.exists(), "a live session's history is kept");
+        assert!(live_tmp.exists(), "its compaction scratch file is kept too");
+        assert!(
+            !orphan_file.exists(),
+            "an archived session's file is reclaimed"
+        );
+    }
+
+    /// Conservative: an unreadable workspace record means the keep-set is
+    /// incomplete, so GC must not delete anything rather than risk wiping
+    /// a live session's history.
+    #[test]
+    fn gc_scrollback_skips_when_a_record_is_unreadable() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let orphan = SessionId::new();
+        let orphan_file = dir.path().join(orphan.to_string());
+        std::fs::write(&orphan_file, b"bytes").unwrap();
+
+        let corrupt = lazybox_store::WorkspaceRecord {
+            key: "ws-corrupt".to_string(),
+            created_at: Utc::now(),
+            workspace_json: Some("{not valid json".to_string()),
+        };
+        gc_scrollback_files(&[corrupt], dir.path());
+
+        assert!(
+            orphan_file.exists(),
+            "no file is deleted when the keep-set can't be fully built"
+        );
     }
 
     #[test]

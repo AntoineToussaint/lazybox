@@ -125,6 +125,28 @@ pub trait SessionBackend: Send + Sync + 'static {
         hint: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String, BackendError>> + Send + 'a>>;
 
+    /// Spawn a fresh session whose output is persisted to disk under the
+    /// stable `persist_key`, so its scrollback survives a daemon restart
+    /// (#468). `persist_key` is a per-session identity stable across
+    /// restarts (the session's UUID) — distinct from the backend key,
+    /// which a respawn reallocates. A backend that already keeps its
+    /// process (and history) alive across restarts out of band — tmux —
+    /// ignores the key and recovers from its own scrollback; the default
+    /// impl therefore drops it and delegates to [`Self::spawn`]. Only
+    /// backends whose child dies with the daemon (raw PTY) need to seed a
+    /// respawn from the persisted bytes.
+    fn spawn_persistent<'a>(
+        &'a self,
+        argv: &'a [String],
+        cwd: Option<&'a Path>,
+        env: &'a [(String, String)],
+        hint: &'a str,
+        persist_key: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = Result<String, BackendError>> + Send + 'a>> {
+        let _ = persist_key;
+        self.spawn(argv, cwd, env, hint)
+    }
+
     /// Write bytes to the session's stdin.
     fn write<'a>(
         &'a self,

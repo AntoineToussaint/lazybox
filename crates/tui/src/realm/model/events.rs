@@ -1664,6 +1664,25 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// Double-click "enter": drop focus into the selected workspace's
+    /// live terminal (#441). With no live session it degrades to the
+    /// default open — the activity pane when there's activity to show,
+    /// otherwise the sidebar selection the click already made.
+    pub(super) fn enter_selected_workspace_terminal(&mut self) {
+        let target = if self.terminals.active_terminal_id().is_some() {
+            PaneFocus::Terminals
+        } else if self.activity_pane_visible() {
+            PaneFocus::Right
+        } else {
+            PaneFocus::Sidebar
+        };
+        if self.focus != target {
+            self.focus = target;
+            self.set_focus_attr();
+            self.redraw = true;
+        }
+    }
+
     /// Turn an agent-CLI update-check reading into footer notices.
     /// Availability is always announced — but an agent the daemon is
     /// about to auto-update (scheduled sweep + `auto_update: true`) is

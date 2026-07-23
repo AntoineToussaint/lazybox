@@ -249,6 +249,13 @@ impl Terminals {
         self.inner.extract_text(rect, start, end)
     }
 
+    /// Forward `visible_text` — dump a terminal's whole visible grid
+    /// as plain text. Seeds the agent-to-agent handoff compose step
+    /// (`x s`) with the source agent's on-screen output.
+    pub fn visible_text(&mut self, id: TerminalId) -> Option<String> {
+        self.inner.visible_text(id)
+    }
+
     /// Classify whatever the focused terminal's grid shows at the
     /// frame-space cell `(col, row)` — a URL, file path, or issue
     /// reference. Used by the right-click handler to detect "the user

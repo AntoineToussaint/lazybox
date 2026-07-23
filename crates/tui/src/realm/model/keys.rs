@@ -1600,6 +1600,7 @@ pub(super) fn action_from_kind(
         ActionKind::Refresh => Action::Refresh,
         ActionKind::ForceRedraw => Action::ForceRedraw,
         ActionKind::AdoptSessions => Action::AdoptSessions,
+        ActionKind::SendToSession => Action::SendToSession,
         ActionKind::CollapseIntoPr => Action::CollapseIntoPr,
         ActionKind::Reply => Action::Reply,
         ActionKind::RequestReviewers => Action::RequestReviewers,

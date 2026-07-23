@@ -42,6 +42,13 @@ impl<T: TerminalAdapter> Model<T> {
             self.drain_queued_daemon_prompts();
             return cmds;
         }
+        // The handoff compose step shares the Textarea component too —
+        // route by top modal id, like broadcast (issue #431).
+        if matches!(top, Some(Id::HandoffText)) {
+            let cmds = self.dispatch_handoff(&body);
+            self.drain_queued_daemon_prompts();
+            return cmds;
+        }
         let mut cmds = Vec::new();
         let target = self.pending_reply.take();
         if let Some(session_key) = target
@@ -135,6 +142,70 @@ impl<T: TerminalAdapter> Model<T> {
             ),
         };
         self.flash_info(summary);
+        self.redraw = true;
+        cmds
+    }
+
+    /// Deliver the composed handoff body into the target session
+    /// (`x s`, issue #431): a running agent gets the same settle-gated
+    /// `InjectPrompt` (+ `RecordUserMessage` recap) the broadcast path
+    /// uses; a plain shell gets the encoded direct write. The visible
+    /// "source → target" notice records the A→B trail. An empty body
+    /// (the user cleared the seed) or a target that lost its session
+    /// between pick and submit cancels with a notice, sending nothing.
+    fn dispatch_handoff(&mut self, body: &str) -> Vec<IpcCommand> {
+        let Some(draft) = self.pending_handoff.take() else {
+            return Vec::new();
+        };
+        let Some(target) = draft.target else {
+            return Vec::new();
+        };
+        let body = body.trim_end();
+        if body.is_empty() {
+            self.flash_info("handoff cancelled — nothing to send");
+            return Vec::new();
+        }
+        let target_name = self
+            .sidebar
+            .workspace_by_key(&target)
+            .map(|w| w.name.clone())
+            .unwrap_or_else(|| target.to_string());
+        let mut cmds = Vec::new();
+        match self.sidebar.broadcast_terminal(&target) {
+            Some((terminal_id, true)) => {
+                // Same recap + inject pair as the broadcast fan-out.
+                let mut recap = body.as_bytes().to_vec();
+                recap.push(b'\r');
+                if let Some(message) = self.terminals.record_pty_write(terminal_id, &recap) {
+                    cmds.push(IpcCommand::RecordUserMessage {
+                        terminal_id,
+                        message,
+                    });
+                }
+                cmds.push(IpcCommand::InjectPrompt {
+                    terminal_id,
+                    prompt: body.to_string(),
+                    fallback_spawn: None,
+                    submit: true,
+                });
+                self.flash_info(format!("handoff: {} → {target_name}", draft.source_name));
+            }
+            Some((terminal_id, false)) => {
+                cmds.push(IpcCommand::Write {
+                    terminal_id,
+                    bytes: encode_snippet_for_pty(body),
+                });
+                self.flash_info(format!(
+                    "handoff: {} → {target_name} (shell)",
+                    draft.source_name
+                ));
+            }
+            None => {
+                self.flash_info(format!(
+                    "handoff failed — {target_name} has no running session"
+                ));
+            }
+        }
         self.redraw = true;
         cmds
     }
@@ -594,6 +665,27 @@ showing keybinding search only",
                     target_workspace_key: target_key.clone(),
                 });
                 self.flash_info(format!("adopted sessions: {source_key} → {target_key}"));
+            }
+            return cmds;
+        }
+        // Handoff target picker (Id::HandoffTarget, issue #431) — the
+        // pick doesn't send yet: it resolves the target session and
+        // funnels into the compose textarea seeded with the source
+        // agent's captured output. Empty pick (Esc) drops the stash.
+        if matches!(self.modal_stack.last(), Some(Id::HandoffTarget)) {
+            let target = picks
+                .first()
+                .and_then(|i| self.handoff_choices.get(*i).cloned());
+            self.handoff_choices.clear();
+            self.pop_modal();
+            match (target, self.pending_handoff.as_mut()) {
+                (Some(target), Some(draft)) => {
+                    draft.target = Some(target);
+                    self.mount_handoff_textarea();
+                }
+                _ => {
+                    self.pending_handoff = None;
+                }
             }
             return cmds;
         }
@@ -1101,6 +1193,16 @@ showing keybinding search only",
             }
             Some(Id::BroadcastText) => {
                 self.pending_broadcast = None;
+            }
+            // Esc anywhere in the handoff flow (#431) cancels it — drop
+            // the target candidates and the stashed source/seed so a
+            // later handoff starts clean.
+            Some(Id::HandoffTarget) => {
+                self.handoff_choices.clear();
+                self.pending_handoff = None;
+            }
+            Some(Id::HandoffText) => {
+                self.pending_handoff = None;
             }
             Some(Id::ThemePicker) => {
                 // Esc cancels the preview: restore the palette that was

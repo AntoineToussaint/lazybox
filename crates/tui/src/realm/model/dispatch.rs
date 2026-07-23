@@ -975,6 +975,30 @@ impl<T: TerminalAdapter> Model<T> {
             Action::BroadcastToSelected => {
                 self.mount_broadcast_picker();
             }
+            Action::SendToSession => {
+                // Source = the focused workspace's live agent terminal.
+                // `broadcast_terminal` prefers the agent over a shell and
+                // returns `is_agent`; a handoff only makes sense from an
+                // agent, so a shell-only or session-less workspace nudges
+                // instead of opening the picker.
+                let Some(source_key) = self.sidebar.selected_workspace_key().cloned() else {
+                    return cmds;
+                };
+                match self.sidebar.broadcast_terminal(&source_key) {
+                    Some((terminal_id, true)) => {
+                        let seed = self.terminals.visible_text(terminal_id).unwrap_or_default();
+                        let source_name = self
+                            .sidebar
+                            .workspace_by_key(&source_key)
+                            .map(|w| w.name.clone())
+                            .unwrap_or_else(|| source_key.to_string());
+                        self.mount_handoff_picker(&source_key, source_name, seed);
+                    }
+                    _ => {
+                        self.flash_info("no agent session here to hand off from");
+                    }
+                }
+            }
             // Actions not yet handled here stay in the existing
             // handlers. As we migrate, the per-key match arms in
             // `handle_pane_key` and the pane wrappers get deleted

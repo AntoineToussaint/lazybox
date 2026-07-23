@@ -263,6 +263,16 @@ pub enum Id {
     /// the picked snippet's body (custom text appends after it).
     /// Submit → one delivery per target in `pending_broadcast`.
     BroadcastText,
+    /// Target picker for the agent-to-agent handoff flow (`x s`,
+    /// issue #431) — pick the session the source agent's output should
+    /// be injected into. Candidate keys live in `handoff_choices`; the
+    /// source name + captured seed live in `pending_handoff`.
+    /// `Msg::ChoicePicked` resolves the target and mounts `HandoffText`.
+    HandoffTarget,
+    /// Compose step of the handoff flow: a Textarea pre-filled with the
+    /// source agent's captured on-screen output, editable before send.
+    /// Submit → inject + submit into the target in `pending_handoff`.
+    HandoffText,
     /// Single-pick `Choice` over the enabled agents (`,` Settings →
     /// "Change default agent"), opened on the current default. Pick →
     /// persist `setup.default_agent` and update the panes live. Ids
@@ -379,6 +389,19 @@ pub(crate) struct ConfigEdit {
 pub(crate) struct BroadcastDraft {
     pub(crate) targets: Vec<lazybox_core::SessionKey>,
     pub(crate) snippet_key: Option<String>,
+}
+
+/// Active agent-to-agent handoff (`x s`, issue #431). Set when the
+/// target picker mounts, carrying the source workspace's display name
+/// (for the A→B notice) and the seed captured from its agent screen
+/// (pre-fills the compose textarea). The `target` is filled in when the
+/// picker resolves; the whole draft is consumed by the compose submit
+/// (`dispatch_handoff`) or dropped on Esc.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HandoffDraft {
+    pub(crate) source_name: String,
+    pub(crate) seed: String,
+    pub(crate) target: Option<lazybox_core::SessionKey>,
 }
 
 /// One queued workspace-removal prompt. Surfaced one at a time as a
@@ -972,6 +995,13 @@ pub struct Model<T: TerminalAdapter> {
     /// mounts, threaded through the snippet-pick step, consumed by the
     /// compose submit (or dropped on Esc). See [`BroadcastDraft`].
     pub(crate) pending_broadcast: Option<BroadcastDraft>,
+    /// Active agent-to-agent handoff flow (`x s`), if any. Set when the
+    /// target picker mounts, threaded through the pick step, consumed by
+    /// the compose submit. See [`HandoffDraft`].
+    pub(crate) pending_handoff: Option<HandoffDraft>,
+    /// Session keys backing the active handoff `HandoffTarget` picker,
+    /// in row order — `Msg::ChoicePicked(idx)` resolves to a key here.
+    pub(crate) handoff_choices: Vec<lazybox_core::SessionKey>,
     /// Session keys backing the active `JumpPicker`, in the same order
     /// as its rows — `Msg::ChoicePicked(idx)` resolves to a key here.
     /// Cleared on mount/unmount.
@@ -1279,6 +1309,8 @@ impl<T: TerminalAdapter> Model<T> {
             update_dismissal_rx,
             update_dismissals_pending: 0,
             pending_broadcast: None,
+            pending_handoff: None,
+            handoff_choices: Vec::new(),
             jump_choices: Vec::new(),
             theme_choices: Vec::new(),
             theme_picker_prev: None,

@@ -120,6 +120,12 @@ pub enum Action {
     ManagePolicies,
     /// Move every session from the focused workspace to another.
     AdoptSessions,
+    /// Hand off the focused agent's on-screen output to another
+    /// session (issue #431): capture what this agent produced, pick a
+    /// target workspace, edit the brief, and inject + submit it into
+    /// the target's agent. The user routes it — no agent tooling — so
+    /// the planner→executor pipe stays in one keystroke chain.
+    SendToSession,
     /// Manually fold an issue workspace into the PR workspace that
     /// closes it. Only available when the local state already knows
     /// of a PR claiming this issue (via `closes_issues`). Same end-
@@ -346,6 +352,7 @@ pub enum ActionKind {
     ToggleAutoMerge,
     ManagePolicies,
     AdoptSessions,
+    SendToSession,
     CollapseIntoPr,
     RequestReviewers,
     AddAssignees,
@@ -446,6 +453,7 @@ impl ActionKind {
         Self::NewWorkspace,
         Self::NewProject,
         Self::AdoptSessions,
+        Self::SendToSession,
         Self::CollapseIntoPr,
         Self::LongSnooze,
         Self::Archive,
@@ -549,6 +557,7 @@ impl Action {
             Action::ToggleAutoMerge => ActionKind::ToggleAutoMerge,
             Action::ManagePolicies => ActionKind::ManagePolicies,
             Action::AdoptSessions => ActionKind::AdoptSessions,
+            Action::SendToSession => ActionKind::SendToSession,
             Action::CollapseIntoPr => ActionKind::CollapseIntoPr,
             Action::RequestReviewers => ActionKind::RequestReviewers,
             Action::AddAssignees => ActionKind::AddAssignees,
@@ -902,6 +911,13 @@ impl ActionDef {
                 default_keys: "x a",
                 label: "adopt sessions",
                 describe: "Move every session from this workspace into another.",
+                section: Section::Workspace,
+            },
+            ActionKind::SendToSession => &Self {
+                kind: ActionKind::SendToSession,
+                default_keys: "x s",
+                label: "send to session",
+                describe: "Hand this agent's on-screen output off to another session: pick a target workspace, edit the brief, and inject + submit it into that session's agent.",
                 section: Section::Workspace,
             },
             ActionKind::CollapseIntoPr => &Self {
@@ -1559,6 +1575,7 @@ impl ActionKind {
             ActionKind::ToggleAutoMerge => "toggle_auto_merge",
             ActionKind::ManagePolicies => "manage_policies",
             ActionKind::AdoptSessions => "adopt_sessions",
+            ActionKind::SendToSession => "send_to_session",
             ActionKind::CollapseIntoPr => "collapse_into_pr",
             ActionKind::RequestReviewers => "request_reviewers",
             ActionKind::AddAssignees => "add_assignees",
@@ -1772,6 +1789,7 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::Archive
         | ActionKind::CloseIssue
         | ActionKind::AdoptSessions
+        | ActionKind::SendToSession
         | ActionKind::CollapseIntoPr => Some("workspace"),
         _ => None,
     }
@@ -2211,6 +2229,10 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::AddAssignees
         | ActionKind::ManageLabels
         | ActionKind::OpenInBrowser => has_ws,
+        // Needs a source workspace; the dispatcher checks it actually
+        // carries a running agent terminal and nudges when it doesn't
+        // (the catalog can't see live terminals).
+        ActionKind::SendToSession => has_ws,
         // Activity actions need a workspace AND that workspace
         // having some activity to act on. The pane that owns this
         // section already enforces "has activity"; the catalog
@@ -3539,6 +3561,7 @@ mod tests {
             (ActionKind::NewWorkspace, 'n'),
             (ActionKind::NewProject, 'p'),
             (ActionKind::AdoptSessions, 'a'),
+            (ActionKind::SendToSession, 's'),
             (ActionKind::CollapseIntoPr, 'j'),
             (ActionKind::LongSnooze, 'z'),
             (ActionKind::Archive, 'x'),

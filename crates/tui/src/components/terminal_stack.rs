@@ -1805,6 +1805,58 @@ impl TerminalStack {
         out
     }
 
+    /// Plain-text dump of a terminal's whole visible grid — every row
+    /// top to bottom, trailing spaces trimmed and blank rows dropped
+    /// off both ends. Seeds an agent-to-agent handoff with the source
+    /// agent's on-screen output (issue #431); the caller lets the user
+    /// edit it before it's injected into the target session, so the
+    /// composer chrome the scrape inevitably picks up is trimmed there.
+    /// `None` when the terminal is unknown, its VT snapshot can't be
+    /// read, or the grid holds no non-blank rows.
+    pub fn visible_text(&mut self, id: TerminalId) -> Option<String> {
+        let slot = self.terminals.get_mut(&id)?;
+        // The grid must reflect every byte received, not just those that
+        // arrived while on screen — mirrors `extract_text`.
+        slot.flush_pending();
+        let snapshot = slot.vt.render_state.update(&slot.vt.terminal).ok()?;
+        let mut row_iter = slot.vt.row_iter.update(&snapshot).ok()?;
+        let mut rows: Vec<String> = Vec::new();
+        while let Some(row) = row_iter.next() {
+            let mut line = String::new();
+            if let Ok(mut cell_iter) = slot.vt.cell_iter.update(row) {
+                while let Some(cell) = cell_iter.next() {
+                    // Wide-glyph spacer cells carry no graphemes; emitting
+                    // them as spaces would split CJK text (see `extract_text`).
+                    if matches!(
+                        cell.wide(),
+                        Ok(vt::screen::CellWide::SpacerTail | vt::screen::CellWide::SpacerHead)
+                    ) {
+                        continue;
+                    }
+                    let graphemes = cell.graphemes().unwrap_or_default();
+                    if graphemes.is_empty() {
+                        line.push(' ');
+                    } else {
+                        for g in graphemes {
+                            line.push(g);
+                        }
+                    }
+                }
+            }
+            rows.push(line.trim_end().to_string());
+        }
+        while rows.first().is_some_and(|l| l.is_empty()) {
+            rows.remove(0);
+        }
+        while rows.last().is_some_and(|l| l.is_empty()) {
+            rows.pop();
+        }
+        if rows.is_empty() {
+            return None;
+        }
+        Some(rows.join("\n"))
+    }
+
     /// If the cell at frame-space `(col, row)` lies inside a URL,
     /// file path, or `#N` / `owner/repo#N` issue reference on its
     /// row, return the matching [`ClickTarget`]. Otherwise `None`.
@@ -4864,6 +4916,27 @@ mod extract_text_offset_tests {
         stack.terminals.insert(TerminalId(1), slot);
         stack.set_active_session(Some(sk));
         stack
+    }
+
+    #[test]
+    fn visible_text_dumps_the_whole_grid_trimming_blank_edges() {
+        let mut stack = stack_with(
+            TerminalKind::Agent("claude".into()),
+            Some("do the thing"),
+            &["plan:", "  1. scope", "  2. build"],
+        );
+        let text = stack
+            .visible_text(TerminalId(1))
+            .expect("a fed grid yields text");
+        // Every content row, top to bottom, with the grid's blank
+        // trailing rows dropped (no leading/trailing empty lines).
+        assert_eq!(text, "plan:\n  1. scope\n  2. build");
+    }
+
+    #[test]
+    fn visible_text_is_none_for_an_unknown_terminal() {
+        let mut stack = stack_with(TerminalKind::Agent("claude".into()), None, &["x"]);
+        assert!(stack.visible_text(TerminalId(999)).is_none());
     }
 
     #[test]

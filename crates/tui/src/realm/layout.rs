@@ -91,12 +91,21 @@ impl LayoutCtx {
     /// Test whether `(col, row)` lands within tolerance of one of the
     /// two splitter lines. Tolerance: ±1 cell so users don't have to
     /// land pixel-perfect on the divider.
+    ///
+    /// `horizontal_active` gates only the horizontal (activity ↔
+    /// terminal) splitter: it's a real resize handle just for the
+    /// *full* activity pane. The slim `Summary` line still has a
+    /// positive height, so the height check alone would synthesize a
+    /// dead splitter there that drags `right_top_pct` with no visible
+    /// effect — pass `false` in Summary / Hidden to suppress it. The
+    /// vertical sidebar splitter is unaffected and always live.
     pub fn hit_test_splitter(
         &self,
         col: u16,
         row: u16,
         sidebar_rect: Rect,
         right_top_rect: Rect,
+        horizontal_active: bool,
     ) -> Option<DragTarget> {
         // Vertical splitter sits between sidebar and the right column.
         let v_x = sidebar_rect.x + sidebar_rect.width;
@@ -108,11 +117,12 @@ impl LayoutCtx {
             return Some(DragTarget::SidebarRight);
         }
         // Horizontal splitter sits between right-top and right-bottom.
-        // A zero-height right-top means the Activity pane is hidden —
-        // there's no splitter to grab, so don't synthesize one at the
-        // top edge of the terminal stack.
+        // Suppressed unless the activity pane is a full, resizable pane
+        // (a zero-height hidden row, or the slim summary line, has no
+        // splitter to grab at the top edge of the terminal stack).
         let h_y = right_top_rect.y + right_top_rect.height;
-        if right_top_rect.height > 0
+        if horizontal_active
+            && right_top_rect.height > 0
             && row + 1 >= h_y
             && row <= h_y + 1
             && col >= right_top_rect.x
@@ -422,7 +432,7 @@ mod tests {
         // Hover one cell right of the sidebar's right edge → vertical splitter.
         let v_x = sidebar.x + sidebar.width;
         assert_eq!(
-            c.hit_test_splitter(v_x, 10, sidebar, right_top),
+            c.hit_test_splitter(v_x, 10, sidebar, right_top, true),
             Some(DragTarget::SidebarRight)
         );
     }
@@ -438,8 +448,38 @@ mod tests {
         );
         let h_y = right_top.y + right_top.height;
         assert_eq!(
-            c.hit_test_splitter(right_top.x + 5, h_y, sidebar, right_top),
+            c.hit_test_splitter(right_top.x + 5, h_y, sidebar, right_top, true),
             Some(DragTarget::ActivityTerminals)
+        );
+    }
+
+    #[test]
+    fn summary_seam_has_no_horizontal_splitter() {
+        // The slim summary line has a positive height, so only the
+        // explicit `horizontal_active = false` keeps its seam from
+        // synthesizing a dead splitter.
+        let c = ctx();
+        let (sidebar, right_top, right_bottom) = pane_areas(
+            area(),
+            c.sidebar_pct,
+            c.right_top_pct,
+            c.sidebar_user_resized,
+        );
+        let (_, summary_top, _) = apply_activity_mode(
+            (sidebar, right_top, right_bottom),
+            ActivityPaneMode::Summary,
+        );
+        let h_y = summary_top.y + summary_top.height;
+        assert_eq!(
+            c.hit_test_splitter(summary_top.x + 5, h_y, sidebar, summary_top, false),
+            None,
+            "no draggable splitter at the summary / terminal seam"
+        );
+        // The vertical sidebar splitter still works in Summary mode.
+        let v_x = sidebar.x + sidebar.width;
+        assert_eq!(
+            c.hit_test_splitter(v_x, 10, sidebar, summary_top, false),
+            Some(DragTarget::SidebarRight),
         );
     }
 
@@ -453,7 +493,7 @@ mod tests {
             c.sidebar_user_resized,
         );
         // Middle of the sidebar — not on any splitter.
-        assert_eq!(c.hit_test_splitter(2, 10, sidebar, right_top), None);
+        assert_eq!(c.hit_test_splitter(2, 10, sidebar, right_top, true), None);
     }
 
     #[test]
@@ -564,13 +604,14 @@ mod tests {
         // a draggable splitter.
         let h_y = right_top.y + right_top.height;
         assert_eq!(
-            c.hit_test_splitter(right_top.x + 5, h_y, sidebar, hidden_top),
+            c.hit_test_splitter(right_top.x + 5, h_y, sidebar, hidden_top, false),
             None,
         );
-        // The vertical sidebar splitter is unaffected.
+        // The vertical sidebar splitter is unaffected even with the
+        // horizontal splitter inactive.
         let v_x = sidebar.x + sidebar.width;
         assert_eq!(
-            c.hit_test_splitter(v_x, 10, sidebar, hidden_top),
+            c.hit_test_splitter(v_x, 10, sidebar, hidden_top, false),
             Some(DragTarget::SidebarRight),
         );
     }

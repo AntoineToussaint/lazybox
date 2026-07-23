@@ -1189,11 +1189,21 @@ impl<T: TerminalAdapter> Model<T> {
                 // under the cursor we fall through to the normal
                 // routing — the PTY still gets the right-click for
                 // its own context menus.
+                // The horizontal splitter is only a live resize handle
+                // while the activity pane is full — in Summary / Hidden
+                // its 1-row / 0-row seam must not grab drags.
+                let horizontal_splitter = self.activity_pane_visible();
                 if matches!(button, crossterm::event::MouseButton::Right)
                     && rect_contains(right_bottom_rect, m.column, m.row)
                     && self
                         .layout
-                        .hit_test_splitter(m.column, m.row, sidebar_rect, right_top_rect)
+                        .hit_test_splitter(
+                            m.column,
+                            m.row,
+                            sidebar_rect,
+                            right_top_rect,
+                            horizontal_splitter,
+                        )
                         .is_none()
                     && let Some(target) =
                         self.terminals.target_at(right_bottom_rect, m.column, m.row)
@@ -1204,10 +1214,13 @@ impl<T: TerminalAdapter> Model<T> {
                 // Splitter drag wins over both focus changes and
                 // terminal interaction — clicking a splitter resizes,
                 // it never refocuses or types into a pane.
-                if let Some(target) =
-                    self.layout
-                        .hit_test_splitter(m.column, m.row, sidebar_rect, right_top_rect)
-                {
+                if let Some(target) = self.layout.hit_test_splitter(
+                    m.column,
+                    m.row,
+                    sidebar_rect,
+                    right_top_rect,
+                    horizontal_splitter,
+                ) {
                     self.layout.active_drag = Some(target);
                     return;
                 }
@@ -1491,7 +1504,11 @@ impl<T: TerminalAdapter> Model<T> {
                     }
                     return;
                 }
-                if rect_contains(right_top_rect, m.column, m.row) {
+                // Only the full feed scrolls. The slim summary line
+                // shares `right_top_rect`, but routing wheel events to
+                // `scroll_activity` there would silently move the
+                // not-rendered feed's offset.
+                if self.activity_pane_visible() && rect_contains(right_top_rect, m.column, m.row) {
                     // Inertia damper: the OS-driven "flick keeps
                     // scrolling for 500ms after the gesture" phase
                     // decays its STEP and a reverse-direction gesture

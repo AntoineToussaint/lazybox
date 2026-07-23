@@ -353,6 +353,10 @@ fn all_commands() -> Vec<Command> {
         Command::UpdateBranch {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
         },
+        Command::RecordSentSnippet {
+            session_key: "github:o/r#1".into(),
+            snippet_key: "rev".into(),
+        },
         Command::Shutdown,
     ]
 }
@@ -812,6 +816,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::UpdateAgentClis => "UpdateAgentClis",
         Command::SetNotes { .. } => "SetNotes",
         Command::UpdateBranch { .. } => "UpdateBranch",
+        Command::RecordSentSnippet { .. } => "RecordSentSnippet",
     }
 }
 
@@ -892,7 +897,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        61,
+        62,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(

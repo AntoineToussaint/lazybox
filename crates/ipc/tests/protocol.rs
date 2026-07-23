@@ -343,6 +343,10 @@ fn all_commands() -> Vec<Command> {
         },
         Command::CheckAgentCliUpdates,
         Command::UpdateAgentClis,
+        Command::SetNotes {
+            session_key: "github:o/r#1".into(),
+            notes: "check the flaky retry".into(),
+        },
         Command::Shutdown,
     ]
 }
@@ -787,6 +791,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::FetchScrollback { .. } => "FetchScrollback",
         Command::CheckAgentCliUpdates => "CheckAgentCliUpdates",
         Command::UpdateAgentClis => "UpdateAgentClis",
+        Command::SetNotes { .. } => "SetNotes",
     }
 }
 
@@ -864,7 +869,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        58,
+        59,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(

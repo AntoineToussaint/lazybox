@@ -60,6 +60,7 @@ Act on the focused workspace. Available from the sidebar **and** the activity pa
 | `m` | mark read | Mark every activity row on the focused workspace read. |
 | `z` | snooze | Snooze the workspace for ~4h (toggle). |
 | `r` | reply | Open the reply textarea targeted at this workspace. |
+| `n` | notes | Edit this workspace's local scratchpad — a private note that never syncs to a provider. |
 
 ## Sidebar
 

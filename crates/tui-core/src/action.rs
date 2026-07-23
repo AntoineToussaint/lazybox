@@ -150,6 +150,10 @@ pub enum Action {
     /// to a close-as-not-planned (with a notice) otherwise.
     /// Confirm-guarded — destructive and outward-facing.
     DeleteOrClose,
+    /// Open the notes editor (a Textarea) for the focused workspace —
+    /// a free-form local scratchpad that never syncs to a provider
+    /// (issue #458). Pre-filled with the current note; submit persists.
+    EditNotes,
 
     // ── Sidebar list management ────────────────────────────────────
     // These act on the sidebar's list/view rather than a single
@@ -357,6 +361,7 @@ pub enum ActionKind {
     ManageLabels,
     OpenInBrowser,
     DeleteOrClose,
+    EditNotes,
     // Sidebar list management
     OpenFilterMenu,
     CycleSort,
@@ -466,6 +471,7 @@ impl ActionKind {
         Self::OpenInBrowser,
         Self::DeleteOrClose,
         Self::Reply,
+        Self::EditNotes,
         // Sidebar list management
         Self::OpenFilterMenu,
         Self::CycleSort,
@@ -574,6 +580,7 @@ impl Action {
             Action::ActivityTop => ActionKind::ActivityTop,
             Action::ActivityBottom => ActionKind::ActivityBottom,
             Action::Reply => ActionKind::Reply,
+            Action::EditNotes => ActionKind::EditNotes,
             Action::SelectRow => ActionKind::SelectRow,
             Action::ToggleDescription => ActionKind::ToggleDescription,
             Action::UndoMarkRead => ActionKind::UndoMarkRead,
@@ -1044,6 +1051,13 @@ impl ActionDef {
                 default_keys: "r",
                 label: "reply",
                 describe: "Open the reply textarea targeted at this workspace.",
+                section: Section::Workspace,
+            },
+            ActionKind::EditNotes => &Self {
+                kind: ActionKind::EditNotes,
+                default_keys: "n",
+                label: "notes",
+                describe: "Edit this workspace's local scratchpad — a private note that never syncs to a provider.",
                 section: Section::Workspace,
             },
             ActionKind::SelectRow => &Self {
@@ -1592,6 +1606,7 @@ impl ActionKind {
             ActionKind::ActivityTop => "activity_top",
             ActionKind::ActivityBottom => "activity_bottom",
             ActionKind::Reply => "reply",
+            ActionKind::EditNotes => "edit_notes",
             ActionKind::SelectRow => "select_row",
             ActionKind::ToggleDescription => "toggle_description",
             ActionKind::UndoMarkRead => "undo_mark_read",
@@ -2226,7 +2241,10 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::RequestReviewers
         | ActionKind::AddAssignees
         | ActionKind::ManageLabels
-        | ActionKind::OpenInBrowser => has_ws,
+        | ActionKind::OpenInBrowser
+        // Notes attach to any workspace — even a session-less/empty
+        // one — so gate purely on a workspace being under the cursor.
+        | ActionKind::EditNotes => has_ws,
         // Activity actions need a workspace AND that workspace
         // having some activity to act on. The pane that owns this
         // section already enforces "has activity"; the catalog

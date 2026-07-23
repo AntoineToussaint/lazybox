@@ -42,6 +42,27 @@ impl<T: TerminalAdapter> Model<T> {
             self.drain_queued_daemon_prompts();
             return cmds;
         }
+        // Notes also share the Textarea component. Unlike Reply, an
+        // empty body is a valid submit — it clears the scratchpad — so
+        // we persist whatever the user left rather than gating on
+        // non-empty (issue #458).
+        if matches!(top, Some(Id::Notes)) {
+            let mut cmds = Vec::new();
+            if let Some(session_key) = self.pending_notes.take() {
+                let cleared = body.trim().is_empty();
+                cmds.push(IpcCommand::SetNotes {
+                    session_key,
+                    notes: body,
+                });
+                if cleared {
+                    self.flash_info("Notes cleared");
+                } else {
+                    self.flash_info("Notes saved");
+                }
+            }
+            self.drain_queued_daemon_prompts();
+            return cmds;
+        }
         let mut cmds = Vec::new();
         let target = self.pending_reply.take();
         if let Some(session_key) = target

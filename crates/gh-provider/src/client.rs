@@ -1211,17 +1211,38 @@ impl GhClient {
             ))
         })?;
 
-        // Persist the new `Last-Modified` for the next call's
-        // conditional. Skip the write when GitHub didn't send one
-        // (rare; happens on test fixtures) — leaving the old value
-        // alone is safer than clearing it and re-pulling the world.
-        // `take`-into-the-Mutex avoids the double-copy a `clone` +
-        // move return would have paid for.
-        if let Some(lm) = new_last_modified {
+        // Do NOT commit the new `Last-Modified` here (#512). Advancing
+        // the cursor the instant the LIST parses — before the per-entry
+        // deep-fetches run — is exactly the bug: if a deep-fetch times
+        // out this tick, the cursor has already moved past its entry, so
+        // the next heartbeat answers 304 and the entry is never re-listed
+        // until its `updated_at` bumps again (a CI failure / new comment
+        // can stay invisible until the ≤10-min full sweep). Instead we
+        // hand the pending cursor back to the polling layer, which
+        // commits it via `commit_notifications_cursor` only after the
+        // fan-out reports every entry handled. A failed entry holds the
+        // cursor so it re-lists next tick.
+        Ok(NotificationsPoll::Modified {
+            entries,
+            last_modified: new_last_modified,
+        })
+    }
+
+    /// Commit the notifications cursor (`Last-Modified`) captured from a
+    /// [`NotificationsPoll::Modified`] poll, echoed back as
+    /// `If-Modified-Since` on the next `GET /notifications` so the steady
+    /// state answers 304 cheaply.
+    ///
+    /// Called by the polling layer AFTER the per-entry deep-fetch fan-out
+    /// finishes with no transient failures — coupling the at-most-once
+    /// cursor advance to work completion (#512). Skips the write when
+    /// GitHub didn't send a `Last-Modified` (rare; some test fixtures):
+    /// leaving the old value alone is safer than clearing it and
+    /// re-pulling the world.
+    pub fn commit_notifications_cursor(&self, last_modified: Option<String>) {
+        if let Some(lm) = last_modified {
             self.notifications_state.lock().last_modified = Some(lm);
         }
-
-        Ok(NotificationsPoll::Modified { entries })
     }
 
     /// Targeted deep-fetch: pull one PR by `(owner, repo, number)` via
@@ -3818,6 +3839,131 @@ mod tests {
         assert!(
             !msg.contains("mergePullRequest") && !msg.contains("MERGED"),
             "parse-failure notice must not echo the raw response body: {msg}"
+        );
+    }
+
+    /// Spin up a `/notifications`-style conditional-GET server: a request
+    /// WITHOUT a matching `If-Modified-Since` gets a `200` carrying
+    /// `Last-Modified: <last_modified>` and `body`; a request whose
+    /// `If-Modified-Since` echoes that exact value gets a `304`. Lets the
+    /// cursor-lifecycle test drive the 200 → 304 transition without
+    /// pulling in `wiremock`.
+    async fn spawn_conditional_notifications_server(
+        last_modified: &'static str,
+        body: &'static str,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => continue,
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    // First colon splits header name from value; the time
+                    // colons in the date stay in the value half.
+                    let ims_matches =
+                        req.lines()
+                            .filter_map(|l| l.split_once(':'))
+                            .any(|(name, val)| {
+                                name.trim().eq_ignore_ascii_case("if-modified-since")
+                                    && val.trim() == last_modified
+                            });
+                    let response = if ims_matches {
+                        "HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n".to_string()
+                    } else {
+                        format!(
+                            "HTTP/1.1 200 OK\r\n\
+                             Content-Type: application/json\r\n\
+                             Last-Modified: {last_modified}\r\n\
+                             Content-Length: {}\r\n\
+                             Connection: close\r\n\r\n{body}",
+                            body.len(),
+                        )
+                    };
+                    let _ = sock.write_all(response.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// #512 regression: parsing the notification LIST must NOT advance
+    /// the `Last-Modified` cursor. The bug was that the cursor committed
+    /// the instant the list parsed — before the per-item deep-fetches
+    /// ran — so an entry whose deep-fetch failed this tick was skipped
+    /// forever (the next heartbeat answered 304 and never re-listed it).
+    /// The cursor must only advance through an explicit
+    /// `commit_notifications_cursor`, which the polling layer calls after
+    /// the fan-out reports every entry handled.
+    #[tokio::test(flavor = "current_thread")]
+    async fn notifications_list_does_not_advance_cursor_until_committed() {
+        const LAST_MODIFIED: &str = "Sun, 06 Nov 2026 08:49:37 GMT";
+        const BODY: &str = r#"[{
+            "reason": "ci_activity",
+            "updated_at": "2026-05-28T12:00:00Z",
+            "subject": {
+                "title": "PR 123",
+                "url": "https://api.github.com/repos/o/r/pulls/123",
+                "type": "PullRequest"
+            },
+            "repository": { "full_name": "o/r" }
+        }]"#;
+        let base_uri = spawn_conditional_notifications_server(LAST_MODIFIED, BODY).await;
+        let client = make_client(&base_uri);
+
+        // Tick 1: a fresh 200 lists PR #123 and hands the pending cursor
+        // BACK to the caller instead of committing it.
+        let poll = client.fetch_notifications().await.expect("first poll ok");
+        let pending = match poll {
+            NotificationsPoll::Modified {
+                entries,
+                last_modified,
+            } => {
+                assert_eq!(entries.len(), 1, "the one PR notification must be listed");
+                assert_eq!(
+                    last_modified.as_deref(),
+                    Some(LAST_MODIFIED),
+                    "the pending cursor rides the poll result, not the shared state",
+                );
+                last_modified
+            }
+            NotificationsPoll::NotModified => panic!("first poll must be 200, not 304"),
+        };
+        assert!(
+            !client.notifications_snapshot().has_last_modified,
+            "listing alone must NOT commit the cursor (#512)",
+        );
+
+        // Tick 2 WITHOUT committing — this is the un-fetched entry's
+        // retry. The heartbeat still sends no `If-Modified-Since`, so
+        // GitHub re-serves the 200 and PR #123 re-lists rather than being
+        // lost to a premature 304.
+        let poll2 = client.fetch_notifications().await.expect("second poll ok");
+        assert!(
+            matches!(poll2, NotificationsPoll::Modified { ref entries, .. } if entries.len() == 1),
+            "an un-committed cursor must re-list the entry next tick, not 304 it away",
+        );
+
+        // Commit (the fan-out reported every entry handled) → the cursor
+        // finally advances.
+        client.commit_notifications_cursor(pending);
+        assert!(
+            client.notifications_snapshot().has_last_modified,
+            "commit_notifications_cursor advances the cursor",
+        );
+
+        // Tick 3: the committed cursor is echoed as `If-Modified-Since`,
+        // so the server answers the cheap steady-state 304.
+        let poll3 = client.fetch_notifications().await.expect("third poll ok");
+        assert!(
+            matches!(poll3, NotificationsPoll::NotModified),
+            "a committed cursor reaches the 304 steady state",
         );
     }
 }

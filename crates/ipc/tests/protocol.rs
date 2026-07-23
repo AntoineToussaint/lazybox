@@ -700,6 +700,9 @@ fn all_events() -> Vec<Event> {
             installed_after: None,
             message: "brew upgrade --cask codex failed: exit 1".into(),
         },
+        Event::RecoveredTerminalsRequireRestart {
+            terminal_ids: vec![TerminalId(12), TerminalId(13)],
+        },
     ]
 }
 
@@ -829,6 +832,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::TerminalScrollback { .. } => "TerminalScrollback",
         Event::AgentCliUpdatesChecked { .. } => "AgentCliUpdatesChecked",
         Event::AgentCliUpdateFinished { .. } => "AgentCliUpdateFinished",
+        Event::RecoveredTerminalsRequireRestart { .. } => "RecoveredTerminalsRequireRestart",
     }
 }
 
@@ -845,7 +849,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
     );
     assert_eq!(
         event_tags.len(),
-        56,
+        57,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

@@ -1275,6 +1275,22 @@ pub async fn dispatch_command(
             let load_errors = workspaces.errors.len() + projects.errors.len();
             let mut terminals = spawn_handler::snapshot_terminals(config).await;
             budget_snapshot_replay(&mut terminals);
+            // Derive compatibility warnings from the exact snapshot this
+            // subscriber receives. Terminal teardown removes the primary
+            // mapping before its auxiliary launch-generation marker; counting
+            // the marker set independently could therefore warn about a
+            // terminal absent from this snapshot.
+            let restart_required = {
+                let outdated = config.outdated_agent_terminals.lock().await;
+                terminals
+                    .iter()
+                    .filter_map(|terminal| {
+                        outdated
+                            .contains(&terminal.terminal_id)
+                            .then_some(terminal.terminal_id)
+                    })
+                    .collect::<Vec<_>>()
+            };
             let _ = tx.send(Event::Snapshot {
                 workspaces: workspaces.values,
                 terminals,
@@ -1283,19 +1299,10 @@ pub async fn dispatch_command(
             if load_errors > 0 {
                 let _ = tx.send(storage_recovery_event(load_errors));
             }
-            let outdated_agents = config.outdated_agent_terminals.lock().await.len();
-            if outdated_agents > 0 {
-                let noun = if outdated_agents == 1 {
-                    "Claude session was"
-                } else {
-                    "Claude sessions were"
-                };
-                let _ = tx.send(Event::provider_error_permanent(
-                    "spawn:recovered-agent",
-                    format!(
-                        "{outdated_agents} recovered {noun} started by an older lazybox build; close and reopen the terminal to enable scrolling"
-                    ),
-                ));
+            if !restart_required.is_empty() {
+                let _ = tx.send(Event::RecoveredTerminalsRequireRestart {
+                    terminal_ids: restart_required,
+                });
             }
             // A fresh subscriber may have missed removal prompts emitted
             // before it connected (broadcast is fire-and-forget) — reset

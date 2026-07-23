@@ -1080,16 +1080,31 @@ async fn recovered_pre_generation_claude_requires_an_explicit_restart() {
             .expect("restart warning event");
         assert!(matches!(
             warning,
-            Event::ProviderError {
-                source,
-                message,
-                kind,
-                ..
-            } if source == "spawn:recovered-agent"
-                && kind == "permanent"
-                && message.contains("close and reopen")
-                && message.contains("enable scrolling")
+            Event::RecoveredTerminalsRequireRestart { terminal_ids }
+                if terminal_ids.len() == 1
         ));
+    })
+    .await
+    .expect("deadline");
+}
+
+#[tokio::test]
+async fn subscribe_does_not_warn_for_an_outdated_terminal_absent_from_its_snapshot() {
+    timeout(TEST_DEADLINE, async {
+        let config = ServerConfig::in_memory();
+        config
+            .outdated_agent_terminals
+            .lock()
+            .await
+            .insert(lazybox_ipc::TerminalId(404));
+
+        let mut client = subscribed(config).await;
+        assert!(
+            timeout(Duration::from_millis(100), client.recv())
+                .await
+                .is_err(),
+            "an auxiliary teardown marker without a snapshotted terminal must not emit a warning"
+        );
     })
     .await
     .expect("deadline");

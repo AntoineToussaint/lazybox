@@ -1607,6 +1607,7 @@ pub(super) fn action_from_kind(
         ActionKind::RequestReviewers => Action::RequestReviewers,
         ActionKind::AddAssignees => Action::AddAssignees,
         ActionKind::ManageLabels => Action::ManageLabels,
+        ActionKind::SyncWorkspace => Action::SyncWorkspace,
         ActionKind::OpenInBrowser => Action::OpenInBrowser,
         ActionKind::DeleteOrClose => Action::DeleteOrClose,
         // Activity-pane cursor jumps (`g` / `Shift-G` under Right

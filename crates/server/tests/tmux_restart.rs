@@ -107,6 +107,60 @@ async fn live_backend_serves_deep_scrollback_without_restart() {
 }
 
 #[tokio::test]
+async fn capture_history_preserves_soft_wrapped_logical_lines() {
+    if modern_tmux_version().is_none() {
+        eprintln!("tmux missing or too old — skipping soft-wrap capture test");
+        return;
+    }
+    let socket = format!("lazybox-test-soft-wrap-{}", std::process::id());
+    let result = timeout(TEST_DEADLINE, async {
+        let backend = TmuxBackend::with_socket(&socket).expect("conf written");
+        let key = backend
+            .spawn(
+                &[
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "printf 'WRAP-START'; printf '%*s' 220 '' | tr ' ' x; \
+                     printf 'WRAP-END\\n'; for i in $(seq 1 100); do echo line-$i; done; \
+                     exec sleep 300"
+                        .to_string(),
+                ],
+                None,
+                &[],
+                "soft-wrap-test",
+            )
+            .await
+            .expect("tmux spawn");
+
+        let mut ticker = tokio::time::interval(Duration::from_millis(100));
+        for attempt in 0.. {
+            ticker.tick().await;
+            let sub = backend.subscribe(&key).await.expect("subscribe");
+            if String::from_utf8_lossy(&sub.replay).contains("line-100") {
+                break;
+            }
+            assert!(attempt < 100, "pane output never completed");
+        }
+
+        let (capture, _) = backend
+            .scrollback(&key)
+            .await
+            .expect("scrollback")
+            .expect("history source");
+        let expected = format!("WRAP-START{}WRAP-END", "x".repeat(220));
+        assert!(
+            String::from_utf8_lossy(&capture).contains(&expected),
+            "capture-pane must join soft-wrapped rows back into one logical line"
+        );
+
+        let _ = backend.kill(&key).await;
+    })
+    .await;
+    kill_test_server(&socket);
+    result.expect("test timed out");
+}
+
+#[tokio::test]
 async fn restarted_backend_seeds_scrollback_from_tmux_history() {
     if modern_tmux_version().is_none() {
         // Skip-as-pass is how this path could go silently unexercised on
@@ -483,6 +537,103 @@ async fn alt_screen_agent_retains_scrollable_history() {
         assert!(
             history.scrollback_rows().expect("scrollback rows") > 100,
             "the first-wheel capture must reconstruct scrollable agent history"
+        );
+
+        let _ = backend.kill(&key).await;
+    })
+    .await;
+    kill_test_server(&socket);
+    result.expect("test timed out");
+}
+
+/// capture-pane pads its output to the full pane grid: when an agent
+/// leaves the cursor mid-screen, the rows below come back as blank lines
+/// that were never scrollback. Seeding them verbatim parked the reattach
+/// cursor at the bottom of that padding, so the live repaint's first
+/// newline scrolled the blanks into history — the "random extra empty
+/// lines after restart / move-session" (#442). The reconstructed seed must
+/// end at the last row with real content, with the deep history above it
+/// intact. Exercises the real capture-pane → `normalize_capture` path.
+#[tokio::test]
+async fn capture_seed_trims_grid_padding_below_the_cursor() {
+    if modern_tmux_version().is_none() {
+        eprintln!("tmux missing or too old — skipping capture-padding test");
+        return;
+    }
+    let socket = format!("lazybox-test-capture-padding-{}", std::process::id());
+    let result = timeout(TEST_DEADLINE, async {
+        let backend = TmuxBackend::with_socket(&socket).expect("conf written");
+        // Fill more than a screen (so history accumulates), then move the
+        // cursor up and clear to the end of the screen so the pane's bottom
+        // rows are blank grid padding, and park a marker on the cursor row.
+        // `sleep` (not an interactive shell) so dropping a backend can't
+        // Ctrl-D the session away — see the restart test's note.
+        let key = backend
+            .spawn(
+                &[
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "for i in $(seq 1 60); do echo line-$i; done; \
+                     printf '\\033[8A\\033[J'; printf 'MIDMARKER'; exec sleep 300"
+                        .to_string(),
+                ],
+                None,
+                &[],
+                "capture-padding-test",
+            )
+            .await
+            .expect("tmux spawn");
+
+        let mut ticker = tokio::time::interval(Duration::from_millis(100));
+        for attempt in 0.. {
+            ticker.tick().await;
+            let sub = backend.subscribe(&key).await.expect("subscribe");
+            if String::from_utf8_lossy(&sub.replay).contains("MIDMARKER") {
+                break;
+            }
+            assert!(attempt < 100, "pane output never reached the attach client");
+        }
+
+        // The RAW capture must actually carry trailing blank padding, else
+        // this test would pass vacuously.
+        let raw = std::process::Command::new("tmux")
+            .args([
+                "-L",
+                &socket,
+                "capture-pane",
+                "-p",
+                "-e",
+                "-S",
+                "-10000",
+                "-t",
+                &key,
+            ])
+            .output()
+            .expect("capture-pane");
+        let raw = String::from_utf8_lossy(&raw.stdout);
+        assert!(
+            raw.ends_with("\n\n"),
+            "raw capture should end in blank grid padding: {raw:?}"
+        );
+
+        // The backend's seed (same `normalize_capture` the reattach path
+        // feeds a fresh client) must strip that padding: it ends at the
+        // marker, not a run of blank rows.
+        let (seed, _) = backend
+            .scrollback(&key)
+            .await
+            .expect("scrollback")
+            .expect("padded pane has retained history to serve");
+        let seed = String::from_utf8_lossy(&seed);
+        assert!(
+            seed.ends_with("MIDMARKER"),
+            "seed must end at the last content row, not grid padding: {seed:?}"
+        );
+        // Deep history above the padding survives — the trim is trailing
+        // only, never the whole capture.
+        assert!(
+            seed.contains("line-5\r"),
+            "seed must retain history above the visible screen"
         );
 
         let _ = backend.kill(&key).await;

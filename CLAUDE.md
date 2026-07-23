@@ -239,7 +239,10 @@ instruction to every selected workspace: a snippet picker (`Ctrl-F`
 skips it for free text) feeds a compose textarea pre-filled with the
 snippet body, and submit delivers per target — running agents via the
 settle-gated inject, plain shells via a direct write, session-less
-workspaces skipped and named in the summary notice. `a` is a leader
+workspaces skipped and named in the summary notice. `Shift-U`
+bulk-updates the branch (rebase/merge base into head) of every
+selected PR that's behind `main` — one `UpdateBranch` per behind PR,
+up-to-date and non-PR selections skipped and counted (#484). `a` is a leader
 for the **agent** group (which-key popup): `a c` claude, `a x` codex,
 `a u` cursor — no top-level `c`/`x`/`u` aliases (re-add via
 `ui.action_keys`, keyed `spawn_agent.<id>`). Both the `w` and `a`
@@ -252,14 +255,18 @@ Claude ships a built-in Haiku/Sonnet/Opus menu, other agents define
 their own. The alias is agent-agnostic at the chord — the daemon maps
 it to whatever agent the spawn targets — and the picked tier's label
 rides a `◆ Opus` tab badge. `g` is a leader that
-opens the **github** group the same way: `g m` merge, `g g` toggle
+opens the **github** group the same way: `g m` merge, `g u` update
+branch (the "Update branch" button — merge base into head; only on a
+PR behind its base, #484), `g g` toggle
 auto-merge on green (lazybox merges automatically once CI passes —
 own PR, no conflicts, no changes requested; only while lazybox runs),
 `g p` policies (the unified automation-policies menu — one surface
 listing merge-on-green, per-session auto-fix arm/disarm, and
 GitHub-native auto-merge status for the focused PR/issue, each toggled
 in place; #363), `g r` reviewers, `g a` assignees, `g l` labels,
-`g o` open in browser, `g d` delete issue / close PR (confirmed
+`g s` sync (a targeted re-poll of just the focused workspace's own
+PR/issue instead of the global `Shift-R` sweep — cheap when you're
+waiting on one PR's CI; #456), `g o` open in browser, `g d` delete issue / close PR (confirmed
 first, naming the target; an issue is hard-deleted when the token
 has admin rights, else closed as not-planned with a notice; a PR is
 closed without merging; #408) — leader chords only, the legacy
@@ -277,8 +284,14 @@ scope.
 **RightPane (Activity)**: `j/k` or arrows move the row cursor,
 `g/G` top/bottom, `→/l` expand row, `←/h` collapse row, `Enter`
 toggle the section, `Space`/`v` multi-select rows, `w` work on
-selection, `d` toggle PR/issue description, `m` mark the focused row
-read, `z` undo mark-read, `r` reply.
+selection, `d` toggle the PR/issue description teaser (Collapsed ⇄
+Preview); a second `d` on a long — or richly-formatted (tables, fenced
+code, images) — preview, or clicking `+N more lines`, opens the full
+body in a scrollable markdown reader modal (#448: proper
+headings/lists/code/links/tables, `j/k`·PgUp/PgDn·wheel to scroll,
+click a link to open it, `Esc` to close; the header hint reads
+`d · read full` when `d` will open it, `d · collapse` otherwise),
+`m` mark the focused row read, `z` undo mark-read, `r` reply.
 
 **TerminalStack**: all keys forward to the PTY. `]]` (configurable
 escape sequence) is a *non-timed* leader (#252) that opens a small

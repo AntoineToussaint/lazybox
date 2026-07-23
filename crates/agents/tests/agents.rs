@@ -80,9 +80,17 @@ fn codex_argv() {
     let agent = Codex;
     let ctx = sample_ctx();
     assert_eq!(agent.spawn(&ctx), vec!["codex".to_string()]);
-    // Default trait impl: resume == spawn when the agent doesn't
-    // override. Codex has no --continue flag today.
-    assert_eq!(agent.resume(&ctx), agent.spawn(&ctx));
+    // Resume reattaches this worktree's most recent session — Codex
+    // filters `resume --last` by cwd, the per-worktree analog of
+    // Claude's `--continue`.
+    assert_eq!(
+        agent.resume(&ctx),
+        vec![
+            "codex".to_string(),
+            "resume".to_string(),
+            "--last".to_string(),
+        ]
+    );
 }
 
 #[test]
@@ -96,7 +104,6 @@ fn codex_skip_permissions_bypasses_every_startup_gate() {
     let expected = vec![
         "codex".to_string(),
         "--dangerously-bypass-approvals-and-sandbox".to_string(),
-        "--dangerously-bypass-hook-trust".to_string(),
         "-c".to_string(),
         "projects={\"/definitely-missing/worktree.with.dot\"={trust_level=\"trusted\"}}"
             .to_string(),
@@ -104,11 +111,70 @@ fn codex_skip_permissions_bypasses_every_startup_gate() {
         "check_for_update_on_startup=false".to_string(),
     ];
     assert_eq!(agent.spawn(&ctx), expected);
+    // Resume prepends `resume --last` and then carries the identical
+    // unattended tail, so a resumed autonomous session stays as clean
+    // as a fresh spawn.
+    let mut expected_resume = vec![
+        "codex".to_string(),
+        "resume".to_string(),
+        "--last".to_string(),
+    ];
+    expected_resume.extend(expected[1..].iter().cloned());
     assert_eq!(
         agent.resume(&ctx),
-        agent.spawn(&ctx),
+        expected_resume,
         "resumed autonomous Codex sessions must retain the bypass and trust config",
     );
+}
+
+#[test]
+fn codex_hook_command_args_register_every_lifecycle_event() {
+    let agent = Codex;
+    let cmd = "lazybox hook-ingest --backend-key-file \"/run/lzb/key-7\"";
+    let args = agent.hook_command_args(cmd);
+
+    // Hook trust must be bypassed or Codex silently drops the injected
+    // hooks (no persisted per-source trust, no prompt).
+    assert_eq!(
+        args.first().map(String::as_str),
+        Some("--dangerously-bypass-hook-trust"),
+    );
+
+    // One `-c hooks.<Event>=…` override per tracked lifecycle event, each
+    // registering our correlated hook command.
+    let overrides: Vec<&String> = args
+        .iter()
+        .skip_while(|a| a.as_str() != "-c")
+        .filter(|a| a.as_str() != "-c")
+        .collect();
+    assert_eq!(
+        overrides.len(),
+        lazybox_agents::hook_settings::HOOKED_EVENTS.len()
+    );
+    for event in lazybox_agents::hook_settings::HOOKED_EVENTS {
+        assert!(
+            overrides
+                .iter()
+                .any(|o| o.starts_with(&format!("hooks.{event}="))),
+            "missing hook override for {event}",
+        );
+    }
+
+    // The command is embedded as a TOML basic string with its inner
+    // quotes escaped, so the `-c` value parses.
+    assert!(
+        overrides.iter().all(|o| o
+            .contains("command=\"lazybox hook-ingest --backend-key-file \\\"/run/lzb/key-7\\\"\"")),
+        "hook command not TOML-escaped into the override: {overrides:?}",
+    );
+}
+
+#[test]
+fn agents_without_argv_hooks_emit_none() {
+    // Claude wires hooks through its settings file, not spawn argv; the
+    // rest have no authoritative signal at all.
+    assert!(Claude.hook_command_args("x").is_empty());
+    assert!(Cursor.hook_command_args("x").is_empty());
 }
 
 #[test]

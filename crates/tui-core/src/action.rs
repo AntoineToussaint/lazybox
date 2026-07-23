@@ -88,6 +88,10 @@ pub enum Action {
     /// sidebar groups workspaces under. Asks for a name. Idempotent
     /// on collision (re-opens the existing local project).
     NewProject,
+    /// Scan the configured dev roots (`scan.roots`) for on-disk git
+    /// clones and import a chosen one as a **linked (no-worktree)**
+    /// workspace — lazybox works directly in the existing checkout.
+    ImportCheckout,
     /// Mark every activity row on the focused workspace read.
     MarkAllRead,
     /// Toggle snooze on the focused workspace (short snooze, ~4h).
@@ -108,6 +112,10 @@ pub enum Action {
     /// surfaces for provider workspaces that have a merge concept
     /// (today: github PRs).
     MergePr,
+    /// Update the workspace's PR branch against its base — the "Update
+    /// branch" button on github.com. Only surfaces when the PR is behind
+    /// its base (the `BEHIND` status tag).
+    UpdateBranch,
     /// Toggle the workspace's "auto-merge on green" arm. When armed,
     /// the client auto-fires a merge the moment this workspace's own
     /// PR becomes merge-ready. Distinct from GitHub's native
@@ -135,6 +143,12 @@ pub enum Action {
     /// checks the currently-applied labels; submit replaces the
     /// label set on the upstream provider.
     ManageLabels,
+    /// Re-poll just the focused workspace's own GitHub entities (its PR
+    /// and linked issues) instead of the global refresh — the "sync
+    /// this" action for when you're waiting on one PR's CI or one
+    /// issue's state. Cheap next to a full sweep; updates that row's
+    /// state and read markers only.
+    SyncWorkspace,
     /// Open the focused workspace's PR / issue page in the host's
     /// default web browser. Useful for jumping to GitHub when the
     /// in-lazybox UI doesn't carry every affordance yet (mobile-rich
@@ -146,6 +160,10 @@ pub enum Action {
     /// to a close-as-not-planned (with a notice) otherwise.
     /// Confirm-guarded — destructive and outward-facing.
     DeleteOrClose,
+    /// Open the notes editor (a Textarea) for the focused workspace —
+    /// a free-form local scratchpad that never syncs to a provider
+    /// (issue #458). Pre-filled with the current note; submit persists.
+    EditNotes,
 
     // ── Sidebar list management ────────────────────────────────────
     // These act on the sidebar's list/view rather than a single
@@ -177,6 +195,12 @@ pub enum Action {
     /// inject; a plain shell gets a direct write; workspaces with no
     /// session are skipped and reported.
     BroadcastToSelected,
+    /// Update the branch (merge base into head) of every multi-selected
+    /// workspace whose PR is behind its base — the bulk fan-out of
+    /// [`Action::UpdateBranch`] over the sidebar's multi-select set. Each
+    /// behind PR gets its own `Command::UpdateBranch`; up-to-date or
+    /// non-PR selections are skipped and reported.
+    UpdateBranchSelected,
 
     // ── Activity pane (right) ──────────────────────────────────────
     /// Toggle the activity-section collapse on the focused workspace.
@@ -337,12 +361,14 @@ pub enum ActionKind {
     OpenEditor,
     NewWorkspace,
     NewProject,
+    ImportCheckout,
     MarkAllRead,
     ToggleSnooze,
     LongSnooze,
     Archive,
     CloseIssue,
     MergePr,
+    UpdateBranch,
     ToggleAutoMerge,
     ManagePolicies,
     AdoptSessions,
@@ -350,8 +376,10 @@ pub enum ActionKind {
     RequestReviewers,
     AddAssignees,
     ManageLabels,
+    SyncWorkspace,
     OpenInBrowser,
     DeleteOrClose,
+    EditNotes,
     // Sidebar list management
     OpenFilterMenu,
     CycleSort,
@@ -360,6 +388,7 @@ pub enum ActionKind {
     ToggleRepoGroup,
     SelectWorkspace,
     BroadcastToSelected,
+    UpdateBranchSelected,
     // Activity
     ToggleActivity,
     ToggleRow,
@@ -445,6 +474,7 @@ impl ActionKind {
         // inherits this order directly.
         Self::NewWorkspace,
         Self::NewProject,
+        Self::ImportCheckout,
         Self::AdoptSessions,
         Self::CollapseIntoPr,
         Self::LongSnooze,
@@ -452,14 +482,17 @@ impl ActionKind {
         Self::CloseIssue,
         // GitHub menu.
         Self::MergePr,
+        Self::UpdateBranch,
         Self::ToggleAutoMerge,
         Self::ManagePolicies,
         Self::RequestReviewers,
         Self::AddAssignees,
         Self::ManageLabels,
+        Self::SyncWorkspace,
         Self::OpenInBrowser,
         Self::DeleteOrClose,
         Self::Reply,
+        Self::EditNotes,
         // Sidebar list management
         Self::OpenFilterMenu,
         Self::CycleSort,
@@ -468,6 +501,7 @@ impl ActionKind {
         Self::ToggleRepoGroup,
         Self::SelectWorkspace,
         Self::BroadcastToSelected,
+        Self::UpdateBranchSelected,
         // Activity
         Self::ToggleActivity,
         Self::ToggleRow,
@@ -540,12 +574,14 @@ impl Action {
             Action::OpenEditor => ActionKind::OpenEditor,
             Action::NewWorkspace => ActionKind::NewWorkspace,
             Action::NewProject => ActionKind::NewProject,
+            Action::ImportCheckout => ActionKind::ImportCheckout,
             Action::MarkAllRead => ActionKind::MarkAllRead,
             Action::ToggleSnooze => ActionKind::ToggleSnooze,
             Action::LongSnooze => ActionKind::LongSnooze,
             Action::Archive => ActionKind::Archive,
             Action::CloseIssue => ActionKind::CloseIssue,
             Action::MergePr => ActionKind::MergePr,
+            Action::UpdateBranch => ActionKind::UpdateBranch,
             Action::ToggleAutoMerge => ActionKind::ToggleAutoMerge,
             Action::ManagePolicies => ActionKind::ManagePolicies,
             Action::AdoptSessions => ActionKind::AdoptSessions,
@@ -553,6 +589,7 @@ impl Action {
             Action::RequestReviewers => ActionKind::RequestReviewers,
             Action::AddAssignees => ActionKind::AddAssignees,
             Action::ManageLabels => ActionKind::ManageLabels,
+            Action::SyncWorkspace => ActionKind::SyncWorkspace,
             Action::OpenInBrowser => ActionKind::OpenInBrowser,
             Action::DeleteOrClose => ActionKind::DeleteOrClose,
             Action::OpenFilterMenu => ActionKind::OpenFilterMenu,
@@ -562,11 +599,13 @@ impl Action {
             Action::ToggleRepoGroup => ActionKind::ToggleRepoGroup,
             Action::SelectWorkspace => ActionKind::SelectWorkspace,
             Action::BroadcastToSelected => ActionKind::BroadcastToSelected,
+            Action::UpdateBranchSelected => ActionKind::UpdateBranchSelected,
             Action::ToggleActivity => ActionKind::ToggleActivity,
             Action::ToggleRow => ActionKind::ToggleRow,
             Action::ActivityTop => ActionKind::ActivityTop,
             Action::ActivityBottom => ActionKind::ActivityBottom,
             Action::Reply => ActionKind::Reply,
+            Action::EditNotes => ActionKind::EditNotes,
             Action::SelectRow => ActionKind::SelectRow,
             Action::ToggleDescription => ActionKind::ToggleDescription,
             Action::UndoMarkRead => ActionKind::UndoMarkRead,
@@ -841,6 +880,13 @@ impl ActionDef {
                 describe: "Pick a tracked repo to start a workspace on, or create a new local project.",
                 section: Section::Workspace,
             },
+            ActionKind::ImportCheckout => &Self {
+                kind: ActionKind::ImportCheckout,
+                default_keys: "x i",
+                label: "import checkout",
+                describe: "Scan the configured dev roots (scan.roots) for on-disk git clones and import one as a linked, no-worktree workspace — lazybox works directly in the existing checkout.",
+                section: Section::Workspace,
+            },
             ActionKind::MarkAllRead => &Self {
                 kind: ActionKind::MarkAllRead,
                 default_keys: "m",
@@ -881,6 +927,13 @@ impl ActionDef {
                 default_keys: "g m",
                 label: "merge PR",
                 describe: "Merge the PR (only when CI green + approved + no conflicts).",
+                section: Section::Workspace,
+            },
+            ActionKind::UpdateBranch => &Self {
+                kind: ActionKind::UpdateBranch,
+                default_keys: "g u",
+                label: "update branch",
+                describe: "Update the PR branch against its base — the \"Update branch\" button on github.com. Only when the PR is behind its base.",
                 section: Section::Workspace,
             },
             ActionKind::ToggleAutoMerge => &Self {
@@ -930,6 +983,13 @@ impl ActionDef {
                 default_keys: "g l",
                 label: "labels",
                 describe: "Add / remove labels on the workspace's PR or issue. Picker pre-checks the labels currently applied; submit replaces the set.",
+                section: Section::Workspace,
+            },
+            ActionKind::SyncWorkspace => &Self {
+                kind: ActionKind::SyncWorkspace,
+                default_keys: "g s",
+                label: "sync",
+                describe: "Re-poll just this workspace's PR / issue instead of every provider — a cheap, targeted refresh for when you're waiting on one PR's CI or one issue's state.",
                 section: Section::Workspace,
             },
             ActionKind::OpenInBrowser => &Self {
@@ -996,6 +1056,13 @@ impl ActionDef {
                 describe: "Send one instruction — a snippet, free text, or both — to every multi-selected workspace at once. Running agents get the prompt injected; plain shells get a direct write; workspaces with no session are skipped and reported.",
                 section: Section::Sidebar,
             },
+            ActionKind::UpdateBranchSelected => &Self {
+                kind: ActionKind::UpdateBranchSelected,
+                default_keys: "Shift-U",
+                label: "update branches",
+                describe: "Update the branch of every multi-selected PR that's behind its base, in one shot — the bulk \"Update branch\". Up-to-date or non-PR selections are skipped and reported.",
+                section: Section::Sidebar,
+            },
             // ── Activity ────────────────────────────────────────────
             ActionKind::ToggleActivity => &Self {
                 kind: ActionKind::ToggleActivity,
@@ -1030,6 +1097,13 @@ impl ActionDef {
                 default_keys: "r",
                 label: "reply",
                 describe: "Open the reply textarea targeted at this workspace.",
+                section: Section::Workspace,
+            },
+            ActionKind::EditNotes => &Self {
+                kind: ActionKind::EditNotes,
+                default_keys: "n",
+                label: "notes",
+                describe: "Edit this workspace's local scratchpad — a private note that never syncs to a provider.",
                 section: Section::Workspace,
             },
             ActionKind::SelectRow => &Self {
@@ -1550,12 +1624,14 @@ impl ActionKind {
             ActionKind::OpenEditor => "open_editor",
             ActionKind::NewWorkspace => "new_workspace",
             ActionKind::NewProject => "new_project",
+            ActionKind::ImportCheckout => "import_checkout",
             ActionKind::MarkAllRead => "mark_all_read",
             ActionKind::ToggleSnooze => "toggle_snooze",
             ActionKind::LongSnooze => "long_snooze",
             ActionKind::Archive => "archive",
             ActionKind::CloseIssue => "close_issue",
             ActionKind::MergePr => "merge_pr",
+            ActionKind::UpdateBranch => "update_branch",
             ActionKind::ToggleAutoMerge => "toggle_auto_merge",
             ActionKind::ManagePolicies => "manage_policies",
             ActionKind::AdoptSessions => "adopt_sessions",
@@ -1563,6 +1639,7 @@ impl ActionKind {
             ActionKind::RequestReviewers => "request_reviewers",
             ActionKind::AddAssignees => "add_assignees",
             ActionKind::ManageLabels => "manage_labels",
+            ActionKind::SyncWorkspace => "sync_workspace",
             ActionKind::OpenInBrowser => "open_in_browser",
             ActionKind::DeleteOrClose => "delete_or_close",
             ActionKind::OpenFilterMenu => "open_filter_menu",
@@ -1572,11 +1649,13 @@ impl ActionKind {
             ActionKind::ToggleRepoGroup => "toggle_repo_group",
             ActionKind::SelectWorkspace => "select_workspace",
             ActionKind::BroadcastToSelected => "broadcast_to_selected",
+            ActionKind::UpdateBranchSelected => "update_branch_selected",
             ActionKind::ToggleActivity => "toggle_activity",
             ActionKind::ToggleRow => "toggle_row",
             ActionKind::ActivityTop => "activity_top",
             ActionKind::ActivityBottom => "activity_bottom",
             ActionKind::Reply => "reply",
+            ActionKind::EditNotes => "edit_notes",
             ActionKind::SelectRow => "select_row",
             ActionKind::ToggleDescription => "toggle_description",
             ActionKind::UndoMarkRead => "undo_mark_read",
@@ -1756,11 +1835,13 @@ pub fn tier_chord_stroke(alias: &str) -> Option<KeyStroke> {
 pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
     match kind {
         ActionKind::MergePr
+        | ActionKind::UpdateBranch
         | ActionKind::ToggleAutoMerge
         | ActionKind::ManagePolicies
         | ActionKind::RequestReviewers
         | ActionKind::AddAssignees
         | ActionKind::ManageLabels
+        | ActionKind::SyncWorkspace
         | ActionKind::OpenInBrowser
         | ActionKind::DeleteOrClose => Some("github"),
         ActionKind::SpawnAgent => Some("agent"),
@@ -1768,6 +1849,7 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         ActionKind::SpawnAgentOnMain | ActionKind::SpawnShellOnMain => Some("main branch"),
         ActionKind::NewWorkspace
         | ActionKind::NewProject
+        | ActionKind::ImportCheckout
         | ActionKind::LongSnooze
         | ActionKind::Archive
         | ActionKind::CloseIssue
@@ -2120,6 +2202,12 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
             intent::resolve_merge(workspace),
             intent::Intent::MergePr { .. },
         ),
+        // Only surfaces when the PR is behind its base — the same
+        // `BEHIND` signal the status tag reads, via the resolver.
+        ActionKind::UpdateBranch => matches!(
+            intent::resolve_update_branch(workspace),
+            intent::Intent::UpdateBranch { .. },
+        ),
         // Arming applies to a PR (armed or not — it toggles). Gate on
         // the workspace having a PR so `g g` only surfaces where it
         // can do something; the resolver Notices on non-PR workspaces
@@ -2129,6 +2217,11 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         // GitHub issue — the "tag this PR/issue" surface (issue #363).
         // The menu itself marks which policies apply to PRs vs issues.
         ActionKind::ManagePolicies => workspace
+            .map(|w| w.pr.is_some() || !w.gh_issues.is_empty())
+            .unwrap_or(false),
+        // Targeted re-poll only has something to fetch when the
+        // workspace owns a GitHub entity — a PR or a linked issue.
+        ActionKind::SyncWorkspace => workspace
             .map(|w| w.pr.is_some() || !w.gh_issues.is_empty())
             .unwrap_or(false),
         ActionKind::Work | ActionKind::WorkWith => intent::classify_work(workspace, &[]).is_some(),
@@ -2210,7 +2303,10 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::RequestReviewers
         | ActionKind::AddAssignees
         | ActionKind::ManageLabels
-        | ActionKind::OpenInBrowser => has_ws,
+        | ActionKind::OpenInBrowser
+        // Notes attach to any workspace — even a session-less/empty
+        // one — so gate purely on a workspace being under the cursor.
+        | ActionKind::EditNotes => has_ws,
         // Activity actions need a workspace AND that workspace
         // having some activity to act on. The pane that owns this
         // section already enforces "has activity"; the catalog
@@ -2238,10 +2334,14 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         // can't see), so the dispatcher gates on it and surfaces a
         // footer nudge when nothing is selected.
         ActionKind::SelectWorkspace => has_ws,
-        ActionKind::BroadcastToSelected => true,
+        // The bulk update-branch acts on the selection set (which the
+        // catalog can't see), so the dispatcher gates on it and surfaces
+        // a footer nudge when nothing behind-base is selected.
+        ActionKind::BroadcastToSelected | ActionKind::UpdateBranchSelected => true,
         // Global / no-workspace-needed actions.
         ActionKind::NewWorkspace
         | ActionKind::NewProject
+        | ActionKind::ImportCheckout
         | ActionKind::StartAgent
         | ActionKind::CyclePane
         | ActionKind::ToggleMouseCapture
@@ -3023,10 +3123,71 @@ mod tests {
         // target. Global ones still can.
         assert!(!availability(ActionKind::Work, None));
         assert!(!availability(ActionKind::MergePr, None));
+        assert!(!availability(ActionKind::SyncWorkspace, None));
         assert!(!availability(ActionKind::Archive, None));
         assert!(availability(ActionKind::Refresh, None));
         assert!(availability(ActionKind::OpenHelp, None));
         assert!(availability(ActionKind::NewWorkspace, None));
+    }
+
+    #[test]
+    fn update_branch_only_offered_on_behind_pr() {
+        use chrono::Utc;
+        use lazybox_core::{
+            CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace, WorkspaceKey,
+        };
+        let mut ws = Workspace::empty(
+            WorkspaceKey("github-acme-widget-8".into()),
+            "main",
+            Utc::now(),
+        );
+        let mut pr = Task {
+            id: TaskId {
+                source: "github".into(),
+                key: "acme/widget#8".into(),
+            },
+            title: "acme/widget#8".into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Author,
+            ci: CiStatus::Success,
+            review: ReviewStatus::Approved,
+            checks: vec![],
+            unread_count: 0,
+            url: String::new(),
+            repo: Some("acme/widget".into()),
+            branch: None,
+            base_branch: None,
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: Some("PR_node".into()),
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        };
+
+        // Up-to-date PR → not offered.
+        ws.pr = Some(pr.clone());
+        assert!(!availability(ActionKind::UpdateBranch, Some(&ws)));
+
+        // Behind its base → offered.
+        pr.is_behind_base = true;
+        ws.pr = Some(pr);
+        assert!(availability(ActionKind::UpdateBranch, Some(&ws)));
+
+        // No workspace → not offered.
+        assert!(!availability(ActionKind::UpdateBranch, None));
     }
 
     #[test]
@@ -3040,10 +3201,12 @@ mod tests {
         let g = KeyStroke::new(false, false, false, ChordCode::Char('g'));
         let github = [
             ActionKind::MergePr,
+            ActionKind::UpdateBranch,
             ActionKind::ToggleAutoMerge,
             ActionKind::RequestReviewers,
             ActionKind::AddAssignees,
             ActionKind::ManageLabels,
+            ActionKind::SyncWorkspace,
             ActionKind::OpenInBrowser,
             ActionKind::DeleteOrClose,
         ];
@@ -3538,6 +3701,7 @@ mod tests {
         let expected = [
             (ActionKind::NewWorkspace, 'n'),
             (ActionKind::NewProject, 'p'),
+            (ActionKind::ImportCheckout, 'i'),
             (ActionKind::AdoptSessions, 'a'),
             (ActionKind::CollapseIntoPr, 'j'),
             (ActionKind::LongSnooze, 'z'),

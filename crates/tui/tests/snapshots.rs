@@ -324,12 +324,12 @@ fn which_key_github_group_golden_render() {
                 })
         })
         .collect();
-    let backend = TestBackend::new(40, 12);
+    let backend = TestBackend::new(40, 13);
     let mut term = Terminal::new(backend).unwrap();
     term.draw(|frame| {
         which_key::render(
             frame,
-            Rect::new(0, 0, 40, 12),
+            Rect::new(0, 0, 40, 13),
             g,
             Some("github"),
             &rows,

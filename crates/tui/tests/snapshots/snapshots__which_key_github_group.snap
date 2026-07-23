@@ -5,12 +5,13 @@ expression: rendered
 
  g ▸ github
   m  merge PR
+  u  update branch
   g  auto-merge on green
   p  policies
   r  reviewers
   a  assignees
   l  labels
+  s  sync
   o  open in browser
   d  delete / close
-
  ↑↓ select · ↵ · Esc

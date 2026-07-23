@@ -313,6 +313,8 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::WorkspaceMerged { .. }
                 | IpcEvent::PrMerged { .. }
                 | IpcEvent::PrMergeFailed { .. }
+                | IpcEvent::BranchUpdated { .. }
+                | IpcEvent::BranchUpdateFailed { .. }
                 | IpcEvent::IssueClosed { .. }
                 | IpcEvent::IssueCloseFailed { .. }
                 | IpcEvent::PrClosed { .. }
@@ -338,6 +340,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::Notification { .. }
                 | IpcEvent::CleanWorktreesCompleted { .. }
                 | IpcEvent::WorktreesInspected { .. }
+                | IpcEvent::CheckoutsDiscovered { .. }
                 | IpcEvent::OrphanedWorktreeDeleted { .. }
                 | IpcEvent::AgentRunStarted { .. }
                 | IpcEvent::AgentRawJson { .. }
@@ -357,7 +360,8 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::TerminalInputRejected { .. }
                 | IpcEvent::CommandRejected { .. }
                 | IpcEvent::AgentCliUpdatesChecked { .. }
-                | IpcEvent::AgentCliUpdateFinished { .. } => {}
+                | IpcEvent::AgentCliUpdateFinished { .. }
+                | IpcEvent::RecoveredTerminalsRequireRestart { .. } => {}
             }
         }
         // Agent-state pings repeat at the detector's cadence while an
@@ -429,6 +433,9 @@ impl<T: TerminalAdapter> Model<T> {
         if let IpcEvent::ProjectRemoved(key) = &event {
             self.projects.remove(key);
             self.sidebar.apply_projects(self.projects.clone());
+            // The cascade the daemon confirmed reconciles any optimistic
+            // project removal (#476).
+            self.reconcile_optimistic(key.as_str());
             self.redraw = true;
             return;
         }
@@ -604,6 +611,25 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
             return;
         }
+        // `g u` / `Shift-U` reached GitHub and the branch was updated.
+        // The BEHIND tag clears on the next poll (which the handler
+        // woke), so flash a notice now so the keypress reads as done.
+        if let IpcEvent::BranchUpdated { pr_label, .. } = &event {
+            self.flash_info(format!("updated branch {pr_label}"));
+            self.redraw = true;
+            return;
+        }
+        // `g u` reached GitHub and was rejected (conflict, permissions)
+        // — the update did NOT happen. Persistent error naming the
+        // reason, mirroring `PrMergeFailed`. The PR stays actionable.
+        if let IpcEvent::BranchUpdateFailed {
+            pr_label, reason, ..
+        } = &event
+        {
+            self.flash_error(format!("✗ update branch failed — {pr_label}: {reason}"));
+            self.redraw = true;
+            return;
+        }
         // `x c` reached GitHub and the issue was closed. The local
         // Task still reads `Open` until the next poll, so flash a notice
         // now; the daemon's open→closed detection (which the close
@@ -698,6 +724,9 @@ impl<T: TerminalAdapter> Model<T> {
         // removed, so a re-added workspace (e.g. user re-checks a
         // filter) gets a fresh details fetch on next focus.
         if let IpcEvent::WorkspaceRemoved(key) = &event {
+            // The daemon confirmed the removal — reconcile any optimistic
+            // archive/delete of this row (#476).
+            self.reconcile_optimistic(key.as_str());
             self.pr_details_fetched.remove(key);
             // A merged/removed workspace can't re-fire; drop its arming
             // latch so the set doesn't leak keys across a session.
@@ -767,6 +796,10 @@ impl<T: TerminalAdapter> Model<T> {
         // carries the full workspace, so check it directly.
         if let IpcEvent::WorkspaceUpserted(ws) = &event {
             self.maybe_auto_merge(ws);
+            // The daemon's fresh copy is authoritative — reconcile any
+            // optimistic chip edit (reviewers/assignees/labels) on this
+            // workspace (#476).
+            self.reconcile_optimistic(ws.key.as_str());
         }
         self.right.on_daemon_event(&event);
         self.terminals.on_daemon_event(&event);
@@ -821,6 +854,8 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::WorkspaceMerged { .. }
             | IpcEvent::PrMerged { .. }
             | IpcEvent::PrMergeFailed { .. }
+            | IpcEvent::BranchUpdated { .. }
+            | IpcEvent::BranchUpdateFailed { .. }
             | IpcEvent::IssueClosed { .. }
             | IpcEvent::IssueCloseFailed { .. }
             | IpcEvent::PrClosed { .. }
@@ -844,6 +879,7 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::Notification { .. }
             | IpcEvent::CleanWorktreesCompleted { .. }
             | IpcEvent::WorktreesInspected { .. }
+            | IpcEvent::CheckoutsDiscovered { .. }
             | IpcEvent::OrphanedWorktreeDeleted { .. }
             | IpcEvent::AgentRunStarted { .. }
             | IpcEvent::AgentRawJson { .. }
@@ -863,7 +899,8 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::TerminalInputRejected { .. }
             | IpcEvent::CommandRejected { .. }
             | IpcEvent::AgentCliUpdatesChecked { .. }
-            | IpcEvent::AgentCliUpdateFinished { .. } => {}
+            | IpcEvent::AgentCliUpdateFinished { .. }
+            | IpcEvent::RecoveredTerminalsRequireRestart { .. } => {}
         }
         // Background-poll indicator. Lights up whenever the daemon
         // emits PollProgress (any cycle, initial or not); clears on
@@ -957,6 +994,22 @@ impl<T: TerminalAdapter> Model<T> {
                         } else {
                             self.flash_error(format!("✗ {action} failed — {message}"));
                         }
+                        // Revert the optimistic chip edit (#476). No-op
+                        // for sources that don't carry one (reply / merge
+                        // / close-issue), so the flash above still stands.
+                        self.rollback_optimistic_chip(source);
+                    } else if matches!(source.as_str(), "store" | "terminal")
+                        && self.rollback_optimistic_removal(message)
+                    {
+                        // An optimistic archive/delete the daemon
+                        // rejected: the row (and, for a project, its
+                        // children) was removed locally, so re-insert it
+                        // and surface why (#476). Delete failures arrive
+                        // as `store` (archive/db) or `terminal` (a backing
+                        // agent that couldn't be stopped) errors naming the
+                        // key; one naming no pending removal keeps its
+                        // quiet sync-log-only handling.
+                        self.flash_error(format!("✗ delete failed — {message}"));
                     }
                     // Manual refresh failed — convert the ack flag
                     // into a "sync failed" notice so the user
@@ -985,6 +1038,8 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::WorkspaceMerged { .. }
                 | IpcEvent::PrMerged { .. }
                 | IpcEvent::PrMergeFailed { .. }
+                | IpcEvent::BranchUpdated { .. }
+                | IpcEvent::BranchUpdateFailed { .. }
                 | IpcEvent::IssueClosed { .. }
                 | IpcEvent::IssueCloseFailed { .. }
                 | IpcEvent::PrClosed { .. }
@@ -1007,6 +1062,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::Notification { .. }
                 | IpcEvent::CleanWorktreesCompleted { .. }
                 | IpcEvent::WorktreesInspected { .. }
+                | IpcEvent::CheckoutsDiscovered { .. }
                 | IpcEvent::OrphanedWorktreeDeleted { .. }
                 | IpcEvent::AgentRunStarted { .. }
                 | IpcEvent::AgentRawJson { .. }
@@ -1026,7 +1082,8 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::TerminalInputRejected { .. }
                 | IpcEvent::CommandRejected { .. }
                 | IpcEvent::AgentCliUpdatesChecked { .. }
-                | IpcEvent::AgentCliUpdateFinished { .. } => {}
+                | IpcEvent::AgentCliUpdateFinished { .. }
+                | IpcEvent::RecoveredTerminalsRequireRestart { .. } => {}
             }
         }
         // CleanWorktrees finished — replace the "cleaning…" notice
@@ -1060,6 +1117,27 @@ impl<T: TerminalAdapter> Model<T> {
                 crate::realm::components::footer::NoticeSeverity::Retryable,
             );
         }
+        // A recovered process cannot inherit a newer PTY launch environment.
+        // This is terminal lifecycle state, not a provider failure: keep it
+        // out of first-poll termination, sync history, and manual-refresh
+        // acknowledgement handling.
+        if let IpcEvent::RecoveredTerminalsRequireRestart { terminal_ids } = &event
+            && !terminal_ids.is_empty()
+        {
+            let count = terminal_ids.len();
+            let noun = if count == 1 {
+                "agent session was"
+            } else {
+                "agent sessions were"
+            };
+            self.flash(
+                format!(
+                    "⚠ restart required — {count} recovered {noun} started by an older \
+                     lazybox build; close and reopen the terminal to enable scrolling"
+                ),
+                crate::realm::components::footer::NoticeSeverity::Permanent,
+            );
+        }
         // Out-of-band agent-CLI version check. A scheduled sweep stays
         // quiet unless something is actionable; a manual check always
         // answers, even when everything is current.
@@ -1088,6 +1166,11 @@ impl<T: TerminalAdapter> Model<T> {
         // the inspector stays open across edits.
         if let IpcEvent::WorktreesInspected { inspections } = &event {
             self.mount_inspect_list(inspections.clone());
+        }
+        // Dev-folder scan replied. Swap the loading placeholder for the
+        // import picker listing every discovered checkout.
+        if let IpcEvent::CheckoutsDiscovered { checkouts } = &event {
+            self.mount_import_checkout_picker(checkouts.clone());
         }
         // One row removed (or refused). Surface the outcome in the
         // footer and re-inspect so the modal's list drops the row
@@ -1601,6 +1684,25 @@ impl<T: TerminalAdapter> Model<T> {
         };
         if available && self.focus != remembered {
             self.focus = remembered;
+            self.set_focus_attr();
+            self.redraw = true;
+        }
+    }
+
+    /// Double-click "enter": drop focus into the selected workspace's
+    /// live terminal (#441). With no live session it degrades to the
+    /// default open — the activity pane when there's activity to show,
+    /// otherwise the sidebar selection the click already made.
+    pub(super) fn enter_selected_workspace_terminal(&mut self) {
+        let target = if self.terminals.active_terminal_id().is_some() {
+            PaneFocus::Terminals
+        } else if self.activity_pane_visible() {
+            PaneFocus::Right
+        } else {
+            PaneFocus::Sidebar
+        };
+        if self.focus != target {
+            self.focus = target;
             self.set_focus_attr();
             self.redraw = true;
         }

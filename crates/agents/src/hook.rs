@@ -1,4 +1,4 @@
-//! Claude Code lifecycle hooks → lazybox state.
+//! Agent lifecycle hooks → lazybox state.
 //!
 //! Claude Code fires structured hook events at lifecycle points (`Stop`,
 //! `Notification`, `PreToolUse`, …). lazybox injects a hook command at
@@ -6,9 +6,18 @@
 //! deterministic JSON payloads instead of reverse-engineering the
 //! rendered TUI from the PTY byte stream (`crate::detect`).
 //!
+//! Codex's hook system is wire-compatible: it delivers the same
+//! PascalCase `hook_event_name` discriminants (`SessionStart`, `Stop`,
+//! `UserPromptSubmit`, `PreToolUse`, …) as JSON on the hook command's
+//! stdin, so both agents flow through [`parse_claude_hook`] unchanged.
+//! Codex is wired through spawn-argv `-c hooks.*` overrides rather than a
+//! settings file (see [`crate::agent::Agent::hook_command_args`]), but
+//! once ingested the two are indistinguishable — the authoritative signal
+//! the daemon consumes, not a per-agent PTY guess.
+//!
 //! Two pure functions live here, both exercised against captured
 //! payload fixtures in `tests/`:
-//!   - [`parse_claude_hook`] — Claude's wire JSON → the IPC-stable
+//!   - [`parse_claude_hook`] — the agent's wire JSON → the IPC-stable
 //!     [`HookEvent`].
 //!   - [`hook_to_state`] — [`HookEvent`] → the [`AgentState`] transition
 //!     it implies (or `None` when the event doesn't change state).
@@ -411,6 +420,76 @@ mod tests {
         assert_eq!(
             hook_to_state(&ev, Some(AgentState::Working)),
             Some(AgentState::Idle)
+        );
+    }
+
+    // Codex hook payloads (captured from `codex 0.145.0` with our
+    // injected `-c hooks.*` overrides) flow through the identical parser
+    // and state map as Claude's — the authoritative signal that replaces
+    // screen-scraping (#430). Screen-scraping topped out at `Idle`; the
+    // real `Stop` hook reaches `Done` (#357).
+    #[test]
+    fn codex_session_start_payload_parses_to_idle() {
+        let ev = parse(
+            r#"{"session_id":"019f8e32-33b4-7910-852c-74859c95d519",
+                "transcript_path":"/x/rollout.jsonl","cwd":"/w",
+                "hook_event_name":"SessionStart","model":"gpt-5.6-sol",
+                "permission_mode":"bypassPermissions","source":"startup"}"#,
+        );
+        assert_eq!(ev.kind, HookEventKind::SessionStart);
+        assert_eq!(
+            ev.session_id.as_deref(),
+            Some("019f8e32-33b4-7910-852c-74859c95d519")
+        );
+        assert_eq!(hook_to_state(&ev, None), Some(AgentState::Idle));
+    }
+
+    #[test]
+    fn codex_stop_payload_reaches_done() {
+        // The signal Codex's screen-scraper could never produce.
+        let ev = parse(
+            r#"{"session_id":"019f8e32-33b4-7910-852c-74859c95d519",
+                "turn_id":"019f8e32-345c-7650-81f4-c51f605ff397",
+                "transcript_path":"/x/rollout.jsonl","cwd":"/w",
+                "hook_event_name":"Stop","model":"gpt-5.6-sol",
+                "permission_mode":"bypassPermissions","stop_hook_active":false,
+                "last_assistant_message":"ok"}"#,
+        );
+        assert_eq!(ev.kind, HookEventKind::Stop);
+        assert_eq!(
+            hook_to_state(&ev, Some(AgentState::Working)),
+            Some(AgentState::Done),
+        );
+    }
+
+    #[test]
+    fn codex_tool_use_payload_is_working() {
+        let ev = parse(
+            r#"{"session_id":"019f8e32-c41b-7ef0-b4f4-5cf767f2cf91",
+                "turn_id":"019f8e32-c47d-7f31-9c2e-731896c3714e",
+                "transcript_path":"/x/rollout.jsonl","cwd":"/w",
+                "hook_event_name":"PreToolUse","model":"gpt-5.6-sol",
+                "permission_mode":"bypassPermissions","tool_name":"Bash",
+                "tool_input":{"command":"echo hello-from-tool"},
+                "tool_use_id":"call_mhdzyyGJCZ2kZzqpAUahquMA"}"#,
+        );
+        assert_eq!(ev.kind, HookEventKind::PreToolUse);
+        assert_eq!(ev.tool_name.as_deref(), Some("Bash"));
+        assert_eq!(
+            hook_to_state(&ev, Some(AgentState::Idle)),
+            Some(AgentState::Working)
+        );
+    }
+
+    #[test]
+    fn codex_user_prompt_submit_payload_is_working() {
+        let ev = parse(
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"019f8e32",
+                "cwd":"/w","prompt":"do the thing"}"#,
+        );
+        assert_eq!(
+            hook_to_state(&ev, Some(AgentState::Idle)),
+            Some(AgentState::Working)
         );
     }
 

@@ -60,6 +60,48 @@ mod effects_tests {
         assert!(matches!(cmds[1], IpcCommand::Refresh));
     }
 
+    /// Notes share the Textarea component with Reply/Broadcast, so the
+    /// submit handler routes on the modal id that was on top. A
+    /// non-empty note persists via `SetNotes` and clears the pending
+    /// target (issue #458).
+    #[test]
+    fn textarea_submitted_notes_persists_setnotes() {
+        let mut m = build_model();
+        let key = SessionKey::from("github:o/r#1");
+        m.pending_notes = Some(key.clone());
+        m.modal_stack.push(Id::Notes);
+        let cmds = m.handle_textarea_submitted("check the flaky retry".into());
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IpcCommand::SetNotes { session_key, notes } => {
+                assert_eq!(session_key, &key);
+                assert_eq!(notes, "check the flaky retry");
+            }
+            other => panic!("expected SetNotes, got {other:?}"),
+        }
+        assert!(m.pending_notes.is_none());
+    }
+
+    /// An empty/whitespace note is a valid submit — it clears the
+    /// scratchpad — so it still emits `SetNotes` rather than being
+    /// dropped the way an empty reply is.
+    #[test]
+    fn textarea_submitted_empty_notes_clears_scratchpad() {
+        let mut m = build_model();
+        let key = SessionKey::from("github:o/r#1");
+        m.pending_notes = Some(key.clone());
+        m.modal_stack.push(Id::Notes);
+        let cmds = m.handle_textarea_submitted("   ".into());
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IpcCommand::SetNotes { session_key, notes } => {
+                assert_eq!(session_key, &key);
+                assert!(notes.trim().is_empty());
+            }
+            other => panic!("expected SetNotes, got {other:?}"),
+        }
+    }
+
     /// Arm a sticky "✗ sync failed" banner for `source` the way a
     /// failed manual refresh (Shift-R) does, and assert it landed.
     /// Returns the model ready for the recovery half of each test.
@@ -1037,6 +1079,36 @@ mod effects_tests {
         assert_eq!(m.dampen_scroll_step_at(false, after_idle), 5);
     }
 
+    /// Build a model with workspace `github:o/r#1` selected and a single
+    /// live shell terminal on screen — the minimal state for a terminal
+    /// mouse gesture (selection / click forwarding) to have a target.
+    fn model_with_terminal() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        use lazybox_ipc::{Event as IpcEvent, TerminalId, TerminalKind};
+        let mut m = build_model();
+        let ws_key = WorkspaceKey::new("github:o/r#1");
+        let session_key: SessionKey = (&ws_key).into();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![lazybox_core::Workspace::empty(
+                ws_key,
+                "main",
+                chrono::Utc::now(),
+            )],
+            terminals: vec![],
+            projects: vec![],
+        });
+        assert!(m.sidebar.focus_workspace_key(&session_key));
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(1),
+            session_key,
+            kind: TerminalKind::Shell,
+            no_permission: false,
+            on_main: false,
+        });
+        assert_eq!(m.terminals.active_terminal_id(), Some(TerminalId(1)));
+        m
+    }
+
     /// Returning to the terminal pane with a single click restores the
     /// ability to interact in one click (#103). Before the fix, the
     /// first click after leaving the terminal only refocused it —
@@ -1048,7 +1120,7 @@ mod effects_tests {
         use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
         use tuirealm::ratatui::layout::Rect;
 
-        let mut m = build_model();
+        let mut m = model_with_terminal();
         let area = Rect::new(0, 0, 120, 40);
         let (sidebar_rect, _right_top, right_bottom) = crate::realm::layout::pane_areas(
             area,
@@ -1075,13 +1147,56 @@ mod effects_tests {
         // it AND claim the click for the pane (selection start) so the
         // Up handler can deliver it to the inner program — no redundant
         // second click.
-        m.terminal_selection = None;
+        m.terminal_drag = None;
         m.dispatch_mouse_in(down(right_bottom.x + 2, right_bottom.y + 2), area);
         assert_eq!(m.focus, PaneFocus::Terminals);
         assert!(
-            m.terminal_selection.is_some(),
+            m.terminal_drag.is_some(),
             "first click back into the terminal must claim the click, not just refocus",
         );
+    }
+
+    /// A press then drag to a different cell marks the gesture as a real
+    /// selection and moves the focus endpoint off the anchor; releasing
+    /// clears the drag. A press-release on the same cell stays a click
+    /// (`dragged` never set). Guards the mouse-down/drag/up wiring for
+    /// the scrollback-aware selection (#432).
+    #[test]
+    fn terminal_drag_marks_selection_then_clears_on_release() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use tuirealm::ratatui::layout::Rect;
+
+        let mut m = model_with_terminal();
+        m.focus = PaneFocus::Terminals;
+        let area = Rect::new(0, 0, 120, 40);
+        let (_sidebar, _right_top, right_bottom) = crate::realm::layout::pane_areas(
+            area,
+            m.layout.sidebar_pct,
+            m.layout.right_top_pct,
+            m.layout.sidebar_user_resized,
+        );
+        let ev = |kind, col, row| MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        // Press inside the grid, then drag two rows down.
+        let (c0, r0) = (right_bottom.x + 3, right_bottom.y + 4);
+        m.dispatch_mouse_in(ev(MouseEventKind::Down(MouseButton::Left), c0, r0), area);
+        let anchor = m.terminal_drag.expect("press claims a drag").anchor;
+        m.dispatch_mouse_in(
+            ev(MouseEventKind::Drag(MouseButton::Left), c0, r0 + 2),
+            area,
+        );
+        let drag = m.terminal_drag.expect("drag still active");
+        assert!(drag.dragged, "moving off the anchor cell is a real drag");
+        assert_eq!(drag.anchor, anchor, "anchor stays pinned");
+        assert_ne!(drag.focus, anchor, "focus tracked the pointer");
+
+        m.dispatch_mouse_in(ev(MouseEventKind::Up(MouseButton::Left), c0, r0 + 2), area);
+        assert!(m.terminal_drag.is_none(), "release ends the drag");
     }
 
     /// Adopt picker: source + target workspace keys flow into an
@@ -3719,6 +3834,76 @@ mod merge_focus_follow_tests {
         )
     }
 
+    /// `Shift-U` on a multi-select fans out one `UpdateBranch` per
+    /// selected PR that's actually behind its base; up-to-date PRs are
+    /// skipped, and the selection clears afterward.
+    #[test]
+    fn bulk_update_branch_fans_out_over_behind_prs_only() {
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+
+        let mut behind_a = workspace("owner/repo#1", true, Duration::hours(1));
+        behind_a.pr.as_mut().unwrap().is_behind_base = true;
+        let up_to_date = workspace("owner/repo#2", true, Duration::hours(2));
+        let mut behind_b = workspace("owner/repo#3", true, Duration::hours(3));
+        behind_b.pr.as_mut().unwrap().is_behind_base = true;
+
+        let key_a = behind_a.key.clone();
+        let key_b = behind_b.key.clone();
+
+        for ws in [behind_a, up_to_date.clone(), behind_b] {
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        }
+
+        // Mark all three rows.
+        for key in [&key_a, &up_to_date.key, &key_b] {
+            assert!(m.sidebar.focus_workspace_key(&SessionKey::from(key)));
+            m.sidebar.toggle_broadcast_select();
+        }
+        assert_eq!(m.sidebar.broadcast_selected_count(), 3);
+
+        let cmds = m.dispatch_action(&Action::UpdateBranchSelected);
+
+        let targets: Vec<lazybox_core::WorkspaceKey> = cmds
+            .into_iter()
+            .map(|c| match c {
+                IpcCommand::UpdateBranch { workspace_key } => workspace_key,
+                other => panic!("expected UpdateBranch, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(targets.len(), 2, "only the two behind PRs fan out");
+        assert!(targets.contains(&key_a));
+        assert!(targets.contains(&key_b));
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "selection clears after the bulk fire",
+        );
+    }
+
+    /// `Shift-U` with no behind-base PR selected fires nothing and
+    /// leaves the selection intact for another action.
+    #[test]
+    fn bulk_update_branch_with_no_behind_pr_is_noop() {
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        let up_to_date = workspace("owner/repo#2", true, Duration::hours(2));
+        let key = up_to_date.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(up_to_date)));
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&key)));
+        m.sidebar.toggle_broadcast_select();
+
+        let cmds = m.dispatch_action(&Action::UpdateBranchSelected);
+        assert!(cmds.is_empty(), "no behind PR → no command");
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            1,
+            "selection survives a no-op bulk update",
+        );
+    }
+
     #[test]
     fn merge_while_viewing_issue_follows_focus_to_pr() {
         let mut m = build_model();
@@ -3875,6 +4060,44 @@ mod merge_focus_follow_tests {
             cmds.is_empty(),
             "native auto-merge status row emits no command"
         );
+    }
+
+    /// The description-reader modal (#448): opening it for the focused
+    /// workspace's body mounts `Id::DescriptionModal`, and dismissing it
+    /// pops cleanly (it carries no pending model state).
+    #[test]
+    fn open_focused_description_mounts_and_dismisses() {
+        let mut m = build_model();
+        let mut t = task("owner/repo#1", false, Duration::hours(1));
+        t.body = Some(format!("# Heading\n\n{}", "word ".repeat(400)));
+        let ws = Workspace::from_task(t, Utc::now());
+        let ws_key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
+        m.sync_panes();
+
+        m.open_focused_description();
+        assert_eq!(m.modal_stack.last(), Some(&Id::DescriptionModal));
+
+        m.update(Msg::ModalDismissed);
+        assert!(
+            m.modal_stack.is_empty(),
+            "the reader modal pops without leaving pending state",
+        );
+    }
+
+    /// A workspace with no body has nothing to read — opening is a no-op.
+    #[test]
+    fn open_focused_description_noop_without_body() {
+        let mut m = build_model();
+        let ws = workspace("owner/repo#2", false, Duration::hours(1));
+        let ws_key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
+        m.sync_panes();
+
+        m.open_focused_description();
+        assert!(m.modal_stack.is_empty(), "no body → no modal");
     }
 
     /// The dispatch → mount seam: pressing `g p` (`Action::ManagePolicies`)
@@ -6151,6 +6374,25 @@ mod destructive_confirm_tests {
         }
     }
 
+    #[test]
+    fn sync_workspace_targets_the_focused_workspace() {
+        // `g s` on a focused PR/issue re-polls just that entity — the
+        // command carries the focused workspace's own key, no confirm
+        // gate.
+        let mut m = build_model();
+        let pr = merge_ready_pr_without_approval("github:owner/repo#1");
+        let wk = pr.key.clone();
+        let sk = SessionKey::from(&wk);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        assert!(m.sidebar.focus_workspace_key(&sk), "PR row focusable");
+
+        let cmds = m.dispatch_action(&Action::SyncWorkspace);
+        match cmds.as_slice() {
+            [IpcCommand::SyncWorkspace { workspace_key }] => assert_eq!(workspace_key, &wk),
+            other => panic!("expected a single SyncWorkspace command, got {other:?}"),
+        }
+    }
+
     /// A PR workspace GitHub would let you merge right now — CI green,
     /// no conflict — but with NO approving review, the case #144 was
     /// falsely blocking.
@@ -6970,6 +7212,94 @@ mod workspace_focus_memory_tests {
         );
     }
 
+    /// Regression for #441: a single click on a sidebar workspace only
+    /// selects it, while a double-click drops focus straight into its
+    /// live agent terminal — no extra keystrokes to reach the running
+    /// session. A workspace with no live terminal degrades gracefully
+    /// to the plain selection.
+    #[test]
+    fn double_click_enters_the_workspace_agent_terminal() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![empty_ws("github:o/r#1"), empty_ws("github:o/r#2")],
+            terminals: vec![],
+            projects: vec![],
+        });
+        let a = key_of("github:o/r#1");
+        let b = key_of("github:o/r#2");
+        // WS-A has a live agent terminal; WS-B has none.
+        spawn_terminal(&mut m, &a, 1);
+
+        let area = Rect::new(0, 0, 120, 40);
+        let (sidebar_rect, _, _) = m.effective_pane_rects(area);
+        let row_a = row_of(&mut m, sidebar_rect, &a);
+        let row_b = row_of(&mut m, sidebar_rect, &b);
+
+        // Single click on WS-A: selects the row, stays on the sidebar.
+        m.dispatch_mouse_in(left_down(sidebar_rect.x + 1, row_a), area);
+        assert_eq!(m.sidebar().selected_workspace_key(), Some(&a));
+        assert_eq!(
+            m.focus(),
+            PaneFocus::Sidebar,
+            "a single click only selects the workspace",
+        );
+
+        // Second click at the same spot (within the double-click
+        // window) enters WS-A's live agent terminal.
+        m.dispatch_mouse_in(left_down(sidebar_rect.x + 1, row_a), area);
+        assert_eq!(m.sidebar().selected_workspace_key(), Some(&a));
+        assert_eq!(
+            m.focus(),
+            PaneFocus::Terminals,
+            "a double click jumps into the agent terminal",
+        );
+        assert_eq!(m.terminals.active_terminal_id(), Some(TerminalId(1)));
+
+        // Double-click WS-B, which has no live session: it degrades to
+        // a plain selection rather than stranding focus in an empty
+        // terminal pane.
+        m.dispatch_mouse_in(left_down(sidebar_rect.x + 1, row_b), area);
+        m.dispatch_mouse_in(left_down(sidebar_rect.x + 1, row_b), area);
+        assert_eq!(m.sidebar().selected_workspace_key(), Some(&b));
+        assert_eq!(
+            m.focus(),
+            PaneFocus::Sidebar,
+            "double-clicking a session-less workspace just selects it",
+        );
+    }
+
+    /// Companion to #441: double-clicking a workspace with no live
+    /// terminal but a visible activity pane falls back to opening that
+    /// pane rather than stranding focus in an empty terminal slot.
+    #[test]
+    fn double_click_without_a_terminal_opens_the_activity_pane() {
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers as TuiMods};
+
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![empty_ws("github:o/r#1")],
+            terminals: vec![],
+            projects: vec![],
+        });
+        let a = key_of("github:o/r#1");
+        // No terminal spawned; force the (otherwise auto-hidden)
+        // activity pane visible so the fallback has somewhere to land.
+        m.dispatch_key(KeyEvent::new(Key::Char('P'), TuiMods::SHIFT));
+        assert!(m.activity_pane_visible());
+
+        let area = Rect::new(0, 0, 120, 40);
+        let (sidebar_rect, _, _) = m.effective_pane_rects(area);
+        let row_a = row_of(&mut m, sidebar_rect, &a);
+
+        m.dispatch_mouse_in(left_down(sidebar_rect.x + 1, row_a), area);
+        m.dispatch_mouse_in(left_down(sidebar_rect.x + 1, row_a), area);
+        assert_eq!(
+            m.focus(),
+            PaneFocus::Right,
+            "with no terminal the double-click opens the activity pane",
+        );
+    }
+
     /// Regression for #268: a wheel event over the sidebar scrolls the
     /// list instead of being swallowed. Before the fix the
     /// `ScrollUp/ScrollDown` router only handled the activity pane and
@@ -7766,6 +8096,52 @@ mod spawn_spinner_projection_tests {
         assert!(
             m.status.spawning.is_none(),
             "spinner cleared by its own terminal"
+        );
+    }
+
+    #[test]
+    fn recovered_agent_restart_warning_isolated_from_polling_refresh_and_spawns() {
+        let mut m = build_model();
+        let target = SessionKey::new("github:o/r#1");
+        m.status
+            .note_spawning("codex", target, TerminalKind::Agent("codex".into()), 0);
+        m.show_polling(vec!["github".into()]);
+
+        m.handle_daemon_event(IpcEvent::RecoveredTerminalsRequireRestart {
+            terminal_ids: vec![TerminalId(7)],
+        });
+
+        assert!(
+            m.status.spawning.is_some(),
+            "a recovery warning must not cancel an unrelated active spawn"
+        );
+        assert!(
+            m.status.polling.is_some(),
+            "terminal compatibility must not terminate first-poll feedback"
+        );
+        m.status.polling_last_tick =
+            std::time::Instant::now() - std::time::Duration::from_millis(100);
+        assert!(
+            m.polling_tick().is_none(),
+            "terminal compatibility must not queue a delayed polling failure"
+        );
+        assert!(m.status.dismiss_polling());
+
+        m.pending_refresh_ack = true;
+        m.handle_daemon_event(IpcEvent::RecoveredTerminalsRequireRestart {
+            terminal_ids: vec![TerminalId(7)],
+        });
+        assert!(
+            m.pending_refresh_ack,
+            "terminal compatibility must not consume a manual refresh acknowledgement"
+        );
+        let notice = m.status.notice.as_ref().expect("restart notice");
+        assert!(notice.message.contains("restart required"));
+        assert!(!notice.message.contains("spawn failed"));
+        assert!(!notice.message.contains("sync failed"));
+        assert_eq!(
+            notice.severity,
+            crate::realm::components::footer::NoticeSeverity::Permanent
         );
     }
 }
@@ -11725,5 +12101,328 @@ mod agent_cli_update_tests {
             cmd_rx.try_recv().expect("update command sent"),
             lazybox_ipc::Command::UpdateAgentClis
         ));
+    }
+}
+
+#[cfg(test)]
+mod optimistic_mutation_tests {
+    //! #476: mutating actions apply locally on the keystroke, reconcile
+    //! on the daemon's success echo, and roll back on its failure event.
+    //! No user-visible wait on a round-trip; a rejected mutation never
+    //! leaves a lie on screen.
+    use super::super::*;
+    use crate::realm::components::footer::NoticeSeverity;
+    use chrono::Utc;
+    use lazybox_core::{SessionKey, Task, TaskId, Workspace, WorkspaceKey};
+    use lazybox_ipc::{Command as IpcCommand, Event as IpcEvent, channel};
+    use lazybox_tui_core::action::Action;
+    use tuirealm::ratatui::layout::Size;
+
+    type TestModel = Model<tuirealm::terminal::TestTerminalAdapter>;
+
+    fn build_model() -> TestModel {
+        let (client, _server) = channel::pair();
+        // A live polling modal swallows footer notices; clear it so
+        // rollback errors surface in `status.notice`.
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        m.status.polling = None;
+        m
+    }
+
+    fn provider_error(source: &str, message: &str) -> IpcEvent {
+        IpcEvent::ProviderError {
+            source: source.into(),
+            message: message.into(),
+            detail: String::new(),
+            kind: "retryable".into(),
+        }
+    }
+
+    fn pr_task(key: &str) -> Task {
+        let (path, num) = key.rsplit_once('#').unwrap_or((key, "1"));
+        Task {
+            id: TaskId {
+                source: "github".into(),
+                key: key.into(),
+            },
+            title: format!("task: {key}"),
+            body: None,
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: format!("https://github.com/{path}/pull/{num}"),
+            repo: Some("owner/repo".into()),
+            branch: Some("feature".into()),
+            base_branch: None,
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: Some("PR_node".into()),
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        }
+    }
+
+    fn seed_pr_workspace(m: &mut TestModel, key: &str) -> WorkspaceKey {
+        let ws = Workspace::from_task(pr_task(key), Utc::now());
+        let ws_key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        ws_key
+    }
+
+    fn reviewers_of(m: &TestModel, sk: &SessionKey) -> Vec<String> {
+        m.sidebar
+            .workspace_by_key(sk)
+            .and_then(|w| w.pr.as_ref())
+            .map(|p| p.reviewers.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn archive_removes_row_instantly_then_reconciles() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#1");
+        let sk: SessionKey = (&ws_key).into();
+        assert!(m.sidebar.workspace_by_key(&sk).is_some());
+
+        let cmds = m.dispatch_action_confirmed(
+            &Action::Archive,
+            &ActionConfirmTarget::Workspace(sk.clone()),
+        );
+        assert!(matches!(cmds.as_slice(), [IpcCommand::Kill { .. }]));
+        assert!(
+            m.sidebar.workspace_by_key(&sk).is_none(),
+            "row must vanish on confirm, not wait for WorkspaceRemoved"
+        );
+        assert_eq!(m.pending_mutations.len(), 1, "rollback stash held");
+
+        m.handle_daemon_event(IpcEvent::WorkspaceRemoved(ws_key));
+        assert!(
+            m.pending_mutations.is_empty(),
+            "the removed echo reconciles the stash"
+        );
+        assert!(m.sidebar.workspace_by_key(&sk).is_none());
+    }
+
+    #[test]
+    fn archive_rolls_back_on_store_failure() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#2");
+        let sk: SessionKey = (&ws_key).into();
+        m.dispatch_action_confirmed(
+            &Action::Archive,
+            &ActionConfirmTarget::Workspace(sk.clone()),
+        );
+        assert!(m.sidebar.workspace_by_key(&sk).is_none());
+
+        m.handle_daemon_event(provider_error(
+            "store",
+            &format!("could not delete workspace {ws_key}: disk full"),
+        ));
+        assert!(
+            m.sidebar.workspace_by_key(&sk).is_some(),
+            "a rejected delete must re-insert the row"
+        );
+        assert!(m.pending_mutations.is_empty());
+        let n = m.status.notice.as_ref().expect("rollback flashes an error");
+        assert_eq!(n.severity, NoticeSeverity::Permanent);
+        assert!(n.message.contains("delete failed"), "got {:?}", n.message);
+    }
+
+    #[test]
+    fn archive_rolls_back_on_terminal_kill_failure() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#8");
+        let sk: SessionKey = (&ws_key).into();
+        m.dispatch_action_confirmed(
+            &Action::Archive,
+            &ActionConfirmTarget::Workspace(sk.clone()),
+        );
+        assert!(m.sidebar.workspace_by_key(&sk).is_none());
+
+        // The daemon couldn't stop a backing agent, so it preserved the
+        // workspace and emitted a `terminal` error naming the key.
+        m.handle_daemon_event(provider_error(
+            "terminal",
+            &format!(
+                "could not stop terminal x; workspace {ws_key} was not deleted: tmux timed out"
+            ),
+        ));
+        assert!(
+            m.sidebar.workspace_by_key(&sk).is_some(),
+            "an un-killable agent must bring the row back"
+        );
+        assert!(m.pending_mutations.is_empty());
+        let n = m.status.notice.as_ref().expect("rollback flashes");
+        assert!(n.message.contains("delete failed"), "got {:?}", n.message);
+    }
+
+    #[test]
+    fn unrelated_store_error_does_not_roll_back() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#9");
+        let sk: SessionKey = (&ws_key).into();
+        m.dispatch_action_confirmed(
+            &Action::Archive,
+            &ActionConfirmTarget::Workspace(sk.clone()),
+        );
+
+        // A store error naming a DIFFERENT workspace must not resurrect
+        // this row.
+        m.handle_daemon_event(provider_error(
+            "store",
+            "could not delete workspace github:owner/repo#99: nope",
+        ));
+        assert!(
+            m.sidebar.workspace_by_key(&sk).is_none(),
+            "rollback keys off the named workspace, not any store error"
+        );
+        assert_eq!(m.pending_mutations.len(), 1, "stash still armed");
+    }
+
+    #[test]
+    fn reviewers_update_chip_instantly_then_reconcile() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#3");
+        let sk: SessionKey = (&ws_key).into();
+        m.pending_review_request = Some(ws_key.clone());
+        m.review_choices = vec!["alice".into(), "bob".into()];
+        m.modal_stack.push(Id::RequestReviewers);
+
+        let cmds = m.handle_choice_picked(vec![0, 1]);
+        assert!(matches!(
+            cmds.as_slice(),
+            [IpcCommand::RequestReviewers { .. }]
+        ));
+        assert_eq!(
+            reviewers_of(&m, &sk),
+            vec!["alice".to_string(), "bob".to_string()]
+        );
+        assert_eq!(m.pending_mutations.len(), 1);
+
+        // The daemon's fresh copy reconciles the stash.
+        let mut updated = Workspace::from_task(pr_task("github:owner/repo#3"), Utc::now());
+        updated.pr.as_mut().unwrap().reviewers = vec!["alice".into(), "bob".into()];
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(updated)));
+        assert!(m.pending_mutations.is_empty());
+        assert_eq!(
+            reviewers_of(&m, &sk),
+            vec!["alice".to_string(), "bob".to_string()]
+        );
+    }
+
+    #[test]
+    fn reviewers_roll_back_on_failure() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#4");
+        let sk: SessionKey = (&ws_key).into();
+        m.pending_review_request = Some(ws_key.clone());
+        m.review_choices = vec!["alice".into()];
+        m.modal_stack.push(Id::RequestReviewers);
+        m.handle_choice_picked(vec![0]);
+        assert_eq!(reviewers_of(&m, &sk), vec!["alice".to_string()]);
+
+        m.handle_daemon_event(provider_error(
+            "reviewers",
+            "request reviewers failed: nope",
+        ));
+        assert!(
+            reviewers_of(&m, &sk).is_empty(),
+            "a rejected reviewer request must roll the chip back"
+        );
+        assert!(m.pending_mutations.is_empty());
+        let n = m.status.notice.as_ref().expect("failure flashes");
+        assert_eq!(n.severity, NoticeSeverity::Permanent);
+        assert!(
+            n.message.contains("request reviewers failed"),
+            "got {:?}",
+            n.message
+        );
+    }
+
+    #[test]
+    fn labels_apply_then_roll_back_on_failure() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#5");
+        let sk: SessionKey = (&ws_key).into();
+        m.pending_labels_request = Some(ws_key.clone());
+        m.labels_choices = vec!["bug".into(), "urgent".into()];
+        m.modal_stack.push(Id::ManageLabels);
+        m.handle_choice_picked(vec![0, 1]);
+        let names: Vec<String> = m
+            .sidebar
+            .workspace_by_key(&sk)
+            .unwrap()
+            .pr
+            .as_ref()
+            .unwrap()
+            .labels
+            .iter()
+            .map(|l| l.name.clone())
+            .collect();
+        assert_eq!(names, vec!["bug".to_string(), "urgent".to_string()]);
+
+        m.handle_daemon_event(provider_error("labels", "update labels failed: boom"));
+        assert!(
+            m.sidebar
+                .workspace_by_key(&sk)
+                .unwrap()
+                .pr
+                .as_ref()
+                .unwrap()
+                .labels
+                .is_empty(),
+            "a rejected label set must roll back"
+        );
+        assert!(m.pending_mutations.is_empty());
+    }
+
+    #[test]
+    fn assignees_apply_then_roll_back_on_failure() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#6");
+        let sk: SessionKey = (&ws_key).into();
+        m.pending_assignees_request = Some(ws_key.clone());
+        m.assignees_choices = vec!["alice".into(), "bob".into()];
+        m.modal_stack.push(Id::AddAssignees);
+        m.handle_choice_picked(vec![0]);
+        assert_eq!(
+            m.sidebar
+                .workspace_by_key(&sk)
+                .unwrap()
+                .pr
+                .as_ref()
+                .unwrap()
+                .assignees,
+            vec!["alice".to_string()]
+        );
+
+        m.handle_daemon_event(provider_error("assignees", "update assignees failed: no"));
+        assert!(
+            m.sidebar
+                .workspace_by_key(&sk)
+                .unwrap()
+                .pr
+                .as_ref()
+                .unwrap()
+                .assignees
+                .is_empty(),
+            "a rejected assignee set must roll back"
+        );
+        assert!(m.pending_mutations.is_empty());
     }
 }

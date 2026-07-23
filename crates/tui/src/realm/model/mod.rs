@@ -29,6 +29,7 @@ mod host_terminal;
 mod inputs;
 mod keys;
 mod modals;
+mod optimistic;
 mod terminal_leader;
 #[cfg(test)]
 mod tests;
@@ -90,6 +91,12 @@ pub enum Id {
     Update,
     Polling,
     Reply,
+    /// Textarea editing the focused workspace's local notes scratchpad
+    /// (issue #458). Pre-filled with the current note; submit →
+    /// `Command::SetNotes`. Shares the `Textarea` component with
+    /// `Reply`/`BroadcastText`, so `handle_textarea_submitted` routes
+    /// on this id. Target key lives in `Model::pending_notes`.
+    Notes,
     /// Single-line input prompt for naming a brand-new pre-PR
     /// workspace. Submit → `Command::CreateWorkspace { name }`.
     NewWorkspace,
@@ -199,6 +206,15 @@ pub enum Id {
     /// The target row lives in `pending_inspect_target`;
     /// `Msg::Confirmed(true)` dispatches `DeleteOrphanedWorktree`.
     InspectConfirm,
+    /// Choice modal listing every on-disk checkout the dev-folder scan
+    /// discovered. Picking a row routes through `pending_import_rows` →
+    /// `ImportCheckoutConfirm` before the linked workspace is created.
+    ImportCheckoutList,
+    /// Confirm modal in front of an actual import — warns that sessions
+    /// run in the user's real checkout (not an isolated worktree). The
+    /// target row lives in `pending_import_target`; `Msg::Confirmed(true)`
+    /// dispatches `ImportLocalCheckout`.
+    ImportCheckoutConfirm,
     /// Unified confirm modal for any destructive catalog action.
     /// `Model::dispatch_action` routes here when
     /// `ActionDef::is_destructive()` is true; the pending `Action`
@@ -291,6 +307,15 @@ pub enum Id {
     /// and fires the same work spawn `w` would have, targeted at the
     /// chosen agent.
     WorkAgentPicker,
+    /// Scrollable full-description reader (#448). Renders a PR/issue
+    /// (or any long) body as real markdown — headings, lists, code,
+    /// links, tables — over most of the pane. Read-only + carries no
+    /// pending model state: dismiss just pops it. Links are click-mapped
+    /// to `Msg::OpenUrl`. Deliberately NOT in
+    /// `dismissable_by_outside_click` — a left-click inside must reach
+    /// the modal so link clicks open, and the modal dismisses its own
+    /// outside-clicks.
+    DescriptionModal,
 }
 
 impl Id {
@@ -314,6 +339,15 @@ impl Id {
                 | Id::SnippetPicker
                 | Id::SnippetBrowser
         )
+    }
+
+    /// Whether this modal reacts to the mouse wheel. Only these get
+    /// forwarded scroll events; for every other modal a wheel notch is
+    /// dropped at the router rather than pushed through the event
+    /// channel to be ignored (#448). Today only the description reader
+    /// scrolls on the wheel.
+    pub(crate) fn consumes_scroll(&self) -> bool {
+        matches!(self, Id::DescriptionModal)
     }
 }
 
@@ -434,6 +468,9 @@ pub enum Msg {
     PollingTimeout,
     PollingEmptyInbox(Vec<String>),
     ModalDismissed,
+    /// A link inside the description-reader modal (#448) was clicked —
+    /// hand its URL to the platform browser launcher.
+    OpenUrl(String),
     /// `c` pressed in the messages window (#309) — wipe the notice
     /// history and re-render the (now empty) window.
     MessagesCleared,
@@ -485,6 +522,36 @@ impl PaneFocus {
             PaneFocus::Terminals => PaneFocus::Sidebar,
         }
     }
+}
+
+/// An in-progress lazybox-side drag-selection in the terminal pane.
+///
+/// Endpoints are stored in **screen-absolute grid coordinates**
+/// (`(col, screen_row)` where `screen_row` counts from the top of the
+/// scrollback), not on-screen crossterm cells — so they stay pinned to
+/// their content while the viewport auto-scrolls under an edge drag
+/// (#432). The visible portion is projected back to crossterm cells at
+/// paint time; the whole span (including rows scrolled off-screen) is
+/// extracted from libghostty on release.
+#[derive(Debug, Clone, Copy)]
+struct TerminalDrag {
+    /// Crossterm cell of the initial mouse-down. A press-release with no
+    /// intervening cell change is a plain click, forwarded to a
+    /// mouse-tracking inner program from this position.
+    down: (u16, u16),
+    /// Screen-absolute grid anchor, fixed for the drag's lifetime.
+    anchor: (u16, u32),
+    /// Screen-absolute grid focus, re-derived on every drag + auto-scroll.
+    focus: (u16, u32),
+    /// The terminal pane rect this drag started in, cached so the idle
+    /// tick can keep auto-scrolling while the pointer is held at an edge.
+    rect: Rect,
+    /// Last crossterm pointer cell — the idle-tick auto-scroll re-reads
+    /// it to decide whether we are still parked against an edge.
+    pointer: (u16, u16),
+    /// Set once the pointer left the mouse-down cell: distinguishes a
+    /// real selection from a plain click.
+    dragged: bool,
 }
 
 /// Top-level application state.
@@ -626,13 +693,13 @@ pub struct Model<T: TerminalAdapter> {
     /// inside the terminal pane do lazybox-side text selection.
     #[allow(dead_code)] // accessed indirectly via the toggle handler
     mouse_capture_on: bool,
-    /// Active lazybox-side text selection in the terminal pane.
-    /// `(start_cell, end_cell)` in absolute viewport coords, set on
-    /// mouse Down inside the terminal rect (when the inner program
-    /// isn't tracking mouse itself) and extended on Drag. On Up the
-    /// selected cells are extracted from libghostty's grid and
-    /// copied to the host clipboard via OSC 52.
-    terminal_selection: Option<((u16, u16), (u16, u16))>,
+    /// Active lazybox-side drag-selection in the terminal pane. Set on
+    /// mouse Down inside the terminal rect and extended on Drag; while a
+    /// drag is parked against the top/bottom edge the idle tick
+    /// auto-scrolls the viewport and grows the selection across
+    /// scrollback (#432). On Up the whole span is extracted from
+    /// libghostty's grid and copied to the host clipboard via OSC 52.
+    terminal_drag: Option<TerminalDrag>,
     /// `]]` escape from the terminal pane: first press of the escape
     /// char arms; a second within the window arms the `]]` *leader*
     /// (see `terminal_leader_armed`) instead of forwarding to the PTY.
@@ -665,6 +732,10 @@ pub struct Model<T: TerminalAdapter> {
     /// Set by `mount_reply`; consumed by `Msg::TextareaSubmitted` to
     /// build the `Command::PostReply` payload.
     pending_reply: Option<lazybox_core::SessionKey>,
+    /// Workspace key the notes textarea (if mounted) is targeting. Set
+    /// by `mount_notes`; consumed by `Msg::TextareaSubmitted` to build
+    /// the `Command::SetNotes` payload (issue #458).
+    pending_notes: Option<lazybox_core::SessionKey>,
     /// Body of the most recently submitted reply, kept until the next
     /// reply is composed. If the daemon later reports the post failed
     /// (`ProviderError { source: "reply" }`), the composed text would
@@ -694,6 +765,11 @@ pub struct Model<T: TerminalAdapter> {
     /// matches the picker's row indices so `Msg::ChoicePicked(indices)`
     /// indexes back into this list. Cleared on submit / dismiss.
     labels_choices: Vec<String>,
+    /// Optimistic mutations applied locally and awaiting the daemon's
+    /// echo (#476). Each carries the prior rows so a rejected
+    /// round-trip rolls back; the success echo drops the entry. See
+    /// `optimistic.rs`.
+    pending_mutations: Vec<optimistic::OptimisticMutation>,
     /// Workspace currently waiting on the `SnoozeDuration` picker's
     /// result. `Msg::ChoicePicked` reads this + `snooze_choices` to
     /// turn the picked index into a `Command::Snooze`.
@@ -908,6 +984,13 @@ pub struct Model<T: TerminalAdapter> {
     /// Row picked from `InspectList`, waiting on the `InspectConfirm`
     /// confirm modal. Consumed by `Msg::Confirmed(true)`.
     pending_inspect_target: Option<lazybox_ipc::WorktreeInspectionDto>,
+    /// Latest dev-folder scan result driving the `ImportCheckoutList`
+    /// picker. `Msg::ChoicePicked` reads the picked index out of this
+    /// to mount the import confirm.
+    pending_import_rows: Vec<lazybox_ipc::DiscoveredCheckoutDto>,
+    /// Checkout picked from `ImportCheckoutList`, waiting on the
+    /// `ImportCheckoutConfirm` modal. Consumed by `Msg::Confirmed(true)`.
+    pending_import_target: Option<lazybox_ipc::DiscoveredCheckoutDto>,
     /// Project the next `Id::NewWorkspace` submit should land the
     /// new workspace under. Set by `mount_new_workspace_input(pk)`
     /// from the focused-project resolver, consumed by
@@ -1206,10 +1289,11 @@ impl<T: TerminalAdapter> Model<T> {
             cmd_send_overloaded: std::cell::Cell::new(false),
             daemon_disconnect_notified: false,
             mouse_capture_on: true,
-            terminal_selection: None,
+            terminal_drag: None,
             preselect: None,
             layout: LayoutCtx::new(),
             pending_reply: None,
+            pending_notes: None,
             last_reply_body: None,
             pending_review_request: None,
             review_choices: Vec::new(),
@@ -1217,6 +1301,7 @@ impl<T: TerminalAdapter> Model<T> {
             assignees_choices: Vec::new(),
             pending_labels_request: None,
             labels_choices: Vec::new(),
+            pending_mutations: Vec::new(),
             pending_snooze_workspace: None,
             snooze_choices: Vec::new(),
             pending_work_picker: None,
@@ -1263,6 +1348,8 @@ impl<T: TerminalAdapter> Model<T> {
             pending_action_confirm: None,
             pending_help_action: None,
             pending_inspect_rows: Vec::new(),
+            pending_import_rows: Vec::new(),
+            pending_import_target: None,
             pending_inspect_target: None,
             pending_new_workspace_project: None,
             pending_focus_project_name: None,
@@ -3398,8 +3485,14 @@ impl<T: TerminalAdapter> Model<T> {
             // matches what the user expects from a per-pane
             // selection (compare to the host terminal's native
             // selection, which crosses panes).
-            if let Some((start, end)) = self.terminal_selection {
-                paint_selection(f.buffer_mut(), right_bottom, start, end);
+            if let Some(drag) = self.terminal_drag.as_ref() {
+                let (anchor, focus) = (drag.anchor, drag.focus);
+                if let Some((start, end)) =
+                    self.terminals
+                        .selection_screen_span(right_bottom, anchor, focus)
+                {
+                    paint_selection(f.buffer_mut(), right_bottom, start, end);
+                }
             }
 
             // Footer: keymap + globals + polling status + notice.
@@ -3552,6 +3645,20 @@ impl<T: TerminalAdapter> Model<T> {
             Msg::ModalDismissed => {
                 let cmds = self.handle_modal_dismissed();
                 self.dispatch_cmds(cmds);
+            }
+            Msg::OpenUrl(url) => {
+                // A link clicked inside the description-reader modal. The
+                // modal stays open (reading isn't over); hand the URL to
+                // the platform launcher and flash the outcome, mirroring
+                // the `g o` "open in browser" path.
+                let browser = self.ui_defaults.browser.clone();
+                match lazybox_tui_core::editors::open_url(&url, browser.as_deref()) {
+                    Ok(()) => self.flash_info(format!("opening {url}…")),
+                    Err(e) => self.flash(
+                        format!("open failed: {e}"),
+                        crate::realm::components::footer::NoticeSeverity::Retryable,
+                    ),
+                }
             }
             Msg::MessagesCleared => {
                 // Wipe the durable history and re-render the window

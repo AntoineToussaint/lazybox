@@ -258,6 +258,38 @@ impl ReplayRing {
         out.extend_from_slice(&self.buf[..self.head]);
     }
 
+    /// Snapshot suitable for seeding a VT reconstruction, appended to
+    /// `out`. Identical to [`Self::snapshot_into`] while the ring is
+    /// complete: nothing has been evicted, so the first stored byte is
+    /// the terminal's true clean start.
+    ///
+    /// Once the ring has wrapped, its oldest retained byte can fall in
+    /// the middle of an escape / UTF-8 sequence. Replaying from there
+    /// mis-parses that leading partial sequence as ground-state text —
+    /// stray glyphs and wrong SGR/cursor state on the first reconstructed
+    /// rows of scrollback. So for a wrapped ring this drops the partial
+    /// leading line, starting the replay on a clean line boundary. An
+    /// escape/UTF-8 sequence never spans a raw `\n`, so the byte after the
+    /// first newline is never mid-sequence. This is the same clean-baseline
+    /// guard [`read_scrollback_tail`] applies to the on-disk seed.
+    pub fn replay_snapshot_into(&self, out: &mut Vec<u8>) {
+        let start = out.len();
+        self.snapshot_into(out);
+        if self.is_complete() {
+            return;
+        }
+        if let Some(rel) = out[start..].iter().position(|&b| b == b'\n') {
+            out.drain(start..=start + rel);
+        }
+    }
+
+    /// Owned form of [`Self::replay_snapshot_into`].
+    pub fn replay_snapshot(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.buf.len());
+        self.replay_snapshot_into(&mut out);
+        out
+    }
+
     pub fn len(&self) -> usize {
         self.buf.len()
     }
@@ -734,7 +766,7 @@ impl DaemonPty {
         let ring = self.ring.lock().await;
         let mut replay = Vec::with_capacity(self.seed.len() + ring.len());
         replay.extend_from_slice(&self.seed);
-        ring.snapshot_into(&mut replay);
+        ring.replay_snapshot_into(&mut replay);
         crate::backend::ReplaySnapshot {
             replay,
             last_seq: self.last_seq.load(Ordering::SeqCst),
@@ -1045,6 +1077,43 @@ mod ring_tests {
         assert_eq!(r.snapshot(), b"cdefg");
         assert_eq!(r.total_written, 7);
         assert_eq!(r.len(), 5);
+    }
+
+    /// A complete ring (nothing evicted) is a clean baseline as-is, so the
+    /// replay snapshot keeps its first byte — trimming would wrongly drop
+    /// the terminal's real opening line.
+    #[test]
+    fn replay_snapshot_keeps_head_while_complete() {
+        let mut r = ReplayRing::with_capacity(32);
+        r.push(b"line one\nline two\n");
+        assert!(r.is_complete());
+        assert_eq!(r.replay_snapshot(), b"line one\nline two\n");
+    }
+
+    /// A wrapped ring's oldest retained byte can be mid-line; the replay
+    /// snapshot drops that partial leading line so a VT reconstruction
+    /// starts on a clean boundary.
+    #[test]
+    fn replay_snapshot_drops_partial_leading_line_when_wrapped() {
+        let mut r = ReplayRing::with_capacity(7);
+        r.push(b"aaa\nbbb\nccc\n");
+        // The last 7 bytes begin mid "bbb" line.
+        assert_eq!(r.snapshot(), b"bb\nccc\n");
+        // The replay snapshot drops that partial line, keeping only the
+        // clean "ccc\n" that follows the first newline.
+        assert_eq!(r.replay_snapshot(), b"ccc\n");
+        assert!(!r.is_complete());
+    }
+
+    /// With no newline in the retained tail there is no safe boundary to
+    /// cut on, so the replay snapshot returns the raw tail unchanged
+    /// rather than discarding everything.
+    #[test]
+    fn replay_snapshot_keeps_tail_without_a_boundary() {
+        let mut r = ReplayRing::with_capacity(4);
+        r.push(b"abcdefgh");
+        assert_eq!(r.snapshot(), b"efgh");
+        assert_eq!(r.replay_snapshot(), b"efgh");
     }
 }
 

@@ -13,6 +13,9 @@
 //! sized ring while the old screen-sized ring does not.
 
 use lazybox_server::pty::{REPLAY_RING_BYTES, ReplayRing};
+use libghostty_vt::fmt::{Format, Formatter, FormatterOptions};
+use libghostty_vt::screen::Selection;
+use libghostty_vt::terminal::{Point, PointCoordinate};
 use libghostty_vt::{Terminal, TerminalOptions};
 
 const COLS: u16 = 120;
@@ -85,5 +88,156 @@ fn recovered_session_retains_meaningful_scrollback() {
         recovered > screen_sized * 4,
         "the larger ring must deepen recovered scrollback \
          (screen-sized ring gave {screen_sized}, sized ring gave {recovered})"
+    );
+}
+
+/// Fixed 104-byte line: an 11-byte SGR introducer `\x1b[38;5;CCCm`
+/// (always 3 colour digits so the length never varies), an 87-byte
+/// body carrying a unique `line NNNNNN` marker, then `\x1b[0m\r\n`.
+/// The fixed width lets the fidelity test place the ring's oldest
+/// retained byte deterministically — see `truncated_replay_is_grid_faithful`.
+const FIDELITY_LINE_BYTES: usize = 104;
+
+fn colored_line(i: usize) -> Vec<u8> {
+    let color = 16 + (i % 216); // 016..=231, zero-padded to a fixed 3 digits
+    let body = format!("line {i:06} ");
+    let mut out = Vec::with_capacity(FIDELITY_LINE_BYTES);
+    out.extend_from_slice(format!("\x1b[38;5;{color:03}m").as_bytes());
+    out.extend_from_slice(body.as_bytes());
+    out.resize(FIDELITY_LINE_BYTES - b"\x1b[0m\r\n".len(), b'=');
+    out.extend_from_slice(b"\x1b[0m\r\n");
+    debug_assert_eq!(out.len(), FIDELITY_LINE_BYTES);
+    out
+}
+
+/// Feed `stream` into a fresh VT (deep scrollback so the ring, not the
+/// grid, bounds recovered depth) and read back every grid row — scrollback
+/// included — as plain text via a full-screen selection, exactly the path
+/// the client uses for cross-scrollback copy.
+fn reconstructed_rows(stream: &[u8]) -> Vec<String> {
+    // Deep scrollback budget so the ring (not the grid) bounds recovered
+    // depth. The budget is spent on the retained pages, not reserved, so a
+    // generous ceiling is cheap.
+    let mut term = Terminal::new(TerminalOptions {
+        cols: COLS,
+        rows: ROWS,
+        max_scrollback: 64 * 1024 * 1024,
+    })
+    .expect("vt init");
+    term.vt_write(stream);
+
+    let total = term.total_rows().expect("total_rows");
+    if total == 0 {
+        return Vec::new();
+    }
+    let start = term
+        .grid_ref(Point::Screen(PointCoordinate { x: 0, y: 0 }))
+        .expect("start grid_ref");
+    let end = term
+        .grid_ref(Point::Screen(PointCoordinate {
+            x: COLS - 1,
+            y: (total - 1) as u32,
+        }))
+        .expect("end grid_ref");
+    let mut formatter = Formatter::new(
+        &term,
+        FormatterOptions {
+            format: Format::Plain,
+            trim: true,
+            unwrap: false,
+            selection: Some(Selection {
+                start,
+                end,
+                rectangle: false,
+            }),
+        },
+    )
+    .expect("formatter");
+    let bytes = formatter.format_alloc(None).expect("format");
+    String::from_utf8_lossy(&bytes)
+        .lines()
+        .map(str::to_string)
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+/// Fidelity regression for #498. A churn-heavy row-count test (above)
+/// proves the ring recovers *depth*; it does not prove the recovered
+/// scrollback is *correct*. The ring drops its oldest bytes on a pure
+/// byte boundary, so once a session exceeds the ring capacity the replay
+/// can begin in the middle of an escape sequence — that partial SGR
+/// introducer is then parsed as ground-state text and corrupts the first
+/// reconstructed rows.
+///
+/// This streams >2 MiB of uniquely-labelled, SGR-coloured lines through a
+/// full ring, positioned so the oldest retained byte lands *inside* an
+/// SGR introducer, and asserts:
+///   - the raw (unguarded) snapshot really is corrupt at its head — the
+///     leaked introducer bytes surface as a bogus leading row, so the test
+///     is exercising the divergence path, not a benign boundary;
+///   - the boundary-guarded snapshot reconstructs a grid whose rows are a
+///     byte-faithful contiguous tail of the true live history.
+#[test]
+fn truncated_replay_is_grid_faithful() {
+    // 25 000 lines × 104 B ≈ 2.48 MiB > REPLAY_RING_BYTES, so the ring
+    // wraps. With a 104-byte line and a 2 MiB ring the oldest retained
+    // byte lands at line offset 8 — the second colour digit of the SGR
+    // introducer — regardless of line count (see the constant's note).
+    let lines = 25_000;
+    let mut stream = Vec::new();
+    for i in 0..lines {
+        stream.extend_from_slice(&colored_line(i));
+    }
+    assert!(stream.len() > REPLAY_RING_BYTES);
+
+    let mut ring = ReplayRing::with_capacity(REPLAY_RING_BYTES);
+    for chunk in stream.chunks(8192) {
+        ring.push(chunk);
+    }
+    assert!(
+        !ring.is_complete(),
+        "the stream must exceed the ring so truncation is in play"
+    );
+
+    // The true history a live client scrolled through: every line, in order.
+    let live = reconstructed_rows(&stream);
+    let live_content: Vec<&String> = live.iter().filter(|l| l.starts_with("line ")).collect();
+
+    // Raw snapshot: replay begins mid-introducer, so the leaked bytes
+    // (`Cm`…) render as a leading row that is not any real history line.
+    let raw = reconstructed_rows(&ring.snapshot());
+    assert!(
+        !raw.is_empty() && !raw[0].starts_with("line "),
+        "the raw snapshot must start mid-sequence and corrupt its first row, \
+         else this test is not exercising the truncation path (got {:?})",
+        raw.first()
+    );
+
+    // Guarded snapshot: replay starts on a clean line boundary, so every
+    // reconstructed row is a real history line...
+    let guarded = reconstructed_rows(&ring.replay_snapshot());
+    assert!(
+        guarded.iter().all(|l| l.starts_with("line ")),
+        "every guarded row must be a clean history line; found {:?}",
+        guarded.iter().find(|l| !l.starts_with("line "))
+    );
+    assert!(
+        guarded.len() > 10_000,
+        "the guard must not gut recovered depth, got {} rows",
+        guarded.len()
+    );
+
+    // ...and those rows are a byte-faithful contiguous tail of the true
+    // history — same content, same order, no corruption at the head.
+    let head = &guarded[0];
+    let idx = live_content
+        .iter()
+        .position(|l| *l == head)
+        .expect("the guarded head row must be a real history line");
+    let live_tail: Vec<&String> = live_content[idx..].to_vec();
+    let guarded_refs: Vec<&String> = guarded.iter().collect();
+    assert_eq!(
+        live_tail, guarded_refs,
+        "reconstructed scrollback must match the true history line-for-line"
     );
 }

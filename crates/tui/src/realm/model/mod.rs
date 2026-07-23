@@ -29,6 +29,7 @@ mod host_terminal;
 mod inputs;
 mod keys;
 mod modals;
+mod optimistic;
 mod terminal_leader;
 #[cfg(test)]
 mod tests;
@@ -90,6 +91,12 @@ pub enum Id {
     Update,
     Polling,
     Reply,
+    /// Textarea editing the focused workspace's local notes scratchpad
+    /// (issue #458). Pre-filled with the current note; submit →
+    /// `Command::SetNotes`. Shares the `Textarea` component with
+    /// `Reply`/`BroadcastText`, so `handle_textarea_submitted` routes
+    /// on this id. Target key lives in `Model::pending_notes`.
+    Notes,
     /// Single-line input prompt for naming a brand-new pre-PR
     /// workspace. Submit → `Command::CreateWorkspace { name }`.
     NewWorkspace,
@@ -199,6 +206,15 @@ pub enum Id {
     /// The target row lives in `pending_inspect_target`;
     /// `Msg::Confirmed(true)` dispatches `DeleteOrphanedWorktree`.
     InspectConfirm,
+    /// Choice modal listing every on-disk checkout the dev-folder scan
+    /// discovered. Picking a row routes through `pending_import_rows` →
+    /// `ImportCheckoutConfirm` before the linked workspace is created.
+    ImportCheckoutList,
+    /// Confirm modal in front of an actual import — warns that sessions
+    /// run in the user's real checkout (not an isolated worktree). The
+    /// target row lives in `pending_import_target`; `Msg::Confirmed(true)`
+    /// dispatches `ImportLocalCheckout`.
+    ImportCheckoutConfirm,
     /// Unified confirm modal for any destructive catalog action.
     /// `Model::dispatch_action` routes here when
     /// `ActionDef::is_destructive()` is true; the pending `Action`
@@ -291,6 +307,15 @@ pub enum Id {
     /// and fires the same work spawn `w` would have, targeted at the
     /// chosen agent.
     WorkAgentPicker,
+    /// Scrollable full-description reader (#448). Renders a PR/issue
+    /// (or any long) body as real markdown — headings, lists, code,
+    /// links, tables — over most of the pane. Read-only + carries no
+    /// pending model state: dismiss just pops it. Links are click-mapped
+    /// to `Msg::OpenUrl`. Deliberately NOT in
+    /// `dismissable_by_outside_click` — a left-click inside must reach
+    /// the modal so link clicks open, and the modal dismisses its own
+    /// outside-clicks.
+    DescriptionModal,
 }
 
 impl Id {
@@ -314,6 +339,15 @@ impl Id {
                 | Id::SnippetPicker
                 | Id::SnippetBrowser
         )
+    }
+
+    /// Whether this modal reacts to the mouse wheel. Only these get
+    /// forwarded scroll events; for every other modal a wheel notch is
+    /// dropped at the router rather than pushed through the event
+    /// channel to be ignored (#448). Today only the description reader
+    /// scrolls on the wheel.
+    pub(crate) fn consumes_scroll(&self) -> bool {
+        matches!(self, Id::DescriptionModal)
     }
 }
 
@@ -434,6 +468,9 @@ pub enum Msg {
     PollingTimeout,
     PollingEmptyInbox(Vec<String>),
     ModalDismissed,
+    /// A link inside the description-reader modal (#448) was clicked —
+    /// hand its URL to the platform browser launcher.
+    OpenUrl(String),
     /// `c` pressed in the messages window (#309) — wipe the notice
     /// history and re-render the (now empty) window.
     MessagesCleared,
@@ -665,6 +702,10 @@ pub struct Model<T: TerminalAdapter> {
     /// Set by `mount_reply`; consumed by `Msg::TextareaSubmitted` to
     /// build the `Command::PostReply` payload.
     pending_reply: Option<lazybox_core::SessionKey>,
+    /// Workspace key the notes textarea (if mounted) is targeting. Set
+    /// by `mount_notes`; consumed by `Msg::TextareaSubmitted` to build
+    /// the `Command::SetNotes` payload (issue #458).
+    pending_notes: Option<lazybox_core::SessionKey>,
     /// Body of the most recently submitted reply, kept until the next
     /// reply is composed. If the daemon later reports the post failed
     /// (`ProviderError { source: "reply" }`), the composed text would
@@ -694,6 +735,11 @@ pub struct Model<T: TerminalAdapter> {
     /// matches the picker's row indices so `Msg::ChoicePicked(indices)`
     /// indexes back into this list. Cleared on submit / dismiss.
     labels_choices: Vec<String>,
+    /// Optimistic mutations applied locally and awaiting the daemon's
+    /// echo (#476). Each carries the prior rows so a rejected
+    /// round-trip rolls back; the success echo drops the entry. See
+    /// `optimistic.rs`.
+    pending_mutations: Vec<optimistic::OptimisticMutation>,
     /// Workspace currently waiting on the `SnoozeDuration` picker's
     /// result. `Msg::ChoicePicked` reads this + `snooze_choices` to
     /// turn the picked index into a `Command::Snooze`.
@@ -908,6 +954,13 @@ pub struct Model<T: TerminalAdapter> {
     /// Row picked from `InspectList`, waiting on the `InspectConfirm`
     /// confirm modal. Consumed by `Msg::Confirmed(true)`.
     pending_inspect_target: Option<lazybox_ipc::WorktreeInspectionDto>,
+    /// Latest dev-folder scan result driving the `ImportCheckoutList`
+    /// picker. `Msg::ChoicePicked` reads the picked index out of this
+    /// to mount the import confirm.
+    pending_import_rows: Vec<lazybox_ipc::DiscoveredCheckoutDto>,
+    /// Checkout picked from `ImportCheckoutList`, waiting on the
+    /// `ImportCheckoutConfirm` modal. Consumed by `Msg::Confirmed(true)`.
+    pending_import_target: Option<lazybox_ipc::DiscoveredCheckoutDto>,
     /// Project the next `Id::NewWorkspace` submit should land the
     /// new workspace under. Set by `mount_new_workspace_input(pk)`
     /// from the focused-project resolver, consumed by
@@ -1210,6 +1263,7 @@ impl<T: TerminalAdapter> Model<T> {
             preselect: None,
             layout: LayoutCtx::new(),
             pending_reply: None,
+            pending_notes: None,
             last_reply_body: None,
             pending_review_request: None,
             review_choices: Vec::new(),
@@ -1217,6 +1271,7 @@ impl<T: TerminalAdapter> Model<T> {
             assignees_choices: Vec::new(),
             pending_labels_request: None,
             labels_choices: Vec::new(),
+            pending_mutations: Vec::new(),
             pending_snooze_workspace: None,
             snooze_choices: Vec::new(),
             pending_work_picker: None,
@@ -1263,6 +1318,8 @@ impl<T: TerminalAdapter> Model<T> {
             pending_action_confirm: None,
             pending_help_action: None,
             pending_inspect_rows: Vec::new(),
+            pending_import_rows: Vec::new(),
+            pending_import_target: None,
             pending_inspect_target: None,
             pending_new_workspace_project: None,
             pending_focus_project_name: None,
@@ -3552,6 +3609,20 @@ impl<T: TerminalAdapter> Model<T> {
             Msg::ModalDismissed => {
                 let cmds = self.handle_modal_dismissed();
                 self.dispatch_cmds(cmds);
+            }
+            Msg::OpenUrl(url) => {
+                // A link clicked inside the description-reader modal. The
+                // modal stays open (reading isn't over); hand the URL to
+                // the platform launcher and flash the outcome, mirroring
+                // the `g o` "open in browser" path.
+                let browser = self.ui_defaults.browser.clone();
+                match lazybox_tui_core::editors::open_url(&url, browser.as_deref()) {
+                    Ok(()) => self.flash_info(format!("opening {url}…")),
+                    Err(e) => self.flash(
+                        format!("open failed: {e}"),
+                        crate::realm::components::footer::NoticeSeverity::Retryable,
+                    ),
+                }
             }
             Msg::MessagesCleared => {
                 // Wipe the durable history and re-render the window

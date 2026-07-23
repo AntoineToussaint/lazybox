@@ -451,6 +451,23 @@ pub struct WorktreeInspectionDto {
     pub is_safe_to_delete: bool,
 }
 
+/// One row of `Event::CheckoutsDiscovered` — an on-disk git checkout
+/// found by the dev-folder scan, mapped to its GitHub repo when the
+/// origin allows. Wire-friendly projection of
+/// `lazybox_git_ops::DiscoveredCheckout` plus the resolved `repo`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoveredCheckoutDto {
+    /// Absolute path to the checkout's working directory.
+    pub path: std::path::PathBuf,
+    /// `owner/repo` resolved from the `origin` remote, or `None` when
+    /// the checkout has no origin / a non-GitHub origin.
+    pub repo: Option<String>,
+    /// Checked-out branch, or `None` on a detached HEAD.
+    pub branch: Option<String>,
+    /// `git status --porcelain` reported at least one entry.
+    pub has_uncommitted_changes: bool,
+}
+
 /// serde `default` for a JSON `bool` field that must default to `true`.
 /// Bincode is not self-describing and cannot apply this to an older, shorter
 /// command; socket peers with that shape are rejected by
@@ -880,6 +897,29 @@ pub enum Command {
     /// Read-only — no deletes happen until the TUI follows up with
     /// per-row `DeleteOrphanedWorktree` calls.
     InspectWorktrees,
+    /// Walk the configured dev roots (`scan.roots`, or `roots` when the
+    /// user pointed the scan at an explicit folder) and reply with
+    /// `Event::CheckoutsDiscovered` — every on-disk git clone found,
+    /// mapped to its GitHub `owner/repo` where the origin allows.
+    /// Read-only discovery; importing a checkout is the separate
+    /// `ImportLocalCheckout` step. `roots` empty ⇒ use `scan.roots`.
+    ScanCheckouts {
+        #[serde(default)]
+        roots: Vec<std::path::PathBuf>,
+    },
+    /// Import a discovered on-disk checkout as a **linked (no-worktree)
+    /// workspace**: lazybox points at `path` directly and every session
+    /// spawns there, on its current branch, with no worktree provisioned
+    /// and no bare clone. The daemon re-describes `path` to derive the
+    /// repo (`origin` → `owner/repo`) and current branch, creates the
+    /// workspace under that repo's project, and emits `WorkspaceUpserted`.
+    /// `spawn_agent = Some(id)` immediately starts that agent in the
+    /// checkout; `None` just creates the tracking workspace.
+    ImportLocalCheckout {
+        path: std::path::PathBuf,
+        #[serde(default)]
+        spawn_agent: Option<String>,
+    },
     /// Delete a single worktree the inspector flagged.
     ///
     /// `force = false` makes the daemon re-check safety on its side
@@ -900,6 +940,15 @@ pub enum Command {
     /// and broadcasts an updated `WorkspaceUpserted`. No-op when
     /// the workspace has no PR (issues don't have review threads).
     FetchPrDetails {
+        workspace_key: lazybox_core::WorkspaceKey,
+    },
+    /// Targeted re-poll of a single workspace's own GitHub entities (its
+    /// PR and any linked issues) instead of the global `Refresh` sweep —
+    /// the "sync this" action. The daemon deep-fetches each entity by
+    /// `(owner, repo, number)` and upserts the result, so read markers
+    /// and state update just for that row. Cheap next to a full sweep;
+    /// no-op for a workspace with no GitHub PR/issue.
+    SyncWorkspace {
         workspace_key: lazybox_core::WorkspaceKey,
     },
     /// Start an agent runtime using a structured protocol surface. This
@@ -985,6 +1034,16 @@ pub enum Command {
     /// `Event::AgentCliUpdateFinished`. Appended last; see
     /// `KeepMergedWorkspace`.
     UpdateAgentClis,
+    /// Persist the workspace's free-form local note (issue #458). The
+    /// note is a lazybox-only scratchpad — never synced to a provider.
+    /// The daemon loads the workspace, replaces its `notes`, and
+    /// re-broadcasts `WorkspaceUpserted` (like `Snooze`), so no
+    /// dedicated read command is needed — the note rides the existing
+    /// workspace snapshot. Appended last; see `KeepMergedWorkspace`.
+    SetNotes {
+        session_key: SessionKey,
+        notes: String,
+    },
 }
 
 /// The terminal state a removable workspace's primary task reached,
@@ -1399,6 +1458,13 @@ pub enum Event {
     WorktreesInspected {
         inspections: Vec<WorktreeInspectionDto>,
     },
+    /// `Command::ScanCheckouts` finished. `checkouts` is every on-disk
+    /// git clone found under the dev roots, mapped to its GitHub repo
+    /// where possible, in path-sorted order. Drives the import picker.
+    /// Empty when nothing was found (or the roots were unset).
+    CheckoutsDiscovered {
+        checkouts: Vec<DiscoveredCheckoutDto>,
+    },
     /// `Command::DeleteOrphanedWorktree` finished. `ok = false` means
     /// the daemon refused (safety gate) or the underlying `git
     /// worktree remove` failed; `error` carries the human-readable
@@ -1505,7 +1571,7 @@ pub enum Event {
         message: String,
     },
     /// Reply to [`Command::FetchScrollback`]: the terminal's history as
-    /// the backend retains it (tmux `capture-pane -e -S -<limit>`,
+    /// the backend retains it (tmux `capture-pane -e -J -S -<limit>`,
     /// normalized like the restart-recovery seed). Unlike
     /// [`Event::TerminalResync`] — whose `replay` is the raw ring
     /// stream and therefore carries the inner program's escape
@@ -1536,7 +1602,6 @@ pub enum Event {
     },
     /// One agent's lazybox-managed CLI update finished. `message`
     /// carries the actionable failure detail when `ok` is false.
-    /// Appended last; see `KeepMergedWorkspace`.
     AgentCliUpdateFinished {
         agent_id: String,
         display_name: String,
@@ -1544,6 +1609,18 @@ pub enum Event {
         installed_before: Option<String>,
         installed_after: Option<String>,
         message: String,
+    },
+    /// Recovered interactive agents whose persisted PTY launch contract
+    /// predates the running daemon's requirement. The ids are guaranteed to
+    /// be a subset of the [`Event::Snapshot`] sent by the same Subscribe
+    /// response, so a client never warns about a terminal it was not given.
+    /// The processes remain attached; clients ask the user to close and reopen
+    /// them.
+    ///
+    /// Appended last for bincode ordinal compatibility; see
+    /// [`PROTOCOL_FINGERPRINT`].
+    RecoveredTerminalsRequireRestart {
+        terminal_ids: Vec<TerminalId>,
     },
 }
 

@@ -712,6 +712,7 @@ impl Sidebar {
                 ascii_glyphs: self.ascii_glyphs,
                 auto_merge_armed: workspace.is_some_and(|w| w.auto_merge_on_green),
                 auto_fix_armed: workspace.is_some_and(|w| w.policies.any_auto_fix_armed()),
+                has_notes: workspace.is_some_and(|w| w.has_notes()),
             };
             positions.push(i);
             rows.push(build_workspace_row(&ctx));

@@ -2596,9 +2596,33 @@ impl GhClient {
         Ok(())
     }
 
+    /// Resolve the repository's default merge method for a PR — the
+    /// method github.com's merge button pre-selects, and (on a repo
+    /// that disallows merge commits) the only method the merge mutation
+    /// will accept.
+    pub async fn pr_merge_method(&self, pull_request_node_id: &str) -> Result<String, GhError> {
+        self.acquire_or_block("pr merge-method query")?;
+        let body = graphql::pr_merge_method_body(pull_request_node_id);
+        let response: graphql::GqlMergeMethodResponse = self.post_graphql_with_retry(&body).await?;
+        if let Some(errors) = response.errors {
+            let joined = errors
+                .iter()
+                .map(|e| e.full())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(GhError::Graphql(joined));
+        }
+        response
+            .data
+            .and_then(|d| d.node)
+            .map(|n| n.repository.viewer_default_merge_method)
+            .ok_or_else(|| GhError::Graphql("PR node has no repository merge method".to_string()))
+    }
+
     pub async fn merge_pr(&self, pull_request_node_id: &str) -> Result<(), GhError> {
+        let merge_method = self.pr_merge_method(pull_request_node_id).await?;
         self.acquire_or_block("mergePullRequest mutation")?;
-        let body = graphql::merge_pr_body(pull_request_node_id);
+        let body = graphql::merge_pr_body(pull_request_node_id, &merge_method);
         let response: graphql::GqlMutationResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(errors) = response.errors {
             // Idempotence guard: `post_graphql_with_retry` re-sends the
@@ -3619,13 +3643,37 @@ mod tests {
     /// `GqlMutationResponse` must parse it cleanly and return `Ok`.
     #[tokio::test(flavor = "current_thread")]
     async fn merge_success_json_reports_ok() {
+        const METHOD: &str =
+            r#"{"data":{"node":{"repository":{"viewerDefaultMergeMethod":"MERGE"}}}}"#;
         const BODY: &str = r#"{"data":{"mergePullRequest":{"pullRequest":{"id":"PR_kwDO","state":"MERGED","merged":true}}}}"#;
-        let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
+        let base_uri = spawn_sequenced_response_server(vec![METHOD, BODY]).await;
         let client = make_client(&base_uri);
         client
             .merge_pr("PR_kwDO")
             .await
             .expect("merge success must not report a false failure");
+    }
+
+    /// Issue #469: a repo that disallows merge commits reports SQUASH
+    /// (or REBASE) as its `viewerDefaultMergeMethod`. `merge_pr` must
+    /// pin that method on the mutation — omitting it makes GitHub
+    /// default to MERGE, which such repos reject outright.
+    #[tokio::test(flavor = "current_thread")]
+    async fn merge_pins_repo_default_method() {
+        assert_eq!(
+            graphql::merge_pr_body("PR_kwDO", "SQUASH")["variables"]["method"],
+            "SQUASH",
+            "the resolved default method must ride the merge mutation"
+        );
+        const METHOD: &str =
+            r#"{"data":{"node":{"repository":{"viewerDefaultMergeMethod":"SQUASH"}}}}"#;
+        const BODY: &str = r#"{"data":{"mergePullRequest":{"pullRequest":{"id":"PR_kwDO","state":"MERGED","merged":true}}}}"#;
+        let base_uri = spawn_sequenced_response_server(vec![METHOD, BODY]).await;
+        let client = make_client(&base_uri);
+        client
+            .merge_pr("PR_kwDO")
+            .await
+            .expect("merging a squash-only repo must succeed");
     }
 
     /// Same class of bug for the label mutation — its `data` node is
@@ -3675,9 +3723,11 @@ mod tests {
     /// messages — a clean reason, never the raw JSON body.
     #[tokio::test(flavor = "current_thread")]
     async fn mutation_graphql_error_surfaces_clean_message() {
+        const METHOD: &str =
+            r#"{"data":{"node":{"repository":{"viewerDefaultMergeMethod":"MERGE"}}}}"#;
         const BODY: &str =
             r#"{"data":null,"errors":[{"message":"Pull request is not mergeable"}]}"#;
-        let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
+        let base_uri = spawn_sequenced_response_server(vec![METHOD, BODY]).await;
         let client = make_client(&base_uri);
         let err = client
             .merge_pr("PR_kwDO")

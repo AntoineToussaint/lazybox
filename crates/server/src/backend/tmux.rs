@@ -169,13 +169,44 @@ fn transparent_conf() -> String {
 /// client's VT parser runs with LNM off, where `\n` is a plain line feed
 /// that moves the cursor down WITHOUT returning to column 0 — feeding the
 /// capture verbatim would staircase every line. So each `\n` becomes
-/// `\r\n`. The trailing newline is dropped so the cursor lands at the end
-/// of the last history line, exactly where tmux's live attach repaint
-/// resumes, stitching seeded history to the live screen without a blank
-/// row between them.
+/// `\r\n`.
+///
+/// capture-pane also pads its output to the full pane grid: unused and
+/// cleared rows at the bottom of the screen come back as blank lines that
+/// were never real scrollback. Seeding them verbatim injects spurious
+/// empty rows into the reconstructed history — the "random extra empty
+/// lines after restart / move-session" (#442). Every trailing blank row is
+/// dropped (subsuming the single separating newline capture appends), so
+/// the seed ends exactly at the last row with real content — where tmux's
+/// live attach repaint resumes, stitching seeded history to the live
+/// screen without a blank row between them. Only the trailing run is
+/// trimmed: interior blank lines are genuine output and survive untouched.
+///
+/// A genuine blank line at the very BOTTOM of the output is
+/// indistinguishable from grid padding and is trimmed with it — but the
+/// live attach repaint redraws the true bottom-of-screen over the seed, so
+/// nothing visible is lost. Reconstructing that boundary faithfully is the
+/// lossy screen-grid problem #393 tracks separately.
 fn normalize_capture(stdout: &[u8]) -> Vec<u8> {
-    let trimmed = stdout.strip_suffix(b"\n").unwrap_or(stdout);
-    let mut seed = Vec::with_capacity(trimmed.len() + 16);
+    // Peel the trailing run of blank rows off the raw bytes without
+    // materializing a line vector: each step takes the slice after the
+    // final `\n` and, while it has no visible content, drops it plus the
+    // `\n` that separated it. `rposition` scans back only to that newline,
+    // so the whole trim is O(trailing-blank bytes), not O(input) per row.
+    let mut end = stdout.len();
+    while end > 0 {
+        let line_start = stdout[..end]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(0, |nl| nl + 1);
+        if !is_blank_capture_line(&stdout[line_start..end]) {
+            break;
+        }
+        end = line_start.saturating_sub(1);
+    }
+    let trimmed = &stdout[..end];
+    let newlines = trimmed.iter().filter(|&&b| b == b'\n').count();
+    let mut seed = Vec::with_capacity(trimmed.len() + newlines);
     for &b in trimmed {
         if b == b'\n' {
             seed.push(b'\r');
@@ -183,6 +214,55 @@ fn normalize_capture(stdout: &[u8]) -> Vec<u8> {
         seed.push(b);
     }
     seed
+}
+
+/// Whether a capture row carries no VISIBLE glyph — grid padding tmux
+/// emits for unused / cleared cells. capture-pane strips trailing spaces,
+/// so an unstyled padding row arrives empty, but with `-e` a row cleared
+/// under a non-default background (agents paint one, then clear) comes back
+/// as SGR/OSC escapes around blank space. Those escape sequences are
+/// skipped so such a row still counts as blank: only a real printable
+/// character keeps the row — that is what protects styled *content* from
+/// being trimmed.
+fn is_blank_capture_line(line: &[u8]) -> bool {
+    let mut i = 0;
+    while i < line.len() {
+        match line[i] {
+            0x1b => {
+                i += 1;
+                match line.get(i) {
+                    // CSI (`ESC [` … final byte 0x40–0x7e), e.g. SGR color.
+                    Some(b'[') => {
+                        i += 1;
+                        while i < line.len() && !(0x40..=0x7e).contains(&line[i]) {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                    // OSC (`ESC ]` … BEL or ST), e.g. an OSC 8 hyperlink.
+                    Some(b']') => {
+                        i += 1;
+                        while i < line.len() {
+                            if line[i] == 0x07 {
+                                i += 1;
+                                break;
+                            }
+                            if line[i] == 0x1b && line.get(i + 1) == Some(&b'\\') {
+                                i += 2;
+                                break;
+                            }
+                            i += 1;
+                        }
+                    }
+                    // Any other escape: skip ESC and its single next byte.
+                    _ => i += 1,
+                }
+            }
+            b if b.is_ascii_whitespace() => i += 1,
+            _ => return false,
+        }
+    }
+    true
 }
 
 /// `set-option` invocations that bring an ALREADY-RUNNING tmux server
@@ -510,18 +590,18 @@ impl TmuxBackend {
     /// Reconstruct a reattaching client's scrollback from tmux's own
     /// history. The daemon's replay ring lives in memory and dies with
     /// the daemon; tmux, however, keeps `history-limit` lines per pane
-    /// across restarts. `capture-pane -e -S -<limit>` dumps that history
-    /// (styled, via `-e`) down to the current bottom line, which we hand
-    /// to the DaemonPty as its durable seed — replayed ahead of the live
-    /// attach bytes on every snapshot (#420) — so the client rebuilds
-    /// the full scrollback instead of a single repainted screen.
+    /// across restarts. `capture-pane -e -J -S -<limit>` dumps that history
+    /// (styled, via `-e`) and joins tmux's soft-wrapped screen rows back into
+    /// logical lines (`-J`) before we hand it to the DaemonPty as its durable
+    /// seed. The seed is replayed ahead of live attach bytes on every snapshot
+    /// (#420), so the client rebuilds full scrollback without hardening wraps.
     ///
     /// Best-effort: any failure returns an empty seed and the client
     /// simply starts from the live repaint.
     async fn capture_history(&self, key: &str) -> Vec<u8> {
         let start = format!("-{HISTORY_LIMIT}");
         let out = match self
-            .tmux(&["capture-pane", "-p", "-e", "-S", &start, "-t", key])
+            .tmux(&["capture-pane", "-p", "-e", "-J", "-S", &start, "-t", key])
             .await
         {
             Ok(out) => out.stdout,
@@ -1201,6 +1281,69 @@ mod tests {
         // No trailing newline → nothing stripped.
         assert_eq!(normalize_capture(b"tail"), b"tail");
         assert_eq!(normalize_capture(b""), b"");
+    }
+
+    /// capture-pane pads its output to the full pane grid, so a short
+    /// session's capture ends in a run of blank rows. Those are padding,
+    /// not scrollback — seeding them verbatim injected the "random extra
+    /// empty lines after restart / move-session" (#442). The seed must end
+    /// at the last row with real content, and interior blanks (genuine
+    /// output) must survive.
+    #[test]
+    fn normalize_capture_trims_trailing_padding_blanks() {
+        // Content rows followed by grid-padding blanks.
+        assert_eq!(
+            normalize_capture(b"one\ntwo\nthree\n\n\n\n"),
+            b"one\r\ntwo\r\nthree"
+        );
+        // Whitespace-only padding rows are trimmed too (defensive:
+        // capture-pane strips trailing spaces, but a run must never leak).
+        assert_eq!(normalize_capture(b"content\n   \n\t\n"), b"content");
+        // An all-blank capture reduces to nothing — no seed to inject.
+        assert_eq!(normalize_capture(b"\n\n\n"), b"");
+        // Interior blank lines are genuine output; only the trailing
+        // padding run is trimmed.
+        assert_eq!(
+            normalize_capture(b"top\n\nmiddle\n\n\n"),
+            b"top\r\n\r\nmiddle"
+        );
+        // A trailing row that is only `-e` escapes around blank space is
+        // grid padding cleared under a style — the escapes are skipped and
+        // the row trims like any other blank (a bare SGR reset, and a
+        // background-colored run of spaces).
+        assert_eq!(normalize_capture(b"body\n\x1b[0m\n"), b"body");
+        assert_eq!(
+            normalize_capture(b"body\n\x1b[48;5;236m   \x1b[0m\n"),
+            b"body"
+        );
+        // A trailing row with a real glyph is content and survives, escape
+        // styling and all — that printable char is what protects it.
+        assert_eq!(
+            normalize_capture(b"a\n\x1b[31mred\x1b[0m\n"),
+            b"a\r\n\x1b[31mred\x1b[0m"
+        );
+    }
+
+    /// A row counts as blank only when it holds no printable glyph:
+    /// whitespace and `-e` escape sequences (SGR colors, OSC 8 hyperlinks)
+    /// around blank space are grid padding, but a single real character
+    /// keeps the row so styled content is never trimmed.
+    #[test]
+    fn is_blank_capture_line_skips_escapes_but_keeps_glyphs() {
+        assert!(is_blank_capture_line(b""));
+        assert!(is_blank_capture_line(b"   \t"));
+        assert!(is_blank_capture_line(b"\x1b[0m"));
+        assert!(is_blank_capture_line(b"\x1b[48;5;236m   \x1b[0m"));
+        // OSC 8 open/close with no visible label between them.
+        assert!(is_blank_capture_line(
+            b"\x1b]8;;https://x\x1b\\\x1b]8;;\x1b\\"
+        ));
+        // A printable char anywhere keeps the row, escapes notwithstanding.
+        assert!(!is_blank_capture_line(b"\x1b[31mred\x1b[0m"));
+        assert!(!is_blank_capture_line(b"  x  "));
+        assert!(!is_blank_capture_line(
+            b"\x1b]8;;https://x\x1b\\LINK\x1b]8;;\x1b\\"
+        ));
     }
 
     /// The `-S` capture depth and the conf's `history-limit` come from

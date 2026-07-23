@@ -80,9 +80,17 @@ fn codex_argv() {
     let agent = Codex;
     let ctx = sample_ctx();
     assert_eq!(agent.spawn(&ctx), vec!["codex".to_string()]);
-    // Default trait impl: resume == spawn when the agent doesn't
-    // override. Codex has no --continue flag today.
-    assert_eq!(agent.resume(&ctx), agent.spawn(&ctx));
+    // Resume reattaches this worktree's most recent session — Codex
+    // filters `resume --last` by cwd, the per-worktree analog of
+    // Claude's `--continue`.
+    assert_eq!(
+        agent.resume(&ctx),
+        vec![
+            "codex".to_string(),
+            "resume".to_string(),
+            "--last".to_string(),
+        ]
+    );
 }
 
 #[test]
@@ -103,9 +111,18 @@ fn codex_skip_permissions_bypasses_every_startup_gate() {
         "check_for_update_on_startup=false".to_string(),
     ];
     assert_eq!(agent.spawn(&ctx), expected);
+    // Resume prepends `resume --last` and then carries the identical
+    // unattended tail, so a resumed autonomous session stays as clean
+    // as a fresh spawn.
+    let mut expected_resume = vec![
+        "codex".to_string(),
+        "resume".to_string(),
+        "--last".to_string(),
+    ];
+    expected_resume.extend(expected[1..].iter().cloned());
     assert_eq!(
         agent.resume(&ctx),
-        agent.spawn(&ctx),
+        expected_resume,
         "resumed autonomous Codex sessions must retain the bypass and trust config",
     );
 }

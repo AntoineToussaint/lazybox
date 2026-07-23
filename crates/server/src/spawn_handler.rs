@@ -79,14 +79,16 @@ enum TerminalPersistedField {
     NoPermission,
     UserMessage,
     Draft,
+    PtyLaunchGeneration,
 }
 
 impl TerminalPersistedField {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::Metadata,
         Self::NoPermission,
         Self::UserMessage,
         Self::Draft,
+        Self::PtyLaunchGeneration,
     ];
 
     fn key(self, backend_key: &str) -> String {
@@ -95,6 +97,7 @@ impl TerminalPersistedField {
             Self::NoPermission => "terminal-noperm",
             Self::UserMessage => "terminal-msg",
             Self::Draft => "terminal-draft",
+            Self::PtyLaunchGeneration => "terminal-pty-generation",
         };
         format!("{prefix}:{backend_key}")
     }
@@ -542,6 +545,19 @@ pub async fn handle_spawn(
         skip_permissions,
         "handle_spawn: entry"
     );
+    // A linked (no-worktree) workspace runs every session in the user's
+    // existing on-disk checkout — the same "shared checkout, not an
+    // isolated worktree" shape as an on-main spawn. Treat it as on-main
+    // from the very top so the inflight-singleton identity, the
+    // duplicate-singleton check, and the resolver all agree it landed on
+    // the shared checkout. Otherwise a normal `a c` (request
+    // on_main=false) would land on the checkout yet claim the *non*-main
+    // singleton, and a second press would spawn a DUPLICATE agent into
+    // the real tree instead of reusing the first. The on-main path also
+    // persists NO session, so no worktree-cleanup path can ever
+    // `rm -rf` the user's real checkout. A `cwd` override is an ad-hoc
+    // spawn with no workspace to inspect, so it's left untouched.
+    let on_main = on_main || (cwd.is_none() && workspace_is_linked(config, &session_key));
     // In-flight guard — claim the singleton identity BEFORE the
     // duplicate check below. That check reads maps populated only after
     // worktree provisioning + `backend.spawn` (minutes on a cold
@@ -785,6 +801,7 @@ pub async fn handle_spawn(
         }
     }
     let env = with_agent_spawn_defaults(env, agent_for_env.as_deref());
+    let env = with_agent_pty_spawn_env(env, agent_for_env.as_deref());
     let env = with_worktree_cargo_target(env, cwd_path.as_deref());
     tracing::info!(
         program = argv.first().map(String::as_str).unwrap_or("<empty>"),
@@ -878,6 +895,10 @@ pub async fn handle_spawn(
         terminal_meta.insert(terminal_id, (session_key.clone(), kind.clone()));
         terminals.insert(terminal_id, backend_key.clone());
         persist_terminal_meta(config, &backend_key, &session_key, &kind).await;
+        if let Some(agent) = agent_for_env.as_deref() {
+            persist_pty_launch_generation(config, &backend_key, agent.pty_launch_generation())
+                .await;
+        }
     }
     drop(workspace_registration_guard);
     // The persisted backend_key → session ownership pairing lets the next
@@ -931,6 +952,7 @@ pub async fn handle_spawn(
     // copy of the spawn origin for the timing trace.
     let t0_for_pump = t0;
     let watchdog_after = working_watchdog_after(&cfg);
+    let quiet_after = pty_quiet_classify_after(&cfg);
     // Broadcast BEFORE spawning the pump task. Otherwise a
     // fast-exiting terminal (e.g. a command that immediately
     // errors) can fire `TerminalExited` from the pump before this
@@ -1078,7 +1100,7 @@ pub async fn handle_spawn(
                 .await;
                 last_chunk_len = sub.replay.len();
                 if agent_for_pump.is_some() {
-                    quiet_deadline = Some(tokio::time::Instant::now() + PTY_QUIET_CLASSIFY_AFTER);
+                    quiet_deadline = Some(tokio::time::Instant::now() + quiet_after);
                     if progress {
                         watchdog_anchor = tokio::time::Instant::now();
                     }
@@ -1192,8 +1214,7 @@ pub async fn handle_spawn(
                     .await;
                     last_chunk_len = snapshot.replay.len();
                     if agent_for_pump.is_some() {
-                        quiet_deadline =
-                            Some(tokio::time::Instant::now() + PTY_QUIET_CLASSIFY_AFTER);
+                        quiet_deadline = Some(tokio::time::Instant::now() + quiet_after);
                         if progress {
                             watchdog_anchor = tokio::time::Instant::now();
                         }
@@ -1259,8 +1280,7 @@ pub async fn handle_spawn(
                 .await;
                 last_chunk_len = chunk.bytes.len();
                 if agent_for_pump.is_some() {
-                    quiet_deadline =
-                        Some(tokio::time::Instant::now() + PTY_QUIET_CLASSIFY_AFTER);
+                    quiet_deadline = Some(tokio::time::Instant::now() + quiet_after);
                     if progress {
                         watchdog_anchor = tokio::time::Instant::now();
                     }
@@ -1735,6 +1755,20 @@ async fn resolve_or_create_session(
             return Err(error);
         }
     };
+
+    // Linked (no-worktree) workspace: every session lands directly in
+    // the user's existing checkout on whatever branch it already sits
+    // on. No worktree is provisioned (the checkout already exists on
+    // disk), no bare clone, and the branch is never switched. Reported
+    // as "on main" so it reuses the shared-checkout machinery — one
+    // agent singleton per checkout, shells share it, the auto-fix guard
+    // tracks it — matching the "one checkout, multiple tasks share it"
+    // contract. Takes precedence over the `on_main` request flag and an
+    // explicit `session_id`, since a linked workspace has no isolated
+    // per-session worktrees to target.
+    if let Some(path) = workspace.linked_checkout.clone() {
+        return Ok((path, SessionId::new(), true));
+    }
 
     // Main-checkout spawn: skip the isolated per-session worktree and
     // land in the repo's shared checkout on its default branch. The
@@ -2374,7 +2408,9 @@ const HOOK_STALENESS: Duration = Duration::from_secs(30);
 /// Claude repaints its status-line ticker about once a second while
 /// busy, so a genuinely working agent never goes quiet this long — and
 /// a blocking dialog freezes all output, so a parked prompt always
-/// does.
+/// does. Default; override with `agent.quiet_classify_secs` (unset or
+/// `0` → this default). Unlike the watchdog it can't be disabled — a
+/// hookless agent has no other path to `Done`.
 pub(crate) const PTY_QUIET_CLASSIFY_AFTER: Duration = Duration::from_secs(5);
 
 /// Fail-safe watchdog for `Working` (#398). The quiet timer above
@@ -2397,6 +2433,18 @@ pub(crate) fn working_watchdog_after(cfg: &lazybox_config::Config) -> Option<Dur
         Some(0) => None,
         Some(secs) => Some(Duration::from_secs(secs)),
         None => Some(WORKING_WATCHDOG_AFTER),
+    }
+}
+
+/// The per-spawn quiet-classify window: the `agent.quiet_classify_secs`
+/// override when set to a positive value, else [`PTY_QUIET_CLASSIFY_AFTER`].
+/// `0` (or unset) falls back to the default rather than disabling — a
+/// zero window would busy-classify every idle loop, and the timer is a
+/// hookless agent's only route to `Done`.
+pub(crate) fn pty_quiet_classify_after(cfg: &lazybox_config::Config) -> Duration {
+    match cfg.agent.quiet_classify_secs {
+        Some(secs) if secs > 0 => Duration::from_secs(secs),
+        _ => PTY_QUIET_CLASSIFY_AFTER,
     }
 }
 
@@ -2490,6 +2538,27 @@ pub(crate) fn with_agent_spawn_defaults(
     for (k, v) in agent.spawn_env() {
         if !env.iter().any(|(ek, _)| ek == &k) {
             env.push((k, v));
+        }
+    }
+    env
+}
+
+/// Apply environment required by an agent's interactive terminal UI. Unlike
+/// [`lazybox_agents::Agent::spawn_env`], these values are correctness
+/// constraints and replace a colliding repository value. Structured runs
+/// intentionally do not call this helper.
+pub(crate) fn with_agent_pty_spawn_env(
+    mut env: Vec<(String, String)>,
+    agent: Option<&dyn lazybox_agents::Agent>,
+) -> Vec<(String, String)> {
+    let Some(agent) = agent else {
+        return env;
+    };
+    for (key, value) in agent.pty_spawn_env() {
+        if let Some((_, existing)) = env.iter_mut().find(|(existing, _)| existing == &key) {
+            *existing = value;
+        } else {
+            env.push((key, value));
         }
     }
     env
@@ -3027,6 +3096,18 @@ pub fn main_worktree_path(workspace: &Workspace) -> Option<PathBuf> {
         .map(|scope| worktree_root().join(scope).join("_main"))
 }
 
+/// Whether the workspace behind `session_key` is a linked (no-worktree)
+/// checkout — its sessions run in the user's existing clone on disk.
+/// Best-effort synchronous store read: a missing / unreadable record
+/// reports `false`, so a spawn degrades to normal handling rather than
+/// failing on a lookup error.
+fn workspace_is_linked(config: &ServerConfig, session_key: &SessionKey) -> bool {
+    let key = WorkspaceKey::new(session_key.as_str());
+    load_workspace(config, &key)
+        .map(|w| w.is_linked())
+        .unwrap_or(false)
+}
+
 /// Explicit session creation. Always provisions a fresh worktree
 /// folder, even if the workspace already has sessions — multi-session
 /// workspaces are the whole point of this entry point.
@@ -3286,8 +3367,8 @@ fn strip_ansi(input: &str) -> String {
 /// later inserted for a recovered terminal (agent_states,
 /// hook_driven_terminals, input_needed_shapes, prompt_submit_signals)
 /// outlived it, and its `terminal:*`/`terminal-noperm:*`/
-/// `terminal-msg:*`/`terminal-draft:*` kv rows accumulated in state.db
-/// forever.
+/// `terminal-msg:*`/`terminal-draft:*`/`terminal-pty-generation:*` kv rows
+/// accumulated in state.db forever.
 pub(crate) async fn teardown_exited_terminal(
     config: &ServerConfig,
     terminal_id: TerminalId,
@@ -3477,6 +3558,11 @@ async fn finish_terminal(
         .remove(&terminal_id);
     config.on_main_terminals.lock().await.remove(&terminal_id);
     config.terminal_models.lock().await.remove(&terminal_id);
+    config
+        .outdated_agent_terminals
+        .lock()
+        .await
+        .remove(&terminal_id);
     for field in TerminalPersistedField::ALL {
         let key = field.key(backend_key);
         if let Err(error) = config.store.delete_kv(&key) {
@@ -4949,6 +5035,16 @@ pub async fn recover_sessions(config: &ServerConfig) {
             .await
             .unwrap_or_else(|| (SessionKey::from(""), TerminalKind::Shell));
         let no_permission = load_no_permission(config, &key).await;
+        let required_generation = match &kind {
+            TerminalKind::Agent(agent_id) => config
+                .agents
+                .get(agent_id)
+                .map(|agent| agent.pty_launch_generation())
+                .unwrap_or(0),
+            _ => 0,
+        };
+        let persisted_generation = load_pty_launch_generation(config, &key).await.unwrap_or(0);
+        let outdated_launch = required_generation > 0 && persisted_generation < required_generation;
         let terminal_id = alloc_terminal_id(&*config.store);
         // Recover the primary maps as one visible registration, under the
         // same canonical lock pair as a fresh spawn. This prevents snapshot
@@ -4963,6 +5059,13 @@ pub async fn recover_sessions(config: &ServerConfig) {
         if no_permission {
             config
                 .no_permission_terminals
+                .lock()
+                .await
+                .insert(terminal_id);
+        }
+        if outdated_launch {
+            config
+                .outdated_agent_terminals
                 .lock()
                 .await
                 .insert(terminal_id);
@@ -5151,6 +5254,33 @@ async fn load_no_permission(config: &ServerConfig, backend_key: &str) -> bool {
         .and_then(Result::ok)
         .flatten()
         .is_some()
+}
+
+async fn persist_pty_launch_generation(config: &ServerConfig, backend_key: &str, generation: u32) {
+    if generation == 0 {
+        return;
+    }
+    let store = config.store.clone();
+    let kv_key = TerminalPersistedField::PtyLaunchGeneration.key(backend_key);
+    let value = generation.to_string();
+    match tokio::task::spawn_blocking(move || store.set_kv(&kv_key, &value)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "persist terminal PTY launch generation failed")
+        }
+        Err(error) => tracing::warn!(%error, "persist terminal PTY generation task failed"),
+    }
+}
+
+async fn load_pty_launch_generation(config: &ServerConfig, backend_key: &str) -> Option<u32> {
+    let store = config.store.clone();
+    let kv_key = TerminalPersistedField::PtyLaunchGeneration.key(backend_key);
+    tokio::task::spawn_blocking(move || store.get_kv(&kv_key))
+        .await
+        .ok()?
+        .ok()??
+        .parse()
+        .ok()
 }
 
 /// Persist the latest prompt the user submitted to an agent terminal,
@@ -5643,6 +5773,7 @@ mod tests {
                 "terminal-noperm:backend".to_string(),
                 "terminal-msg:backend".to_string(),
                 "terminal-draft:backend".to_string(),
+                "terminal-pty-generation:backend".to_string(),
             ]
             .into(),
             "every persisted terminal field must live in the teardown inventory",
@@ -5798,11 +5929,37 @@ mod tests {
     }
 
     #[test]
-    fn non_codex_agent_leaves_homebrew_alone() {
+    fn claude_pty_spawn_requires_inline_renderer_without_homebrew_changes() {
         // Claude / Cursor don't self-update through `brew`, so suppressing
         // auto-update would only risk staling an unrelated `brew install`.
         let claude = lazybox_agents::agent::builtins::Claude;
-        assert!(with_agent_spawn_defaults(Vec::new(), Some(&claude)).is_empty());
+        let defaults = with_agent_spawn_defaults(Vec::new(), Some(&claude));
+        assert!(defaults.is_empty());
+        let out = with_agent_pty_spawn_env(defaults, Some(&claude));
+        let map: std::collections::BTreeMap<_, _> = out.into_iter().collect();
+        assert!(!map.contains_key("HOMEBREW_NO_AUTO_UPDATE"));
+        assert_eq!(
+            map.get("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN")
+                .map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn claude_pty_renderer_overrides_a_colliding_repo_value() {
+        let claude = lazybox_agents::agent::builtins::Claude;
+        let env = vec![(
+            "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_string(),
+            "0".to_string(),
+        )];
+        let out = with_agent_pty_spawn_env(env, Some(&claude));
+        assert_eq!(
+            out,
+            vec![(
+                "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_string(),
+                "1".to_string(),
+            )]
+        );
     }
 
     #[test]
@@ -7867,6 +8024,54 @@ mod tests {
         );
     }
 
+    /// A linked (no-worktree) workspace resolves every spawn straight to
+    /// its on-disk checkout: the returned cwd is the linked path, it's
+    /// reported as landed-on-main (so it reuses the shared-checkout
+    /// singleton + auto-fix machinery), and NO worktree is provisioned
+    /// under the state root. The `on_main` request flag and an explicit
+    /// `session_id` don't change the landing — a linked workspace has no
+    /// isolated per-session trees.
+    #[tokio::test]
+    async fn linked_workspace_spawns_directly_in_the_checkout() {
+        let config = ServerConfig::in_memory();
+        let tmp = tempfile::tempdir().unwrap();
+        let checkout = tmp.path().join("acme").join("widget");
+        std::fs::create_dir_all(&checkout).unwrap();
+
+        let mut ws = Workspace::empty(WorkspaceKey::new("acme-widget"), "feature-x", Utc::now());
+        ws.project_key = Some(lazybox_core::ProjectKey::github("acme", "widget"));
+        ws.local = true;
+        ws.linked_checkout = Some(checkout.clone());
+        config
+            .store
+            .save_workspace(&WorkspaceRecord {
+                key: ws.key.as_str().to_string(),
+                created_at: ws.created_at,
+                workspace_json: Some(serde_json::to_string(&ws).unwrap()),
+            })
+            .unwrap();
+
+        let session_key = SessionKey::new("acme-widget");
+        let kind = TerminalKind::Agent("claude".into());
+        // Even with on_main=false and a bogus session_id, the linked
+        // branch wins.
+        let (path, _id, landed_on_main) =
+            resolve_or_create_session(&config, &session_key, Some(SessionId::new()), &kind, false)
+                .await
+                .expect("linked spawn resolves");
+
+        assert_eq!(path, checkout, "sessions land in the real checkout");
+        assert!(
+            landed_on_main,
+            "linked spawns reuse the shared-checkout path"
+        );
+        // No worktree provisioned anywhere under the managed root.
+        assert!(
+            !main_worktree_path(&ws).is_some_and(|p| p.exists()),
+            "a linked workspace must not provision a `_main` worktree",
+        );
+    }
+
     /// End-to-end through `provision_worktree`: a blank workspace under
     /// a local project has no repo to clone, so it gets a standalone
     /// `git init` worktree on the workspace-key branch rather than a
@@ -8953,6 +9158,24 @@ mod tests {
             working_watchdog_after(&cfg),
             None,
             "0 disables the watchdog"
+        );
+    }
+
+    #[test]
+    fn quiet_classify_window_reads_config() {
+        let mut cfg = lazybox_config::Config::default();
+        assert_eq!(pty_quiet_classify_after(&cfg), PTY_QUIET_CLASSIFY_AFTER);
+        cfg.agent.quiet_classify_secs = Some(45);
+        assert_eq!(
+            pty_quiet_classify_after(&cfg),
+            Duration::from_secs(45),
+            "a positive override sets the quiet window",
+        );
+        cfg.agent.quiet_classify_secs = Some(0);
+        assert_eq!(
+            pty_quiet_classify_after(&cfg),
+            PTY_QUIET_CLASSIFY_AFTER,
+            "0 falls back to the default rather than disabling the timer",
         );
     }
 

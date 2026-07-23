@@ -199,6 +199,51 @@ async fn worktree_from_blobless_clone_fetches_blobs_lazily() {
     drop(upstream);
 }
 
+/// #447 end to end: a failed/interrupted provision that leaves a
+/// pristine checkout with dangling worktree metadata (here: the bare's
+/// `worktrees/` wiped, as a re-clone would) must NOT wedge on "move the
+/// directory aside and retry". The next provision reclaims the leftover
+/// — auto-pruning the stale registration — and re-provisions cleanly.
+#[tokio::test]
+async fn interrupted_provision_leftover_is_reclaimed_and_reprovisioned() {
+    let (upstream, base, bare, _partial) = setup_with_partial("acme", "rapid");
+
+    let wm = WorktreeManager::new(base.path().to_path_buf());
+    let wt_path = base.path().join("wt");
+    let wt = wm
+        .checkout_new_branch_at(&wt_path, "acme", "rapid", "feature/x", "trunk")
+        .await
+        .expect("initial provision succeeds");
+    assert_eq!(
+        std::fs::read_to_string(wt.path.join("f.txt")).unwrap(),
+        "hello\n"
+    );
+
+    // Simulate the orphan: the checkout's files survive, but the bare's
+    // worktree registration is gone, so its `.git` gitdir dangles —
+    // exactly the state a killed `worktree add` / bare re-clone leaves.
+    std::fs::remove_dir_all(bare.join("worktrees")).expect("wipe worktree metadata");
+    assert!(wt_path.join("f.txt").exists(), "leftover files remain");
+
+    // Same spawn again: instead of refusing, it reclaims and rebuilds.
+    let wt2 = wm
+        .checkout_new_branch_at(&wt_path, "acme", "rapid", "feature/x", "trunk")
+        .await
+        .expect("re-provision reclaims the pristine leftover");
+    assert_eq!(
+        std::fs::read_to_string(wt2.path.join("f.txt")).unwrap(),
+        "hello\n",
+        "the rebuilt worktree is a real, usable checkout"
+    );
+    // A genuine worktree, registered and healthy this time.
+    assert_eq!(
+        git_out(&wt2.path, &["rev-parse", "--is-inside-work-tree"]),
+        "true"
+    );
+
+    drop(upstream);
+}
+
 /// The trade a blobless clone makes: refs tolerate an unreachable
 /// origin (stale-base fallback), but the worktree checkout itself
 /// needs origin to download file contents. When that fails, the error

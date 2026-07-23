@@ -29,6 +29,7 @@ mod host_terminal;
 mod inputs;
 mod keys;
 mod modals;
+mod optimistic;
 mod terminal_leader;
 #[cfg(test)]
 mod tests;
@@ -90,6 +91,12 @@ pub enum Id {
     Update,
     Polling,
     Reply,
+    /// Textarea editing the focused workspace's local notes scratchpad
+    /// (issue #458). Pre-filled with the current note; submit →
+    /// `Command::SetNotes`. Shares the `Textarea` component with
+    /// `Reply`/`BroadcastText`, so `handle_textarea_submitted` routes
+    /// on this id. Target key lives in `Model::pending_notes`.
+    Notes,
     /// Single-line input prompt for naming a brand-new pre-PR
     /// workspace. Submit → `Command::CreateWorkspace { name }`.
     NewWorkspace,
@@ -149,6 +156,13 @@ pub enum Id {
     /// Works on issues too — both PRs and issues implement GraphQL's
     /// `Labelable` interface.
     ManageLabels,
+    /// Composable sidebar filter menu mounted on `f` (`OpenFilterMenu`).
+    /// Multi-select `Choice` over every [`Filter`](crate::components::sidebar::Filter)
+    /// (state / role / kind), each row showing its match count, with the
+    /// currently-active filters pre-checked. Submit replaces the
+    /// sidebar's active set; the picked→filter index map lives in
+    /// `filter_choices`. `Msg::ChoicePicked` resolves it.
+    FilterMenu,
     /// Automation-policies menu mounted on `g p` (`ManagePolicies`,
     /// issue #363). Single-pick `Choice` listing every policy on the
     /// focused PR/issue with its on/off state; picking a row toggles
@@ -192,6 +206,15 @@ pub enum Id {
     /// The target row lives in `pending_inspect_target`;
     /// `Msg::Confirmed(true)` dispatches `DeleteOrphanedWorktree`.
     InspectConfirm,
+    /// Choice modal listing every on-disk checkout the dev-folder scan
+    /// discovered. Picking a row routes through `pending_import_rows` →
+    /// `ImportCheckoutConfirm` before the linked workspace is created.
+    ImportCheckoutList,
+    /// Confirm modal in front of an actual import — warns that sessions
+    /// run in the user's real checkout (not an isolated worktree). The
+    /// target row lives in `pending_import_target`; `Msg::Confirmed(true)`
+    /// dispatches `ImportLocalCheckout`.
+    ImportCheckoutConfirm,
     /// Unified confirm modal for any destructive catalog action.
     /// `Model::dispatch_action` routes here when
     /// `ActionDef::is_destructive()` is true; the pending `Action`
@@ -658,6 +681,10 @@ pub struct Model<T: TerminalAdapter> {
     /// Set by `mount_reply`; consumed by `Msg::TextareaSubmitted` to
     /// build the `Command::PostReply` payload.
     pending_reply: Option<lazybox_core::SessionKey>,
+    /// Workspace key the notes textarea (if mounted) is targeting. Set
+    /// by `mount_notes`; consumed by `Msg::TextareaSubmitted` to build
+    /// the `Command::SetNotes` payload (issue #458).
+    pending_notes: Option<lazybox_core::SessionKey>,
     /// Body of the most recently submitted reply, kept until the next
     /// reply is composed. If the daemon later reports the post failed
     /// (`ProviderError { source: "reply" }`), the composed text would
@@ -687,6 +714,11 @@ pub struct Model<T: TerminalAdapter> {
     /// matches the picker's row indices so `Msg::ChoicePicked(indices)`
     /// indexes back into this list. Cleared on submit / dismiss.
     labels_choices: Vec<String>,
+    /// Optimistic mutations applied locally and awaiting the daemon's
+    /// echo (#476). Each carries the prior rows so a rejected
+    /// round-trip rolls back; the success echo drops the entry. See
+    /// `optimistic.rs`.
+    pending_mutations: Vec<optimistic::OptimisticMutation>,
     /// Workspace currently waiting on the `SnoozeDuration` picker's
     /// result. `Msg::ChoicePicked` reads this + `snooze_choices` to
     /// turn the picked index into a `Command::Snooze`.
@@ -706,6 +738,11 @@ pub struct Model<T: TerminalAdapter> {
     /// The toggle each policy-menu row maps to, in row order. Order
     /// MUST match the labels rendered in `mount_policy_picker`.
     policy_choices: Vec<crate::realm::model::modals::PolicyToggle>,
+    /// The filter each `FilterMenu` row maps to, in row order. Order
+    /// MUST match the labels rendered in `mount_filter_menu` so
+    /// `Msg::ChoicePicked(indices)` resolves back to the picked
+    /// filters. Cleared on submit / dismiss.
+    filter_choices: Vec<crate::components::sidebar::Filter>,
     /// Queued workspace-removal prompts — either out-of-scope
     /// workspaces with running terminals (`WorkspaceOutOfScope`) or
     /// merged PRs (`MergedPrRemovable`). The daemon won't auto-remove
@@ -896,6 +933,13 @@ pub struct Model<T: TerminalAdapter> {
     /// Row picked from `InspectList`, waiting on the `InspectConfirm`
     /// confirm modal. Consumed by `Msg::Confirmed(true)`.
     pending_inspect_target: Option<lazybox_ipc::WorktreeInspectionDto>,
+    /// Latest dev-folder scan result driving the `ImportCheckoutList`
+    /// picker. `Msg::ChoicePicked` reads the picked index out of this
+    /// to mount the import confirm.
+    pending_import_rows: Vec<lazybox_ipc::DiscoveredCheckoutDto>,
+    /// Checkout picked from `ImportCheckoutList`, waiting on the
+    /// `ImportCheckoutConfirm` modal. Consumed by `Msg::Confirmed(true)`.
+    pending_import_target: Option<lazybox_ipc::DiscoveredCheckoutDto>,
     /// Project the next `Id::NewWorkspace` submit should land the
     /// new workspace under. Set by `mount_new_workspace_input(pk)`
     /// from the focused-project resolver, consumed by
@@ -1198,6 +1242,7 @@ impl<T: TerminalAdapter> Model<T> {
             preselect: None,
             layout: LayoutCtx::new(),
             pending_reply: None,
+            pending_notes: None,
             last_reply_body: None,
             pending_review_request: None,
             review_choices: Vec::new(),
@@ -1205,11 +1250,13 @@ impl<T: TerminalAdapter> Model<T> {
             assignees_choices: Vec::new(),
             pending_labels_request: None,
             labels_choices: Vec::new(),
+            pending_mutations: Vec::new(),
             pending_snooze_workspace: None,
             snooze_choices: Vec::new(),
             pending_work_picker: None,
             pending_policy_workspace: None,
             policy_choices: Vec::new(),
+            filter_choices: Vec::new(),
             pending_removal_prompts: std::collections::VecDeque::new(),
             active_removal_prompt: None,
             pending_merge_prompts: std::collections::VecDeque::new(),
@@ -1250,6 +1297,8 @@ impl<T: TerminalAdapter> Model<T> {
             pending_action_confirm: None,
             pending_help_action: None,
             pending_inspect_rows: Vec::new(),
+            pending_import_rows: Vec::new(),
+            pending_import_target: None,
             pending_inspect_target: None,
             pending_new_workspace_project: None,
             pending_focus_project_name: None,

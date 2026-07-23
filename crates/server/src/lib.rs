@@ -332,6 +332,10 @@ pub struct ServerConfig {
     /// client re-renders the tier badge. Cleaned on `TerminalExited`
     /// alongside the other per-terminal maps.
     pub terminal_models: Arc<Mutex<HashMap<TerminalId, String>>>,
+    /// Recovered agent processes launched under an older PTY compatibility
+    /// generation. Their inherited environment cannot be changed in place;
+    /// Subscribe reports an actionable restart notice until they exit.
+    pub outdated_agent_terminals: Arc<Mutex<HashSet<TerminalId>>>,
     /// Per-backend-key serialization between prompt-state persistence and
     /// terminal teardown. Draft/user-message writes run on a background lane;
     /// without this boundary a delayed write could finish after teardown's
@@ -597,6 +601,7 @@ impl ServerConfig {
             no_permission_terminals: Arc::new(Mutex::new(HashSet::new())),
             on_main_terminals: Arc::new(Mutex::new(HashSet::new())),
             terminal_models: Arc::new(Mutex::new(HashMap::new())),
+            outdated_agent_terminals: Arc::new(Mutex::new(HashSet::new())),
             terminal_persistence_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             terminal_io_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             agent_detect_resets: Arc::new(Mutex::new(HashSet::new())),
@@ -923,6 +928,7 @@ impl Server {
                         lazybox_ipc::Command::MarkActivityRead { .. } => "MarkActivityRead",
                         lazybox_ipc::Command::UnmarkActivityRead { .. } => "UnmarkActivityRead",
                         lazybox_ipc::Command::FetchPrDetails { .. } => "FetchPrDetails",
+                        lazybox_ipc::Command::SyncWorkspace { .. } => "SyncWorkspace",
                         lazybox_ipc::Command::PostReply { .. } => "PostReply",
                         lazybox_ipc::Command::MergePr { .. } => "MergePr",
                         lazybox_ipc::Command::CloseIssue { .. } => "CloseIssue",
@@ -956,10 +962,13 @@ impl Server {
                         lazybox_ipc::Command::ListProviderCredentials { .. } => "ListProviderCredentials",
                         lazybox_ipc::Command::CleanWorktrees => "CleanWorktrees",
                         lazybox_ipc::Command::InspectWorktrees => "InspectWorktrees",
+                        lazybox_ipc::Command::ScanCheckouts { .. } => "ScanCheckouts",
+                        lazybox_ipc::Command::ImportLocalCheckout { .. } => "ImportLocalCheckout",
                         lazybox_ipc::Command::DeleteOrphanedWorktree { .. } => "DeleteOrphanedWorktree",
                         lazybox_ipc::Command::FetchScrollback { .. } => "FetchScrollback",
                         lazybox_ipc::Command::CheckAgentCliUpdates => "CheckAgentCliUpdates",
                         lazybox_ipc::Command::UpdateAgentClis => "UpdateAgentClis",
+                        lazybox_ipc::Command::SetNotes { .. } => "SetNotes",
                         lazybox_ipc::Command::Shutdown => "Shutdown",
                     };
                     // `Write` fires on every keystroke — at info it floods
@@ -1270,6 +1279,22 @@ pub async fn dispatch_command(
             let load_errors = workspaces.errors.len() + projects.errors.len();
             let mut terminals = spawn_handler::snapshot_terminals(config).await;
             budget_snapshot_replay(&mut terminals);
+            // Derive compatibility warnings from the exact snapshot this
+            // subscriber receives. Terminal teardown removes the primary
+            // mapping before its auxiliary launch-generation marker; counting
+            // the marker set independently could therefore warn about a
+            // terminal absent from this snapshot.
+            let restart_required = {
+                let outdated = config.outdated_agent_terminals.lock().await;
+                terminals
+                    .iter()
+                    .filter_map(|terminal| {
+                        outdated
+                            .contains(&terminal.terminal_id)
+                            .then_some(terminal.terminal_id)
+                    })
+                    .collect::<Vec<_>>()
+            };
             let _ = tx.send(Event::Snapshot {
                 workspaces: workspaces.values,
                 terminals,
@@ -1277,6 +1302,11 @@ pub async fn dispatch_command(
             });
             if load_errors > 0 {
                 let _ = tx.send(storage_recovery_event(load_errors));
+            }
+            if !restart_required.is_empty() {
+                let _ = tx.send(Event::RecoveredTerminalsRequireRestart {
+                    terminal_ids: restart_required,
+                });
             }
             // A fresh subscriber may have missed removal prompts emitted
             // before it connected (broadcast is fire-and-forget) — reset
@@ -1502,6 +1532,10 @@ pub async fn dispatch_command(
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
             polling::set_snooze(config, &key, None).await;
         }
+        lazybox_ipc::Command::SetNotes { session_key, notes } => {
+            let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
+            polling::set_notes(config, &key, notes).await;
+        }
         lazybox_ipc::Command::SetAutoMergeOnGreen {
             session_key,
             enabled,
@@ -1595,6 +1629,9 @@ pub async fn dispatch_command(
         lazybox_ipc::Command::FetchPrDetails { workspace_key } => {
             polling::handle_fetch_pr_details(config, workspace_key).await;
         }
+        lazybox_ipc::Command::SyncWorkspace { workspace_key } => {
+            polling::handle_sync_workspace(config, workspace_key).await;
+        }
         lazybox_ipc::Command::RequestReviewers {
             workspace_key,
             logins,
@@ -1627,6 +1664,27 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::InspectWorktrees => {
             polling::handle_inspect_worktrees(config).await;
+        }
+        lazybox_ipc::Command::ScanCheckouts { roots } => {
+            polling::handle_scan_checkouts(config, roots).await;
+        }
+        lazybox_ipc::Command::ImportLocalCheckout { path, spawn_agent } => {
+            let key = polling::import_local_checkout(config, path).await;
+            if let (Some(key), Some(agent_id)) = (key, spawn_agent) {
+                let session_key: lazybox_core::SessionKey = (&key).into();
+                spawn_handler::handle_spawn(
+                    config,
+                    session_key,
+                    None,
+                    lazybox_ipc::TerminalKind::Agent(agent_id),
+                    None,
+                    None,
+                    false,
+                    false,
+                    None,
+                )
+                .await;
+            }
         }
         lazybox_ipc::Command::DeleteOrphanedWorktree { path, force } => {
             polling::handle_delete_orphaned_worktree(config, path, force).await;

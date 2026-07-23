@@ -218,9 +218,15 @@ resize.
 
 **Sidebar**: `j/k` or arrows navigate, `Enter` open (focus activity),
 `w` work on this (contextual agent prompt), `s` shell, `e` editor,
-`m` mark read, `z` snooze, `f` cycle role
-filter, `o` cycle sort, `Space` collapse/expand repo group, `Shift-S`
-cycle mailbox (Inbox → Inactive → Snoozed), `/` search. `x` is a
+`m` mark read, `z` snooze, `f` open the filter
+menu (a multi-select over state / role / kind predicates — with-agent,
+CI-failing, conflict, unread, asking, review-requested, auto-merge,
+author/reviewer/assignee/mentioned, PR/issue — combined AND-across /
+OR-within-axis, shown with match counts and as removable header chips),
+`o` cycle sort, `Space` collapse/expand repo group, `Shift-S`
+cycle mailbox (Inbox → Inactive → Snoozed), `/` search (composes with
+the active filters; matches title, number, repo, labels, reviewers /
+assignees). `x` is a
 leader for the **workspace** group (which-key popup): `x n` new
 workspace, `x p` new project, `x a` adopt sessions, `x j` join issue
 into PR, `x z` long snooze, `x x` archive, `x c` close issue
@@ -253,7 +259,9 @@ own PR, no conflicts, no changes requested; only while lazybox runs),
 listing merge-on-green, per-session auto-fix arm/disarm, and
 GitHub-native auto-merge status for the focused PR/issue, each toggled
 in place; #363), `g r` reviewers, `g a` assignees, `g l` labels,
-`g o` open in browser, `g d` delete issue / close PR (confirmed
+`g s` sync (a targeted re-poll of just the focused workspace's own
+PR/issue instead of the global `Shift-R` sweep — cheap when you're
+waiting on one PR's CI; #456), `g o` open in browser, `g d` delete issue / close PR (confirmed
 first, naming the target; an issue is hard-deleted when the token
 has admin rights, else closed as not-planned with a notice; a PR is
 closed without merging; #408) — leader chords only, the legacy

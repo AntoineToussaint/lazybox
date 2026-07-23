@@ -1433,6 +1433,7 @@ pub async fn handle_spawn(
                             agent_for_pump.as_ref(),
                             &state_buf,
                             last_chunk_len,
+                            lazybox_agents::Liveness::Silent,
                             &agent_states_map,
                             &bus,
                             id_for_pump,
@@ -2504,14 +2505,6 @@ pub(crate) fn spawn_is_autonomous(initial_prompt: &Option<String>) -> bool {
     initial_prompt.is_some()
 }
 
-/// How old a terminal's most recent hook may be before the PTY
-/// detector regains full authority over it. Hooks normally arrive
-/// every few seconds while Claude works (each tool call fires two);
-/// half a minute of silence on a terminal whose PTY says `Working`
-/// means the hook pipeline has stopped flowing (socket hiccup, helper
-/// failure) and screen-scraping is the better signal again.
-const HOOK_STALENESS: Duration = Duration::from_secs(30);
-
 /// How long the PTY must stay silent before the resting screen is
 /// classified (`classify_quiet_screen`). While bytes are flowing the
 /// agent is doing *something*, so the state reading is `Working`;
@@ -2572,45 +2565,6 @@ pub(crate) fn watchdog_notes_progress(last_fp: &mut Option<u64>, bytes: &[u8]) -
         }
         _ => false,
     }
-}
-
-/// Whether a PTY-detector reading may be emitted for a hook-driven
-/// terminal. Fresh hooks own Working↔Idle, so only two corrections
-/// pass: an on-screen permission dialog (`InputNeeded`) and an
-/// affirmatively-recognized idle composer demoting a stale `Working`.
-/// The idle-composer reading must NOT clear a fresh hook-set
-/// `InputNeeded`: the idle nudge (`Claude is waiting for your input`,
-/// #62) raises `InputNeeded` precisely WHEN the composer is sitting
-/// ready, so a ready-composer reading is corroborating, not contradicting
-/// — clearing on it would flicker the `?` off the moment a cursor-blink
-/// repaint arrived. A fresh `?` clears instead via a newer hook (a
-/// resumed turn → `Working`, `Stop` → `Idle`) or once hooks go stale.
-/// Once the last hook is older than `staleness`, readings pass — the
-/// terminal degrades to plain PTY detection instead of freezing on the
-/// last hook state — with ONE exception: a `Working` reading demoting a
-/// hook-set `InputNeeded`. A live dialog BLOCKS the hook stream (no tool
-/// calls fire while Claude waits), so "stale hooks + cached `?`" is the
-/// normal shape of a real unanswered dialog, not a broken pipeline; the
-/// demotion needs the agent's affirmative evidence
-/// (`working_supersedes_dialog`: a tight working anchor painted AFTER the
-/// dialog markers), or a full-repaint status bar would clear a real `?`.
-fn pty_reading_allowed(
-    current: Option<lazybox_ipc::AgentState>,
-    new_state: lazybox_ipc::AgentState,
-    ready_for_prompt: bool,
-    working_supersedes_dialog: impl FnOnce() -> bool,
-    since_last_hook: Duration,
-    staleness: Duration,
-) -> bool {
-    if since_last_hook >= staleness {
-        let demotes_input_needed = current == Some(lazybox_ipc::AgentState::InputNeeded)
-            && new_state == lazybox_ipc::AgentState::Working;
-        return !demotes_input_needed || working_supersedes_dialog();
-    }
-    new_state == lazybox_ipc::AgentState::InputNeeded
-        || (new_state == lazybox_ipc::AgentState::Idle
-            && ready_for_prompt
-            && current != Some(lazybox_ipc::AgentState::InputNeeded))
 }
 
 /// Base-URL env var pointing the agent at the global LLM gateway, if one
@@ -3762,25 +3716,28 @@ pub(crate) async fn note_pty_activity(
     let last_chunk_start = detect_window.len().saturating_sub(bytes.len());
     let immediate_shape =
         agent.detect_input_needed_in_current_chunk(detect_window, last_chunk_start);
-    let reading = if let Some(shape) = immediate_shape {
+    let pty = if let Some(shape) = immediate_shape {
         input_shapes.lock().await.insert(id, shape);
-        lazybox_agents::Reading {
+        lazybox_agents::PtyReading {
             state: lazybox_ipc::AgentState::InputNeeded,
             clear: true,
             progress: false,
+            liveness: lazybox_agents::Liveness::Streaming,
+            ready_for_prompt: false,
         }
     } else {
-        lazybox_agents::Reading {
+        lazybox_agents::PtyReading {
             state: lazybox_ipc::AgentState::Working,
             clear: false,
             progress,
+            liveness: lazybox_agents::Liveness::Streaming,
+            ready_for_prompt: false,
         }
     };
     commit_pty_reading(
         agent,
         detect_window,
-        reading,
-        false,
+        pty,
         states,
         bus,
         id,
@@ -3809,6 +3766,12 @@ pub(crate) async fn classify_quiet_screen(
     agent: Option<&std::sync::Arc<dyn lazybox_agents::Agent>>,
     buf: &[u8],
     last_chunk_len: usize,
+    // How the pump reached this classification: [`Liveness::Silent`] from
+    // the quiet timer (no BYTES for the quiet window — authoritative that
+    // the turn ended) or [`Liveness::Stalled`] from the watchdog (no
+    // CONTENT change but bytes may still tick). The state machine's gate
+    // treats the two differently for a hook-driven terminal.
+    liveness: lazybox_agents::Liveness,
     states: &std::sync::Arc<
         tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
     >,
@@ -3896,16 +3859,17 @@ pub(crate) async fn classify_quiet_screen(
     // The quiet window itself is the confidence: the screen has been at
     // rest for seconds, so the classification is authoritative (`clear`)
     // and no ambiguous-exit damping holds it.
-    let reading = lazybox_agents::Reading {
+    let pty = lazybox_agents::PtyReading {
         state: new_state,
         clear: true,
         progress: false,
+        liveness,
+        ready_for_prompt,
     };
     commit_pty_reading(
         agent,
         detect_window,
-        reading,
-        ready_for_prompt,
+        pty,
         states,
         bus,
         id,
@@ -3970,6 +3934,11 @@ pub(crate) async fn watchdog_escape_working(
         Some(agent),
         buf,
         last_chunk_len,
+        // The watchdog fires on content-stability, not byte-silence: a
+        // ticking counter can keep the stream alive. So this classification
+        // is `Stalled`, not `Silent` — it stays subordinate to a fresh
+        // hook (a long silent tool call looks identical).
+        lazybox_agents::Liveness::Stalled,
         states,
         bus,
         id,
@@ -3991,12 +3960,13 @@ pub(crate) async fn watchdog_escape_working(
     commit_pty_reading(
         agent,
         detect_window(buf),
-        lazybox_agents::Reading {
+        lazybox_agents::PtyReading {
             state: lazybox_ipc::AgentState::Done,
             clear: true,
             progress: false,
+            liveness: lazybox_agents::Liveness::Stalled,
+            ready_for_prompt: false,
         },
-        false,
         states,
         bus,
         id,
@@ -4018,8 +3988,7 @@ pub(crate) async fn watchdog_escape_working(
 async fn commit_pty_reading(
     agent: &std::sync::Arc<dyn lazybox_agents::Agent>,
     detect_window: &[u8],
-    mut reading: lazybox_agents::Reading,
-    ready_for_prompt: bool,
+    pty: lazybox_agents::PtyReading,
     states: &std::sync::Arc<
         tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
     >,
@@ -4040,62 +4009,12 @@ async fn commit_pty_reading(
         tokio::sync::Mutex<std::collections::HashMap<TerminalId, std::time::Instant>>,
     >,
 ) {
-    // Hooks-primary, PTY-fallback. Once a terminal has reported
-    // any structured lifecycle hook, hooks own the Working↔Idle
-    // distinction (deterministic, no screen-scraping flicker), so
-    // a PTY `Working` reading is ignored for it. The PTY detector
-    // still contributes two corrections hooks miss:
-    //   - a confident idle (composer drawn, ready for a prompt) —
-    //     Ctrl-C / Esc end Claude's turn without firing `Stop`, so
-    //     a hook-driven terminal could otherwise stick at
-    //     `Working` forever;
-    //   - an on-screen permission dialog → `InputNeeded`. An
-    //     inline mid-turn approval fires NO hook (`PreToolUse`
-    //     lands only AFTER approval, `Notification` only after
-    //     Claude goes idle), so the rendered `Esc to cancel`
-    //     dialog is the sole source of truth — without honoring it
-    //     the `?` never shows on a hook-driven terminal. The PTY
-    //     detector's recency gating keeps this from leaking the
-    //     stale-scrollback false positives it once produced.
-    // When the last hook is older than `HOOK_STALENESS`, the
-    // gate opens entirely: hooks that stopped flowing (socket
-    // hiccup, helper failure) must degrade the terminal back to
-    // scraping rather than freeze it on the last hook state.
-    // A terminal that never reported a hook isn't in the map and
-    // keeps full PTY detection unchanged.
-    let last_hook_at = hook_driven.lock().await.get(&id).copied();
-    if let Some(last_hook_at) = last_hook_at {
-        let current = states.lock().await.get(&id).copied();
-        let since_last_hook = last_hook_at.elapsed();
-        if !pty_reading_allowed(
-            current,
-            reading.state,
-            ready_for_prompt,
-            // Lazy: the dialog-supersession scan re-strips the
-            // window, so only the one reading that needs it
-            // (stale hooks + Working demoting a cached `?`)
-            // pays for it.
-            || agent.working_reading_supersedes_dialog(detect_window),
-            since_last_hook,
-            HOOK_STALENESS,
-        ) {
-            return;
-        }
-        // A stale-hook terminal demoting a cached `?` to `Working` passed
-        // the gate ONLY on `working_supersedes_dialog` evidence — a working
-        // status line painted after the dialog markers, i.e. proof the
-        // prompt was answered. Mark that reading `clear` so the machine's
-        // `InputNeeded` stickiness (#374) honors the demotion instead of
-        // damping it as an ambiguous byte-flow flap. Hookless / PTY-sourced
-        // `?`s never reach here, so an incidental repaint still can't clear
-        // them.
-        if since_last_hook >= HOOK_STALENESS
-            && current == Some(lazybox_ipc::AgentState::InputNeeded)
-            && reading.state == lazybox_ipc::AgentState::Working
-        {
-            reading.clear = true;
-        }
-    }
+    // The pump gathers facts and defers every decision to the state
+    // machine (`on_pty_reading`), which owns the whole hooks-primary gate
+    // and hysteresis. The only fact the machine can't derive itself is how
+    // long ago this terminal last spoke a lifecycle hook — a hook-driven
+    // terminal is in the map, a pure screen-scraped one never is.
+    let since_last_hook = hook_driven.lock().await.get(&id).map(|at| at.elapsed());
     // Decide, insert, and broadcast under the same canonical lock boundary.
     // A separate cache insert followed by an unlocked broadcast allowed a
     // concurrent hook/exit to commit second but publish first, presenting the
@@ -4111,7 +4030,15 @@ async fn commit_pty_reading(
             if !terminal_live {
                 return (lazybox_agents::Outcome::Rejected, None);
             }
-            let outcome = state_machine.on_reading(current, reading);
+            let outcome = state_machine.on_pty_reading(
+                current,
+                pty,
+                since_last_hook,
+                // Lazy: the dialog-supersession scan re-strips the window,
+                // so only the one reading that needs it (stale hooks +
+                // Working demoting a cached `?`) pays for it.
+                || agent.working_reading_supersedes_dialog(detect_window),
+            );
             let committed = match outcome {
                 lazybox_agents::Outcome::Committed(state) => Some(state),
                 _ => None,
@@ -4121,13 +4048,20 @@ async fn commit_pty_reading(
     )
     .await;
     match outcome {
-        // Keep flap-damping visible at debug — a stuck / missing `?` pill is
-        // bisected from this line. (Steady-state and structural rejections
-        // stay silent to avoid flooding at 100+ chunks/sec.)
+        // Keep flap-damping and hook-gating visible at debug — a stuck /
+        // missing `?` pill is bisected from these lines. (Steady-state and
+        // structural rejections stay silent to avoid flooding at 100+
+        // chunks/sec.)
         lazybox_agents::Outcome::Damped => tracing::debug!(
             terminal_id = ?id,
-            new_state = ?reading.state,
+            new_state = ?pty.state,
             "state hysteresis: damped ambiguous flap",
+        ),
+        lazybox_agents::Outcome::Gated => tracing::debug!(
+            terminal_id = ?id,
+            new_state = ?pty.state,
+            ?since_last_hook,
+            "hooks-primary gate: PTY reading suppressed by a fresh hook",
         ),
         lazybox_agents::Outcome::Committed(_)
         | lazybox_agents::Outcome::Unchanged
@@ -5055,10 +4989,11 @@ pub async fn handle_ingest_hook(
         }
     };
     // From now on this terminal is hook-driven: the PTY detector defers
-    // to hooks for Working/InputNeeded (until the timestamp recorded
-    // here goes stale — see `HOOK_STALENESS`). Done even for events
-    // that carry no state change (e.g. SessionStart) — the signal is
-    // "this terminal speaks hooks", not the specific transition.
+    // to hooks for Working/InputNeeded (until the timestamp recorded here
+    // goes stale — see `lazybox_agents::HOOK_STALENESS`, consulted by the
+    // state machine's gate). Done even for events that carry no state
+    // change (e.g. SessionStart) — the signal is "this terminal speaks
+    // hooks", not the specific transition.
     config
         .hook_driven_terminals
         .lock()
@@ -6506,120 +6441,6 @@ mod tests {
         })
         .await
         .expect("injection reservation released after terminal exit");
-    }
-
-    /// PTY readings on a hook-driven terminal: fresh hooks own
-    /// Working↔Idle, only the two corrections pass; stale hooks open
-    /// the gate so the terminal degrades to scraping instead of
-    /// freezing on the last hook state — except that demoting a
-    /// hook-set `?` with a Working reading needs dialog-supersession
-    /// evidence (a dialog blocks the hook stream, so stale + `?` is
-    /// the normal shape of a REAL unanswered dialog).
-    #[test]
-    fn pty_reading_allowed_gates_on_hook_freshness() {
-        use lazybox_ipc::AgentState::{Idle, InputNeeded, Working};
-        let staleness = Duration::from_secs(30);
-        let fresh = Duration::from_secs(1);
-        let stale = Duration::from_secs(31);
-        let supersedes = || true;
-        let no_evidence = || false;
-
-        // Fresh hooks: only the corrections pass, whatever the cache.
-        assert!(pty_reading_allowed(
-            None,
-            InputNeeded,
-            false,
-            supersedes,
-            fresh,
-            staleness
-        ));
-        assert!(pty_reading_allowed(
-            None, Idle, true, supersedes, fresh, staleness
-        ));
-        assert!(!pty_reading_allowed(
-            None, Idle, false, supersedes, fresh, staleness
-        ));
-        assert!(!pty_reading_allowed(
-            None, Working, false, supersedes, fresh, staleness
-        ));
-        assert!(!pty_reading_allowed(
-            None, Working, true, supersedes, fresh, staleness
-        ));
-        // …but a fresh hook-set `?` (e.g. the idle nudge, whose on-screen
-        // state IS a ready composer) must NOT be cleared by the
-        // idle-composer reading — that would flicker the `?` off on the
-        // first cursor-blink repaint. It clears via a newer hook or once
-        // hooks go stale (asserted below).
-        assert!(!pty_reading_allowed(
-            Some(InputNeeded),
-            Idle,
-            true,
-            supersedes,
-            fresh,
-            staleness
-        ));
-
-        // Stale hooks: full PTY fallback for everything…
-        assert!(pty_reading_allowed(
-            None,
-            Working,
-            false,
-            no_evidence,
-            stale,
-            staleness
-        ));
-        assert!(pty_reading_allowed(
-            Some(Working),
-            Idle,
-            false,
-            no_evidence,
-            stale,
-            staleness
-        ));
-        assert!(pty_reading_allowed(
-            None,
-            InputNeeded,
-            false,
-            no_evidence,
-            stale,
-            staleness
-        ));
-        // …except Working demoting a hook-set `?`, which needs the
-        // detector's affirmative "activity painted after the dialog
-        // markers" evidence.
-        assert!(!pty_reading_allowed(
-            Some(InputNeeded),
-            Working,
-            false,
-            no_evidence,
-            stale,
-            staleness
-        ));
-        assert!(pty_reading_allowed(
-            Some(InputNeeded),
-            Working,
-            false,
-            supersedes,
-            stale,
-            staleness
-        ));
-        // An InputNeeded re-assert and a ready-idle clear still pass.
-        assert!(pty_reading_allowed(
-            Some(InputNeeded),
-            InputNeeded,
-            false,
-            no_evidence,
-            stale,
-            staleness
-        ));
-        assert!(pty_reading_allowed(
-            Some(InputNeeded),
-            Idle,
-            true,
-            no_evidence,
-            stale,
-            staleness
-        ));
     }
 
     /// The in-flight spawn guard claims a singleton identity exactly
@@ -8771,6 +8592,7 @@ mod tests {
                 Some(&self.agent),
                 &self.buf,
                 self.last_chunk_len,
+                lazybox_agents::Liveness::Silent,
                 &self.states,
                 &self.bus,
                 self.id,
@@ -9452,6 +9274,35 @@ mod tests {
             .await
             .insert(p.id, std::time::Instant::now() - Duration::from_secs(31));
         assert_eq!(p.watchdog().await, vec![Done]);
+    }
+
+    /// The fix (#504). The quiet timer measures true byte-silence, and a
+    /// busy agent repaints its ticker within that window — so a byte-silent
+    /// screen is authoritative that the turn ended. Unlike the watchdog's
+    /// content-stability force (gated above), the quiet classification
+    /// settles a `Working` agent to `Done` even while a hook is still
+    /// fresh. This is what stops a hook-driven agent whose `Stop` hook
+    /// never fires (a manual interrupt, a lost hook) from pinning `Working`
+    /// until the 30s staleness window elapses.
+    #[tokio::test]
+    async fn quiet_settles_working_to_done_despite_a_fresh_hook() {
+        use lazybox_ipc::AgentState::{Done, Working};
+        let working = include_bytes!("../../agents/tests/fixtures/working_status_line.bin");
+
+        let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
+        assert_eq!(p.feed(working).await, vec![Working]);
+        // A hook fired one instant ago — the watchdog would defer to it.
+        p.hook_driven
+            .lock()
+            .await
+            .insert(p.id, std::time::Instant::now());
+        // But the PTY has gone byte-silent: the quiet timer settles it.
+        assert_eq!(
+            p.quiet().await,
+            vec![Done],
+            "byte-silence must settle Working → Done without waiting for hook staleness",
+        );
+        assert_eq!(p.states.lock().await.get(&p.id), Some(&Done));
     }
 
     /// The watchdog tick is inert when there is nothing to escape: a

@@ -21,7 +21,9 @@ pub use pty::{
     EncodedPrompt, PromptFraming, PromptIntent, PromptShape, PtyProtocol, ReadinessPolicy,
     trim_leading_blank_lines,
 };
-pub use state_machine::{AgentStateMachine, Outcome, Reading};
+pub use state_machine::{
+    AgentStateMachine, HOOK_STALENESS, Liveness, Outcome, PtyReading, Reading,
+};
 pub use update::UpdateChannel;
 
 /// Look up a built-in agent by id, or fall back to a `GenericCli`

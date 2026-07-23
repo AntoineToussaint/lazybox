@@ -124,6 +124,33 @@ async fn discovers_clone_worktree_and_nested_but_not_plain_dirs() {
 }
 
 #[tokio::test]
+async fn describe_checkout_at_maps_a_single_path_or_rejects_a_non_repo() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path().join("repo");
+    init_repo(&repo).await;
+    run(
+        &repo,
+        &["remote", "add", "origin", "git@github.com:acme/widget.git"],
+    )
+    .await;
+
+    let got = lazybox_git_ops::describe_checkout_at(repo.clone())
+        .await
+        .expect("an initialized repo describes");
+    assert_eq!(got.path, repo);
+    assert_eq!(got.branch.as_deref(), Some("main"));
+    assert_eq!(
+        got.remote_url.as_deref(),
+        Some("git@github.com:acme/widget.git")
+    );
+
+    // A plain directory (no `.git`) is not a checkout.
+    let plain = tmp.path().join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    assert!(lazybox_git_ops::describe_checkout_at(plain).await.is_none());
+}
+
+#[tokio::test]
 async fn max_depth_bounds_the_walk() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().join("code");

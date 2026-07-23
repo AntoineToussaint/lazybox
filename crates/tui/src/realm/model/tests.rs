@@ -60,6 +60,48 @@ mod effects_tests {
         assert!(matches!(cmds[1], IpcCommand::Refresh));
     }
 
+    /// Notes share the Textarea component with Reply/Broadcast, so the
+    /// submit handler routes on the modal id that was on top. A
+    /// non-empty note persists via `SetNotes` and clears the pending
+    /// target (issue #458).
+    #[test]
+    fn textarea_submitted_notes_persists_setnotes() {
+        let mut m = build_model();
+        let key = SessionKey::from("github:o/r#1");
+        m.pending_notes = Some(key.clone());
+        m.modal_stack.push(Id::Notes);
+        let cmds = m.handle_textarea_submitted("check the flaky retry".into());
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IpcCommand::SetNotes { session_key, notes } => {
+                assert_eq!(session_key, &key);
+                assert_eq!(notes, "check the flaky retry");
+            }
+            other => panic!("expected SetNotes, got {other:?}"),
+        }
+        assert!(m.pending_notes.is_none());
+    }
+
+    /// An empty/whitespace note is a valid submit — it clears the
+    /// scratchpad — so it still emits `SetNotes` rather than being
+    /// dropped the way an empty reply is.
+    #[test]
+    fn textarea_submitted_empty_notes_clears_scratchpad() {
+        let mut m = build_model();
+        let key = SessionKey::from("github:o/r#1");
+        m.pending_notes = Some(key.clone());
+        m.modal_stack.push(Id::Notes);
+        let cmds = m.handle_textarea_submitted("   ".into());
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IpcCommand::SetNotes { session_key, notes } => {
+                assert_eq!(session_key, &key);
+                assert!(notes.trim().is_empty());
+            }
+            other => panic!("expected SetNotes, got {other:?}"),
+        }
+    }
+
     /// Arm a sticky "✗ sync failed" banner for `source` the way a
     /// failed manual refresh (Shift-R) does, and assert it landed.
     /// Returns the model ready for the recovery half of each test.
@@ -7766,6 +7808,52 @@ mod spawn_spinner_projection_tests {
         assert!(
             m.status.spawning.is_none(),
             "spinner cleared by its own terminal"
+        );
+    }
+
+    #[test]
+    fn recovered_agent_restart_warning_isolated_from_polling_refresh_and_spawns() {
+        let mut m = build_model();
+        let target = SessionKey::new("github:o/r#1");
+        m.status
+            .note_spawning("codex", target, TerminalKind::Agent("codex".into()), 0);
+        m.show_polling(vec!["github".into()]);
+
+        m.handle_daemon_event(IpcEvent::RecoveredTerminalsRequireRestart {
+            terminal_ids: vec![TerminalId(7)],
+        });
+
+        assert!(
+            m.status.spawning.is_some(),
+            "a recovery warning must not cancel an unrelated active spawn"
+        );
+        assert!(
+            m.status.polling.is_some(),
+            "terminal compatibility must not terminate first-poll feedback"
+        );
+        m.status.polling_last_tick =
+            std::time::Instant::now() - std::time::Duration::from_millis(100);
+        assert!(
+            m.polling_tick().is_none(),
+            "terminal compatibility must not queue a delayed polling failure"
+        );
+        assert!(m.status.dismiss_polling());
+
+        m.pending_refresh_ack = true;
+        m.handle_daemon_event(IpcEvent::RecoveredTerminalsRequireRestart {
+            terminal_ids: vec![TerminalId(7)],
+        });
+        assert!(
+            m.pending_refresh_ack,
+            "terminal compatibility must not consume a manual refresh acknowledgement"
+        );
+        let notice = m.status.notice.as_ref().expect("restart notice");
+        assert!(notice.message.contains("restart required"));
+        assert!(!notice.message.contains("spawn failed"));
+        assert!(!notice.message.contains("sync failed"));
+        assert_eq!(
+            notice.severity,
+            crate::realm::components::footer::NoticeSeverity::Permanent
         );
     }
 }

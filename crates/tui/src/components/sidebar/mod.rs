@@ -332,6 +332,11 @@ pub struct Sidebar {
     /// one Claude + two shells running). Populated from `Event::Snapshot`
     /// and kept in sync via `TerminalSpawned` / `TerminalExited`.
     running_terminals: HashMap<TerminalId, (SessionKey, TerminalKind)>,
+    /// Built-in agent registry, consulted so an agent's display badge
+    /// (`C` / `X` / `U`) comes from the agent itself rather than a
+    /// hardcoded match here — a new agent declares its own letter and
+    /// can't silently collide (#440).
+    agent_registry: lazybox_agents::Registry,
     /// Threshold config for the per-repo "needs attention" counter.
     /// Loaded from `~/.lazybox/config.yaml::attention` at startup;
     /// toggle individual signals there to customize.
@@ -453,6 +458,7 @@ impl Sidebar {
             filters: FilterSet::default(),
             sort_mode: SortMode::default(),
             running_terminals: HashMap::new(),
+            agent_registry: lazybox_agents::registry(),
             attention: lazybox_config::AttentionConfig::default(),
             projects: BTreeMap::new(),
             default_agent: "claude".to_string(),
@@ -1632,20 +1638,15 @@ impl Sidebar {
     }
 
     /// Stable single-letter key for a runner kind. Drives the workspace
-    /// row badge — `claude` → `C`, `codex` → `X`, `cursor` → `U`,
-    /// `shell` → `S`, log tail → `L`, generic agent → `A`.
-    fn badge_letter(kind: &TerminalKind) -> char {
+    /// row badge. Agent letters are declared by the agent itself
+    /// ([`lazybox_agents::Agent::badge`]) — `claude` → `C`, `codex` →
+    /// `X`, `cursor` → `U` — so identity lives in one place and a new
+    /// agent can't silently collide (#440). Resolution (registered badge
+    /// or first-char fallback) belongs to the registry, not here.
+    /// Non-agent kinds: `shell` → `S`, log tail → `L`.
+    fn badge_letter(&self, kind: &TerminalKind) -> char {
         match kind {
-            TerminalKind::Agent(id) => match id.as_str() {
-                "claude" => 'C',
-                "codex" => 'X',
-                "cursor" => 'U',
-                _ => id
-                    .chars()
-                    .next()
-                    .map(|c| c.to_ascii_uppercase())
-                    .unwrap_or('A'),
-            },
+            TerminalKind::Agent(id) => self.agent_registry.badge_for(id),
             TerminalKind::Shell => 'S',
             TerminalKind::LogTail { .. } => 'L',
         }
@@ -1660,7 +1661,7 @@ impl Sidebar {
         let mut counts: HashMap<char, usize> = HashMap::new();
         for (sk, kind) in self.running_terminals.values() {
             if sk == key {
-                *counts.entry(Self::badge_letter(kind)).or_default() += 1;
+                *counts.entry(self.badge_letter(kind)).or_default() += 1;
             }
         }
         let mut entries: Vec<(char, usize)> = counts.into_iter().collect();

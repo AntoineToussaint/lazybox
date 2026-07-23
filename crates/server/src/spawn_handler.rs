@@ -138,15 +138,23 @@ fn alloc_terminal_id(store: &dyn lazybox_store::Store) -> TerminalId {
 /// it (unknown agent id, etc.) — handled by emitting a ProviderError.
 ///
 /// `hook_settings_path` is the per-session settings file the daemon
-/// generated for an agent that reports state through structured hooks
+/// generated for an agent that reports state through a settings-file hook
 /// (Claude). It's threaded into [`SpawnCtx`] so the agent's argv builder
-/// can append its settings flag; `None` for agents without hook support.
+/// can append its settings flag; `None` for agents without one.
+///
+/// `hook_command` is the correlated `hook-ingest` command for an agent
+/// that wires hooks through spawn-argv config overrides instead (Codex).
+/// The agent's [`Agent::hook_command_args`] turns it into the argv
+/// fragments — appended here — that route its lifecycle events through the
+/// same `IngestHook` path. `None` when no hook command could be built
+/// (binary missing); agents that use neither transport keep PTY detection.
 fn argv_for(
     config: &ServerConfig,
     kind: &TerminalKind,
     cwd: &Option<PathBuf>,
     skip_permissions: bool,
     hook_settings_path: Option<PathBuf>,
+    hook_command: Option<&str>,
     model_args: &[String],
 ) -> Option<Vec<String>> {
     match kind {
@@ -164,6 +172,12 @@ fn argv_for(
                 hook_settings_path,
             };
             let mut argv = agent.spawn(&ctx);
+            // Argv-based hooks (Codex's `-c hooks.*`) go next, before the
+            // model flag, so the agent's own launch config is complete
+            // before any tier override lands.
+            if let Some(cmd) = hook_command {
+                argv.extend(agent.hook_command_args(cmd));
+            }
             // The tier's model flag (`--model claude-opus-4-8`) is
             // appended after the agent's own args so it can override a
             // default the agent baked into its spawn argv.
@@ -205,6 +219,33 @@ fn hook_settings_path(terminal_id: TerminalId) -> PathBuf {
     lazybox_core::paths::runtime_dir()
         .join("hooks")
         .join(format!("settings-{}.json", terminal_id.0))
+}
+
+/// Per-terminal file holding the backend session key for an agent whose
+/// hook command is baked into the spawn argv (Codex). Argv can't be
+/// rewritten once the process launches, and the backend key only exists
+/// after `backend.spawn` returns — so the argv-baked command reads the
+/// key from this file (written post-spawn) instead of embedding it, the
+/// same late-binding trick Claude's settings-file rewrite performs.
+/// Deterministic in `terminal_id`, so the pump deletes it on exit with
+/// no bookkeeping, and it survives daemon restarts to keep a
+/// tmux-surviving session's hooks correlating.
+fn hook_backend_key_path(terminal_id: TerminalId) -> PathBuf {
+    lazybox_core::paths::runtime_dir()
+        .join("hooks")
+        .join(format!("backend-key-{}", terminal_id.0))
+}
+
+/// The hook command an argv-hooked agent runs on each lifecycle event.
+/// Reads the correlation key from [`hook_backend_key_path`] (see there
+/// for why it's a file, not an inline value). Missing key file → a
+/// flagless `hook-ingest` that drains stdin and exits 0, so a hook racing
+/// the post-spawn key write is a harmless no-op, not a failure.
+fn hook_command_keyfile(exe: &Path, key_path: &Path) -> String {
+    guarded_hook_command(
+        exe,
+        &format!(" --backend-key-file \"{}\"", key_path.display()),
+    )
 }
 
 /// The shell command Claude runs on each lifecycle hook. Uses the
@@ -319,6 +360,29 @@ fn write_hook_settings(
             tracing::warn!("hook settings: rename into {}: {e}", path.display());
             None
         }
+    }
+}
+
+/// Write the backend session key to the per-terminal file an argv-hooked
+/// agent's baked hook command reads (see [`hook_backend_key_path`]).
+/// Write-to-temp + rename so a hook that fires mid-write never reads a
+/// torn key. Best-effort: a failure leaves the file absent, and a hook
+/// that finds no key resolves to a harmless no-op.
+fn write_hook_backend_key(terminal_id: TerminalId, backend_key: &str) {
+    let path = hook_backend_key_path(terminal_id);
+    if let Some(parent) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        tracing::warn!("hook backend key: create_dir_all {}: {e}", parent.display());
+        return;
+    }
+    let tmp = path.with_extension("tmp");
+    if let Err(e) = std::fs::write(&tmp, backend_key) {
+        tracing::warn!("hook backend key: write {}: {e}", tmp.display());
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        tracing::warn!("hook backend key: rename into {}: {e}", path.display());
     }
 }
 
@@ -707,25 +771,37 @@ pub async fn handle_spawn(
     // is no longer on disk (`cargo clean` under a `cargo run` daemon):
     // hooks would be guaranteed to fail, so the session keeps PTY
     // detection instead.
-    let hook_settings = match hook_exe() {
-        Some(exe) => {
-            write_hook_settings(config, &kind, terminal_id, &hook_command_placeholder(&exe))
-        }
-        None => {
-            tracing::warn!(
-                ?terminal_id,
-                "hook settings: lazybox binary path is unresolvable or no longer on disk — \
-                 skipping hooks; agent state falls back to PTY detection"
-            );
-            None
-        }
-    };
+    let exe = hook_exe();
+    if exe.is_none() {
+        tracing::warn!(
+            ?terminal_id,
+            "hooks: lazybox binary path is unresolvable or no longer on disk — \
+             skipping hooks; agent state falls back to PTY detection"
+        );
+    }
+    let hook_settings = exe.as_deref().and_then(|exe| {
+        write_hook_settings(config, &kind, terminal_id, &hook_command_placeholder(exe))
+    });
+    // Correlated hook command for an argv-hooked agent (Codex). Reads its
+    // backend key from a per-terminal file written post-spawn — argv is
+    // fixed at launch, so the key can't be embedded inline like Claude's
+    // rewritten settings file. Only agents that override
+    // `hook_command_args` actually consume it; others ignore it.
+    let argv_hook_command = exe
+        .as_deref()
+        .map(|exe| hook_command_keyfile(exe, &hook_backend_key_path(terminal_id)));
+    let uses_argv_hooks = matches!(&kind, TerminalKind::Agent(id)
+        if argv_hook_command
+            .as_deref()
+            .zip(config.agents.get(id))
+            .is_some_and(|(cmd, agent)| !agent.hook_command_args(cmd).is_empty()));
     let argv = match argv_for(
         config,
         &kind,
         &cwd_path,
         skip_permissions,
         hook_settings.clone(),
+        argv_hook_command.as_deref(),
         &model_args,
     ) {
         Some(a) => a,
@@ -834,6 +910,13 @@ pub async fn handle_spawn(
             terminal_id,
             &hook_command(&exe, &backend_key),
         );
+    }
+    // Argv-hooked agents (Codex) can't rewrite their launched argv, so
+    // instead the backend key is dropped into the file their baked hook
+    // command reads. This is the moment it becomes known — write it now,
+    // long before the agent's first lifecycle event.
+    if uses_argv_hooks {
+        write_hook_backend_key(terminal_id, &backend_key);
     }
 
     // `terminal_id` was allocated above (before argv) so the hook settings
@@ -3497,6 +3580,7 @@ async fn finish_terminal(
     // since ids are monotonic) but cleaning up keeps the runtime dir
     // tidy. Reconstructed from the id, no bookkeeping needed.
     let _ = std::fs::remove_file(hook_settings_path(terminal_id));
+    let _ = std::fs::remove_file(hook_backend_key_path(terminal_id));
     config.forget_terminal_persistence_lock(backend_key);
     config.forget_terminal_io_lock(backend_key);
 }
@@ -7188,7 +7272,8 @@ mod tests {
         let kind = TerminalKind::Agent("claude".into());
         let cwd = Some(std::path::PathBuf::from("/tmp/wt"));
 
-        let with_skip = argv_for(&config, &kind, &cwd, true, None, &[]).expect("claude registered");
+        let with_skip =
+            argv_for(&config, &kind, &cwd, true, None, None, &[]).expect("claude registered");
         assert_eq!(
             with_skip,
             vec![
@@ -7199,7 +7284,7 @@ mod tests {
         );
 
         let without_skip =
-            argv_for(&config, &kind, &cwd, false, None, &[]).expect("claude registered");
+            argv_for(&config, &kind, &cwd, false, None, None, &[]).expect("claude registered");
         assert_eq!(without_skip, vec!["claude".to_string()]);
 
         // With a generated hook settings file, `--settings <path>` is
@@ -7210,6 +7295,7 @@ mod tests {
             &cwd,
             false,
             Some(std::path::PathBuf::from("/run/hooks/settings-1.json")),
+            None,
             &[],
         )
         .expect("claude registered");
@@ -7220,6 +7306,36 @@ mod tests {
                 "--settings".to_string(),
                 "/run/hooks/settings-1.json".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn argv_for_codex_appends_hook_overrides_from_command() {
+        let config =
+            ServerConfig::with_store(std::sync::Arc::new(lazybox_store::MemoryStore::new()));
+        let kind = TerminalKind::Agent("codex".into());
+        let cwd = Some(std::path::PathBuf::from("/tmp/wt"));
+
+        // No hook command → PTY-only, argv untouched beyond the bare spawn.
+        let bare =
+            argv_for(&config, &kind, &cwd, false, None, None, &[]).expect("codex registered");
+        assert_eq!(bare, vec!["codex".to_string()]);
+
+        // With a hook command, Codex's argv gains the trust-bypass flag and
+        // one `-c hooks.<Event>=…` override per tracked lifecycle event, so
+        // it reports state through the authoritative hook path.
+        let cmd = "lazybox hook-ingest --backend-key-file \"/run/lzb/key-3\"";
+        let argv =
+            argv_for(&config, &kind, &cwd, false, None, Some(cmd), &[]).expect("codex registered");
+        assert_eq!(argv.first().map(String::as_str), Some("codex"));
+        assert!(
+            argv.contains(&"--dangerously-bypass-hook-trust".to_string()),
+            "codex hook argv must bypass hook trust: {argv:?}",
+        );
+        let override_count = argv.iter().filter(|a| a.starts_with("hooks.")).count();
+        assert_eq!(
+            override_count,
+            lazybox_agents::hook_settings::HOOKED_EVENTS.len(),
         );
     }
 
@@ -7236,6 +7352,7 @@ mod tests {
             &kind,
             &cwd,
             false,
+            None,
             None,
             &["--model".to_string(), "claude-opus-4-8".to_string()],
         )
@@ -7338,6 +7455,36 @@ mod tests {
         let cmd = hook_command_placeholder(Path::new("/opt/lazybox"));
         assert!(cmd.starts_with("[ -x \"/opt/lazybox\" ]"), "{cmd}");
         assert!(cmd.ends_with("\"/opt/lazybox\" hook-ingest"), "{cmd}");
+    }
+
+    #[test]
+    fn hook_command_keyfile_reads_key_from_path() {
+        // Codex's argv-baked hook command can't embed the backend key
+        // (unknown at launch), so it reads it from the per-terminal file.
+        let cmd = hook_command_keyfile(
+            Path::new("/opt/lazy box/lazybox"),
+            Path::new("/run/lzb/backend-key-7"),
+        );
+        assert!(
+            cmd.contains(
+                "\"/opt/lazy box/lazybox\" hook-ingest --backend-key-file \"/run/lzb/backend-key-7\""
+            ),
+            "keyfile flag missing or unquoted: {cmd}"
+        );
+        assert!(cmd.starts_with("[ -x \"/opt/lazy box/lazybox\" ]"), "{cmd}");
+    }
+
+    #[test]
+    fn backend_key_file_round_trips_written_key() {
+        // The daemon writes the key post-spawn; the baked command reads it
+        // back through `--backend-key-file`. The path is deterministic in
+        // the terminal id, so no bookkeeping is needed to clean it up.
+        let tid = TerminalId(918_273);
+        write_hook_backend_key(tid, "lazybox-ws-codex-42-7");
+        let path = hook_backend_key_path(tid);
+        let read = std::fs::read_to_string(&path).expect("key file written");
+        assert_eq!(read, "lazybox-ws-codex-42-7");
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Through a real `/bin/sh`: an existing executable passes the guard

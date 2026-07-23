@@ -3936,9 +3936,14 @@ pub(crate) async fn watchdog_escape_working(
     // reset or settle the turn. Skipping the tick then pins `Working`
     // forever (the quiet timer disarms itself and only a chunk re-arms it).
     // So skip only the stale-buffer classify (which would re-raise the
-    // answered prompt) and force the turn closed directly. Leave the reset
-    // latched — a late chunk still clears the buffer via the chunk arm, and
-    // by then the state is `Done`, so the watchdog no-ops.
+    // answered prompt) and commit the `Done` straight away. That commit
+    // still folds through `on_pty_reading`'s hooks-primary gate, so a
+    // genuinely live silent turn — one whose agent kept a *fresh* hook —
+    // is suppressed and stays `Working`; only a hook-stale or hookless
+    // terminal actually settles here, and it self-corrects the instant the
+    // next byte arrives (the chunk arm re-classifies from `Done`). Leave
+    // the reset latched — that late chunk clears the buffer via the chunk
+    // arm, and by then the state is `Done`, so the watchdog no-ops.
     let answered = detect_resets.lock().await.contains(&id);
     if !answered {
         classify_quiet_screen(
@@ -8633,6 +8638,18 @@ mod tests {
             self.detect_resets.lock().await.insert(self.id);
         }
 
+        /// A lifecycle hook just landed for this terminal — the pump
+        /// records its arrival instant in `hook_driven`. A reading taken
+        /// within [`lazybox_agents::HOOK_STALENESS`] of it is gated by the
+        /// hooks-primary policy, so this is how a test asserts the PTY
+        /// paths defer to a still-fresh hook.
+        async fn hook_now(&mut self) {
+            self.hook_driven
+                .lock()
+                .await
+                .insert(self.id, std::time::Instant::now());
+        }
+
         /// The pump's Working watchdog fired — [`WORKING_WATCHDOG_AFTER`]
         /// with no meaningful content change — so classify the screen and,
         /// if still Working, force the turn closed; return the
@@ -9272,10 +9289,7 @@ mod tests {
 
         let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
         assert_eq!(p.feed(working).await, vec![Working]);
-        p.hook_driven
-            .lock()
-            .await
-            .insert(p.id, std::time::Instant::now());
+        p.hook_now().await;
         assert_eq!(
             p.watchdog().await,
             Vec::<lazybox_ipc::AgentState>::new(),
@@ -9351,6 +9365,36 @@ mod tests {
             "out of Working the tick is a no-op",
         );
         assert_eq!(p.states.lock().await.get(&p.id), Some(&Done));
+    }
+
+    /// The zero-output settle is the fail-safe for a *dead* silent turn,
+    /// not a live one. An answered agent that is genuinely still at work
+    /// (a long tool call fires no bytes) keeps a *fresh* lifecycle hook,
+    /// and the forced `Done` still folds through the hooks-primary gate —
+    /// so it is suppressed and the terminal stays `Working`. Only once the
+    /// hook goes stale does the PTY watchdog own the settle. This guards
+    /// the exact invariant the answered path leans on by bypassing the
+    /// classify: the gate, not the classify, is what protects a live turn.
+    #[tokio::test]
+    async fn watchdog_zero_output_settle_still_yields_to_a_fresh_hook() {
+        use lazybox_ipc::AgentState::Working;
+        let working = include_bytes!("../../agents/tests/fixtures/working_status_line.bin");
+
+        let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
+        assert_eq!(p.feed(working).await, vec![Working]);
+        // The user answered and no chunk has cleared the reset — but a
+        // hook landed just now, so the agent is provably still at work.
+        p.detect_resets.lock().await.insert(p.id);
+        p.hook_now().await;
+        assert_eq!(
+            p.watchdog().await,
+            Vec::<lazybox_ipc::AgentState>::new(),
+            "a fresh hook must gate the forced Done — the turn is still live",
+        );
+        assert_eq!(p.states.lock().await.get(&p.id), Some(&Working));
+        // The reset stays latched: the buffer still predates the answer,
+        // so the next chunk (not this gated tick) is what clears it.
+        assert!(p.detect_resets.lock().await.contains(&p.id));
     }
 
     #[test]

@@ -3915,12 +3915,19 @@ struct PendingIssueMerge {
 /// default (#108) and a title slug is appended after the number (#109), so
 /// the match reads the leading numeric component of the stem and ignores
 /// both the prefix and the slug.
+///
+/// GitHub-only: the `issue-<n>` stem and the `<repo>#<n>` key it rebuilds are
+/// GitHub conventions (`derive_branch_for_branchless` only emits that stem for
+/// GitHub tasks). Gating on the source both keeps the heuristic off other
+/// providers — whose keys aren't `<repo>#<n>` — and narrows the branch shapes
+/// a stray match could fire on.
 fn issue_id_from_branch(pr: &Task) -> Option<lazybox_core::TaskId> {
-    let number = pr
-        .branch
-        .as_deref()?
-        .rsplit('/')
-        .next()?
+    if !pr.id.source.eq_ignore_ascii_case("github") {
+        return None;
+    }
+    let branch = pr.branch.as_deref()?;
+    let stem = branch.rsplit('/').next().unwrap_or(branch);
+    let number = stem
         .strip_prefix("issue-")?
         .split('-')
         .next()
@@ -5824,6 +5831,15 @@ mod merge_detection_tests {
         assert!(issue_id_from_branch(&pr_on_branch("linear-eng-456-ship")).is_none());
         assert!(issue_id_from_branch(&pr_on_branch("issue-fix-thing")).is_none());
         assert!(issue_id_from_branch(&pr_on_branch("feat")).is_none());
+    }
+
+    #[test]
+    fn issue_id_from_branch_ignores_non_github_sources() {
+        // The `issue-<n>` stem is a GitHub spawn convention; a non-GitHub
+        // PR on such a branch must not be rebuilt into a `<repo>#<n>` key.
+        let mut t = pr_on_branch("issue-5");
+        t.id.source = "linear".into();
+        assert!(issue_id_from_branch(&t).is_none());
     }
 
     #[test]

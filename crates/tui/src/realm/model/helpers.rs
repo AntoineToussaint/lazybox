@@ -317,7 +317,15 @@ pub(crate) fn keymap_config_warnings(
     };
 
     // 1 + 2: unknown / ineffective config keys.
-    for key in overrides.keys() {
+    for (key, raw) in overrides {
+        // Partial chord-parse drop: resolution keeps the parseable
+        // alternatives of a ` | `-separated spec and silently discards
+        // the rest, so a typo in one alternative vanishes without
+        // feedback. Flag each dropped alternative (independent of
+        // whether the config key itself resolves below).
+        for w in lazybox_tui_core::action::unparseable_chord_warnings(key, raw) {
+            push(&mut warnings, w);
+        }
         match catalog.iter().find(|e| e.config_key == *key) {
             None => push(
                 &mut warnings,

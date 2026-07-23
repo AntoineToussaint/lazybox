@@ -16,6 +16,45 @@ pub enum TermError {
     Terminal(String),
 }
 
+/// Upper bound on the `recent_output` inspection buffer. Callers scan
+/// this tail for agent-state / prompt markers, so it must stay large
+/// enough to hold a marker whole.
+const RECENT_OUTPUT_CAP: usize = 4096;
+
+/// Bound `buf` to roughly the last `cap` bytes, trimming on a newline
+/// boundary so the retained head starts on a clean line.
+///
+/// A raw byte cap can bisect a marker that straddles the eviction
+/// boundary: its head falls in the dropped prefix while its tail stays
+/// in the buffer in a form no longer matchable, so a `recent_output`
+/// pattern scan silently misses the state transition. Dropping up to
+/// and including the first newline at/after the cut keeps every
+/// (line-anchored) marker either fully retained or fully gone, never
+/// split. If the retained tail carries no newline we keep the raw cut so
+/// the buffer stays bounded. Likewise, if that first newline is the
+/// buffer's final byte the line-aligned cut would empty the tail
+/// entirely — discarding a whole intact line the raw cut would have kept
+/// — so we fall back to the raw cut there too. Mirrors
+/// `ReplayRing::replay_snapshot_into` / `read_scrollback_tail` in
+/// `crates/server/src/pty.rs`.
+fn trim_recent_output(buf: &mut Vec<u8>, cap: usize) {
+    if buf.len() <= cap {
+        return;
+    }
+    let excess = buf.len() - cap;
+    // Advance past the first newline at/after the raw cut, so the head
+    // is line-aligned; fall back to the raw cut when the tail has none,
+    // or when advancing would empty the buffer (newline at the very end).
+    let cut = buf[excess..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map(|rel| excess + rel + 1)
+        .filter(|&c| c < buf.len())
+        .unwrap_or(excess);
+    buf.copy_within(cut.., 0);
+    buf.truncate(buf.len() - cut);
+}
+
 /// Manages a PTY child process + libghostty-vt terminal state.
 ///
 /// PTY reader runs on a background thread, sends bytes via channel.
@@ -154,7 +193,7 @@ impl TermSession {
             cell_iter,
             shadow: None,
             last_output_at: Instant::now(),
-            recent_output: Vec::with_capacity(4096),
+            recent_output: Vec::with_capacity(RECENT_OUTPUT_CAP),
             _not_send: std::marker::PhantomData,
         })
     }
@@ -167,11 +206,7 @@ impl TermSession {
             self.terminal.vt_write(&chunk);
             // Buffer recent output for callers to inspect.
             self.recent_output.extend_from_slice(&chunk);
-            if self.recent_output.len() > 4096 {
-                let excess = self.recent_output.len() - 4096;
-                self.recent_output.copy_within(excess.., 0);
-                self.recent_output.truncate(4096);
-            }
+            trim_recent_output(&mut self.recent_output, RECENT_OUTPUT_CAP);
             had_output = true;
         }
         if had_output {
@@ -261,5 +296,88 @@ impl TermSession {
                 .terminal
                 .mode(libghostty_vt::terminal::Mode::ALT_SCREEN_LEGACY)
                 .unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RECENT_OUTPUT_CAP, trim_recent_output};
+
+    #[test]
+    fn trim_keeps_buffer_bounded() {
+        let mut buf = vec![b'a'; RECENT_OUTPUT_CAP + 500];
+        // No newline anywhere: falls back to the raw cut, retaining
+        // exactly the last `cap` bytes so the buffer stays bounded.
+        trim_recent_output(&mut buf, RECENT_OUTPUT_CAP);
+        assert_eq!(buf.len(), RECENT_OUTPUT_CAP);
+    }
+
+    #[test]
+    fn trim_with_newline_at_the_very_end_keeps_the_final_line() {
+        // Degenerate layout: the only newline in the eviction window is
+        // the buffer's final byte. Line-aligning past it would empty the
+        // tail, discarding a whole intact line the raw cut would keep —
+        // so we fall back to the raw cut and stay non-empty + bounded.
+        let cap = 16usize;
+        const MARKER: &[u8] = b"<STATE>";
+        // A single long line (no interior newline) carrying a marker near
+        // its end, terminated by a newline exactly at the buffer's tail.
+        let mut buf = b"padding padding <STATE>\n".to_vec();
+        assert!(buf.len() > cap);
+
+        trim_recent_output(&mut buf, cap);
+        assert!(!buf.is_empty(), "tail is not emptied: {}", buf.len());
+        assert!(buf.len() <= cap, "stays bounded: {}", buf.len());
+        assert!(
+            buf.windows(MARKER.len()).any(|w| w == MARKER),
+            "the intact marker in the final line survives: {:?}",
+            String::from_utf8_lossy(&buf)
+        );
+    }
+
+    #[test]
+    fn trim_is_a_noop_below_cap() {
+        let mut buf = b"short output\nno trim".to_vec();
+        let before = buf.clone();
+        trim_recent_output(&mut buf, RECENT_OUTPUT_CAP);
+        assert_eq!(buf, before);
+    }
+
+    #[test]
+    fn marker_spanning_the_raw_cut_stays_matchable_after_trim() {
+        // Reproduces the boundary-bisection bug (#512). Layout: a
+        // leading partial line holding a MARKER positioned so the raw
+        // byte cutoff lands *inside* it, then a clean line carrying an
+        // intact MARKER within the retained window.
+        let cap = 32usize;
+        const MARKER: &[u8] = b"<STATE>";
+        //         ".xx<STATE>yy\nclean line <STATE> here\n"
+        let mut buf = b".xx<STATE>yy\nclean line <STATE> here\n".to_vec();
+        assert!(buf.len() > cap);
+
+        // Old behavior (plain byte cap): the last `cap` bytes bisect the
+        // first marker — the retained tail starts mid-marker, so the
+        // *only* occurrence a scan can see is unusable.
+        let raw_tail = &buf[buf.len() - cap..];
+        assert!(
+            raw_tail.starts_with(b"TATE>yy"),
+            "fixture: raw cut bisects the first marker: {:?}",
+            String::from_utf8_lossy(raw_tail)
+        );
+
+        trim_recent_output(&mut buf, cap);
+        assert!(buf.len() <= cap, "stays bounded: {}", buf.len());
+        // Line-aligned trim drops the whole partial leading line, so the
+        // intact marker on the clean line survives and stays matchable.
+        assert!(
+            buf.starts_with(b"clean line"),
+            "retained head is line-aligned: {:?}",
+            String::from_utf8_lossy(&buf)
+        );
+        assert!(
+            buf.windows(MARKER.len()).any(|w| w == MARKER),
+            "intact marker still matchable: {:?}",
+            String::from_utf8_lossy(&buf)
+        );
     }
 }

@@ -38,6 +38,7 @@ Work from any non-terminal pane. A focused terminal forwards keys to the PTY; pr
 | `Shift-D` | sync diagnostics | Show recent provider-sync outcomes, last poll times, and errors. |
 | `Shift-M` | messages | Open the messages log — a scrollable, clearable history of recent footer notices, so an error that flashed and faded is still readable. |
 | `Esc` | dismiss | Clear the current footer notice, whatever its severity — retryable, info, permanent, or auth. |
+| `Enter` | detail | Open the current footer error in a full-text detail modal. |
 | `` ` `` | jump to workspace | Open a fuzzy picker over every workspace (across repos) and jump to the one you pick. |
 | `!` | next asking | Jump the cursor to the next workspace whose agent is waiting on input (a quick jump; the workspace picker `` ` `` reaches any workspace). |
 | `Shift-F` | next failing | Jump the cursor to the next PR whose CI is failing (a quick jump; the workspace picker `` ` `` reaches any workspace). |

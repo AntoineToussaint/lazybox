@@ -4789,9 +4789,24 @@ mod chord_resolution_tests {
     /// here that collides is a shipped ambiguity.
     fn known_aliases() -> Vec<(Chord, Vec<ActionKind>)> {
         vec![
+            // `Enter` also drives the Global `InspectNotice` (rank 0),
+            // but only ever fires from the explicit sticky-error branch
+            // in `handle_pane_key`; it is pane-native (not catalog-
+            // dispatched), so it falls through to the pane's own Enter
+            // when no error is up — exactly like Esc/DismissNotice.
+            // Sidebar sees InspectNotice + OpenWorkspace; the activity
+            // pane adds its own ToggleActivity.
             (
                 Chord::Key(stroke("Enter")),
-                vec![ActionKind::OpenWorkspace, ActionKind::ToggleActivity],
+                vec![ActionKind::InspectNotice, ActionKind::OpenWorkspace],
+            ),
+            (
+                Chord::Key(stroke("Enter")),
+                vec![
+                    ActionKind::InspectNotice,
+                    ActionKind::OpenWorkspace,
+                    ActionKind::ToggleActivity,
+                ],
             ),
             (
                 Chord::Key(stroke("z")),
@@ -9471,6 +9486,77 @@ mod dismiss_and_messages_tests {
         assert!(m.status.notice.is_none());
         m.dispatch_key(key(Key::Esc));
         assert!(m.status.notice.is_none());
+    }
+
+    /// #453: a sticky error is a dead end unless its full text is
+    /// reachable. Enter (the `InspectNotice` binding) pops the whole
+    /// message — which the footer pill would otherwise truncate — into a
+    /// detail modal, without dismissing the notice.
+    #[test]
+    fn enter_inspects_a_sticky_error_into_a_detail_modal() {
+        let mut m = build_model();
+        m.flash_error("merge failed — owner/repo#1: Pull Request is not mergeable");
+        m.dispatch_key(key(Key::Enter));
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::Error),
+            "Enter must open the error detail modal while a sticky error is up",
+        );
+        assert!(
+            m.status.notice.is_some(),
+            "inspecting must not clear the notice — only Esc does that",
+        );
+    }
+
+    /// Gated on *sticky* severity: a transient Info notice auto-fades
+    /// and is up too often for Enter to lose its pane meaning, so Enter
+    /// passes through (no detail modal).
+    #[test]
+    fn enter_is_inert_for_a_non_sticky_notice() {
+        let mut m = build_model();
+        m.flash_info("saved");
+        m.dispatch_key(key(Key::Enter));
+        assert!(
+            !m.modal_stack.contains(&Id::Error),
+            "Enter must not open a detail modal for a non-sticky notice",
+        );
+    }
+
+    /// With a quiet footer, Enter keeps its normal pane meaning — the
+    /// inspect path is gated on a sticky notice being up.
+    #[test]
+    fn enter_is_inert_when_no_notice_is_up() {
+        let mut m = build_model();
+        assert!(m.status.notice.is_none());
+        m.dispatch_key(key(Key::Enter));
+        assert!(!m.modal_stack.contains(&Id::Error));
+    }
+
+    /// The lifecycle is discoverable: while a sticky error is pinned the
+    /// footer advertises both `detail` (inspect) and `dismiss`. A
+    /// non-sticky notice — and a quiet footer — advertise neither.
+    #[test]
+    fn footer_advertises_inspect_and_dismiss_for_sticky_errors() {
+        let mut m = build_model();
+        assert!(m.notice_action_hints().is_empty(), "quiet footer: no hints");
+
+        m.flash_info("saved");
+        assert!(
+            m.notice_action_hints().is_empty(),
+            "non-sticky Info notice must not advertise inspect/dismiss",
+        );
+
+        m.flash_error("boom");
+        let labels: Vec<_> = m
+            .notice_action_hints()
+            .into_iter()
+            .map(|b| b.label.to_string())
+            .collect();
+        assert_eq!(
+            labels,
+            vec!["detail".to_string(), "dismiss".to_string()],
+            "sticky error must advertise inspect then dismiss",
+        );
     }
 
     /// The collision the guard defends against: with a sidebar

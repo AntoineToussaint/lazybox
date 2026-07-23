@@ -46,6 +46,15 @@ pub enum NoticeSeverity {
     Hint,
 }
 
+impl NoticeSeverity {
+    /// Sticky severities own the footer slot until acknowledged: they
+    /// never auto-fade and demand an explicit dismiss. These are the
+    /// "error toasts" whose full text is worth inspecting (#453).
+    pub fn is_sticky(self) -> bool {
+        matches!(self, Self::Permanent | Self::Auth)
+    }
+}
+
 /// One footer notice — message + severity + when it was set
 /// (for auto-fade).
 #[derive(Debug, Clone)]

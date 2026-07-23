@@ -1869,7 +1869,7 @@ pub struct MergePromptMemory {
 /// same own-lock reasoning as [`MergePromptMemory`].
 ///
 /// This is now purely the emit-cadence throttle. The user's "keep"
-/// answer lives on the workspace itself as [`CleanupPrompt::Declined`]
+/// answer lives on the workspace itself as [`lazybox_core::CleanupPrompt::Declined`]
 /// (issue #499), so it survives a restart instead of being a
 /// per-process pin.
 #[derive(Default)]
@@ -3744,7 +3744,7 @@ fn pr_workspace_claiming_issue(
 /// a merged PR, or a closed issue no PR workspace claims (the PR's
 /// own prompt owns that cleanup — same deferral as the upsert path).
 /// `None` for open work, task-less rows, and workspaces the user
-/// already answered "keep" for ([`CleanupPrompt::Declined`]).
+/// already answered "keep" for ([`lazybox_core::CleanupPrompt::Declined`]).
 ///
 /// A **merged PR** qualifies even with no sessions (issue #499): its
 /// tracking row should be offered for cleanup even when it never had a
@@ -3825,7 +3825,7 @@ pub(crate) async fn reprompt_unresolved_removals_with(
 }
 
 /// Handle `Command::KeepMergedWorkspace`: the user answered "no" on
-/// the removal modal. Persist [`CleanupPrompt::Declined`] on the row so
+/// the removal modal. Persist [`lazybox_core::CleanupPrompt::Declined`] on the row so
 /// the reprompt sweep stops asking — across restarts, not just this
 /// session (issue #499). The row stays until removed explicitly.
 pub async fn keep_merged_workspace(config: &ServerConfig, key: &WorkspaceKey) {

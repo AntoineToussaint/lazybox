@@ -1331,7 +1331,7 @@ pub async fn on_terminal_transition(
 ///
 /// Every emit path (the open→terminal transition and the per-tick
 /// reprompt sweep) funnels through here. A durable "keep" answer
-/// ([`CleanupPrompt::Declined`], issue #499) suppresses permanently;
+/// ([`lazybox_core::CleanupPrompt::Declined`], issue #499) suppresses permanently;
 /// re-emits are otherwise throttled to [`super::REMOVAL_REPROMPT_AFTER`]
 /// via [`super::RemovalPromptMemory`] so a user staring at the modal
 /// doesn't collect a fresh copy every tick.
@@ -3070,7 +3070,7 @@ mod inspect_tests {
         assert_no_event(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
     }
 
-    /// Issue #499: "keep" persists [`CleanupPrompt::Declined`] on the
+    /// Issue #499: "keep" persists [`lazybox_core::CleanupPrompt::Declined`] on the
     /// stored row, so a *restarted* daemon (fresh in-memory prompt
     /// memory) never re-offers cleanup — unlike the old per-process pin
     /// that a restart cleared.

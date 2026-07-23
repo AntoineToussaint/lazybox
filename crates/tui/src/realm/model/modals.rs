@@ -138,6 +138,19 @@ fn auto_fix_label_opt_out(pr: &lazybox_core::Task, opt_out_labels: &[String]) ->
 /// Tabular label for one inspector row. Single-line — the Choice
 /// modal truncates with an ellipsis when it overflows. Pack the
 /// signal-dense bits first: name, reasons, size, age, flags.
+/// One row of the import picker: `owner/repo · /path · branch [DIRTY]`,
+/// falling back to the path when the checkout has no GitHub origin.
+fn format_discovered_checkout(c: &lazybox_ipc::DiscoveredCheckoutDto) -> String {
+    let repo = c.repo.as_deref().unwrap_or("(no origin)");
+    let branch = c.branch.as_deref().unwrap_or("(detached)");
+    let dirty = if c.has_uncommitted_changes {
+        " [DIRTY]"
+    } else {
+        ""
+    };
+    format!("{repo} · {} · {branch}{dirty}", c.path.display())
+}
+
 fn format_inspect_row(row: &InspectRow) -> String {
     match row {
         InspectRow::BulkSafe { count } => {
@@ -309,6 +322,31 @@ impl<T: TerminalAdapter> Model<T> {
         let modal = Textarea::new("Reply").with_header(format!("on {label}"));
         self.pending_reply = Some(workspace_key);
         self.mount_modal(Id::Reply, modal);
+    }
+
+    /// Mount the notes editor for `workspace_key`, pre-filled with the
+    /// workspace's current local note (issue #458). Submit →
+    /// `Msg::TextareaSubmitted(body)` → orchestrator builds a
+    /// `Command::SetNotes { session_key, notes }`.
+    pub(super) fn mount_notes(&mut self, workspace_key: lazybox_core::SessionKey) {
+        use crate::realm::components::textarea::Textarea;
+
+        if matches!(self.modal_stack.last(), Some(Id::Notes)) {
+            return;
+        }
+
+        let existing = self
+            .sidebar
+            .workspace_by_key(&workspace_key)
+            .map(|w| w.notes.clone())
+            .unwrap_or_default();
+        let label = workspace_key.to_string();
+        let modal = Textarea::new("Notes")
+            .with_header(format!("local scratchpad — {label} (never synced)"))
+            .with_body(existing)
+            .allow_empty();
+        self.pending_notes = Some(workspace_key);
+        self.mount_modal(Id::Notes, modal);
     }
 
     /// Mount the "New workspace" name prompt under a specific
@@ -893,6 +931,19 @@ impl<T: TerminalAdapter> Model<T> {
         );
     }
 
+    /// Build + mount the scrollable full-description reader (#448) for a
+    /// raw markdown `body` under `title`. Idempotent: re-triggering
+    /// while it's up is a no-op. The modal renders proper markdown and
+    /// owns no pending model state, so dismiss just pops it.
+    pub(crate) fn mount_description_modal(&mut self, title: String, body: String) {
+        use crate::realm::components::markdown_modal::MarkdownModal;
+
+        if self.modal_stack.last() == Some(&Id::DescriptionModal) {
+            return;
+        }
+        self.mount_modal(Id::DescriptionModal, MarkdownModal::new(title, body));
+    }
+
     /// Build + mount the notices-log window from the current
     /// `MessageLog` snapshot (#309). Idempotent: re-pressing the key
     /// while it's up is a no-op. Re-mounting after a `c` clear is
@@ -1201,6 +1252,79 @@ impl<T: TerminalAdapter> Model<T> {
         let modal = Confirm::new(&prompt).default_no();
         self.pending_inspect_target = Some(target);
         self.mount_modal(Id::InspectConfirm, modal);
+    }
+
+    /// Kick off the dev-folder scan (`x i`). Dispatches
+    /// `Command::ScanCheckouts` (roots come from `scan.roots`) and
+    /// flashes a hint. `Event::CheckoutsDiscovered` arriving later
+    /// calls [`Self::mount_import_checkout_picker`] with the payload.
+    pub(super) fn start_scan_checkouts(&mut self) {
+        self.send_cmd(lazybox_ipc::Command::ScanCheckouts { roots: Vec::new() });
+        self.flash_info("scanning dev folders…");
+    }
+
+    /// Mount the import picker. Called from the
+    /// `Event::CheckoutsDiscovered` handler. Stashes the discovered
+    /// rows in `pending_import_rows` so the choice handler can index
+    /// back to the picked checkout.
+    pub(super) fn mount_import_checkout_picker(
+        &mut self,
+        checkouts: Vec<lazybox_ipc::DiscoveredCheckoutDto>,
+    ) {
+        use crate::realm::components::choice::Choice;
+
+        // Async mount (the scan reply): only take the stack when it's
+        // empty or already owned by the import flow, so another client's
+        // scan broadcast (multi-client mode) can't steal focus from an
+        // unrelated modal.
+        let import_owned = matches!(
+            self.modal_stack.last(),
+            None | Some(Id::ImportCheckoutList | Id::ImportCheckoutConfirm)
+        );
+        if !import_owned {
+            return;
+        }
+        if checkouts.is_empty() {
+            self.flash_info("no importable checkouts found under scan.roots");
+            return;
+        }
+
+        let labels: Vec<String> = checkouts.iter().map(format_discovered_checkout).collect();
+        self.pending_import_rows = checkouts;
+
+        let modal = Choice::single("Import which checkout?", labels)
+            .title("Import local checkout")
+            .label(|s: &String| s.clone());
+        self.modal_stack.retain(|id| id != &Id::ImportCheckoutList);
+        self.mount_modal(Id::ImportCheckoutList, modal);
+    }
+
+    /// Confirm step in front of an actual import. Warns that sessions
+    /// run in the user's REAL checkout — not an isolated worktree — so
+    /// an agent started here edits the real tree, mirroring the `b`
+    /// on-main warning. Surfaces uncommitted state when the checkout is
+    /// dirty. Stashes the target so `Msg::Confirmed(true)` dispatches
+    /// `ImportLocalCheckout`.
+    pub(super) fn mount_import_checkout_confirm(
+        &mut self,
+        target: lazybox_ipc::DiscoveredCheckoutDto,
+    ) {
+        use crate::realm::components::confirm::Confirm;
+        let repo = target.repo.as_deref().unwrap_or("(no GitHub origin)");
+        let dirty = if target.has_uncommitted_changes {
+            " It has uncommitted changes — lazybox won't touch them, but an agent might."
+        } else {
+            ""
+        };
+        let prompt = format!(
+            "Import {repo} at {} as a linked workspace? Sessions run in this \
+             REAL checkout on its current branch — no isolated worktree — so \
+             agents/shells edit it directly.{dirty}",
+            target.path.display(),
+        );
+        let modal = Confirm::new(&prompt).default_yes();
+        self.pending_import_target = Some(target);
+        self.mount_modal(Id::ImportCheckoutConfirm, modal);
     }
 
     /// Confirm prompt before dispatching `Command::CleanWorktrees`.

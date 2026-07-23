@@ -29,46 +29,46 @@ impl Default for MemoryStore {
 
 impl Store for MemoryStore {
     fn apply_batch(&self, mutations: &[StoreMutation]) -> Result<(), StoreError> {
-        // Validate every save payload up front so a bad record aborts the
-        // whole batch before any mutation lands — the same all-or-nothing
-        // contract `SqliteStore` gets from its transaction.
+        // Resolve every mutation into an infallible kv op BEFORE taking
+        // the lock. A rejected payload (empty/None) aborts here, so the
+        // locked section below can never fail partway and leave a
+        // half-applied batch — atomicity is structural, not dependent on
+        // a redundant re-check. This is the all-or-nothing contract
+        // `SqliteStore` gets from its transaction.
+        enum Op {
+            Insert(String, String),
+            Remove(String),
+        }
+        let mut ops = Vec::with_capacity(mutations.len());
         for mutation in mutations {
-            match mutation {
-                StoreMutation::SaveWorkspace(record) => {
-                    record.require_json()?;
+            let op = match mutation {
+                StoreMutation::SetKv { key, value } => Op::Insert(key.clone(), value.clone()),
+                StoreMutation::DeleteKv { key } => Op::Remove(key.clone()),
+                StoreMutation::SaveWorkspace(record) => Op::Insert(
+                    format!("workspace:{}", record.key),
+                    record.require_json()?.to_string(),
+                ),
+                StoreMutation::DeleteWorkspace(key) => {
+                    Op::Remove(format!("workspace:{}", key.as_str()))
                 }
-                StoreMutation::SaveProject(record) => {
-                    record.require_json()?;
+                StoreMutation::SaveProject(record) => Op::Insert(
+                    format!("project:{}", record.key),
+                    record.require_json()?.to_string(),
+                ),
+                StoreMutation::DeleteProject(key) => {
+                    Op::Remove(format!("project:{}", key.as_str()))
                 }
-                _ => {}
-            }
+            };
+            ops.push(op);
         }
         let mut kv = self.kv_lock();
-        for mutation in mutations {
-            match mutation {
-                StoreMutation::SetKv { key, value } => {
-                    kv.insert(key.clone(), value.clone());
+        for op in ops {
+            match op {
+                Op::Insert(key, value) => {
+                    kv.insert(key, value);
                 }
-                StoreMutation::DeleteKv { key } => {
-                    kv.remove(key);
-                }
-                StoreMutation::SaveWorkspace(record) => {
-                    kv.insert(
-                        format!("workspace:{}", record.key),
-                        record.require_json()?.to_string(),
-                    );
-                }
-                StoreMutation::DeleteWorkspace(key) => {
-                    kv.remove(&format!("workspace:{}", key.as_str()));
-                }
-                StoreMutation::SaveProject(record) => {
-                    kv.insert(
-                        format!("project:{}", record.key),
-                        record.require_json()?.to_string(),
-                    );
-                }
-                StoreMutation::DeleteProject(key) => {
-                    kv.remove(&format!("project:{}", key.as_str()));
+                Op::Remove(key) => {
+                    kv.remove(&key);
                 }
             }
         }
@@ -99,6 +99,12 @@ impl Store for MemoryStore {
         let mut out = Vec::new();
         for (key, value) in kv.iter() {
             if let Some(stripped) = key.strip_prefix("workspace:") {
+                // Skip a legacy empty payload rather than list a phantom
+                // row — matches `SqliteStore::list_workspaces` and the
+                // `get_workspace` read heal.
+                if value.is_empty() {
+                    continue;
+                }
                 out.push(crate::WorkspaceRecord {
                     key: stripped.to_string(),
                     created_at: crate::traits::created_at_or_oldest(value),
@@ -119,6 +125,10 @@ impl Store for MemoryStore {
         let mut out = Vec::new();
         for (key, value) in kv.iter() {
             if let Some(stripped) = key.strip_prefix("project:") {
+                // Skip a legacy empty payload — same heal as list_workspaces.
+                if value.is_empty() {
+                    continue;
+                }
                 out.push(crate::ProjectRecord {
                     key: stripped.to_string(),
                     created_at: crate::traits::created_at_or_oldest(value),

@@ -192,6 +192,30 @@ fn workspace_contract(store: &dyn Store) {
         "saving a workspace with an empty JSON payload must be rejected"
     );
 
+    // A legacy empty payload already on disk (written before empty writes
+    // were refused — simulated here by a raw `set_kv` that bypasses the
+    // write boundary) must read back as ABSENT, not as a `Some("")`
+    // phantom, and must not appear in `list_workspaces`. The write
+    // boundary makes empty unrepresentable going forward; the read path
+    // heals rows that predate it.
+    store.set_kv("workspace:conf-ws-legacy-empty", "").unwrap();
+    assert!(
+        store
+            .get_workspace(&WorkspaceKey::new("conf-ws-legacy-empty"))
+            .unwrap()
+            .is_none(),
+        "a legacy empty payload must read as absent, not a phantom"
+    );
+    assert!(
+        store
+            .list_workspaces()
+            .unwrap()
+            .iter()
+            .all(|r| r.key != "conf-ws-legacy-empty"),
+        "a legacy empty payload must not surface in list_workspaces"
+    );
+    store.delete_kv("workspace:conf-ws-legacy-empty").unwrap();
+
     // A JSON blob with no parseable `created_at` (corrupt/legacy) must
     // collapse to the OLDEST instant, never `Utc::now()` — a fabricated
     // now() sorted the broken row newest and let it dodge staleness.
@@ -291,6 +315,26 @@ fn project_contract(store: &dyn Store) {
     store
         .delete_project(&ProjectKey::new("project:nested"))
         .unwrap();
+
+    // A legacy empty payload heals on read here too — absent from
+    // `get_project` and `list_projects`, same as the workspace path.
+    store.set_kv("project:conf-proj-legacy-empty", "").unwrap();
+    assert!(
+        store
+            .get_project(&ProjectKey::new("conf-proj-legacy-empty"))
+            .unwrap()
+            .is_none(),
+        "a legacy empty payload must read as absent, not a phantom"
+    );
+    assert!(
+        store
+            .list_projects()
+            .unwrap()
+            .iter()
+            .all(|r| r.key != "conf-proj-legacy-empty"),
+        "a legacy empty payload must not surface in list_projects"
+    );
+    store.delete_kv("project:conf-proj-legacy-empty").unwrap();
 
     // Delete + idempotence.
     store.delete_project(&key_a).unwrap();

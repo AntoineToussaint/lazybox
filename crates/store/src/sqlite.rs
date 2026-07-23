@@ -176,6 +176,13 @@ impl Store for SqliteStore {
         let mut out = Vec::new();
         for row in rows {
             let (key, value) = row.map_err(|e| StoreError::Backend(e.to_string()))?;
+            // Skip a legacy empty payload rather than list a phantom row
+            // (writes now reject empty via `require_json`; this heals
+            // pre-fix rows on read). Matches `get_workspace` and
+            // `MemoryStore::list_workspaces`.
+            if value.is_empty() {
+                continue;
+            }
             // Strip the `workspace:` prefix ONCE so consumers see clean
             // keys. `strip_prefix` (not `trim_start_matches`, which
             // strips the prefix repeatedly) keeps this identical to
@@ -209,6 +216,10 @@ impl Store for SqliteStore {
         let mut out = Vec::new();
         for row in rows {
             let (key, value) = row.map_err(|e| StoreError::Backend(e.to_string()))?;
+            // Skip a legacy empty payload — same heal as list_workspaces.
+            if value.is_empty() {
+                continue;
+            }
             let key = key.strip_prefix("project:").unwrap_or(&key).to_string();
             out.push(crate::ProjectRecord {
                 key,

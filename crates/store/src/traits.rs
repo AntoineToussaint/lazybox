@@ -157,6 +157,13 @@ pub trait Store: Send + Sync {
         let Some(json) = self.get_kv(&kv_key)? else {
             return Ok(None);
         };
+        // An empty payload can only be legacy data (writes now reject
+        // empty via `require_json`). Treat it as absent rather than
+        // surface a `Some("")` phantom that deserialization chokes on —
+        // this heals pre-fix rows on read, not just on the write path.
+        if json.is_empty() {
+            return Ok(None);
+        }
         Ok(Some(WorkspaceRecord {
             key: key.as_str().to_string(),
             created_at: created_at_or_oldest(&json),
@@ -192,6 +199,10 @@ pub trait Store: Send + Sync {
         let Some(json) = self.get_kv(&kv_key)? else {
             return Ok(None);
         };
+        // Same legacy empty-payload heal as `get_workspace`.
+        if json.is_empty() {
+            return Ok(None);
+        }
         Ok(Some(ProjectRecord {
             key: key.as_str().to_string(),
             created_at: created_at_or_oldest(&json),

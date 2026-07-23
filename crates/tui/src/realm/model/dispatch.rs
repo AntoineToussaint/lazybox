@@ -526,6 +526,7 @@ impl<T: TerminalAdapter> Model<T> {
                     | Intent::MountAdoptPicker { .. }
                     | Intent::OpenEditor
                     | Intent::MergePr { .. }
+                    | Intent::UpdateBranch { .. }
                     | Intent::SetAutoMergeOnGreen { .. }
                     | Intent::KillWorkspace { .. }
                     | Intent::Snooze { .. }
@@ -613,6 +614,7 @@ impl<T: TerminalAdapter> Model<T> {
                     | Intent::MountNewWorkspaceInput { .. }
                     | Intent::OpenEditor
                     | Intent::MergePr { .. }
+                    | Intent::UpdateBranch { .. }
                     | Intent::SetAutoMergeOnGreen { .. }
                     | Intent::KillWorkspace { .. }
                     | Intent::Snooze { .. }
@@ -700,6 +702,67 @@ impl<T: TerminalAdapter> Model<T> {
                     cmds.push(IpcCommand::MergePr { workspace_key });
                 }
             }
+            Action::UpdateBranch => {
+                // Non-destructive (Guard::None), so it fires straight
+                // through here. Re-resolve against the live selection —
+                // the catalog availability gate already keeps the action
+                // off non-behind PRs, so this mostly names the target.
+                let workspace = self.sidebar.selected_workspace().cloned();
+                if let crate::intent::Intent::UpdateBranch { workspace_key } =
+                    crate::intent::resolve_update_branch(workspace.as_ref())
+                {
+                    self.flash_info(format!(
+                        "updating branch PR{}…",
+                        task_number_suffix(
+                            workspace
+                                .as_ref()
+                                .and_then(|w| w.pr.as_ref())
+                                .map(|t| t.id.key.as_str())
+                                .unwrap_or("")
+                        )
+                    ));
+                    cmds.push(IpcCommand::UpdateBranch { workspace_key });
+                }
+            }
+            Action::UpdateBranchSelected => {
+                // Bulk fan-out over the sidebar multi-select: one
+                // `UpdateBranch` per selected PR that's actually behind
+                // its base. Up-to-date and non-PR selections are skipped
+                // and reported so the count adds up.
+                let keys = self.sidebar.selected_broadcast_keys();
+                let mut targets = Vec::new();
+                let mut skipped = 0usize;
+                for sk in &keys {
+                    match self.sidebar.workspace_by_key(sk) {
+                        Some(ws) if ws.pr.as_ref().is_some_and(|p| p.is_behind_base) => {
+                            targets.push(ws.key.clone());
+                        }
+                        _ => skipped += 1,
+                    }
+                }
+                if targets.is_empty() {
+                    self.flash_info(if keys.is_empty() {
+                        "update branches: nothing selected".to_string()
+                    } else {
+                        "update branches: no selected PR is behind base".to_string()
+                    });
+                } else {
+                    let n = targets.len();
+                    let plural = if n == 1 { "" } else { "es" };
+                    if skipped == 0 {
+                        self.flash_info(format!("updating {n} branch{plural}…"));
+                    } else {
+                        self.flash_info(format!(
+                            "updating {n} branch{plural} ({skipped} skipped)…"
+                        ));
+                    }
+                    for workspace_key in targets {
+                        cmds.push(IpcCommand::UpdateBranch { workspace_key });
+                    }
+                    self.sidebar.clear_broadcast_selection();
+                    self.redraw = true;
+                }
+            }
             Action::ToggleAutoMerge => {
                 let workspace = self.sidebar.selected_workspace().cloned();
                 // Explicit variant list — a new Intent variant must be
@@ -733,6 +796,7 @@ impl<T: TerminalAdapter> Model<T> {
                     | Intent::MountAdoptPicker { .. }
                     | Intent::OpenEditor
                     | Intent::MergePr { .. }
+                    | Intent::UpdateBranch { .. }
                     | Intent::KillWorkspace { .. }
                     | Intent::Snooze { .. }
                     | Intent::Unsnooze { .. }

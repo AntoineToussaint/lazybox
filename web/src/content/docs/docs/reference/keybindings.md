@@ -75,6 +75,7 @@ Manage the sidebar list itself — only while the sidebar has focus.
 | `Space` | collapse group | Collapse or expand the repo group the cursor is in — fold a project's workspaces into a single header row, and unfold it again. |
 | `v` | select | Toggle the focused workspace in/out of the multi-select set. |
 | `Shift-B` | broadcast | Send one instruction — a snippet, free text, or both — to every multi-selected workspace at once. |
+| `Shift-U` | update branches | Update the branch of every multi-selected PR that's behind its base, in one shot — the bulk "Update branch". |
 
 `j` / `k` (or arrows) move the cursor; `Esc` clears a `v` multi-selection.
 
@@ -172,6 +173,7 @@ Press the leader key, then the second key. Every menu shows a which-key popup wh
 | Chord | Action |
 | --- | --- |
 | `g m` | merge PR *(confirmed first)* |
+| `g u` | update branch |
 | `g g` | auto-merge on green |
 | `g p` | policies |
 | `g r` | reviewers |

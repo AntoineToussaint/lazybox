@@ -1910,8 +1910,24 @@ impl Sidebar {
 
         // A live multi-select makes the broadcast THE next action —
         // surface it first so the `v` marks visibly lead somewhere.
+        // When any marked row is a PR behind its base, the bulk
+        // update-branch rides alongside it.
         if !self.broadcast_selected.is_empty() {
             actions.push(Action::BroadcastToSelected);
+            if self
+                .broadcast_selected
+                .iter()
+                .filter_map(|k| self.workspace_by_key(k))
+                .any(|w| w.pr.as_ref().is_some_and(|p| p.is_behind_base))
+            {
+                actions.push(Action::UpdateBranchSelected);
+            }
+        }
+
+        // A PR behind its base can update its branch (the `g u` /
+        // "Update branch" affordance).
+        if workspace.is_some_and(|w| w.pr.as_ref().is_some_and(|p| p.is_behind_base)) {
+            actions.push(Action::UpdateBranch);
         }
 
         // Primary action: what's most likely useful on THIS row.

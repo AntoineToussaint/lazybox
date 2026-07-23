@@ -270,6 +270,10 @@ fn all_commands() -> Vec<Command> {
             kind: lazybox_core::AutoFixKind::CiFailure,
             arm: lazybox_core::PolicyArm::Arm,
         },
+        Command::SetWorkspaceNote {
+            session_key: key.clone(),
+            note: "check the migration path".into(),
+        },
         Command::PostReply {
             session_key: key.clone(),
             body: "ship it".into(),
@@ -735,6 +739,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::Unsnooze { .. } => "Unsnooze",
         Command::SetAutoMergeOnGreen { .. } => "SetAutoMergeOnGreen",
         Command::SetAutoFixPolicy { .. } => "SetAutoFixPolicy",
+        Command::SetWorkspaceNote { .. } => "SetWorkspaceNote",
         Command::PostReply { .. } => "PostReply",
         Command::Refresh => "Refresh",
         Command::Shutdown => "Shutdown",
@@ -840,7 +845,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        56,
+        57,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(

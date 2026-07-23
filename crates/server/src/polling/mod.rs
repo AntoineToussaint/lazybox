@@ -4820,6 +4820,20 @@ pub async fn set_auto_merge_on_green(config: &ServerConfig, key: &WorkspaceKey, 
     commit_upsert_offloaded_reported(config, key, workspace, "set auto-merge preference").await;
 }
 
+/// Persist the workspace's free-form private note (issue #458).
+/// Mirrors [`set_auto_merge_on_green`]: load, set the field, commit
+/// (persists the JSON blob + broadcasts `WorkspaceUpserted` so every
+/// TUI sees the new note and its sidebar indicator). Never leaves
+/// lazybox — the note is not synced to any provider.
+pub async fn set_workspace_note(config: &ServerConfig, key: &WorkspaceKey, note: String) {
+    let _ws_guard = config.lock_workspace(key.as_str()).await;
+    let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
+        return;
+    };
+    workspace.note = note;
+    commit_upsert_offloaded_reported(config, key, workspace, "set workspace note").await;
+}
+
 /// Persist the workspace's per-session auto-fix arm for one
 /// [`lazybox_core::AutoFixKind`] (issue #363). Mirrors
 /// [`set_auto_merge_on_green`]: load, set the policy, commit (persists +
@@ -6392,6 +6406,42 @@ mod tick_noop_skip_tests {
             upserted_keys(&drain(&mut rx)),
             vec![key],
             "a changed task must re-broadcast"
+        );
+    }
+
+    /// Setting a workspace note persists it on the `Workspace` and
+    /// re-broadcasts `WorkspaceUpserted` carrying the new text; clearing
+    /// it round-trips through empty and re-broadcasts (issue #458).
+    #[tokio::test]
+    async fn set_workspace_note_persists_and_broadcasts() {
+        let store = Arc::new(lazybox_store::MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+        let sources: Vec<Box<dyn TaskSource>> =
+            vec![Box::new(FixtureSource::new(vec![issue("o/r#1", "first")]))];
+        let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&issue("o/r#1", "first")));
+        tick(&config, &sources).await;
+
+        let upserted_note = |rx: &mut tokio::sync::broadcast::Receiver<Event>| {
+            drain(rx).into_iter().find_map(|e| match e {
+                Event::WorkspaceUpserted(w) if w.key == key => Some(w.note),
+                _ => None,
+            })
+        };
+
+        let mut rx = config.bus.subscribe();
+        set_workspace_note(&config, &key, "check the migration path".into()).await;
+        assert_eq!(
+            upserted_note(&mut rx).as_deref(),
+            Some("check the migration path"),
+            "the note must persist and broadcast on the workspace",
+        );
+
+        let mut rx = config.bus.subscribe();
+        set_workspace_note(&config, &key, String::new()).await;
+        assert_eq!(
+            upserted_note(&mut rx).as_deref(),
+            Some(""),
+            "clearing the note must re-broadcast an empty note",
         );
     }
 

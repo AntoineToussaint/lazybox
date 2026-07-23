@@ -399,6 +399,10 @@ fn all_non_shutdown_commands() -> Vec<Command> {
             session_key: "test:ws".into(),
             body: "b".into(),
         },
+        Command::SetWorkspaceNote {
+            session_key: "test:ws".into(),
+            note: "n".into(),
+        },
         Command::Refresh,
         Command::ConfirmMerge {
             issue_workspace_key: wkey(),

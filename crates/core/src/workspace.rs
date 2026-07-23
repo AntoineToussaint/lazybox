@@ -154,6 +154,13 @@ pub struct Workspace {
     /// pre-#363 records read back as all-`Default` and behave unchanged.
     #[serde(default)]
     pub policies: crate::AutomationPolicies,
+    /// Free-form private note the user attaches to this workspace — a
+    /// local scratchpad for context that doesn't belong on the GitHub
+    /// PR/issue (issue #458). Never synced to any provider; persisted in
+    /// the workspace JSON blob alongside [`Workspace::snoozed_until`].
+    /// Empty string means "no note".
+    #[serde(default)]
+    pub note: String,
     pub created_at: DateTime<Utc>,
     pub last_viewed_at: Option<DateTime<Utc>>,
 }
@@ -179,6 +186,7 @@ impl Workspace {
             snoozed_until: None,
             auto_merge_on_green: false,
             policies: crate::AutomationPolicies::default(),
+            note: String::new(),
             created_at: now,
             last_viewed_at: None,
         }
@@ -1821,6 +1829,32 @@ mod tests {
         let mut t = pr(&format!("o/r#{num}"));
         t.title = title.into();
         Workspace::from_task(t, now())
+    }
+
+    /// The private note (#458) round-trips through the workspace JSON
+    /// blob, and a pre-#458 record (no `note` key) reads back as an
+    /// empty note rather than failing to deserialize.
+    #[test]
+    fn note_round_trips_and_defaults_empty_on_legacy_records() {
+        let mut w = ws_with_pr(1, "x");
+        assert_eq!(w.note, "", "a fresh workspace has no note");
+        w.note = "check the migration path".into();
+        let restored: Workspace =
+            serde_json::from_str(&serde_json::to_string(&w).unwrap()).unwrap();
+        assert_eq!(restored.note, "check the migration path");
+
+        let legacy = serde_json::to_string(&w)
+            .unwrap()
+            .replace(",\"note\":\"check the migration path\"", "");
+        assert!(
+            !legacy.contains("\"note\":"),
+            "note key dropped for the legacy fixture"
+        );
+        let restored: Workspace = serde_json::from_str(&legacy).unwrap();
+        assert_eq!(
+            restored.note, "",
+            "a record without a note key defaults empty"
+        );
     }
 
     #[test]

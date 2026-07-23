@@ -90,6 +90,11 @@ pub enum Id {
     Update,
     Polling,
     Reply,
+    /// Note editor textarea (issue #458) — the workspace's private
+    /// local scratchpad, prefilled with the current note. Submit →
+    /// `Command::SetWorkspaceNote { session_key, note }`. Target key
+    /// lives in `pending_note`.
+    NoteEditor,
     /// Single-line input prompt for naming a brand-new pre-PR
     /// workspace. Submit → `Command::CreateWorkspace { name }`.
     NewWorkspace,
@@ -665,6 +670,10 @@ pub struct Model<T: TerminalAdapter> {
     /// Set by `mount_reply`; consumed by `Msg::TextareaSubmitted` to
     /// build the `Command::PostReply` payload.
     pending_reply: Option<lazybox_core::SessionKey>,
+    /// Workspace key the note editor (if mounted) is targeting. Set by
+    /// `mount_note_editor`; consumed by `Msg::TextareaSubmitted` to
+    /// build the `Command::SetWorkspaceNote` payload.
+    pending_note: Option<lazybox_core::SessionKey>,
     /// Body of the most recently submitted reply, kept until the next
     /// reply is composed. If the daemon later reports the post failed
     /// (`ProviderError { source: "reply" }`), the composed text would
@@ -1210,6 +1219,7 @@ impl<T: TerminalAdapter> Model<T> {
             preselect: None,
             layout: LayoutCtx::new(),
             pending_reply: None,
+            pending_note: None,
             last_reply_body: None,
             pending_review_request: None,
             review_choices: Vec::new(),

@@ -42,6 +42,19 @@ impl<T: TerminalAdapter> Model<T> {
             self.drain_queued_daemon_prompts();
             return cmds;
         }
+        // Note editor (issue #458): persist whatever's in the buffer,
+        // including empty — an empty submission clears the note. Unlike
+        // Reply, no non-empty guard, and no upstream side effects.
+        if matches!(top, Some(Id::NoteEditor)) {
+            let mut cmds = Vec::new();
+            if let Some(session_key) = self.pending_note.take() {
+                let note = body.trim_end().to_string();
+                cmds.push(IpcCommand::SetWorkspaceNote { session_key, note });
+                self.flash_info("Note saved.");
+            }
+            self.drain_queued_daemon_prompts();
+            return cmds;
+        }
         let mut cmds = Vec::new();
         let target = self.pending_reply.take();
         if let Some(session_key) = target

@@ -827,6 +827,17 @@ impl<T: TerminalAdapter> Model<T> {
                     self.mount_reply(session_key);
                 }
             }
+            Action::EditNote => {
+                // The note is a lazybox-local scratchpad on any
+                // workspace (Section::Workspace → fires from Sidebar or
+                // Right). Prefill the editor with the current note so
+                // editing is additive.
+                if let Some(ws) = self.sidebar.selected_workspace() {
+                    let session_key: lazybox_core::SessionKey = (&ws.key).into();
+                    let current = ws.note.clone();
+                    self.mount_note_editor(session_key, current);
+                }
+            }
             Action::RequestReviewers => {
                 if let Some(ws) = self.sidebar.selected_workspace()
                     && ws.pr.is_some()

@@ -311,6 +311,30 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::Reply, modal);
     }
 
+    /// Mount the note editor textarea for `workspace_key`, prefilled
+    /// with the workspace's current note (issue #458). Submit →
+    /// `Msg::TextareaSubmitted(body)` → orchestrator builds a
+    /// `Command::SetWorkspaceNote { session_key, note }`. An empty
+    /// submission clears the note.
+    pub(super) fn mount_note_editor(
+        &mut self,
+        workspace_key: lazybox_core::SessionKey,
+        current: String,
+    ) {
+        use crate::realm::components::textarea::Textarea;
+
+        if matches!(self.modal_stack.last(), Some(Id::NoteEditor)) {
+            return;
+        }
+
+        let label = workspace_key.to_string();
+        let modal = Textarea::new("Note")
+            .with_header(format!("private · {label}"))
+            .with_body(current);
+        self.pending_note = Some(workspace_key);
+        self.mount_modal(Id::NoteEditor, modal);
+    }
+
     /// Mount the "New workspace" name prompt under a specific
     /// Project. Submit → `Msg::InputSubmitted(name)` while
     /// `Id::NewWorkspace` is on top → `Command::CreateWorkspace

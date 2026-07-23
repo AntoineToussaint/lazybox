@@ -752,6 +752,15 @@ pub enum Command {
         kind: lazybox_core::AutoFixKind,
         arm: lazybox_core::PolicyArm,
     },
+    /// Set the workspace's free-form private note (issue #458). The
+    /// daemon persists it on the `Workspace` (like `SetAutoMergeOnGreen`)
+    /// and re-broadcasts `WorkspaceUpserted` so every TUI sees the new
+    /// note text and its sidebar indicator. An empty `note` clears it.
+    /// Local-only — never synced to any provider.
+    SetWorkspaceNote {
+        session_key: SessionKey,
+        note: String,
+    },
     /// Post a top-level reply to the workspace's primary task. Today
     /// this maps to "create an issue/PR comment" on GitHub; future
     /// providers (Linear, etc.) wire their own send path. The daemon

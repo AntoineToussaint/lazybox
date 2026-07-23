@@ -192,6 +192,9 @@ pub enum Action {
     ActivityBottom,
     /// Mount the reply textarea targeted at the focused workspace.
     Reply,
+    /// Open the focused workspace's private local note in an editor
+    /// (issue #458). A scratchpad that never syncs to any provider.
+    EditNote,
     /// Toggle the multi-select state on the focused activity row.
     SelectRow,
     /// Toggle the PR / issue description visibility.
@@ -366,6 +369,7 @@ pub enum ActionKind {
     ActivityTop,
     ActivityBottom,
     Reply,
+    EditNote,
     SelectRow,
     ToggleDescription,
     UndoMarkRead,
@@ -450,6 +454,7 @@ impl ActionKind {
         Self::LongSnooze,
         Self::Archive,
         Self::CloseIssue,
+        Self::EditNote,
         // GitHub menu.
         Self::MergePr,
         Self::ToggleAutoMerge,
@@ -567,6 +572,7 @@ impl Action {
             Action::ActivityTop => ActionKind::ActivityTop,
             Action::ActivityBottom => ActionKind::ActivityBottom,
             Action::Reply => ActionKind::Reply,
+            Action::EditNote => ActionKind::EditNote,
             Action::SelectRow => ActionKind::SelectRow,
             Action::ToggleDescription => ActionKind::ToggleDescription,
             Action::UndoMarkRead => ActionKind::UndoMarkRead,
@@ -1030,6 +1036,13 @@ impl ActionDef {
                 default_keys: "r",
                 label: "reply",
                 describe: "Open the reply textarea targeted at this workspace.",
+                section: Section::Workspace,
+            },
+            ActionKind::EditNote => &Self {
+                kind: ActionKind::EditNote,
+                default_keys: "x e",
+                label: "note",
+                describe: "Open the workspace's private local note in an editor (issue #458). A scratchpad for context, reminders, and things to check — never synced to GitHub or any provider.",
                 section: Section::Workspace,
             },
             ActionKind::SelectRow => &Self {
@@ -1577,6 +1590,7 @@ impl ActionKind {
             ActionKind::ActivityTop => "activity_top",
             ActionKind::ActivityBottom => "activity_bottom",
             ActionKind::Reply => "reply",
+            ActionKind::EditNote => "edit_note",
             ActionKind::SelectRow => "select_row",
             ActionKind::ToggleDescription => "toggle_description",
             ActionKind::UndoMarkRead => "undo_mark_read",
@@ -1772,6 +1786,7 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::Archive
         | ActionKind::CloseIssue
         | ActionKind::AdoptSessions
+        | ActionKind::EditNote
         | ActionKind::CollapseIntoPr => Some("workspace"),
         _ => None,
     }
@@ -2193,6 +2208,9 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
             intent::resolve_reply(workspace),
             intent::Intent::MountReply { .. },
         ),
+        // A note is a pure lazybox-local scratchpad — available on any
+        // workspace, provider-backed or not.
+        ActionKind::EditNote => has_ws,
         // "On main" only makes sense when the workspace resolves to a
         // repo/project scope — that's what gives a shared main checkout
         // to sit on. A repo-less/standalone workspace has no "main", so
@@ -3543,6 +3561,7 @@ mod tests {
             (ActionKind::LongSnooze, 'z'),
             (ActionKind::Archive, 'x'),
             (ActionKind::CloseIssue, 'c'),
+            (ActionKind::EditNote, 'e'),
         ];
         let leader = KeyStroke::new(false, false, false, ChordCode::Char('x'));
         for (kind, key) in expected {

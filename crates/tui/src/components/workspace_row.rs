@@ -87,6 +87,10 @@ pub struct WorkspaceRowCtx<'a> {
     /// (`Workspace::policies` — issue #363). Renders a ` FIX ` pill so an
     /// explicit per-session auto-fix arm is visible, never invisible.
     pub auto_fix_armed: bool,
+    /// This workspace has a non-empty private note (`Workspace::note` —
+    /// issue #458). Renders a dim `✎` marker at the title's tail so the
+    /// user can see, at a glance, which rows carry a scratchpad.
+    pub has_note: bool,
 }
 
 impl<'a> WorkspaceRowCtx<'a> {
@@ -403,6 +407,17 @@ fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     let labels = label_spans(ctx);
     let tail = labels.len();
     let mut spans = vec![Span::styled(ctx.raw_title().to_string(), style)];
+    // A dim `✎` between the title and its labels marks a workspace that
+    // carries a private note (#458). It rides in the flex body (not the
+    // atomic label tail), so labels shed before it under width pressure.
+    if ctx.has_note {
+        let note_style = if ctx.is_cursor {
+            ctx.row_style()
+        } else {
+            Style::default().fg(ctx.theme.text_dim)
+        };
+        spans.push(Span::styled(" ✎", note_style));
+    }
     spans.extend(labels);
     Cell::new(spans).atomic_tail(tail)
 }
@@ -758,6 +773,7 @@ mod tests {
             ascii_glyphs: false,
             auto_merge_armed: false,
             auto_fix_armed: false,
+            has_note: false,
         }
     }
 
@@ -1075,6 +1091,7 @@ mod tests {
             ascii_glyphs: false,
             auto_merge_armed: false,
             auto_fix_armed: false,
+            has_note: false,
         };
         assert_eq!(cell_type(&ctx).width(), 0);
     }
@@ -1089,6 +1106,27 @@ mod tests {
         let ctx = ctx_for(&ws, &task, &theme);
         let cell = cell_title(&ctx);
         assert_eq!(cell.spans[0].content.as_ref(), "[CI] cache post-job upload");
+    }
+
+    /// A workspace carrying a private note (#458) shows a dim `✎`
+    /// marker at the title's tail; a note-less row shows nothing extra.
+    #[test]
+    fn cell_title_marks_workspaces_with_a_note() {
+        let task = make_task("owner/repo#1", "wire the note editor");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+
+        assert!(
+            !cell_text(&cell_title(&ctx)).contains('✎'),
+            "a note-less row must not show the marker",
+        );
+
+        ctx.has_note = true;
+        assert!(
+            cell_text(&cell_title(&ctx)).contains('✎'),
+            "a workspace with a note must show the ✎ marker",
+        );
     }
 
     /// Title cell keeps a conventional-commit prefix inline rather than
@@ -1222,6 +1260,7 @@ mod tests {
             ascii_glyphs: false,
             auto_merge_armed: false,
             auto_fix_armed: false,
+            has_note: false,
         };
         assert_eq!(cell_title(&ctx).spans[0].content.as_ref(), "lonely");
     }
@@ -2021,6 +2060,7 @@ mod tests {
             ascii_glyphs: false,
             auto_merge_armed: false,
             auto_fix_armed: false,
+            has_note: false,
         };
         let columns = build_columns(4);
         let rows = vec![build_row(&ctx_task), build_row(&ctx_scratch)];

@@ -60,6 +60,50 @@ mod effects_tests {
         assert!(matches!(cmds[1], IpcCommand::Refresh));
     }
 
+    /// Note-editor submit persists the buffer as `SetWorkspaceNote`
+    /// against the pending workspace — no upstream side effects, no
+    /// Refresh (the note never leaves lazybox). Routing is by the modal
+    /// id on top, so the NoteEditor branch must win over the Reply path
+    /// even when both pending stashes happen to be set.
+    #[test]
+    fn textarea_submitted_for_note_editor_returns_set_workspace_note() {
+        let mut m = build_model();
+        let key = SessionKey::from("github:o/r#1");
+        m.modal_stack.push(Id::NoteEditor);
+        m.pending_note = Some(key.clone());
+        let cmds = m.handle_textarea_submitted("check the migration path\n".into());
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IpcCommand::SetWorkspaceNote { session_key, note } => {
+                assert_eq!(session_key, &key);
+                // Trailing newline the textarea leaves is trimmed.
+                assert_eq!(note, "check the migration path");
+            }
+            other => panic!("expected SetWorkspaceNote, got {other:?}"),
+        }
+        assert!(m.pending_note.is_none());
+    }
+
+    /// An empty note-editor submission clears the note — it still emits
+    /// `SetWorkspaceNote` (with an empty string), unlike Reply which
+    /// short-circuits an empty body.
+    #[test]
+    fn textarea_submitted_for_note_editor_empty_clears_note() {
+        let mut m = build_model();
+        let key = SessionKey::from("github:o/r#1");
+        m.modal_stack.push(Id::NoteEditor);
+        m.pending_note = Some(key.clone());
+        let cmds = m.handle_textarea_submitted("   ".into());
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IpcCommand::SetWorkspaceNote { session_key, note } => {
+                assert_eq!(session_key, &key);
+                assert_eq!(note, "");
+            }
+            other => panic!("expected SetWorkspaceNote, got {other:?}"),
+        }
+    }
+
     /// Arm a sticky "✗ sync failed" banner for `source` the way a
     /// failed manual refresh (Shift-R) does, and assert it landed.
     /// Returns the model ready for the recovery half of each test.

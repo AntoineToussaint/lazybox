@@ -215,23 +215,19 @@ impl<T: TerminalAdapter> Model<T> {
             .unwrap_or_else(|| target.to_string());
         let mut cmds = Vec::new();
         match self.sidebar.broadcast_terminal(&target) {
-            Some((terminal_id, is_agent)) => {
-                self.deliver_prompt(terminal_id, is_agent, body, &mut cmds);
-                let suffix = if is_agent { "" } else { " (shell)" };
-                self.flash_info(format!(
-                    "handoff: {} → {target_name}{suffix}",
-                    draft.source_name
-                ));
+            Some((terminal_id, true)) => {
+                self.deliver_prompt(terminal_id, true, body, &mut cmds);
+                self.flash_info(format!("handoff: {} → {target_name}", draft.source_name));
             }
-            None => {
-                // The target's session ended in the seconds between
-                // picking it and submitting. Don't silently drop the
-                // composed brief — re-open the target picker seeded with
-                // it so the user can route it to a session that's still
-                // live (or Esc out). `mount_handoff_picker` nudges on its
-                // own if nothing else is running.
+            // The target's agent ended between picking it and submitting
+            // (its session is gone, or only a shell remains — and a brief
+            // is meant for an agent). Don't silently drop the composed
+            // work: re-open the picker seeded with it so the user can
+            // route it to another agent (or Esc out). `mount_handoff_picker`
+            // nudges on its own if no other agent is running.
+            _ => {
                 self.flash_info(format!(
-                    "{target_name}'s session ended — pick another target"
+                    "{target_name}'s agent session ended — pick another target"
                 ));
                 self.mount_handoff_picker(&draft.source, draft.source_name, body.to_string());
             }

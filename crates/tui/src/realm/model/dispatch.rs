@@ -1020,17 +1020,25 @@ impl<T: TerminalAdapter> Model<T> {
                 self.mount_broadcast_picker();
             }
             Action::SendToSession => {
-                // Source = the focused workspace's live agent terminal.
-                // `broadcast_terminal` prefers the agent over a shell and
-                // returns `is_agent`; a handoff only makes sense from an
-                // agent, so a shell-only or session-less workspace nudges
-                // instead of opening the picker.
+                // Source = the focused workspace's agent terminal, live or
+                // a kept exited pane (so a finished agent's final output is
+                // still capturable). A workspace with no agent slot at all
+                // — shell-only or session-less — nudges instead.
                 let Some(source_key) = self.sidebar.selected_workspace_key().cloned() else {
                     return cmds;
                 };
-                match self.sidebar.broadcast_terminal(&source_key) {
-                    Some((terminal_id, true)) => {
+                match self.terminals.agent_terminal_for(&source_key) {
+                    Some(terminal_id) => {
                         let seed = self.terminals.visible_text(terminal_id).unwrap_or_default();
+                        if seed.is_empty() {
+                            // Scrape came back blank (VT unreadable / grid
+                            // is only chrome). Proceed to the picker anyway
+                            // — the user composes the brief by hand — but
+                            // say so rather than opening a silent empty box.
+                            self.flash_info(
+                                "couldn't capture this agent's output — compose the brief yourself",
+                            );
+                        }
                         let source_name = self
                             .sidebar
                             .workspace_by_key(&source_key)
@@ -1038,7 +1046,7 @@ impl<T: TerminalAdapter> Model<T> {
                             .unwrap_or_else(|| source_key.to_string());
                         self.mount_handoff_picker(&source_key, source_name, seed);
                     }
-                    _ => {
+                    None => {
                         self.flash_info("no agent session here to hand off from");
                     }
                 }

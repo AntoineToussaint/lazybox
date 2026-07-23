@@ -1444,12 +1444,14 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     /// Mount the agent-to-agent handoff target picker (`x s`, issue
-    /// #431). Candidates are every OTHER workspace that has a running
-    /// session (agent or shell) — excluding the source, so a handoff
-    /// can't loop straight back to itself. The source name + the seed
-    /// captured from its agent screen are stashed in `pending_handoff`;
-    /// the pick funnels into the compose textarea (`mount_handoff_textarea`).
-    /// No eligible target → a footer nudge and nothing stashed.
+    /// #431). Candidates are every OTHER workspace running an agent —
+    /// excluding the source, so a handoff can't loop straight back to
+    /// itself, and excluding shell-only workspaces since the brief is
+    /// meant for another agent, not a shell prompt. The source name +
+    /// the seed captured from its agent screen are stashed in
+    /// `pending_handoff`; the pick funnels into the compose textarea
+    /// (`mount_handoff_textarea`). No eligible target → a footer nudge
+    /// and nothing stashed.
     pub(super) fn mount_handoff_picker(
         &mut self,
         source_key: &lazybox_core::SessionKey,
@@ -1469,11 +1471,12 @@ impl<T: TerminalAdapter> Model<T> {
                 .unwrap_or_else(|| ws.name.clone());
             items.push((key.clone(), label));
         }
-        // Only sessions we can actually deliver into — same resolver the
-        // broadcast fan-out uses to pick a workspace's live terminal.
-        items.retain(|(key, _)| self.sidebar.broadcast_terminal(key).is_some());
+        // Only workspaces whose deliverable terminal is an agent —
+        // `broadcast_terminal` returns `is_agent`, and the handoff brief
+        // is meant for another agent, not a shell.
+        items.retain(|(key, _)| matches!(self.sidebar.broadcast_terminal(key), Some((_, true))));
         if items.is_empty() {
-            self.flash_info("no other running session to hand off to");
+            self.flash_info("no other running agent to hand off to");
             return;
         }
         let labels: Vec<String> = items.iter().map(|(_, l)| l.clone()).collect();

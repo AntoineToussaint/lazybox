@@ -2049,7 +2049,7 @@ snippets:
         assert!(m.pending_handoff.is_none());
         let notice = m.status.notice.as_ref().expect("nudge notice");
         assert!(
-            notice.message.contains("no other running session"),
+            notice.message.contains("no other running agent"),
             "nudge explains why: {}",
             notice.message,
         );
@@ -2076,10 +2076,11 @@ snippets:
         );
     }
 
-    /// A handoff into a shell target gets the encoded direct write, not
-    /// the agent inject path — same split as the broadcast fan-out.
+    /// A shell-only workspace is NOT offered as a handoff target — the
+    /// brief is meant for another agent, not a shell prompt. With a
+    /// shell as the only other session, the picker refuses to mount.
     #[test]
-    fn send_to_session_shell_target_writes_encoded_bytes() {
+    fn send_to_session_excludes_shell_targets() {
         use lazybox_tui_core::action::Action;
         let (mut m, keys) = model_with_broadcast_targets(&[
             Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
@@ -2087,18 +2088,40 @@ snippets:
         ]);
         assert!(m.sidebar.focus_workspace_key(&keys[0]));
         m.dispatch_action(&Action::SendToSession);
-        m.handle_choice_picked(vec![0]);
-        let cmds = m.handle_textarea_submitted("cargo test".into());
-        match cmds.as_slice() {
-            [IpcCommand::Write { terminal_id, bytes }] => {
-                assert_eq!(terminal_id.0, 2);
-                assert_eq!(
-                    bytes,
-                    &super::super::inputs::encode_snippet_for_pty("cargo test")
-                );
-            }
-            other => panic!("shell target must get exactly one Write, got {other:?}"),
-        }
+        assert!(m.modal_stack.is_empty(), "a shell isn't a handoff target");
+        assert!(m.pending_handoff.is_none());
+        let notice = m.status.notice.as_ref().expect("nudge notice");
+        assert!(
+            notice.message.contains("no other running agent"),
+            "nudge names the reason: {}",
+            notice.message,
+        );
+    }
+
+    /// When the source scrape comes back empty (here: a freshly-spawned
+    /// agent with no rendered output yet), the flow flags it rather than
+    /// opening a silent empty composer — but still proceeds to the picker
+    /// so the user can compose the brief by hand.
+    #[test]
+    fn send_to_session_flags_an_empty_capture_but_still_opens_the_picker() {
+        use lazybox_tui_core::action::Action;
+        let (mut m, keys) = model_with_broadcast_targets(&[
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+            Some(lazybox_ipc::TerminalKind::Agent("codex".into())),
+        ]);
+        assert!(m.sidebar.focus_workspace_key(&keys[0]));
+        m.dispatch_action(&Action::SendToSession);
+        let notice = m.status.notice.as_ref().expect("notice");
+        assert!(
+            notice.message.contains("couldn't capture"),
+            "empty scrape is surfaced: {}",
+            notice.message,
+        );
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::HandoffTarget),
+            "the flow still proceeds to the picker",
+        );
     }
 
     /// Clearing the seed and submitting an empty body cancels the

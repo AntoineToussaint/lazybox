@@ -59,7 +59,19 @@ impl CredentialChain {
     }
 
     /// Try each provider in order. Returns the first successful credential.
+    ///
+    /// When every provider declines, the chain reports *why*: a
+    /// [`CredentialError::NotFound`] is mere absence (nothing configured) and
+    /// must not mask a real failure, but any other error means a provider
+    /// ran and failed — a locked keyring, a network blip, an expired
+    /// token — so the most recent such failure is surfaced instead of a bare
+    /// [`CredentialError::Exhausted`]. Collapsing every cause into `Exhausted`
+    /// made a 2-second `gh auth token` hiccup indistinguishable from an
+    /// unconfigured user, turning a transient error into a permanent-looking
+    /// auth failure. Only a chain where *no* provider even ran (all absent)
+    /// stays `Exhausted`.
     pub async fn resolve(&self, scope: &str) -> Result<Credential, CredentialError> {
+        let mut last_failure: Option<CredentialError> = None;
         for provider in &self.providers {
             trace!(
                 provider = provider.name(),
@@ -77,11 +89,14 @@ impl CredentialChain {
                 }
                 Err(e) => {
                     trace!(provider = provider.name(), error = %e, "provider skipped");
+                    if !matches!(e, CredentialError::NotFound(_)) {
+                        last_failure = Some(e);
+                    }
                     continue;
                 }
             }
         }
-        Err(CredentialError::Exhausted)
+        Err(last_failure.unwrap_or(CredentialError::Exhausted))
     }
 
     /// Number of providers in the chain.
@@ -97,5 +112,86 @@ impl CredentialChain {
 impl Default for CredentialChain {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A provider that always fails with a preset error — lets the chain
+    /// tests assert which cause survives to the exhausted result.
+    struct Failing {
+        name: &'static str,
+        err: fn() -> CredentialError,
+    }
+
+    impl CredentialProvider for Failing {
+        fn name(&self) -> &str {
+            self.name
+        }
+        async fn resolve(&self, _scope: &str) -> Result<Credential, CredentialError> {
+            Err((self.err)())
+        }
+    }
+
+    fn not_found() -> CredentialError {
+        CredentialError::NotFound("nothing here".into())
+    }
+    fn provider_err() -> CredentialError {
+        CredentialError::Provider("gh auth token: keyring locked".into())
+    }
+
+    #[tokio::test]
+    async fn all_absent_reports_exhausted() {
+        let chain = CredentialChain::new()
+            .with(Failing {
+                name: "env",
+                err: not_found,
+            })
+            .with(Failing {
+                name: "cmd",
+                err: not_found,
+            });
+        assert!(matches!(
+            chain.resolve("github").await,
+            Err(CredentialError::Exhausted)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_real_provider_failure_is_surfaced_not_masked() {
+        // A transient `gh auth token` failure must not read as "nothing
+        // configured" (Exhausted) — the specific cause survives.
+        let chain = CredentialChain::new()
+            .with(Failing {
+                name: "env",
+                err: not_found,
+            })
+            .with(Failing {
+                name: "cmd",
+                err: provider_err,
+            });
+        match chain.resolve("github").await {
+            Err(CredentialError::Provider(msg)) => assert!(msg.contains("keyring locked")),
+            other => panic!("expected the provider failure, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_later_absence_does_not_overwrite_an_earlier_failure() {
+        let chain = CredentialChain::new()
+            .with(Failing {
+                name: "cmd",
+                err: provider_err,
+            })
+            .with(Failing {
+                name: "env",
+                err: not_found,
+            });
+        assert!(matches!(
+            chain.resolve("github").await,
+            Err(CredentialError::Provider(_))
+        ));
     }
 }

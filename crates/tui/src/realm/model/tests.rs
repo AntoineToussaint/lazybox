@@ -7026,6 +7026,38 @@ mod workspace_focus_memory_tests {
         );
     }
 
+    /// Companion to #441: double-clicking a workspace with no live
+    /// terminal but a visible activity pane falls back to opening that
+    /// pane rather than stranding focus in an empty terminal slot.
+    #[test]
+    fn double_click_without_a_terminal_opens_the_activity_pane() {
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers as TuiMods};
+
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![empty_ws("github:o/r#1")],
+            terminals: vec![],
+            projects: vec![],
+        });
+        let a = key_of("github:o/r#1");
+        // No terminal spawned; force the (otherwise auto-hidden)
+        // activity pane visible so the fallback has somewhere to land.
+        m.dispatch_key(KeyEvent::new(Key::Char('P'), TuiMods::SHIFT));
+        assert!(m.activity_pane_visible());
+
+        let area = Rect::new(0, 0, 120, 40);
+        let (sidebar_rect, _, _) = m.effective_pane_rects(area);
+        let row_a = row_of(&mut m, sidebar_rect, &a);
+
+        m.dispatch_mouse_in(left_down(sidebar_rect.x + 1, row_a), area);
+        m.dispatch_mouse_in(left_down(sidebar_rect.x + 1, row_a), area);
+        assert_eq!(
+            m.focus(),
+            PaneFocus::Right,
+            "with no terminal the double-click opens the activity pane",
+        );
+    }
+
     /// Regression for #268: a wheel event over the sidebar scrolls the
     /// list instead of being swallowed. Before the fix the
     /// `ScrollUp/ScrollDown` router only handled the activity pane and

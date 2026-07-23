@@ -1616,22 +1616,12 @@ impl Sidebar {
     /// row badge. Agent letters are declared by the agent itself
     /// ([`lazybox_agents::Agent::badge`]) — `claude` → `C`, `codex` →
     /// `X`, `cursor` → `U` — so identity lives in one place and a new
-    /// agent can't silently collide (#440). An id the built-in registry
-    /// doesn't know (a YAML `GenericCli`) falls back to the same
-    /// first-char rule the trait default uses. Non-agent kinds:
-    /// `shell` → `S`, log tail → `L`.
+    /// agent can't silently collide (#440). Resolution (registered badge
+    /// or first-char fallback) belongs to the registry, not here.
+    /// Non-agent kinds: `shell` → `S`, log tail → `L`.
     fn badge_letter(&self, kind: &TerminalKind) -> char {
         match kind {
-            TerminalKind::Agent(id) => self
-                .agent_registry
-                .get(id)
-                .map(|a| a.badge())
-                .unwrap_or_else(|| {
-                    id.chars()
-                        .next()
-                        .map(|c| c.to_ascii_uppercase())
-                        .unwrap_or('A')
-                }),
+            TerminalKind::Agent(id) => self.agent_registry.badge_for(id),
             TerminalKind::Shell => 'S',
             TerminalKind::LogTail { .. } => 'L',
         }

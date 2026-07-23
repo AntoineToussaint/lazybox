@@ -120,6 +120,17 @@ impl AgentObservation {
     }
 }
 
+/// The generic badge rule for an agent id: its first char, uppercased
+/// (`'A'` for the degenerate empty id). The single source of the
+/// fallback — [`Agent::badge`]'s default and [`Registry::badge_for`]'s
+/// unknown-id path both defer here so the rule never drifts.
+pub fn default_badge(id: &str) -> char {
+    id.chars()
+        .next()
+        .map(|c| c.to_ascii_uppercase())
+        .unwrap_or('A')
+}
+
 pub trait Agent: Send + Sync {
     /// Stable id used in config and IPC (`"claude"`, `"codex"`, etc.).
     fn id(&self) -> &'static str;
@@ -133,14 +144,10 @@ pub trait Agent: Send + Sync {
     /// special-cases a kind, and a new agent can pick a letter that
     /// doesn't collide instead of silently sharing the first char of a
     /// name that's already taken (Codex vs Claude, both `C`). The
-    /// default derives the first char of [`Agent::id`] — fine for a
+    /// default is [`default_badge`] over [`Agent::id`] — fine for a
     /// unique leading letter, overridden when it would collide.
     fn badge(&self) -> char {
-        self.id()
-            .chars()
-            .next()
-            .map(|c| c.to_ascii_uppercase())
-            .unwrap_or('A')
+        default_badge(self.id())
     }
 
     /// Which upstream LLM API this agent speaks. Drives base-URL env
@@ -388,6 +395,16 @@ impl Registry {
 
     pub fn get(&self, id: &str) -> Option<Arc<dyn Agent>> {
         self.agents.get(id).cloned()
+    }
+
+    /// Display badge for an agent id: the registered agent's declared
+    /// [`Agent::badge`], or [`default_badge`] for an id this registry
+    /// doesn't know (a YAML `GenericCli`). Lets a consumer resolve a
+    /// badge from a bare id string without reaching for the fallback
+    /// itself.
+    pub fn badge_for(&self, id: &str) -> char {
+        self.get(id)
+            .map_or_else(|| default_badge(id), |a| a.badge())
     }
 
     pub fn ids(&self) -> impl Iterator<Item = &&'static str> {
@@ -788,6 +805,17 @@ mod tests {
             asking_patterns: vec![],
         };
         assert_eq!(agent.badge(), 'A');
+    }
+
+    #[test]
+    fn registry_badge_for_resolves_known_ids_and_falls_back_otherwise() {
+        let reg = super::Registry::default_builtins();
+        assert_eq!(reg.badge_for("codex"), 'X', "known id → declared badge");
+        assert_eq!(reg.badge_for("cursor-agent"), 'U');
+        // Unknown id (a YAML GenericCli the built-in registry never saw)
+        // falls back to the same first-char rule the trait default uses.
+        assert_eq!(reg.badge_for("aider"), 'A');
+        assert_eq!(reg.badge_for(""), 'A', "empty id degenerates to 'A'");
     }
 
     #[test]

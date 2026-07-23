@@ -4573,6 +4573,7 @@ fn issue_id_to_workspace_key(issue_id: &lazybox_core::TaskId) -> WorkspaceKey {
         recent_activity: vec![],
         additions: 0,
         deletions: 0,
+        kind: None,
         closes_issues: vec![],
     };
     WorkspaceKey::new(lazybox_core::workspace_key_for(&stub))
@@ -5441,6 +5442,7 @@ mod workspace_lock_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         }
     }
@@ -5661,6 +5663,7 @@ mod merge_detection_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         }
     }
@@ -5821,6 +5824,7 @@ mod rescope_collapse_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: closes,
         }
     }
@@ -6550,6 +6554,7 @@ mod tick_noop_skip_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         }
     }

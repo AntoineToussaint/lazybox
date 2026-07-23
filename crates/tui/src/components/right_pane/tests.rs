@@ -739,6 +739,7 @@ mod has_visible_content_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         }
     }
@@ -830,6 +831,7 @@ mod summary_render_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         }
     }
@@ -948,6 +950,7 @@ mod mark_workspace_merged_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         }
     }
@@ -1037,6 +1040,7 @@ mod description_expand_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         }
     }
@@ -1294,6 +1298,7 @@ mod linked_issue_modal_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         }
     }

@@ -2552,6 +2552,7 @@ fn collapse_task(key: &str, url: &str, closes: Vec<lazybox_core::TaskId>) -> laz
         recent_activity: vec![],
         additions: 0,
         deletions: 0,
+        kind: None,
         closes_issues: closes,
     }
 }

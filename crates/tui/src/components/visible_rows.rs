@@ -326,6 +326,7 @@ mod tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         };
         let mut ws = Workspace::from_task(task, fixed_time());

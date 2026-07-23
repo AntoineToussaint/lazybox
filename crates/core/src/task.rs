@@ -41,6 +41,19 @@ pub enum TaskState {
     Draft,
 }
 
+/// Whether a task is a pull/merge request or an issue/ticket. Set by
+/// the provider at construction — the provider always knows which kind
+/// of object it fetched — so classification never has to reverse-engineer
+/// it from the URL shape. See [`Task::is_pr`] for how this authoritative
+/// field supersedes the legacy URL heuristic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TaskKind {
+    /// A pull request / merge request (GitHub PR, GitLab MR, …).
+    Pr,
+    /// An issue / ticket (GitHub issue, Linear ticket, Slack thread, …).
+    Issue,
+}
+
 /// A label/tag on a task. Mostly transparent to lazybox — providers
 /// give us the name + color (hex like `"d73a4a"` for GitHub) and
 /// the sidebar renders the name with the color as foreground. Color
@@ -310,6 +323,12 @@ pub struct Task {
     /// see two rows for the same work.
     #[serde(default)]
     pub closes_issues: Vec<TaskId>,
+    /// Authoritative PR-vs-issue discriminator, set by the provider that
+    /// built this task. `None` only for legacy persisted snapshots that
+    /// predate the field; [`Task::is_pr`] falls back to the URL heuristic
+    /// in that case. Prefer this over any URL sniffing.
+    #[serde(default)]
+    pub kind: Option<TaskKind>,
 }
 
 impl Task {
@@ -324,11 +343,24 @@ impl Task {
     ///
     /// Linear has no PR concept — its tasks always return false
     /// here; classification routes them to the linear-issue slot.
+    ///
+    /// Resolution order:
+    /// - The provider-set [`Task::kind`] is authoritative when present —
+    ///   an empty/API PR URL no longer misclassifies as an issue, and an
+    ///   issue whose body URL happens to contain `/pull/` stays an issue.
+    /// - Only when `kind` is `None` (a legacy snapshot persisted before
+    ///   the field existed) do we fall back to the URL-shape heuristic.
     pub fn is_pr(&self) -> bool {
-        let url = self.url.as_str();
-        url.contains("/pull/")
-            || url.contains("/pull-requests/")
-            || url.contains("/merge_requests/")
+        match self.kind {
+            Some(TaskKind::Pr) => true,
+            Some(TaskKind::Issue) => false,
+            None => {
+                let url = self.url.as_str();
+                url.contains("/pull/")
+                    || url.contains("/pull-requests/")
+                    || url.contains("/merge_requests/")
+            }
+        }
     }
 
     /// When this task was opened, for age/staleness purposes. Uses the
@@ -553,6 +585,7 @@ mod status_tag_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         }
     }
@@ -776,6 +809,61 @@ mod status_tag_tests {
     }
 
     #[test]
+    fn typed_kind_overrides_url_heuristic() {
+        // The authoritative provider-set `kind` must win over the URL
+        // shape in BOTH directions — this is the whole point of #512.
+
+        // An empty/API URL that the heuristic would read as "not a PR"
+        // is still a PR when the provider said so. Previously this PR
+        // silently classified as an issue and was never auto-fixed.
+        let mut pr = base();
+        pr.url = String::new();
+        pr.kind = Some(TaskKind::Pr);
+        assert!(pr.is_pr(), "typed Pr wins over an empty/API URL");
+
+        // An issue whose body-derived URL happens to contain `/pull/`
+        // stays an issue when the provider said Issue.
+        let mut issue = base();
+        issue.url = "https://github.com/o/r/pull/42".into();
+        issue.kind = Some(TaskKind::Issue);
+        assert!(!issue.is_pr(), "typed Issue wins over a /pull/ URL");
+    }
+
+    #[test]
+    fn missing_kind_falls_back_to_url_heuristic() {
+        // Legacy persisted snapshots (serialized before the field
+        // existed) deserialize `kind == None` and must keep classifying
+        // via the URL shape.
+        let mut t = base();
+        assert!(t.kind.is_none(), "the test base carries no typed kind");
+        t.url = "https://github.com/o/r/pull/42".into();
+        assert!(t.is_pr(), "None kind falls back to the URL heuristic (PR)");
+        t.url = "https://github.com/o/r/issues/42".into();
+        assert!(
+            !t.is_pr(),
+            "None kind falls back to the URL heuristic (issue)"
+        );
+    }
+
+    #[test]
+    fn kind_defaults_to_none_on_legacy_json() {
+        // A snapshot persisted before `kind` existed omits the field;
+        // `#[serde(default)]` must read it back as `None` so the URL
+        // fallback stays in force rather than erroring.
+        let json = r#"{
+            "id": {"source": "github", "key": "o/r#1"},
+            "title": "t", "body": null, "state": "Open", "role": "Author",
+            "ci": "None", "review": "None", "checks": [], "unread_count": 0,
+            "url": "https://github.com/o/r/pull/1", "repo": "o/r",
+            "branch": "b", "updated_at": "2026-01-01T00:00:00Z",
+            "needs_reply": false, "last_commenter": null
+        }"#;
+        let t: Task = serde_json::from_str(json).unwrap();
+        assert_eq!(t.kind, None);
+        assert!(t.is_pr(), "legacy PR snapshot still classifies via URL");
+    }
+
+    #[test]
     fn label_deserializes_old_string_shape() {
         // Pre-color persisted state stored labels as bare strings.
         // The custom Deserialize must keep accepting that shape so a
@@ -806,6 +894,15 @@ mod status_tag_tests {
 
     #[test]
     fn label_round_trips_through_non_self_describing_bincode() {
+        // #512 drift guard: `Label` serializes through its derived impl
+        // but decodes through the hand-mirrored `BinaryLabel` in the
+        // custom `Deserialize`. Adding or reordering a `Label` field
+        // without updating `BinaryLabel` would shear the wire decode.
+        // This round-trip catches that: the derived encoder writes N
+        // fields, the mirror reads its own field list, and the
+        // `consumed == encoded.len()` assertion fails the build the
+        // moment the two shapes diverge (a stray trailing field is left
+        // unconsumed; a missing one under-reads).
         let label = Label::with_color("bug", "d73a4a");
         let config = bincode::config::legacy();
         let encoded = bincode::serde::encode_to_vec(&label, config).unwrap();
@@ -813,6 +910,11 @@ mod status_tag_tests {
             bincode::serde::decode_from_slice(&encoded, config).unwrap();
 
         assert_eq!(decoded, label);
-        assert_eq!(consumed, encoded.len());
+        assert_eq!(
+            consumed,
+            encoded.len(),
+            "every encoded Label byte must be consumed — a mismatch \
+             means Label and BinaryLabel field shapes have drifted",
+        );
     }
 }

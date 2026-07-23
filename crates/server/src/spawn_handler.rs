@@ -7990,6 +7990,7 @@ mod tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         }
     }

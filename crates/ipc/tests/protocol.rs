@@ -337,6 +337,9 @@ fn all_commands() -> Vec<Command> {
         Command::FetchPrDetails {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
         },
+        Command::SyncWorkspace {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+        },
         Command::KeepMergedWorkspace { session_key: key },
         Command::FetchScrollback {
             terminal_id: TerminalId(12),
@@ -782,6 +785,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::ImportLocalCheckout { .. } => "ImportLocalCheckout",
         Command::DeleteOrphanedWorktree { .. } => "DeleteOrphanedWorktree",
         Command::FetchPrDetails { .. } => "FetchPrDetails",
+        Command::SyncWorkspace { .. } => "SyncWorkspace",
         Command::StartAgentRun { .. } => "StartAgentRun",
         Command::SendAgentInput { .. } => "SendAgentInput",
         Command::InterruptAgentRun { .. } => "InterruptAgentRun",
@@ -873,7 +877,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        59,
+        60,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(

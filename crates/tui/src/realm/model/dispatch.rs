@@ -923,6 +923,23 @@ impl<T: TerminalAdapter> Model<T> {
                     }
                 }
             }
+            Action::SyncWorkspace => {
+                // Targeted re-poll of just this workspace's PR / issue —
+                // cheaper than the global refresh when you're waiting on
+                // one PR's CI. The daemon deep-fetches the entity and
+                // upserts it, so the row's state + read markers update
+                // without a full sweep.
+                let Some(ws) = self.sidebar.selected_workspace() else {
+                    return cmds;
+                };
+                if ws.pr.is_none() && ws.gh_issues.is_empty() {
+                    self.flash_info("nothing to sync on this workspace");
+                    return cmds;
+                }
+                let workspace_key = ws.key.clone();
+                cmds.push(IpcCommand::SyncWorkspace { workspace_key });
+                self.flash_hint("syncing…");
+            }
             Action::CyclePane => {
                 // The keyboard path normally consumes the chord in
                 // `handle_pane_key`'s guard arm (which owns the

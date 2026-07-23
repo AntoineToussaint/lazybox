@@ -706,8 +706,13 @@ fn classify(task: &Task) -> TaskSlot {
     TaskSlot::Unknown
 }
 
-fn upsert_by_id(list: &mut Vec<Task>, task: Task) {
+fn upsert_by_id(list: &mut Vec<Task>, mut task: Task) {
     if let Some(slot) = list.iter_mut().find(|t| t.id == task.id) {
+        // Same #512 guard as `preserve_lazy_pr_fields`: never let an
+        // untyped re-poll clobber a stored typed `kind`.
+        if task.kind.is_none() {
+            task.kind = slot.kind;
+        }
         *slot = task;
     } else {
         list.push(task);
@@ -752,6 +757,13 @@ fn preserve_lazy_pr_fields(mut incoming: Task, existing: &Task) -> Task {
     {
         incoming.mergeable = existing.mergeable;
         incoming.is_behind_base = existing.is_behind_base;
+    }
+    // Once a provider has typed this task's kind, a later poll that
+    // arrives untyped (`None`) must not erase it — that would revive
+    // the URL-heuristic ambiguity #512 removed. Incoming still wins
+    // whenever it carries its own typed kind.
+    if incoming.kind.is_none() {
+        incoming.kind = existing.kind;
     }
     incoming
 }
@@ -1454,6 +1466,50 @@ mod tests {
             ws.pr.as_ref().unwrap().id.key,
             "o/r#2",
             "second PR replaces first"
+        );
+    }
+
+    /// Regression (#512): once a provider has typed a task's `kind`, an
+    /// untyped re-poll (`kind: None`) must NOT clobber it back to `None`
+    /// — that would revive the URL-heuristic ambiguity this PR removed.
+    /// Covers both merge paths: PRs through `preserve_lazy_pr_fields`,
+    /// issues through `upsert_by_id`. A re-poll carrying its own typed
+    /// kind still wins.
+    #[test]
+    fn attach_preserves_typed_kind_against_untyped_repoll() {
+        // PR slot: first poll typed, second poll untyped.
+        let mut first = pr("o/r#1");
+        first.kind = Some(crate::TaskKind::Pr);
+        let mut ws = Workspace::from_task(first, now());
+        let mut untyped = pr("o/r#1");
+        untyped.url = String::new();
+        untyped.kind = None;
+        ws.attach_task(untyped);
+        assert_eq!(
+            ws.pr.as_ref().unwrap().kind,
+            Some(crate::TaskKind::Pr),
+            "untyped re-poll must not erase the stored PR kind",
+        );
+        assert!(ws.pr.is_some(), "PR stays in the PR slot across the merge");
+
+        // A re-poll that IS typed still wins (here: same Pr, but proves
+        // incoming typing is honored rather than blindly kept).
+        let mut retyped = pr("o/r#1");
+        retyped.kind = Some(crate::TaskKind::Pr);
+        ws.attach_task(retyped);
+        assert_eq!(ws.pr.as_ref().unwrap().kind, Some(crate::TaskKind::Pr));
+
+        // Issue slot (upsert_by_id): first typed, second untyped.
+        let mut first_issue = issue("github", "o/r#9");
+        first_issue.kind = Some(crate::TaskKind::Issue);
+        let mut ws = Workspace::from_task(first_issue, now());
+        let mut untyped_issue = issue("github", "o/r#9");
+        untyped_issue.kind = None;
+        ws.attach_task(untyped_issue);
+        assert_eq!(
+            ws.gh_issues[0].kind,
+            Some(crate::TaskKind::Issue),
+            "untyped re-poll must not erase the stored issue kind",
         );
     }
 

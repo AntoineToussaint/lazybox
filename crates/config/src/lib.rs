@@ -711,6 +711,14 @@ pub struct AgentSection {
     /// Unset → 15; `0` disables the watchdog.
     #[serde(default)]
     pub working_watchdog_secs: Option<u64>,
+    /// Quiet-timer window: seconds of no PTY output a `Working` agent
+    /// terminal must go silent before the daemon classifies the resting
+    /// screen and settles the turn to `Done` (the generic, every-agent
+    /// path to `Done` — no lifecycle hook required). Unset or `0` → 5.
+    /// The timer can't be disabled (that would strand hookless agents on
+    /// `Working`); raise it to be less eager to call a turn finished.
+    #[serde(default)]
+    pub quiet_classify_secs: Option<u64>,
 }
 
 impl Default for AgentSection {
@@ -721,6 +729,7 @@ impl Default for AgentSection {
             skip_permissions: false,
             llm_gateway_url: None,
             working_watchdog_secs: None,
+            quiet_classify_secs: None,
         }
     }
 }

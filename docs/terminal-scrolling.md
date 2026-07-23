@@ -148,6 +148,9 @@ notice to close and reopen that terminal. The session stays attached until the
 user chooses to restart it, so an upgrade never kills in-flight agent work.
 Persisted generations newer than the running daemon are treated as compatible,
 so temporarily downgrading lazybox does not falsely condemn a newer session.
+The notice is derived from the exact terminal snapshot sent on subscribe and
+stays outside provider polling, so concurrent teardown cannot produce a stale
+warning or turn terminal lifecycle state into a provider-sync failure.
 
 ## The regression harness
 

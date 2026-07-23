@@ -3548,6 +3548,7 @@ async fn spawn_losing_to_merge_cannot_recreate_the_deleted_source() {
             false,
             false,
             None,
+            false,
         )
         .await;
     });

@@ -487,6 +487,36 @@ impl PaneFocus {
     }
 }
 
+/// An in-progress lazybox-side drag-selection in the terminal pane.
+///
+/// Endpoints are stored in **screen-absolute grid coordinates**
+/// (`(col, screen_row)` where `screen_row` counts from the top of the
+/// scrollback), not on-screen crossterm cells — so they stay pinned to
+/// their content while the viewport auto-scrolls under an edge drag
+/// (#432). The visible portion is projected back to crossterm cells at
+/// paint time; the whole span (including rows scrolled off-screen) is
+/// extracted from libghostty on release.
+#[derive(Debug, Clone, Copy)]
+struct TerminalDrag {
+    /// Crossterm cell of the initial mouse-down. A press-release with no
+    /// intervening cell change is a plain click, forwarded to a
+    /// mouse-tracking inner program from this position.
+    down: (u16, u16),
+    /// Screen-absolute grid anchor, fixed for the drag's lifetime.
+    anchor: (u16, u32),
+    /// Screen-absolute grid focus, re-derived on every drag + auto-scroll.
+    focus: (u16, u32),
+    /// The terminal pane rect this drag started in, cached so the idle
+    /// tick can keep auto-scrolling while the pointer is held at an edge.
+    rect: Rect,
+    /// Last crossterm pointer cell — the idle-tick auto-scroll re-reads
+    /// it to decide whether we are still parked against an edge.
+    pointer: (u16, u16),
+    /// Set once the pointer left the mouse-down cell: distinguishes a
+    /// real selection from a plain click.
+    dragged: bool,
+}
+
 /// Top-level application state.
 pub struct Model<T: TerminalAdapter> {
     pub app: Application<Id, Msg, UserEvent>,
@@ -626,13 +656,13 @@ pub struct Model<T: TerminalAdapter> {
     /// inside the terminal pane do lazybox-side text selection.
     #[allow(dead_code)] // accessed indirectly via the toggle handler
     mouse_capture_on: bool,
-    /// Active lazybox-side text selection in the terminal pane.
-    /// `(start_cell, end_cell)` in absolute viewport coords, set on
-    /// mouse Down inside the terminal rect (when the inner program
-    /// isn't tracking mouse itself) and extended on Drag. On Up the
-    /// selected cells are extracted from libghostty's grid and
-    /// copied to the host clipboard via OSC 52.
-    terminal_selection: Option<((u16, u16), (u16, u16))>,
+    /// Active lazybox-side drag-selection in the terminal pane. Set on
+    /// mouse Down inside the terminal rect and extended on Drag; while a
+    /// drag is parked against the top/bottom edge the idle tick
+    /// auto-scrolls the viewport and grows the selection across
+    /// scrollback (#432). On Up the whole span is extracted from
+    /// libghostty's grid and copied to the host clipboard via OSC 52.
+    terminal_drag: Option<TerminalDrag>,
     /// `]]` escape from the terminal pane: first press of the escape
     /// char arms; a second within the window arms the `]]` *leader*
     /// (see `terminal_leader_armed`) instead of forwarding to the PTY.
@@ -1206,7 +1236,7 @@ impl<T: TerminalAdapter> Model<T> {
             cmd_send_overloaded: std::cell::Cell::new(false),
             daemon_disconnect_notified: false,
             mouse_capture_on: true,
-            terminal_selection: None,
+            terminal_drag: None,
             preselect: None,
             layout: LayoutCtx::new(),
             pending_reply: None,
@@ -3398,8 +3428,14 @@ impl<T: TerminalAdapter> Model<T> {
             // matches what the user expects from a per-pane
             // selection (compare to the host terminal's native
             // selection, which crosses panes).
-            if let Some((start, end)) = self.terminal_selection {
-                paint_selection(f.buffer_mut(), right_bottom, start, end);
+            if let Some(drag) = self.terminal_drag.as_ref() {
+                let (anchor, focus) = (drag.anchor, drag.focus);
+                if let Some((start, end)) =
+                    self.terminals
+                        .selection_screen_span(right_bottom, anchor, focus)
+                {
+                    paint_selection(f.buffer_mut(), right_bottom, start, end);
+                }
             }
 
             // Footer: keymap + globals + polling status + notice.

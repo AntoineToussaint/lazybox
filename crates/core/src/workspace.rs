@@ -98,6 +98,27 @@ fn activity_key(a: &Activity) -> (String, String, DateTime<Utc>) {
     (a.author.clone(), a.body.clone(), a.created_at)
 }
 
+/// Durable state of the "this PR merged / issue closed — clean up the
+/// workspace?" prompt. Persisted on the workspace (issue #499) so the
+/// decision survives a daemon restart, unlike the old per-process pin.
+///
+/// The prompt itself is level-triggered off the primary task's terminal
+/// state (a merged PR or a closed issue) — this field only records the
+/// user's *answer*, so a "keep" doesn't have to be re-derived every
+/// launch. Removal deletes the whole row, so there's no "done" state to
+/// persist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanupPrompt {
+    /// No answer recorded. While the primary task sits in a terminal
+    /// state, the removal sweep keeps offering cleanup.
+    #[default]
+    Unresolved,
+    /// The user answered "keep". Never prompt again for this
+    /// workspace, across restarts.
+    Declined,
+}
+
 /// One workspace = one unit of work (PR + linked issues), holding
 /// **zero or more sessions**. A session is one folder worktree on
 /// disk; without sessions the workspace is purely a tracking row
@@ -185,6 +206,10 @@ pub struct Workspace {
     /// alongside [`Workspace::notes`]; never synced to any provider.
     #[serde(default)]
     pub sent_snippets: Vec<String>,
+    /// Durable answer to the merged/closed cleanup prompt (issue #499).
+    /// Serde-defaulted so pre-#499 records read back as `Unresolved`.
+    #[serde(default)]
+    pub cleanup_prompt: CleanupPrompt,
     pub created_at: DateTime<Utc>,
     pub last_viewed_at: Option<DateTime<Utc>>,
 }
@@ -213,6 +238,7 @@ impl Workspace {
             policies: crate::AutomationPolicies::default(),
             notes: String::new(),
             sent_snippets: Vec::new(),
+            cleanup_prompt: CleanupPrompt::default(),
             created_at: now,
             last_viewed_at: None,
         }

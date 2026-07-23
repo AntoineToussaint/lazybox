@@ -499,22 +499,9 @@ impl WorktreeManager {
         // From a blobless clone, `worktree add` downloads the checked-
         // out tree's blobs on demand — a real network transfer, so it
         // gets the auth env and the transfer-class timeout instead of
-        // the 30s in-repo cap.
-        run_git_transfer(
-            &bare_path,
-            &[
-                "worktree",
-                "add",
-                &wt_path.to_string_lossy(),
-                "-B",
-                branch,
-                &start_point,
-            ],
-            &auth,
-            None,
-        )
-        .await
-        .map_err(explain_promisor_failure)?;
+        // the 30s in-repo cap. Resilient to a nested agent worktree
+        // already holding the branch (issue #439).
+        add_worktree_resilient(&bare_path, wt_path, branch, &start_point, &auth).await?;
 
         // Record the upstream when we branched off the remote-tracking
         // ref. `git worktree add -B` doesn't set it, so without this
@@ -685,22 +672,10 @@ impl WorktreeManager {
         // mount fails, fixes config, presses `c` again, get "branch
         // already exists" and the spawn falls through to empty dir.
         // See `checkout_at`: blob download on demand from a blobless
-        // clone makes this a network transfer.
-        run_git_transfer(
-            &bare_path,
-            &[
-                "worktree",
-                "add",
-                "-B",
-                new_branch,
-                &wt_path.to_string_lossy(),
-                &start_point,
-            ],
-            &auth,
-            None,
-        )
-        .await
-        .map_err(explain_promisor_failure)?;
+        // clone makes this a network transfer, and a nested agent
+        // worktree already holding the branch is resolved rather than
+        // fatal (issue #439).
+        add_worktree_resilient(&bare_path, wt_path, new_branch, &start_point, &auth).await?;
 
         let name = wt_path
             .file_name()
@@ -1754,6 +1729,100 @@ fn is_transfer_progress(line: &str) -> bool {
     line.contains('%') || line.ends_with("done.")
 }
 
+/// Run `git worktree add -B <branch> <wt_path> <start_point>`,
+/// resolving a "branch already checked out in another worktree"
+/// collision instead of failing hard (issue #439).
+///
+/// A branch can be checked out in only one worktree at a time. Claude
+/// Code creates its own sub-agent worktrees under
+/// `<bare>.git/.claude/worktrees/agent-*`; because lazybox's bare clone
+/// is the git dir, those nested worktrees register against the same
+/// bare clone and can already hold the branch lazybox now wants.
+/// `git worktree add -B` then refuses with
+/// `fatal: '<branch>' is already used by worktree at '<path>'`.
+///
+/// Resolution ladder:
+/// 1. Any *other* failure propagates unchanged (reworded for the
+///    blobless-clone promisor case).
+/// 2. `git worktree prune` + retry — drops *stale* registrations whose
+///    directory is gone (a leftover lazybox worktree, a reaped agent
+///    run), the common recoverable case, without touching any live
+///    checkout.
+/// 3. If the holder is a worktree nested *inside* the bare clone (a
+///    Claude Code agent worktree — never one of lazybox's own, which
+///    live under `<base>/worktrees/`), attach here with `--force`.
+///    git overrides the "already checked out" refusal for the *add*,
+///    but separately refuses to force-*reset* a branch (`-B`) held by
+///    another worktree — so the force path drops `-B` and checks the
+///    branch out at its current tip. Both worktrees then share the
+///    branch; the abandoned agent worktree's files are left in place.
+/// 4. Otherwise the holder is another real checkout (e.g. a live
+///    lazybox session on the same branch); surface a clear, actionable
+///    error instead of silently stealing its branch.
+async fn add_worktree_resilient(
+    bare_path: &Path,
+    wt_path: &Path,
+    branch: &str,
+    start_point: &str,
+    auth: &[(String, String)],
+) -> Result<(), GitError> {
+    let wt = wt_path.to_string_lossy();
+    let wt: &str = &wt;
+    let plain: [&str; 6] = ["worktree", "add", "-B", branch, wt, start_point];
+    let forced: [&str; 5] = ["worktree", "add", "--force", wt, branch];
+
+    let err = match run_git_transfer(bare_path, &plain, auth, None).await {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
+    let Some(holder) = branch_already_checked_out_at(&err) else {
+        return Err(explain_promisor_failure(err));
+    };
+
+    let _ = run_git_in(bare_path, &["worktree", "prune"]).await;
+    if run_git_transfer(bare_path, &plain, auth, None)
+        .await
+        .is_ok()
+    {
+        return Ok(());
+    }
+
+    if canonical_or_self(&holder).starts_with(canonical_or_self(bare_path)) {
+        return run_git_transfer(bare_path, &forced, auth, None)
+            .await
+            .map_err(explain_promisor_failure);
+    }
+
+    Err(GitError::Command(format!(
+        "branch '{branch}' is already checked out at {} — refusing to take it \
+         from another live worktree; remove that worktree (or switch it to a \
+         different branch) and retry",
+        holder.display()
+    )))
+}
+
+/// Parse the holding worktree's path out of a failed `worktree add`
+/// where the branch is checked out elsewhere, returning `None` for any
+/// other failure (the caller then treats the error as fatal). git
+/// phrases this collision three ways across versions and add flags, all
+/// carrying the path in trailing single quotes: `'<b>' is already used
+/// by worktree at '<path>'` (modern `-B`) and `cannot force update the
+/// branch '<b>' used by worktree at '<path>'` (the branch-reset guard)
+/// both match `used by worktree at`; older gits say `'<b>' is already
+/// checked out at '<path>'`.
+fn branch_already_checked_out_at(err: &GitError) -> Option<PathBuf> {
+    let GitError::Command(msg) = err else {
+        return None;
+    };
+    let after_marker = ["used by worktree at", "is already checked out at"]
+        .into_iter()
+        .find_map(|m| msg.find(m).map(|i| i + m.len()))?;
+    let rest = &msg[after_marker..];
+    let start = rest.find('\'')? + 1;
+    let end = rest[start..].find('\'')? + start;
+    Some(PathBuf::from(rest[start..end].trim()))
+}
+
 /// A blobless clone materializes file contents through origin at
 /// checkout time, so `worktree add` can fail on a *network* problem
 /// even though every ref it needs is local. Reword git's opaque
@@ -2788,6 +2857,214 @@ mod health_probe_tests {
             validate_worktree_dir(&wt, &bare).await.unwrap(),
             WorktreeDirState::Reprovision,
             "a non-peelable tag must not wedge recovery of a pristine leftover"
+        );
+    }
+}
+
+#[cfg(test)]
+mod resilient_add_tests {
+    use super::*;
+
+    fn git(cwd: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-c")
+            .arg("user.email=test@example.com")
+            .arg("-c")
+            .arg("user.name=test")
+            .arg("-c")
+            .arg("commit.gpgsign=false")
+            .current_dir(cwd)
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .output()
+            .expect("git must be runnable in tests");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// `<tmp>/src` repo with one commit, cloned to `<tmp>/bare.git`.
+    fn local_bare_clone() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src = tmp.path().join("src");
+        std::fs::create_dir(&src).expect("mkdir src");
+        git(&src, &["init", "-q"]);
+        std::fs::write(src.join("f.txt"), "content\n").expect("write f.txt");
+        git(&src, &["add", "f.txt"]);
+        git(&src, &["commit", "-q", "-m", "init"]);
+        git(tmp.path(), &["clone", "-q", "--bare", "src", "bare.git"]);
+        let bare = tmp.path().join("bare.git");
+        (tmp, bare)
+    }
+
+    /// The parser pulls the holding worktree's path out of both the
+    /// modern and the older git refusal wording, and yields `None` for
+    /// unrelated failures.
+    #[test]
+    fn parses_the_holder_path() {
+        let modern = GitError::Command(
+            "Preparing worktree\nfatal: 'feat' is already used by worktree at \
+             '/repo.git/.claude/worktrees/agent-abc'\n"
+                .into(),
+        );
+        assert_eq!(
+            branch_already_checked_out_at(&modern),
+            Some(PathBuf::from("/repo.git/.claude/worktrees/agent-abc"))
+        );
+        let older = GitError::Command(
+            "fatal: 'feat' is already checked out at '/some/other/tree'\n".into(),
+        );
+        assert_eq!(
+            branch_already_checked_out_at(&older),
+            Some(PathBuf::from("/some/other/tree"))
+        );
+        // The branch-reset guard's distinct wording — note the branch
+        // name is itself quoted before the path, so the parser must
+        // anchor on the marker, not the first quote in the message.
+        let reset_guard = GitError::Command(
+            "Preparing worktree (resetting branch 'feat'; was at 6790fc7)\n\
+             fatal: cannot force update the branch 'feat' used by worktree at \
+             '/repo.git/.claude/worktrees/agent-abc'\n"
+                .into(),
+        );
+        assert_eq!(
+            branch_already_checked_out_at(&reset_guard),
+            Some(PathBuf::from("/repo.git/.claude/worktrees/agent-abc"))
+        );
+        let unrelated = GitError::Command("fatal: invalid reference: refs/heads/feat\n".into());
+        assert_eq!(branch_already_checked_out_at(&unrelated), None);
+    }
+
+    /// The headline #439 case: a nested Claude Code agent worktree
+    /// (living *inside* the bare clone) already holds the branch.
+    /// Provisioning must resolve it with `--force` — landing lazybox's
+    /// worktree on the branch — rather than failing hard, and it must
+    /// leave the agent worktree's files untouched.
+    #[tokio::test]
+    async fn nested_agent_worktree_holding_the_branch_is_forced_through() {
+        let (tmp, bare) = local_bare_clone();
+        let nested = bare.join(".claude").join("worktrees").join("agent-abc");
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                nested.to_str().unwrap(),
+                "-B",
+                "feat",
+                "HEAD",
+            ],
+        );
+        std::fs::write(nested.join("agent-work.txt"), "in progress").expect("write agent file");
+
+        let target = tmp.path().join("target");
+        add_worktree_resilient(&bare, &target, "feat", "HEAD", &[])
+            .await
+            .expect("nested agent collision must resolve, not fail");
+
+        assert!(target.join(".git").exists(), "target is a real worktree");
+        assert_eq!(
+            validate_worktree_dir(&target, &bare).await.unwrap(),
+            WorktreeDirState::Valid,
+            "the forced worktree checked out on the branch"
+        );
+        assert_eq!(
+            std::fs::read_to_string(nested.join("agent-work.txt")).expect("still readable"),
+            "in progress",
+            "the agent worktree's files are left in place"
+        );
+    }
+
+    /// A *stale* registration — a worktree whose directory is gone
+    /// (leftover lazybox worktree, reaped agent run) — is cleared by
+    /// the `prune` + retry step alone, without needing `--force`.
+    #[tokio::test]
+    async fn stale_registration_is_pruned_then_retried() {
+        let (tmp, bare) = local_bare_clone();
+        let ghost = tmp.path().join("ghost");
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                ghost.to_str().unwrap(),
+                "-B",
+                "feat",
+                "HEAD",
+            ],
+        );
+        // Drop the directory but leave git's registration behind.
+        std::fs::remove_dir_all(&ghost).expect("remove ghost dir");
+        assert!(
+            branch_already_checked_out_at(
+                &run_git_transfer(
+                    &bare,
+                    &[
+                        "worktree",
+                        "add",
+                        "-B",
+                        "feat",
+                        tmp.path().join("probe").to_str().unwrap(),
+                        "HEAD",
+                    ],
+                    &[],
+                    None,
+                )
+                .await
+                .expect_err("sanity: the stale registration still blocks a plain add")
+            )
+            .is_some(),
+            "sanity: git reports the branch as still checked out"
+        );
+
+        let target = tmp.path().join("target");
+        add_worktree_resilient(&bare, &target, "feat", "HEAD", &[])
+            .await
+            .expect("prune must clear the stale registration and let the retry win");
+        assert_eq!(
+            validate_worktree_dir(&target, &bare).await.unwrap(),
+            WorktreeDirState::Valid
+        );
+    }
+
+    /// A *live* worktree that is NOT nested inside the bare clone (e.g.
+    /// another lazybox session on the same branch) is not force-stolen:
+    /// the caller gets a clear, actionable error and the existing
+    /// worktree is left intact.
+    #[tokio::test]
+    async fn live_external_holder_degrades_with_a_clear_error() {
+        let (tmp, bare) = local_bare_clone();
+        let external = tmp.path().join("external");
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                external.to_str().unwrap(),
+                "-B",
+                "feat",
+                "HEAD",
+            ],
+        );
+
+        let target = tmp.path().join("target");
+        let err = add_worktree_resilient(&bare, &target, "feat", "HEAD", &[])
+            .await
+            .expect_err("a live external holder must not be silently stolen from");
+        let msg = err.to_string();
+        assert!(msg.contains("already checked out at"), "{msg}");
+        assert!(msg.contains("external"), "error names the holder: {msg}");
+        assert!(
+            external.join("f.txt").exists(),
+            "the existing worktree is untouched"
+        );
+        assert!(
+            !target.exists(),
+            "no half-provisioned target is left behind"
         );
     }
 }

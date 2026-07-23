@@ -414,6 +414,7 @@ pub(crate) struct BroadcastDraft {
 /// (`dispatch_handoff`) or dropped on Esc.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HandoffDraft {
+    pub(crate) source: lazybox_core::SessionKey,
     pub(crate) source_name: String,
     pub(crate) seed: String,
     pub(crate) target: Option<lazybox_core::SessionKey>,

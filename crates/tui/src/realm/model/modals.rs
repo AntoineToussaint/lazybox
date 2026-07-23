@@ -1466,6 +1466,7 @@ impl<T: TerminalAdapter> Model<T> {
         let labels: Vec<String> = items.iter().map(|(_, l)| l.clone()).collect();
         self.handoff_choices = items.into_iter().map(|(k, _)| k).collect();
         self.pending_handoff = Some(HandoffDraft {
+            source: source_key.clone(),
             source_name,
             seed,
             target: None,

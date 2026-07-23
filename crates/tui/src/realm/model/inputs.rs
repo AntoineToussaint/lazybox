@@ -222,9 +222,16 @@ impl<T: TerminalAdapter> Model<T> {
                 ));
             }
             None => {
+                // The target's session ended in the seconds between
+                // picking it and submitting. Don't silently drop the
+                // composed brief — re-open the target picker seeded with
+                // it so the user can route it to a session that's still
+                // live (or Esc out). `mount_handoff_picker` nudges on its
+                // own if nothing else is running.
                 self.flash_info(format!(
-                    "handoff failed — {target_name} has no running session"
+                    "{target_name}'s session ended — pick another target"
                 ));
+                self.mount_handoff_picker(&draft.source, draft.source_name, body.to_string());
             }
         }
         self.redraw = true;

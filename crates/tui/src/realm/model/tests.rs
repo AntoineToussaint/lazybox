@@ -2047,6 +2047,48 @@ snippets:
         assert!(notice.message.contains("cancelled"), "{}", notice.message);
     }
 
+    /// If the picked target's session ends between pick and submit, the
+    /// composed brief is NOT silently dropped: the picker re-opens seeded
+    /// with the edited body so it can be routed to a session that's still
+    /// live. Modeled by a draft whose target no longer has a session.
+    #[test]
+    fn send_to_session_dead_target_reopens_picker_preserving_brief() {
+        let (mut m, keys) = model_with_broadcast_targets(&[
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+            None,
+            Some(lazybox_ipc::TerminalKind::Agent("codex".into())),
+        ]);
+        // The user picked keys[1], but its session is gone by submit time.
+        m.pending_handoff = Some(HandoffDraft {
+            source: keys[0].clone(),
+            source_name: "planner".into(),
+            seed: "original brief".into(),
+            target: Some(keys[1].clone()),
+        });
+        m.modal_stack.push(Id::HandoffText);
+
+        let cmds = m.handle_textarea_submitted("refined brief".into());
+        assert!(
+            cmds.is_empty(),
+            "nothing delivered to a dead target: {cmds:?}"
+        );
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::HandoffTarget),
+            "the picker re-opens instead of dropping the work",
+        );
+        assert_eq!(
+            m.pending_handoff.as_ref().map(|d| d.seed.as_str()),
+            Some("refined brief"),
+            "the edited brief becomes the new seed — not lost",
+        );
+        assert_eq!(
+            m.handoff_choices,
+            vec![keys[2].clone()],
+            "only the still-live other session is offered (dead target + source excluded)",
+        );
+    }
+
     /// Esc anywhere in the handoff flow drops the stash so a later
     /// handoff starts clean.
     #[test]

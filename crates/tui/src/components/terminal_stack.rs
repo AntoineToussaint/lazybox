@@ -1670,6 +1670,30 @@ impl TerminalStack {
     /// line 2 to word Y on line 5" — they get EVERYTHING in
     /// between, not just the rectangular cells `[sx..ex] × [sy..ey]`
     /// which is what the previous version produced.
+    /// Append one grid cell's text to `line`: its graphemes, a single
+    /// space for an empty cell, or nothing for a wide-glyph spacer cell.
+    /// A wide glyph (CJK / emoji) occupies its base cell plus a
+    /// `SpacerTail`/`SpacerHead` cell that carries no graphemes; emitting
+    /// that spacer as a space turns "日本語" into "日 本 語", so it's
+    /// dropped. Shared by `extract_text` (selection copy) and
+    /// `visible_text` (handoff scrape) so the rule lives once.
+    fn append_cell_text(line: &mut String, cell: &vt::render::CellIteration<'_, '_>) {
+        if matches!(
+            cell.wide(),
+            Ok(vt::screen::CellWide::SpacerTail | vt::screen::CellWide::SpacerHead)
+        ) {
+            return;
+        }
+        let graphemes = cell.graphemes().unwrap_or_default();
+        if graphemes.is_empty() {
+            line.push(' ');
+        } else {
+            for g in graphemes {
+                line.push(g);
+            }
+        }
+    }
+
     pub fn extract_text(
         &mut self,
         rect: tuirealm::ratatui::layout::Rect,
@@ -1765,28 +1789,7 @@ impl TerminalStack {
                             break;
                         }
                         if x >= col_start {
-                            // The blank spacer cell of a wide glyph carries
-                            // no graphemes; emitting it as a space turns
-                            // "日本語" into "日 本 語". Skip it. `SpacerTail`
-                            // follows a wide glyph; `SpacerHead` pads the
-                            // end of a soft-wrapped row where a wide glyph
-                            // couldn't fit — both are non-text.
-                            if matches!(
-                                cell.wide(),
-                                Ok(vt::screen::CellWide::SpacerTail
-                                    | vt::screen::CellWide::SpacerHead)
-                            ) {
-                                x += 1;
-                                continue;
-                            }
-                            let graphemes = cell.graphemes().unwrap_or_default();
-                            if graphemes.is_empty() {
-                                line.push(' ');
-                            } else {
-                                for g in graphemes {
-                                    line.push(g);
-                                }
-                            }
+                            Self::append_cell_text(&mut line, cell);
                         }
                         x += 1;
                     }
@@ -1825,22 +1828,7 @@ impl TerminalStack {
             let mut line = String::new();
             if let Ok(mut cell_iter) = slot.vt.cell_iter.update(row) {
                 while let Some(cell) = cell_iter.next() {
-                    // Wide-glyph spacer cells carry no graphemes; emitting
-                    // them as spaces would split CJK text (see `extract_text`).
-                    if matches!(
-                        cell.wide(),
-                        Ok(vt::screen::CellWide::SpacerTail | vt::screen::CellWide::SpacerHead)
-                    ) {
-                        continue;
-                    }
-                    let graphemes = cell.graphemes().unwrap_or_default();
-                    if graphemes.is_empty() {
-                        line.push(' ');
-                    } else {
-                        for g in graphemes {
-                            line.push(g);
-                        }
-                    }
+                    Self::append_cell_text(&mut line, cell);
                 }
             }
             rows.push(line.trim_end().to_string());

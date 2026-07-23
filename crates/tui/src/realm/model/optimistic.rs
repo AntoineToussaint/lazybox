@@ -15,9 +15,10 @@
 //!
 //! Correlation rides existing events (no new IPC variant): chip edits
 //! match the daemon's `emit_err` source (`"reviewers"` / `"assignees"` /
-//! `"labels"`), and removals match `source == "store"` whose message
-//! names the removed key (the daemon embeds `workspace {key}` /
-//! `project {key}` in every delete-failure message).
+//! `"labels"`), and removals match a delete-failure `"store"` (archive /
+//! db) or `"terminal"` (a backing agent that couldn't be stopped, so the
+//! daemon preserves the workspace) error whose message names the removed
+//! key — the daemon embeds `workspace {key}` / `project {key}` in each.
 
 use super::Model;
 use tuirealm::terminal::TerminalAdapter;

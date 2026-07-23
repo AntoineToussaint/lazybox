@@ -11868,6 +11868,34 @@ mod optimistic_mutation_tests {
     }
 
     #[test]
+    fn archive_rolls_back_on_terminal_kill_failure() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#8");
+        let sk: SessionKey = (&ws_key).into();
+        m.dispatch_action_confirmed(
+            &Action::Archive,
+            &ActionConfirmTarget::Workspace(sk.clone()),
+        );
+        assert!(m.sidebar.workspace_by_key(&sk).is_none());
+
+        // The daemon couldn't stop a backing agent, so it preserved the
+        // workspace and emitted a `terminal` error naming the key.
+        m.handle_daemon_event(provider_error(
+            "terminal",
+            &format!(
+                "could not stop terminal x; workspace {ws_key} was not deleted: tmux timed out"
+            ),
+        ));
+        assert!(
+            m.sidebar.workspace_by_key(&sk).is_some(),
+            "an un-killable agent must bring the row back"
+        );
+        assert!(m.pending_mutations.is_empty());
+        let n = m.status.notice.as_ref().expect("rollback flashes");
+        assert!(n.message.contains("delete failed"), "got {:?}", n.message);
+    }
+
+    #[test]
     fn unrelated_store_error_does_not_roll_back() {
         let mut m = build_model();
         let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#9");

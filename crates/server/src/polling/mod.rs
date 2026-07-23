@@ -4967,11 +4967,49 @@ async fn delete_workspace_internal(
             .collect()
     };
 
-    // Archive + drop the store record, then broadcast `WorkspaceRemoved`
-    // BEFORE tearing down backing terminals — the row's disappearance
-    // must not wait on killing them (#476). Terminal teardown runs below,
-    // off the echo's critical path. The store ops are fast/local, so the
-    // echo lands promptly even when a workspace backs several terminals.
+    if !to_kill.is_empty() {
+        tracing::info!(
+            "delete_workspace {key}: killing {} backing terminal(s)",
+            to_kill.len()
+        );
+        for (tid, backend_key) in to_kill {
+            let Some(interaction) =
+                crate::terminal_io::acquire_live(config, tid, &backend_key).await
+            else {
+                // The output pump won teardown after `to_kill` was
+                // snapshotted. There is no live session left to signal.
+                continue;
+            };
+            if let Err(e) = config.backend.kill(&backend_key).await {
+                tracing::warn!("kill {backend_key}: {e}");
+                let _ = config.bus.send(Event::provider_error_retryable(
+                    "terminal",
+                    format!(
+                        "could not stop terminal {backend_key}; workspace {key} was not deleted: {e}"
+                    ),
+                ));
+                // Preserve the workspace and every live mapping so the user
+                // can retry. The backend contract deliberately keeps a slot
+                // after a transport/timeout failure; deleting our metadata
+                // here would orphan an agent we failed to stop. The client
+                // rolls back its optimistic row removal off this "terminal"
+                // error (#476).
+                config.deleted_workspaces.lock().remove(key_str);
+                return false;
+            }
+            drop(interaction);
+            // One lifecycle owner handles every map, persisted terminal key,
+            // AgentState::Exited, and TerminalExited. The output pump may
+            // observe the child first or later; the owner's atomic claim
+            // makes both orders idempotent and leaves backend release to the
+            // pump that observed the real exit.
+            crate::spawn_handler::detach_killed_terminal(config, tid, &backend_key).await;
+        }
+    }
+
+    // Record the archive only after every requested terminal kill succeeded.
+    // Otherwise a transient backend failure both keeps the workspace alive
+    // and blocks the next poll from repairing/re-presenting it.
     if archive && !archive_workspace_key(config, key_str) {
         let _ = config.bus.send(Event::provider_error_retryable(
             "store",
@@ -5000,42 +5038,6 @@ async fn delete_workspace_internal(
         return false;
     }
     let _ = config.bus.send(Event::WorkspaceRemoved(key.clone()));
-
-    // Terminal teardown, now non-gating. The row is already gone and the
-    // user asked to delete it, so a kill failure surfaces a retryable
-    // notice and moves on rather than resurrecting the workspace.
-    if !to_kill.is_empty() {
-        tracing::info!(
-            "delete_workspace {key}: killing {} backing terminal(s)",
-            to_kill.len()
-        );
-        for (tid, backend_key) in to_kill {
-            let Some(interaction) =
-                crate::terminal_io::acquire_live(config, tid, &backend_key).await
-            else {
-                // The output pump won teardown after `to_kill` was
-                // snapshotted. There is no live session left to signal.
-                continue;
-            };
-            if let Err(e) = config.backend.kill(&backend_key).await {
-                tracing::warn!("kill {backend_key}: {e}");
-                let _ = config.bus.send(Event::provider_error_retryable(
-                    "terminal",
-                    format!(
-                        "could not stop terminal {backend_key} for deleted workspace {key}: {e}"
-                    ),
-                ));
-                continue;
-            }
-            drop(interaction);
-            // One lifecycle owner handles every map, persisted terminal key,
-            // AgentState::Exited, and TerminalExited. The output pump may
-            // observe the child first or later; the owner's atomic claim
-            // makes both orders idempotent and leaves backend release to the
-            // pump that observed the real exit.
-            crate::spawn_handler::detach_killed_terminal(config, tid, &backend_key).await;
-        }
-    }
     true
 }
 

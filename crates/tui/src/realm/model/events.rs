@@ -971,13 +971,17 @@ impl<T: TerminalAdapter> Model<T> {
                         // for sources that don't carry one (reply / merge
                         // / close-issue), so the flash above still stands.
                         self.rollback_optimistic_chip(source);
-                    } else if source == "store" && self.rollback_optimistic_removal(message) {
+                    } else if matches!(source.as_str(), "store" | "terminal")
+                        && self.rollback_optimistic_removal(message)
+                    {
                         // An optimistic archive/delete the daemon
                         // rejected: the row (and, for a project, its
                         // children) was removed locally, so re-insert it
-                        // and surface why (#476). A `store` error naming
-                        // no pending removal keeps its quiet sync-log-only
-                        // handling.
+                        // and surface why (#476). Delete failures arrive
+                        // as `store` (archive/db) or `terminal` (a backing
+                        // agent that couldn't be stopped) errors naming the
+                        // key; one naming no pending removal keeps its
+                        // quiet sync-log-only handling.
                         self.flash_error(format!("✗ delete failed — {message}"));
                     }
                     // Manual refresh failed — convert the ack flag

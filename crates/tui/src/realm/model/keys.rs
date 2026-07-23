@@ -1062,10 +1062,11 @@ impl<T: TerminalAdapter> Model<T> {
     /// click.
     ///
     /// Returns whether it handled the event. Only left/right/middle
-    /// *presses* qualify — scroll and drag over a dismissable overlay
-    /// still forward to it (so e.g. the sync-status window scrolls).
-    /// A blocking modal, or no modal, returns `false` so the caller
-    /// forwards to the modal / pane as before.
+    /// *presses* qualify — scroll and drag fall through to the normal
+    /// forwarding path (where the wheel-gate in `dispatch_event` decides
+    /// whether the top modal actually consumes the notch; today only the
+    /// description reader does). A blocking modal, or no modal, returns
+    /// `false` so the caller forwards to the modal / pane as before.
     pub fn dismiss_modal_on_outside_click(&mut self, m: crossterm::event::MouseEvent) -> bool {
         use crossterm::event::MouseEventKind;
         if !matches!(m.kind, MouseEventKind::Down(_)) {

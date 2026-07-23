@@ -761,6 +761,13 @@ impl RightPane {
             // Footer's "selected activity #N of M" must not leak —
             // the M was from the old workspace.
             self.pending_selection_notice = None;
+            // The description-teaser toggle is per-workspace too: a
+            // Preview left open on PR A must not silently expand PR B's
+            // description the moment it's selected. Fold back to the
+            // Collapsed default (and clear the render-derived overflow
+            // flag; it's recomputed on the next `render_task_body`).
+            self.task_body_view = TaskBodyView::Collapsed;
+            self.body_overflows = false;
         }
         self.auto_collapse_for_workspace();
         // Bump the activity revision iff the content actually changed —

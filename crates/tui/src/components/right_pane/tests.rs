@@ -1076,6 +1076,29 @@ mod description_expand_tests {
     }
 
     #[test]
+    fn switching_workspace_resets_the_description_teaser() {
+        // An open Preview on PR A must not silently expand PR B's
+        // description the moment B is selected — the teaser state is
+        // per-workspace, like every other per-workspace UI bit reset in
+        // `set_workspace`.
+        let mut pane = pane_showing(&long_body());
+        pane.toggle_task_body(); // Collapsed → Preview on A
+        assert_eq!(pane.task_body_view, TaskBodyView::Preview);
+
+        // A distinct second workspace (different task key).
+        let mut task_b = task_with_body("some other body");
+        task_b.id.key = "github:o/r#2".into();
+        let ws_b = Workspace::from_task(task_b, Utc::now());
+        pane.set_workspace(Some(ws_b));
+
+        assert_eq!(
+            pane.task_body_view,
+            TaskBodyView::Collapsed,
+            "a new workspace starts with its description collapsed",
+        );
+    }
+
+    #[test]
     fn trailer_spells_out_the_read_full_affordance() {
         let theme = crate::theme::current();
         let trailer = more_lines_trailer(44, theme);

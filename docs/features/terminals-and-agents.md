@@ -181,8 +181,8 @@ counterweight to relaxed approvals.
 ## Agent state detection
 
 **Status:** beta
-**Crate(s):** `agents` (`src/detect.rs`, `tests/detect_fixtures.rs`), `ipc` (`AgentState`)
-**Config / flags:** —
+**Crate(s):** `agents` (`src/detect.rs`, `src/state_machine.rs`, `tests/detect_fixtures.rs`), `ipc` (`AgentState`)
+**Config / flags:** `agent.quiet_classify_secs` (quiet-timer → `Done` window, default 5), `agent.working_watchdog_secs` (stuck-`Working` fail-safe, default 15, `0` disables)
 **Key bindings:** `!` jump to next waiting agent, `Shift-F` jump to next failing-CI PR
 
 ### What it does
@@ -204,7 +204,12 @@ live status line (`esc to interrupt`, or `·` + token counter). Codex/Cursor use
 narrower yes/no pattern sets; GenericCli matches user-supplied
 `asking_patterns`. Recent work (#153) added real ready/working-screen detection
 so prompt injection no longer rides a fixed 10s deadline. Real-PTY transcripts
-back the fixtures in `tests/detect_fixtures.rs`.
+back the fixtures in `tests/detect_fixtures.rs`. Readings fold into an explicit
+state machine (`src/state_machine.rs`) instead of overwriting the badge directly:
+`Working` is a one-way door that only leaves for `Done`/`InputNeeded`/`Exited`.
+`Done` is reachable for *every* agent (not just Claude's `Stop` hook) via a
+generic quiet timer — after `agent.quiet_classify_secs` of no PTY output a
+`Working` turn settles to `Done`, even when the resting screen matches no marker.
 
 ### Test checklist
 - [ ] A Claude permission prompt flips the row to InputNeeded.

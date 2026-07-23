@@ -51,6 +51,16 @@ pub enum LinearError {
     Graphql(String),
 }
 
+/// `true` when a `reqwest::Error` is a transport-layer failure that
+/// carried no HTTP status — connect, DNS, TLS, timeout, or a
+/// body/decode error. These never reached Linear's app layer, so a
+/// fresh attempt next tick is safe. Status errors (`is_status()`)
+/// return `false` here; the shared classifier reads their status code
+/// directly instead.
+fn reqwest_is_transport(e: &reqwest::Error) -> bool {
+    e.is_timeout() || e.is_connect() || e.is_request() || e.is_body() || e.is_decode()
+}
+
 impl From<LinearError> for ProviderError {
     fn from(err: LinearError) -> Self {
         const SOURCE: &str = "linear";
@@ -61,38 +71,29 @@ impl From<LinearError> for ProviderError {
                 None => ProviderError::retryable(SOURCE, err.to_string()),
             },
             LinearError::Http(http_err) => {
-                // 429 must classify as retryable: it's the provider
-                // saying "later", not a permanent failure. Matched on
-                // the typed status (the display string for a status
-                // error doesn't reliably hit the substring probes
-                // below).
-                if http_err.status() == Some(reqwest::StatusCode::TOO_MANY_REQUESTS) {
-                    return ProviderError::retryable(SOURCE, err.to_string());
-                }
-                let s = err.to_string().to_lowercase();
-                if s.contains("401") || s.contains("403") || s.contains("unauthorized") {
-                    ProviderError::auth(SOURCE, err.to_string())
-                } else if s.contains("timeout")
-                    || s.contains("connection")
-                    || s.contains("network")
-                    || s.contains("502")
-                    || s.contains("503")
-                    || s.contains("504")
-                {
-                    ProviderError::retryable(SOURCE, err.to_string())
-                } else {
-                    ProviderError::permanent(SOURCE, err.to_string())
-                }
+                // Route through the ONE shared classifier so Linear
+                // and GitHub can't disagree about the same transport
+                // failure. Pass the typed reqwest signal — the HTTP
+                // status when the response carried one (429 → retry,
+                // 401/403 → auth, 5xx → retry), otherwise the
+                // transport flag (connect/timeout/body). The display
+                // string is only the last-resort fallback; the typed
+                // status doesn't reliably hit substring probes.
+                let msg = err.to_string();
+                let signals = lazybox_core::HttpErrorSignals {
+                    status: http_err.status().map(|s| s.as_u16()),
+                    transport: reqwest_is_transport(http_err),
+                    message: &msg,
+                };
+                lazybox_core::classify(&signals).into_provider_error(SOURCE, msg.clone())
             }
             LinearError::Graphql(_) => {
-                let s = err.to_string().to_lowercase();
-                if s.contains("rate limit") || s.contains("temporarily") {
-                    ProviderError::retryable(SOURCE, err.to_string())
-                } else if s.contains("authentication") || s.contains("unauthorized") {
-                    ProviderError::auth(SOURCE, err.to_string())
-                } else {
-                    ProviderError::permanent(SOURCE, err.to_string())
-                }
+                // GraphQL errors arrive in the response *body*, not as
+                // an HTTP status — there's no typed signal, so the
+                // shared substring fallback is all we have. It still
+                // lives in one place, so gh and linear agree on it.
+                let msg = err.to_string();
+                lazybox_core::classify_message(&msg).into_provider_error(SOURCE, msg.clone())
             }
         }
     }
@@ -440,5 +441,43 @@ mod tests {
             ProviderError::from(err),
             ProviderError::Retryable { .. }
         ));
+    }
+
+    #[test]
+    fn missing_key_is_auth() {
+        assert!(ProviderError::from(LinearError::MissingKey).is_auth());
+    }
+
+    /// GraphQL errors have no HTTP status, so they route through the
+    /// shared `classify_message` fallback in `lazybox-core`. Verifying
+    /// the same verdicts the shared classifier gives proves Linear
+    /// delegates rather than reimplementing its own keyword list.
+    #[test]
+    fn graphql_errors_delegate_to_shared_classifier() {
+        let cases = [
+            ("secondary rate limit exceeded", true, false),
+            ("service temporarily unavailable", true, false),
+            ("authentication required", false, true),
+            ("unauthorized", false, true),
+            ("field 'foo' doesn't exist on type 'Query'", false, false),
+        ];
+        for (msg, retryable, auth) in cases {
+            let perr = ProviderError::from(LinearError::Graphql(msg.to_string()));
+            // The provider's verdict must match the shared classifier's.
+            let shared =
+                lazybox_core::classify_message(msg).into_provider_error("linear", msg.to_string());
+            assert_eq!(
+                perr.is_retryable(),
+                shared.is_retryable(),
+                "retryable mismatch for {msg:?}"
+            );
+            assert_eq!(
+                perr.is_auth(),
+                shared.is_auth(),
+                "auth mismatch for {msg:?}"
+            );
+            assert_eq!(perr.is_retryable(), retryable, "retryable for {msg:?}");
+            assert_eq!(perr.is_auth(), auth, "auth for {msg:?}");
+        }
     }
 }

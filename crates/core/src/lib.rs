@@ -6,6 +6,7 @@
 pub mod agent;
 pub mod autofix;
 pub mod config;
+pub mod error_class;
 pub mod issue_links;
 pub mod paths;
 pub mod policy;
@@ -28,6 +29,7 @@ pub use config::{
     KV_KEY_ARCHIVED, KV_KEY_LAYOUT, KV_KEY_SETUP, KV_KEY_THEME, PaneLayout, PersistedSetup,
     ProviderConfig,
 };
+pub use error_class::{ErrorClass, HttpErrorSignals, classify, classify_message, classify_status};
 pub use issue_links::{IssueLink, extract as extract_issue_links};
 pub use policy::{AutomationPolicies, PolicyArm, auto_fix_permitted, toggled_arm};
 pub use priority::{PriorityTier, resolve_priority_tier};

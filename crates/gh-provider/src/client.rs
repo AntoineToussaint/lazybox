@@ -234,13 +234,22 @@ fn detail_of(err: &GhError) -> String {
 }
 
 impl From<GhError> for lazybox_core::ProviderError {
-    /// Classify GitHub failures so polling knows whether to retry.
-    /// Heuristics:
-    /// - 401/403 only when the GitHub API itself returned that status →
-    ///   Auth (user needs to rotate token).
-    /// - Hyper/Service/IO/Json variants → Retryable (transient).
-    /// - 5xx, network-y words, "rate limit" → Retryable.
-    /// - Everything else → Permanent.
+    /// Classify GitHub failures so polling knows whether to retry, all
+    /// via the shared `lazybox_core` classifier so GitHub and Linear
+    /// can't disagree about the same failure. Routing, in order:
+    /// - A typed HTTP status (octocrab `GitHub` error, or the raw
+    ///   GraphQL path's `HttpStatus`) → `classify_status`: 401/403 →
+    ///   Auth (rotate token), 429 + 5xx → Retryable, else Permanent.
+    ///   `HttpStatus` keeps one GitHub-specific pre-check: a 2xx with a
+    ///   non-JSON body (proxy/CDN maintenance page) → Retryable.
+    /// - Transport octocrab variants (Hyper/Service/Http/Serde/Json/
+    ///   Uri) → Retryable by definition; no data was ever returned.
+    /// - Everything with no typed status (GraphQL wrapper strings,
+    ///   future variants) → the shared substring probe, which can also
+    ///   mint Auth when the message carries "unauthorized"/"forbidden"/
+    ///   "401"/"403" — reached only here, never for the transport
+    ///   variants above, so a transient hyper/json chain that happens
+    ///   to mention either word still classifies Retryable.
     fn from(err: GhError) -> Self {
         const SOURCE: &str = "github";
         let detail = detail_of(&err);
@@ -258,52 +267,43 @@ impl From<GhError> for lazybox_core::ProviderError {
         }
 
         // Status-aware classification when we have an octocrab
-        // GitHub error: 401/403 → auth; 5xx + 429 → retryable. This
-        // is the ONLY path that mints `Auth` — substring matching for
-        // "unauthorized"/"forbidden" produced false positives on
-        // transient hyper/json errors that happen to mention either
-        // word in their message chains.
+        // GitHub error: the shared classifier maps 401/403 → auth,
+        // 5xx + 429 → retryable, other statuses → permanent. Feeding
+        // it the *typed* status (never a substring probe) is what
+        // keeps "unauthorized"/"forbidden" mentions inside transient
+        // hyper/json chains from producing false `Auth` verdicts.
         if let GhError::Api(octocrab::Error::GitHub { source, .. }) = &err {
-            let status = source.status_code.as_u16();
-            if status == 401 || status == 403 {
-                return lazybox_core::ProviderError::auth(SOURCE, detail);
-            }
-            if status == 429 || (500..=599).contains(&status) {
-                return lazybox_core::ProviderError::retryable(SOURCE, detail);
-            }
-            return lazybox_core::ProviderError::permanent(SOURCE, detail);
+            return lazybox_core::classify_status(source.status_code.as_u16())
+                .into_provider_error(SOURCE, detail);
         }
 
         // Same status-aware classification for `HttpStatus`, the
-        // variant emitted by the raw GraphQL path. 2xx + non-JSON
-        // is treated as retryable: it almost always means a proxy /
-        // CDN intercepted the call with an HTML maintenance page
-        // even though the upstream eventually came back.
+        // variant emitted by the raw GraphQL path — plus one
+        // GitHub-specific quirk: a 2xx with a non-JSON body almost
+        // always means a proxy / CDN intercepted the call with an HTML
+        // maintenance page even though the upstream eventually came
+        // back, so it's worth one retry rather than the permanent
+        // verdict a bare 2xx would earn.
         if let GhError::HttpStatus {
             status,
             content_type,
             ..
         } = &err
         {
-            if *status == 401 || *status == 403 {
-                return lazybox_core::ProviderError::auth(SOURCE, detail);
-            }
-            if *status == 429 || (500..=599).contains(status) {
-                return lazybox_core::ProviderError::retryable(SOURCE, detail);
-            }
             if (200..=299).contains(status) && !content_type_is_json(content_type) {
                 return lazybox_core::ProviderError::retryable(SOURCE, detail);
             }
-            return lazybox_core::ProviderError::permanent(SOURCE, detail);
+            return lazybox_core::classify_status(*status).into_provider_error(SOURCE, detail);
         }
 
-        // Variant-aware classification: every transport-layer variant
-        // is retryable by definition (no PR/issue data was ever
-        // returned, so a fresh attempt next tick is safe and likely
-        // to succeed).
-        if let GhError::Api(api) = &err
-            && matches!(
-                api,
+        // Everything else has no typed HTTP status. Transport-layer
+        // octocrab variants (no PR/issue data was ever returned) are
+        // retryable by definition; the rest fall through to the
+        // shared substring probe. Both routes go through the one
+        // `classify` so this provider can't disagree with Linear.
+        let transport = matches!(
+            &err,
+            GhError::Api(
                 octocrab::Error::Hyper { .. }
                     | octocrab::Error::Service { .. }
                     | octocrab::Error::Http { .. }
@@ -312,28 +312,13 @@ impl From<GhError> for lazybox_core::ProviderError {
                     | octocrab::Error::UriParse { .. }
                     | octocrab::Error::Uri { .. }
             )
-        {
-            return lazybox_core::ProviderError::retryable(SOURCE, detail);
-        }
-
-        // Fallback string matching for everything else (GraphQL
-        // wrapper errors, future octocrab variants, etc.).
-        let lower = detail.to_lowercase();
-        let is_retryable = lower.contains("timed out")
-            || lower.contains("timeout")
-            || lower.contains("connection")
-            || lower.contains("network")
-            || lower.contains("rate limit")
-            || lower.contains("hyper")
-            || lower.contains("502")
-            || lower.contains("503")
-            || lower.contains("504")
-            || lower.contains("temporarily");
-        if is_retryable {
-            return lazybox_core::ProviderError::retryable(SOURCE, detail);
-        }
-
-        lazybox_core::ProviderError::permanent(SOURCE, detail)
+        );
+        let class = lazybox_core::classify(&lazybox_core::HttpErrorSignals {
+            status: None,
+            transport,
+            message: &detail,
+        });
+        class.into_provider_error(SOURCE, detail)
     }
 }
 
@@ -3309,6 +3294,58 @@ mod tests {
     #[test]
     fn issue_query_skipped_when_neither_display_nor_mentions() {
         assert!(!should_query_issues(false, &logins(&[])));
+    }
+
+    fn http_status(status: u16) -> GhError {
+        GhError::HttpStatus {
+            status,
+            reason: String::new(),
+            content_type: "application/json; charset=utf-8".to_string(),
+            body_excerpt: String::new(),
+        }
+    }
+
+    /// A typed HTTP status routes through the shared `classify_status`
+    /// in `lazybox-core` — same verdicts Linear gets, so the two can't
+    /// disagree: 5xx → retryable, 401/403 → auth, other 4xx → permanent.
+    #[test]
+    fn http_status_delegates_to_shared_classifier() {
+        assert!(lazybox_core::ProviderError::from(http_status(503)).is_retryable());
+        assert!(lazybox_core::ProviderError::from(http_status(429)).is_retryable());
+        assert!(lazybox_core::ProviderError::from(http_status(401)).is_auth());
+        assert!(lazybox_core::ProviderError::from(http_status(403)).is_auth());
+        let perm = lazybox_core::ProviderError::from(http_status(404));
+        assert!(!perm.is_retryable() && !perm.is_auth());
+        let perm = lazybox_core::ProviderError::from(http_status(422));
+        assert!(!perm.is_retryable() && !perm.is_auth());
+    }
+
+    /// A 2xx with a non-JSON body keeps its GitHub-specific retry quirk
+    /// (proxy/CDN maintenance page) on top of the shared classifier.
+    #[test]
+    fn two_hundred_non_json_stays_retryable() {
+        let err = GhError::HttpStatus {
+            status: 200,
+            reason: String::new(),
+            content_type: "text/html".to_string(),
+            body_excerpt: "<html>maintenance</html>".to_string(),
+        };
+        assert!(lazybox_core::ProviderError::from(err).is_retryable());
+    }
+
+    /// A stringly GraphQL wrapper error has no typed status, so it
+    /// falls through to the shared substring probe. Matching the
+    /// shared classifier's verdicts proves the fallback delegates.
+    #[test]
+    fn graphql_wrapper_delegates_to_shared_substring_probe() {
+        let retry = lazybox_core::ProviderError::from(GhError::Graphql(
+            "connection reset by peer".to_string(),
+        ));
+        assert!(retry.is_retryable());
+        let perm = lazybox_core::ProviderError::from(GhError::Graphql(
+            "field 'foo' does not exist".to_string(),
+        ));
+        assert!(!perm.is_retryable() && !perm.is_auth());
     }
 
     /// Spin up a tiny TCP server that answers every request with the

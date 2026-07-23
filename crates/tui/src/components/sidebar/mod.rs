@@ -983,6 +983,31 @@ impl Sidebar {
         self.workspaces.get(key)
     }
 
+    /// Remove a workspace row locally, without waiting for the daemon's
+    /// `WorkspaceRemoved` echo — the optimistic half of an archive /
+    /// delete (#476). Returns the removed workspace so the caller can
+    /// restore it if the round-trip fails. Mirrors the cleanup the
+    /// `WorkspaceRemoved` event handler does so a later echo is a no-op.
+    pub fn take_workspace(&mut self, key: &SessionKey) -> Option<Workspace> {
+        let removed = self.workspaces.remove(key);
+        if removed.is_some() {
+            self.broadcast_selected.remove(key);
+            self.agents.remove(key);
+            self.recompute_visible();
+        }
+        removed
+    }
+
+    /// Re-insert (or replace) a workspace optimistically edited or
+    /// removed, to roll back a failed round-trip (#476). Unlike the
+    /// `WorkspaceUpserted` event path this fires no desktop
+    /// notification — it restores state the user already saw.
+    pub fn restore_workspace(&mut self, workspace: Workspace) {
+        let key: SessionKey = (&workspace.key).into();
+        self.workspaces.insert(key, workspace);
+        self.recompute_visible();
+    }
+
     /// Move the cursor onto the workspace row matching `key`. Returns
     /// true on a hit. Used by `--workspace` preselect on startup.
     pub fn focus_workspace_key(&mut self, key: &SessionKey) -> bool {

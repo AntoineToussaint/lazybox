@@ -237,16 +237,45 @@ impl Terminals {
         self.inner.take_scrollback_fetch()
     }
 
-    /// Forward `extract_text` — read the focused terminal's grid
-    /// between two absolute frame-space coordinates and return the
-    /// plain text. Used by the mouse-up selection-copy path.
-    pub fn extract_text(
+    /// Scroll the focused terminal's viewport by `delta` rows. Used by
+    /// the edge drag-selection auto-scroll (#432).
+    pub fn scroll_active(
         &mut self,
+        delta: isize,
+    ) -> crate::components::terminal_stack::ScrollOutcome {
+        self.inner.scroll_active(delta)
+    }
+
+    /// Crossterm `(col, row)` → screen-absolute grid coords
+    /// `(col, screen_row)` for the focused terminal, clamped into the
+    /// grid. The anchor / focus of a lazybox drag-selection are stored in
+    /// this space so they stay pinned to content across an auto-scroll.
+    pub fn selection_point(
+        &self,
         rect: tuirealm::ratatui::layout::Rect,
-        start: (u16, u16),
-        end: (u16, u16),
-    ) -> String {
-        self.inner.extract_text(rect, start, end)
+        col: u16,
+        row: u16,
+    ) -> Option<(u16, u32)> {
+        self.inner.selection_point(rect, col, row)
+    }
+
+    /// Extract the plain text of a screen-absolute selection span from
+    /// the focused terminal — the whole passage, including rows scrolled
+    /// off the viewport. Used by the mouse-up selection-copy path.
+    pub fn extract_selection(&mut self, anchor: (u16, u32), focus: (u16, u32)) -> String {
+        self.inner.extract_selection(anchor, focus)
+    }
+
+    /// Project a screen-absolute selection span back to the on-screen
+    /// crossterm cells currently visible in `rect`, for the reverse-video
+    /// highlight overlay. `None` when nothing is focused.
+    pub fn selection_screen_span(
+        &self,
+        rect: tuirealm::ratatui::layout::Rect,
+        anchor: (u16, u32),
+        focus: (u16, u32),
+    ) -> Option<((u16, u16), (u16, u16))> {
+        self.inner.selection_screen_span(rect, anchor, focus)
     }
 
     /// Forward `visible_text` — dump a terminal's whole visible grid

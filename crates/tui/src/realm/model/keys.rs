@@ -14,8 +14,8 @@
 //! modules can see their parent's private items.
 
 use super::{
-    Id, Model, PaneFocus, emit_clipboard_copy, find_action_for_seq, find_action_for_stroke,
-    key_event_to_stroke, rect_contains, seq_continuations,
+    Id, Model, PaneFocus, TerminalDrag, emit_clipboard_copy, find_action_for_seq,
+    find_action_for_stroke, key_event_to_stroke, rect_contains, seq_continuations,
 };
 use crate::realm::keymap::realm_key_to_crossterm;
 use lazybox_ipc::Command as IpcCommand;
@@ -1314,14 +1314,26 @@ impl<T: TerminalAdapter> Model<T> {
                         }
                     }
                     // Lazybox-side selection start: any left-click that
-                    // landed in the terminal pane. Recording start ==
-                    // end means a click-without-drag is treated as a
-                    // click in the Up handler.
+                    // landed in the terminal pane. The anchor is pinned
+                    // in screen-absolute grid coords so it survives the
+                    // viewport auto-scrolling under an edge drag; a
+                    // press-release with no cell change (`dragged` never
+                    // set) is treated as a plain click in the Up handler.
                     if focus == PaneFocus::Terminals
                         && matches!(button, crossterm::event::MouseButton::Left)
                         && claim_for_selection
+                        && let Some(anchor) =
+                            self.terminals
+                                .selection_point(right_bottom_rect, m.column, m.row)
                     {
-                        self.terminal_selection = Some(((m.column, m.row), (m.column, m.row)));
+                        self.terminal_drag = Some(TerminalDrag {
+                            down: (m.column, m.row),
+                            anchor,
+                            focus: anchor,
+                            rect: right_bottom_rect,
+                            pointer: (m.column, m.row),
+                            dragged: false,
+                        });
                     } else {
                         let _ = button;
                     }
@@ -1361,9 +1373,8 @@ impl<T: TerminalAdapter> Model<T> {
                     }
                     return;
                 }
-                if let Some((start, _)) = self.terminal_selection {
-                    self.terminal_selection = Some((start, (m.column, m.row)));
-                    self.redraw = true;
+                if self.terminal_drag.is_some() {
+                    self.drive_terminal_drag(m.column, m.row);
                 }
             }
             MouseEventKind::Up(button) => {
@@ -1372,10 +1383,9 @@ impl<T: TerminalAdapter> Model<T> {
                     self.layout.persist();
                 }
                 let mut click_no_drag_at: Option<(u16, u16)> = None;
-                if let Some((start, end)) = self.terminal_selection.take() {
-                    let was_drag = start != end;
-                    if was_drag {
-                        let text = self.terminals.extract_text(right_bottom_rect, start, end);
+                if let Some(drag) = self.terminal_drag.take() {
+                    if drag.dragged {
+                        let text = self.terminals.extract_selection(drag.anchor, drag.focus);
                         if !text.trim().is_empty() {
                             emit_clipboard_copy(&text);
                             let lines = text.lines().count();
@@ -1386,7 +1396,7 @@ impl<T: TerminalAdapter> Model<T> {
                             ));
                         }
                     } else {
-                        click_no_drag_at = Some(start);
+                        click_no_drag_at = Some(drag.down);
                     }
                     self.redraw = true;
                 }
@@ -1497,6 +1507,85 @@ impl<T: TerminalAdapter> Model<T> {
             }
             _ => {}
         }
+    }
+
+    /// Advance the active terminal drag-selection to crossterm cell
+    /// `(col, row)`: auto-scroll the viewport when the pointer is parked
+    /// against the top/bottom edge, then re-derive the screen-absolute
+    /// focus so the highlight tracks whatever content is now under the
+    /// pointer. Shared by the `Drag` mouse handler and the idle-tick
+    /// auto-scroll (`tick_terminal_drag`) so a pointer held still at the
+    /// edge keeps scrolling (#432).
+    pub(super) fn drive_terminal_drag(&mut self, col: u16, row: u16) {
+        let (rect, down) = match &self.terminal_drag {
+            Some(drag) => (drag.rect, drag.down),
+            None => return,
+        };
+        let delta = edge_scroll_delta(rect, row);
+        if delta != 0 {
+            let _ = self.terminals.scroll_active(delta);
+            // Reaching for scrollback above the local grid arms the same
+            // deep-scrollback fetch the wheel/keyboard scroll paths do, so
+            // an edge drag can select as deep as the daemon retained (#393).
+            if let Some(terminal_id) = self.terminals.take_scrollback_fetch() {
+                self.send_cmd(IpcCommand::FetchScrollback { terminal_id });
+            }
+        }
+        let focus = self.terminals.selection_point(rect, col, row);
+        if let Some(drag) = self.terminal_drag.as_mut() {
+            drag.pointer = (col, row);
+            if (col, row) != down {
+                drag.dragged = true;
+            }
+            if let Some(focus) = focus {
+                drag.focus = focus;
+            }
+        }
+        self.redraw = true;
+    }
+
+    /// Idle-tick companion to [`Self::drive_terminal_drag`]: while a drag
+    /// is held against an edge with no fresh mouse events, keep scrolling
+    /// and extending the selection. A no-op when there is no drag or the
+    /// pointer is away from an edge, so it costs nothing on a still drag.
+    pub(super) fn tick_terminal_drag(&mut self) {
+        let Some((rect, pointer)) = self
+            .terminal_drag
+            .as_ref()
+            .map(|drag| (drag.rect, drag.pointer))
+        else {
+            return;
+        };
+        if edge_scroll_delta(rect, pointer.1) != 0 {
+            self.drive_terminal_drag(pointer.0, pointer.1);
+        }
+    }
+}
+
+/// Per-step viewport scroll for an edge drag-selection, signed by
+/// direction: negative (up into scrollback) when the pointer sits in the
+/// top chrome or above the pane, positive (down toward live output) when
+/// it reaches the bottom border or below, `0` inside the grid. The step
+/// grows with how far past the edge the pointer strayed so a big
+/// overshoot scrolls faster, capped so it never overshoots wildly.
+fn edge_scroll_delta(rect: Rect, row: u16) -> isize {
+    const MAX_STEP: u16 = 6;
+    if rect.height == 0 {
+        return 0;
+    }
+    // The grid's first visible row sits below the 3-row top chrome; treat
+    // that band (and anything above the pane) as the scroll-up zone, and
+    // the bottom border row (and below) as the scroll-down zone. Both
+    // zones stay clear of real grid cells so an in-grid selection never
+    // scrolls on its own.
+    let top_zone = rect.y.saturating_add(2);
+    let bottom_zone = rect.y.saturating_add(rect.height).saturating_sub(1);
+    if row <= top_zone {
+        -((top_zone - row).saturating_add(1).min(MAX_STEP) as isize)
+    } else if row >= bottom_zone {
+        (row - bottom_zone).saturating_add(1).min(MAX_STEP) as isize
+    } else {
+        0
     }
 }
 
@@ -1759,6 +1848,40 @@ pub(super) fn override_takes_effect(entry: &lazybox_tui_core::action::CatalogEnt
         .find(|(k, _, _)| *k == entry.kind)
         .map(|(_, _, effective)| *effective)
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod edge_scroll_tests {
+    use super::edge_scroll_delta;
+    use tuirealm::ratatui::layout::Rect;
+
+    #[test]
+    fn only_the_edges_scroll_and_direction_follows_the_edge() {
+        // Pane rows 5..=24 (y=5, height=20).
+        let rect = Rect::new(0, 5, 80, 20);
+        // Inside the grid → no auto-scroll.
+        assert_eq!(edge_scroll_delta(rect, 12), 0);
+        // Top chrome band / above the pane → scroll up (negative).
+        assert!(edge_scroll_delta(rect, 6) < 0, "top band scrolls up");
+        assert!(edge_scroll_delta(rect, 0) < 0, "above the pane scrolls up");
+        // Bottom border / below the pane → scroll down (positive).
+        assert!(edge_scroll_delta(rect, 24) > 0, "bottom row scrolls down");
+        assert!(
+            edge_scroll_delta(rect, 60) > 0,
+            "below the pane scrolls down"
+        );
+    }
+
+    #[test]
+    fn step_grows_with_overshoot_but_is_capped() {
+        let rect = Rect::new(0, 5, 80, 20);
+        // Just past the bottom edge is the smallest step; a large
+        // overshoot accelerates but never exceeds the cap.
+        let near = edge_scroll_delta(rect, 24);
+        let far = edge_scroll_delta(rect, 60);
+        assert!(far > near, "a bigger overshoot scrolls faster");
+        assert!(far <= 6, "the step is capped");
+    }
 }
 
 #[cfg(test)]

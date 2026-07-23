@@ -1079,6 +1079,36 @@ mod effects_tests {
         assert_eq!(m.dampen_scroll_step_at(false, after_idle), 5);
     }
 
+    /// Build a model with workspace `github:o/r#1` selected and a single
+    /// live shell terminal on screen — the minimal state for a terminal
+    /// mouse gesture (selection / click forwarding) to have a target.
+    fn model_with_terminal() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        use lazybox_ipc::{Event as IpcEvent, TerminalId, TerminalKind};
+        let mut m = build_model();
+        let ws_key = WorkspaceKey::new("github:o/r#1");
+        let session_key: SessionKey = (&ws_key).into();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![lazybox_core::Workspace::empty(
+                ws_key,
+                "main",
+                chrono::Utc::now(),
+            )],
+            terminals: vec![],
+            projects: vec![],
+        });
+        assert!(m.sidebar.focus_workspace_key(&session_key));
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(1),
+            session_key,
+            kind: TerminalKind::Shell,
+            no_permission: false,
+            on_main: false,
+        });
+        assert_eq!(m.terminals.active_terminal_id(), Some(TerminalId(1)));
+        m
+    }
+
     /// Returning to the terminal pane with a single click restores the
     /// ability to interact in one click (#103). Before the fix, the
     /// first click after leaving the terminal only refocused it —
@@ -1090,7 +1120,7 @@ mod effects_tests {
         use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
         use tuirealm::ratatui::layout::Rect;
 
-        let mut m = build_model();
+        let mut m = model_with_terminal();
         let area = Rect::new(0, 0, 120, 40);
         let (sidebar_rect, _right_top, right_bottom) = crate::realm::layout::pane_areas(
             area,
@@ -1117,13 +1147,56 @@ mod effects_tests {
         // it AND claim the click for the pane (selection start) so the
         // Up handler can deliver it to the inner program — no redundant
         // second click.
-        m.terminal_selection = None;
+        m.terminal_drag = None;
         m.dispatch_mouse_in(down(right_bottom.x + 2, right_bottom.y + 2), area);
         assert_eq!(m.focus, PaneFocus::Terminals);
         assert!(
-            m.terminal_selection.is_some(),
+            m.terminal_drag.is_some(),
             "first click back into the terminal must claim the click, not just refocus",
         );
+    }
+
+    /// A press then drag to a different cell marks the gesture as a real
+    /// selection and moves the focus endpoint off the anchor; releasing
+    /// clears the drag. A press-release on the same cell stays a click
+    /// (`dragged` never set). Guards the mouse-down/drag/up wiring for
+    /// the scrollback-aware selection (#432).
+    #[test]
+    fn terminal_drag_marks_selection_then_clears_on_release() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use tuirealm::ratatui::layout::Rect;
+
+        let mut m = model_with_terminal();
+        m.focus = PaneFocus::Terminals;
+        let area = Rect::new(0, 0, 120, 40);
+        let (_sidebar, _right_top, right_bottom) = crate::realm::layout::pane_areas(
+            area,
+            m.layout.sidebar_pct,
+            m.layout.right_top_pct,
+            m.layout.sidebar_user_resized,
+        );
+        let ev = |kind, col, row| MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        // Press inside the grid, then drag two rows down.
+        let (c0, r0) = (right_bottom.x + 3, right_bottom.y + 4);
+        m.dispatch_mouse_in(ev(MouseEventKind::Down(MouseButton::Left), c0, r0), area);
+        let anchor = m.terminal_drag.expect("press claims a drag").anchor;
+        m.dispatch_mouse_in(
+            ev(MouseEventKind::Drag(MouseButton::Left), c0, r0 + 2),
+            area,
+        );
+        let drag = m.terminal_drag.expect("drag still active");
+        assert!(drag.dragged, "moving off the anchor cell is a real drag");
+        assert_eq!(drag.anchor, anchor, "anchor stays pinned");
+        assert_ne!(drag.focus, anchor, "focus tracked the pointer");
+
+        m.dispatch_mouse_in(ev(MouseEventKind::Up(MouseButton::Left), c0, r0 + 2), area);
+        assert!(m.terminal_drag.is_none(), "release ends the drag");
     }
 
     /// Adopt picker: source + target workspace keys flow into an

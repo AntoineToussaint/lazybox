@@ -56,9 +56,13 @@ pub(crate) struct PendingWorkPicker {
 /// Build the automation-policies menu rows for `ws`: one `(label,
 /// toggle)` pair per policy, reflecting current state. `opt_out_labels`
 /// is the configured auto-fix opt-out set so a label that disables
-/// auto-fix is surfaced rather than invisible (issue #363 acceptance).
+/// auto-fix is surfaced rather than invisible (issue #363 acceptance);
+/// `auto_fix_enabled` is the global switch, so an armed workspace reads
+/// as off while the feature is globally disabled — matching what would
+/// actually fire.
 pub(crate) fn build_policy_rows(
     ws: &lazybox_core::Workspace,
+    auto_fix_enabled: bool,
     opt_out_labels: &[String],
 ) -> (Vec<String>, Vec<PolicyToggle>) {
     let mut labels = Vec::new();
@@ -94,12 +98,19 @@ pub(crate) fn build_policy_rows(
             ] {
                 let opted_out = auto_fix_label_opt_out(pr, opt_out_labels);
                 let arm = ws.policies.arm(kind);
-                let on = lazybox_core::auto_fix_permitted(arm, opted_out);
+                // Gate through the same core composition the daemon uses
+                // (enable + label + arm), so the glyph can't drift from
+                // what would actually fire (tracker #512).
+                let on =
+                    lazybox_core::auto_fix_enabled_and_permitted(auto_fix_enabled, opted_out, arm);
                 let name = match kind {
                     lazybox_core::AutoFixKind::CiFailure => "auto-fix CI",
                     lazybox_core::AutoFixKind::MergeConflict => "auto-fix conflict",
                 };
                 let detail = match arm {
+                    // A globally-disabled feature never fires, whatever the
+                    // arm — say so rather than claim an armed row is on.
+                    _ if !auto_fix_enabled => "  (off · auto-fix disabled globally)".to_string(),
                     lazybox_core::PolicyArm::Disarm => "  (disarmed here)".to_string(),
                     lazybox_core::PolicyArm::Arm => "  (armed here · overrides label)".to_string(),
                     lazybox_core::PolicyArm::Default if opted_out => {
@@ -478,7 +489,8 @@ impl<T: TerminalAdapter> Model<T> {
         else {
             return;
         };
-        let (labels, toggles) = build_policy_rows(ws, &self.auto_fix_opt_out_labels);
+        let (labels, toggles) =
+            build_policy_rows(ws, self.auto_fix_enabled, &self.auto_fix_opt_out_labels);
         self.policy_choices = toggles;
         self.pending_policy_workspace = Some(workspace_key);
         let modal = Choice::single("● armed · ○ off — Enter toggles", labels)
@@ -1764,6 +1776,99 @@ impl<T: TerminalAdapter> Model<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A minimal open, author, CI-failing PR workspace with the given
+    /// labels and CI-auto-fix arm — enough to exercise `build_policy_rows`
+    /// glyph/detail logic.
+    fn pr_workspace(labels: &[&str], ci_arm: lazybox_core::PolicyArm) -> lazybox_core::Workspace {
+        let task = lazybox_core::Task {
+            id: lazybox_core::TaskId {
+                source: "github".into(),
+                key: "owner/repo#1".into(),
+            },
+            title: "t".into(),
+            body: None,
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::Failure,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: "https://github.com/owner/repo/pull/1".into(),
+            repo: Some("owner/repo".into()),
+            branch: Some("feat".into()),
+            base_branch: None,
+            updated_at: chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap(),
+            created_at: None,
+            closed_at: None,
+            labels: labels
+                .iter()
+                .map(|l| lazybox_core::Label::new(*l))
+                .collect(),
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        };
+        let mut ws = lazybox_core::Workspace::from_task(
+            task,
+            chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap(),
+        );
+        ws.policies
+            .set(lazybox_core::AutoFixKind::CiFailure, ci_arm);
+        ws
+    }
+
+    /// The CI-auto-fix row of the policies menu (`●` armed / `○` off).
+    fn ci_auto_fix_row(labels: &[&str], arm: lazybox_core::PolicyArm, enabled: bool) -> String {
+        let (rows, _) =
+            build_policy_rows(&pr_workspace(labels, arm), enabled, &["no-auto-fix".into()]);
+        // Rows: [merge-on-green, github-auto-merge, auto-fix CI, auto-fix conflict].
+        rows[2].clone()
+    }
+
+    /// An explicitly-armed workspace still reads as **off** while the
+    /// feature is globally disabled — the menu gates through the same
+    /// `auto_fix_enabled_and_permitted` composition the daemon uses, so
+    /// the glyph can't claim a fix would fire when it wouldn't (tracker
+    /// #512).
+    #[test]
+    fn armed_row_reads_off_when_globally_disabled() {
+        let armed_off = ci_auto_fix_row(&[], lazybox_core::PolicyArm::Arm, false);
+        assert!(armed_off.starts_with('○'), "globally-off: {armed_off:?}");
+        assert!(
+            armed_off.contains("disabled globally"),
+            "detail must explain the global-off: {armed_off:?}"
+        );
+        // …and the same arm reads on once the feature is enabled.
+        let armed_on = ci_auto_fix_row(&[], lazybox_core::PolicyArm::Arm, true);
+        assert!(armed_on.starts_with('●'), "globally-on: {armed_on:?}");
+    }
+
+    /// With the feature enabled, the row tracks the arm × label rule:
+    /// `Arm` overrides an opt-out label (on), `Default` follows it (off),
+    /// `Disarm` is always off.
+    #[test]
+    fn enabled_row_tracks_arm_and_label() {
+        assert!(ci_auto_fix_row(&[], lazybox_core::PolicyArm::Default, true).starts_with('●'));
+        assert!(
+            ci_auto_fix_row(&["no-auto-fix"], lazybox_core::PolicyArm::Default, true)
+                .starts_with('○')
+        );
+        assert!(
+            ci_auto_fix_row(&["no-auto-fix"], lazybox_core::PolicyArm::Arm, true).starts_with('●')
+        );
+        assert!(ci_auto_fix_row(&[], lazybox_core::PolicyArm::Disarm, true).starts_with('○'));
+    }
 
     fn dto_with(
         reasons: &[&str],

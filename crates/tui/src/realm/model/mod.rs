@@ -892,6 +892,13 @@ pub struct Model<T: TerminalAdapter> {
     /// authoritative set. Defaults to the standard set until config is
     /// applied.
     auto_fix_opt_out_labels: Vec<String>,
+    /// Global auto-fix enable switch (`auto_fix.enabled`). Display-only,
+    /// mirrored here so the policies menu can gate its "armed" glyph
+    /// through the same `auto_fix_enabled_and_permitted` composition the
+    /// daemon uses — an armed workspace reads as off while the feature is
+    /// globally disabled, matching what would actually fire. Defaults to
+    /// off (auto-fix is opt-in) until config is applied.
+    auto_fix_enabled: bool,
     /// Workspace keys for which we've already fired
     /// `Command::FetchPrDetails` this session — the lazy-fetch path
     /// that back-fills review-thread activity. Used to dedupe the
@@ -1356,6 +1363,7 @@ impl<T: TerminalAdapter> Model<T> {
             status: StatusCtx::new(),
             ui_defaults: lazybox_config::UiDefaults::default(),
             auto_fix_opt_out_labels: lazybox_core::AutoFixSettings::default().opt_out_labels,
+            auto_fix_enabled: lazybox_core::AutoFixSettings::default().enabled,
             pr_details_fetched: std::collections::HashSet::new(),
             auto_merge_fired: std::collections::HashSet::new(),
             merge_confirmed: std::collections::HashSet::new(),
@@ -1598,11 +1606,13 @@ impl<T: TerminalAdapter> Model<T> {
         self.snippets = snippets;
     }
 
-    /// Install the configured auto-fix opt-out label set so the policies
-    /// menu (`g p`, issue #363) reflects which labels opt a PR out.
-    /// Display-only — the daemon enforces the authoritative set.
-    pub fn apply_auto_fix_opt_out_labels(&mut self, labels: Vec<String>) {
-        self.auto_fix_opt_out_labels = labels;
+    /// Install the configured auto-fix settings the policies menu (`g p`,
+    /// issue #363) needs to reflect state: the global enable switch and
+    /// the opt-out label set. Display-only — the daemon enforces the
+    /// authoritative decision; this only keeps the menu's glyphs honest.
+    pub fn apply_auto_fix_config(&mut self, enabled: bool, opt_out_labels: Vec<String>) {
+        self.auto_fix_enabled = enabled;
+        self.auto_fix_opt_out_labels = opt_out_labels;
     }
 
     /// Arm the auto-launch of the feature tour. `main.rs` passes

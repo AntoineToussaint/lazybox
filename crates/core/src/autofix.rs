@@ -162,15 +162,22 @@ pub fn resolve_auto_fix(
     arm: PolicyArm,
 ) -> Option<AutoFixKind> {
     let kind = auto_fix_candidate(task)?;
-    auto_fix_enabled_and_permitted(settings, is_auto_fix_opted_out(task, settings), arm)
+    auto_fix_enabled_and_permitted(settings.enabled, is_auto_fix_opted_out(task, settings), arm)
         .then_some(kind)
 }
 
 /// The **policy-layer gate** for an already-shape-eligible candidate:
-/// whether it may be auto-fixed given the global enable switch, whether a
-/// label currently opts the PR out, and the resolved per-session
-/// [`PolicyArm`]. This is the one place the enable + label + arm layers
-/// are composed.
+/// whether it may be auto-fixed given the global enable switch
+/// (`enabled`), whether a label currently opts the PR out, and the
+/// resolved per-session [`PolicyArm`]. This is the one place the
+/// enable + label + arm layers are composed — the daemon dispatcher, the
+/// pure `resolve_auto_fix` path, and the TUI policies menu all gate
+/// through it, so the "should we touch this PR?" answer can never drift
+/// between where it's decided and where it's shown.
+///
+/// Takes the bare `enabled` flag rather than the whole [`AutoFixSettings`]
+/// so a caller that only knows the global switch (the TUI client, which
+/// never sees the daemon's full settings) composes the identical rule.
 ///
 /// Split out from [`resolve_auto_fix`] because the daemon resolves the
 /// three inputs in two phases separated by the action queue: the source
@@ -181,11 +188,11 @@ pub fn resolve_auto_fix(
 /// exact same code the pure `resolve_auto_fix` path uses, rather than
 /// re-deriving the rule (issue #363).
 pub fn auto_fix_enabled_and_permitted(
-    settings: &AutoFixSettings,
+    enabled: bool,
     label_opted_out: bool,
     arm: PolicyArm,
 ) -> bool {
-    settings.enabled && auto_fix_permitted(arm, label_opted_out)
+    enabled && auto_fix_permitted(arm, label_opted_out)
 }
 
 /// The **task-shape** half of the auto-fix decision: everything that
@@ -606,12 +613,8 @@ mod tests {
             (true, true, PolicyArm::Disarm, false),
         ];
         for (enabled, opted_out, arm, expected) in cases {
-            let settings = AutoFixSettings {
-                enabled,
-                ..Default::default()
-            };
             assert_eq!(
-                auto_fix_enabled_and_permitted(&settings, opted_out, arm),
+                auto_fix_enabled_and_permitted(enabled, opted_out, arm),
                 expected,
                 "enabled={enabled} opted_out={opted_out} arm={arm:?}",
             );
@@ -639,8 +642,8 @@ mod tests {
                     // label; the dispatcher phase applies the gate.
                     let candidate = auto_fix_candidate(&t);
                     let label = is_auto_fix_opted_out(&t, &settings);
-                    let two_phase =
-                        candidate.filter(|_| auto_fix_enabled_and_permitted(&settings, label, arm));
+                    let two_phase = candidate
+                        .filter(|_| auto_fix_enabled_and_permitted(settings.enabled, label, arm));
                     assert_eq!(
                         two_phase,
                         resolve_auto_fix(&t, &settings, arm),

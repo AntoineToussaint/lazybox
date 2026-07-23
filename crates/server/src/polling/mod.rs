@@ -969,7 +969,7 @@ async fn dispatch_action(
             // queuing; here we compose the same enable + label + arm
             // policy layer the pure `resolve_auto_fix` path uses, so the
             // decision lives in one place (issue #363, tracker #512).
-            if !lazybox_core::auto_fix_enabled_and_permitted(&settings, opted_out, arm) {
+            if !lazybox_core::auto_fix_enabled_and_permitted(settings.enabled, opted_out, arm) {
                 tracing::info!(
                     source = source_name,
                     %session_key,

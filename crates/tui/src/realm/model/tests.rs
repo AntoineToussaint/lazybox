@@ -6193,6 +6193,25 @@ mod destructive_confirm_tests {
         }
     }
 
+    #[test]
+    fn sync_workspace_targets_the_focused_workspace() {
+        // `g s` on a focused PR/issue re-polls just that entity — the
+        // command carries the focused workspace's own key, no confirm
+        // gate.
+        let mut m = build_model();
+        let pr = merge_ready_pr_without_approval("github:owner/repo#1");
+        let wk = pr.key.clone();
+        let sk = SessionKey::from(&wk);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        assert!(m.sidebar.focus_workspace_key(&sk), "PR row focusable");
+
+        let cmds = m.dispatch_action(&Action::SyncWorkspace);
+        match cmds.as_slice() {
+            [IpcCommand::SyncWorkspace { workspace_key }] => assert_eq!(workspace_key, &wk),
+            other => panic!("expected a single SyncWorkspace command, got {other:?}"),
+        }
+    }
+
     /// A PR workspace GitHub would let you merge right now — CI green,
     /// no conflict — but with NO approving review, the case #144 was
     /// falsely blocking.

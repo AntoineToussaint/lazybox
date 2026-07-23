@@ -177,6 +177,7 @@ Press the leader key, then the second key. Every menu shows a which-key popup wh
 | `g r` | reviewers |
 | `g a` | assignees |
 | `g l` | labels |
+| `g s` | sync |
 | `g o` | open in browser |
 | `g d` | delete / close *(confirmed first)* |
 

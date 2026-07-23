@@ -928,6 +928,7 @@ impl Server {
                         lazybox_ipc::Command::MarkActivityRead { .. } => "MarkActivityRead",
                         lazybox_ipc::Command::UnmarkActivityRead { .. } => "UnmarkActivityRead",
                         lazybox_ipc::Command::FetchPrDetails { .. } => "FetchPrDetails",
+                        lazybox_ipc::Command::SyncWorkspace { .. } => "SyncWorkspace",
                         lazybox_ipc::Command::PostReply { .. } => "PostReply",
                         lazybox_ipc::Command::MergePr { .. } => "MergePr",
                         lazybox_ipc::Command::CloseIssue { .. } => "CloseIssue",
@@ -1627,6 +1628,9 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::FetchPrDetails { workspace_key } => {
             polling::handle_fetch_pr_details(config, workspace_key).await;
+        }
+        lazybox_ipc::Command::SyncWorkspace { workspace_key } => {
+            polling::handle_sync_workspace(config, workspace_key).await;
         }
         lazybox_ipc::Command::RequestReviewers {
             workspace_key,

@@ -41,6 +41,11 @@ struct MockInner {
     /// an error. Lets retry-contract tests fail once without sleeping
     /// through the timeout path.
     snapshot_failures: Mutex<HashMap<String, usize>>,
+    /// Keys whose `snapshot()` should report `complete: false` — a ring
+    /// that has wrapped past its capacity. Lets tests exercise the resync
+    /// path against a genuinely incomplete (but line-boundary-clean)
+    /// snapshot without emitting megabytes of output.
+    incomplete_snapshot_keys: Mutex<std::collections::HashSet<String>>,
     /// Fault/delay injection for terminal command-lane isolation tests.
     wedged_write_keys: Mutex<std::collections::HashSet<String>>,
     wedged_resize_keys: Mutex<std::collections::HashSet<String>>,
@@ -240,6 +245,17 @@ impl MockBackend {
             .lock()
             .await
             .insert(key.into(), count);
+    }
+
+    /// Make every `snapshot()` for `key` report `complete: false` — the
+    /// shape a wrapped ring (output past `REPLAY_RING_BYTES`) has. The
+    /// replay bytes are unchanged; only the completeness flag flips.
+    pub async fn mark_snapshot_incomplete(&self, key: &str) {
+        self.inner
+            .incomplete_snapshot_keys
+            .lock()
+            .await
+            .insert(key.into());
     }
 
     /// Make writes for `key` never resolve. The server-side deadline and
@@ -489,6 +505,12 @@ impl SessionBackend for MockBackend {
                     return Err(BackendError::Other("injected snapshot failure".into()));
                 }
             }
+            let incomplete = self
+                .inner
+                .incomplete_snapshot_keys
+                .lock()
+                .await
+                .contains(key);
             let map = self.inner.sessions.lock().await;
             let session = map
                 .get(key)
@@ -496,7 +518,7 @@ impl SessionBackend for MockBackend {
             Ok(crate::backend::ReplaySnapshot {
                 replay: session.replay.clone(),
                 last_seq: session.last_seq,
-                complete: true,
+                complete: !incomplete,
             })
         })
     }

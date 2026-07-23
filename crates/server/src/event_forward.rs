@@ -369,8 +369,26 @@ impl ForwardState {
 }
 
 /// Fetch an authoritative daemon-side replay covering `required_seq`.
-/// Returns `None` on absence, failure, timeout, truncation, or a stale
-/// snapshot. Callers must preserve their last known screen and retry.
+/// Returns `None` on absence, failure, timeout, or a stale snapshot.
+/// Callers must preserve their last known screen and retry.
+///
+/// A `TerminalResync` REPLACES the client's grid with the replay, and the
+/// backend's `snapshot` returns the ring's line-boundary-clean
+/// `replay_snapshot` (`ReplayRing::replay_snapshot_into`) — VT-safe even after
+/// the ring has wrapped, because it drops the partial leading line so the
+/// replay starts on a clean boundary. So an *incomplete* (wrapped) ring is a
+/// perfectly good resync source: the client adopts a correct, if
+/// shorter-history, screen. This is the SAME seed every other consumer of a
+/// wrapped ring now serves — fresh attach (`snapshot_terminals`), a
+/// client-requested resync (`handle_terminal_resync_request`), and the pump's
+/// gap recovery (`resync_replay_after_gap`) — so completeness never gates
+/// reconstruction anywhere. Rejecting `!complete` here instead froze every
+/// terminal that had ever produced more than the ring capacity — once
+/// wrapped, `is_complete()` is false forever, so the first channel overflow
+/// scheduled a resync that could never succeed and `route` then dropped all
+/// further output for that terminal. Only genuine unavailability (backend
+/// error/timeout) or a snapshot that doesn't even reach the gap
+/// (`last_seq < required_seq`) is a real miss.
 async fn resync_replay(
     config: &ServerConfig,
     terminal_id: TerminalId,
@@ -381,15 +399,6 @@ async fn resync_replay(
         return None;
     };
     match tokio::time::timeout(RESYNC_SNAPSHOT_TIMEOUT, config.backend.snapshot(&key)).await {
-        Ok(Ok(snapshot)) if !snapshot.complete => {
-            tracing::warn!(
-                ?terminal_id,
-                required_seq,
-                snapshot_seq = snapshot.last_seq,
-                "resync replay prefix was truncated; preserving client state"
-            );
-            None
-        }
         Ok(Ok(snapshot)) if snapshot.last_seq < required_seq => {
             tracing::warn!(
                 ?terminal_id,
@@ -652,6 +661,46 @@ mod tests {
             }
         }
         assert_eq!(seqs, vec![2], "only the post-resync chunk survives");
+    }
+
+    /// A wrapped ring (`complete: false`) must still serve a resync. Once
+    /// a terminal produces more than the ring capacity, `is_complete()` is
+    /// false forever; rejecting that froze the terminal after its first
+    /// channel overflow (the resync could never succeed, so `route` dropped
+    /// all further output). The backend's snapshot is line-boundary-clean,
+    /// so an incomplete ring is a valid — if shorter-history — reset.
+    #[tokio::test]
+    async fn incomplete_wrapped_ring_still_serves_a_resync() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let key = config
+            .backend
+            .spawn(&[], None, &[], "t")
+            .await
+            .expect("spawn");
+        mock.emit(&key, b"screen-state").await; // seq 1
+        // The ring has wrapped past its capacity — snapshot reports
+        // incomplete, exactly as a >2 MiB agent's ring does.
+        mock.mark_snapshot_incomplete(&key).await;
+        let tid = TerminalId(1);
+        config.terminals.lock().await.insert(tid, key.clone());
+
+        let mut state = ForwardState::new(config.event_metrics.clone());
+        let (tx, mut rx) = mpsc::channel(8);
+        state.schedule_resync(tid, 1);
+        let permit = tx.reserve().await.expect("permit");
+        state.deliver_one(permit, &config).await;
+
+        // The resync is served from the wrapped ring, not refused.
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Ok(Event::TerminalResync { terminal_id, replay, seq })
+                    if terminal_id == tid && replay == b"screen-state" && seq == 1
+            ),
+            "a wrapped-but-boundary-clean ring must serve the resync",
+        );
+        // Debt cleared → `route` resumes forwarding live output.
+        assert!(!state.resync_debt.contains_key(&tid));
     }
 
     /// Snapshot failure must not become an empty authoritative reset or

@@ -3333,10 +3333,19 @@ fn detect_window(buf: &[u8]) -> &[u8] {
 /// gap (a chunk dropped on the backend's bounded bridge or a lagged
 /// broadcast). The reader thread pushes to the ring BEFORE
 /// broadcasting, so a snapshot taken after observing `gap_chunk_seq`
-/// covers every dropped chunk and the observed one. Failure, timeout,
-/// truncation, and stale snapshots are explicit: the caller preserves
-/// its last coherent state, drops the torn chunk, and retries on the next
-/// output instead of fabricating an empty reset or coverage it never saw.
+/// covers every dropped chunk and the observed one. Failure, timeout, and
+/// stale snapshots are explicit: the caller preserves its last coherent
+/// state, drops the torn chunk, and retries on the next output instead of
+/// fabricating an empty reset or coverage it never saw.
+///
+/// A wrapped ring (`complete: false`) is NOT a miss. Its `replay_snapshot`
+/// is line-boundary-clean (`ReplayRing::replay_snapshot_into`), so the
+/// `TerminalResync` still replaces the torn stream with a correct, if
+/// shorter-history, screen — exactly as the forwarder's `resync_replay`
+/// does. Rejecting `!complete` here froze the daemon pump for every client:
+/// once the ring wrapped, `is_complete()` is false forever, so a single
+/// upstream gap made every subsequent chunk re-enter this path and get
+/// dropped (the callers never advance `last_seq` on `None`).
 async fn resync_replay_after_gap(
     backend: &dyn crate::backend::SessionBackend,
     key: &str,
@@ -3350,14 +3359,6 @@ async fn resync_replay_after_gap(
         "output seq gap — chunk(s) dropped upstream; resyncing from replay ring"
     );
     match tokio::time::timeout(SNAPSHOT_PER_SESSION_TIMEOUT, backend.snapshot(key)).await {
-        Ok(Ok(snapshot)) if !snapshot.complete => {
-            tracing::warn!(
-                key,
-                snapshot_seq = snapshot.last_seq,
-                "gap resync replay prefix was truncated; retrying on later output"
-            );
-            None
-        }
         Ok(Ok(snapshot)) if snapshot.last_seq < gap_chunk_seq => {
             tracing::warn!(
                 key,
@@ -5208,7 +5209,14 @@ pub async fn recover_sessions(config: &ServerConfig) {
         tokio::spawn(async move {
             let exit_code = match backend.subscribe(&key_for_pump).await {
                 Ok(mut sub) => {
-                    if !sub.replay.is_empty() && sub.replay_complete {
+                    // Seed the recovered terminal from the ring even when it has
+                    // wrapped (`!replay_complete`): the replay is the
+                    // line-boundary-clean `replay_snapshot`, a correct
+                    // shorter-history screen, and `seq = last_seq` marks its
+                    // coverage exactly as a complete ring would. Gating on
+                    // completeness left every >ring-capacity terminal blank on
+                    // recovery until it produced new output.
+                    if !sub.replay.is_empty() {
                         let _ = bus.send(Event::TerminalOutput {
                             terminal_id,
                             bytes: sub.replay.clone(),
@@ -5555,8 +5563,17 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
             let composing_fut = load_composing_buffer(config, &key);
             let (snapshot, last_user_message, composing_buffer) =
                 tokio::join!(snapshot_fut, user_message_fut, composing_fut);
-            let snapshot = match snapshot {
-                Ok(Ok(snap)) => snap,
+            // `replay_available` reflects whether the snapshot SUCCEEDED, not
+            // whether the ring is still complete. A wrapped ring returns a
+            // non-empty, line-boundary-clean `replay_snapshot`
+            // (`ReplayRing::replay_snapshot_into`) — a correct if
+            // shorter-history VT reset — so it is a perfectly good reattach
+            // seed, the same one the resync paths serve. Only a genuine backend
+            // failure/timeout leaves the client with no replay to adopt; that
+            // path alone reports `replay_available: false` (and the client then
+            // requests a resync via `handle_terminal_resync_request`).
+            let (replay, last_seq, replay_available) = match snapshot {
+                Ok(Ok(snap)) => (snap.replay, snap.last_seq, true),
                 Ok(Err(error)) => {
                     tracing::warn!(
                         terminal_id = ?id,
@@ -5564,11 +5581,7 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
                         %error,
                         "snapshot_terminals: backend.snapshot failed — replay unavailable"
                     );
-                    crate::backend::ReplaySnapshot {
-                        replay: Vec::new(),
-                        last_seq: 0,
-                        complete: false,
-                    }
+                    (Vec::new(), 0, false)
                 }
                 Err(_) => {
                     tracing::warn!(
@@ -5577,11 +5590,7 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
                         timeout_ms = SNAPSHOT_PER_SESSION_TIMEOUT.as_millis() as u64,
                         "snapshot_terminals: backend.snapshot timed out — replay unavailable"
                     );
-                    crate::backend::ReplaySnapshot {
-                        replay: Vec::new(),
-                        last_seq: 0,
-                        complete: false,
-                    }
+                    (Vec::new(), 0, false)
                 }
             };
             TerminalSnapshot {
@@ -5593,13 +5602,9 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
                 terminal_id: id,
                 session_key,
                 kind,
-                replay: if snapshot.complete {
-                    snapshot.replay
-                } else {
-                    Vec::new()
-                },
-                last_seq: snapshot.last_seq,
-                replay_available: snapshot.complete,
+                replay,
+                last_seq,
+                replay_available,
             }
         })
         .buffered(SNAPSHOT_CONCURRENCY)
@@ -5607,9 +5612,16 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
         .await
 }
 
-/// Serve a client-observed sequence gap without trusting a partial or
-/// stale backend replay. This path is defense in depth for drops below
-/// the daemon's normal pump/forwarder recovery machinery.
+/// Serve a client-observed sequence gap from the backend replay. This path
+/// is defense in depth for drops below the daemon's normal pump/forwarder
+/// recovery machinery.
+///
+/// A wrapped ring (`complete: false`) still serves the resync: its
+/// `replay_snapshot` is line-boundary-clean and the `TerminalResync`
+/// replaces the client grid, so the client adopts a correct, shorter-history
+/// screen — the same seed `snapshot_terminals` and the forwarder's
+/// `resync_replay` serve. Only a snapshot that doesn't even reach
+/// `required_seq`, a backend error, or a timeout leaves the client desynced.
 pub async fn handle_terminal_resync_request(
     config: &ServerConfig,
     tx: &lazybox_ipc::EventSender,
@@ -5624,7 +5636,7 @@ pub async fn handle_terminal_resync_request(
     let snapshot =
         tokio::time::timeout(SNAPSHOT_PER_SESSION_TIMEOUT, config.backend.snapshot(&key)).await;
     match snapshot {
-        Ok(Ok(snapshot)) if snapshot.complete && snapshot.last_seq >= required_seq => {
+        Ok(Ok(snapshot)) if snapshot.last_seq >= required_seq => {
             let _ = tx.send(Event::TerminalResync {
                 terminal_id,
                 replay: snapshot.replay,
@@ -7080,6 +7092,184 @@ mod tests {
                 .composing_buffer,
             None,
         );
+    }
+
+    /// A wrapped ring (`complete: false`) is a valid reattach seed: the
+    /// snapshot carries its line-boundary-clean `replay_snapshot` and reports
+    /// `replay_available: true`. Gating this on completeness blanked every
+    /// terminal that had ever produced more than the ring capacity on
+    /// reconnect / lag-recovery, then defeated the client's follow-up resync
+    /// request (see `handle_terminal_resync_request`).
+    #[tokio::test]
+    async fn snapshot_terminals_serves_a_wrapped_ring() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let key = config
+            .backend
+            .spawn(&[], None, &[], "t")
+            .await
+            .expect("spawn");
+        mock.emit(&key, b"screen-state").await;
+        mock.mark_snapshot_incomplete(&key).await;
+        let id = TerminalId(1);
+        let session_key: SessionKey = "acme/widget#1".into();
+        let kind = TerminalKind::Agent("claude".into());
+        config.terminals.lock().await.insert(id, key.clone());
+        config
+            .terminal_meta
+            .lock()
+            .await
+            .insert(id, (session_key, kind));
+
+        let snaps = snapshot_terminals(&config).await;
+        let snap = snaps
+            .iter()
+            .find(|s| s.terminal_id == id)
+            .expect("snapshot");
+        assert!(
+            snap.replay_available,
+            "a wrapped-but-boundary-clean ring is a valid reattach seed"
+        );
+        assert_eq!(snap.replay, b"screen-state");
+    }
+
+    /// The counterpart to the wrapped-ring case: `replay_available` tracks
+    /// snapshot SUCCESS, not ring completeness. A genuine backend failure has
+    /// no authoritative replay, so it alone blanks the replay and flips
+    /// `replay_available` to false — the signal that drives the client's
+    /// recovery resync.
+    #[tokio::test]
+    async fn snapshot_terminals_flags_a_failed_snapshot_unavailable() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let key = config
+            .backend
+            .spawn(&[], None, &[], "t")
+            .await
+            .expect("spawn");
+        mock.emit(&key, b"screen-state").await;
+        mock.fail_next_snapshots(&key, 1).await;
+        let id = TerminalId(1);
+        let session_key: SessionKey = "acme/widget#1".into();
+        let kind = TerminalKind::Agent("claude".into());
+        config.terminals.lock().await.insert(id, key.clone());
+        config
+            .terminal_meta
+            .lock()
+            .await
+            .insert(id, (session_key, kind));
+
+        let snaps = snapshot_terminals(&config).await;
+        let snap = snaps
+            .iter()
+            .find(|s| s.terminal_id == id)
+            .expect("snapshot");
+        assert!(
+            !snap.replay_available,
+            "a failed snapshot carries no authoritative replay"
+        );
+        assert!(snap.replay.is_empty());
+    }
+
+    /// A client-requested resync must be served from a wrapped ring. On
+    /// reconnect a `>ring-capacity` terminal arrives `replay_available: false`
+    /// and the client fires `RequestTerminalResync`; rejecting `!complete`
+    /// here answered `TerminalResyncUnavailable`, so the pane stayed blank
+    /// until new output. The ring's `replay_snapshot` is line-boundary-clean,
+    /// a valid VT reset.
+    #[tokio::test]
+    async fn handle_terminal_resync_request_serves_a_wrapped_ring() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let key = config
+            .backend
+            .spawn(&[], None, &[], "t")
+            .await
+            .expect("spawn");
+        mock.emit(&key, b"screen-state").await; // seq 1
+        mock.mark_snapshot_incomplete(&key).await;
+        let id = TerminalId(1);
+        config.terminals.lock().await.insert(id, key.clone());
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = lazybox_ipc::EventSender::from_unbounded(tx);
+        handle_terminal_resync_request(&config, &sender, id, 1).await;
+
+        match rx.try_recv() {
+            Ok(Event::TerminalResync {
+                terminal_id,
+                replay,
+                seq,
+            }) => {
+                assert_eq!(terminal_id, id);
+                assert_eq!(replay, b"screen-state");
+                assert_eq!(seq, 1);
+            }
+            other => panic!("wrapped ring must serve the resync, got {other:?}"),
+        }
+    }
+
+    /// The genuine miss still stands: a snapshot whose `last_seq` doesn't even
+    /// reach the client's `required_seq` is stale and must not be sent as an
+    /// authoritative reset.
+    #[tokio::test]
+    async fn handle_terminal_resync_request_rejects_a_stale_snapshot() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let key = config
+            .backend
+            .spawn(&[], None, &[], "t")
+            .await
+            .expect("spawn");
+        mock.emit(&key, b"old").await; // seq 1
+        let id = TerminalId(1);
+        config.terminals.lock().await.insert(id, key.clone());
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = lazybox_ipc::EventSender::from_unbounded(tx);
+        // The client is ahead of the snapshot (required 5 > last_seq 1).
+        handle_terminal_resync_request(&config, &sender, id, 5).await;
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Event::TerminalResyncUnavailable { terminal_id }) if terminal_id == id
+        ));
+    }
+
+    /// The pump's gap recovery must serve a wrapped ring, not drop the torn
+    /// stream. Rejecting `!complete` froze the whole daemon pump for a
+    /// `>ring-capacity` terminal after a single upstream gap: `is_complete()`
+    /// is false forever once wrapped, and the callers never advance `last_seq`
+    /// on `None`, so every subsequent chunk re-entered the gap branch and was
+    /// dropped for all clients.
+    #[tokio::test]
+    async fn gap_resync_serves_a_wrapped_ring() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let key = config
+            .backend
+            .spawn(&[], None, &[], "t")
+            .await
+            .expect("spawn");
+        mock.emit(&key, b"screen-state").await; // seq 1
+        mock.mark_snapshot_incomplete(&key).await;
+
+        // Gap observed at seq 1; the wrapped ring covers it (last_seq >= gap).
+        let snapshot = resync_replay_after_gap(&mock, &key, 1, 0)
+            .await
+            .expect("wrapped ring must serve the gap resync");
+        assert_eq!(snapshot.replay, b"screen-state");
+        assert_eq!(snapshot.last_seq, 1);
+        assert!(!snapshot.complete, "the ring is genuinely wrapped");
+    }
+
+    /// The gap path's genuine miss is preserved: a snapshot that doesn't even
+    /// reach the observed gap chunk can't cover it, so it must not be sent.
+    #[tokio::test]
+    async fn gap_resync_rejects_a_snapshot_that_misses_the_gap() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let key = config
+            .backend
+            .spawn(&[], None, &[], "t")
+            .await
+            .expect("spawn");
+        mock.emit(&key, b"old").await; // seq 1
+        // The observed gap chunk (seq 5) is newer than the snapshot's last_seq.
+        assert!(resync_replay_after_gap(&mock, &key, 5, 1).await.is_none());
     }
 
     /// The #48 fix: a terminal that produces neither a

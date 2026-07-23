@@ -1251,7 +1251,13 @@ impl<T: TerminalAdapter> Model<T> {
                         // selection. All three outcomes update the
                         // same state, so one consolidated branch.
                         let prev_key = self.sidebar.selected_workspace_key().cloned();
-                        let handled = self.sidebar.click_to_cycle_filter(m.column, m.row)
+                        // The filter chip opens the menu (a modal the
+                        // model owns) rather than mutating in place.
+                        let filter_hit = self.sidebar.filter_chip_hit(m.column, m.row);
+                        if filter_hit {
+                            self.mount_filter_menu();
+                        }
+                        let handled = filter_hit
                             || self.sidebar.click_to_cycle_sort(m.column, m.row)
                             || self.sidebar.click_to_select(sidebar_rect, m.row);
                         if handled {
@@ -1584,6 +1590,7 @@ pub(super) fn action_from_kind(
         ActionKind::OpenEditor => Action::OpenEditor,
         ActionKind::NewWorkspace => Action::NewWorkspace,
         ActionKind::NewProject => Action::NewProject,
+        ActionKind::ImportCheckout => Action::ImportCheckout,
         ActionKind::MergePr => Action::MergePr,
         ActionKind::ToggleAutoMerge => Action::ToggleAutoMerge,
         ActionKind::ManagePolicies => Action::ManagePolicies,
@@ -1596,9 +1603,11 @@ pub(super) fn action_from_kind(
         ActionKind::AdoptSessions => Action::AdoptSessions,
         ActionKind::CollapseIntoPr => Action::CollapseIntoPr,
         ActionKind::Reply => Action::Reply,
+        ActionKind::EditNotes => Action::EditNotes,
         ActionKind::RequestReviewers => Action::RequestReviewers,
         ActionKind::AddAssignees => Action::AddAssignees,
         ActionKind::ManageLabels => Action::ManageLabels,
+        ActionKind::SyncWorkspace => Action::SyncWorkspace,
         ActionKind::OpenInBrowser => Action::OpenInBrowser,
         ActionKind::DeleteOrClose => Action::DeleteOrClose,
         // Activity-pane cursor jumps (`g` / `Shift-G` under Right
@@ -1615,7 +1624,7 @@ pub(super) fn action_from_kind(
         // fallback set.
         ActionKind::CyclePane => Action::CyclePane,
         ActionKind::ToggleMouseCapture => Action::ToggleMouseCapture,
-        ActionKind::CycleRoleFilter => Action::CycleRoleFilter,
+        ActionKind::OpenFilterMenu => Action::OpenFilterMenu,
         ActionKind::CycleSort => Action::CycleSort,
         ActionKind::CycleMailbox => Action::CycleMailbox,
         ActionKind::OpenSearch => Action::OpenSearch,

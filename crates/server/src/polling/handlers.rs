@@ -1330,16 +1330,18 @@ pub async fn on_terminal_transition(
 /// issue) only steers the confirm-modal wording.
 ///
 /// Every emit path (the open→terminal transition and the per-tick
-/// reprompt sweep) funnels through here, so this is where the shared
-/// [`super::RemovalPromptMemory`] gates: an explicit "keep" answer
-/// suppresses for the session, and re-emits are throttled to
-/// [`super::REMOVAL_REPROMPT_AFTER`] so a user staring at the modal
+/// reprompt sweep) funnels through here. A durable "keep" answer
+/// ([`lazybox_core::CleanupPrompt::Declined`], issue #499) suppresses permanently;
+/// re-emits are otherwise throttled to [`super::REMOVAL_REPROMPT_AFTER`]
+/// via [`super::RemovalPromptMemory`] so a user staring at the modal
 /// doesn't collect a fresh copy every tick.
 ///
-/// No-op for a session-less workspace: there's no worktree to delete
-/// and no terminal to kill, so the only thing removal would do is drop
-/// the tracking row — which the user can do with `x x` without
-/// being nagged.
+/// A session-less **merged PR** still prompts (issue #499): removal just
+/// drops the tracking row, but a merged PR shouldn't linger unprompted
+/// just because it never had a worktree — `has_local_work` and
+/// `active_terminal_count` come back `false`/`0`. A session-less
+/// **closed issue** is a no-op (no worktree to reap; the bare row is
+/// `x x` territory), matching [`super::removal_candidate_state`].
 pub(crate) async fn prompt_merged_pr_removal_with(
     config: &ServerConfig,
     mgr: &lazybox_git_ops::WorktreeManager,
@@ -1349,14 +1351,22 @@ pub(crate) async fn prompt_merged_pr_removal_with(
     let Some(workspace) = load_workspace(config, key) else {
         return;
     };
-    if workspace.sessions.is_empty() {
+    // A "keep" answer is durable (issue #499) — check it before the
+    // throttle so a declined workspace never re-prompts, even after a
+    // restart clears the in-memory cadence memory.
+    if workspace.cleanup_prompt == lazybox_core::CleanupPrompt::Declined {
+        return;
+    }
+    // A merged PR prompts even without a worktree (issue #499); a closed
+    // issue only when it has a session to reap — otherwise the bare row
+    // stays `x x` territory. Mirrors `super::removal_candidate_state`.
+    if terminal_state == lazybox_ipc::RemovableTerminalState::Closed
+        && workspace.sessions.is_empty()
+    {
         return;
     }
     {
         let mut prompts = config.removal_prompts.lock().await;
-        if prompts.kept.contains(key.as_str()) {
-            return;
-        }
         let now = std::time::Instant::now();
         let stale = prompts
             .prompted
@@ -1895,6 +1905,7 @@ mod github_target_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         }
     }
@@ -2097,6 +2108,7 @@ mod inspect_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         };
         let mut workspace = Workspace::from_task(task, chrono::Utc::now());
@@ -2400,6 +2412,7 @@ mod inspect_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         };
         let mut workspace = Workspace::from_task(task, chrono::Utc::now());
@@ -2417,6 +2430,59 @@ mod inspect_tests {
             })
             .unwrap();
         (key, session_id)
+    }
+
+    /// Seed a merged-PR workspace with **no sessions** (a tracking row
+    /// the user watched but never opened a worktree for). Returns its
+    /// key. Exercises the issue #499 session-less cleanup path.
+    fn seed_merged_workspace_no_session(store: &MemoryStore, number: u64) -> WorkspaceKey {
+        use lazybox_core::{Task, TaskId, TaskRole, TaskState, Workspace};
+        let task = Task {
+            id: TaskId {
+                source: "github".into(),
+                key: format!("o/r#{number}"),
+            },
+            title: "merged pr".into(),
+            body: None,
+            state: TaskState::Merged,
+            role: TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: format!("https://github.com/o/r/pull/{number}"),
+            repo: Some("o/r".into()),
+            branch: Some(format!("feat-{number}")),
+            base_branch: None,
+            updated_at: chrono::Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            kind: None,
+            closes_issues: vec![],
+        };
+        let workspace = Workspace::from_task(task, chrono::Utc::now());
+        let key = workspace.key.clone();
+        store
+            .save_workspace(&WorkspaceRecord {
+                key: key.as_str().into(),
+                created_at: chrono::Utc::now(),
+                workspace_json: Some(serde_json::to_string(&workspace).unwrap()),
+            })
+            .unwrap();
+        key
     }
 
     /// Drop the remote-tracking ref so the inspector sees the merged
@@ -2915,6 +2981,127 @@ mod inspect_tests {
             ["o/r#1".to_string(), "o/r#2".to_string()].into(),
             "each merged workspace must get its own prompt"
         );
+    }
+
+    /// Issue #499: a merged PR the user tracked but never opened a
+    /// worktree for (no sessions) is still offered for cleanup by the
+    /// sweep — removal just drops the row, but a merged PR shouldn't
+    /// linger unprompted. The prompt reports no worktree/terminal.
+    #[tokio::test]
+    async fn sweep_prompts_session_less_merged_pr() {
+        let fx = setup_fixture().await;
+        let store = Arc::new(MemoryStore::new());
+        let key = seed_merged_workspace_no_session(&store, 7);
+
+        let config = fresh_config(store);
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mut rx = config.bus.subscribe();
+
+        crate::polling::reprompt_unresolved_removals_with(&config, &mgr).await;
+
+        let evt = drain_until(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
+        let Event::MergedPrRemovable {
+            workspace_key,
+            has_local_work,
+            active_terminal_count,
+            ..
+        } = evt
+        else {
+            unreachable!()
+        };
+        assert_eq!(workspace_key, key);
+        assert!(!has_local_work, "no worktree means no local work to warn");
+        assert_eq!(active_terminal_count, 0, "no sessions means no terminals");
+    }
+
+    /// Issue #499: a session-less *closed issue* is NOT prompted — with
+    /// no worktree to reap the bare row stays `x x` territory, unlike a
+    /// merged PR. Locks the deliberately asymmetric scope.
+    #[tokio::test]
+    async fn sweep_skips_session_less_closed_issue() {
+        use lazybox_core::{Task, TaskId, TaskRole, TaskState, Workspace};
+        let fx = setup_fixture().await;
+        let store = Arc::new(MemoryStore::new());
+        let task = Task {
+            id: TaskId {
+                source: "github".into(),
+                key: "o/r#9".into(),
+            },
+            title: "closed issue".into(),
+            body: None,
+            state: TaskState::Closed,
+            role: TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: "https://github.com/o/r/issues/9".into(),
+            repo: Some("o/r".into()),
+            branch: None,
+            base_branch: None,
+            updated_at: chrono::Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Unknown,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            kind: None,
+            closes_issues: vec![],
+        };
+        let workspace = Workspace::from_task(task, chrono::Utc::now());
+        store
+            .save_workspace(&WorkspaceRecord {
+                key: workspace.key.as_str().into(),
+                created_at: chrono::Utc::now(),
+                workspace_json: Some(serde_json::to_string(&workspace).unwrap()),
+            })
+            .unwrap();
+
+        let config = fresh_config(store);
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mut rx = config.bus.subscribe();
+
+        crate::polling::reprompt_unresolved_removals_with(&config, &mgr).await;
+        assert_no_event(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
+    }
+
+    /// Issue #499: "keep" persists [`lazybox_core::CleanupPrompt::Declined`] on the
+    /// stored row, so a *restarted* daemon (fresh in-memory prompt
+    /// memory) never re-offers cleanup — unlike the old per-process pin
+    /// that a restart cleared.
+    #[tokio::test]
+    async fn keep_persists_decline_across_restart() {
+        let fx = setup_fixture().await;
+        let store = Arc::new(MemoryStore::new());
+        let key = seed_merged_workspace_no_session(&store, 3);
+
+        let config = fresh_config(store.clone());
+        crate::polling::keep_merged_workspace(&config, &key).await;
+
+        // The decision is durable in the store, not just in memory.
+        let persisted = load_workspace(&config, &key).expect("workspace");
+        assert_eq!(
+            persisted.cleanup_prompt,
+            lazybox_core::CleanupPrompt::Declined,
+            "keep must persist Declined on the workspace"
+        );
+
+        // A "restarted" daemon with empty prompt memory stays quiet.
+        let restarted = fresh_config(store);
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mut rx = restarted.bus.subscribe();
+        crate::polling::reprompt_unresolved_removals_with(&restarted, &mgr).await;
+        assert_no_event(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
     }
 
     /// On confirm, `remove_merged_workspace_with` deletes the worktree

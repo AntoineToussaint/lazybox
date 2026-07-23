@@ -205,8 +205,11 @@ severity — severity only drives auto-fade, never dismissability, and
 `` ` ``
 open the fuzzy jump-to-workspace picker (all repos; from inside an
 agent use `]]` then `` ` ``), `!` jump to agent-asking workspace,
-`Shift-F` jump to failing CI, `Shift-P` toggle
-the activity pane (auto-hidden when the workspace has no activity), `.`
+`Shift-F` jump to failing CI, `Shift-P` cycle
+the activity pane full → summary (a slim one-line count of new activity /
+failing CI) → hidden → full, remembered per workspace with a
+`ui.activity_pane_default` starting mode (auto-hidden when the workspace
+has no activity), `.`
 toggle focus mode (near-fullscreen agent terminal behind a slim event
 header; from inside a terminal use `]]f`, and `]]q` exits),
 `]]<digit>` jump the focused terminal straight to the Nth agent
@@ -228,7 +231,12 @@ cycle mailbox (Inbox → Inactive → Snoozed), `/` search (composes with
 the active filters; matches title, number, repo, labels, reviewers /
 assignees). `x` is a
 leader for the **workspace** group (which-key popup): `x n` new
-workspace, `x p` new project, `x a` adopt sessions, `x j` join issue
+workspace, `x p` new project, `x a` adopt sessions, `x s` send to
+session (agent-to-agent handoff, #431 — capture the focused agent's
+on-screen output, pick a target workspace, edit the brief, and
+inject + submit it into that session's agent; the source is excluded
+so a handoff can't loop back to itself, and a visible `source →
+target` notice records the trail), `x j` join issue
 into PR, `x z` long snooze, `x x` archive, `x c` close issue
 (as not-planned, upstream; issue workspaces only, confirmed first) —
 the legacy `Shift-{N,A,J,X,C,Z}` direct aliases are gone (#304).

@@ -183,6 +183,7 @@ fn make_task(key: &str) -> Task {
         recent_activity: vec![],
         additions: 0,
         deletions: 0,
+        kind: None,
         closes_issues: vec![],
     }
 }
@@ -3048,15 +3049,17 @@ async fn merge_emits_rebadge_then_upsert_then_remove_then_merged() {
 
 #[tokio::test]
 async fn branch_name_fallback_collapses_issue_workspace() {
-    // A PR whose head branch is the lazybox-named `lazybox/issue-N`
-    // worktree branch claims issue #N even when `closes_issues` is
-    // empty (the agent forgot the "Closes #N" line and the lazy
-    // details fetch hasn't run yet).
+    // A PR whose head branch is the lazybox-named issue worktree branch
+    // claims issue #N even when `closes_issues` is empty (the agent
+    // forgot the "Closes #N" line and the lazy details fetch hasn't run
+    // yet). The fixture mirrors the real `derive_branch_for_branchless`
+    // output — empty default prefix plus the appended title slug
+    // (`issue-<n>-<slug>`), not the historical `lazybox/issue-<n>`.
     let config = ServerConfig::in_memory();
     polling::upsert(&config, make_issue_task("o/r#42")).await;
 
     let mut pr = make_task("o/r#141");
-    pr.branch = Some("lazybox/issue-42".into());
+    pr.branch = Some("issue-42-fix-the-thing".into());
     assert!(pr.closes_issues.is_empty(), "fixture: no closing refs");
     polling::upsert(&config, pr).await;
 

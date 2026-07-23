@@ -279,6 +279,16 @@ pub enum Id {
     /// the picked snippet's body (custom text appends after it).
     /// Submit → one delivery per target in `pending_broadcast`.
     BroadcastText,
+    /// Target picker for the agent-to-agent handoff flow (`x s`,
+    /// issue #431) — pick the session the source agent's output should
+    /// be injected into. Candidate keys live in `handoff_choices`; the
+    /// source name + captured seed live in `pending_handoff`.
+    /// `Msg::ChoicePicked` resolves the target and mounts `HandoffText`.
+    HandoffTarget,
+    /// Compose step of the handoff flow: a Textarea pre-filled with the
+    /// source agent's captured on-screen output, editable before send.
+    /// Submit → inject + submit into the target in `pending_handoff`.
+    HandoffText,
     /// Single-pick `Choice` over the enabled agents (`,` Settings →
     /// "Change default agent"), opened on the current default. Pick →
     /// persist `setup.default_agent` and update the panes live. Ids
@@ -414,6 +424,20 @@ pub(crate) struct ConfigEdit {
 pub(crate) struct BroadcastDraft {
     pub(crate) targets: Vec<lazybox_core::SessionKey>,
     pub(crate) snippet_key: Option<String>,
+}
+
+/// Active agent-to-agent handoff (`x s`, issue #431). Set when the
+/// target picker mounts, carrying the source workspace's display name
+/// (for the A→B notice) and the seed captured from its agent screen
+/// (pre-fills the compose textarea). The `target` is filled in when the
+/// picker resolves; the whole draft is consumed by the compose submit
+/// (`dispatch_handoff`) or dropped on Esc.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HandoffDraft {
+    pub(crate) source: lazybox_core::SessionKey,
+    pub(crate) source_name: String,
+    pub(crate) seed: String,
+    pub(crate) target: Option<lazybox_core::SessionKey>,
 }
 
 /// One queued workspace-removal prompt. Surfaced one at a time as a
@@ -923,14 +947,16 @@ pub struct Model<T: TerminalAdapter> {
     /// overwrites the terminal focus of the workspace being left.
     /// Session-scoped — not persisted across launches.
     workspace_focus: std::collections::HashMap<lazybox_core::SessionKey, PaneFocus>,
-    /// Per-workspace manual override of the Activity pane's
-    /// visibility, keyed by workspace. The pane auto-hides when a
-    /// workspace has no activity worth showing (`Right::
-    /// has_visible_content`); `ToggleActivityPane` (Shift-P) flips
-    /// that and records the user's choice here so navigating away and
-    /// back keeps it. Session-scoped — not persisted across launches.
-    /// An entry's `bool` is the desired visibility (`true` = shown).
-    activity_pane_overrides: std::collections::HashMap<lazybox_core::WorkspaceKey, bool>,
+    /// Per-workspace manual override of the Activity pane's mode,
+    /// keyed by workspace. Absent → the pane starts in
+    /// `ui.activity_pane_default` (and still auto-hides when the
+    /// workspace has no activity worth showing, `Right::
+    /// has_visible_content`). `ToggleActivityPane` (Shift-P) cycles
+    /// `Full → Summary → Hidden` and records the user's choice here so
+    /// navigating away and back keeps it. Session-scoped — not
+    /// persisted across launches.
+    activity_pane_overrides:
+        std::collections::HashMap<lazybox_core::WorkspaceKey, ActivityPaneMode>,
     /// Active sidebar right-click context menu state: the workspace
     /// row the menu was raised over plus the ordered list of catalog
     /// `Action`s the picker is offering. `Msg::ChoicePicked` indexes
@@ -1056,6 +1082,13 @@ pub struct Model<T: TerminalAdapter> {
     /// mounts, threaded through the snippet-pick step, consumed by the
     /// compose submit (or dropped on Esc). See [`BroadcastDraft`].
     pub(crate) pending_broadcast: Option<BroadcastDraft>,
+    /// Active agent-to-agent handoff flow (`x s`), if any. Set when the
+    /// target picker mounts, threaded through the pick step, consumed by
+    /// the compose submit. See [`HandoffDraft`].
+    pub(crate) pending_handoff: Option<HandoffDraft>,
+    /// Session keys backing the active handoff `HandoffTarget` picker,
+    /// in row order — `Msg::ChoicePicked(idx)` resolves to a key here.
+    pub(crate) handoff_choices: Vec<lazybox_core::SessionKey>,
     /// Session keys backing the active `JumpPicker`, in the same order
     /// as its rows — `Msg::ChoicePicked(idx)` resolves to a key here.
     /// Cleared on mount/unmount.
@@ -1190,9 +1223,10 @@ pub struct Preselect {
     pub session_id_raw: Option<String>,
 }
 
-use crate::realm::layout::{LayoutCtx, apply_activity_visibility, focus_mode_areas, pane_areas};
+use crate::realm::layout::{LayoutCtx, apply_activity_mode, focus_mode_areas, pane_areas};
 use crate::realm::setup_ctx::{SettingsAction, SetupCtx};
 use crate::realm::status_ctx::StatusCtx;
+use lazybox_config::ActivityPaneMode;
 
 /// How long the run loop keeps re-rendering after a modal-bound key is
 /// forwarded to the listener channel. Generous multiple of the 10ms
@@ -1367,6 +1401,8 @@ impl<T: TerminalAdapter> Model<T> {
             update_dismissal_rx,
             update_dismissals_pending: 0,
             pending_broadcast: None,
+            pending_handoff: None,
+            handoff_choices: Vec::new(),
             jump_choices: Vec::new(),
             theme_choices: Vec::new(),
             theme_picker_prev: None,
@@ -3281,27 +3317,38 @@ impl<T: TerminalAdapter> Model<T> {
     pub fn shutdown(&mut self) {
         self.term_guard.take();
     }
-    /// Whether the Activity (right) pane should render for the
-    /// currently-selected workspace. A per-workspace manual override
-    /// (set by `ToggleActivityPane`) wins; otherwise the pane shows
-    /// only when the workspace has content worth showing. The
-    /// auto-hide rule is about a *selected* workspace with no
-    /// activity — with nothing selected (empty inbox) the pane keeps
-    /// its prior always-on behavior.
-    pub(super) fn activity_pane_visible(&self) -> bool {
+    /// The Activity (right) pane's mode for the currently-selected
+    /// workspace: `Full` (whole feed), `Summary` (one slim count
+    /// line), or `Hidden`. A per-workspace manual override (cycled by
+    /// `ToggleActivityPane`) wins; otherwise the pane opens in
+    /// `ui.activity_pane_default`, except a *selected* workspace with
+    /// nothing to show still auto-hides. With nothing selected (empty
+    /// inbox) the pane keeps its prior always-on behavior.
+    pub(super) fn activity_pane_mode(&self) -> ActivityPaneMode {
         let Some(ws) = self.sidebar.selected_workspace() else {
-            return true;
+            return ActivityPaneMode::Full;
         };
-        if let Some(&shown) = self.activity_pane_overrides.get(&ws.key) {
-            return shown;
+        if let Some(&mode) = self.activity_pane_overrides.get(&ws.key) {
+            return mode;
         }
-        self.right.has_visible_content()
+        if !self.right.has_visible_content() {
+            return ActivityPaneMode::Hidden;
+        }
+        self.ui_defaults.activity_pane_default
     }
 
-    /// The three pane rects, accounting for a hidden Activity pane.
-    /// When the pane is hidden its row folds into the terminal stack:
-    /// the returned `right_top` is zero-height (so hit-tests and the
-    /// render skip it) and `right_bottom` spans the full right column.
+    /// Whether the *full* Activity pane is shown (and thus focusable).
+    /// `Summary` and `Hidden` both read as not-visible here: the slim
+    /// summary line is a non-focusable header, so Tab / click / Enter
+    /// route past it exactly like a hidden pane.
+    pub(super) fn activity_pane_visible(&self) -> bool {
+        self.activity_pane_mode() == ActivityPaneMode::Full
+    }
+
+    /// The three pane rects, accounting for the Activity pane's mode.
+    /// A `Hidden` pane folds its row into the terminal stack (zero-
+    /// height `right_top`); a `Summary` pane keeps a single slim row
+    /// and hands the rest to the terminal.
     pub(super) fn effective_pane_rects(&self, area: Rect) -> (Rect, Rect, Rect) {
         let rects = pane_areas(
             area,
@@ -3309,7 +3356,7 @@ impl<T: TerminalAdapter> Model<T> {
             self.layout.right_top_pct,
             self.layout.sidebar_user_resized,
         );
-        apply_activity_visibility(rects, self.activity_pane_visible())
+        apply_activity_mode(rects, self.activity_pane_mode())
     }
 
     /// Keep focus off the Activity pane while it's hidden — Tab,
@@ -3335,7 +3382,7 @@ impl<T: TerminalAdapter> Model<T> {
         // Computed outside the draw closure: calling a `&self` method
         // inside it would capture all of `self` and clash with the
         // disjoint `&mut self.sidebar` / `self.right` borrows below.
-        let activity_visible = self.activity_pane_visible();
+        let activity_mode = self.activity_pane_mode();
         // Pick the polling indicator for the footer:
         // - During the initial blocking modal, surface the rich
         //   first-poll spinner.
@@ -3521,16 +3568,20 @@ impl<T: TerminalAdapter> Model<T> {
                 self.terminals.view_in(body, f);
                 body
             } else {
-                let (left, right_top, right_bottom) = apply_activity_visibility(
+                let (left, right_top, right_bottom) = apply_activity_mode(
                     pane_areas(pane_area, sidebar_pct, right_top_pct, sidebar_user_resized),
-                    activity_visible,
+                    activity_mode,
                 );
                 self.sidebar.view_in(left, f);
-                // A zero-height `right_top` means the Activity pane is
-                // hidden for this workspace — its space went to the
-                // terminal stack below.
+                // `right_top` carries the Activity pane; what renders
+                // there depends on the mode. Hidden gave its row to the
+                // terminal stack (zero height); Summary keeps a single
+                // slim count line; Full draws the whole feed.
                 if right_top.height > 0 {
-                    self.right.view_in(right_top, f);
+                    match activity_mode {
+                        ActivityPaneMode::Summary => self.right.view_summary_in(right_top, f),
+                        _ => self.right.view_in(right_top, f),
+                    }
                 }
                 self.terminals.view_in(right_bottom, f);
                 right_bottom

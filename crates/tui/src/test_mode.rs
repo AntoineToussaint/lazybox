@@ -132,6 +132,7 @@ fn seed_one_session(store: &dyn Store, worktree: &Path) -> anyhow::Result<()> {
         recent_activity: vec![],
         additions: 0,
         deletions: 0,
+        kind: None,
         closes_issues: vec![],
     };
     let mut workspace = Workspace::from_task(task, Utc::now());

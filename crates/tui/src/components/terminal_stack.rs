@@ -1793,6 +1793,78 @@ impl TerminalStack {
         Some((project(a), project(b)))
     }
 
+    /// Plain-text dump of a terminal's whole visible grid — every row
+    /// top to bottom, trailing spaces trimmed, pure box-drawing border
+    /// rows dropped, and blank rows dropped off both ends. Seeds an
+    /// agent-to-agent handoff with the source agent's on-screen output
+    /// (issue #431); the caller lets the user edit it before it's
+    /// injected into the target session, so any remaining composer
+    /// chrome is trimmed there. `None` when the terminal is unknown, its
+    /// VT snapshot can't be read, or nothing but chrome/blanks is left.
+    pub fn visible_text(&mut self, id: TerminalId) -> Option<String> {
+        let slot = self.terminals.get_mut(&id)?;
+        // The grid must reflect every byte received, not just those that
+        // arrived while on screen — mirrors `target_at`.
+        slot.flush_pending();
+        let snapshot = slot.vt.render_state.update(&slot.vt.terminal).ok()?;
+        let mut row_iter = slot.vt.row_iter.update(&snapshot).ok()?;
+        let mut rows: Vec<String> = Vec::new();
+        while let Some(row) = row_iter.next() {
+            let mut line = String::new();
+            if let Ok(mut cell_iter) = slot.vt.cell_iter.update(row) {
+                while let Some(cell) = cell_iter.next() {
+                    // Wide-glyph spacer cells carry no graphemes; emitting
+                    // one as a space would split CJK text ("日本語" →
+                    // "日 本 語"), so drop it.
+                    if matches!(
+                        cell.wide(),
+                        Ok(vt::screen::CellWide::SpacerTail | vt::screen::CellWide::SpacerHead)
+                    ) {
+                        continue;
+                    }
+                    let graphemes = cell.graphemes().unwrap_or_default();
+                    if graphemes.is_empty() {
+                        line.push(' ');
+                    } else {
+                        for g in graphemes {
+                            line.push(g);
+                        }
+                    }
+                }
+            }
+            rows.push(line.trim_end().to_string());
+        }
+        // Drop pure box-drawing rows — the agent composer's borders and
+        // separators (╭──╮, ├──┤, ────). A row with any real text stays,
+        // so content framed by │ … │ survives (the user trims the rest).
+        rows.retain(|r| !is_border_row(r));
+        while rows.first().is_some_and(|l| l.is_empty()) {
+            rows.remove(0);
+        }
+        while rows.last().is_some_and(|l| l.is_empty()) {
+            rows.pop();
+        }
+        if rows.is_empty() {
+            return None;
+        }
+        Some(rows.join("\n"))
+    }
+
+    /// The agent terminal for `session_key`, preferring a live pane but
+    /// falling back to a kept exited one — so a handoff can capture the
+    /// final output of an agent that already finished and exited (#431).
+    /// Ties break on the lowest id for determinism. `None` when the
+    /// session has no agent slot at all.
+    pub fn agent_terminal_for(&self, session_key: &SessionKey) -> Option<TerminalId> {
+        self.terminals
+            .iter()
+            .filter(|(_, s)| {
+                s.session_key == *session_key && matches!(s.kind, TerminalKind::Agent(_))
+            })
+            .min_by_key(|(id, s)| (s.exited.is_some(), id.0))
+            .map(|(id, _)| *id)
+    }
+
     /// If the cell at frame-space `(col, row)` lies inside a URL,
     /// file path, or `#N` / `owner/repo#N` issue reference on its
     /// row, return the matching [`ClickTarget`]. Otherwise `None`.
@@ -4053,6 +4125,19 @@ fn function_key_seq(n: u8) -> Option<Vec<u8>> {
     Some(seq.to_vec())
 }
 
+/// True when a row is nothing but box-drawing characters and
+/// whitespace — a composer/panel border or separator (`╭──╮`, `├──┤`,
+/// `────`), never agent prose or code. Used to strip TUI chrome from a
+/// handoff scrape (#431). A row with any non-box glyph (so any framed
+/// content like `│ text │`) is kept. An empty row is not a border.
+fn is_border_row(row: &str) -> bool {
+    let trimmed = row.trim();
+    !trimmed.is_empty()
+        && trimmed
+            .chars()
+            .all(|c| c.is_whitespace() || ('\u{2500}'..='\u{257F}').contains(&c))
+}
+
 /// Scan `row_text` for an `http(s)://…` token whose byte range
 /// contains `byte_pos`. Returns the URL as a borrowed slice when
 /// found. URL terminates at the first whitespace; trailing
@@ -4852,6 +4937,75 @@ mod selection_offset_tests {
         stack.terminals.insert(TerminalId(1), slot);
         stack.set_active_session(Some(sk));
         stack
+    }
+
+    #[test]
+    fn visible_text_dumps_the_whole_grid_trimming_blank_edges() {
+        let mut stack = stack_with(
+            TerminalKind::Agent("claude".into()),
+            Some("do the thing"),
+            &["plan:", "  1. scope", "  2. build"],
+        );
+        let text = stack
+            .visible_text(TerminalId(1))
+            .expect("a fed grid yields text");
+        assert_eq!(text, "plan:\n  1. scope\n  2. build");
+    }
+
+    #[test]
+    fn visible_text_is_none_for_an_unknown_terminal() {
+        let mut stack = stack_with(TerminalKind::Agent("claude".into()), None, &["x"]);
+        assert!(stack.visible_text(TerminalId(999)).is_none());
+    }
+
+    #[test]
+    fn visible_text_drops_pure_border_rows() {
+        let mut stack = stack_with(
+            TerminalKind::Agent("claude".into()),
+            None,
+            &["────────", "actual content", "╰──────╯"],
+        );
+        let text = stack.visible_text(TerminalId(1)).expect("content survives");
+        assert_eq!(text, "actual content", "box-drawing borders are stripped");
+    }
+
+    #[test]
+    fn agent_terminal_for_finds_a_kept_exited_pane() {
+        // A finished agent whose process exited but whose pane is kept
+        // (showing its final output) is still a valid handoff source.
+        let mut stack = stack_with(TerminalKind::Agent("claude".into()), None, &["done"]);
+        stack.terminals.get_mut(&TerminalId(1)).unwrap().exited = Some(TerminalExit {
+            code: Some(0),
+            dead_on_arrival: false,
+            last_output: None,
+        });
+        let sk = SessionKey::new("session");
+        assert_eq!(stack.agent_terminal_for(&sk), Some(TerminalId(1)));
+    }
+
+    #[test]
+    fn agent_terminal_for_prefers_a_live_pane_over_an_exited_one() {
+        let sk = SessionKey::new("session");
+        let mut stack = stack_with(TerminalKind::Agent("claude".into()), None, &["a"]);
+        // Exit the low-id pane; add a live higher-id agent in the same
+        // session. The live one must win despite the higher id.
+        stack.terminals.get_mut(&TerminalId(1)).unwrap().exited = Some(TerminalExit {
+            code: Some(0),
+            dead_on_arrival: false,
+            last_output: None,
+        });
+        let live = TerminalStack::make_slot(
+            sk.clone(),
+            TerminalKind::Agent("codex".into()),
+            0,
+            false,
+            false,
+            None,
+            None,
+            String::new(),
+        );
+        stack.terminals.insert(TerminalId(5), live);
+        assert_eq!(stack.agent_terminal_for(&sk), Some(TerminalId(5)));
     }
 
     /// Map two crossterm points through `selection_point` and copy the

@@ -1118,9 +1118,21 @@ impl<T: TerminalAdapter> Model<T> {
         if !dismissable {
             return false;
         }
-        // Close it the same way Esc does (per-modal cleanup +
-        // draining any queued daemon prompt).
-        let cmds = self.handle_modal_dismissed();
+        // Close it the same way Esc does (per-modal cleanup + draining
+        // any queued daemon prompt) — with one exception: an outside
+        // click *backgrounds* an in-flight worktree provision, it does
+        // not abort it. Esc on the checklist is a deliberate "cancel
+        // this wedged clone" gesture (#403); clicking a sidebar row to
+        // go do something else is not, and must never kill the spawn the
+        // user just started. Drop the `CancelSpawn` the shared dismiss
+        // path queues for that case — the provision keeps running and
+        // its later progress events are absorbed silently (the checklist
+        // state is already recorded as dismissed).
+        let cmds = self
+            .handle_modal_dismissed()
+            .into_iter()
+            .filter(|c| !matches!(c, IpcCommand::CancelSpawn { .. }))
+            .collect();
         self.dispatch_cmds(cmds);
         // Fall through to normal pane hit-testing only when nothing is
         // left on the stack — a dismissable overlay stacked over
@@ -1183,6 +1195,23 @@ impl<T: TerminalAdapter> Model<T> {
                     self.redraw = true;
                     return;
                 }
+                // Left-click on the slim summary line (Summary mode) →
+                // expand the pane back to the full feed. The summary is
+                // a non-focusable header, so a plain focus change would
+                // just bounce off `enforce_pane_focus`; instead treat
+                // the click as "expand me" and record the Full override.
+                if matches!(button, crossterm::event::MouseButton::Left)
+                    && self.activity_pane_mode() == lazybox_config::ActivityPaneMode::Summary
+                    && rect_contains(right_top_rect, m.column, m.row)
+                    && let Some(ws_key) = self.sidebar.selected_workspace().map(|w| w.key.clone())
+                {
+                    self.activity_pane_overrides
+                        .insert(ws_key, lazybox_config::ActivityPaneMode::Full);
+                    self.focus = PaneFocus::Right;
+                    self.set_focus_attr();
+                    self.redraw = true;
+                    return;
+                }
                 // Right-click in the sidebar → open the workspace
                 // context menu. Move the cursor to the clicked row
                 // first (same as left-click) so the menu acts on
@@ -1211,11 +1240,21 @@ impl<T: TerminalAdapter> Model<T> {
                 // under the cursor we fall through to the normal
                 // routing — the PTY still gets the right-click for
                 // its own context menus.
+                // The horizontal splitter is only a live resize handle
+                // while the activity pane is full — in Summary / Hidden
+                // its 1-row / 0-row seam must not grab drags.
+                let horizontal_splitter = self.activity_pane_visible();
                 if matches!(button, crossterm::event::MouseButton::Right)
                     && rect_contains(right_bottom_rect, m.column, m.row)
                     && self
                         .layout
-                        .hit_test_splitter(m.column, m.row, sidebar_rect, right_top_rect)
+                        .hit_test_splitter(
+                            m.column,
+                            m.row,
+                            sidebar_rect,
+                            right_top_rect,
+                            horizontal_splitter,
+                        )
                         .is_none()
                     && let Some(target) =
                         self.terminals.target_at(right_bottom_rect, m.column, m.row)
@@ -1226,10 +1265,13 @@ impl<T: TerminalAdapter> Model<T> {
                 // Splitter drag wins over both focus changes and
                 // terminal interaction — clicking a splitter resizes,
                 // it never refocuses or types into a pane.
-                if let Some(target) =
-                    self.layout
-                        .hit_test_splitter(m.column, m.row, sidebar_rect, right_top_rect)
-                {
+                if let Some(target) = self.layout.hit_test_splitter(
+                    m.column,
+                    m.row,
+                    sidebar_rect,
+                    right_top_rect,
+                    horizontal_splitter,
+                ) {
                     self.layout.active_drag = Some(target);
                     return;
                 }
@@ -1513,7 +1555,11 @@ impl<T: TerminalAdapter> Model<T> {
                     }
                     return;
                 }
-                if rect_contains(right_top_rect, m.column, m.row) {
+                // Only the full feed scrolls. The slim summary line
+                // shares `right_top_rect`, but routing wheel events to
+                // `scroll_activity` there would silently move the
+                // not-rendered feed's offset.
+                if self.activity_pane_visible() && rect_contains(right_top_rect, m.column, m.row) {
                     // Inertia damper: the OS-driven "flick keeps
                     // scrolling for 500ms after the gesture" phase
                     // decays its STEP and a reverse-direction gesture
@@ -1770,6 +1816,7 @@ pub(super) fn action_from_kind(
         ActionKind::Refresh => Action::Refresh,
         ActionKind::ForceRedraw => Action::ForceRedraw,
         ActionKind::AdoptSessions => Action::AdoptSessions,
+        ActionKind::SendToSession => Action::SendToSession,
         ActionKind::CollapseIntoPr => Action::CollapseIntoPr,
         ActionKind::Reply => Action::Reply,
         ActionKind::EditNotes => Action::EditNotes,

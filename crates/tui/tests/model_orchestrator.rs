@@ -892,6 +892,7 @@ fn task_with_issue(key: &str, title: &str, body: Option<&str>) -> lazybox_core::
         recent_activity: vec![],
         additions: 0,
         deletions: 0,
+        kind: None,
         closes_issues: vec![],
     }
 }
@@ -1146,6 +1147,7 @@ fn task_with_pr(key: &str) -> lazybox_core::Task {
         recent_activity: vec![],
         additions: 0,
         deletions: 0,
+        kind: None,
         closes_issues: vec![],
     }
 }

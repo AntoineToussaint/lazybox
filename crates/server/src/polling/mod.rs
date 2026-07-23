@@ -1867,6 +1867,11 @@ pub struct MergePromptMemory {
 /// disconnected, or not yet started lost it forever and the merged
 /// workspace sat unprompted (issue #292). Same self-heal contract and
 /// same own-lock reasoning as [`MergePromptMemory`].
+///
+/// This is now purely the emit-cadence throttle. The user's "keep"
+/// answer lives on the workspace itself as [`lazybox_core::CleanupPrompt::Declined`]
+/// (issue #499), so it survives a restart instead of being a
+/// per-process pin.
 #[derive(Default)]
 pub struct RemovalPromptMemory {
     /// Workspace keys we've broadcast `MergedPrRemovable` for, with
@@ -1876,10 +1881,6 @@ pub struct RemovalPromptMemory {
     /// heals on its own. Cleared wholesale on client (re)connect so a
     /// fresh subscriber is prompted on the next tick, not in 5 min.
     pub(crate) prompted: std::collections::HashMap<String, std::time::Instant>,
-    /// Workspace keys the user answered "keep" for
-    /// (`Command::KeepMergedWorkspace`). Not re-prompted this session;
-    /// a daemon restart clears the pin, mirroring `rejected` merges.
-    pub(crate) kept: std::collections::HashSet<String>,
 }
 
 pub async fn tick_with_state(
@@ -3742,13 +3743,20 @@ fn pr_workspace_claiming_issue(
 /// The terminal state that makes `workspace` a removal candidate:
 /// a merged PR, or a closed issue no PR workspace claims (the PR's
 /// own prompt owns that cleanup — same deferral as the upsert path).
-/// `None` for open work, task-less rows, and session-less workspaces
-/// (nothing to reap; dropping the bare row is `x x` territory).
+/// `None` for open work, task-less rows, and workspaces the user
+/// already answered "keep" for ([`lazybox_core::CleanupPrompt::Declined`]).
+///
+/// A **merged PR** qualifies even with no sessions (issue #499): its
+/// tracking row should be offered for cleanup even when it never had a
+/// worktree — removal just drops the row, but the user shouldn't have to
+/// discover `x x` to be rid of it. A **closed issue** still requires a
+/// session (a worktree to reap); a bare closed-issue row remains `x x`
+/// territory to avoid nagging on every externally-closed tracked issue.
 fn removal_candidate_state(
     config: &ServerConfig,
     workspace: &Workspace,
 ) -> Option<lazybox_ipc::RemovableTerminalState> {
-    if workspace.sessions.is_empty() {
+    if workspace.cleanup_prompt == lazybox_core::CleanupPrompt::Declined {
         return None;
     }
     let task = workspace.primary_task()?;
@@ -3756,7 +3764,8 @@ fn removal_candidate_state(
         return (task.state == lazybox_core::TaskState::Merged)
             .then_some(lazybox_ipc::RemovableTerminalState::Merged);
     }
-    if task.state != lazybox_core::TaskState::Closed
+    if workspace.sessions.is_empty()
+        || task.state != lazybox_core::TaskState::Closed
         || pr_workspace_claiming_issue(config, &task.id).is_some()
     {
         return None;
@@ -3816,13 +3825,25 @@ pub(crate) async fn reprompt_unresolved_removals_with(
 }
 
 /// Handle `Command::KeepMergedWorkspace`: the user answered "no" on
-/// the removal modal. Pin the workspace so the reprompt sweep stops
-/// asking this session; the row stays until removed explicitly.
+/// the removal modal. Persist [`lazybox_core::CleanupPrompt::Declined`] on the row so
+/// the reprompt sweep stops asking — across restarts, not just this
+/// session (issue #499). The row stays until removed explicitly.
 pub async fn keep_merged_workspace(config: &ServerConfig, key: &WorkspaceKey) {
-    let mut prompts = config.removal_prompts.lock().await;
-    prompts.prompted.remove(key.as_str());
-    prompts.kept.insert(key.as_str().to_string());
-    tracing::info!(workspace = %key, "user kept terminal-state workspace; removal prompt pinned for this session");
+    config
+        .removal_prompts
+        .lock()
+        .await
+        .prompted
+        .remove(key.as_str());
+    let outcome = apply_and_commit(config, key, |ws| {
+        ws.cleanup_prompt = lazybox_core::CleanupPrompt::Declined;
+    })
+    .await;
+    tracing::info!(
+        workspace = %key,
+        ?outcome,
+        "user kept terminal-state workspace; cleanup prompt declined (persisted)"
+    );
 }
 
 /// A client just (re)connected: forget the per-workspace emit
@@ -3881,18 +3902,35 @@ struct PendingIssueMerge {
 }
 
 /// Issue id a lazybox-named branch implies. Issue spawns check out
-/// `lazybox/issue-<n>` (see `spawn_handler::derive_branch_for_branchless`),
-/// so a PR opened from that worktree closes issue `<repo>#<n>` even
-/// when neither GitHub's `closingIssuesReferences` nor the body text
-/// says so yet (the agent forgot the "Closes #N" line, or the lazy
-/// details fetch hasn't run). Used as an extra collapse candidate —
-/// the "target must be an ISSUE workspace" filter downstream keeps a
-/// false positive harmless.
+/// `<prefix>/issue-<n>-<title-slug>` (see
+/// `spawn_handler::derive_branch_for_branchless`), so a PR opened from that
+/// worktree closes issue `<repo>#<n>` even when neither GitHub's
+/// `closingIssuesReferences` nor the body text says so yet (the agent forgot
+/// the "Closes #N" line, or the lazy details fetch hasn't run). Used as an
+/// extra collapse candidate — the "target must be an ISSUE workspace" filter
+/// downstream keeps a false positive harmless.
+///
+/// The id lives in the `issue-<n>` stem of the branch's last path segment,
+/// not in a fixed `lazybox/issue-<n>` string: the branch prefix is empty by
+/// default (#108) and a title slug is appended after the number (#109), so
+/// the match reads the leading numeric component of the stem and ignores
+/// both the prefix and the slug.
+///
+/// GitHub-only: the `issue-<n>` stem and the `<repo>#<n>` key it rebuilds are
+/// GitHub conventions (`derive_branch_for_branchless` only emits that stem for
+/// GitHub tasks). Gating on the source both keeps the heuristic off other
+/// providers — whose keys aren't `<repo>#<n>` — and narrows the branch shapes
+/// a stray match could fire on.
 fn issue_id_from_branch(pr: &Task) -> Option<lazybox_core::TaskId> {
-    let number = pr
-        .branch
-        .as_deref()?
-        .strip_prefix("lazybox/issue-")
+    if !pr.id.source.eq_ignore_ascii_case("github") {
+        return None;
+    }
+    let branch = pr.branch.as_deref()?;
+    let stem = branch.rsplit('/').next().unwrap_or(branch);
+    let number = stem
+        .strip_prefix("issue-")?
+        .split('-')
+        .next()
         .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))?;
     let repo = pr.repo.as_deref().filter(|r| !r.is_empty())?;
     Some(lazybox_core::TaskId {
@@ -4552,6 +4590,7 @@ fn issue_id_to_workspace_key(issue_id: &lazybox_core::TaskId) -> WorkspaceKey {
         recent_activity: vec![],
         additions: 0,
         deletions: 0,
+        kind: None,
         closes_issues: vec![],
     };
     WorkspaceKey::new(lazybox_core::workspace_key_for(&stub))
@@ -5420,6 +5459,7 @@ mod workspace_lock_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         }
     }
@@ -5640,6 +5680,7 @@ mod merge_detection_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         }
     }
@@ -5755,6 +5796,70 @@ mod merge_detection_tests {
         let incoming = pr("o/r#7", TaskState::Closed);
         assert_eq!(closed_issue_transition(Some(&prev), &incoming), None);
     }
+
+    fn pr_on_branch(branch: &str) -> Task {
+        let mut t = pr("o/r#99", TaskState::Open);
+        t.branch = Some(branch.into());
+        t
+    }
+
+    #[test]
+    fn issue_id_from_branch_reads_slug_suffixed_stem() {
+        // The default (empty) branch prefix plus the #109 title slug: the
+        // fallback must still recover the issue number from the stem.
+        let id = issue_id_from_branch(&pr_on_branch("issue-42-fix-the-thing"))
+            .expect("issue number in slug-suffixed branch");
+        assert_eq!(id.source, "github");
+        assert_eq!(id.key, "o/r#42");
+    }
+
+    #[test]
+    fn issue_id_from_branch_reads_prefixed_stem() {
+        // A non-empty prefix (`worktree.branch_prefix`, possibly
+        // multi-segment) sits ahead of the stem and must be ignored.
+        let id = issue_id_from_branch(&pr_on_branch("team/feat/issue-7-do-it"))
+            .expect("issue number behind a multi-segment prefix");
+        assert_eq!(id.key, "o/r#7");
+    }
+
+    #[test]
+    fn issue_id_from_branch_reads_bare_number_stem() {
+        // Empty title slug → the stem is just `issue-<n>`.
+        let id = issue_id_from_branch(&pr_on_branch("issue-5")).expect("bare issue stem");
+        assert_eq!(id.key, "o/r#5");
+    }
+
+    #[test]
+    fn issue_id_from_branch_ignores_non_issue_branches() {
+        assert!(issue_id_from_branch(&pr_on_branch("linear-eng-456-ship")).is_none());
+        assert!(issue_id_from_branch(&pr_on_branch("issue-fix-thing")).is_none());
+        assert!(issue_id_from_branch(&pr_on_branch("feat")).is_none());
+    }
+
+    #[test]
+    fn issue_id_from_branch_ignores_non_github_sources() {
+        // The `issue-<n>` stem is a GitHub spawn convention; a non-GitHub
+        // PR on such a branch must not be rebuilt into a `<repo>#<n>` key.
+        let mut t = pr_on_branch("issue-5");
+        t.id.source = "linear".into();
+        assert!(issue_id_from_branch(&t).is_none());
+    }
+
+    #[test]
+    fn closing_issue_workspace_keys_includes_branch_fallback() {
+        // With no `closes_issues`, the branch-derived candidate is the
+        // only thing linking the PR to its issue workspace.
+        let pr = pr_on_branch("issue-42-fix-the-thing");
+        let keys = closing_issue_workspace_keys(&pr);
+        let expected = issue_id_to_workspace_key(&TaskId {
+            source: "github".into(),
+            key: "o/r#42".into(),
+        });
+        assert!(
+            keys.contains(&expected),
+            "branch fallback must surface the issue workspace key, got {keys:?}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -5800,6 +5905,7 @@ mod rescope_collapse_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: closes,
         }
     }
@@ -6020,7 +6126,7 @@ mod rescope_collapse_tests {
     }
 
     /// The reprompt sweep's candidate filter: merged PR workspaces
-    /// with sessions qualify; session-less rows and open work don't.
+    /// qualify with OR without sessions (issue #499); open work doesn't.
     #[tokio::test]
     async fn removal_candidate_state_matches_merged_pr_with_sessions() {
         let store = Arc::new(lazybox_store::MemoryStore::new());
@@ -6044,8 +6150,18 @@ mod rescope_collapse_tests {
             Some(lazybox_ipc::RemovableTerminalState::Merged)
         );
 
-        let session_less = Workspace::from_task(merged, Utc::now());
-        assert_eq!(removal_candidate_state(&config, &session_less), None);
+        // Issue #499: a session-less merged PR is still a candidate — its
+        // tracking row should be offered for cleanup regardless.
+        let session_less = Workspace::from_task(merged.clone(), Utc::now());
+        assert_eq!(
+            removal_candidate_state(&config, &session_less),
+            Some(lazybox_ipc::RemovableTerminalState::Merged)
+        );
+
+        // ...unless the user already answered "keep" (durable decline).
+        let mut declined = Workspace::from_task(merged, Utc::now());
+        declined.cleanup_prompt = lazybox_core::CleanupPrompt::Declined;
+        assert_eq!(removal_candidate_state(&config, &declined), None);
 
         let open = gh_task(
             "o/r#8",
@@ -6519,6 +6635,7 @@ mod tick_noop_skip_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         }
     }

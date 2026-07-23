@@ -33,11 +33,72 @@
 use crate::SlackError;
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
+use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 const APP_OPEN: &str = "https://slack.com/api/apps.connections.open";
+
+/// How many recently-seen `envelope_id`s to remember for dedup. Slack
+/// redelivers an un-ACKed `events_api` frame within seconds, so dedup
+/// only has to outlive that short redelivery window — not retain
+/// history. A few hundred keys covers the distinct frames that can
+/// arrive inside such a window even in a busy workspace, and bounds the
+/// memory regardless of traffic.
+const DEDUP_CAPACITY: usize = 256;
+
+/// Bounded FIFO set of already-processed transport keys (`envelope_id`).
+///
+/// Slack Socket Mode guarantees *at-least-once* delivery: if our ACK is
+/// lost or late, Slack redelivers the same `events_api` frame (same
+/// `envelope_id`). Without dedup that redelivery surfaces the same
+/// `Mention`/`Message` twice, injecting the same prompt into the running
+/// agent twice. This set drops the repeat before it is surfaced,
+/// turning at-least-once into exactly-once at the seam where events
+/// leave the socket.
+///
+/// Eviction is FIFO (oldest-inserted first), not LRU: a redelivery is
+/// dropped without refreshing its key's position, which is exactly what
+/// dedup wants — each key only needs to survive its own short
+/// redelivery window, never to be kept warm by repeat hits.
+///
+/// `envelope_id` is the transport-level dedup key (stable across
+/// redeliveries of one frame); when a frame carries none we can't dedup
+/// it, but only `events_api` frames — which always carry one — surface
+/// downstream events.
+struct SeenEnvelopes {
+    set: HashSet<String>,
+    order: VecDeque<String>,
+    capacity: usize,
+}
+
+impl SeenEnvelopes {
+    fn new(capacity: usize) -> Self {
+        Self {
+            set: HashSet::new(),
+            order: VecDeque::new(),
+            capacity,
+        }
+    }
+
+    /// Record `id` as seen. Returns `true` if this is the first time
+    /// (caller should surface the event), `false` if it's a redelivery
+    /// (caller should drop it). Evicts the oldest-inserted key when full.
+    fn insert(&mut self, id: &str) -> bool {
+        if self.set.contains(id) {
+            return false;
+        }
+        if self.order.len() >= self.capacity
+            && let Some(old) = self.order.pop_front()
+        {
+            self.set.remove(&old);
+        }
+        self.set.insert(id.to_string());
+        self.order.push_back(id.to_string());
+        true
+    }
+}
 
 /// Output stream item — lazybox consumes these in the daemon's slack
 /// task and routes to the right session.
@@ -162,9 +223,13 @@ impl SocketModeClient {
         // upstream maintenance, network blip); we just rebuild.
         let mut backoff = Duration::from_secs(1);
         let mut clean_close = CleanCloseBackoff::new();
+        // Dedup lives across reconnects: Slack can redeliver an un-ACKed
+        // frame on a fresh socket, so the seen-set must outlive a single
+        // `run_once`.
+        let mut seen = SeenEnvelopes::new(DEDUP_CAPACITY);
         loop {
             let started = Instant::now();
-            match self.run_once(&tx).await {
+            match self.run_once(&tx, &mut seen).await {
                 Ok(RunOutcome::ConsumerGone) => {
                     tracing::info!("slack: event consumer dropped, stopping socket loop");
                     return;
@@ -185,7 +250,11 @@ impl SocketModeClient {
         }
     }
 
-    async fn run_once(&self, tx: &mpsc::Sender<InboundEvent>) -> Result<RunOutcome, SlackError> {
+    async fn run_once(
+        &self,
+        tx: &mpsc::Sender<InboundEvent>,
+        seen: &mut SeenEnvelopes,
+    ) -> Result<RunOutcome, SlackError> {
         // Slack pings every few seconds; a healthy socket never goes
         // quiet for anywhere near this long. Going 90s without ANY
         // frame means the connection is half-open (peer gone, TCP
@@ -230,14 +299,21 @@ impl SocketModeClient {
             };
             // ACK every envelope that carries one (events_api, slash,
             // interactivity). hello / disconnect don't carry an
-            // envelope_id.
+            // envelope_id. We ACK on *every* arrival, including a
+            // redelivery — a repeat means our earlier ACK was lost, so
+            // re-ACKing is what finally stops Slack retrying.
             if let Some(eid) = &envelope.envelope_id {
                 let ack = serde_json::json!({ "envelope_id": eid });
                 if let Err(e) = ws_sink.send(WsMessage::Text(ack.to_string().into())).await {
                     tracing::warn!("slack: ack send failed: {e}");
                 }
             }
-            for event in envelope.into_inbound() {
+            // Transport-level dedup: Slack redelivers an un-ACKed frame
+            // (same `envelope_id`) within seconds. `surface_if_new` yields
+            // its events only the first time, so a lost/late ACK can't
+            // inject the same prompt twice. ACK still fired above on every
+            // arrival — re-ACKing is what finally stops Slack retrying.
+            for event in envelope.surface_if_new(seen) {
                 if tx.send(event).await.is_err() {
                     // Consumer dropped — stop the whole loop rather than
                     // reconnecting (a clean `Closed` would just reopen
@@ -301,6 +377,22 @@ struct SocketEnvelope {
 }
 
 impl SocketEnvelope {
+    /// Dedup-gated surface: record this frame's `envelope_id` (if any)
+    /// and return its inbound events only on first delivery; a
+    /// redelivery (same `envelope_id`) yields no events. ACKing is the
+    /// caller's responsibility and must happen on *every* arrival,
+    /// including redeliveries — this method only governs what is
+    /// surfaced downstream, never whether Slack is ACKed.
+    fn surface_if_new(self, seen: &mut SeenEnvelopes) -> Vec<InboundEvent> {
+        if let Some(eid) = &self.envelope_id
+            && !seen.insert(eid)
+        {
+            tracing::debug!("slack: dropping redelivered envelope {eid}");
+            return Vec::new();
+        }
+        self.into_inbound()
+    }
+
     fn into_inbound(self) -> Vec<InboundEvent> {
         match self.kind.as_str() {
             "hello" => vec![InboundEvent::Hello],
@@ -557,6 +649,54 @@ mod tests {
         }))
         .unwrap();
         assert!(env.into_inbound().is_empty());
+    }
+
+    fn mention_frame(envelope_id: &str) -> SocketEnvelope {
+        serde_json::from_value(json!({
+            "type": "events_api",
+            "envelope_id": envelope_id,
+            "payload": {
+                "event": {
+                    "type": "app_mention",
+                    "channel": "C123",
+                    "user": "U456",
+                    "text": "<@UBOT> work",
+                    "ts": "12345.6789",
+                }
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn redelivered_envelope_surfaces_event_only_once() {
+        let mut seen = SeenEnvelopes::new(DEDUP_CAPACITY);
+        // First delivery surfaces the mention.
+        let first = mention_frame("dup-1").surface_if_new(&mut seen);
+        assert!(matches!(first.as_slice(), [InboundEvent::Mention { .. }]));
+        // Slack redelivers the same envelope_id (lost/late ACK) — dropped.
+        let second = mention_frame("dup-1").surface_if_new(&mut seen);
+        assert!(second.is_empty(), "redelivery must not surface again");
+        // A third redelivery is still dropped.
+        let third = mention_frame("dup-1").surface_if_new(&mut seen);
+        assert!(third.is_empty());
+        // A genuinely new envelope still gets through.
+        let other = mention_frame("dup-2").surface_if_new(&mut seen);
+        assert!(matches!(other.as_slice(), [InboundEvent::Mention { .. }]));
+    }
+
+    #[test]
+    fn seen_envelopes_is_bounded_and_evicts_oldest() {
+        let mut seen = SeenEnvelopes::new(2);
+        assert!(seen.insert("a"));
+        assert!(seen.insert("b"));
+        // Inserting "c" evicts the oldest ("a").
+        assert!(seen.insert("c"));
+        assert_eq!(seen.order.len(), 2);
+        assert!(!seen.set.contains("a"));
+        // "a" evicted, so it now reads as new again; "b"/"c" still seen.
+        assert!(seen.insert("a"));
+        assert!(!seen.insert("c"));
     }
 
     #[test]

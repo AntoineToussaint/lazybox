@@ -2016,6 +2016,259 @@ snippets:
         assert!(notice.message.contains("v"), "nudge names the select key");
     }
 
+    /// Agent-to-agent handoff (`x s`, issue #431), full flow: dispatch
+    /// on the focused agent workspace opens the target picker, picking a
+    /// target funnels into the compose step, and submit injects the
+    /// edited brief into the target session (settle-gated inject +
+    /// recap) with a "source → target" notice. The captured seed is
+    /// empty in tests (no rendered grid), so the user-composed body is
+    /// what gets delivered.
+    #[test]
+    fn send_to_session_full_flow_injects_into_picked_target() {
+        use lazybox_tui_core::action::Action;
+        let (mut m, keys) = model_with_broadcast_targets(&[
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+            Some(lazybox_ipc::TerminalKind::Agent("codex".into())),
+        ]);
+        // Source = the first agent workspace.
+        assert!(m.sidebar.focus_workspace_key(&keys[0]));
+
+        m.dispatch_action(&Action::SendToSession);
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::HandoffTarget),
+            "dispatch opens the target picker",
+        );
+        assert_eq!(
+            m.handoff_choices,
+            vec![keys[1].clone()],
+            "the source is excluded — a handoff can't loop back to itself",
+        );
+
+        let cmds = m.handle_choice_picked(vec![0]);
+        assert!(cmds.is_empty(), "picking the target sends nothing yet");
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::HandoffText),
+            "the pick funnels into the compose step",
+        );
+        assert_eq!(
+            m.pending_handoff.as_ref().and_then(|d| d.target.clone()),
+            Some(keys[1].clone()),
+        );
+
+        let cmds = m.handle_textarea_submitted("build the parser".into());
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                IpcCommand::InjectPrompt { terminal_id, prompt, submit: true, .. }
+                    if terminal_id.0 == 2 && prompt == "build the parser"
+            )),
+            "the brief is injected + submitted into the target agent: {cmds:?}",
+        );
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                IpcCommand::RecordUserMessage { terminal_id, message }
+                    if terminal_id.0 == 2 && message == "build the parser"
+            )),
+            "the target's recap line updates: {cmds:?}",
+        );
+        assert!(m.pending_handoff.is_none(), "draft consumed");
+        let notice = m.status.notice.as_ref().expect("handoff notice");
+        assert!(
+            notice.message.contains("handoff:") && notice.message.contains('→'),
+            "notice records the A→B trail: {}",
+            notice.message,
+        );
+    }
+
+    /// The handoff target picker only offers OTHER workspaces that have
+    /// a running session: the source and any session-less workspace are
+    /// filtered out.
+    #[test]
+    fn send_to_session_excludes_source_and_sessionless_targets() {
+        use lazybox_tui_core::action::Action;
+        let (mut m, keys) = model_with_broadcast_targets(&[
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+            Some(lazybox_ipc::TerminalKind::Agent("codex".into())),
+            None,
+        ]);
+        assert!(m.sidebar.focus_workspace_key(&keys[0]));
+        m.dispatch_action(&Action::SendToSession);
+        assert_eq!(
+            m.handoff_choices,
+            vec![keys[1].clone()],
+            "only the other running session is a candidate",
+        );
+    }
+
+    /// A handoff whose source is the only running session has nobody to
+    /// hand off to: nudge and stash nothing.
+    #[test]
+    fn send_to_session_with_no_other_session_nudges() {
+        use lazybox_tui_core::action::Action;
+        let (mut m, keys) = model_with_broadcast_targets(&[Some(
+            lazybox_ipc::TerminalKind::Agent("claude".into()),
+        )]);
+        assert!(m.sidebar.focus_workspace_key(&keys[0]));
+        m.dispatch_action(&Action::SendToSession);
+        assert!(m.modal_stack.is_empty(), "no target, no picker");
+        assert!(m.pending_handoff.is_none());
+        let notice = m.status.notice.as_ref().expect("nudge notice");
+        assert!(
+            notice.message.contains("no other running agent"),
+            "nudge explains why: {}",
+            notice.message,
+        );
+    }
+
+    /// `x s` on a workspace whose only session is a plain shell has no
+    /// agent output to hand off — nudge instead of opening the picker.
+    #[test]
+    fn send_to_session_from_shell_only_workspace_nudges() {
+        use lazybox_tui_core::action::Action;
+        let (mut m, keys) = model_with_broadcast_targets(&[
+            Some(lazybox_ipc::TerminalKind::Shell),
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+        ]);
+        assert!(m.sidebar.focus_workspace_key(&keys[0]));
+        m.dispatch_action(&Action::SendToSession);
+        assert!(m.modal_stack.is_empty(), "no agent source, no picker");
+        assert!(m.pending_handoff.is_none());
+        let notice = m.status.notice.as_ref().expect("nudge notice");
+        assert!(
+            notice.message.contains("no agent session"),
+            "nudge explains why: {}",
+            notice.message,
+        );
+    }
+
+    /// A shell-only workspace is NOT offered as a handoff target — the
+    /// brief is meant for another agent, not a shell prompt. With a
+    /// shell as the only other session, the picker refuses to mount.
+    #[test]
+    fn send_to_session_excludes_shell_targets() {
+        use lazybox_tui_core::action::Action;
+        let (mut m, keys) = model_with_broadcast_targets(&[
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+            Some(lazybox_ipc::TerminalKind::Shell),
+        ]);
+        assert!(m.sidebar.focus_workspace_key(&keys[0]));
+        m.dispatch_action(&Action::SendToSession);
+        assert!(m.modal_stack.is_empty(), "a shell isn't a handoff target");
+        assert!(m.pending_handoff.is_none());
+        let notice = m.status.notice.as_ref().expect("nudge notice");
+        assert!(
+            notice.message.contains("no other running agent"),
+            "nudge names the reason: {}",
+            notice.message,
+        );
+    }
+
+    /// When the source scrape comes back empty (here: a freshly-spawned
+    /// agent with no rendered output yet), the flow flags it rather than
+    /// opening a silent empty composer — but still proceeds to the picker
+    /// so the user can compose the brief by hand.
+    #[test]
+    fn send_to_session_flags_an_empty_capture_but_still_opens_the_picker() {
+        use lazybox_tui_core::action::Action;
+        let (mut m, keys) = model_with_broadcast_targets(&[
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+            Some(lazybox_ipc::TerminalKind::Agent("codex".into())),
+        ]);
+        assert!(m.sidebar.focus_workspace_key(&keys[0]));
+        m.dispatch_action(&Action::SendToSession);
+        let notice = m.status.notice.as_ref().expect("notice");
+        assert!(
+            notice.message.contains("couldn't capture"),
+            "empty scrape is surfaced: {}",
+            notice.message,
+        );
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::HandoffTarget),
+            "the flow still proceeds to the picker",
+        );
+    }
+
+    /// Clearing the seed and submitting an empty body cancels the
+    /// handoff without sending anything.
+    #[test]
+    fn send_to_session_empty_body_cancels() {
+        use lazybox_tui_core::action::Action;
+        let (mut m, keys) = model_with_broadcast_targets(&[
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+            Some(lazybox_ipc::TerminalKind::Agent("codex".into())),
+        ]);
+        assert!(m.sidebar.focus_workspace_key(&keys[0]));
+        m.dispatch_action(&Action::SendToSession);
+        m.handle_choice_picked(vec![0]);
+        let cmds = m.handle_textarea_submitted("   \n".into());
+        assert!(cmds.is_empty(), "empty body sends nothing: {cmds:?}");
+        assert!(m.pending_handoff.is_none(), "draft consumed even on cancel");
+        let notice = m.status.notice.as_ref().expect("cancel notice");
+        assert!(notice.message.contains("cancelled"), "{}", notice.message);
+    }
+
+    /// If the picked target's session ends between pick and submit, the
+    /// composed brief is NOT silently dropped: the picker re-opens seeded
+    /// with the edited body so it can be routed to a session that's still
+    /// live. Modeled by a draft whose target no longer has a session.
+    #[test]
+    fn send_to_session_dead_target_reopens_picker_preserving_brief() {
+        let (mut m, keys) = model_with_broadcast_targets(&[
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+            None,
+            Some(lazybox_ipc::TerminalKind::Agent("codex".into())),
+        ]);
+        // The user picked keys[1], but its session is gone by submit time.
+        m.pending_handoff = Some(HandoffDraft {
+            source: keys[0].clone(),
+            source_name: "planner".into(),
+            seed: "original brief".into(),
+            target: Some(keys[1].clone()),
+        });
+        m.modal_stack.push(Id::HandoffText);
+
+        let cmds = m.handle_textarea_submitted("refined brief".into());
+        assert!(
+            cmds.is_empty(),
+            "nothing delivered to a dead target: {cmds:?}"
+        );
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::HandoffTarget),
+            "the picker re-opens instead of dropping the work",
+        );
+        assert_eq!(
+            m.pending_handoff.as_ref().map(|d| d.seed.as_str()),
+            Some("refined brief"),
+            "the edited brief becomes the new seed — not lost",
+        );
+        assert_eq!(
+            m.handoff_choices,
+            vec![keys[2].clone()],
+            "only the still-live other session is offered (dead target + source excluded)",
+        );
+    }
+
+    /// Esc anywhere in the handoff flow drops the stash so a later
+    /// handoff starts clean.
+    #[test]
+    fn send_to_session_dismiss_drops_the_stash() {
+        use lazybox_tui_core::action::Action;
+        let (mut m, keys) = model_with_broadcast_targets(&[
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+            Some(lazybox_ipc::TerminalKind::Agent("codex".into())),
+        ]);
+        assert!(m.sidebar.focus_workspace_key(&keys[0]));
+        m.dispatch_action(&Action::SendToSession);
+        m.handle_modal_dismissed();
+        assert!(m.pending_handoff.is_none(), "Esc on the picker cancels");
+        assert!(m.handoff_choices.is_empty());
+    }
+
     /// mount_snippet_picker with an empty collection flashes a hint
     /// and refuses to mount — no Id::SnippetPicker on the stack.
     /// This is the "user typed `]]s<key>` but never configured any
@@ -3883,6 +4136,7 @@ mod merge_focus_follow_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         }
     }
@@ -6514,6 +6768,7 @@ mod destructive_confirm_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         };
         Workspace::from_task(task, Utc::now())
@@ -7004,9 +7259,11 @@ mod tips_tests {
 #[cfg(test)]
 mod activity_pane_visibility_tests {
     //! Hide the Activity pane when a workspace has no activity worth
-    //! showing (#162), with `Shift-P` to reveal / re-hide on demand.
+    //! showing (#162), with `Shift-P` cycling full → summary → hidden
+    //! → full on demand (#487).
     use super::super::{Model, PaneFocus};
     use chrono::Utc;
+    use lazybox_config::ActivityPaneMode;
     use lazybox_core::{Workspace, WorkspaceKey};
     use lazybox_ipc::{Event as IpcEvent, channel};
     use tuirealm::event::{Key, KeyEvent, KeyModifiers};
@@ -7075,27 +7332,173 @@ mod activity_pane_visibility_tests {
     }
 
     #[test]
-    fn shift_p_reveals_an_empty_pane_then_re_hides() {
+    fn shift_p_reveals_an_empty_pane_then_cycles() {
         let mut m = build_model();
         seed(&mut m, vec![empty_ws("github:o/r#1")]);
-        assert!(!m.activity_pane_visible(), "auto-hidden when empty");
+        assert_eq!(
+            m.activity_pane_mode(),
+            ActivityPaneMode::Hidden,
+            "auto-hidden when empty"
+        );
 
+        // From Hidden the cycle wraps to Full, then Summary, then back.
         m.dispatch_key(shift_p());
-        assert!(m.activity_pane_visible(), "Shift-P reveals it on demand");
-
+        assert_eq!(m.activity_pane_mode(), ActivityPaneMode::Full);
         m.dispatch_key(shift_p());
-        assert!(!m.activity_pane_visible(), "Shift-P again re-hides it");
+        assert_eq!(m.activity_pane_mode(), ActivityPaneMode::Summary);
+        m.dispatch_key(shift_p());
+        assert_eq!(m.activity_pane_mode(), ActivityPaneMode::Hidden);
     }
 
     #[test]
-    fn shift_p_can_hide_a_non_empty_pane() {
+    fn shift_p_cycles_a_non_empty_pane_full_summary_hidden() {
         let mut m = build_model();
         seed(&mut m, vec![ws_with_activity("github:o/r#1")]);
+        assert_eq!(
+            m.activity_pane_mode(),
+            ActivityPaneMode::Full,
+            "content present → starts full"
+        );
         assert!(m.activity_pane_visible());
+
         m.dispatch_key(shift_p());
+        assert_eq!(m.activity_pane_mode(), ActivityPaneMode::Summary);
         assert!(
             !m.activity_pane_visible(),
-            "the override can hide a non-empty pane too"
+            "the slim summary line is not the focusable full pane"
+        );
+
+        m.dispatch_key(shift_p());
+        assert_eq!(m.activity_pane_mode(), ActivityPaneMode::Hidden);
+
+        m.dispatch_key(shift_p());
+        assert_eq!(m.activity_pane_mode(), ActivityPaneMode::Full, "wraps back");
+    }
+
+    fn ws_with_n_activities(key: &str, n: usize) -> Workspace {
+        let mut w = empty_ws(key);
+        for i in 0..n {
+            w.activity.push(lazybox_core::Activity {
+                author: format!("u{i}"),
+                body: format!("comment {i}"),
+                created_at: Utc::now(),
+                kind: lazybox_core::ActivityKind::Comment,
+                node_id: Some(format!("n-{i}")),
+                path: None,
+                line: None,
+                diff_hunk: None,
+                thread_id: None,
+            });
+        }
+        w
+    }
+
+    #[test]
+    fn clicking_the_summary_line_expands_to_full() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use tuirealm::ratatui::layout::Rect;
+
+        let mut m = build_model();
+        seed(&mut m, vec![ws_with_activity("github:o/r#1")]);
+        // Full → Summary.
+        m.dispatch_key(shift_p());
+        assert_eq!(m.activity_pane_mode(), ActivityPaneMode::Summary);
+
+        // The slim summary line sits at the top of the right column.
+        let area = Rect::new(0, 0, 120, 40);
+        let (_, right_top, _) = m.effective_pane_rects(area);
+        assert_eq!(right_top.height, 1, "summary keeps a single row");
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: right_top.x + 2,
+            row: right_top.y,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        m.dispatch_mouse_in(click, area);
+        assert_eq!(
+            m.activity_pane_mode(),
+            ActivityPaneMode::Full,
+            "clicking the summary line restores the full feed",
+        );
+        assert_eq!(m.focus(), PaneFocus::Right);
+    }
+
+    #[test]
+    fn summary_seam_does_not_start_a_splitter_drag() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use tuirealm::ratatui::layout::Rect;
+
+        let mut m = build_model();
+        seed(&mut m, vec![ws_with_activity("github:o/r#1")]);
+        m.dispatch_key(shift_p()); // Full → Summary
+        assert_eq!(m.activity_pane_mode(), ActivityPaneMode::Summary);
+
+        let area = Rect::new(0, 0, 120, 40);
+        let (_, right_top, _) = m.effective_pane_rects(area);
+        // The seam sits at the terminal's first row (just below the
+        // 1-row summary). In Full mode this is a draggable splitter;
+        // in Summary it must not be.
+        let seam = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: right_top.x + 5,
+            row: right_top.y + 1,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        m.dispatch_mouse_in(seam, area);
+        assert!(
+            m.layout.active_drag.is_none(),
+            "the summary / terminal seam must not arm a horizontal splitter drag",
+        );
+    }
+
+    #[test]
+    fn scrolling_the_summary_line_does_not_move_the_hidden_feed() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        use tuirealm::ratatui::layout::Rect;
+
+        let mut m = build_model();
+        // A long feed so a downward wheel WOULD scroll if it were routed
+        // to the activity pane.
+        seed(&mut m, vec![ws_with_n_activities("github:o/r#1", 60)]);
+        m.dispatch_key(shift_p()); // Full → Summary
+        assert_eq!(m.activity_pane_mode(), ActivityPaneMode::Summary);
+
+        let area = Rect::new(0, 0, 120, 40);
+        let (_, right_top, _) = m.effective_pane_rects(area);
+        let wheel = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: right_top.x + 2,
+            row: right_top.y,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        m.redraw = false;
+        m.dispatch_mouse_in(wheel, area);
+        assert!(
+            !m.redraw,
+            "a wheel over the slim summary line must be a no-op, not scroll the hidden feed",
+        );
+    }
+
+    #[test]
+    fn activity_pane_default_sets_the_initial_mode() {
+        let mut m = build_model();
+        m.ui_defaults.activity_pane_default = ActivityPaneMode::Summary;
+        seed(&mut m, vec![ws_with_activity("github:o/r#1")]);
+        assert_eq!(
+            m.activity_pane_mode(),
+            ActivityPaneMode::Summary,
+            "un-toggled workspace opens in the configured default",
+        );
+
+        // The empty-workspace auto-hide still wins over the default.
+        seed(&mut m, vec![empty_ws("github:o/r#2")]);
+        let second: lazybox_core::SessionKey = (&WorkspaceKey::new("github:o/r#2")).into();
+        assert!(m.sidebar.focus_workspace_key(&second));
+        m.sync_panes();
+        assert_eq!(
+            m.activity_pane_mode(),
+            ActivityPaneMode::Hidden,
+            "nothing to summarize → auto-hidden regardless of default",
         );
     }
 
@@ -7703,6 +8106,7 @@ mod focus_mode_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         };
         let mut ws = Workspace::from_task(task, Utc::now());
@@ -7960,6 +8364,7 @@ mod jump_to_workspace_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         }
     }
@@ -8693,6 +9098,62 @@ mod click_outside_modal_dismiss_tests {
         );
     }
 
+    /// Regression: clicking away from the checklist *backgrounds* an
+    /// in-flight worktree provision — it must NOT abort the spawn. Esc is
+    /// the deliberate cancel gesture (#403, see
+    /// `worktree_progress_dismiss_tests::esc_mid_provision_sends_cancel_spawn`);
+    /// clicking a sidebar row to go do something else while the spawn is
+    /// still provisioning previously killed it, because outside-click
+    /// reused Esc's `CancelSpawn`-emitting dismiss path.
+    #[test]
+    fn outside_click_backgrounds_provision_without_cancelling_spawn() {
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![empty_ws("github:o/r#1"), empty_ws("github:o/r#2")],
+            terminals: vec![],
+            projects: vec![],
+        });
+        let a = key_of("github:o/r#1");
+        let b = key_of("github:o/r#2");
+
+        let area = Rect::new(0, 0, 120, 40);
+        let (sidebar_rect, _, _) = m.effective_pane_rects(area);
+        let row_b = row_of(&mut m, sidebar_rect, &b);
+        assert!(m.__test_sidebar_mut().focus_workspace_key(&a));
+
+        // Provisioning is genuinely in flight (a Started step — not
+        // failed/warned), i.e. exactly the state where an Esc WOULD
+        // cancel the spawn.
+        m.handle_daemon_event(IpcEvent::WorktreeProgress {
+            session_key: a.clone(),
+            step: WorktreeStep::Fetch,
+            status: WorktreeStepStatus::Started,
+        });
+        assert!(m.modal_stack.contains(&Id::WorktreeProgress));
+
+        // Drop setup traffic (Subscribe, focus hints, …) before the click.
+        while server.rx.try_recv().is_ok() {}
+
+        m.layout.last_area = area;
+        assert!(m.dismiss_modal_on_outside_click(left_down(sidebar_rect.x + 1, row_b)));
+
+        assert!(
+            !m.modal_stack.contains(&Id::WorktreeProgress),
+            "the checklist still closes on the outside click",
+        );
+        let cancelled = std::iter::from_fn(|| server.rx.try_recv().ok()).any(|c| {
+            matches!(
+                c,
+                lazybox_ipc::Command::CancelSpawn { session_key } if session_key == a
+            )
+        });
+        assert!(
+            !cancelled,
+            "an outside click must background the provision, not cancel the spawn",
+        );
+    }
+
     /// A destructive confirm must ignore the outside click — it keeps
     /// owning input so a stray click can't dismiss or trigger data loss.
     #[test]
@@ -8820,6 +9281,7 @@ mod auto_merge_on_green_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         };
         let mut ws = Workspace::from_task(task, Utc::now());
@@ -8990,6 +9452,7 @@ mod merge_latch_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         };
         Workspace::from_task(task, Utc::now())
@@ -11006,6 +11469,7 @@ mod spawn_focus_steal_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         };
         lazybox_core::Workspace::from_task(task, Utc::now())
@@ -11113,6 +11577,7 @@ mod repo_labels_failure_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         }
     }
@@ -11488,6 +11953,7 @@ mod keybinding_audit_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         };
         let mut ws = Workspace::from_task(task, Utc::now());
@@ -12425,6 +12891,7 @@ mod optimistic_mutation_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         }
     }

@@ -32,7 +32,7 @@
 use crate::task::{Activity, Task, TaskId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -92,10 +92,56 @@ pub const MAX_ACTIVITY_ITEMS: usize = 500;
 /// blob unbounded.
 pub const SENT_SNIPPETS_MAX: usize = 12;
 
-/// Content identity used to carry read/seen state across re-sorts
-/// and to de-duplicate node-id-less activity.
-fn activity_key(a: &Activity) -> (String, String, DateTime<Utc>) {
-    (a.author.clone(), a.body.clone(), a.created_at)
+/// Stable identity of an activity item used to carry read/seen state
+/// across the re-sort a merge triggers.
+///
+/// It is the `(author, body, created_at)` content tuple PLUS an
+/// occurrence index. Keeping `body` in the key is deliberate: an edited
+/// comment changes its body, so its identity changes and it correctly
+/// resurfaces as unread. The occurrence index disambiguates genuinely
+/// distinct events that share the *same* tuple — e.g. two identical bot
+/// posts landing in the same second. Keying purely on the tuple
+/// collapsed such twins onto one identity, so read-state remapped onto a
+/// single survivor and the other silently lost its state. Occurrence is
+/// stable across re-polls because Rust's `sort_by_key` is a stable sort:
+/// equal-`created_at` items keep their relative order.
+type ActivityIdentity = (String, String, DateTime<Utc>, usize);
+
+/// Per-index identities for `list`, assigning occurrence indices (in
+/// list order) to items that share a content tuple. The returned vector
+/// is aligned with `list` by position.
+fn activity_identities(list: &[Activity]) -> Vec<ActivityIdentity> {
+    let mut seen: HashMap<(String, String, DateTime<Utc>), usize> = HashMap::new();
+    list.iter()
+        .map(|a| {
+            let tuple = (a.author.clone(), a.body.clone(), a.created_at);
+            let slot = seen.entry(tuple).or_insert(0);
+            let occurrence = *slot;
+            *slot += 1;
+            (a.author.clone(), a.body.clone(), a.created_at, occurrence)
+        })
+        .collect()
+}
+
+/// Durable state of the "this PR merged / issue closed — clean up the
+/// workspace?" prompt. Persisted on the workspace (issue #499) so the
+/// decision survives a daemon restart, unlike the old per-process pin.
+///
+/// The prompt itself is level-triggered off the primary task's terminal
+/// state (a merged PR or a closed issue) — this field only records the
+/// user's *answer*, so a "keep" doesn't have to be re-derived every
+/// launch. Removal deletes the whole row, so there's no "done" state to
+/// persist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanupPrompt {
+    /// No answer recorded. While the primary task sits in a terminal
+    /// state, the removal sweep keeps offering cleanup.
+    #[default]
+    Unresolved,
+    /// The user answered "keep". Never prompt again for this
+    /// workspace, across restarts.
+    Declined,
 }
 
 /// One workspace = one unit of work (PR + linked issues), holding
@@ -185,6 +231,10 @@ pub struct Workspace {
     /// alongside [`Workspace::notes`]; never synced to any provider.
     #[serde(default)]
     pub sent_snippets: Vec<String>,
+    /// Durable answer to the merged/closed cleanup prompt (issue #499).
+    /// Serde-defaulted so pre-#499 records read back as `Unresolved`.
+    #[serde(default)]
+    pub cleanup_prompt: CleanupPrompt,
     pub created_at: DateTime<Utc>,
     pub last_viewed_at: Option<DateTime<Utc>>,
 }
@@ -213,6 +263,7 @@ impl Workspace {
             policies: crate::AutomationPolicies::default(),
             notes: String::new(),
             sent_snippets: Vec::new(),
+            cleanup_prompt: CleanupPrompt::default(),
             created_at: now,
             last_viewed_at: None,
         }
@@ -406,22 +457,29 @@ impl Workspace {
         if incoming.is_empty() {
             return;
         }
-        // Snapshot read + seen state by content key BEFORE we mutate.
-        let read_keys: HashSet<(String, String, DateTime<Utc>)> = self
+        // Snapshot read + seen state by stable identity BEFORE we
+        // mutate. Identities are occurrence-aware so two distinct
+        // node-id-less twins never share a key.
+        let identities = activity_identities(&self.activity);
+        let read_keys: HashSet<ActivityIdentity> = self
             .read_indices
             .iter()
-            .filter_map(|i| self.activity.get(*i))
-            .map(activity_key)
+            .filter_map(|i| identities.get(*i).cloned())
             .collect();
         let seen_start = self.activity.len().saturating_sub(self.seen_count);
-        let seen_keys: HashSet<(String, String, DateTime<Utc>)> = self
-            .activity
+        let seen_keys: HashSet<ActivityIdentity> = identities
             .get(seen_start..)
             .unwrap_or(&[])
             .iter()
-            .map(activity_key)
+            .cloned()
             .collect();
 
+        // Occurrence counter for the tuple fallback: the k-th incoming
+        // item with a given content tuple maps to the k-th stored item
+        // with that tuple, so a batch of identical-tuple events doesn't
+        // all fold onto the first match — genuinely distinct twins both
+        // survive instead of collapsing into one.
+        let mut claimed: HashMap<(String, String, DateTime<Utc>), usize> = HashMap::new();
         for act in incoming {
             // Upsert by node id when both sides have one — replaces
             // the body/edited fields of the stored copy.
@@ -435,26 +493,38 @@ impl Workspace {
                 continue;
             }
             // Tuple fallback. Upsert rather than skip so a re-poll
-            // that gained a node_id migrates it onto the stored item.
-            if let Some(existing) = self.activity.iter_mut().find(|a| {
-                a.author == act.author && a.body == act.body && a.created_at == act.created_at
-            }) {
-                *existing = act.clone();
-            } else {
-                self.activity.push(act.clone());
+            // that gained a node_id migrates it onto the stored item —
+            // but claim stored occurrences in order so distinct twins
+            // don't all target the same slot.
+            let tuple = (act.author.clone(), act.body.clone(), act.created_at);
+            let skip = claimed.get(&tuple).copied().unwrap_or(0);
+            let target = self
+                .activity
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| {
+                    a.author == act.author && a.body == act.body && a.created_at == act.created_at
+                })
+                .map(|(i, _)| i)
+                .nth(skip);
+            match target {
+                Some(i) => self.activity[i] = act.clone(),
+                None => self.activity.push(act.clone()),
             }
+            *claimed.entry(tuple).or_insert(0) += 1;
         }
         self.sort_activity();
         // Sorted newest-first, so truncation drops the oldest items.
         self.activity.truncate(MAX_ACTIVITY_ITEMS);
 
-        // Reconstruct seen/read content-wise. `seen_count` becomes
-        // the longest suffix (= oldest run) of previously-seen items;
+        // Reconstruct seen/read by identity. `seen_count` becomes the
+        // longest suffix (= oldest run) of previously-seen items;
         // everything read-or-seen above that suffix gets an explicit
         // read mark instead.
+        let identities = activity_identities(&self.activity);
         let mut suffix = 0usize;
-        for a in self.activity.iter().rev() {
-            if seen_keys.contains(&activity_key(a)) {
+        for id in identities.iter().rev() {
+            if seen_keys.contains(id) {
                 suffix += 1;
             } else {
                 break;
@@ -462,16 +532,12 @@ impl Workspace {
         }
         self.seen_count = suffix;
         let cut = self.activity.len() - suffix;
-        self.read_indices = self
-            .activity
+        self.read_indices = identities
             .get(..cut)
             .unwrap_or(&[])
             .iter()
             .enumerate()
-            .filter_map(|(i, a)| {
-                let key = activity_key(a);
-                (read_keys.contains(&key) || seen_keys.contains(&key)).then_some(i)
-            })
+            .filter_map(|(i, id)| (read_keys.contains(id) || seen_keys.contains(id)).then_some(i))
             .collect();
     }
 
@@ -640,8 +706,13 @@ fn classify(task: &Task) -> TaskSlot {
     TaskSlot::Unknown
 }
 
-fn upsert_by_id(list: &mut Vec<Task>, task: Task) {
+fn upsert_by_id(list: &mut Vec<Task>, mut task: Task) {
     if let Some(slot) = list.iter_mut().find(|t| t.id == task.id) {
+        // Same #512 guard as `preserve_lazy_pr_fields`: never let an
+        // untyped re-poll clobber a stored typed `kind`.
+        if task.kind.is_none() {
+            task.kind = slot.kind;
+        }
         *slot = task;
     } else {
         list.push(task);
@@ -686,6 +757,13 @@ fn preserve_lazy_pr_fields(mut incoming: Task, existing: &Task) -> Task {
     {
         incoming.mergeable = existing.mergeable;
         incoming.is_behind_base = existing.is_behind_base;
+    }
+    // Once a provider has typed this task's kind, a later poll that
+    // arrives untyped (`None`) must not erase it — that would revive
+    // the URL-heuristic ambiguity #512 removed. Incoming still wins
+    // whenever it carries its own typed kind.
+    if incoming.kind.is_none() {
+        incoming.kind = existing.kind;
     }
     incoming
 }
@@ -1286,6 +1364,7 @@ mod tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         }
     }
@@ -1359,6 +1438,27 @@ mod tests {
     }
 
     #[test]
+    fn classify_prefers_typed_kind_over_url() {
+        // #512: a PR the provider tagged `TaskKind::Pr` routes to the PR
+        // slot even with an empty/API URL the heuristic would misread as
+        // an issue.
+        let mut t = pr("o/r#1");
+        t.url = String::new();
+        t.kind = Some(crate::TaskKind::Pr);
+        let ws = Workspace::from_task(t, now());
+        assert!(ws.pr.is_some(), "typed Pr routes to the PR slot sans URL");
+
+        // Conversely, an issue tagged `TaskKind::Issue` whose URL
+        // happens to contain `/pull/` stays out of the PR slot.
+        let mut t = issue("github", "o/r#7");
+        t.url = "https://github.com/o/r/pull/7".into();
+        t.kind = Some(crate::TaskKind::Issue);
+        let ws = Workspace::from_task(t, now());
+        assert!(ws.pr.is_none(), "typed Issue is not routed to the PR slot");
+        assert_eq!(ws.gh_issues.len(), 1);
+    }
+
+    #[test]
     fn attach_pr_replaces_existing_pr() {
         let mut ws = Workspace::from_task(pr("o/r#1"), now());
         ws.attach_task(pr("o/r#2"));
@@ -1366,6 +1466,50 @@ mod tests {
             ws.pr.as_ref().unwrap().id.key,
             "o/r#2",
             "second PR replaces first"
+        );
+    }
+
+    /// Regression (#512): once a provider has typed a task's `kind`, an
+    /// untyped re-poll (`kind: None`) must NOT clobber it back to `None`
+    /// — that would revive the URL-heuristic ambiguity this PR removed.
+    /// Covers both merge paths: PRs through `preserve_lazy_pr_fields`,
+    /// issues through `upsert_by_id`. A re-poll carrying its own typed
+    /// kind still wins.
+    #[test]
+    fn attach_preserves_typed_kind_against_untyped_repoll() {
+        // PR slot: first poll typed, second poll untyped.
+        let mut first = pr("o/r#1");
+        first.kind = Some(crate::TaskKind::Pr);
+        let mut ws = Workspace::from_task(first, now());
+        let mut untyped = pr("o/r#1");
+        untyped.url = String::new();
+        untyped.kind = None;
+        ws.attach_task(untyped);
+        assert_eq!(
+            ws.pr.as_ref().unwrap().kind,
+            Some(crate::TaskKind::Pr),
+            "untyped re-poll must not erase the stored PR kind",
+        );
+        assert!(ws.pr.is_some(), "PR stays in the PR slot across the merge");
+
+        // A re-poll that IS typed still wins (here: same Pr, but proves
+        // incoming typing is honored rather than blindly kept).
+        let mut retyped = pr("o/r#1");
+        retyped.kind = Some(crate::TaskKind::Pr);
+        ws.attach_task(retyped);
+        assert_eq!(ws.pr.as_ref().unwrap().kind, Some(crate::TaskKind::Pr));
+
+        // Issue slot (upsert_by_id): first typed, second untyped.
+        let mut first_issue = issue("github", "o/r#9");
+        first_issue.kind = Some(crate::TaskKind::Issue);
+        let mut ws = Workspace::from_task(first_issue, now());
+        let mut untyped_issue = issue("github", "o/r#9");
+        untyped_issue.kind = None;
+        ws.attach_task(untyped_issue);
+        assert_eq!(
+            ws.gh_issues[0].kind,
+            Some(crate::TaskKind::Issue),
+            "untyped re-poll must not erase the stored issue kind",
         );
     }
 
@@ -1705,6 +1849,56 @@ mod tests {
         ws.merge_activity(&[activity_with_node(10, "same", "n9")]);
         assert_eq!(ws.activity.len(), 1);
         assert_eq!(ws.activity[0].node_id.as_deref(), Some("n9"));
+    }
+
+    /// Regression (#512): two genuinely distinct node-id-less events
+    /// sharing the same (author, body, created_at) tuple — e.g. two
+    /// identical bot posts in the same second — must BOTH survive when
+    /// they arrive in one poll batch. The old content-as-identity dedup
+    /// collapsed them into one and the second silently vanished.
+    #[test]
+    fn merge_activity_keeps_distinct_same_second_twins() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("ws-1"), "main", now());
+        ws.merge_activity(&[activity_at(10, "beep boop"), activity_at(10, "beep boop")]);
+        assert_eq!(
+            ws.activity.len(),
+            2,
+            "two identical-tuple events in one batch stay distinct",
+        );
+
+        // Re-polling the same batch must NOT duplicate them — the k-th
+        // incoming twin claims the k-th stored twin.
+        ws.merge_activity(&[activity_at(10, "beep boop"), activity_at(10, "beep boop")]);
+        assert_eq!(
+            ws.activity.len(),
+            2,
+            "a re-poll of identical twins upserts in place, no growth",
+        );
+    }
+
+    /// Regression (#512): read-state must track the correct twin. Mark
+    /// exactly one of two identical-tuple events read; a re-poll must
+    /// keep exactly one read and one unread — not remap the mark onto
+    /// the wrong occurrence or collapse both.
+    #[test]
+    fn merge_activity_twins_keep_independent_read_state() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("ws-1"), "main", now());
+        ws.merge_activity(&[activity_at(10, "dup"), activity_at(10, "dup")]);
+        assert_eq!(ws.activity.len(), 2);
+
+        // Mark one twin read, leave the other unread.
+        ws.mark_activity_read(0);
+        assert_eq!(ws.unread_count(), 1);
+
+        // Re-poll the identical batch — the read mark must follow its
+        // occurrence, leaving exactly one unread.
+        ws.merge_activity(&[activity_at(10, "dup"), activity_at(10, "dup")]);
+        assert_eq!(ws.activity.len(), 2, "no duplication on re-poll");
+        assert_eq!(
+            ws.unread_count(),
+            1,
+            "exactly one twin stays unread across the re-poll",
+        );
     }
 
     /// The feed is capped at `MAX_ACTIVITY_ITEMS`, dropping oldest.

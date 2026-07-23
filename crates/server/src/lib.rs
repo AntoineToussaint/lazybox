@@ -967,6 +967,7 @@ impl Server {
                         lazybox_ipc::Command::FetchScrollback { .. } => "FetchScrollback",
                         lazybox_ipc::Command::CheckAgentCliUpdates => "CheckAgentCliUpdates",
                         lazybox_ipc::Command::UpdateAgentClis => "UpdateAgentClis",
+                        lazybox_ipc::Command::SetNotes { .. } => "SetNotes",
                         lazybox_ipc::Command::Shutdown => "Shutdown",
                     };
                     // `Write` fires on every keystroke — at info it floods
@@ -1529,6 +1530,10 @@ pub async fn dispatch_command(
         lazybox_ipc::Command::Unsnooze { session_key } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
             polling::set_snooze(config, &key, None).await;
+        }
+        lazybox_ipc::Command::SetNotes { session_key, notes } => {
+            let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
+            polling::set_notes(config, &key, notes).await;
         }
         lazybox_ipc::Command::SetAutoMergeOnGreen {
             session_key,

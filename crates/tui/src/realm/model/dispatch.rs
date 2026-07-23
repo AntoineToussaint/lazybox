@@ -830,6 +830,15 @@ impl<T: TerminalAdapter> Model<T> {
                     self.mount_reply(session_key);
                 }
             }
+            Action::EditNotes => {
+                // Notes attach to the focused workspace (any workspace,
+                // even a session-less one). Section::Workspace, so this
+                // fires from both Sidebar and Right focus.
+                if let Some(ws) = self.sidebar.selected_workspace() {
+                    let session_key: lazybox_core::SessionKey = (&ws.key).into();
+                    self.mount_notes(session_key);
+                }
+            }
             Action::RequestReviewers => {
                 if let Some(ws) = self.sidebar.selected_workspace()
                     && ws.pr.is_some()

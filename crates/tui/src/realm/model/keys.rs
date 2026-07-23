@@ -1603,6 +1603,7 @@ pub(super) fn action_from_kind(
         ActionKind::AdoptSessions => Action::AdoptSessions,
         ActionKind::CollapseIntoPr => Action::CollapseIntoPr,
         ActionKind::Reply => Action::Reply,
+        ActionKind::EditNotes => Action::EditNotes,
         ActionKind::RequestReviewers => Action::RequestReviewers,
         ActionKind::AddAssignees => Action::AddAssignees,
         ActionKind::ManageLabels => Action::ManageLabels,

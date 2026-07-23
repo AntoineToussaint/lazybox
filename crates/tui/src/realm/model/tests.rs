@@ -60,6 +60,48 @@ mod effects_tests {
         assert!(matches!(cmds[1], IpcCommand::Refresh));
     }
 
+    /// Notes share the Textarea component with Reply/Broadcast, so the
+    /// submit handler routes on the modal id that was on top. A
+    /// non-empty note persists via `SetNotes` and clears the pending
+    /// target (issue #458).
+    #[test]
+    fn textarea_submitted_notes_persists_setnotes() {
+        let mut m = build_model();
+        let key = SessionKey::from("github:o/r#1");
+        m.pending_notes = Some(key.clone());
+        m.modal_stack.push(Id::Notes);
+        let cmds = m.handle_textarea_submitted("check the flaky retry".into());
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IpcCommand::SetNotes { session_key, notes } => {
+                assert_eq!(session_key, &key);
+                assert_eq!(notes, "check the flaky retry");
+            }
+            other => panic!("expected SetNotes, got {other:?}"),
+        }
+        assert!(m.pending_notes.is_none());
+    }
+
+    /// An empty/whitespace note is a valid submit — it clears the
+    /// scratchpad — so it still emits `SetNotes` rather than being
+    /// dropped the way an empty reply is.
+    #[test]
+    fn textarea_submitted_empty_notes_clears_scratchpad() {
+        let mut m = build_model();
+        let key = SessionKey::from("github:o/r#1");
+        m.pending_notes = Some(key.clone());
+        m.modal_stack.push(Id::Notes);
+        let cmds = m.handle_textarea_submitted("   ".into());
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IpcCommand::SetNotes { session_key, notes } => {
+                assert_eq!(session_key, &key);
+                assert!(notes.trim().is_empty());
+            }
+            other => panic!("expected SetNotes, got {other:?}"),
+        }
+    }
+
     /// Arm a sticky "✗ sync failed" banner for `source` the way a
     /// failed manual refresh (Shift-R) does, and assert it landed.
     /// Returns the model ready for the recovery half of each test.

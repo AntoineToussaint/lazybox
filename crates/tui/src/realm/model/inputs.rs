@@ -739,6 +739,19 @@ showing keybinding search only",
             let workspace_key = self.pending_review_request.take();
             if let (Some(workspace_key), false) = (workspace_key, logins.is_empty()) {
                 let count = logins.len();
+                // Optimistic: union the picked logins onto the PR's
+                // reviewer chips now (the mutation uses `union: true`),
+                // reconciled by the next poll's `WorkspaceUpserted` and
+                // rolled back if GitHub rejects it (#476).
+                self.optimistic_chip_edit(&workspace_key, "reviewers", |ws| {
+                    if let Some(pr) = ws.pr.as_mut() {
+                        for login in &logins {
+                            if !pr.reviewers.contains(login) {
+                                pr.reviewers.push(login.clone());
+                            }
+                        }
+                    }
+                });
                 cmds.push(IpcCommand::RequestReviewers {
                     workspace_key,
                     logins,
@@ -874,6 +887,37 @@ showing keybinding search only",
                 } else {
                     format!("set labels ({count})")
                 };
+                // Optimistic: replace the task's label chips now. Keep
+                // any color already known for a name so the chips don't
+                // flash colorless; the next poll fills the rest.
+                // Reconciled by `WorkspaceUpserted`, rolled back on
+                // failure (#476).
+                self.optimistic_chip_edit(&workspace_key, "labels", |ws| {
+                    let known: std::collections::HashMap<String, String> = ws
+                        .pr
+                        .iter()
+                        .flat_map(|p| p.labels.iter())
+                        .chain(
+                            ws.gh_issues
+                                .first()
+                                .into_iter()
+                                .flat_map(|i| i.labels.iter()),
+                        )
+                        .map(|l| (l.name.clone(), l.color.clone()))
+                        .collect();
+                    let next: Vec<lazybox_core::Label> = names
+                        .iter()
+                        .map(|name| lazybox_core::Label {
+                            name: name.clone(),
+                            color: known.get(name).cloned().unwrap_or_default(),
+                        })
+                        .collect();
+                    if let Some(pr) = ws.pr.as_mut() {
+                        pr.labels = next;
+                    } else if let Some(issue) = ws.gh_issues.first_mut() {
+                        issue.labels = next;
+                    }
+                });
                 cmds.push(IpcCommand::SetLabels {
                     workspace_key,
                     names,
@@ -902,6 +946,16 @@ showing keybinding search only",
                 } else {
                     format!("set assignees ({count})")
                 };
+                // Optimistic: replace the task's assignee chips now,
+                // reconciled by `WorkspaceUpserted` and rolled back on
+                // failure (#476).
+                self.optimistic_chip_edit(&workspace_key, "assignees", |ws| {
+                    if let Some(pr) = ws.pr.as_mut() {
+                        pr.assignees = logins.clone();
+                    } else if let Some(issue) = ws.gh_issues.first_mut() {
+                        issue.assignees = logins.clone();
+                    }
+                });
                 cmds.push(IpcCommand::SetAssignees {
                     workspace_key,
                     logins,

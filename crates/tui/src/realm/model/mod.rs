@@ -29,6 +29,7 @@ mod host_terminal;
 mod inputs;
 mod keys;
 mod modals;
+mod optimistic;
 mod terminal_leader;
 #[cfg(test)]
 mod tests;
@@ -316,6 +317,15 @@ pub enum Id {
     /// and fires the same work spawn `w` would have, targeted at the
     /// chosen agent.
     WorkAgentPicker,
+    /// Scrollable full-description reader (#448). Renders a PR/issue
+    /// (or any long) body as real markdown — headings, lists, code,
+    /// links, tables — over most of the pane. Read-only + carries no
+    /// pending model state: dismiss just pops it. Links are click-mapped
+    /// to `Msg::OpenUrl`. Deliberately NOT in
+    /// `dismissable_by_outside_click` — a left-click inside must reach
+    /// the modal so link clicks open, and the modal dismisses its own
+    /// outside-clicks.
+    DescriptionModal,
 }
 
 impl Id {
@@ -339,6 +349,15 @@ impl Id {
                 | Id::SnippetPicker
                 | Id::SnippetBrowser
         )
+    }
+
+    /// Whether this modal reacts to the mouse wheel. Only these get
+    /// forwarded scroll events; for every other modal a wheel notch is
+    /// dropped at the router rather than pushed through the event
+    /// channel to be ignored (#448). Today only the description reader
+    /// scrolls on the wheel.
+    pub(crate) fn consumes_scroll(&self) -> bool {
+        matches!(self, Id::DescriptionModal)
     }
 }
 
@@ -473,6 +492,9 @@ pub enum Msg {
     PollingTimeout,
     PollingEmptyInbox(Vec<String>),
     ModalDismissed,
+    /// A link inside the description-reader modal (#448) was clicked —
+    /// hand its URL to the platform browser launcher.
+    OpenUrl(String),
     /// `c` pressed in the messages window (#309) — wipe the notice
     /// history and re-render the (now empty) window.
     MessagesCleared,
@@ -737,6 +759,11 @@ pub struct Model<T: TerminalAdapter> {
     /// matches the picker's row indices so `Msg::ChoicePicked(indices)`
     /// indexes back into this list. Cleared on submit / dismiss.
     labels_choices: Vec<String>,
+    /// Optimistic mutations applied locally and awaiting the daemon's
+    /// echo (#476). Each carries the prior rows so a rejected
+    /// round-trip rolls back; the success echo drops the entry. See
+    /// `optimistic.rs`.
+    pending_mutations: Vec<optimistic::OptimisticMutation>,
     /// Workspace currently waiting on the `SnoozeDuration` picker's
     /// result. `Msg::ChoicePicked` reads this + `snooze_choices` to
     /// turn the picked index into a `Command::Snooze`.
@@ -1275,6 +1302,7 @@ impl<T: TerminalAdapter> Model<T> {
             assignees_choices: Vec::new(),
             pending_labels_request: None,
             labels_choices: Vec::new(),
+            pending_mutations: Vec::new(),
             pending_snooze_workspace: None,
             snooze_choices: Vec::new(),
             pending_work_picker: None,
@@ -3614,6 +3642,20 @@ impl<T: TerminalAdapter> Model<T> {
             Msg::ModalDismissed => {
                 let cmds = self.handle_modal_dismissed();
                 self.dispatch_cmds(cmds);
+            }
+            Msg::OpenUrl(url) => {
+                // A link clicked inside the description-reader modal. The
+                // modal stays open (reading isn't over); hand the URL to
+                // the platform launcher and flash the outcome, mirroring
+                // the `g o` "open in browser" path.
+                let browser = self.ui_defaults.browser.clone();
+                match lazybox_tui_core::editors::open_url(&url, browser.as_deref()) {
+                    Ok(()) => self.flash_info(format!("opening {url}…")),
+                    Err(e) => self.flash(
+                        format!("open failed: {e}"),
+                        crate::realm::components::footer::NoticeSeverity::Retryable,
+                    ),
+                }
             }
             Msg::MessagesCleared => {
                 // Wipe the durable history and re-render the window

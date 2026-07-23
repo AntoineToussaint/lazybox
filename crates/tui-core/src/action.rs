@@ -145,6 +145,12 @@ pub enum Action {
     /// checks the currently-applied labels; submit replaces the
     /// label set on the upstream provider.
     ManageLabels,
+    /// Re-poll just the focused workspace's own GitHub entities (its PR
+    /// and linked issues) instead of the global refresh — the "sync
+    /// this" action for when you're waiting on one PR's CI or one
+    /// issue's state. Cheap next to a full sweep; updates that row's
+    /// state and read markers only.
+    SyncWorkspace,
     /// Open the focused workspace's PR / issue page in the host's
     /// default web browser. Useful for jumping to GitHub when the
     /// in-lazybox UI doesn't carry every affordance yet (mobile-rich
@@ -366,6 +372,7 @@ pub enum ActionKind {
     RequestReviewers,
     AddAssignees,
     ManageLabels,
+    SyncWorkspace,
     OpenInBrowser,
     DeleteOrClose,
     EditNotes,
@@ -476,6 +483,7 @@ impl ActionKind {
         Self::RequestReviewers,
         Self::AddAssignees,
         Self::ManageLabels,
+        Self::SyncWorkspace,
         Self::OpenInBrowser,
         Self::DeleteOrClose,
         Self::Reply,
@@ -575,6 +583,7 @@ impl Action {
             Action::RequestReviewers => ActionKind::RequestReviewers,
             Action::AddAssignees => ActionKind::AddAssignees,
             Action::ManageLabels => ActionKind::ManageLabels,
+            Action::SyncWorkspace => ActionKind::SyncWorkspace,
             Action::OpenInBrowser => ActionKind::OpenInBrowser,
             Action::DeleteOrClose => ActionKind::DeleteOrClose,
             Action::OpenFilterMenu => ActionKind::OpenFilterMenu,
@@ -967,6 +976,13 @@ impl ActionDef {
                 default_keys: "g l",
                 label: "labels",
                 describe: "Add / remove labels on the workspace's PR or issue. Picker pre-checks the labels currently applied; submit replaces the set.",
+                section: Section::Workspace,
+            },
+            ActionKind::SyncWorkspace => &Self {
+                kind: ActionKind::SyncWorkspace,
+                default_keys: "g s",
+                label: "sync",
+                describe: "Re-poll just this workspace's PR / issue instead of every provider — a cheap, targeted refresh for when you're waiting on one PR's CI or one issue's state.",
                 section: Section::Workspace,
             },
             ActionKind::OpenInBrowser => &Self {
@@ -1609,6 +1625,7 @@ impl ActionKind {
             ActionKind::RequestReviewers => "request_reviewers",
             ActionKind::AddAssignees => "add_assignees",
             ActionKind::ManageLabels => "manage_labels",
+            ActionKind::SyncWorkspace => "sync_workspace",
             ActionKind::OpenInBrowser => "open_in_browser",
             ActionKind::DeleteOrClose => "delete_or_close",
             ActionKind::OpenFilterMenu => "open_filter_menu",
@@ -1808,6 +1825,7 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::RequestReviewers
         | ActionKind::AddAssignees
         | ActionKind::ManageLabels
+        | ActionKind::SyncWorkspace
         | ActionKind::OpenInBrowser
         | ActionKind::DeleteOrClose => Some("github"),
         ActionKind::SpawnAgent => Some("agent"),
@@ -2178,6 +2196,11 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         // GitHub issue — the "tag this PR/issue" surface (issue #363).
         // The menu itself marks which policies apply to PRs vs issues.
         ActionKind::ManagePolicies => workspace
+            .map(|w| w.pr.is_some() || !w.gh_issues.is_empty())
+            .unwrap_or(false),
+        // Targeted re-poll only has something to fetch when the
+        // workspace owns a GitHub entity — a PR or a linked issue.
+        ActionKind::SyncWorkspace => workspace
             .map(|w| w.pr.is_some() || !w.gh_issues.is_empty())
             .unwrap_or(false),
         ActionKind::Work | ActionKind::WorkWith => intent::classify_work(workspace, &[]).is_some(),
@@ -3080,6 +3103,7 @@ mod tests {
         // target. Global ones still can.
         assert!(!availability(ActionKind::Work, None));
         assert!(!availability(ActionKind::MergePr, None));
+        assert!(!availability(ActionKind::SyncWorkspace, None));
         assert!(!availability(ActionKind::Archive, None));
         assert!(availability(ActionKind::Refresh, None));
         assert!(availability(ActionKind::OpenHelp, None));
@@ -3101,6 +3125,7 @@ mod tests {
             ActionKind::RequestReviewers,
             ActionKind::AddAssignees,
             ActionKind::ManageLabels,
+            ActionKind::SyncWorkspace,
             ActionKind::OpenInBrowser,
             ActionKind::DeleteOrClose,
         ];

@@ -14,8 +14,8 @@
 //! main loop when `send` errors.
 
 use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
-use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::{Mutex, Notify, broadcast, watch};
@@ -39,6 +39,25 @@ use tokio::sync::{Mutex, Notify, broadcast, watch};
 /// slice of per-terminal daemon memory (paid only as output accrues)
 /// for parity with the live experience.
 pub const REPLAY_RING_BYTES: usize = 2 * 1024 * 1024;
+
+/// On-disk scrollback contract: bytes of raw output retained per
+/// persistent terminal (see [`DaemonPty::spawn_persistent`]).
+///
+/// The in-memory ring is destroyed when the daemon exits, so a terminal
+/// whose child is respawned after a restart comes back with an empty
+/// grid. A persistent terminal mirrors every output byte into a
+/// per-session file and seeds the fresh PTY's replay from it, so restart
+/// replay reconstructs real history rather than a blank screen. Sized to
+/// match [`REPLAY_RING_BYTES`] so the persisted depth tracks what a live
+/// reattaching client would rebuild from the ring.
+pub const SCROLLBACK_PERSIST_BYTES: usize = REPLAY_RING_BYTES;
+
+/// Compaction trigger for the on-disk scrollback file. Appends are cheap
+/// and unbounded until the file crosses this, at which point it is
+/// rewritten down to its last [`SCROLLBACK_PERSIST_BYTES`]. Twice the
+/// retained size so compaction is amortized (one rewrite per
+/// `SCROLLBACK_PERSIST_BYTES` appended) rather than per write.
+const SCROLLBACK_COMPACT_BYTES: u64 = SCROLLBACK_PERSIST_BYTES as u64 * 2;
 
 /// Broadcast channel capacity. If a subscriber lags by more than this
 /// many chunks it gets dropped with `RecvError::Lagged` — ring-buffer
@@ -256,6 +275,130 @@ impl ReplayRing {
     }
 }
 
+/// Append-backed on-disk mirror of a terminal's output, keeping the
+/// most recent [`SCROLLBACK_PERSIST_BYTES`] durable across daemon
+/// restarts. Owned by the reader thread, so its blocking file IO never
+/// touches the async runtime — the same pattern as the reader ring and
+/// the `LAZYBOX_CAPTURE_PTY` capture.
+struct ScrollbackLog {
+    file: std::fs::File,
+    path: PathBuf,
+    /// Bytes appended since the last compaction. Tracked rather than
+    /// re-`stat`'d per write so the hot path stays a single `write_all`.
+    len: u64,
+}
+
+impl ScrollbackLog {
+    /// Open (creating parents) the append-mode log at `path`, seeding
+    /// `len` from any bytes a prior run left behind. `None` on any IO
+    /// error — persistence is best-effort and must never fail a spawn.
+    fn open(path: PathBuf) -> Option<Self> {
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            tracing::warn!(
+                "scrollback persist: create {} failed: {e}",
+                parent.display()
+            );
+            return None;
+        }
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            Ok(file) => {
+                let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+                Some(Self { file, path, len })
+            }
+            Err(e) => {
+                tracing::warn!("scrollback persist: open {} failed: {e}", path.display());
+                None
+            }
+        }
+    }
+
+    fn append(&mut self, bytes: &[u8]) {
+        if let Err(e) = self.file.write_all(bytes) {
+            tracing::warn!(
+                "scrollback persist: write {} failed: {e}",
+                self.path.display()
+            );
+            return;
+        }
+        self.len += bytes.len() as u64;
+        if self.len > SCROLLBACK_COMPACT_BYTES {
+            self.compact();
+        }
+    }
+
+    /// Rewrite the file down to its last [`SCROLLBACK_PERSIST_BYTES`] so
+    /// it can't grow without bound. Best-effort: a failed rewrite leaves
+    /// the (larger but correct) file in place and retries next trigger.
+    fn compact(&mut self) {
+        let tail = read_scrollback_tail(&self.path, SCROLLBACK_PERSIST_BYTES);
+        let tmp = self.path.with_extension("tmp");
+        if let Err(e) = std::fs::write(&tmp, &tail) {
+            tracing::warn!(
+                "scrollback persist: compact write {} failed: {e}",
+                tmp.display()
+            );
+            return;
+        }
+        if let Err(e) = std::fs::rename(&tmp, &self.path) {
+            tracing::warn!(
+                "scrollback persist: compact rename {} failed: {e}",
+                self.path.display()
+            );
+            let _ = std::fs::remove_file(&tmp);
+            return;
+        }
+        // Reopen the append handle onto the freshly compacted inode; the
+        // old handle still pointed at the now-unlinked original.
+        match std::fs::OpenOptions::new().append(true).open(&self.path) {
+            Ok(file) => {
+                self.file = file;
+                self.len = tail.len() as u64;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "scrollback persist: reopen {} after compact failed: {e}",
+                    self.path.display()
+                );
+            }
+        }
+    }
+}
+
+/// Read the last `max` bytes of the scrollback file, trimmed to start at
+/// a line boundary when the file was longer than `max`. The trim drops a
+/// partial leading line so the retained head is a clean VT baseline
+/// rather than the middle of a UTF-8 / escape sequence — the same
+/// property tmux's line-oriented `capture-pane` seed has. Empty on any IO
+/// error or a missing file (a fresh session has no prior scrollback).
+fn read_scrollback_tail(path: &Path, max: usize) -> Vec<u8> {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    let Ok(meta) = file.metadata() else {
+        return Vec::new();
+    };
+    let start = meta.len().saturating_sub(max as u64);
+    if start > 0 && file.seek(SeekFrom::Start(start)).is_err() {
+        return Vec::new();
+    }
+    let mut buf = Vec::new();
+    if file.read_to_end(&mut buf).is_err() {
+        return Vec::new();
+    }
+    if start > 0
+        && let Some(nl) = buf.iter().position(|&b| b == b'\n')
+    {
+        buf.drain(..=nl);
+    }
+    buf
+}
+
 /// A subscription to a `DaemonPty`'s output. Includes the replay so
 /// the caller can reconstruct the screen, then the live stream for
 /// everything after.
@@ -288,6 +431,39 @@ impl DaemonPty {
         cwd: Option<&PathBuf>,
         env: Vec<(String, String)>,
         initial: &[u8],
+    ) -> Result<Self, PtyError> {
+        Self::spawn_inner(cmd, size, cwd, env, initial, None)
+    }
+
+    /// Like [`Self::spawn`], but mirrors output to a durable on-disk log
+    /// at `persist_path` so the terminal's scrollback survives a daemon
+    /// restart. Any bytes a prior run left in that file seed the replay
+    /// ahead of the fresh child's output — this is how a respawned
+    /// session (whose child died with the old daemon) comes back with its
+    /// history instead of a blank grid (#468). The file is bounded to
+    /// [`SCROLLBACK_PERSIST_BYTES`]; keying it per session is the caller's
+    /// job (see the spawn handler). Persistence is best-effort: an
+    /// unwritable path degrades to an in-memory-only ring, never a failed
+    /// spawn.
+    pub fn spawn_persistent(
+        cmd: &[String],
+        size: PtySize,
+        cwd: Option<&PathBuf>,
+        env: Vec<(String, String)>,
+        persist_path: PathBuf,
+    ) -> Result<Self, PtyError> {
+        let initial = read_scrollback_tail(&persist_path, SCROLLBACK_PERSIST_BYTES);
+        let log = ScrollbackLog::open(persist_path);
+        Self::spawn_inner(cmd, size, cwd, env, &initial, log)
+    }
+
+    fn spawn_inner(
+        cmd: &[String],
+        size: PtySize,
+        cwd: Option<&PathBuf>,
+        env: Vec<(String, String)>,
+        initial: &[u8],
+        mut persist: Option<ScrollbackLog>,
     ) -> Result<Self, PtyError> {
         let pty_system = NativePtySystem::default();
         let pair = pty_system
@@ -395,6 +571,9 @@ impl DaemonPty {
                         Ok(n) => {
                             if let Some(f) = capture.as_mut() {
                                 let _ = f.write_all(&buf[..n]);
+                            }
+                            if let Some(log) = persist.as_mut() {
+                                log.append(&buf[..n]);
                             }
                             let bytes: Arc<[u8]> = Arc::from(&buf[..n]);
                             // Push to the ring and assign the seq under the
@@ -1124,6 +1303,154 @@ mod seed_tests {
         assert!(
             !String::from_utf8_lossy(&sub.replay).contains("seeded"),
             "nothing but child output in the ring"
+        );
+    }
+}
+
+#[cfg(test)]
+mod persist_tests {
+    use super::*;
+
+    fn small() -> PtySize {
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        }
+    }
+
+    fn sh(script: &str) -> Vec<String> {
+        vec!["/bin/sh".into(), "-c".into(), script.into()]
+    }
+
+    /// The whole point of #468: after the process that produced the
+    /// output is gone, a FRESH PTY seeded from the same persist path
+    /// replays that output — the durable file, not the dead ring, carries
+    /// the history across the (simulated) daemon restart.
+    #[tokio::test]
+    async fn persisted_output_seeds_a_later_spawn() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session-a.log");
+
+        let first = DaemonPty::spawn_persistent(
+            &sh("printf 'history-line\\n'"),
+            small(),
+            None,
+            Vec::new(),
+            path.clone(),
+        )
+        .expect("spawn");
+        first.wait_finished().await;
+        // Drop the first PTY entirely — its ring is gone, only the file
+        // remains, exactly as after a daemon restart.
+        drop(first);
+
+        let second = DaemonPty::spawn_persistent(
+            &sh("printf 'fresh-output'"),
+            small(),
+            None,
+            Vec::new(),
+            path.clone(),
+        )
+        .expect("respawn");
+        second.wait_finished().await;
+
+        let replay = String::from_utf8_lossy(&second.snapshot_only().await.replay).into_owned();
+        assert!(
+            replay.contains("history-line"),
+            "the respawn must replay the prior process's persisted history: {replay:?}"
+        );
+        assert!(
+            replay.contains("fresh-output"),
+            "and its own fresh output after it: {replay:?}"
+        );
+        let history_at = replay.find("history-line").unwrap();
+        let fresh_at = replay.find("fresh-output").unwrap();
+        assert!(history_at < fresh_at, "history seeds ahead of live output");
+    }
+
+    /// An unpersisted spawn (plain `spawn`) writes no file, and a persist
+    /// path that never existed seeds an empty replay — a fresh session
+    /// starts clean rather than erroring on the missing file.
+    #[tokio::test]
+    async fn missing_persist_file_seeds_empty() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("brand-new.log");
+        assert!(!path.exists());
+
+        let pty = DaemonPty::spawn_persistent(
+            &sh("printf only-live"),
+            small(),
+            None,
+            Vec::new(),
+            path.clone(),
+        )
+        .expect("spawn");
+        pty.wait_finished().await;
+
+        assert!(path.exists(), "the log is created as output flows");
+        let replay = String::from_utf8_lossy(&pty.snapshot_only().await.replay).into_owned();
+        assert!(replay.contains("only-live"));
+        assert!(
+            !replay.contains("brand-new"),
+            "nothing seeded from a previously-empty session"
+        );
+    }
+
+    /// The on-disk file is bounded: a burst far past the retain size
+    /// compacts down to (roughly) the last `SCROLLBACK_PERSIST_BYTES`,
+    /// never growing without limit, while still carrying the recent tail
+    /// forward to a reseed.
+    #[test]
+    fn scrollback_log_is_bounded_and_keeps_the_tail() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("busy.log");
+        let mut log = ScrollbackLog::open(path.clone()).expect("open");
+
+        // Write comfortably past the compaction trigger in line-sized
+        // chunks so the trimmed head still lands on a boundary.
+        let line = {
+            let mut l = vec![b'x'; 4096];
+            l.push(b'\n');
+            l
+        };
+        let mut total = 0u64;
+        while total <= SCROLLBACK_COMPACT_BYTES + line.len() as u64 {
+            log.append(&line);
+            total += line.len() as u64;
+        }
+        // A final unique marker so we can prove the tail survived.
+        log.append(b"TAIL-MARKER\n");
+        drop(log);
+
+        let on_disk = std::fs::metadata(&path).unwrap().len();
+        assert!(
+            on_disk <= SCROLLBACK_COMPACT_BYTES,
+            "file compacts under the bound: {on_disk} > {SCROLLBACK_COMPACT_BYTES}"
+        );
+        let seed = read_scrollback_tail(&path, SCROLLBACK_PERSIST_BYTES);
+        assert!(
+            seed.windows(b"TAIL-MARKER".len())
+                .any(|w| w == b"TAIL-MARKER"),
+            "the most recent output survives compaction"
+        );
+    }
+
+    /// A cut-in-the-middle tail is trimmed to the next line boundary so a
+    /// reseed never begins inside a partial escape/UTF-8 sequence — the
+    /// same clean-baseline property tmux's line-oriented capture has.
+    #[test]
+    fn tail_trims_to_a_line_boundary_when_truncated() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("lines.log");
+        std::fs::write(&path, b"aaaa\nbbbb\ncccc\n").unwrap();
+        // Ask for fewer bytes than the file holds: the read starts mid
+        // "aaaa" and must drop that partial first line.
+        let tail = read_scrollback_tail(&path, 9);
+        assert_eq!(
+            tail, b"cccc\n",
+            "partial leading line dropped, got {tail:?}"
         );
     }
 }

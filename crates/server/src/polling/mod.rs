@@ -37,7 +37,7 @@ pub use handlers::{
     handle_close_issue, handle_delete_or_close, handle_delete_orphaned_worktree,
     handle_fetch_pr_details, handle_fetch_repo_labels, handle_inspect_worktrees, handle_merge_pr,
     handle_request_reviewers, handle_scan_checkouts, handle_set_assignees, handle_set_labels,
-    post_reply, prefetch_top_pr_details, remove_merged_workspace,
+    handle_sync_workspace, post_reply, prefetch_top_pr_details, remove_merged_workspace,
 };
 pub use mutate::{MutationOutcome, apply_and_commit, fetch_and_apply};
 
@@ -921,6 +921,8 @@ async fn dispatch_action(
                 false,
                 // Autonomous spawns use the agent's default model.
                 None,
+                // Fresh spawn, not a session restore.
+                false,
             )
             .await;
         }
@@ -1094,6 +1096,8 @@ async fn dispatch_action(
                         false,
                         // Auto-fix uses the agent's default model.
                         None,
+                        // Fresh spawn, not a session restore.
+                        false,
                     )
                     .await;
                 }
@@ -5084,7 +5088,9 @@ async fn delete_workspace_internal(
                 // Preserve the workspace and every live mapping so the user
                 // can retry. The backend contract deliberately keeps a slot
                 // after a transport/timeout failure; deleting our metadata
-                // here would orphan an agent we failed to stop.
+                // here would orphan an agent we failed to stop. The client
+                // rolls back its optimistic row removal off this "terminal"
+                // error (#476).
                 config.deleted_workspaces.lock().remove(key_str);
                 return false;
             }

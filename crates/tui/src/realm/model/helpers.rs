@@ -1497,13 +1497,24 @@ fn dispatch_event<T: TerminalAdapter>(model: &mut Model<T>, event: crossterm::ev
                 // then did its normal thing (focus a pane, select a
                 // workspace). Nothing left to forward.
             } else if let Some(realm_mouse) = crossterm_mouse_to_realm(m) {
-                // A modal owns input — route button presses to it so
-                // its buttons respond to clicks. Only presses are
-                // forwarded; drag/move/scroll noise stays out of the
-                // modal's event queue. Forwarded non-blocking like keys
-                // (see the keyboard arm) so the dispatcher never stalls
-                // on modal input.
-                model.forward_modal_event(RealmEvent::Mouse(realm_mouse));
+                // A modal owns input — route button presses (and, for a
+                // scroll-aware modal like the description reader, wheel
+                // notches) to it. Wheel events are dropped here for every
+                // other modal rather than pushed through the channel to
+                // be ignored (#448). Forwarded non-blocking like keys so
+                // the dispatcher never stalls on modal input.
+                use tuirealm::event::MouseEventKind;
+                let is_wheel = matches!(
+                    realm_mouse.kind,
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                );
+                let wants_wheel = model
+                    .modal_stack
+                    .last()
+                    .is_some_and(super::Id::consumes_scroll);
+                if !is_wheel || wants_wheel {
+                    model.forward_modal_event(RealmEvent::Mouse(realm_mouse));
+                }
             }
         }
         crossterm::event::Event::Paste(text) => {
@@ -1571,6 +1582,11 @@ fn crossterm_mouse_to_realm(
         CMK::Down(CMB::Left) => RMK::Down(RMB::Left),
         CMK::Down(CMB::Right) => RMK::Down(RMB::Right),
         CMK::Down(CMB::Middle) => RMK::Down(RMB::Middle),
+        // Wheel scroll is forwarded so a scrollable modal (the
+        // description reader, #448) responds to the wheel. Other modals
+        // ignore mouse events, so this is inert for them.
+        CMK::ScrollUp => RMK::ScrollUp,
+        CMK::ScrollDown => RMK::ScrollDown,
         _ => return None,
     };
     Some(tuirealm::event::MouseEvent {

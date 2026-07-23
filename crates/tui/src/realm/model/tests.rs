@@ -3992,6 +3992,44 @@ mod merge_focus_follow_tests {
         );
     }
 
+    /// The description-reader modal (#448): opening it for the focused
+    /// workspace's body mounts `Id::DescriptionModal`, and dismissing it
+    /// pops cleanly (it carries no pending model state).
+    #[test]
+    fn open_focused_description_mounts_and_dismisses() {
+        let mut m = build_model();
+        let mut t = task("owner/repo#1", false, Duration::hours(1));
+        t.body = Some(format!("# Heading\n\n{}", "word ".repeat(400)));
+        let ws = Workspace::from_task(t, Utc::now());
+        let ws_key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
+        m.sync_panes();
+
+        m.open_focused_description();
+        assert_eq!(m.modal_stack.last(), Some(&Id::DescriptionModal));
+
+        m.update(Msg::ModalDismissed);
+        assert!(
+            m.modal_stack.is_empty(),
+            "the reader modal pops without leaving pending state",
+        );
+    }
+
+    /// A workspace with no body has nothing to read — opening is a no-op.
+    #[test]
+    fn open_focused_description_noop_without_body() {
+        let mut m = build_model();
+        let ws = workspace("owner/repo#2", false, Duration::hours(1));
+        let ws_key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
+        m.sync_panes();
+
+        m.open_focused_description();
+        assert!(m.modal_stack.is_empty(), "no body → no modal");
+    }
+
     /// The dispatch → mount seam: pressing `g p` (`Action::ManagePolicies`)
     /// on a focused PR workspace actually mounts the picker with rows
     /// stashed — the wiring the direct `handle_choice_picked` tests skip.

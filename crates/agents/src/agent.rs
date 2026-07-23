@@ -563,6 +563,23 @@ pub mod builtins {
         format!("projects={{{path}={{trust_level=\"trusted\"}}}}")
     }
 
+    /// The flags that make an unattended (`skip_permissions`) Codex launch
+    /// start clean, shared by [`Codex::spawn`] and [`Codex::resume`] so the
+    /// two paths never drift. Empty unless `skip_permissions` is set.
+    fn codex_unattended_flags(ctx: &SpawnCtx) -> Vec<String> {
+        if !ctx.skip_permissions {
+            return Vec::new();
+        }
+        vec![
+            "--dangerously-bypass-approvals-and-sandbox".into(),
+            "--dangerously-bypass-hook-trust".into(),
+            "-c".into(),
+            codex_trusted_project_override(&ctx.worktree),
+            "-c".into(),
+            "check_for_update_on_startup=false".into(),
+        ]
+    }
+
     impl Agent for Codex {
         fn id(&self) -> &'static str {
             "codex"
@@ -581,14 +598,18 @@ pub mod builtins {
         }
         fn spawn(&self, ctx: &SpawnCtx) -> Vec<String> {
             let mut argv = vec!["codex".into()];
-            if ctx.skip_permissions {
-                argv.push("--dangerously-bypass-approvals-and-sandbox".into());
-                argv.push("--dangerously-bypass-hook-trust".into());
-                argv.push("-c".into());
-                argv.push(codex_trusted_project_override(&ctx.worktree));
-                argv.push("-c".into());
-                argv.push("check_for_update_on_startup=false".into());
-            }
+            argv.extend(codex_unattended_flags(ctx));
+            argv
+        }
+
+        /// Continue this worktree's most recent Codex session — the
+        /// per-worktree analog of Claude's `--continue`. `codex resume
+        /// --last` filters recorded sessions by cwd (only `--all` widens
+        /// that), so a restored session reattaches its own conversation
+        /// instead of starting blank.
+        fn resume(&self, ctx: &SpawnCtx) -> Vec<String> {
+            let mut argv = vec!["codex".into(), "resume".into(), "--last".into()];
+            argv.extend(codex_unattended_flags(ctx));
             argv
         }
 
@@ -910,6 +931,40 @@ mod tests {
             settings["hooks"]["Stop"][0]["hooks"][0]["command"],
             "lazybox hook-ingest --backend-key lazybox-ws-claude-1-7"
         );
+    }
+
+    #[test]
+    fn codex_resume_continues_last_cwd_session() {
+        let codex = super::builtins::Codex;
+
+        // Bare resume reattaches the cwd's most recent session; no
+        // unattended flags unless opted in.
+        let off = SpawnCtx {
+            skip_permissions: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            codex.resume(&off),
+            vec![
+                "codex".to_string(),
+                "resume".to_string(),
+                "--last".to_string(),
+            ]
+        );
+
+        // The unattended flags ride resume identically to spawn, so a
+        // restored autonomous session starts just as clean.
+        let on = SpawnCtx {
+            skip_permissions: true,
+            worktree: std::path::PathBuf::from("/tmp/wt"),
+            ..Default::default()
+        };
+        let resumed = codex.resume(&on);
+        assert_eq!(resumed[..3], ["codex", "resume", "--last"]);
+        assert!(resumed.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+        assert!(resumed.contains(&"--dangerously-bypass-hook-trust".to_string()));
+        // The unattended tail matches spawn's exactly.
+        assert_eq!(resumed[3..], codex.spawn(&on)[1..]);
     }
 
     #[test]

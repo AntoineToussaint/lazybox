@@ -16,7 +16,7 @@
 
 use super::{Id, Model, Msg, dismissed_update_key};
 use crate::realm::UserEvent;
-use lazybox_ipc::Command as IpcCommand;
+use lazybox_ipc::{Command as IpcCommand, TerminalId};
 use tuirealm::terminal::TerminalAdapter;
 
 impl<T: TerminalAdapter> Model<T> {
@@ -39,6 +39,13 @@ impl<T: TerminalAdapter> Model<T> {
         // pending stash happens to be set.
         if matches!(top, Some(Id::BroadcastText)) {
             let cmds = self.dispatch_broadcast(&body);
+            self.drain_queued_daemon_prompts();
+            return cmds;
+        }
+        // The handoff compose step shares the Textarea component too —
+        // route by top modal id, like broadcast (issue #431).
+        if matches!(top, Some(Id::HandoffText)) {
+            let cmds = self.dispatch_handoff(&body);
             self.drain_queued_daemon_prompts();
             return cmds;
         }
@@ -82,6 +89,50 @@ impl<T: TerminalAdapter> Model<T> {
         cmds
     }
 
+    /// Deliver a prompt `body` to one live terminal, appending the right
+    /// IPC command(s) to `cmds`. An agent terminal gets the daemon's
+    /// settle-gated `InjectPrompt` (+ a `RecordUserMessage` so its pinned
+    /// "you ▸ …" recap updates): the body is pasted, then Enter is sent
+    /// as a separate keystroke once the paste's repaint quiesces. A
+    /// single `body + \r` write is NOT enough for an agent — Claude
+    /// batches the burst as a paste and swallows the `\r` as a soft
+    /// newline, so the prompt expands but never submits (#246). A plain
+    /// shell has no paste debounce, so the encoded direct write submits
+    /// cleanly. Shared by the snippet, broadcast, and handoff paths so
+    /// the #246 invariant lives in one place.
+    fn deliver_prompt(
+        &mut self,
+        terminal_id: TerminalId,
+        is_agent: bool,
+        body: &str,
+        cmds: &mut Vec<IpcCommand>,
+    ) {
+        if is_agent {
+            // Feed the raw body + a submit `\r` (embedded newlines stay
+            // `\n`, i.e. soft breaks) so the whole body commits as one
+            // recap message.
+            let mut recap = body.as_bytes().to_vec();
+            recap.push(b'\r');
+            if let Some(message) = self.terminals.record_pty_write(terminal_id, &recap) {
+                cmds.push(IpcCommand::RecordUserMessage {
+                    terminal_id,
+                    message,
+                });
+            }
+            cmds.push(IpcCommand::InjectPrompt {
+                terminal_id,
+                prompt: body.to_string(),
+                fallback_spawn: None,
+                submit: true,
+            });
+        } else {
+            cmds.push(IpcCommand::Write {
+                terminal_id,
+                bytes: encode_snippet_for_pty(body),
+            });
+        }
+    }
+
     /// Fan the composed broadcast body out to every stashed target:
     /// a running agent terminal gets the settle-gated `InjectPrompt`
     /// (+ a `RecordUserMessage` so its recap line updates, #246-safe);
@@ -106,31 +157,8 @@ impl<T: TerminalAdapter> Model<T> {
         let mut delivered: Vec<lazybox_core::SessionKey> = Vec::new();
         for key in &draft.targets {
             match self.sidebar.broadcast_terminal(key) {
-                Some((terminal_id, true)) => {
-                    // Same recap + inject pair as the single-target
-                    // snippet path (see the SnippetPicker arm above).
-                    let mut recap = body.as_bytes().to_vec();
-                    recap.push(b'\r');
-                    if let Some(message) = self.terminals.record_pty_write(terminal_id, &recap) {
-                        cmds.push(IpcCommand::RecordUserMessage {
-                            terminal_id,
-                            message,
-                        });
-                    }
-                    cmds.push(IpcCommand::InjectPrompt {
-                        terminal_id,
-                        prompt: body.to_string(),
-                        fallback_spawn: None,
-                        submit: true,
-                    });
-                    sent += 1;
-                    delivered.push(key.clone());
-                }
-                Some((terminal_id, false)) => {
-                    cmds.push(IpcCommand::Write {
-                        terminal_id,
-                        bytes: encode_snippet_for_pty(body),
-                    });
+                Some((terminal_id, is_agent)) => {
+                    self.deliver_prompt(terminal_id, is_agent, body, &mut cmds);
                     sent += 1;
                     delivered.push(key.clone());
                 }
@@ -169,6 +197,53 @@ impl<T: TerminalAdapter> Model<T> {
             ),
         };
         self.flash_info(summary);
+        self.redraw = true;
+        cmds
+    }
+
+    /// Deliver the composed handoff body into the target session
+    /// (`x s`, issue #431): a running agent gets the same settle-gated
+    /// `InjectPrompt` (+ `RecordUserMessage` recap) the broadcast path
+    /// uses; a plain shell gets the encoded direct write. The visible
+    /// "source → target" notice records the A→B trail. An empty body
+    /// (the user cleared the seed) or a target that lost its session
+    /// between pick and submit cancels with a notice, sending nothing.
+    fn dispatch_handoff(&mut self, body: &str) -> Vec<IpcCommand> {
+        let Some(draft) = self.pending_handoff.take() else {
+            return Vec::new();
+        };
+        let Some(target) = draft.target else {
+            return Vec::new();
+        };
+        let body = body.trim_end();
+        if body.is_empty() {
+            self.flash_info("handoff cancelled — nothing to send");
+            return Vec::new();
+        }
+        let target_name = self
+            .sidebar
+            .workspace_by_key(&target)
+            .map(|w| w.name.clone())
+            .unwrap_or_else(|| target.to_string());
+        let mut cmds = Vec::new();
+        match self.sidebar.broadcast_terminal(&target) {
+            Some((terminal_id, true)) => {
+                self.deliver_prompt(terminal_id, true, body, &mut cmds);
+                self.flash_info(format!("handoff: {} → {target_name}", draft.source_name));
+            }
+            // The target's agent ended between picking it and submitting
+            // (its session is gone, or only a shell remains — and a brief
+            // is meant for an agent). Don't silently drop the composed
+            // work: re-open the picker seeded with it so the user can
+            // route it to another agent (or Esc out). `mount_handoff_picker`
+            // nudges on its own if no other agent is running.
+            _ => {
+                self.flash_info(format!(
+                    "{target_name}'s agent session ended — pick another target"
+                ));
+                self.mount_handoff_picker(&draft.source, draft.source_name, body.to_string());
+            }
+        }
         self.redraw = true;
         cmds
     }
@@ -429,44 +504,13 @@ showing keybinding search only",
                 self.flash_info("no active terminal — open a session first");
                 return cmds;
             };
-            // An agent terminal gets the daemon's settle-gated inject
-            // path — the SAME one `w w` uses: the body is pasted, then
-            // Enter is sent as a separate keystroke once the paste's
-            // repaint quiesces. A single write with a trailing `\r`
-            // (`encode_snippet_for_pty`) is not enough: Claude batches
-            // the burst as a paste and swallows the `\r` as a soft
-            // newline, so the snippet expands but never submits (#246).
-            // A plain shell has no paste debounce, so the direct
-            // `body + \r` write submits cleanly there.
-            if self.terminals.terminal_is_agent(terminal_id) {
-                // Mirror the snippet into the recap tracker — the daemon
-                // performs the actual PTY write, so without this the
-                // pinned "you ▸ …" line would keep showing the previous
-                // message. Feed the raw body + a submit `\r` (embedded
-                // newlines stay `\n`, i.e. soft breaks) so the whole
-                // body commits as one recap message.
-                let mut recap = snippet.body.clone().into_bytes();
-                recap.push(b'\r');
-                if let Some(message) = self.terminals.record_pty_write(terminal_id, &recap) {
-                    cmds.push(IpcCommand::RecordUserMessage {
-                        terminal_id,
-                        message,
-                    });
-                }
-                cmds.push(IpcCommand::InjectPrompt {
-                    terminal_id,
-                    prompt: snippet.body.clone(),
-                    fallback_spawn: None,
-                    submit: true,
-                });
-            } else {
-                let bytes = encode_snippet_for_pty(&snippet.body);
-                cmds.push(IpcCommand::Write { terminal_id, bytes });
-            }
+            let is_agent = self.terminals.terminal_is_agent(terminal_id);
+            // Clone the body out so the `self.snippets` borrow ends before
+            // the `&mut self` delivery call.
+            let body = snippet.body.clone();
+            self.deliver_prompt(terminal_id, is_agent, &body, &mut cmds);
             // Only reached once the snippet has actually been dispatched
-            // (agent inject or shell write) — so the MRU tracks sent
-            // snippets, not abandoned ones. Ends the `snippet` borrow of
-            // `self.snippets` above (NLL) before this `&mut self` call.
+            // — so the MRU tracks sent snippets, not abandoned ones.
             self.record_recent_snippet(key.clone());
             // Also pin it onto the target workspace's per-session history
             // (#463) so the sidebar shows what this agent's been told.
@@ -637,6 +681,27 @@ showing keybinding search only",
                     target_workspace_key: target_key.clone(),
                 });
                 self.flash_info(format!("adopted sessions: {source_key} → {target_key}"));
+            }
+            return cmds;
+        }
+        // Handoff target picker (Id::HandoffTarget, issue #431) — the
+        // pick doesn't send yet: it resolves the target session and
+        // funnels into the compose textarea seeded with the source
+        // agent's captured output. Empty pick (Esc) drops the stash.
+        if matches!(self.modal_stack.last(), Some(Id::HandoffTarget)) {
+            let target = picks
+                .first()
+                .and_then(|i| self.handoff_choices.get(*i).cloned());
+            self.handoff_choices.clear();
+            self.pop_modal();
+            match (target, self.pending_handoff.as_mut()) {
+                (Some(target), Some(draft)) => {
+                    draft.target = Some(target);
+                    self.mount_handoff_textarea();
+                }
+                _ => {
+                    self.pending_handoff = None;
+                }
             }
             return cmds;
         }
@@ -1214,6 +1279,16 @@ showing keybinding search only",
             }
             Some(Id::BroadcastText) => {
                 self.pending_broadcast = None;
+            }
+            // Esc anywhere in the handoff flow (#431) cancels it — drop
+            // the target candidates and the stashed source/seed so a
+            // later handoff starts clean.
+            Some(Id::HandoffTarget) => {
+                self.handoff_choices.clear();
+                self.pending_handoff = None;
+            }
+            Some(Id::HandoffText) => {
+                self.pending_handoff = None;
             }
             Some(Id::ThemePicker) => {
                 // Esc cancels the preview: restore the palette that was

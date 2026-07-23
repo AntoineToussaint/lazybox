@@ -2016,6 +2016,259 @@ snippets:
         assert!(notice.message.contains("v"), "nudge names the select key");
     }
 
+    /// Agent-to-agent handoff (`x s`, issue #431), full flow: dispatch
+    /// on the focused agent workspace opens the target picker, picking a
+    /// target funnels into the compose step, and submit injects the
+    /// edited brief into the target session (settle-gated inject +
+    /// recap) with a "source → target" notice. The captured seed is
+    /// empty in tests (no rendered grid), so the user-composed body is
+    /// what gets delivered.
+    #[test]
+    fn send_to_session_full_flow_injects_into_picked_target() {
+        use lazybox_tui_core::action::Action;
+        let (mut m, keys) = model_with_broadcast_targets(&[
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+            Some(lazybox_ipc::TerminalKind::Agent("codex".into())),
+        ]);
+        // Source = the first agent workspace.
+        assert!(m.sidebar.focus_workspace_key(&keys[0]));
+
+        m.dispatch_action(&Action::SendToSession);
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::HandoffTarget),
+            "dispatch opens the target picker",
+        );
+        assert_eq!(
+            m.handoff_choices,
+            vec![keys[1].clone()],
+            "the source is excluded — a handoff can't loop back to itself",
+        );
+
+        let cmds = m.handle_choice_picked(vec![0]);
+        assert!(cmds.is_empty(), "picking the target sends nothing yet");
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::HandoffText),
+            "the pick funnels into the compose step",
+        );
+        assert_eq!(
+            m.pending_handoff.as_ref().and_then(|d| d.target.clone()),
+            Some(keys[1].clone()),
+        );
+
+        let cmds = m.handle_textarea_submitted("build the parser".into());
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                IpcCommand::InjectPrompt { terminal_id, prompt, submit: true, .. }
+                    if terminal_id.0 == 2 && prompt == "build the parser"
+            )),
+            "the brief is injected + submitted into the target agent: {cmds:?}",
+        );
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                IpcCommand::RecordUserMessage { terminal_id, message }
+                    if terminal_id.0 == 2 && message == "build the parser"
+            )),
+            "the target's recap line updates: {cmds:?}",
+        );
+        assert!(m.pending_handoff.is_none(), "draft consumed");
+        let notice = m.status.notice.as_ref().expect("handoff notice");
+        assert!(
+            notice.message.contains("handoff:") && notice.message.contains('→'),
+            "notice records the A→B trail: {}",
+            notice.message,
+        );
+    }
+
+    /// The handoff target picker only offers OTHER workspaces that have
+    /// a running session: the source and any session-less workspace are
+    /// filtered out.
+    #[test]
+    fn send_to_session_excludes_source_and_sessionless_targets() {
+        use lazybox_tui_core::action::Action;
+        let (mut m, keys) = model_with_broadcast_targets(&[
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+            Some(lazybox_ipc::TerminalKind::Agent("codex".into())),
+            None,
+        ]);
+        assert!(m.sidebar.focus_workspace_key(&keys[0]));
+        m.dispatch_action(&Action::SendToSession);
+        assert_eq!(
+            m.handoff_choices,
+            vec![keys[1].clone()],
+            "only the other running session is a candidate",
+        );
+    }
+
+    /// A handoff whose source is the only running session has nobody to
+    /// hand off to: nudge and stash nothing.
+    #[test]
+    fn send_to_session_with_no_other_session_nudges() {
+        use lazybox_tui_core::action::Action;
+        let (mut m, keys) = model_with_broadcast_targets(&[Some(
+            lazybox_ipc::TerminalKind::Agent("claude".into()),
+        )]);
+        assert!(m.sidebar.focus_workspace_key(&keys[0]));
+        m.dispatch_action(&Action::SendToSession);
+        assert!(m.modal_stack.is_empty(), "no target, no picker");
+        assert!(m.pending_handoff.is_none());
+        let notice = m.status.notice.as_ref().expect("nudge notice");
+        assert!(
+            notice.message.contains("no other running agent"),
+            "nudge explains why: {}",
+            notice.message,
+        );
+    }
+
+    /// `x s` on a workspace whose only session is a plain shell has no
+    /// agent output to hand off — nudge instead of opening the picker.
+    #[test]
+    fn send_to_session_from_shell_only_workspace_nudges() {
+        use lazybox_tui_core::action::Action;
+        let (mut m, keys) = model_with_broadcast_targets(&[
+            Some(lazybox_ipc::TerminalKind::Shell),
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+        ]);
+        assert!(m.sidebar.focus_workspace_key(&keys[0]));
+        m.dispatch_action(&Action::SendToSession);
+        assert!(m.modal_stack.is_empty(), "no agent source, no picker");
+        assert!(m.pending_handoff.is_none());
+        let notice = m.status.notice.as_ref().expect("nudge notice");
+        assert!(
+            notice.message.contains("no agent session"),
+            "nudge explains why: {}",
+            notice.message,
+        );
+    }
+
+    /// A shell-only workspace is NOT offered as a handoff target — the
+    /// brief is meant for another agent, not a shell prompt. With a
+    /// shell as the only other session, the picker refuses to mount.
+    #[test]
+    fn send_to_session_excludes_shell_targets() {
+        use lazybox_tui_core::action::Action;
+        let (mut m, keys) = model_with_broadcast_targets(&[
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+            Some(lazybox_ipc::TerminalKind::Shell),
+        ]);
+        assert!(m.sidebar.focus_workspace_key(&keys[0]));
+        m.dispatch_action(&Action::SendToSession);
+        assert!(m.modal_stack.is_empty(), "a shell isn't a handoff target");
+        assert!(m.pending_handoff.is_none());
+        let notice = m.status.notice.as_ref().expect("nudge notice");
+        assert!(
+            notice.message.contains("no other running agent"),
+            "nudge names the reason: {}",
+            notice.message,
+        );
+    }
+
+    /// When the source scrape comes back empty (here: a freshly-spawned
+    /// agent with no rendered output yet), the flow flags it rather than
+    /// opening a silent empty composer — but still proceeds to the picker
+    /// so the user can compose the brief by hand.
+    #[test]
+    fn send_to_session_flags_an_empty_capture_but_still_opens_the_picker() {
+        use lazybox_tui_core::action::Action;
+        let (mut m, keys) = model_with_broadcast_targets(&[
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+            Some(lazybox_ipc::TerminalKind::Agent("codex".into())),
+        ]);
+        assert!(m.sidebar.focus_workspace_key(&keys[0]));
+        m.dispatch_action(&Action::SendToSession);
+        let notice = m.status.notice.as_ref().expect("notice");
+        assert!(
+            notice.message.contains("couldn't capture"),
+            "empty scrape is surfaced: {}",
+            notice.message,
+        );
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::HandoffTarget),
+            "the flow still proceeds to the picker",
+        );
+    }
+
+    /// Clearing the seed and submitting an empty body cancels the
+    /// handoff without sending anything.
+    #[test]
+    fn send_to_session_empty_body_cancels() {
+        use lazybox_tui_core::action::Action;
+        let (mut m, keys) = model_with_broadcast_targets(&[
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+            Some(lazybox_ipc::TerminalKind::Agent("codex".into())),
+        ]);
+        assert!(m.sidebar.focus_workspace_key(&keys[0]));
+        m.dispatch_action(&Action::SendToSession);
+        m.handle_choice_picked(vec![0]);
+        let cmds = m.handle_textarea_submitted("   \n".into());
+        assert!(cmds.is_empty(), "empty body sends nothing: {cmds:?}");
+        assert!(m.pending_handoff.is_none(), "draft consumed even on cancel");
+        let notice = m.status.notice.as_ref().expect("cancel notice");
+        assert!(notice.message.contains("cancelled"), "{}", notice.message);
+    }
+
+    /// If the picked target's session ends between pick and submit, the
+    /// composed brief is NOT silently dropped: the picker re-opens seeded
+    /// with the edited body so it can be routed to a session that's still
+    /// live. Modeled by a draft whose target no longer has a session.
+    #[test]
+    fn send_to_session_dead_target_reopens_picker_preserving_brief() {
+        let (mut m, keys) = model_with_broadcast_targets(&[
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+            None,
+            Some(lazybox_ipc::TerminalKind::Agent("codex".into())),
+        ]);
+        // The user picked keys[1], but its session is gone by submit time.
+        m.pending_handoff = Some(HandoffDraft {
+            source: keys[0].clone(),
+            source_name: "planner".into(),
+            seed: "original brief".into(),
+            target: Some(keys[1].clone()),
+        });
+        m.modal_stack.push(Id::HandoffText);
+
+        let cmds = m.handle_textarea_submitted("refined brief".into());
+        assert!(
+            cmds.is_empty(),
+            "nothing delivered to a dead target: {cmds:?}"
+        );
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::HandoffTarget),
+            "the picker re-opens instead of dropping the work",
+        );
+        assert_eq!(
+            m.pending_handoff.as_ref().map(|d| d.seed.as_str()),
+            Some("refined brief"),
+            "the edited brief becomes the new seed — not lost",
+        );
+        assert_eq!(
+            m.handoff_choices,
+            vec![keys[2].clone()],
+            "only the still-live other session is offered (dead target + source excluded)",
+        );
+    }
+
+    /// Esc anywhere in the handoff flow drops the stash so a later
+    /// handoff starts clean.
+    #[test]
+    fn send_to_session_dismiss_drops_the_stash() {
+        use lazybox_tui_core::action::Action;
+        let (mut m, keys) = model_with_broadcast_targets(&[
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+            Some(lazybox_ipc::TerminalKind::Agent("codex".into())),
+        ]);
+        assert!(m.sidebar.focus_workspace_key(&keys[0]));
+        m.dispatch_action(&Action::SendToSession);
+        m.handle_modal_dismissed();
+        assert!(m.pending_handoff.is_none(), "Esc on the picker cancels");
+        assert!(m.handoff_choices.is_empty());
+    }
+
     /// mount_snippet_picker with an empty collection flashes a hint
     /// and refuses to mount — no Id::SnippetPicker on the stack.
     /// This is the "user typed `]]s<key>` but never configured any

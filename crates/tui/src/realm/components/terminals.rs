@@ -278,6 +278,20 @@ impl Terminals {
         self.inner.selection_screen_span(rect, anchor, focus)
     }
 
+    /// Forward `visible_text` — dump a terminal's whole visible grid
+    /// as plain text. Seeds the agent-to-agent handoff compose step
+    /// (`x s`) with the source agent's on-screen output.
+    pub fn visible_text(&mut self, id: TerminalId) -> Option<String> {
+        self.inner.visible_text(id)
+    }
+
+    /// Forward `agent_terminal_for` — the agent terminal for a session
+    /// (live, else a kept exited pane). Resolves the handoff source so a
+    /// finished-and-exited agent's final output can still be captured.
+    pub fn agent_terminal_for(&self, session_key: &SessionKey) -> Option<TerminalId> {
+        self.inner.agent_terminal_for(session_key)
+    }
+
     /// Classify whatever the focused terminal's grid shows at the
     /// frame-space cell `(col, row)` — a URL, file path, or issue
     /// reference. Used by the right-click handler to detect "the user

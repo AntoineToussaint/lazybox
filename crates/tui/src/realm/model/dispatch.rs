@@ -1108,6 +1108,38 @@ impl<T: TerminalAdapter> Model<T> {
             Action::BroadcastToSelected => {
                 self.mount_broadcast_picker();
             }
+            Action::SendToSession => {
+                // Source = the focused workspace's agent terminal, live or
+                // a kept exited pane (so a finished agent's final output is
+                // still capturable). A workspace with no agent slot at all
+                // — shell-only or session-less — nudges instead.
+                let Some(source_key) = self.sidebar.selected_workspace_key().cloned() else {
+                    return cmds;
+                };
+                match self.terminals.agent_terminal_for(&source_key) {
+                    Some(terminal_id) => {
+                        let seed = self.terminals.visible_text(terminal_id).unwrap_or_default();
+                        if seed.is_empty() {
+                            // Scrape came back blank (VT unreadable / grid
+                            // is only chrome). Proceed to the picker anyway
+                            // — the user composes the brief by hand — but
+                            // say so rather than opening a silent empty box.
+                            self.flash_info(
+                                "couldn't capture this agent's output — compose the brief yourself",
+                            );
+                        }
+                        let source_name = self
+                            .sidebar
+                            .workspace_by_key(&source_key)
+                            .map(|w| w.name.clone())
+                            .unwrap_or_else(|| source_key.to_string());
+                        self.mount_handoff_picker(&source_key, source_name, seed);
+                    }
+                    None => {
+                        self.flash_info("no agent session here to hand off from");
+                    }
+                }
+            }
             // Actions not yet handled here stay in the existing
             // handlers. As we migrate, the per-key match arms in
             // `handle_pane_key` and the pane wrappers get deleted

@@ -11,7 +11,7 @@
 //! `handle_choice_picked` / `handle_confirmed` arms (in mod.rs or
 //! events.rs) read the stashed state and execute on submit.
 
-use super::{Id, Model};
+use super::{HandoffDraft, Id, Model};
 use tuirealm::terminal::TerminalAdapter;
 
 /// Choice-modal item wrapper for the worktree inspector. Picker
@@ -1441,6 +1441,84 @@ impl<T: TerminalAdapter> Model<T> {
             .title("Adopt sessions")
             .label(|s: &String| s.clone());
         self.mount_modal(Id::AdoptTarget, modal);
+    }
+
+    /// Mount the agent-to-agent handoff target picker (`x s`, issue
+    /// #431). Candidates are every OTHER workspace running an agent —
+    /// excluding the source, so a handoff can't loop straight back to
+    /// itself, and excluding shell-only workspaces since the brief is
+    /// meant for another agent, not a shell prompt. The source name +
+    /// the seed captured from its agent screen are stashed in
+    /// `pending_handoff`; the pick funnels into the compose textarea
+    /// (`mount_handoff_textarea`). No eligible target → a footer nudge
+    /// and nothing stashed.
+    pub(super) fn mount_handoff_picker(
+        &mut self,
+        source_key: &lazybox_core::SessionKey,
+        source_name: String,
+        seed: String,
+    ) {
+        use crate::realm::components::choice::Choice;
+
+        let mut items: Vec<(lazybox_core::SessionKey, String)> = Vec::new();
+        for (key, ws) in self.sidebar.workspace_iter() {
+            if key.as_str() == source_key.as_str() {
+                continue;
+            }
+            let label = ws
+                .primary_task()
+                .map(|t| t.id.key.clone())
+                .unwrap_or_else(|| ws.name.clone());
+            items.push((key.clone(), label));
+        }
+        // Only workspaces whose deliverable terminal is an agent —
+        // `broadcast_terminal` returns `is_agent`, and the handoff brief
+        // is meant for another agent, not a shell.
+        items.retain(|(key, _)| matches!(self.sidebar.broadcast_terminal(key), Some((_, true))));
+        if items.is_empty() {
+            self.flash_info("no other running agent to hand off to");
+            return;
+        }
+        let labels: Vec<String> = items.iter().map(|(_, l)| l.clone()).collect();
+        self.handoff_choices = items.into_iter().map(|(k, _)| k).collect();
+        self.pending_handoff = Some(HandoffDraft {
+            source: source_key.clone(),
+            source_name,
+            seed,
+            target: None,
+        });
+
+        let modal = Choice::single("Send this agent's output to which session?", labels)
+            .title("Send to session")
+            .label(|s: &String| s.clone());
+        self.mount_modal(Id::HandoffTarget, modal);
+    }
+
+    /// Mount the handoff compose step: a Textarea pre-filled with the
+    /// captured source-agent output, headed with the "source → target"
+    /// trail. Submit injects the (edited) body into the target session
+    /// (`dispatch_handoff`).
+    pub(super) fn mount_handoff_textarea(&mut self) {
+        use crate::realm::components::textarea::Textarea;
+        let Some(draft) = &self.pending_handoff else {
+            return;
+        };
+        let Some(target) = &draft.target else {
+            return;
+        };
+        let target_name = self
+            .sidebar
+            .workspace_by_key(target)
+            .map(|w| w.name.clone())
+            .unwrap_or_else(|| target.to_string());
+        let header = format!("Handoff {} → {}", draft.source_name, target_name);
+        let mut modal = Textarea::new("Send to session").with_header(header);
+        if !draft.seed.is_empty() {
+            // Trailing blank line so any note the user appends starts on
+            // its own line; trimmed back off at send time if unused.
+            modal = modal.with_body(format!("{}\n\n", draft.seed.trim_end()));
+        }
+        self.mount_modal(Id::HandoffText, modal);
     }
 
     /// Drive the global "start agent" (`Shift-W`) flow. Resolve the

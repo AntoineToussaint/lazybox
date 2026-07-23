@@ -827,7 +827,7 @@ impl ActionDef {
                 kind: ActionKind::ToggleActivityPane,
                 default_keys: "Shift-P",
                 label: "activity pane",
-                describe: "Show or hide the activity pane. It auto-hides when the workspace has no activity; this reveals it on demand and re-hides it.",
+                describe: "Cycle the activity pane: full feed → one-line summary (new-activity / failing-CI counts) → hidden → full. The choice is remembered per workspace; `ui.activity_pane_default` sets the starting mode. A workspace with no activity still auto-hides.",
                 section: Section::Global,
             },
             ActionKind::Quit => &Self {

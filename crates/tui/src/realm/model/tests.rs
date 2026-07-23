@@ -7257,9 +7257,11 @@ mod tips_tests {
 #[cfg(test)]
 mod activity_pane_visibility_tests {
     //! Hide the Activity pane when a workspace has no activity worth
-    //! showing (#162), with `Shift-P` to reveal / re-hide on demand.
+    //! showing (#162), with `Shift-P` cycling full → summary → hidden
+    //! → full on demand (#487).
     use super::super::{Model, PaneFocus};
     use chrono::Utc;
+    use lazybox_config::ActivityPaneMode;
     use lazybox_core::{Workspace, WorkspaceKey};
     use lazybox_ipc::{Event as IpcEvent, channel};
     use tuirealm::event::{Key, KeyEvent, KeyModifiers};
@@ -7328,27 +7330,173 @@ mod activity_pane_visibility_tests {
     }
 
     #[test]
-    fn shift_p_reveals_an_empty_pane_then_re_hides() {
+    fn shift_p_reveals_an_empty_pane_then_cycles() {
         let mut m = build_model();
         seed(&mut m, vec![empty_ws("github:o/r#1")]);
-        assert!(!m.activity_pane_visible(), "auto-hidden when empty");
+        assert_eq!(
+            m.activity_pane_mode(),
+            ActivityPaneMode::Hidden,
+            "auto-hidden when empty"
+        );
 
+        // From Hidden the cycle wraps to Full, then Summary, then back.
         m.dispatch_key(shift_p());
-        assert!(m.activity_pane_visible(), "Shift-P reveals it on demand");
-
+        assert_eq!(m.activity_pane_mode(), ActivityPaneMode::Full);
         m.dispatch_key(shift_p());
-        assert!(!m.activity_pane_visible(), "Shift-P again re-hides it");
+        assert_eq!(m.activity_pane_mode(), ActivityPaneMode::Summary);
+        m.dispatch_key(shift_p());
+        assert_eq!(m.activity_pane_mode(), ActivityPaneMode::Hidden);
     }
 
     #[test]
-    fn shift_p_can_hide_a_non_empty_pane() {
+    fn shift_p_cycles_a_non_empty_pane_full_summary_hidden() {
         let mut m = build_model();
         seed(&mut m, vec![ws_with_activity("github:o/r#1")]);
+        assert_eq!(
+            m.activity_pane_mode(),
+            ActivityPaneMode::Full,
+            "content present → starts full"
+        );
         assert!(m.activity_pane_visible());
+
         m.dispatch_key(shift_p());
+        assert_eq!(m.activity_pane_mode(), ActivityPaneMode::Summary);
         assert!(
             !m.activity_pane_visible(),
-            "the override can hide a non-empty pane too"
+            "the slim summary line is not the focusable full pane"
+        );
+
+        m.dispatch_key(shift_p());
+        assert_eq!(m.activity_pane_mode(), ActivityPaneMode::Hidden);
+
+        m.dispatch_key(shift_p());
+        assert_eq!(m.activity_pane_mode(), ActivityPaneMode::Full, "wraps back");
+    }
+
+    fn ws_with_n_activities(key: &str, n: usize) -> Workspace {
+        let mut w = empty_ws(key);
+        for i in 0..n {
+            w.activity.push(lazybox_core::Activity {
+                author: format!("u{i}"),
+                body: format!("comment {i}"),
+                created_at: Utc::now(),
+                kind: lazybox_core::ActivityKind::Comment,
+                node_id: Some(format!("n-{i}")),
+                path: None,
+                line: None,
+                diff_hunk: None,
+                thread_id: None,
+            });
+        }
+        w
+    }
+
+    #[test]
+    fn clicking_the_summary_line_expands_to_full() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use tuirealm::ratatui::layout::Rect;
+
+        let mut m = build_model();
+        seed(&mut m, vec![ws_with_activity("github:o/r#1")]);
+        // Full → Summary.
+        m.dispatch_key(shift_p());
+        assert_eq!(m.activity_pane_mode(), ActivityPaneMode::Summary);
+
+        // The slim summary line sits at the top of the right column.
+        let area = Rect::new(0, 0, 120, 40);
+        let (_, right_top, _) = m.effective_pane_rects(area);
+        assert_eq!(right_top.height, 1, "summary keeps a single row");
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: right_top.x + 2,
+            row: right_top.y,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        m.dispatch_mouse_in(click, area);
+        assert_eq!(
+            m.activity_pane_mode(),
+            ActivityPaneMode::Full,
+            "clicking the summary line restores the full feed",
+        );
+        assert_eq!(m.focus(), PaneFocus::Right);
+    }
+
+    #[test]
+    fn summary_seam_does_not_start_a_splitter_drag() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use tuirealm::ratatui::layout::Rect;
+
+        let mut m = build_model();
+        seed(&mut m, vec![ws_with_activity("github:o/r#1")]);
+        m.dispatch_key(shift_p()); // Full → Summary
+        assert_eq!(m.activity_pane_mode(), ActivityPaneMode::Summary);
+
+        let area = Rect::new(0, 0, 120, 40);
+        let (_, right_top, _) = m.effective_pane_rects(area);
+        // The seam sits at the terminal's first row (just below the
+        // 1-row summary). In Full mode this is a draggable splitter;
+        // in Summary it must not be.
+        let seam = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: right_top.x + 5,
+            row: right_top.y + 1,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        m.dispatch_mouse_in(seam, area);
+        assert!(
+            m.layout.active_drag.is_none(),
+            "the summary / terminal seam must not arm a horizontal splitter drag",
+        );
+    }
+
+    #[test]
+    fn scrolling_the_summary_line_does_not_move_the_hidden_feed() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        use tuirealm::ratatui::layout::Rect;
+
+        let mut m = build_model();
+        // A long feed so a downward wheel WOULD scroll if it were routed
+        // to the activity pane.
+        seed(&mut m, vec![ws_with_n_activities("github:o/r#1", 60)]);
+        m.dispatch_key(shift_p()); // Full → Summary
+        assert_eq!(m.activity_pane_mode(), ActivityPaneMode::Summary);
+
+        let area = Rect::new(0, 0, 120, 40);
+        let (_, right_top, _) = m.effective_pane_rects(area);
+        let wheel = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: right_top.x + 2,
+            row: right_top.y,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        m.redraw = false;
+        m.dispatch_mouse_in(wheel, area);
+        assert!(
+            !m.redraw,
+            "a wheel over the slim summary line must be a no-op, not scroll the hidden feed",
+        );
+    }
+
+    #[test]
+    fn activity_pane_default_sets_the_initial_mode() {
+        let mut m = build_model();
+        m.ui_defaults.activity_pane_default = ActivityPaneMode::Summary;
+        seed(&mut m, vec![ws_with_activity("github:o/r#1")]);
+        assert_eq!(
+            m.activity_pane_mode(),
+            ActivityPaneMode::Summary,
+            "un-toggled workspace opens in the configured default",
+        );
+
+        // The empty-workspace auto-hide still wins over the default.
+        seed(&mut m, vec![empty_ws("github:o/r#2")]);
+        let second: lazybox_core::SessionKey = (&WorkspaceKey::new("github:o/r#2")).into();
+        assert!(m.sidebar.focus_workspace_key(&second));
+        m.sync_panes();
+        assert_eq!(
+            m.activity_pane_mode(),
+            ActivityPaneMode::Hidden,
+            "nothing to summarize → auto-hidden regardless of default",
         );
     }
 

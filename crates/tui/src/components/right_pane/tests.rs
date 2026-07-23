@@ -784,6 +784,127 @@ mod has_visible_content_tests {
 }
 
 #[cfg(test)]
+mod summary_render_tests {
+    //! The `Summary`-mode one-line render (#487): a slim count of new
+    //! activity + failing CI + how recently the task moved. Snapshots
+    //! the full / summary distinction at the row level with a pinned
+    //! clock so the relative time stays deterministic.
+    use super::super::{PaneId, RightPane};
+    use chrono::{Duration, Utc};
+    use lazybox_core::{Activity, ActivityKind, CiStatus, Task, TaskId, Workspace};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+
+    fn task(ci: CiStatus, updated: chrono::DateTime<chrono::Utc>) -> Task {
+        Task {
+            id: TaskId {
+                source: "github".into(),
+                key: "github:o/r#1".into(),
+            },
+            title: "a pr".into(),
+            body: None,
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: "https://github.com/o/r/pull/1".into(),
+            repo: Some("o/r".into()),
+            branch: Some("feature".into()),
+            base_branch: Some("main".into()),
+            updated_at: updated,
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        }
+    }
+
+    fn ws_with(n_unread: usize, ci: CiStatus, now: chrono::DateTime<chrono::Utc>) -> Workspace {
+        let mut w = Workspace::from_task(task(ci, now - Duration::minutes(5)), now);
+        for i in 0..n_unread {
+            w.activity.push(Activity {
+                author: format!("user{i}"),
+                body: "ping".into(),
+                created_at: now,
+                kind: ActivityKind::Comment,
+                node_id: Some(format!("n-{i}")),
+                path: None,
+                line: None,
+                diff_hunk: None,
+                thread_id: None,
+            });
+        }
+        w
+    }
+
+    fn summary_row(pane: &RightPane, now: chrono::DateTime<chrono::Utc>) -> String {
+        let (w, h) = (80u16, 1u16);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| pane.render_summary(Rect::new(0, 0, w, h), f, now))
+            .unwrap();
+        let buf = term.backend().buffer();
+        (0..w).map(|x| buf[(x, 0)].symbol()).collect()
+    }
+
+    #[test]
+    fn summary_shows_new_count_and_failing_ci() {
+        let now = Utc::now();
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws_with(3, CiStatus::Failure, now)));
+        let row = summary_row(&pane, now);
+        assert!(row.contains("3 new"), "new count missing: {row:?}");
+        assert!(row.contains("CI failing"), "CI signal missing: {row:?}");
+        assert!(
+            row.contains("updated 5m ago"),
+            "time trailer missing: {row:?}"
+        );
+        assert!(row.starts_with('▸'), "expand glyph missing: {row:?}");
+    }
+
+    #[test]
+    fn summary_omits_ci_when_green() {
+        let now = Utc::now();
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws_with(1, CiStatus::Success, now)));
+        let row = summary_row(&pane, now);
+        assert!(row.contains("1 new"));
+        assert!(
+            !row.contains("CI failing"),
+            "green CI must not show: {row:?}"
+        );
+    }
+
+    #[test]
+    fn summary_reads_no_new_when_all_read() {
+        let now = Utc::now();
+        let mut ws = ws_with(2, CiStatus::None, now);
+        ws.mark_read_all();
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        let row = summary_row(&pane, now);
+        assert!(
+            row.contains("no new activity"),
+            "all-read summary wrong: {row:?}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod mark_workspace_merged_tests {
     //! Issue #265: `Event::PrMerged` flips the right-pane header pill to
     //! MERGED immediately for the shown workspace — the twin of

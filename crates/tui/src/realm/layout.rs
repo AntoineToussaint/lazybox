@@ -8,6 +8,7 @@
 //! / `nudge_splits` and read `(sidebar_pct, right_top_pct)` straight
 //! off the struct.
 
+use lazybox_config::ActivityPaneMode;
 use tuirealm::ratatui::layout::{Constraint, Direction, Layout, Rect};
 
 /// Initial split percentages. Match the legacy defaults so users
@@ -90,12 +91,21 @@ impl LayoutCtx {
     /// Test whether `(col, row)` lands within tolerance of one of the
     /// two splitter lines. Tolerance: ±1 cell so users don't have to
     /// land pixel-perfect on the divider.
+    ///
+    /// `horizontal_active` gates only the horizontal (activity ↔
+    /// terminal) splitter: it's a real resize handle just for the
+    /// *full* activity pane. The slim `Summary` line still has a
+    /// positive height, so the height check alone would synthesize a
+    /// dead splitter there that drags `right_top_pct` with no visible
+    /// effect — pass `false` in Summary / Hidden to suppress it. The
+    /// vertical sidebar splitter is unaffected and always live.
     pub fn hit_test_splitter(
         &self,
         col: u16,
         row: u16,
         sidebar_rect: Rect,
         right_top_rect: Rect,
+        horizontal_active: bool,
     ) -> Option<DragTarget> {
         // Vertical splitter sits between sidebar and the right column.
         let v_x = sidebar_rect.x + sidebar_rect.width;
@@ -107,11 +117,12 @@ impl LayoutCtx {
             return Some(DragTarget::SidebarRight);
         }
         // Horizontal splitter sits between right-top and right-bottom.
-        // A zero-height right-top means the Activity pane is hidden —
-        // there's no splitter to grab, so don't synthesize one at the
-        // top edge of the terminal stack.
+        // Suppressed unless the activity pane is a full, resizable pane
+        // (a zero-height hidden row, or the slim summary line, has no
+        // splitter to grab at the top edge of the terminal stack).
         let h_y = right_top_rect.y + right_top_rect.height;
-        if right_top_rect.height > 0
+        if horizontal_active
+            && right_top_rect.height > 0
             && row + 1 >= h_y
             && row <= h_y + 1
             && col >= right_top_rect.x
@@ -263,34 +274,40 @@ pub(crate) fn pane_areas(
     (cols[0], rows[0], rows[1])
 }
 
-/// Fold the activity row into the terminal stack when the Activity
-/// pane is hidden (a workspace with no activity worth showing, or a
-/// manual hide). `right_top` collapses to zero height and
-/// `right_bottom` spans the full right column. A zero-height
-/// `right_top` reads as "hidden" everywhere downstream: the renderer
-/// skips it and mouse hit-tests can't land on it.
-pub(crate) fn apply_activity_visibility(
+/// Rows the Activity pane keeps in `Summary` mode: a single slim line
+/// carrying the counts that matter (new activity / failing CI) above
+/// the terminal.
+pub(crate) const ACTIVITY_SUMMARY_HEIGHT: u16 = 1;
+
+/// Resize the activity row for the pane's [`ActivityPaneMode`], handing
+/// whatever it gives up to the terminal stack below it:
+///
+/// - `Full` — rects unchanged; the whole feed renders in `right_top`.
+/// - `Summary` — `right_top` shrinks to [`ACTIVITY_SUMMARY_HEIGHT`] and
+///   the reclaimed rows fold into `right_bottom`.
+/// - `Hidden` — `right_top` collapses to zero height (the renderer
+///   skips it and mouse hit-tests can't land on it) and `right_bottom`
+///   spans the full right column.
+pub(crate) fn apply_activity_mode(
     rects: (Rect, Rect, Rect),
-    activity_visible: bool,
+    mode: ActivityPaneMode,
 ) -> (Rect, Rect, Rect) {
     let (sidebar, right_top, right_bottom) = rects;
-    if activity_visible {
-        return (sidebar, right_top, right_bottom);
-    }
-    let merged = Rect {
-        x: right_top.x,
-        y: right_top.y,
-        width: right_top.width,
-        height: right_top.height + right_bottom.height,
+    let kept = match mode {
+        ActivityPaneMode::Full => return (sidebar, right_top, right_bottom),
+        ActivityPaneMode::Summary => ACTIVITY_SUMMARY_HEIGHT.min(right_top.height),
+        ActivityPaneMode::Hidden => 0,
     };
-    (
-        sidebar,
-        Rect {
-            height: 0,
-            ..right_top
-        },
-        merged,
-    )
+    let top = Rect {
+        height: kept,
+        ..right_top
+    };
+    let bottom = Rect {
+        y: right_top.y + kept,
+        height: right_top.height + right_bottom.height - kept,
+        ..right_bottom
+    };
+    (sidebar, top, bottom)
 }
 
 /// Rows reserved for the focus-mode event header (issue #156).
@@ -415,7 +432,7 @@ mod tests {
         // Hover one cell right of the sidebar's right edge → vertical splitter.
         let v_x = sidebar.x + sidebar.width;
         assert_eq!(
-            c.hit_test_splitter(v_x, 10, sidebar, right_top),
+            c.hit_test_splitter(v_x, 10, sidebar, right_top, true),
             Some(DragTarget::SidebarRight)
         );
     }
@@ -431,8 +448,38 @@ mod tests {
         );
         let h_y = right_top.y + right_top.height;
         assert_eq!(
-            c.hit_test_splitter(right_top.x + 5, h_y, sidebar, right_top),
+            c.hit_test_splitter(right_top.x + 5, h_y, sidebar, right_top, true),
             Some(DragTarget::ActivityTerminals)
+        );
+    }
+
+    #[test]
+    fn summary_seam_has_no_horizontal_splitter() {
+        // The slim summary line has a positive height, so only the
+        // explicit `horizontal_active = false` keeps its seam from
+        // synthesizing a dead splitter.
+        let c = ctx();
+        let (sidebar, right_top, right_bottom) = pane_areas(
+            area(),
+            c.sidebar_pct,
+            c.right_top_pct,
+            c.sidebar_user_resized,
+        );
+        let (_, summary_top, _) = apply_activity_mode(
+            (sidebar, right_top, right_bottom),
+            ActivityPaneMode::Summary,
+        );
+        let h_y = summary_top.y + summary_top.height;
+        assert_eq!(
+            c.hit_test_splitter(summary_top.x + 5, h_y, sidebar, summary_top, false),
+            None,
+            "no draggable splitter at the summary / terminal seam"
+        );
+        // The vertical sidebar splitter still works in Summary mode.
+        let v_x = sidebar.x + sidebar.width;
+        assert_eq!(
+            c.hit_test_splitter(v_x, 10, sidebar, summary_top, false),
+            Some(DragTarget::SidebarRight),
         );
     }
 
@@ -446,7 +493,7 @@ mod tests {
             c.sidebar_user_resized,
         );
         // Middle of the sidebar — not on any splitter.
-        assert_eq!(c.hit_test_splitter(2, 10, sidebar, right_top), None);
+        assert_eq!(c.hit_test_splitter(2, 10, sidebar, right_top, true), None);
     }
 
     #[test]
@@ -480,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_activity_visibility_keeps_rects_when_visible() {
+    fn apply_activity_mode_keeps_rects_when_full() {
         let c = ctx();
         let rects = pane_areas(
             area(),
@@ -488,11 +535,11 @@ mod tests {
             c.right_top_pct,
             c.sidebar_user_resized,
         );
-        assert_eq!(apply_activity_visibility(rects, true), rects);
+        assert_eq!(apply_activity_mode(rects, ActivityPaneMode::Full), rects);
     }
 
     #[test]
-    fn apply_activity_visibility_folds_top_into_bottom_when_hidden() {
+    fn apply_activity_mode_folds_top_into_bottom_when_hidden() {
         let c = ctx();
         let (sidebar, right_top, right_bottom) = pane_areas(
             area(),
@@ -500,7 +547,8 @@ mod tests {
             c.right_top_pct,
             c.sidebar_user_resized,
         );
-        let (s, top, bottom) = apply_activity_visibility((sidebar, right_top, right_bottom), false);
+        let (s, top, bottom) =
+            apply_activity_mode((sidebar, right_top, right_bottom), ActivityPaneMode::Hidden);
         assert_eq!(s, sidebar, "sidebar is untouched");
         assert_eq!(
             top.height, 0,
@@ -514,6 +562,33 @@ mod tests {
     }
 
     #[test]
+    fn apply_activity_mode_keeps_one_summary_row() {
+        let c = ctx();
+        let (sidebar, right_top, right_bottom) = pane_areas(
+            area(),
+            c.sidebar_pct,
+            c.right_top_pct,
+            c.sidebar_user_resized,
+        );
+        let (s, top, bottom) = apply_activity_mode(
+            (sidebar, right_top, right_bottom),
+            ActivityPaneMode::Summary,
+        );
+        assert_eq!(s, sidebar, "sidebar is untouched");
+        assert_eq!(
+            top.height, ACTIVITY_SUMMARY_HEIGHT,
+            "summary keeps a single slim row"
+        );
+        assert_eq!(top.y, right_top.y);
+        // The terminal reclaims everything the summary gave up.
+        assert_eq!(bottom.y, right_top.y + ACTIVITY_SUMMARY_HEIGHT);
+        assert_eq!(
+            bottom.height,
+            right_top.height + right_bottom.height - ACTIVITY_SUMMARY_HEIGHT
+        );
+    }
+
+    #[test]
     fn hidden_activity_row_has_no_horizontal_splitter() {
         let c = ctx();
         let (sidebar, right_top, right_bottom) = pane_areas(
@@ -523,19 +598,20 @@ mod tests {
             c.sidebar_user_resized,
         );
         let (_, hidden_top, _) =
-            apply_activity_visibility((sidebar, right_top, right_bottom), false);
+            apply_activity_mode((sidebar, right_top, right_bottom), ActivityPaneMode::Hidden);
         // The old splitter sat at `right_top.y + right_top.height`. With
         // the row hidden (zero height) nothing there should hit-test as
         // a draggable splitter.
         let h_y = right_top.y + right_top.height;
         assert_eq!(
-            c.hit_test_splitter(right_top.x + 5, h_y, sidebar, hidden_top),
+            c.hit_test_splitter(right_top.x + 5, h_y, sidebar, hidden_top, false),
             None,
         );
-        // The vertical sidebar splitter is unaffected.
+        // The vertical sidebar splitter is unaffected even with the
+        // horizontal splitter inactive.
         let v_x = sidebar.x + sidebar.width;
         assert_eq!(
-            c.hit_test_splitter(v_x, 10, sidebar, hidden_top),
+            c.hit_test_splitter(v_x, 10, sidebar, hidden_top, false),
             Some(DragTarget::SidebarRight),
         );
     }

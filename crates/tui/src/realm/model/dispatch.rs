@@ -859,15 +859,13 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Action::JumpToAsking => {
                 if self.sidebar.focus_next_asking_workspace() {
-                    self.focus = PaneFocus::Sidebar;
-                    self.set_focus_attr();
+                    self.set_focus(PaneFocus::Sidebar);
                     self.redraw = true;
                 }
             }
             Action::JumpToFailingCi => {
                 if self.sidebar.focus_next_failing_ci_workspace() {
-                    self.focus = PaneFocus::Sidebar;
-                    self.set_focus_attr();
+                    self.set_focus(PaneFocus::Sidebar);
                     self.redraw = true;
                 } else {
                     self.flash_hint("no failing PRs");
@@ -1035,12 +1033,11 @@ impl<T: TerminalAdapter> Model<T> {
                 // right. Skip the activity pane when it's hidden and go
                 // straight to the terminal, mirroring the Tab-cycle skip
                 // in `cycle_pane_focus`.
-                self.focus = if self.activity_pane_visible() {
+                self.set_focus(if self.activity_pane_visible() {
                     PaneFocus::Right
                 } else {
                     PaneFocus::Terminals
-                };
-                self.set_focus_attr();
+                });
                 self.redraw = true;
             }
             Action::FocusPaneLeft => {
@@ -1050,8 +1047,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // the sidebar, so arrow navigation is reversible without
                 // clobbering the collapse gesture.
                 if !self.right.collapse_focused_row() {
-                    self.focus = PaneFocus::Sidebar;
-                    self.set_focus_attr();
+                    self.set_focus(PaneFocus::Sidebar);
                 }
                 self.redraw = true;
             }
@@ -1259,9 +1255,7 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         }
         self.focus_mode = true;
-        self.focus = PaneFocus::Terminals;
-        self.terminal_user_typed_since_focus = false;
-        self.set_focus_attr();
+        self.set_focus(PaneFocus::Terminals);
         self.redraw = true;
     }
 
@@ -1275,9 +1269,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// the cursor on a specific agent rather than asking / failing-CI.
     pub(super) fn jump_to_agent_workspace(&mut self, n: usize) {
         if self.sidebar.focus_nth_agent_workspace(n) {
-            self.focus = PaneFocus::Terminals;
-            self.terminal_user_typed_since_focus = false;
-            self.set_focus_attr();
+            self.set_focus(PaneFocus::Terminals);
             self.sync_panes();
             self.redraw = true;
         } else {
@@ -1290,7 +1282,6 @@ impl<T: TerminalAdapter> Model<T> {
     /// must restore the normal three-pane layout.
     pub(super) fn leave_terminal_to_sidebar(&mut self) {
         self.focus_mode = false;
-        self.focus = PaneFocus::Sidebar;
-        self.set_focus_attr();
+        self.set_focus(PaneFocus::Sidebar);
     }
 }

@@ -2149,13 +2149,11 @@ impl<T: TerminalAdapter> Model<T> {
         }
         self.sync_panes();
         if self.terminals.active_terminal_id().is_some() {
-            self.focus = PaneFocus::Terminals;
-            self.terminal_user_typed_since_focus = false;
+            self.set_focus(PaneFocus::Terminals);
         } else {
             self.focus_mode = false;
-            self.focus = PaneFocus::Sidebar;
+            self.set_focus(PaneFocus::Sidebar);
         }
-        self.set_focus_attr();
         self.redraw = true;
     }
 
@@ -3434,8 +3432,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// terminal is live).
     pub(super) fn enforce_pane_focus(&mut self) {
         if self.focus == PaneFocus::Right && !self.activity_pane_visible() {
-            self.focus = PaneFocus::Terminals;
-            self.set_focus_attr();
+            self.set_focus(PaneFocus::Terminals);
         }
     }
 

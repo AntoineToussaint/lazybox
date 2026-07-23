@@ -325,12 +325,11 @@ impl<T: TerminalAdapter> Model<T> {
                 // straight to the terminal — "open workspace → drive
                 // the agent" in one keystroke. Otherwise focus the
                 // Activity pane so the user can read / reply.
-                self.focus = if self.activity_pane_visible() {
+                self.set_focus(if self.activity_pane_visible() {
                     PaneFocus::Right
                 } else {
                     PaneFocus::Terminals
-                };
-                self.set_focus_attr();
+                });
                 self.redraw = true;
                 return;
             }
@@ -1043,13 +1042,13 @@ impl<T: TerminalAdapter> Model<T> {
     /// shared by the guard arm in `handle_pane_key` and the catalog
     /// dispatch (`dispatch_action`).
     pub(super) fn cycle_pane_focus(&mut self) {
-        self.focus = self.focus.next();
+        let mut next = self.focus.next();
         // Skip the Activity pane when it's hidden — cycling should
         // never land focus on a pane the user can't see.
-        if self.focus == PaneFocus::Right && !self.activity_pane_visible() {
-            self.focus = self.focus.next();
+        if next == PaneFocus::Right && !self.activity_pane_visible() {
+            next = next.next();
         }
-        self.set_focus_attr();
+        self.set_focus(next);
         self.redraw = true;
     }
 
@@ -1190,8 +1189,7 @@ impl<T: TerminalAdapter> Model<T> {
                     && let Some(idx) = self.terminals.tab_at(m.column, m.row)
                 {
                     self.terminals.set_active_tab(idx);
-                    self.focus = PaneFocus::Terminals;
-                    self.set_focus_attr();
+                    self.set_focus(PaneFocus::Terminals);
                     self.redraw = true;
                     return;
                 }
@@ -1207,8 +1205,7 @@ impl<T: TerminalAdapter> Model<T> {
                 {
                     self.activity_pane_overrides
                         .insert(ws_key, lazybox_config::ActivityPaneMode::Full);
-                    self.focus = PaneFocus::Right;
-                    self.set_focus_attr();
+                    self.set_focus(PaneFocus::Right);
                     self.redraw = true;
                     return;
                 }
@@ -1219,8 +1216,7 @@ impl<T: TerminalAdapter> Model<T> {
                 if matches!(button, crossterm::event::MouseButton::Right)
                     && rect_contains(sidebar_rect, m.column, m.row)
                 {
-                    self.focus = PaneFocus::Sidebar;
-                    self.set_focus_attr();
+                    self.set_focus(PaneFocus::Sidebar);
                     if self.sidebar.click_to_select(sidebar_rect, m.row) {
                         self.sync_panes();
                     }
@@ -1294,8 +1290,7 @@ impl<T: TerminalAdapter> Model<T> {
                 if let Some(focus) = target
                     && self.focus != focus
                 {
-                    self.focus = focus;
-                    self.set_focus_attr();
+                    self.set_focus(focus);
                     self.redraw = true;
                 }
 

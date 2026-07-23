@@ -964,7 +964,12 @@ async fn dispatch_action(
                 return;
             };
             let arm = workspace.policies.arm(kind);
-            if !lazybox_core::auto_fix_permitted(arm, opted_out) {
+            // The source already applied the task-shape gate
+            // (`auto_fix_candidate`) and the global enable check before
+            // queuing; here we compose the same enable + label + arm
+            // policy layer the pure `resolve_auto_fix` path uses, so the
+            // decision lives in one place (issue #363, tracker #512).
+            if !lazybox_core::auto_fix_enabled_and_permitted(&settings, opted_out, arm) {
                 tracing::info!(
                     source = source_name,
                     %session_key,

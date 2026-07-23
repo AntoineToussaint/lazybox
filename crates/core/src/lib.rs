@@ -22,7 +22,8 @@ mod workspace;
 
 pub use agent::{AgentConfig, AgentModels, ModelTier};
 pub use autofix::{
-    AutoFixKind, AutoFixSettings, auto_fix_candidate, evaluate_auto_fix, is_auto_fix_opted_out,
+    AutoFixKind, AutoFixSettings, auto_fix_candidate, auto_fix_enabled_and_permitted,
+    evaluate_auto_fix, is_auto_fix_opted_out, resolve_auto_fix,
 };
 pub use config::{
     KV_KEY_ARCHIVED, KV_KEY_LAYOUT, KV_KEY_SETUP, KV_KEY_THEME, PaneLayout, PersistedSetup,

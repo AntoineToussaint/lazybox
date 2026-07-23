@@ -543,7 +543,7 @@ async fn live_agent_boots_to_ready(agent: &str, socket: &str) {
     let store: Arc<MemoryStore> = Arc::new(MemoryStore::new());
     let backend = TmuxBackend::with_socket(socket).expect("conf written");
     let config = ServerConfig::with_store_and_backend(store, Arc::new(backend));
-    let (mut client, _daemon) = subscribed(config).await;
+    let (mut client, _daemon) = subscribed(config.clone()).await;
 
     let cwd = tempfile::TempDir::new().unwrap();
     git(cwd.path(), &["init", "-q", "-b", "main"]);
@@ -558,16 +558,16 @@ async fn live_agent_boots_to_ready(agent: &str, socket: &str) {
             on_main: false,
         })
         .unwrap();
-    assert!(
-        wait_for(
-            &mut client,
-            |e| matches!(e, Event::TerminalSpawned { .. }),
-            Duration::from_secs(30),
-        )
-        .await
-        .is_some(),
-        "TerminalSpawned"
-    );
+    let terminal_id = match wait_for(
+        &mut client,
+        |e| matches!(e, Event::TerminalSpawned { .. }),
+        Duration::from_secs(30),
+    )
+    .await
+    {
+        Some(Event::TerminalSpawned { terminal_id, .. }) => terminal_id,
+        _ => panic!("TerminalSpawned"),
+    };
     let ready = wait_for(
         &mut client,
         |e| {
@@ -592,20 +592,188 @@ async fn live_agent_boots_to_ready(agent: &str, socket: &str) {
              or readiness detection is broken against the real binary"
         ),
     }
+    if agent == "claude" {
+        assert_real_claude_spawn_env(&config, terminal_id, socket).await;
+    }
+}
+
+async fn assert_real_claude_spawn_env(
+    config: &ServerConfig,
+    terminal_id: lazybox_ipc::TerminalId,
+    socket: &str,
+) {
+    let backend_key = config
+        .backend_key_for(terminal_id)
+        .await
+        .expect("Claude backend key");
+    let env = std::process::Command::new("tmux")
+        .args([
+            "-L",
+            socket,
+            "show-environment",
+            "-t",
+            &backend_key,
+            "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN",
+        ])
+        .output()
+        .expect("tmux show-environment");
+    assert!(env.status.success(), "tmux show-environment failed");
+    assert_eq!(
+        String::from_utf8_lossy(&env.stdout).trim(),
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1"
+    );
+}
+
+async fn assert_real_claude_retains_inline_scrollback(socket: &str, session: &str) {
+    let composer_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let capture = tmux_capture(socket, session);
+        if capture.contains('❯') {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < composer_deadline,
+            "Claude composer never appeared; pane tail: {capture:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let open = std::process::Command::new("tmux")
+        .args([
+            "-L",
+            socket,
+            "send-keys",
+            "-l",
+            "-t",
+            session,
+            "/release-notes",
+        ])
+        .output()
+        .expect("open release notes");
+    assert!(open.status.success(), "tmux send-keys failed");
+    let submit = std::process::Command::new("tmux")
+        .args(["-L", socket, "send-keys", "-t", session, "Enter"])
+        .output()
+        .expect("submit release notes");
+    assert!(submit.status.success(), "tmux send-keys failed");
+    let menu_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let capture = tmux_capture(socket, session);
+        if capture.contains("Show all") {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < menu_deadline,
+            "Claude release-notes chooser never appeared; pane tail: {capture:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let select_all = std::process::Command::new("tmux")
+        .args(["-L", socket, "send-keys", "-t", session, "Enter"])
+        .output()
+        .expect("select all release notes");
+    assert!(select_all.status.success(), "tmux send-keys failed");
+
+    let history_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let state = std::process::Command::new("tmux")
+            .args([
+                "-L",
+                socket,
+                "display-message",
+                "-p",
+                "-t",
+                session,
+                "#{alternate_on}\t#{history_size}",
+            ])
+            .output()
+            .expect("tmux pane history state");
+        let state = String::from_utf8_lossy(&state.stdout);
+        let mut fields = state.trim().split('\t');
+        let alternate_on = fields.next() == Some("1");
+        let history_size = fields
+            .next()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        if !alternate_on && history_size > 100 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < history_deadline,
+            "real Claude did not retain inline history (state {state:?}); pane tail: {:?}",
+            tmux_capture(socket, session)
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+struct TmuxServerGuard(String);
+
+impl Drop for TmuxServerGuard {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("tmux")
+            .args(["-L", &self.0, "kill-server"])
+            .output();
+    }
+}
+
+fn tmux_capture(socket: &str, backend_key: &str) -> String {
+    let output = std::process::Command::new("tmux")
+        .args(["-L", socket, "capture-pane", "-p", "-t", backend_key])
+        .output()
+        .expect("tmux capture-pane");
+    String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
 #[tokio::test]
 #[ignore = "live agent: needs an installed, authenticated `claude` — LAZYBOX_E2E_LIVE_AGENTS=1 + --run-ignored"]
-async fn e2e_real_claude_boots_to_a_detected_ready_state() {
+async fn e2e_real_claude_boots_ready_with_inline_spawn_env() {
     if !live_agent_available("claude") {
         return;
     }
     let socket = format!("lazybox-e2e-claude-{}", std::process::id());
+    let _cleanup = TmuxServerGuard(socket.clone());
     let result = timeout(TEST_DEADLINE, live_agent_boots_to_ready("claude", &socket)).await;
-    let _ = std::process::Command::new("tmux")
-        .args(["-L", &socket, "kill-server"])
-        .output();
     result.expect("deadline");
+}
+
+#[tokio::test]
+#[ignore = "live agent: needs an installed, authenticated `claude` — LAZYBOX_E2E_LIVE_AGENTS=1 + --run-ignored"]
+async fn e2e_real_claude_inline_renderer_retains_tmux_history() {
+    if !live_agent_available("claude") {
+        return;
+    }
+    let socket = format!("lazybox-e2e-claude-scroll-{}", std::process::id());
+    let _cleanup = TmuxServerGuard(socket.clone());
+    let session = "claude-inline";
+    let start = std::process::Command::new("tmux")
+        .args([
+            "-L",
+            &socket,
+            "-f",
+            "/dev/null",
+            "new-session",
+            "-d",
+            "-s",
+            session,
+            "-x",
+            "120",
+            "-y",
+            "32",
+            "-e",
+            "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1",
+            "--",
+            "claude",
+        ])
+        .output()
+        .expect("start real Claude in tmux");
+    assert!(start.status.success(), "tmux new-session failed");
+    timeout(
+        TEST_DEADLINE,
+        assert_real_claude_retains_inline_scrollback(&socket, session),
+    )
+    .await
+    .expect("deadline");
 }
 
 #[tokio::test]

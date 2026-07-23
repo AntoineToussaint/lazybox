@@ -536,6 +536,9 @@ impl<T: TerminalAdapter> Model<T> {
             Action::NewProject => {
                 self.mount_new_workspace_repo_picker();
             }
+            Action::ImportCheckout => {
+                self.start_scan_checkouts();
+            }
             Action::MarkAllRead => {
                 // Context-sensitive: when the user has activities
                 // multi-selected in the right pane, `m` marks only
@@ -840,6 +843,15 @@ impl<T: TerminalAdapter> Model<T> {
                 if let crate::intent::Intent::MountReply { workspace_key } = intent {
                     let session_key: lazybox_core::SessionKey = (&workspace_key).into();
                     self.mount_reply(session_key);
+                }
+            }
+            Action::EditNotes => {
+                // Notes attach to the focused workspace (any workspace,
+                // even a session-less one). Section::Workspace, so this
+                // fires from both Sidebar and Right focus.
+                if let Some(ws) = self.sidebar.selected_workspace() {
+                    let session_key: lazybox_core::SessionKey = (&ws.key).into();
+                    self.mount_notes(session_key);
                 }
             }
             Action::RequestReviewers => {

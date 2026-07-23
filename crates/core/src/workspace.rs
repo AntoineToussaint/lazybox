@@ -114,6 +114,17 @@ pub struct Workspace {
     /// derived workspaces leave this `false`.
     #[serde(default)]
     pub local: bool,
+    /// When `Some`, this is a **linked (no-worktree) checkout**: the
+    /// workspace points directly at an existing clone on disk (a
+    /// canonical `~/development/<owner>/<repo>` folder imported via the
+    /// dev-folder scan) rather than a lazybox-provisioned worktree.
+    /// Every session spawns straight into this path on whatever branch
+    /// it already sits on — lazybox never provisions a worktree, never
+    /// bare-clones, and never switches the branch. Always paired with
+    /// `local = true` so the reconcile sweep can't prune it. `None` for
+    /// every ordinary workspace, whose sessions get isolated worktrees.
+    #[serde(default)]
+    pub linked_checkout: Option<PathBuf>,
     /// Display name. Defaults to the PR title or the first issue's
     /// title when first created; user can rename.
     pub name: String,
@@ -154,6 +165,13 @@ pub struct Workspace {
     /// pre-#363 records read back as all-`Default` and behave unchanged.
     #[serde(default)]
     pub policies: crate::AutomationPolicies,
+    /// Free-form local scratchpad the user attaches to this workspace
+    /// (issue #458). Purely a lazybox concept — never synced to a
+    /// provider. Persisted in the workspace JSON blob alongside the
+    /// other user-owned fields above, so providers overwrite only
+    /// upstream-derived state and leave this intact across polls.
+    #[serde(default)]
+    pub notes: String,
     pub created_at: DateTime<Utc>,
     pub last_viewed_at: Option<DateTime<Utc>>,
 }
@@ -168,6 +186,7 @@ impl Workspace {
             key,
             project_key: None,
             local: false,
+            linked_checkout: None,
             branch,
             sessions: Vec::new(),
             pr: None,
@@ -179,9 +198,16 @@ impl Workspace {
             snoozed_until: None,
             auto_merge_on_green: false,
             policies: crate::AutomationPolicies::default(),
+            notes: String::new(),
             created_at: now,
             last_viewed_at: None,
         }
+    }
+
+    /// Whether this workspace carries a non-empty local note. Drives the
+    /// sidebar's notes indicator; whitespace-only notes don't count.
+    pub fn has_notes(&self) -> bool {
+        !self.notes.trim().is_empty()
     }
 
     /// Append a fresh session and return its id. Sessions own a
@@ -214,6 +240,13 @@ impl Workspace {
 
     pub fn session_count(&self) -> usize {
         self.sessions.len()
+    }
+
+    /// `true` when this workspace is a linked (no-worktree) checkout —
+    /// its sessions run in the user's existing clone on disk, not in a
+    /// lazybox-provisioned worktree. See [`Workspace::linked_checkout`].
+    pub fn is_linked(&self) -> bool {
+        self.linked_checkout.is_some()
     }
 
     /// The session lazybox should target when the user issues a workspace-
@@ -1693,6 +1726,30 @@ mod tests {
     }
 
     #[test]
+    fn is_linked_reflects_linked_checkout_and_survives_serde() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("acme-widget"), "feature", now());
+        assert!(!ws.is_linked(), "a plain workspace is not linked");
+        ws.linked_checkout = Some(std::path::PathBuf::from("/home/dev/code/acme/widget"));
+        assert!(ws.is_linked());
+
+        // Round-trips through JSON (the store's persistence format).
+        let json = serde_json::to_string(&ws).unwrap();
+        let back: Workspace = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.linked_checkout,
+            Some(std::path::PathBuf::from("/home/dev/code/acme/widget"))
+        );
+
+        // Back-compat: a pre-feature record with no `linked_checkout`
+        // field deserializes to `None` (not an error).
+        let legacy = r#"{"key":"old","name":"old","branch":"main","pr":null,
+            "gh_issues":[],"linear_issues":[],"activity":[],"seen_count":0,
+            "created_at":"2024-01-01T00:00:00Z","last_viewed_at":null}"#;
+        let old: Workspace = serde_json::from_str(legacy).unwrap();
+        assert!(!old.is_linked());
+    }
+
+    #[test]
     fn linked_task_ids_reports_every_attached_task() {
         let mut ws = Workspace::empty(WorkspaceKey::new("ws-1"), "main", now());
         ws.attach_task(pr("o/r#1"));
@@ -2012,5 +2069,32 @@ mod tests {
         let mut w = Workspace::empty(crate::WorkspaceKey::new("scratch"), "main", now());
         w.name = "Scratch".into();
         assert_eq!(w.worktree_scope(), None);
+    }
+
+    #[test]
+    fn has_notes_ignores_blank_and_whitespace() {
+        let mut w = Workspace::from_task(pr("o/r#1"), now());
+        assert!(!w.has_notes());
+        w.notes = "   \n\t".into();
+        assert!(!w.has_notes());
+        w.notes = "check the flaky test".into();
+        assert!(w.has_notes());
+    }
+
+    #[test]
+    fn notes_default_when_absent_from_json() {
+        // Records written before #458 have no `notes` key; they must
+        // deserialize to an empty scratchpad rather than fail.
+        let mut w = Workspace::from_task(pr("o/r#1"), now());
+        w.notes = "keep me".into();
+        let json = serde_json::to_string(&w).unwrap();
+        let back: Workspace = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.notes, "keep me");
+
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        value.as_object_mut().unwrap().remove("notes");
+        let legacy: Workspace = serde_json::from_value(value).unwrap();
+        assert_eq!(legacy.notes, "");
+        assert!(!legacy.has_notes());
     }
 }

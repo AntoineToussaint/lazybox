@@ -42,6 +42,27 @@ impl<T: TerminalAdapter> Model<T> {
             self.drain_queued_daemon_prompts();
             return cmds;
         }
+        // Notes also share the Textarea component. Unlike Reply, an
+        // empty body is a valid submit — it clears the scratchpad — so
+        // we persist whatever the user left rather than gating on
+        // non-empty (issue #458).
+        if matches!(top, Some(Id::Notes)) {
+            let mut cmds = Vec::new();
+            if let Some(session_key) = self.pending_notes.take() {
+                let cleared = body.trim().is_empty();
+                cmds.push(IpcCommand::SetNotes {
+                    session_key,
+                    notes: body,
+                });
+                if cleared {
+                    self.flash_info("Notes cleared");
+                } else {
+                    self.flash_info("Notes saved");
+                }
+            }
+            self.drain_queued_daemon_prompts();
+            return cmds;
+        }
         let mut cmds = Vec::new();
         let target = self.pending_reply.take();
         if let Some(session_key) = target
@@ -873,6 +894,16 @@ showing keybinding search only",
             }
             return cmds;
         }
+        // Import picker (Id::ImportCheckoutList) — pick a discovered
+        // checkout, then mount the real-checkout warning confirm.
+        if matches!(self.modal_stack.last(), Some(Id::ImportCheckoutList)) {
+            self.pop_modal();
+            let rows = std::mem::take(&mut self.pending_import_rows);
+            if let Some(target) = picks.first().and_then(|&i| rows.get(i).cloned()) {
+                self.mount_import_checkout_confirm(target);
+            }
+            return cmds;
+        }
         // Filter menu (Id::FilterMenu) — picker is pre-checked with
         // the active filters, so the submitted selection IS the new
         // full set. An empty pick is meaningful ("clear all filters").
@@ -1078,6 +1109,12 @@ showing keybinding search only",
             Some(Id::InspectConfirm) => {
                 self.pending_inspect_target = None;
             }
+            Some(Id::ImportCheckoutList) => {
+                self.pending_import_rows.clear();
+            }
+            Some(Id::ImportCheckoutConfirm) => {
+                self.pending_import_target = None;
+            }
             Some(Id::HelpActionConfirm) => {
                 // Esc = decline the proposed action; drop the stash,
                 // change nothing (#353).
@@ -1271,6 +1308,16 @@ showing keybinding search only",
                         path: row.path,
                         force,
                     });
+                }
+            }
+            Some(Id::ImportCheckoutConfirm) => {
+                let target = self.pending_import_target.take();
+                if yes && let Some(row) = target {
+                    cmds.push(IpcCommand::ImportLocalCheckout {
+                        path: row.path,
+                        spawn_agent: None,
+                    });
+                    self.flash_info("importing checkout…");
                 }
             }
             Some(Id::HelpActionConfirm) => {

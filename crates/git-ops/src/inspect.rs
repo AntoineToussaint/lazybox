@@ -278,11 +278,28 @@ impl WorktreeManager {
             }
         }
 
-        // No bare clone known → fall back to a plain `rm -rf`. This
-        // path is for "ghost on disk" entries where the matching
-        // bare clone was deleted manually; git has no metadata to
-        // clean up either.
+        // No bare clone known → fall back to a plain `rm -rf`. This path
+        // is for "ghost on disk" entries where the matching bare clone was
+        // deleted manually; git has no metadata to clean up either.
+        //
+        // But the `has_uncommitted_changes` / `has_unpushed_commits` guards
+        // above are hollow here: both probes run git *inside* the worktree,
+        // which fails on a severed `.git` (its gitdir is gone) and defaults
+        // to "clean" — so `is_safe_to_delete` can be true for a directory
+        // that still holds real, possibly uncommitted, work. With no bare
+        // clone to verify the checkout against (the way
+        // `leftover_is_pristine_checkout` does), we cannot confirm the
+        // content is disposable. So without `force`, only empty-ish debris
+        // (at most a `.git`) is cleared outright; a content-bearing ghost
+        // is refused rather than `rm -rf`'d blind.
         let Some(bare) = inspection.bare_path.as_ref() else {
+            if !force && directory_has_real_content(&inspection.path).await {
+                return Err(GitError::Command(format!(
+                    "worktree {} has no bare clone to verify against and holds files — \
+                     refusing to delete unverifiable content; pass force to override",
+                    inspection.path.display()
+                )));
+            }
             if inspection.path.exists() {
                 tokio::fs::remove_dir_all(&inspection.path).await?;
             }
@@ -786,6 +803,28 @@ async fn ref_exists(bare: &Path, ref_name: &str) -> bool {
 pub async fn worktree_is_pristine(worktree: &Path, bare: Option<&Path>) -> bool {
     let (dirty, ahead) = tokio::join!(uncommitted(worktree), unpushed(worktree, bare));
     !dirty && !ahead
+}
+
+/// Whether `path` holds anything other than a `.git` entry — the same
+/// "real work vs. disposable debris" test `ensure_worktree_present` uses
+/// before reclaiming a leftover. An unreadable directory or a mid-walk IO
+/// error reports `true`: a delete guard must never read a failure as
+/// "empty" and green-light an `rm -rf`.
+async fn directory_has_real_content(path: &Path) -> bool {
+    let Ok(mut entries) = tokio::fs::read_dir(path).await else {
+        return true;
+    };
+    loop {
+        match entries.next_entry().await {
+            Ok(Some(entry)) => {
+                if entry.file_name() != ".git" {
+                    return true;
+                }
+            }
+            Ok(None) => return false,
+            Err(_) => return true,
+        }
+    }
 }
 
 async fn uncommitted(worktree: &Path) -> bool {

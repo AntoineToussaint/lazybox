@@ -234,13 +234,22 @@ fn detail_of(err: &GhError) -> String {
 }
 
 impl From<GhError> for lazybox_core::ProviderError {
-    /// Classify GitHub failures so polling knows whether to retry.
-    /// Heuristics:
-    /// - 401/403 only when the GitHub API itself returned that status →
-    ///   Auth (user needs to rotate token).
-    /// - Hyper/Service/IO/Json variants → Retryable (transient).
-    /// - 5xx, network-y words, "rate limit" → Retryable.
-    /// - Everything else → Permanent.
+    /// Classify GitHub failures so polling knows whether to retry, all
+    /// via the shared `lazybox_core` classifier so GitHub and Linear
+    /// can't disagree about the same failure. Routing, in order:
+    /// - A typed HTTP status (octocrab `GitHub` error, or the raw
+    ///   GraphQL path's `HttpStatus`) → `classify_status`: 401/403 →
+    ///   Auth (rotate token), 429 + 5xx → Retryable, else Permanent.
+    ///   `HttpStatus` keeps one GitHub-specific pre-check: a 2xx with a
+    ///   non-JSON body (proxy/CDN maintenance page) → Retryable.
+    /// - Transport octocrab variants (Hyper/Service/Http/Serde/Json/
+    ///   Uri) → Retryable by definition; no data was ever returned.
+    /// - Everything with no typed status (GraphQL wrapper strings,
+    ///   future variants) → the shared substring probe, which can also
+    ///   mint Auth when the message carries "unauthorized"/"forbidden"/
+    ///   "401"/"403" — reached only here, never for the transport
+    ///   variants above, so a transient hyper/json chain that happens
+    ///   to mention either word still classifies Retryable.
     fn from(err: GhError) -> Self {
         const SOURCE: &str = "github";
         let detail = detail_of(&err);

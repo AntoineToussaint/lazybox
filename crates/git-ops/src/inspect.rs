@@ -807,12 +807,15 @@ pub async fn worktree_is_pristine(worktree: &Path, bare: Option<&Path>) -> bool 
 
 /// Whether `path` holds anything other than a `.git` entry — the same
 /// "real work vs. disposable debris" test `ensure_worktree_present` uses
-/// before reclaiming a leftover. An unreadable directory or a mid-walk IO
-/// error reports `true`: a delete guard must never read a failure as
-/// "empty" and green-light an `rm -rf`.
+/// before reclaiming a leftover. A `NotFound` reports `false`: the
+/// directory is already gone, so there is nothing to refuse and the
+/// caller can no-op cleanly. Any *other* read failure (permissions, a
+/// mid-walk IO error) reports `true`: a delete guard must never read an
+/// unreadable directory as "empty" and green-light an `rm -rf`.
 async fn directory_has_real_content(path: &Path) -> bool {
-    let Ok(mut entries) = tokio::fs::read_dir(path).await else {
-        return true;
+    let mut entries = match tokio::fs::read_dir(path).await {
+        Ok(entries) => entries,
+        Err(e) => return e.kind() != std::io::ErrorKind::NotFound,
     };
     loop {
         match entries.next_entry().await {

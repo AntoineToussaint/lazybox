@@ -408,6 +408,35 @@ async fn empty_ghost_without_bare_is_still_cleaned() {
     assert!(!dir.exists());
 }
 
+/// A bare-less ghost whose directory already vanished between inspection
+/// and delete must no-op cleanly, not raise a spurious "holds files"
+/// refusal. `read_dir` returns `NotFound`, which the content probe reads
+/// as "nothing to refuse" (distinct from an unreadable directory, which
+/// still fails safe to content-bearing).
+#[tokio::test]
+async fn vanished_ghost_without_bare_is_a_clean_noop() {
+    let fx = setup_fixture().await;
+    let dir = fx.base.path().join("gone-ghost");
+    // Never created on disk — the path is already absent.
+    let row = WorktreeInspection {
+        path: dir.clone(),
+        bare_path: None,
+        branch: None,
+        session_id: None,
+        reasons: vec![OrphanReason::Untracked],
+        size_bytes: 0,
+        last_modified: None,
+        has_uncommitted_changes: false,
+        has_unpushed_commits: false,
+        is_safe_to_delete: true,
+    };
+    mgr(&fx)
+        .delete_inspected(&row, /*force=*/ false)
+        .await
+        .expect("an already-gone ghost is a clean no-op, not a refusal");
+    assert!(!dir.exists());
+}
+
 /// Unpushed commits (HEAD ahead of upstream) block safe-delete.
 #[tokio::test]
 async fn unpushed_commits_block_safe_delete() {

@@ -88,6 +88,10 @@ pub enum Action {
     /// sidebar groups workspaces under. Asks for a name. Idempotent
     /// on collision (re-opens the existing local project).
     NewProject,
+    /// Scan the configured dev roots (`scan.roots`) for on-disk git
+    /// clones and import a chosen one as a **linked (no-worktree)**
+    /// workspace — lazybox works directly in the existing checkout.
+    ImportCheckout,
     /// Mark every activity row on the focused workspace read.
     MarkAllRead,
     /// Toggle snooze on the focused workspace (short snooze, ~4h).
@@ -152,6 +156,10 @@ pub enum Action {
     /// to a close-as-not-planned (with a notice) otherwise.
     /// Confirm-guarded — destructive and outward-facing.
     DeleteOrClose,
+    /// Open the notes editor (a Textarea) for the focused workspace —
+    /// a free-form local scratchpad that never syncs to a provider
+    /// (issue #458). Pre-filled with the current note; submit persists.
+    EditNotes,
 
     // ── Sidebar list management ────────────────────────────────────
     // These act on the sidebar's list/view rather than a single
@@ -343,6 +351,7 @@ pub enum ActionKind {
     OpenEditor,
     NewWorkspace,
     NewProject,
+    ImportCheckout,
     MarkAllRead,
     ToggleSnooze,
     LongSnooze,
@@ -359,6 +368,7 @@ pub enum ActionKind {
     ManageLabels,
     OpenInBrowser,
     DeleteOrClose,
+    EditNotes,
     // Sidebar list management
     OpenFilterMenu,
     CycleSort,
@@ -452,6 +462,7 @@ impl ActionKind {
         // inherits this order directly.
         Self::NewWorkspace,
         Self::NewProject,
+        Self::ImportCheckout,
         Self::AdoptSessions,
         Self::SendToSession,
         Self::CollapseIntoPr,
@@ -468,6 +479,7 @@ impl ActionKind {
         Self::OpenInBrowser,
         Self::DeleteOrClose,
         Self::Reply,
+        Self::EditNotes,
         // Sidebar list management
         Self::OpenFilterMenu,
         Self::CycleSort,
@@ -548,6 +560,7 @@ impl Action {
             Action::OpenEditor => ActionKind::OpenEditor,
             Action::NewWorkspace => ActionKind::NewWorkspace,
             Action::NewProject => ActionKind::NewProject,
+            Action::ImportCheckout => ActionKind::ImportCheckout,
             Action::MarkAllRead => ActionKind::MarkAllRead,
             Action::ToggleSnooze => ActionKind::ToggleSnooze,
             Action::LongSnooze => ActionKind::LongSnooze,
@@ -576,6 +589,7 @@ impl Action {
             Action::ActivityTop => ActionKind::ActivityTop,
             Action::ActivityBottom => ActionKind::ActivityBottom,
             Action::Reply => ActionKind::Reply,
+            Action::EditNotes => ActionKind::EditNotes,
             Action::SelectRow => ActionKind::SelectRow,
             Action::ToggleDescription => ActionKind::ToggleDescription,
             Action::UndoMarkRead => ActionKind::UndoMarkRead,
@@ -850,6 +864,13 @@ impl ActionDef {
                 describe: "Pick a tracked repo to start a workspace on, or create a new local project.",
                 section: Section::Workspace,
             },
+            ActionKind::ImportCheckout => &Self {
+                kind: ActionKind::ImportCheckout,
+                default_keys: "x i",
+                label: "import checkout",
+                describe: "Scan the configured dev roots (scan.roots) for on-disk git clones and import one as a linked, no-worktree workspace — lazybox works directly in the existing checkout.",
+                section: Section::Workspace,
+            },
             ActionKind::MarkAllRead => &Self {
                 kind: ActionKind::MarkAllRead,
                 default_keys: "m",
@@ -1046,6 +1067,13 @@ impl ActionDef {
                 default_keys: "r",
                 label: "reply",
                 describe: "Open the reply textarea targeted at this workspace.",
+                section: Section::Workspace,
+            },
+            ActionKind::EditNotes => &Self {
+                kind: ActionKind::EditNotes,
+                default_keys: "n",
+                label: "notes",
+                describe: "Edit this workspace's local scratchpad — a private note that never syncs to a provider.",
                 section: Section::Workspace,
             },
             ActionKind::SelectRow => &Self {
@@ -1566,6 +1594,7 @@ impl ActionKind {
             ActionKind::OpenEditor => "open_editor",
             ActionKind::NewWorkspace => "new_workspace",
             ActionKind::NewProject => "new_project",
+            ActionKind::ImportCheckout => "import_checkout",
             ActionKind::MarkAllRead => "mark_all_read",
             ActionKind::ToggleSnooze => "toggle_snooze",
             ActionKind::LongSnooze => "long_snooze",
@@ -1594,6 +1623,7 @@ impl ActionKind {
             ActionKind::ActivityTop => "activity_top",
             ActionKind::ActivityBottom => "activity_bottom",
             ActionKind::Reply => "reply",
+            ActionKind::EditNotes => "edit_notes",
             ActionKind::SelectRow => "select_row",
             ActionKind::ToggleDescription => "toggle_description",
             ActionKind::UndoMarkRead => "undo_mark_read",
@@ -1785,6 +1815,7 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         ActionKind::SpawnAgentOnMain | ActionKind::SpawnShellOnMain => Some("main branch"),
         ActionKind::NewWorkspace
         | ActionKind::NewProject
+        | ActionKind::ImportCheckout
         | ActionKind::LongSnooze
         | ActionKind::Archive
         | ActionKind::CloseIssue
@@ -2228,7 +2259,10 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::RequestReviewers
         | ActionKind::AddAssignees
         | ActionKind::ManageLabels
-        | ActionKind::OpenInBrowser => has_ws,
+        | ActionKind::OpenInBrowser
+        // Notes attach to any workspace — even a session-less/empty
+        // one — so gate purely on a workspace being under the cursor.
+        | ActionKind::EditNotes => has_ws,
         // Needs a source workspace; the dispatcher checks it actually
         // carries a running agent terminal and nudges when it doesn't
         // (the catalog can't see live terminals).
@@ -2264,6 +2298,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         // Global / no-workspace-needed actions.
         ActionKind::NewWorkspace
         | ActionKind::NewProject
+        | ActionKind::ImportCheckout
         | ActionKind::StartAgent
         | ActionKind::CyclePane
         | ActionKind::ToggleMouseCapture
@@ -3560,6 +3595,7 @@ mod tests {
         let expected = [
             (ActionKind::NewWorkspace, 'n'),
             (ActionKind::NewProject, 'p'),
+            (ActionKind::ImportCheckout, 'i'),
             (ActionKind::AdoptSessions, 'a'),
             (ActionKind::SendToSession, 's'),
             (ActionKind::CollapseIntoPr, 'j'),

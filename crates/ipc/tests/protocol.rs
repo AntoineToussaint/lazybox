@@ -314,6 +314,18 @@ fn all_commands() -> Vec<Command> {
         Command::Refresh,
         Command::CleanWorktrees,
         Command::InspectWorktrees,
+        Command::ScanCheckouts { roots: vec![] },
+        Command::ScanCheckouts {
+            roots: vec![std::path::PathBuf::from("/home/dev/code")],
+        },
+        Command::ImportLocalCheckout {
+            path: std::path::PathBuf::from("/home/dev/code/acme/widget"),
+            spawn_agent: Some("claude".into()),
+        },
+        Command::ImportLocalCheckout {
+            path: std::path::PathBuf::from("/home/dev/code/acme/widget"),
+            spawn_agent: None,
+        },
         Command::DeleteOrphanedWorktree {
             path: std::path::PathBuf::from("/tmp/wt"),
             force: false,
@@ -331,6 +343,10 @@ fn all_commands() -> Vec<Command> {
         },
         Command::CheckAgentCliUpdates,
         Command::UpdateAgentClis,
+        Command::SetNotes {
+            session_key: "github:o/r#1".into(),
+            notes: "check the flaky retry".into(),
+        },
         Command::Shutdown,
     ]
 }
@@ -657,6 +673,15 @@ fn all_events() -> Vec<Event> {
                 is_safe_to_delete: false,
             }],
         },
+        Event::CheckoutsDiscovered { checkouts: vec![] },
+        Event::CheckoutsDiscovered {
+            checkouts: vec![lazybox_ipc::DiscoveredCheckoutDto {
+                path: std::path::PathBuf::from("/home/dev/code/acme/widget"),
+                repo: Some("acme/widget".into()),
+                branch: Some("main".into()),
+                has_uncommitted_changes: true,
+            }],
+        },
         Event::OrphanedWorktreeDeleted {
             path: std::path::PathBuf::from("/tmp/wt"),
             ok: true,
@@ -750,6 +775,8 @@ fn command_tag(command: &Command) -> &'static str {
         Command::FetchRepoLabels { .. } => "FetchRepoLabels",
         Command::CleanWorktrees => "CleanWorktrees",
         Command::InspectWorktrees => "InspectWorktrees",
+        Command::ScanCheckouts { .. } => "ScanCheckouts",
+        Command::ImportLocalCheckout { .. } => "ImportLocalCheckout",
         Command::DeleteOrphanedWorktree { .. } => "DeleteOrphanedWorktree",
         Command::FetchPrDetails { .. } => "FetchPrDetails",
         Command::StartAgentRun { .. } => "StartAgentRun",
@@ -764,6 +791,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::FetchScrollback { .. } => "FetchScrollback",
         Command::CheckAgentCliUpdates => "CheckAgentCliUpdates",
         Command::UpdateAgentClis => "UpdateAgentClis",
+        Command::SetNotes { .. } => "SetNotes",
     }
 }
 
@@ -808,6 +836,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::Notification { .. } => "Notification",
         Event::CleanWorktreesCompleted { .. } => "CleanWorktreesCompleted",
         Event::WorktreesInspected { .. } => "WorktreesInspected",
+        Event::CheckoutsDiscovered { .. } => "CheckoutsDiscovered",
         Event::OrphanedWorktreeDeleted { .. } => "OrphanedWorktreeDeleted",
         Event::AgentRunStarted { .. } => "AgentRunStarted",
         Event::AgentRawJson { .. } => "AgentRawJson",
@@ -840,12 +869,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        56,
+        59,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(
         event_tags.len(),
-        56,
+        57,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

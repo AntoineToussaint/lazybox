@@ -956,10 +956,13 @@ impl Server {
                         lazybox_ipc::Command::ListProviderCredentials { .. } => "ListProviderCredentials",
                         lazybox_ipc::Command::CleanWorktrees => "CleanWorktrees",
                         lazybox_ipc::Command::InspectWorktrees => "InspectWorktrees",
+                        lazybox_ipc::Command::ScanCheckouts { .. } => "ScanCheckouts",
+                        lazybox_ipc::Command::ImportLocalCheckout { .. } => "ImportLocalCheckout",
                         lazybox_ipc::Command::DeleteOrphanedWorktree { .. } => "DeleteOrphanedWorktree",
                         lazybox_ipc::Command::FetchScrollback { .. } => "FetchScrollback",
                         lazybox_ipc::Command::CheckAgentCliUpdates => "CheckAgentCliUpdates",
                         lazybox_ipc::Command::UpdateAgentClis => "UpdateAgentClis",
+                        lazybox_ipc::Command::SetNotes { .. } => "SetNotes",
                         lazybox_ipc::Command::Shutdown => "Shutdown",
                     };
                     // `Write` fires on every keystroke — at info it floods
@@ -1502,6 +1505,10 @@ pub async fn dispatch_command(
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
             polling::set_snooze(config, &key, None).await;
         }
+        lazybox_ipc::Command::SetNotes { session_key, notes } => {
+            let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
+            polling::set_notes(config, &key, notes).await;
+        }
         lazybox_ipc::Command::SetAutoMergeOnGreen {
             session_key,
             enabled,
@@ -1627,6 +1634,27 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::InspectWorktrees => {
             polling::handle_inspect_worktrees(config).await;
+        }
+        lazybox_ipc::Command::ScanCheckouts { roots } => {
+            polling::handle_scan_checkouts(config, roots).await;
+        }
+        lazybox_ipc::Command::ImportLocalCheckout { path, spawn_agent } => {
+            let key = polling::import_local_checkout(config, path).await;
+            if let (Some(key), Some(agent_id)) = (key, spawn_agent) {
+                let session_key: lazybox_core::SessionKey = (&key).into();
+                spawn_handler::handle_spawn(
+                    config,
+                    session_key,
+                    None,
+                    lazybox_ipc::TerminalKind::Agent(agent_id),
+                    None,
+                    None,
+                    false,
+                    false,
+                    None,
+                )
+                .await;
+            }
         }
         lazybox_ipc::Command::DeleteOrphanedWorktree { path, force } => {
             polling::handle_delete_orphaned_worktree(config, path, force).await;

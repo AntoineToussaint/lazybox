@@ -31,19 +31,25 @@ const RECENT_OUTPUT_CAP: usize = 4096;
 /// and including the first newline at/after the cut keeps every
 /// (line-anchored) marker either fully retained or fully gone, never
 /// split. If the retained tail carries no newline we keep the raw cut so
-/// the buffer stays bounded. Mirrors `ReplayRing::replay_snapshot_into`
-/// / `read_scrollback_tail` in `crates/server/src/pty.rs`.
+/// the buffer stays bounded. Likewise, if that first newline is the
+/// buffer's final byte the line-aligned cut would empty the tail
+/// entirely — discarding a whole intact line the raw cut would have kept
+/// — so we fall back to the raw cut there too. Mirrors
+/// `ReplayRing::replay_snapshot_into` / `read_scrollback_tail` in
+/// `crates/server/src/pty.rs`.
 fn trim_recent_output(buf: &mut Vec<u8>, cap: usize) {
     if buf.len() <= cap {
         return;
     }
     let excess = buf.len() - cap;
     // Advance past the first newline at/after the raw cut, so the head
-    // is line-aligned; fall back to the raw cut when the tail has none.
+    // is line-aligned; fall back to the raw cut when the tail has none,
+    // or when advancing would empty the buffer (newline at the very end).
     let cut = buf[excess..]
         .iter()
         .position(|&b| b == b'\n')
         .map(|rel| excess + rel + 1)
+        .filter(|&c| c < buf.len())
         .unwrap_or(excess);
     buf.copy_within(cut.., 0);
     buf.truncate(buf.len() - cut);
@@ -304,6 +310,29 @@ mod tests {
         // exactly the last `cap` bytes so the buffer stays bounded.
         trim_recent_output(&mut buf, RECENT_OUTPUT_CAP);
         assert_eq!(buf.len(), RECENT_OUTPUT_CAP);
+    }
+
+    #[test]
+    fn trim_with_newline_at_the_very_end_keeps_the_final_line() {
+        // Degenerate layout: the only newline in the eviction window is
+        // the buffer's final byte. Line-aligning past it would empty the
+        // tail, discarding a whole intact line the raw cut would keep —
+        // so we fall back to the raw cut and stay non-empty + bounded.
+        let cap = 16usize;
+        const MARKER: &[u8] = b"<STATE>";
+        // A single long line (no interior newline) carrying a marker near
+        // its end, terminated by a newline exactly at the buffer's tail.
+        let mut buf = b"padding padding <STATE>\n".to_vec();
+        assert!(buf.len() > cap);
+
+        trim_recent_output(&mut buf, cap);
+        assert!(!buf.is_empty(), "tail is not emptied: {}", buf.len());
+        assert!(buf.len() <= cap, "stays bounded: {}", buf.len());
+        assert!(
+            buf.windows(MARKER.len()).any(|w| w == MARKER),
+            "the intact marker in the final line survives: {:?}",
+            String::from_utf8_lossy(&buf)
+        );
     }
 
     #[test]

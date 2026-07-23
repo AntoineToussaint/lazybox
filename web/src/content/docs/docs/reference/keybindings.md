@@ -73,6 +73,7 @@ Manage the sidebar list itself — only while the sidebar has focus.
 | `Shift-S` | switch mailbox | Cycle the mailbox view (Inbox → Inactive → Snoozed). |
 | `/` | search | Open the incremental search bar scoped to the focused project. |
 | `Space` | collapse group | Collapse or expand the repo group the cursor is in — fold a project's workspaces into a single header row, and unfold it again. |
+| `Right \| l` | focus right | Move focus one pane to the right — from the sidebar to the activity pane, or straight to the terminal when the activity pane is hidden. |
 | `v` | select | Toggle the focused workspace in/out of the multi-select set. |
 | `Shift-B` | broadcast | Send one instruction — a snippet, free text, or both — to every multi-selected workspace at once. |
 | `Shift-U` | update branches | Update the branch of every multi-selected PR that's behind its base, in one shot — the bulk "Update branch". |
@@ -87,6 +88,7 @@ Only while the activity (right) pane has focus.
 | --- | --- | --- |
 | `Enter` | toggle section | Collapse / expand the activity section. |
 | `→/←` | expand/collapse | Expand or collapse the focused activity row. |
+| `Left \| h` | focus left | Move focus one pane to the left — from the activity pane back to the sidebar. |
 | `g` | top | Jump the activity cursor to the first row. |
 | `Shift-G` | bottom | Jump the activity cursor to the last row. |
 | `d` | description | Toggle the PR / issue description visibility. |

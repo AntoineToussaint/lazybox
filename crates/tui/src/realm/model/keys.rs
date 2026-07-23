@@ -1753,6 +1753,12 @@ pub(super) fn action_from_kind(
         // invariant tests) and keep the kinds out of the silent
         // fallback set.
         ActionKind::CyclePane => Action::CyclePane,
+        // Directional pane focus (`Right`/`l` from the sidebar,
+        // `Left`/`h` from the activity pane). Dispatched through the
+        // catalog like every other focus move so they show in `?` help
+        // and are remappable.
+        ActionKind::FocusPaneRight => Action::FocusPaneRight,
+        ActionKind::FocusPaneLeft => Action::FocusPaneLeft,
         ActionKind::ToggleMouseCapture => Action::ToggleMouseCapture,
         ActionKind::OpenFilterMenu => Action::OpenFilterMenu,
         ActionKind::CycleSort => Action::CycleSort,

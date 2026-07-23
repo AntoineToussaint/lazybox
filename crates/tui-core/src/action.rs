@@ -226,6 +226,17 @@ pub enum Action {
     // ── Global / cross-pane ────────────────────────────────────────
     /// Cycle pane focus (Tab).
     CyclePane,
+    /// Move focus one pane to the right — from the sidebar to the
+    /// activity pane, or to the terminal stack when the activity pane
+    /// is hidden (`Right` / `l`). Directional counterpart to the Tab
+    /// cycle; resolves only under sidebar focus so `l` still expands a
+    /// row in the activity pane.
+    FocusPaneRight,
+    /// Move focus one pane to the left — from the activity pane back to
+    /// the sidebar (`Left` / `h`). Yields to the activity pane's own
+    /// `←`/`h` meaning: it collapses an expanded row first and only
+    /// steps focus back when there's nothing left to collapse.
+    FocusPaneLeft,
     /// Force a fresh poll of every provider (Shift+R / g).
     Refresh,
     /// Clear the host terminal and repaint the whole UI from scratch
@@ -400,6 +411,8 @@ pub enum ActionKind {
     UndoMarkRead,
     // Global
     CyclePane,
+    FocusPaneRight,
+    FocusPaneLeft,
     ToggleMouseCapture,
     Refresh,
     ForceRedraw,
@@ -499,12 +512,14 @@ impl ActionKind {
         Self::CycleMailbox,
         Self::OpenSearch,
         Self::ToggleRepoGroup,
+        Self::FocusPaneRight,
         Self::SelectWorkspace,
         Self::BroadcastToSelected,
         Self::UpdateBranchSelected,
         // Activity
         Self::ToggleActivity,
         Self::ToggleRow,
+        Self::FocusPaneLeft,
         Self::ActivityTop,
         Self::ActivityBottom,
         Self::ToggleDescription,
@@ -610,6 +625,8 @@ impl Action {
             Action::ToggleDescription => ActionKind::ToggleDescription,
             Action::UndoMarkRead => ActionKind::UndoMarkRead,
             Action::CyclePane => ActionKind::CyclePane,
+            Action::FocusPaneRight => ActionKind::FocusPaneRight,
+            Action::FocusPaneLeft => ActionKind::FocusPaneLeft,
             Action::ToggleMouseCapture => ActionKind::ToggleMouseCapture,
             Action::Refresh => ActionKind::Refresh,
             Action::ForceRedraw => ActionKind::ForceRedraw,
@@ -661,6 +678,20 @@ impl ActionDef {
                 label: "cycle panes",
                 describe: "Move focus to the next pane.",
                 section: Section::Global,
+            },
+            ActionKind::FocusPaneRight => &Self {
+                kind: ActionKind::FocusPaneRight,
+                default_keys: "Right | l",
+                label: "focus right",
+                describe: "Move focus one pane to the right — from the sidebar to the activity pane, or straight to the terminal when the activity pane is hidden. The directional counterpart to Tab.",
+                section: Section::Sidebar,
+            },
+            ActionKind::FocusPaneLeft => &Self {
+                kind: ActionKind::FocusPaneLeft,
+                default_keys: "Left | h",
+                label: "focus left",
+                describe: "Move focus one pane to the left — from the activity pane back to the sidebar. Collapses an expanded activity row first; only steps focus back when there's nothing left to collapse.",
+                section: Section::Activity,
             },
             ActionKind::ToggleMouseCapture => &Self {
                 kind: ActionKind::ToggleMouseCapture,
@@ -1660,6 +1691,8 @@ impl ActionKind {
             ActionKind::ToggleDescription => "toggle_description",
             ActionKind::UndoMarkRead => "undo_mark_read",
             ActionKind::CyclePane => "cycle_pane",
+            ActionKind::FocusPaneRight => "focus_pane_right",
+            ActionKind::FocusPaneLeft => "focus_pane_left",
             ActionKind::ToggleMouseCapture => "toggle_mouse_capture",
             ActionKind::Refresh => "refresh",
             ActionKind::ForceRedraw => "force_redraw",
@@ -2344,6 +2377,11 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::ImportCheckout
         | ActionKind::StartAgent
         | ActionKind::CyclePane
+        // Directional focus moves — always usable from the pane that
+        // owns them (`section_rank` already scopes them to the right
+        // focus); no workspace required.
+        | ActionKind::FocusPaneRight
+        | ActionKind::FocusPaneLeft
         | ActionKind::ToggleMouseCapture
         | ActionKind::Refresh
         | ActionKind::ForceRedraw
@@ -2777,12 +2815,24 @@ mod tests {
 
     #[test]
     fn compatibility_aliases_are_exceptional_not_the_default_style() {
+        // Multiple default chords are reserved for ergonomic duals,
+        // never for a leader-vs-alias split on a grouped action:
+        //  - ToggleMouseCapture ships three fallbacks because terminals
+        //    report its chord inconsistently (F8 / Alt-s / Ctrl-Alt-s);
+        //  - the directional-focus moves bind both the arrow and the vim
+        //    key (`Right`/`l`, `Left`/`h`) — the same arrow+vim dual the
+        //    pane-level j/k navigation already offers, just surfaced in
+        //    the catalog so it shows in `?` help and is remappable.
+        const MULTI_CHORD_OK: &[ActionKind] = &[
+            ActionKind::ToggleMouseCapture,
+            ActionKind::FocusPaneRight,
+            ActionKind::FocusPaneLeft,
+        ];
         for def in ActionDef::all() {
             let count = def.default_chords().len();
             if count > 1 {
-                assert_eq!(
-                    def.kind,
-                    ActionKind::ToggleMouseCapture,
+                assert!(
+                    MULTI_CHORD_OK.contains(&def.kind),
                     "{:?} has {count} default aliases; grouped actions belong behind a leader",
                     def.kind,
                 );

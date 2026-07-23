@@ -1026,6 +1026,31 @@ impl<T: TerminalAdapter> Model<T> {
                 // surfaces (context menu, tests) with the same effect.
                 self.cycle_pane_focus();
             }
+            Action::FocusPaneRight => {
+                // Sidebar `Right`/`l`: step focus into the pane on the
+                // right. Skip the activity pane when it's hidden and go
+                // straight to the terminal, mirroring the Tab-cycle skip
+                // in `cycle_pane_focus`.
+                self.focus = if self.activity_pane_visible() {
+                    PaneFocus::Right
+                } else {
+                    PaneFocus::Terminals
+                };
+                self.set_focus_attr();
+                self.redraw = true;
+            }
+            Action::FocusPaneLeft => {
+                // Activity-pane `Left`/`h`: collapse an expanded row
+                // first — that's the pane's own meaning — and only when
+                // there's nothing left to collapse step focus back to
+                // the sidebar, so arrow navigation is reversible without
+                // clobbering the collapse gesture.
+                if !self.right.collapse_focused_row() {
+                    self.focus = PaneFocus::Sidebar;
+                    self.set_focus_attr();
+                }
+                self.redraw = true;
+            }
             Action::ToggleMouseCapture => {
                 self.toggle_mouse_capture();
             }

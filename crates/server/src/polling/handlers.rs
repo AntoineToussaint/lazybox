@@ -2664,6 +2664,29 @@ mod inspect_tests {
         );
     }
 
+    /// #476: deleting a workspace with no backing terminals broadcasts
+    /// `WorkspaceRemoved` and records the archive tombstone. The reorder
+    /// (emit the echo before terminal teardown, so the row's
+    /// disappearance isn't gated on killing terminals) must not regress
+    /// the happy path.
+    #[tokio::test]
+    async fn delete_workspace_emits_removed_and_archives() {
+        let store = Arc::new(MemoryStore::new());
+        let wt = std::env::temp_dir().join(format!("lb-del-{}", std::process::id()));
+        seed_workspace(&store, wt, /*stopped=*/ true);
+        let config = fresh_config(store);
+        let mut rx = config.bus.subscribe();
+        let key = lazybox_core::WorkspaceKey::new("github:o/r#1".to_string());
+
+        assert!(crate::polling::delete_workspace(&config, &key).await);
+        drain_until(&mut rx, |e| matches!(e, Event::WorkspaceRemoved(_))).await;
+        assert!(load_workspace(&config, &key).is_none(), "store row removed");
+        assert!(
+            crate::polling::load_archived_set(&config).contains(key.as_str()),
+            "archive tombstone recorded so the next poll won't resurrect it",
+        );
+    }
+
     /// Confirming removal force-deletes even a worktree with
     /// uncommitted work — the modal already warned. (Contrast with
     /// `cleanup_preserves_dirty_merged_worktree`, the silent path,

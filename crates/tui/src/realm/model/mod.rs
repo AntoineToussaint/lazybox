@@ -29,6 +29,7 @@ mod host_terminal;
 mod inputs;
 mod keys;
 mod modals;
+mod optimistic;
 mod terminal_leader;
 #[cfg(test)]
 mod tests;
@@ -694,6 +695,11 @@ pub struct Model<T: TerminalAdapter> {
     /// matches the picker's row indices so `Msg::ChoicePicked(indices)`
     /// indexes back into this list. Cleared on submit / dismiss.
     labels_choices: Vec<String>,
+    /// Optimistic mutations applied locally and awaiting the daemon's
+    /// echo (#476). Each carries the prior rows so a rejected
+    /// round-trip rolls back; the success echo drops the entry. See
+    /// `optimistic.rs`.
+    pending_mutations: Vec<optimistic::OptimisticMutation>,
     /// Workspace currently waiting on the `SnoozeDuration` picker's
     /// result. `Msg::ChoicePicked` reads this + `snooze_choices` to
     /// turn the picked index into a `Command::Snooze`.
@@ -1217,6 +1223,7 @@ impl<T: TerminalAdapter> Model<T> {
             assignees_choices: Vec::new(),
             pending_labels_request: None,
             labels_choices: Vec::new(),
+            pending_mutations: Vec::new(),
             pending_snooze_workspace: None,
             snooze_choices: Vec::new(),
             pending_work_picker: None,

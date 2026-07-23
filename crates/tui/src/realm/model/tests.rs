@@ -11,6 +11,37 @@
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
+mod prompt_history_format_tests {
+    //! Formatting helpers for the `]]h` prompt-history rows (#523).
+    use super::super::{relative_age, summarize_prompt};
+
+    #[test]
+    fn relative_age_buckets_by_magnitude() {
+        let now = 1_000_000_000_000;
+        assert_eq!(relative_age(now, now), "just now");
+        assert_eq!(relative_age(now - 30_000, now), "just now");
+        assert_eq!(relative_age(now - 120_000, now), "2m ago");
+        assert_eq!(relative_age(now - 3 * 3_600_000, now), "3h ago");
+        assert_eq!(relative_age(now - 5 * 86_400_000, now), "5d ago");
+        // Clock skew (future timestamp) collapses to "just now".
+        assert_eq!(relative_age(now + 5_000, now), "just now");
+    }
+
+    #[test]
+    fn relative_age_zero_is_the_migrated_marker() {
+        assert_eq!(relative_age(0, 1_000_000_000_000), "earlier");
+    }
+
+    #[test]
+    fn summarize_prompt_collapses_whitespace_and_newlines() {
+        assert_eq!(
+            summarize_prompt("fix bug in foo.rs\nand   retry"),
+            "fix bug in foo.rs and retry",
+        );
+    }
+}
+
+#[cfg(test)]
 mod effects_tests {
     //! Handler effect-contract tests.
     //!
@@ -1456,7 +1487,7 @@ snippets:
         assert!(
             cmds.iter().any(|c| matches!(
                 c,
-                IpcCommand::RecordUserMessage { message, .. } if message == "review the diff"
+                IpcCommand::RecordUserMessage { prompt, .. } if prompt.text == "review the diff"
             )),
             "snippet must be recorded as the latest user message, got {cmds:?}",
         );
@@ -1708,7 +1739,7 @@ snippets:
             .iter()
             .filter(|c| matches!(
                 c,
-                IpcCommand::RecordUserMessage { message, .. } if message == "merge when the PR is green"
+                IpcCommand::RecordUserMessage { prompt, .. } if prompt.text == "merge when the PR is green"
             ))
             .count();
         assert_eq!(recap_count, 2, "each agent gets its recap line");
@@ -2069,8 +2100,8 @@ snippets:
         assert!(
             cmds.iter().any(|c| matches!(
                 c,
-                IpcCommand::RecordUserMessage { terminal_id, message }
-                    if terminal_id.0 == 2 && message == "build the parser"
+                IpcCommand::RecordUserMessage { terminal_id, prompt }
+                    if terminal_id.0 == 2 && prompt.text == "build the parser"
             )),
             "the target's recap line updates: {cmds:?}",
         );
@@ -2996,7 +3027,7 @@ mod coalesce_tests {
                 no_permission: false,
                 on_main: false,
                 model_label: None,
-                last_user_message: None,
+                prompt_history: Vec::new(),
                 composing_buffer: None,
             }],
         });
@@ -6304,10 +6335,11 @@ mod leader_tile_tests {
         assert_eq!(m.terminal_leader_highlight(), Some(1));
         m.dispatch_key(RealmKey::new(Key::Char('k'), RealmMods::NONE));
         assert_eq!(m.terminal_leader_highlight(), Some(0));
-        // Menu order: s,r,f,… — step to `focus mode` at index 2.
+        // Menu order: s,r,h,f,… — step to `focus mode` at index 3.
         m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
         m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
-        assert_eq!(m.terminal_leader_highlight(), Some(2));
+        m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
+        assert_eq!(m.terminal_leader_highlight(), Some(3));
 
         assert!(!m.focus_mode, "focus mode starts off");
         m.dispatch_key(RealmKey::new(Key::Enter, RealmMods::NONE));
@@ -6356,26 +6388,27 @@ mod leader_tile_tests {
         while server.rx.try_recv().is_ok() {}
         arm_leader(&mut m);
 
-        // Splits menu order: s,r,f,q,`,|,- then the `move tile` aggregate
-        // at index 7, then `x` at index 8. Seven `j` presses reach index 6.
-        for _ in 0..7 {
+        // Splits menu order: s,r,h,f,q,`,|,- then the `move tile`
+        // aggregate at index 8, then `x` at index 9. Eight `j` presses
+        // reach index 7.
+        for _ in 0..8 {
             m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
         }
         assert_eq!(
             m.terminal_leader_highlight(),
-            Some(6),
+            Some(7),
             "reached the last row before the aggregate"
         );
         m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
         assert_eq!(
             m.terminal_leader_highlight(),
-            Some(8),
-            "`j` jumps over the aggregate at index 7"
+            Some(9),
+            "`j` jumps over the aggregate at index 8"
         );
         m.dispatch_key(RealmKey::new(Key::Char('k'), RealmMods::NONE));
         assert_eq!(
             m.terminal_leader_highlight(),
-            Some(6),
+            Some(7),
             "`k` skips it going back too"
         );
     }
@@ -6424,7 +6457,7 @@ mod leader_tile_tests {
                 no_permission: false,
                 on_main: false,
                 model_label: None,
-                last_user_message: None,
+                prompt_history: Vec::new(),
                 composing_buffer: Some("\n  recover me".into()),
             }],
         });
@@ -6460,6 +6493,113 @@ mod leader_tile_tests {
             )),
             "recall must persist the canonical draft mirrored by the client",
         );
+    }
+
+    /// Issue #523: `]]h` opens the per-session prompt-history picker over
+    /// the prompts sent to the focused agent, and picking one re-sends it
+    /// into the session (a fresh `Typed` submit via `InjectPrompt`).
+    #[test]
+    fn leader_h_opens_prompt_history_and_resends_a_pick() {
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let key = lazybox_core::SessionKey::from("github:o/r#1");
+        m.terminals.set_active_session(Some(key.clone()));
+        // Seed a two-prompt history via the daemon snapshot (typing-into-
+        // history is covered by the terminal_stack integration tests; here
+        // the harness doesn't keep the tab focus that live typing needs).
+        m.terminals.on_daemon_event(&IpcEvent::Snapshot {
+            workspaces: vec![],
+            projects: vec![],
+            terminals: vec![lazybox_ipc::TerminalSnapshot {
+                terminal_id: TerminalId(1),
+                session_key: key.clone(),
+                kind: TerminalKind::Agent("claude".into()),
+                replay: Vec::new(),
+                last_seq: 0,
+                replay_available: true,
+                no_permission: false,
+                on_main: false,
+                model_label: None,
+                prompt_history: vec![
+                    lazybox_ipc::UserPrompt {
+                        text: "rebase onto main".into(),
+                        timestamp_ms: 1,
+                        source: lazybox_ipc::PromptSource::Typed,
+                    },
+                    lazybox_ipc::UserPrompt {
+                        text: "run the tests".into(),
+                        timestamp_ms: 2,
+                        source: lazybox_ipc::PromptSource::Snippet {
+                            key: "test".into(),
+                            category: "CI".into(),
+                        },
+                    },
+                ],
+                composing_buffer: None,
+            }],
+        });
+        // A single-leaf split so `focused_terminal_id` resolves via the
+        // tile tree (the model harness doesn't drive the tab/active-session
+        // focus the real app maintains).
+        m.terminals.set_layout(lazybox_core::SessionLayout::Splits {
+            tree: lazybox_core::TileTree::Leaf { terminal_id: 1 },
+            focused: vec![],
+        });
+        m.focus = PaneFocus::Terminals;
+        while server.rx.try_recv().is_ok() {}
+
+        // `]]h` opens the history picker.
+        arm_leader(&mut m);
+        m.dispatch_key(RealmKey::new(Key::Char('h'), RealmMods::NONE));
+        assert!(matches!(m.top_modal(), Some(Id::PromptHistoryPicker)));
+        // Newest-first: row 0 is the most recent prompt.
+        assert_eq!(
+            m.prompt_history_choices,
+            vec!["run the tests".to_string(), "rebase onto main".to_string()],
+        );
+
+        // Pick the older prompt (row 1) → re-sent into the session.
+        let cmds = m.handle_choice_picked(vec![1]);
+        assert!(m.top_modal().is_none(), "picker closes on pick");
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                IpcCommand::InjectPrompt { terminal_id, prompt, .. }
+                    if *terminal_id == TerminalId(1) && prompt == "rebase onto main"
+            )),
+            "the picked prompt is re-injected: {cmds:?}",
+        );
+    }
+
+    /// `]]h` with no prompts sent yet is a no-op with a hint, not a
+    /// silently-empty picker.
+    #[test]
+    fn leader_h_without_history_flashes_and_does_not_mount() {
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let key = lazybox_core::SessionKey::from("github:o/r#1");
+        m.terminals.set_active_session(Some(key.clone()));
+        m.terminals.on_daemon_event(&IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(1),
+            session_key: key.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        // A single-leaf split so `focused_terminal_id` resolves via the
+        // tile tree (the model harness doesn't drive the tab/active-session
+        // focus the real app maintains).
+        m.terminals.set_layout(lazybox_core::SessionLayout::Splits {
+            tree: lazybox_core::TileTree::Leaf { terminal_id: 1 },
+            focused: vec![],
+        });
+        m.focus = PaneFocus::Terminals;
+        while server.rx.try_recv().is_ok() {}
+
+        arm_leader(&mut m);
+        m.dispatch_key(RealmKey::new(Key::Char('h'), RealmMods::NONE));
+        assert!(m.top_modal().is_none(), "no picker without history");
     }
 }
 
@@ -8773,7 +8913,7 @@ mod worktree_progress_recovery_tests {
             replay_available: true,
             no_permission: false,
             on_main: false,
-            last_user_message: None,
+            prompt_history: Vec::new(),
             composing_buffer: None,
         }
     }

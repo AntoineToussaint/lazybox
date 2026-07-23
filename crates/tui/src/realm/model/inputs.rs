@@ -100,11 +100,26 @@ impl<T: TerminalAdapter> Model<T> {
     /// shell has no paste debounce, so the encoded direct write submits
     /// cleanly. Shared by the snippet, broadcast, and handoff paths so
     /// the #246 invariant lives in one place.
+    /// Resolve a snippet key to a `Snippet` prompt source, looking up its
+    /// category so the history can name which snippet an entry came from
+    /// (issue #523). The category is empty when the snippet declares none.
+    fn snippet_source(&self, key: &str) -> lazybox_ipc::PromptSource {
+        lazybox_ipc::PromptSource::Snippet {
+            key: key.to_string(),
+            category: self
+                .snippets
+                .get(key)
+                .map(|s| s.category.clone())
+                .unwrap_or_default(),
+        }
+    }
+
     fn deliver_prompt(
         &mut self,
         terminal_id: TerminalId,
         is_agent: bool,
         body: &str,
+        source: lazybox_ipc::PromptSource,
         cmds: &mut Vec<IpcCommand>,
     ) {
         if is_agent {
@@ -113,10 +128,10 @@ impl<T: TerminalAdapter> Model<T> {
             // recap message.
             let mut recap = body.as_bytes().to_vec();
             recap.push(b'\r');
-            if let Some(message) = self.terminals.record_pty_write(terminal_id, &recap) {
+            if let Some(prompt) = self.terminals.record_pty_write(terminal_id, &recap, source) {
                 cmds.push(IpcCommand::RecordUserMessage {
                     terminal_id,
-                    message,
+                    prompt,
                 });
             }
             cmds.push(IpcCommand::InjectPrompt {
@@ -151,6 +166,14 @@ impl<T: TerminalAdapter> Model<T> {
         if body.is_empty() {
             return Vec::new();
         }
+        // A snippet-seeded broadcast tags every delivery as `Snippet`
+        // even after the user edits the compose buffer — it's still the
+        // snippet they picked; free-text broadcasts are `Typed`.
+        let source = draft
+            .snippet_key
+            .as_deref()
+            .map(|k| self.snippet_source(k))
+            .unwrap_or(lazybox_ipc::PromptSource::Typed);
         let mut cmds = Vec::new();
         let mut sent = 0usize;
         let mut skipped: Vec<String> = Vec::new();
@@ -158,7 +181,7 @@ impl<T: TerminalAdapter> Model<T> {
         for key in &draft.targets {
             match self.sidebar.broadcast_terminal(key) {
                 Some((terminal_id, is_agent)) => {
-                    self.deliver_prompt(terminal_id, is_agent, body, &mut cmds);
+                    self.deliver_prompt(terminal_id, is_agent, body, source.clone(), &mut cmds);
                     sent += 1;
                     delivered.push(key.clone());
                 }
@@ -228,7 +251,13 @@ impl<T: TerminalAdapter> Model<T> {
         let mut cmds = Vec::new();
         match self.sidebar.broadcast_terminal(&target) {
             Some((terminal_id, true)) => {
-                self.deliver_prompt(terminal_id, true, body, &mut cmds);
+                self.deliver_prompt(
+                    terminal_id,
+                    true,
+                    body,
+                    lazybox_ipc::PromptSource::Typed,
+                    &mut cmds,
+                );
                 self.flash_info(format!("handoff: {} → {target_name}", draft.source_name));
             }
             // The target's agent ended between picking it and submitting
@@ -505,10 +534,14 @@ showing keybinding search only",
                 return cmds;
             };
             let is_agent = self.terminals.terminal_is_agent(terminal_id);
-            // Clone the body out so the `self.snippets` borrow ends before
-            // the `&mut self` delivery call.
+            // Clone the body + category out so the `self.snippets` borrow
+            // ends before the `&mut self` delivery call.
             let body = snippet.body.clone();
-            self.deliver_prompt(terminal_id, is_agent, &body, &mut cmds);
+            let source = lazybox_ipc::PromptSource::Snippet {
+                key: key.clone(),
+                category: snippet.category.clone(),
+            };
+            self.deliver_prompt(terminal_id, is_agent, &body, source, &mut cmds);
             // Only reached once the snippet has actually been dispatched
             // — so the MRU tracks sent snippets, not abandoned ones.
             self.record_recent_snippet(key.clone());
@@ -522,6 +555,31 @@ showing keybinding search only",
                 });
             }
             self.flash_info(format!("sent snippet ]{key}"));
+            return cmds;
+        }
+        // Prompt-history picker (Id::PromptHistoryPicker, #523) — pick →
+        // re-send the chosen past prompt into the session it was opened
+        // over. A resend is a fresh `Typed` submit (the original snippet
+        // provenance stays on the historical entry). Empty / Esc drops
+        // the stash without sending.
+        if matches!(self.modal_stack.last(), Some(Id::PromptHistoryPicker)) {
+            let text = picks
+                .first()
+                .and_then(|i| self.prompt_history_choices.get(*i).cloned());
+            let target = self.prompt_history_target.take();
+            self.prompt_history_choices.clear();
+            self.pop_modal();
+            if let (Some(text), Some(terminal_id)) = (text, target) {
+                let is_agent = self.terminals.terminal_is_agent(terminal_id);
+                self.deliver_prompt(
+                    terminal_id,
+                    is_agent,
+                    &text,
+                    lazybox_ipc::PromptSource::Typed,
+                    &mut cmds,
+                );
+                self.flash_info("re-sent prompt");
+            }
             return cmds;
         }
         // Jump picker (Id::JumpPicker) — pick → land the cursor on the
@@ -1268,6 +1326,10 @@ showing keybinding search only",
             }
             Some(Id::JumpPicker) => {
                 self.jump_choices.clear();
+            }
+            Some(Id::PromptHistoryPicker) => {
+                self.prompt_history_choices.clear();
+                self.prompt_history_target = None;
             }
             // Esc anywhere in the broadcast flow cancels the whole
             // thing — drop the stashed targets + picked snippet so a

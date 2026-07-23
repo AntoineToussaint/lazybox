@@ -32,7 +32,8 @@ use lazybox_core::{
     SessionId, SessionKey, SessionKind, Task, Workspace, WorkspaceKey, WorkspaceSession as Session,
 };
 use lazybox_ipc::{
-    Event, TerminalId, TerminalKind, TerminalSnapshot, WorktreeStep, WorktreeStepStatus,
+    Event, PromptSource, TerminalId, TerminalKind, TerminalSnapshot, UserPrompt, WorktreeStep,
+    WorktreeStepStatus,
 };
 use lazybox_store::WorkspaceRecord;
 use std::path::{Path, PathBuf};
@@ -77,16 +78,23 @@ const TERMINAL_ID_HIGH_WATER_KEY: &str = "terminal-id-high-water";
 enum TerminalPersistedField {
     Metadata,
     NoPermission,
+    /// Legacy single last-prompt row (`terminal-msg`). Superseded by
+    /// `UserMessageHistory`; still read once for migration and swept at
+    /// teardown so old rows don't leak (issue #523).
     UserMessage,
+    /// Bounded per-session prompt history (`terminal-msgs`, JSON array of
+    /// `UserPrompt`), issue #523.
+    UserMessageHistory,
     Draft,
     PtyLaunchGeneration,
 }
 
 impl TerminalPersistedField {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Metadata,
         Self::NoPermission,
         Self::UserMessage,
+        Self::UserMessageHistory,
         Self::Draft,
         Self::PtyLaunchGeneration,
     ];
@@ -96,6 +104,7 @@ impl TerminalPersistedField {
             Self::Metadata => "terminal",
             Self::NoPermission => "terminal-noperm",
             Self::UserMessage => "terminal-msg",
+            Self::UserMessageHistory => "terminal-msgs",
             Self::Draft => "terminal-draft",
             Self::PtyLaunchGeneration => "terminal-pty-generation",
         };
@@ -3480,8 +3489,8 @@ fn strip_ansi(input: &str) -> String {
 /// later inserted for a recovered terminal (agent_states,
 /// hook_driven_terminals, input_needed_shapes, prompt_submit_signals)
 /// outlived it, and its `terminal:*`/`terminal-noperm:*`/
-/// `terminal-msg:*`/`terminal-draft:*`/`terminal-pty-generation:*` kv rows
-/// accumulated in state.db forever.
+/// `terminal-msg:*`/`terminal-msgs:*`/`terminal-draft:*`/
+/// `terminal-pty-generation:*` kv rows accumulated in state.db forever.
 pub(crate) async fn teardown_exited_terminal(
     config: &ServerConfig,
     terminal_id: TerminalId,
@@ -5406,16 +5415,17 @@ async fn load_pty_launch_generation(config: &ServerConfig, backend_key: &str) ->
         .ok()
 }
 
-/// Persist the latest prompt the user submitted to an agent terminal,
-/// keyed by backend session key so it survives a daemon restart (which
-/// reassigns `TerminalId`s but keeps backend keys). Replayed to clients
-/// in `snapshot_terminals` so the pinned "you ▸ …" recap is present
-/// immediately after reconnect — the ring buffer only carries PTY
-/// output, never the input the recap is built from.
+/// Append one submitted prompt to an agent terminal's bounded per-session
+/// history, keyed by backend session key so it survives a daemon restart
+/// (which reassigns `TerminalId`s but keeps backend keys). Replayed to
+/// clients in `snapshot_terminals` so the pinned "you ▸ …" recap (last
+/// entry) and the `]]h` history are present immediately after reconnect —
+/// the ring buffer only carries PTY output, never the input the recap is
+/// built from (issue #523).
 pub async fn handle_record_user_message(
     config: &ServerConfig,
     terminal_id: TerminalId,
-    message: &str,
+    prompt: &UserPrompt,
 ) {
     let Some(backend_key) = config.backend_key_for(terminal_id).await else {
         tracing::trace!("record user message for unknown terminal {terminal_id:?}");
@@ -5431,26 +5441,89 @@ pub async fn handle_record_user_message(
         return;
     }
     let store = config.store.clone();
-    let kv_key = TerminalPersistedField::UserMessage.key(&backend_key);
-    let message = message.to_string();
-    match tokio::task::spawn_blocking(move || store.set_kv(&kv_key, &message)).await {
+    let history_key = TerminalPersistedField::UserMessageHistory.key(&backend_key);
+    let legacy_key = TerminalPersistedField::UserMessage.key(&backend_key);
+    let prompt = prompt.clone();
+    let write = tokio::task::spawn_blocking(move || {
+        let mut history = load_prompt_history_blocking(&*store, &history_key, &legacy_key);
+        history.push(prompt);
+        cap_prompt_history(&mut history);
+        match serde_json::to_string(&history) {
+            Ok(json) => store.set_kv(&history_key, &json),
+            Err(e) => {
+                tracing::warn!("persist terminal user message: serialize failed: {e}");
+                Ok(())
+            }
+        }
+    });
+    match write.await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => tracing::warn!("persist terminal user message: store write failed: {e}"),
         Err(e) => tracing::warn!("persist terminal user message: store task failed: {e}"),
     }
 }
 
-/// Read back the value `handle_record_user_message` stored, or `None`
-/// when the terminal has no recorded prompt. Async since the
-/// sync-rusqlite offload (issue #34's spawn_blocking convention).
-async fn load_user_message(config: &ServerConfig, backend_key: &str) -> Option<String> {
+/// Cap on retained prompt-history entries per terminal. Old entries are
+/// evicted oldest-first once the count or the total text budget (mirroring
+/// the client's `COMPOSING_CAP` at 16× headroom for the running log) is
+/// exceeded, so a long-lived session can't grow the row without bound.
+const PROMPT_HISTORY_MAX_ENTRIES: usize = 200;
+const PROMPT_HISTORY_MAX_BYTES: usize = 128 * 1024;
+
+/// Evict oldest entries until the history fits both the entry-count and
+/// total-byte budgets. Always keeps at least the newest entry so the recap
+/// never blanks even for a single pathologically large prompt.
+fn cap_prompt_history(history: &mut Vec<UserPrompt>) {
+    while history.len() > PROMPT_HISTORY_MAX_ENTRIES {
+        history.remove(0);
+    }
+    while history.len() > 1
+        && history.iter().map(|p| p.text.len()).sum::<usize>() > PROMPT_HISTORY_MAX_BYTES
+    {
+        history.remove(0);
+    }
+}
+
+/// Read the persisted history JSON, falling back to migrating the legacy
+/// single-value `terminal-msg` row into a one-entry `Typed` history when
+/// the new key doesn't exist yet (issue #523). Sync — runs inside the
+/// caller's `spawn_blocking`.
+fn load_prompt_history_blocking(
+    store: &dyn lazybox_store::Store,
+    history_key: &str,
+    legacy_key: &str,
+) -> Vec<UserPrompt> {
+    if let Ok(Some(json)) = store.get_kv(history_key) {
+        match serde_json::from_str::<Vec<UserPrompt>>(&json) {
+            Ok(history) => return history,
+            Err(e) => tracing::warn!("prompt history decode failed, resetting: {e}"),
+        }
+    }
+    // Migrate the legacy last-prompt row as the first Typed entry. Its
+    // original submit time is gone, so timestamp 0 marks it as "before
+    // history tracking existed" rather than inventing a plausible one.
+    match store.get_kv(legacy_key) {
+        Ok(Some(text)) if !text.trim().is_empty() => vec![UserPrompt {
+            text,
+            timestamp_ms: 0,
+            source: PromptSource::Typed,
+        }],
+        _ => Vec::new(),
+    }
+}
+
+/// Read back the persisted prompt history (migrating the legacy row if
+/// needed), oldest-first. Async since the sync-rusqlite offload (issue
+/// #34's spawn_blocking convention).
+async fn load_prompt_history(config: &ServerConfig, backend_key: &str) -> Vec<UserPrompt> {
     let store = config.store.clone();
-    let kv_key = TerminalPersistedField::UserMessage.key(backend_key);
-    tokio::task::spawn_blocking(move || store.get_kv(&kv_key))
-        .await
-        .ok()?
-        .ok()
-        .flatten()
+    let history_key = TerminalPersistedField::UserMessageHistory.key(backend_key);
+    let legacy_key = TerminalPersistedField::UserMessage.key(backend_key);
+    tokio::task::spawn_blocking(move || {
+        load_prompt_history_blocking(&*store, &history_key, &legacy_key)
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// Persist the in-flight composer buffer (typed but not submitted) for
@@ -5559,10 +5632,10 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
         .map(|(id, key, session_key, kind)| async move {
             let snapshot_fut =
                 tokio::time::timeout(SNAPSHOT_PER_SESSION_TIMEOUT, config.backend.snapshot(&key));
-            let user_message_fut = load_user_message(config, &key);
+            let history_fut = load_prompt_history(config, &key);
             let composing_fut = load_composing_buffer(config, &key);
-            let (snapshot, last_user_message, composing_buffer) =
-                tokio::join!(snapshot_fut, user_message_fut, composing_fut);
+            let (snapshot, prompt_history, composing_buffer) =
+                tokio::join!(snapshot_fut, history_fut, composing_fut);
             // `replay_available` reflects whether the snapshot SUCCEEDED, not
             // whether the ring is still complete. A wrapped ring returns a
             // non-empty, line-boundary-clean `replay_snapshot`
@@ -5597,7 +5670,7 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
                 no_permission: no_permission.contains(&id),
                 on_main: on_main.contains(&id),
                 model_label: terminal_models.get(&id).cloned(),
-                last_user_message,
+                prompt_history,
                 composing_buffer,
                 terminal_id: id,
                 session_key,
@@ -6025,6 +6098,7 @@ mod tests {
                 "terminal:backend".to_string(),
                 "terminal-noperm:backend".to_string(),
                 "terminal-msg:backend".to_string(),
+                "terminal-msgs:backend".to_string(),
                 "terminal-draft:backend".to_string(),
                 "terminal-pty-generation:backend".to_string(),
             ]
@@ -6986,12 +7060,21 @@ mod tests {
         );
     }
 
-    /// Issue #105: a submitted prompt recorded via
-    /// `handle_record_user_message` is persisted against the backend key
-    /// and round-trips back through `snapshot_terminals`, so a
-    /// reconnecting client can restore the pinned "you ▸ …" recap.
+    fn typed(text: &str) -> UserPrompt {
+        UserPrompt {
+            text: text.to_string(),
+            timestamp_ms: 1,
+            source: PromptSource::Typed,
+        }
+    }
+
+    /// Issue #523: every submitted prompt recorded via
+    /// `handle_record_user_message` is appended to a per-terminal history
+    /// persisted against the backend key, and the whole list round-trips
+    /// back through `snapshot_terminals` (oldest-first) so a reconnecting
+    /// client can restore both the pinned recap and the `]]h` view.
     #[tokio::test]
-    async fn recorded_user_message_round_trips_through_snapshot() {
+    async fn recorded_user_messages_accumulate_and_round_trip() {
         let (config, _mock) = ServerConfig::in_memory_with_mock();
         let key = config
             .backend
@@ -7008,29 +7091,111 @@ mod tests {
             .await
             .insert(id, (session_key.clone(), kind.clone()));
 
-        // No prompt recorded yet → the snapshot carries None.
+        // No prompt recorded yet → the snapshot carries an empty history.
         let before = snapshot_terminals(&config).await;
-        assert_eq!(
+        assert!(
             before
                 .iter()
                 .find(|s| s.terminal_id == id)
                 .unwrap()
-                .last_user_message,
-            None,
+                .prompt_history
+                .is_empty()
         );
 
-        handle_record_user_message(&config, id, "rebase onto main").await;
+        handle_record_user_message(&config, id, &typed("rebase onto main")).await;
+        handle_record_user_message(
+            &config,
+            id,
+            &UserPrompt {
+                text: "run the tests".into(),
+                timestamp_ms: 2,
+                source: PromptSource::Snippet {
+                    key: "test".into(),
+                    category: "CI".into(),
+                },
+            },
+        )
+        .await;
 
         let after = snapshot_terminals(&config).await;
+        let history = &after
+            .iter()
+            .find(|s| s.terminal_id == id)
+            .unwrap()
+            .prompt_history;
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].text, "rebase onto main");
+        assert_eq!(history[0].source, PromptSource::Typed);
+        assert_eq!(history[1].text, "run the tests");
         assert_eq!(
-            after
-                .iter()
-                .find(|s| s.terminal_id == id)
-                .unwrap()
-                .last_user_message
-                .as_deref(),
-            Some("rebase onto main"),
+            history[1].source,
+            PromptSource::Snippet {
+                key: "test".into(),
+                category: "CI".into(),
+            }
         );
+    }
+
+    /// The legacy single-value `terminal-msg` row migrates into the new
+    /// history as one `Typed` entry the first time the history is read,
+    /// so a prompt recorded before #523 isn't lost on upgrade.
+    #[tokio::test]
+    async fn legacy_last_message_migrates_into_history() {
+        let (config, _mock) = ServerConfig::in_memory_with_mock();
+        let key = config
+            .backend
+            .spawn(&["claude".into()], None, &[], "t")
+            .await
+            .unwrap();
+        let id = TerminalId(9);
+        config.terminals.lock().await.insert(id, key.clone());
+        config.terminal_meta.lock().await.insert(
+            id,
+            ("acme/widget#2".into(), TerminalKind::Agent("claude".into())),
+        );
+        config
+            .store
+            .set_kv(&TerminalPersistedField::UserMessage.key(&key), "old prompt")
+            .unwrap();
+
+        let migrated = load_prompt_history(&config, &key).await;
+        assert_eq!(migrated.len(), 1);
+        assert_eq!(migrated[0].text, "old prompt");
+        assert_eq!(migrated[0].source, PromptSource::Typed);
+
+        // A new submit appends after the migrated entry.
+        handle_record_user_message(&config, id, &typed("new prompt")).await;
+        let history = load_prompt_history(&config, &key).await;
+        assert_eq!(
+            history.iter().map(|p| p.text.as_str()).collect::<Vec<_>>(),
+            vec!["old prompt", "new prompt"],
+        );
+    }
+
+    /// Count-based eviction keeps the history bounded, dropping oldest.
+    #[test]
+    fn cap_prompt_history_evicts_oldest_over_count() {
+        let mut history: Vec<UserPrompt> = (0..PROMPT_HISTORY_MAX_ENTRIES + 5)
+            .map(|i| typed(&format!("p{i}")))
+            .collect();
+        cap_prompt_history(&mut history);
+        assert_eq!(history.len(), PROMPT_HISTORY_MAX_ENTRIES);
+        assert_eq!(history.first().unwrap().text, "p5");
+        assert_eq!(
+            history.last().unwrap().text,
+            format!("p{}", PROMPT_HISTORY_MAX_ENTRIES + 4),
+        );
+    }
+
+    /// Byte-based eviction keeps the newest entry even when it alone
+    /// exceeds the budget, so the recap never blanks.
+    #[test]
+    fn cap_prompt_history_keeps_newest_over_byte_budget() {
+        let big = "x".repeat(PROMPT_HISTORY_MAX_BYTES + 1);
+        let mut history = vec![typed("small"), typed(&big)];
+        cap_prompt_history(&mut history);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].text, big);
     }
 
     /// Issue #373: the in-flight composer buffer persisted via

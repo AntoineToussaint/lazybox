@@ -353,8 +353,8 @@ async fn run_persistence_lane(
                 }
                 spawn_handler::handle_record_composing_buffer(&config, terminal_id, &buffer).await;
             }
-            Command::RecordUserMessage { message, .. } => {
-                spawn_handler::handle_record_user_message(&config, terminal_id, &message).await;
+            Command::RecordUserMessage { prompt, .. } => {
+                spawn_handler::handle_record_user_message(&config, terminal_id, &prompt).await;
             }
             other => {
                 tracing::error!(

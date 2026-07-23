@@ -161,21 +161,98 @@ fn workspace_contract(store: &dyn Store) {
         .delete_workspace(&WorkspaceKey::new("conf-ws-never"))
         .unwrap();
 
-    // A record saved with `workspace_json: None` still produces a row
-    // on read (stored as an empty payload) — both backends must agree.
+    // A record with no JSON payload is REJECTED at the write boundary
+    // rather than silently stored as `""` — which a later read surfaced
+    // as a `Some("")` phantom that deserialization then choked on. Both
+    // backends must reject, and neither may create a row.
     let none_json = WorkspaceRecord {
         key: "conf-ws-none".into(),
         created_at: created,
         workspace_json: None,
     };
-    store.save_workspace(&none_json).unwrap();
-    let got = store
-        .get_workspace(&WorkspaceKey::new("conf-ws-none"))
-        .unwrap()
-        .expect("row exists even when saved without json");
-    assert_eq!(got.workspace_json.as_deref(), Some(""));
+    assert!(
+        store.save_workspace(&none_json).is_err(),
+        "saving a workspace with no JSON payload must be rejected"
+    );
+    assert!(
+        store
+            .get_workspace(&WorkspaceKey::new("conf-ws-none"))
+            .unwrap()
+            .is_none(),
+        "a rejected save must not leave a phantom row"
+    );
+    // An empty-string payload is refused on the same grounds.
+    let empty_json = WorkspaceRecord {
+        key: "conf-ws-empty".into(),
+        created_at: created,
+        workspace_json: Some(String::new()),
+    };
+    assert!(
+        store.save_workspace(&empty_json).is_err(),
+        "saving a workspace with an empty JSON payload must be rejected"
+    );
+
+    // A legacy empty payload already on disk (written before empty writes
+    // were refused — simulated here by a raw `set_kv` that bypasses the
+    // write boundary) must read back as ABSENT, not as a `Some("")`
+    // phantom, and must not appear in `list_workspaces`. The write
+    // boundary makes empty unrepresentable going forward; the read path
+    // heals rows that predate it.
+    store.set_kv("workspace:conf-ws-legacy-empty", "").unwrap();
+    assert!(
+        store
+            .get_workspace(&WorkspaceKey::new("conf-ws-legacy-empty"))
+            .unwrap()
+            .is_none(),
+        "a legacy empty payload must read as absent, not a phantom"
+    );
+    assert!(
+        store
+            .list_workspaces()
+            .unwrap()
+            .iter()
+            .all(|r| r.key != "conf-ws-legacy-empty"),
+        "a legacy empty payload must not surface in list_workspaces"
+    );
+    store.delete_kv("workspace:conf-ws-legacy-empty").unwrap();
+
+    // A JSON blob with no parseable `created_at` (corrupt/legacy) must
+    // collapse to the OLDEST instant, never `Utc::now()` — a fabricated
+    // now() sorted the broken row newest and let it dodge staleness.
     store
-        .delete_workspace(&WorkspaceKey::new("conf-ws-none"))
+        .save_workspace(&WorkspaceRecord {
+            key: "conf-ws-nocreated".into(),
+            created_at: created,
+            workspace_json: Some(r#"{"key":"conf-ws-nocreated"}"#.into()),
+        })
+        .unwrap();
+    let got = store
+        .get_workspace(&WorkspaceKey::new("conf-ws-nocreated"))
+        .unwrap()
+        .expect("row saved with a valid, non-empty blob");
+    assert_eq!(
+        got.created_at,
+        DateTime::<Utc>::UNIX_EPOCH,
+        "a missing created_at must read as the oldest instant, not now()"
+    );
+    store
+        .delete_workspace(&WorkspaceKey::new("conf-ws-nocreated"))
+        .unwrap();
+
+    // A workspace key that itself begins `workspace:` round-trips through
+    // list_workspaces with the store prefix stripped exactly ONCE — this
+    // caught SqliteStore's `trim_start_matches` (strips repeatedly)
+    // diverging from MemoryStore's single strip.
+    store
+        .save_workspace(&workspace_record("workspace:nested", created, "nested"))
+        .unwrap();
+    let listed = store.list_workspaces().unwrap();
+    assert!(
+        listed.iter().any(|r| r.key == "workspace:nested"),
+        "a `workspace:`-prefixed key must strip only the store prefix, once"
+    );
+    store
+        .delete_workspace(&WorkspaceKey::new("workspace:nested"))
         .unwrap();
 }
 
@@ -221,6 +298,43 @@ fn project_contract(store: &dyn Store) {
         listed.iter().all(|r| r.key != "conf-ws-noise"),
         "workspace rows must not leak into list_projects"
     );
+
+    // A `project:`-prefixed key strips only the store prefix, once —
+    // same divergence guard as the workspace path.
+    store
+        .save_project(&project_record("project:nested", created, "nested"))
+        .unwrap();
+    assert!(
+        store
+            .list_projects()
+            .unwrap()
+            .iter()
+            .any(|r| r.key == "project:nested"),
+        "a `project:`-prefixed key must strip only the store prefix, once"
+    );
+    store
+        .delete_project(&ProjectKey::new("project:nested"))
+        .unwrap();
+
+    // A legacy empty payload heals on read here too — absent from
+    // `get_project` and `list_projects`, same as the workspace path.
+    store.set_kv("project:conf-proj-legacy-empty", "").unwrap();
+    assert!(
+        store
+            .get_project(&ProjectKey::new("conf-proj-legacy-empty"))
+            .unwrap()
+            .is_none(),
+        "a legacy empty payload must read as absent, not a phantom"
+    );
+    assert!(
+        store
+            .list_projects()
+            .unwrap()
+            .iter()
+            .all(|r| r.key != "conf-proj-legacy-empty"),
+        "a legacy empty payload must not surface in list_projects"
+    );
+    store.delete_kv("project:conf-proj-legacy-empty").unwrap();
 
     // Delete + idempotence.
     store.delete_project(&key_a).unwrap();

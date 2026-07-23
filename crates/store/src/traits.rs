@@ -12,19 +12,31 @@ pub enum StoreError {
 }
 
 /// Recover the record's real `created_at` from its serialized JSON
-/// (both `Workspace` and `Project` carry the field). The kv table
-/// only stores the JSON blob, so without this every read fabricated
-/// `Utc::now()` — anything sorting or aging on the record timestamp
-/// saw a value that changed on every call. Falls back to now() when
-/// the JSON is missing the field or unparseable (legacy rows).
-pub(crate) fn created_at_from_json(json: &str) -> DateTime<Utc> {
+/// (both `Workspace` and `Project` carry the field). The kv table only
+/// stores the JSON blob. Returns `None` when the blob is missing the
+/// field or is unparseable (legacy / corrupt rows) — critically it does
+/// NOT fabricate a timestamp. An earlier version fell back to
+/// `Utc::now()`, which re-stamped a broken row as "created just now" on
+/// EVERY read: the row sorted to the top of any recency sort and never
+/// aged out of staleness checks. Surfacing the unknown as `None` lets
+/// the caller fail it safe instead.
+pub(crate) fn created_at_from_json(json: &str) -> Option<DateTime<Utc>> {
     #[derive(serde::Deserialize)]
     struct CreatedAt {
         created_at: DateTime<Utc>,
     }
     serde_json::from_str::<CreatedAt>(json)
+        .ok()
         .map(|c| c.created_at)
-        .unwrap_or_else(|_| Utc::now())
+}
+
+/// The `created_at` a read path assigns a record whose JSON carries no
+/// parseable timestamp. The Unix epoch sorts oldest and is maximally
+/// stale, so a corrupt row fails safe (least-recent, never newest)
+/// rather than masquerading as freshly created the way `Utc::now()`
+/// once did.
+pub(crate) fn created_at_or_oldest(json: &str) -> DateTime<Utc> {
+    created_at_from_json(json).unwrap_or(DateTime::<Utc>::UNIX_EPOCH)
 }
 
 /// A persisted workspace record — full workspace data (PR + linked
@@ -38,6 +50,25 @@ pub struct WorkspaceRecord {
     pub workspace_json: Option<String>,
 }
 
+impl WorkspaceRecord {
+    /// The JSON payload a store write must persist, or an error.
+    ///
+    /// A `None` or empty blob is refused here so it can never reach the
+    /// kv table. Previously every save mapped `None -> ""`; a later
+    /// `get_workspace` then returned `Some("")`, a present-but-empty
+    /// phantom record that `serde_json` chokes on. Rejecting at the
+    /// write boundary makes that empty record unrepresentable.
+    pub(crate) fn require_json(&self) -> Result<&str, StoreError> {
+        match self.workspace_json.as_deref() {
+            Some(json) if !json.is_empty() => Ok(json),
+            _ => Err(StoreError::Backend(format!(
+                "workspace {}: refusing to persist an empty JSON payload",
+                self.key
+            ))),
+        }
+    }
+}
+
 /// A persisted project record — the parent container that holds
 /// workspaces. JSON-serialized `lazybox_core::Project`, keyed by
 /// `ProjectKey`. See the trait methods below for default kv-piggyback
@@ -48,6 +79,20 @@ pub struct ProjectRecord {
     pub key: String,
     pub created_at: DateTime<Utc>,
     pub project_json: Option<String>,
+}
+
+impl ProjectRecord {
+    /// The JSON payload a store write must persist, or an error. Same
+    /// empty/`None`-rejection contract as [`WorkspaceRecord::require_json`].
+    pub(crate) fn require_json(&self) -> Result<&str, StoreError> {
+        match self.project_json.as_deref() {
+            Some(json) if !json.is_empty() => Ok(json),
+            _ => Err(StoreError::Backend(format!(
+                "project {}: refusing to persist an empty JSON payload",
+                self.key
+            ))),
+        }
+    }
 }
 
 /// One durable mutation in an atomic [`Store::apply_batch`] call.
@@ -112,17 +157,24 @@ pub trait Store: Send + Sync {
         let Some(json) = self.get_kv(&kv_key)? else {
             return Ok(None);
         };
+        // An empty payload can only be legacy data (writes now reject
+        // empty via `require_json`). Treat it as absent rather than
+        // surface a `Some("")` phantom that deserialization chokes on —
+        // this heals pre-fix rows on read, not just on the write path.
+        if json.is_empty() {
+            return Ok(None);
+        }
         Ok(Some(WorkspaceRecord {
             key: key.as_str().to_string(),
-            created_at: created_at_from_json(&json),
+            created_at: created_at_or_oldest(&json),
             workspace_json: Some(json),
         }))
     }
 
     fn save_workspace(&self, record: &WorkspaceRecord) -> Result<(), StoreError> {
         let kv_key = format!("workspace:{}", record.key);
-        let json = record.workspace_json.clone().unwrap_or_default();
-        self.set_kv(&kv_key, &json)
+        let json = record.require_json()?;
+        self.set_kv(&kv_key, json)
     }
 
     fn delete_workspace(&self, key: &WorkspaceKey) -> Result<(), StoreError> {
@@ -147,17 +199,21 @@ pub trait Store: Send + Sync {
         let Some(json) = self.get_kv(&kv_key)? else {
             return Ok(None);
         };
+        // Same legacy empty-payload heal as `get_workspace`.
+        if json.is_empty() {
+            return Ok(None);
+        }
         Ok(Some(ProjectRecord {
             key: key.as_str().to_string(),
-            created_at: created_at_from_json(&json),
+            created_at: created_at_or_oldest(&json),
             project_json: Some(json),
         }))
     }
 
     fn save_project(&self, record: &ProjectRecord) -> Result<(), StoreError> {
         let kv_key = format!("project:{}", record.key);
-        let json = record.project_json.clone().unwrap_or_default();
-        self.set_kv(&kv_key, &json)
+        let json = record.require_json()?;
+        self.set_kv(&kv_key, json)
     }
 
     fn delete_project(&self, key: &ProjectKey) -> Result<(), StoreError> {

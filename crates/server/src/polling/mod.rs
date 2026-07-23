@@ -5084,7 +5084,9 @@ async fn delete_workspace_internal(
                 // Preserve the workspace and every live mapping so the user
                 // can retry. The backend contract deliberately keeps a slot
                 // after a transport/timeout failure; deleting our metadata
-                // here would orphan an agent we failed to stop.
+                // here would orphan an agent we failed to stop. The client
+                // rolls back its optimistic row removal off this "terminal"
+                // error (#476).
                 config.deleted_workspaces.lock().remove(key_str);
                 return false;
             }

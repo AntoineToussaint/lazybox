@@ -11815,3 +11815,326 @@ mod agent_cli_update_tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod optimistic_mutation_tests {
+    //! #476: mutating actions apply locally on the keystroke, reconcile
+    //! on the daemon's success echo, and roll back on its failure event.
+    //! No user-visible wait on a round-trip; a rejected mutation never
+    //! leaves a lie on screen.
+    use super::super::*;
+    use crate::realm::components::footer::NoticeSeverity;
+    use chrono::Utc;
+    use lazybox_core::{SessionKey, Task, TaskId, Workspace, WorkspaceKey};
+    use lazybox_ipc::{Command as IpcCommand, Event as IpcEvent, channel};
+    use lazybox_tui_core::action::Action;
+    use tuirealm::ratatui::layout::Size;
+
+    type TestModel = Model<tuirealm::terminal::TestTerminalAdapter>;
+
+    fn build_model() -> TestModel {
+        let (client, _server) = channel::pair();
+        // A live polling modal swallows footer notices; clear it so
+        // rollback errors surface in `status.notice`.
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        m.status.polling = None;
+        m
+    }
+
+    fn provider_error(source: &str, message: &str) -> IpcEvent {
+        IpcEvent::ProviderError {
+            source: source.into(),
+            message: message.into(),
+            detail: String::new(),
+            kind: "retryable".into(),
+        }
+    }
+
+    fn pr_task(key: &str) -> Task {
+        let (path, num) = key.rsplit_once('#').unwrap_or((key, "1"));
+        Task {
+            id: TaskId {
+                source: "github".into(),
+                key: key.into(),
+            },
+            title: format!("task: {key}"),
+            body: None,
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: format!("https://github.com/{path}/pull/{num}"),
+            repo: Some("owner/repo".into()),
+            branch: Some("feature".into()),
+            base_branch: None,
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: Some("PR_node".into()),
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        }
+    }
+
+    fn seed_pr_workspace(m: &mut TestModel, key: &str) -> WorkspaceKey {
+        let ws = Workspace::from_task(pr_task(key), Utc::now());
+        let ws_key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        ws_key
+    }
+
+    fn reviewers_of(m: &TestModel, sk: &SessionKey) -> Vec<String> {
+        m.sidebar
+            .workspace_by_key(sk)
+            .and_then(|w| w.pr.as_ref())
+            .map(|p| p.reviewers.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn archive_removes_row_instantly_then_reconciles() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#1");
+        let sk: SessionKey = (&ws_key).into();
+        assert!(m.sidebar.workspace_by_key(&sk).is_some());
+
+        let cmds = m.dispatch_action_confirmed(
+            &Action::Archive,
+            &ActionConfirmTarget::Workspace(sk.clone()),
+        );
+        assert!(matches!(cmds.as_slice(), [IpcCommand::Kill { .. }]));
+        assert!(
+            m.sidebar.workspace_by_key(&sk).is_none(),
+            "row must vanish on confirm, not wait for WorkspaceRemoved"
+        );
+        assert_eq!(m.pending_mutations.len(), 1, "rollback stash held");
+
+        m.handle_daemon_event(IpcEvent::WorkspaceRemoved(ws_key));
+        assert!(
+            m.pending_mutations.is_empty(),
+            "the removed echo reconciles the stash"
+        );
+        assert!(m.sidebar.workspace_by_key(&sk).is_none());
+    }
+
+    #[test]
+    fn archive_rolls_back_on_store_failure() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#2");
+        let sk: SessionKey = (&ws_key).into();
+        m.dispatch_action_confirmed(
+            &Action::Archive,
+            &ActionConfirmTarget::Workspace(sk.clone()),
+        );
+        assert!(m.sidebar.workspace_by_key(&sk).is_none());
+
+        m.handle_daemon_event(provider_error(
+            "store",
+            &format!("could not delete workspace {ws_key}: disk full"),
+        ));
+        assert!(
+            m.sidebar.workspace_by_key(&sk).is_some(),
+            "a rejected delete must re-insert the row"
+        );
+        assert!(m.pending_mutations.is_empty());
+        let n = m.status.notice.as_ref().expect("rollback flashes an error");
+        assert_eq!(n.severity, NoticeSeverity::Permanent);
+        assert!(n.message.contains("delete failed"), "got {:?}", n.message);
+    }
+
+    #[test]
+    fn archive_rolls_back_on_terminal_kill_failure() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#8");
+        let sk: SessionKey = (&ws_key).into();
+        m.dispatch_action_confirmed(
+            &Action::Archive,
+            &ActionConfirmTarget::Workspace(sk.clone()),
+        );
+        assert!(m.sidebar.workspace_by_key(&sk).is_none());
+
+        // The daemon couldn't stop a backing agent, so it preserved the
+        // workspace and emitted a `terminal` error naming the key.
+        m.handle_daemon_event(provider_error(
+            "terminal",
+            &format!(
+                "could not stop terminal x; workspace {ws_key} was not deleted: tmux timed out"
+            ),
+        ));
+        assert!(
+            m.sidebar.workspace_by_key(&sk).is_some(),
+            "an un-killable agent must bring the row back"
+        );
+        assert!(m.pending_mutations.is_empty());
+        let n = m.status.notice.as_ref().expect("rollback flashes");
+        assert!(n.message.contains("delete failed"), "got {:?}", n.message);
+    }
+
+    #[test]
+    fn unrelated_store_error_does_not_roll_back() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#9");
+        let sk: SessionKey = (&ws_key).into();
+        m.dispatch_action_confirmed(
+            &Action::Archive,
+            &ActionConfirmTarget::Workspace(sk.clone()),
+        );
+
+        // A store error naming a DIFFERENT workspace must not resurrect
+        // this row.
+        m.handle_daemon_event(provider_error(
+            "store",
+            "could not delete workspace github:owner/repo#99: nope",
+        ));
+        assert!(
+            m.sidebar.workspace_by_key(&sk).is_none(),
+            "rollback keys off the named workspace, not any store error"
+        );
+        assert_eq!(m.pending_mutations.len(), 1, "stash still armed");
+    }
+
+    #[test]
+    fn reviewers_update_chip_instantly_then_reconcile() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#3");
+        let sk: SessionKey = (&ws_key).into();
+        m.pending_review_request = Some(ws_key.clone());
+        m.review_choices = vec!["alice".into(), "bob".into()];
+        m.modal_stack.push(Id::RequestReviewers);
+
+        let cmds = m.handle_choice_picked(vec![0, 1]);
+        assert!(matches!(
+            cmds.as_slice(),
+            [IpcCommand::RequestReviewers { .. }]
+        ));
+        assert_eq!(
+            reviewers_of(&m, &sk),
+            vec!["alice".to_string(), "bob".to_string()]
+        );
+        assert_eq!(m.pending_mutations.len(), 1);
+
+        // The daemon's fresh copy reconciles the stash.
+        let mut updated = Workspace::from_task(pr_task("github:owner/repo#3"), Utc::now());
+        updated.pr.as_mut().unwrap().reviewers = vec!["alice".into(), "bob".into()];
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(updated)));
+        assert!(m.pending_mutations.is_empty());
+        assert_eq!(
+            reviewers_of(&m, &sk),
+            vec!["alice".to_string(), "bob".to_string()]
+        );
+    }
+
+    #[test]
+    fn reviewers_roll_back_on_failure() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#4");
+        let sk: SessionKey = (&ws_key).into();
+        m.pending_review_request = Some(ws_key.clone());
+        m.review_choices = vec!["alice".into()];
+        m.modal_stack.push(Id::RequestReviewers);
+        m.handle_choice_picked(vec![0]);
+        assert_eq!(reviewers_of(&m, &sk), vec!["alice".to_string()]);
+
+        m.handle_daemon_event(provider_error(
+            "reviewers",
+            "request reviewers failed: nope",
+        ));
+        assert!(
+            reviewers_of(&m, &sk).is_empty(),
+            "a rejected reviewer request must roll the chip back"
+        );
+        assert!(m.pending_mutations.is_empty());
+        let n = m.status.notice.as_ref().expect("failure flashes");
+        assert_eq!(n.severity, NoticeSeverity::Permanent);
+        assert!(
+            n.message.contains("request reviewers failed"),
+            "got {:?}",
+            n.message
+        );
+    }
+
+    #[test]
+    fn labels_apply_then_roll_back_on_failure() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#5");
+        let sk: SessionKey = (&ws_key).into();
+        m.pending_labels_request = Some(ws_key.clone());
+        m.labels_choices = vec!["bug".into(), "urgent".into()];
+        m.modal_stack.push(Id::ManageLabels);
+        m.handle_choice_picked(vec![0, 1]);
+        let names: Vec<String> = m
+            .sidebar
+            .workspace_by_key(&sk)
+            .unwrap()
+            .pr
+            .as_ref()
+            .unwrap()
+            .labels
+            .iter()
+            .map(|l| l.name.clone())
+            .collect();
+        assert_eq!(names, vec!["bug".to_string(), "urgent".to_string()]);
+
+        m.handle_daemon_event(provider_error("labels", "update labels failed: boom"));
+        assert!(
+            m.sidebar
+                .workspace_by_key(&sk)
+                .unwrap()
+                .pr
+                .as_ref()
+                .unwrap()
+                .labels
+                .is_empty(),
+            "a rejected label set must roll back"
+        );
+        assert!(m.pending_mutations.is_empty());
+    }
+
+    #[test]
+    fn assignees_apply_then_roll_back_on_failure() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#6");
+        let sk: SessionKey = (&ws_key).into();
+        m.pending_assignees_request = Some(ws_key.clone());
+        m.assignees_choices = vec!["alice".into(), "bob".into()];
+        m.modal_stack.push(Id::AddAssignees);
+        m.handle_choice_picked(vec![0]);
+        assert_eq!(
+            m.sidebar
+                .workspace_by_key(&sk)
+                .unwrap()
+                .pr
+                .as_ref()
+                .unwrap()
+                .assignees,
+            vec!["alice".to_string()]
+        );
+
+        m.handle_daemon_event(provider_error("assignees", "update assignees failed: no"));
+        assert!(
+            m.sidebar
+                .workspace_by_key(&sk)
+                .unwrap()
+                .pr
+                .as_ref()
+                .unwrap()
+                .assignees
+                .is_empty(),
+            "a rejected assignee set must roll back"
+        );
+        assert!(m.pending_mutations.is_empty());
+    }
+}

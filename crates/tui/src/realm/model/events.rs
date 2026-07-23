@@ -431,6 +431,9 @@ impl<T: TerminalAdapter> Model<T> {
         if let IpcEvent::ProjectRemoved(key) = &event {
             self.projects.remove(key);
             self.sidebar.apply_projects(self.projects.clone());
+            // The cascade the daemon confirmed reconciles any optimistic
+            // project removal (#476).
+            self.reconcile_optimistic(key.as_str());
             self.redraw = true;
             return;
         }
@@ -700,6 +703,9 @@ impl<T: TerminalAdapter> Model<T> {
         // removed, so a re-added workspace (e.g. user re-checks a
         // filter) gets a fresh details fetch on next focus.
         if let IpcEvent::WorkspaceRemoved(key) = &event {
+            // The daemon confirmed the removal — reconcile any optimistic
+            // archive/delete of this row (#476).
+            self.reconcile_optimistic(key.as_str());
             self.pr_details_fetched.remove(key);
             // A merged/removed workspace can't re-fire; drop its arming
             // latch so the set doesn't leak keys across a session.
@@ -769,6 +775,10 @@ impl<T: TerminalAdapter> Model<T> {
         // carries the full workspace, so check it directly.
         if let IpcEvent::WorkspaceUpserted(ws) = &event {
             self.maybe_auto_merge(ws);
+            // The daemon's fresh copy is authoritative — reconcile any
+            // optimistic chip edit (reviewers/assignees/labels) on this
+            // workspace (#476).
+            self.reconcile_optimistic(ws.key.as_str());
         }
         self.right.on_daemon_event(&event);
         self.terminals.on_daemon_event(&event);
@@ -961,6 +971,22 @@ impl<T: TerminalAdapter> Model<T> {
                         } else {
                             self.flash_error(format!("✗ {action} failed — {message}"));
                         }
+                        // Revert the optimistic chip edit (#476). No-op
+                        // for sources that don't carry one (reply / merge
+                        // / close-issue), so the flash above still stands.
+                        self.rollback_optimistic_chip(source);
+                    } else if matches!(source.as_str(), "store" | "terminal")
+                        && self.rollback_optimistic_removal(message)
+                    {
+                        // An optimistic archive/delete the daemon
+                        // rejected: the row (and, for a project, its
+                        // children) was removed locally, so re-insert it
+                        // and surface why (#476). Delete failures arrive
+                        // as `store` (archive/db) or `terminal` (a backing
+                        // agent that couldn't be stopped) errors naming the
+                        // key; one naming no pending removal keeps its
+                        // quiet sync-log-only handling.
+                        self.flash_error(format!("✗ delete failed — {message}"));
                     }
                     // Manual refresh failed — convert the ack flag
                     // into a "sync failed" notice so the user

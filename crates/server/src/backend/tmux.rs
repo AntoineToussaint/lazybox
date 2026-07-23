@@ -169,20 +169,40 @@ fn transparent_conf() -> String {
 /// client's VT parser runs with LNM off, where `\n` is a plain line feed
 /// that moves the cursor down WITHOUT returning to column 0 — feeding the
 /// capture verbatim would staircase every line. So each `\n` becomes
-/// `\r\n`. The trailing newline is dropped so the cursor lands at the end
-/// of the last history line, exactly where tmux's live attach repaint
-/// resumes, stitching seeded history to the live screen without a blank
-/// row between them.
+/// `\r\n`.
+///
+/// capture-pane also pads its output to the full pane grid: unused and
+/// cleared rows at the bottom of the screen come back as blank lines that
+/// were never real scrollback. Seeding them verbatim injects spurious
+/// empty rows into the reconstructed history — the "random extra empty
+/// lines after restart / move-session" (#442). Every trailing blank row is
+/// dropped (subsuming the single separating newline capture appends), so
+/// the seed ends exactly at the last row with real content — where tmux's
+/// live attach repaint resumes, stitching seeded history to the live
+/// screen without a blank row between them. Only the trailing run is
+/// trimmed: interior blank lines are genuine output and survive untouched.
 fn normalize_capture(stdout: &[u8]) -> Vec<u8> {
-    let trimmed = stdout.strip_suffix(b"\n").unwrap_or(stdout);
-    let mut seed = Vec::with_capacity(trimmed.len() + 16);
-    for &b in trimmed {
-        if b == b'\n' {
-            seed.push(b'\r');
+    let mut lines: Vec<&[u8]> = stdout.split(|&b| b == b'\n').collect();
+    while lines.last().is_some_and(|line| is_blank_capture_line(line)) {
+        lines.pop();
+    }
+    let mut seed = Vec::with_capacity(stdout.len());
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            seed.extend_from_slice(b"\r\n");
         }
-        seed.push(b);
+        seed.extend_from_slice(line);
     }
     seed
+}
+
+/// A capture row is blank when it holds no visible cells. capture-pane
+/// strips trailing spaces, so grid-padding rows arrive empty; the
+/// whitespace check is defensive. A row carrying `-e` escape sequences is
+/// deliberately NOT blank — trimming it could swallow styled output, and
+/// the conservative choice is to keep it.
+fn is_blank_capture_line(line: &[u8]) -> bool {
+    line.iter().all(|b| b.is_ascii_whitespace())
 }
 
 /// `set-option` invocations that bring an ALREADY-RUNNING tmux server
@@ -1201,6 +1221,35 @@ mod tests {
         // No trailing newline → nothing stripped.
         assert_eq!(normalize_capture(b"tail"), b"tail");
         assert_eq!(normalize_capture(b""), b"");
+    }
+
+    /// capture-pane pads its output to the full pane grid, so a short
+    /// session's capture ends in a run of blank rows. Those are padding,
+    /// not scrollback — seeding them verbatim injected the "random extra
+    /// empty lines after restart / move-session" (#442). The seed must end
+    /// at the last row with real content, and interior blanks (genuine
+    /// output) must survive.
+    #[test]
+    fn normalize_capture_trims_trailing_padding_blanks() {
+        // Content rows followed by grid-padding blanks.
+        assert_eq!(
+            normalize_capture(b"one\ntwo\nthree\n\n\n\n"),
+            b"one\r\ntwo\r\nthree"
+        );
+        // Whitespace-only padding rows are trimmed too (defensive:
+        // capture-pane strips trailing spaces, but a run must never leak).
+        assert_eq!(normalize_capture(b"content\n   \n\t\n"), b"content");
+        // An all-blank capture reduces to nothing — no seed to inject.
+        assert_eq!(normalize_capture(b"\n\n\n"), b"");
+        // Interior blank lines are genuine output; only the trailing
+        // padding run is trimmed.
+        assert_eq!(
+            normalize_capture(b"top\n\nmiddle\n\n\n"),
+            b"top\r\n\r\nmiddle"
+        );
+        // A trailing blank row carrying an `-e` escape (styled but empty)
+        // is kept rather than risk swallowing real styled output.
+        assert_eq!(normalize_capture(b"body\n\x1b[0m\n"), b"body\r\n\x1b[0m");
     }
 
     /// The `-S` capture depth and the conf's `history-limit` come from

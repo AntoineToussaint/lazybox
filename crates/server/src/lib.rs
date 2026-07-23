@@ -1348,6 +1348,7 @@ pub async fn dispatch_command(
                 autonomous,
                 on_main,
                 model_alias,
+                false,
             )
             .await;
         }
@@ -1516,6 +1517,7 @@ pub async fn dispatch_command(
                     false,
                     false,
                     None,
+                    false,
                 )
                 .await;
             }

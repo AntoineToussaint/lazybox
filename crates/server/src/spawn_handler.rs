@@ -151,6 +151,7 @@ fn argv_for(
     skip_permissions: bool,
     hook_settings_path: Option<PathBuf>,
     model_args: &[String],
+    resume: bool,
 ) -> Option<Vec<String>> {
     match kind {
         TerminalKind::Agent(agent_id) => {
@@ -166,7 +167,16 @@ fn argv_for(
                 skip_permissions,
                 hook_settings_path,
             };
-            let mut argv = agent.spawn(&ctx);
+            // Restoring a persisted session consults the agent's declared
+            // resume incantation (Claude `--continue`, Codex `resume
+            // --last`) so the prior conversation reattaches; a fresh spawn
+            // starts a new one. Agents without a resume override fall back
+            // to `spawn`, so parity is opt-in per agent, never guessed here.
+            let mut argv = if resume {
+                agent.resume(&ctx)
+            } else {
+                agent.spawn(&ctx)
+            };
             // The tier's model flag (`--model claude-opus-4-8`) is
             // appended after the agent's own args so it can override a
             // default the agent baked into its spawn argv.
@@ -488,6 +498,7 @@ pub async fn handle_spawn(
     autonomous: bool,
     on_main: bool,
     model_alias: Option<String>,
+    resume: bool,
 ) {
     // Autonomous sessions (e.g. `@lazybox`-triggered work) launch with
     // tool-use permission prompts disabled so the agent runs unattended
@@ -743,6 +754,7 @@ pub async fn handle_spawn(
         skip_permissions,
         hook_settings.clone(),
         &model_args,
+        resume,
     ) {
         Some(a) => a,
         None => {
@@ -4660,6 +4672,8 @@ pub async fn handle_inject_prompt(
                     // through prompt injection.
                     false,
                     fb.model_alias,
+                    // A fresh re-spawn, not a restore.
+                    false,
                 )
                 .await;
                 return;
@@ -5601,9 +5615,12 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
                 // main-checkout terminals aren't persisted as sessions.
                 false,
                 // A restored session keeps whatever model it was first
-                // launched with (the agent's `--continue` resumes it);
-                // we don't re-pick a tier here.
+                // launched with; we don't re-pick a tier here.
                 None,
+                // Restore: relaunch through the agent's resume path so the
+                // prior conversation reattaches (Claude `--continue`, Codex
+                // `resume --last`) instead of coming back blank.
+                true,
             )
             .await;
         }
@@ -7332,7 +7349,8 @@ mod tests {
         let kind = TerminalKind::Agent("claude".into());
         let cwd = Some(std::path::PathBuf::from("/tmp/wt"));
 
-        let with_skip = argv_for(&config, &kind, &cwd, true, None, &[]).expect("claude registered");
+        let with_skip =
+            argv_for(&config, &kind, &cwd, true, None, &[], false).expect("claude registered");
         assert_eq!(
             with_skip,
             vec![
@@ -7343,7 +7361,7 @@ mod tests {
         );
 
         let without_skip =
-            argv_for(&config, &kind, &cwd, false, None, &[]).expect("claude registered");
+            argv_for(&config, &kind, &cwd, false, None, &[], false).expect("claude registered");
         assert_eq!(without_skip, vec!["claude".to_string()]);
 
         // With a generated hook settings file, `--settings <path>` is
@@ -7355,6 +7373,7 @@ mod tests {
             false,
             Some(std::path::PathBuf::from("/run/hooks/settings-1.json")),
             &[],
+            false,
         )
         .expect("claude registered");
         assert_eq!(
@@ -7382,6 +7401,7 @@ mod tests {
             false,
             None,
             &["--model".to_string(), "claude-opus-4-8".to_string()],
+            false,
         )
         .expect("claude registered");
         assert_eq!(
@@ -7390,6 +7410,46 @@ mod tests {
                 "claude".to_string(),
                 "--model".to_string(),
                 "claude-opus-4-8".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn argv_for_resume_uses_agent_resume_incantation() {
+        let config =
+            ServerConfig::with_store(std::sync::Arc::new(lazybox_store::MemoryStore::new()));
+        let cwd = Some(std::path::PathBuf::from("/tmp/wt"));
+
+        // Restore relaunches through the agent's declared resume path, so
+        // the prior conversation reattaches instead of coming back blank.
+        let claude = argv_for(
+            &config,
+            &TerminalKind::Agent("claude".into()),
+            &cwd,
+            false,
+            None,
+            &[],
+            true,
+        )
+        .expect("claude registered");
+        assert_eq!(claude, vec!["claude".to_string(), "--continue".to_string()]);
+
+        let codex = argv_for(
+            &config,
+            &TerminalKind::Agent("codex".into()),
+            &cwd,
+            false,
+            None,
+            &[],
+            true,
+        )
+        .expect("codex registered");
+        assert_eq!(
+            codex,
+            vec![
+                "codex".to_string(),
+                "resume".to_string(),
+                "--last".to_string(),
             ]
         );
     }

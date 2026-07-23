@@ -921,6 +921,8 @@ async fn dispatch_action(
                 false,
                 // Autonomous spawns use the agent's default model.
                 None,
+                // Fresh spawn, not a session restore.
+                false,
             )
             .await;
         }
@@ -1094,6 +1096,8 @@ async fn dispatch_action(
                         false,
                         // Auto-fix uses the agent's default model.
                         None,
+                        // Fresh spawn, not a session restore.
+                        false,
                     )
                     .await;
                 }

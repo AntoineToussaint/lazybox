@@ -728,6 +728,7 @@ async fn autonomous_spawn_wires_no_permission_consistently() {
             true,  // autonomous
             false, // on_main
             None,  // model_alias
+            false,
         )
         .await;
 
@@ -1952,6 +1953,7 @@ async fn concurrent_spawns_collapse_onto_one_backend_session() {
                 false,
                 false, // on_main
                 None,  // model_alias
+                false,
             )
             .await;
         });
@@ -1971,6 +1973,7 @@ async fn concurrent_spawns_collapse_onto_one_backend_session() {
                 true,
                 false, // on_main
                 None,  // model_alias
+                false,
             )
             .await;
         });
@@ -2047,6 +2050,7 @@ async fn spawn_aborts_when_workspace_was_deleted_mid_flight() {
             false,
             false, // on_main
             None,  // model_alias
+            false,
         )
         .await;
 
@@ -2089,6 +2093,7 @@ async fn spawn_aborts_when_workspace_does_not_exist() {
             false,
             false,
             None,
+            false,
         )
         .await;
 
@@ -2772,6 +2777,7 @@ async fn many_concurrent_prompt_spawns_all_deliver() {
                     false,
                     false, // on_main
                     None,  // model_alias
+                    false,
                 )
                 .await;
             }));

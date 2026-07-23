@@ -1324,6 +1324,22 @@ pub async fn dispatch_command(
             if !logins.is_empty() {
                 let _ = tx.send(Event::ViewerIdentities { logins });
             }
+            // Last of the post-subscribe pushes: the daemon's authoritative
+            // auto-fix policy config, so the policies menu (`g p`) reflects
+            // what *this daemon* would do, not the client's own local config
+            // — the two differ in `--connect` remote mode (tracker #512).
+            // Loaded fresh from the daemon's config file (the poller reads
+            // it the same way each tick); a missing/broken config reads as
+            // the off-by-default settings. Emitted after the snapshot +
+            // recovery/identity pushes so it never interposes in their
+            // order.
+            let auto_fix = lazybox_config::Config::load()
+                .map(|c| c.auto_fix.to_settings())
+                .unwrap_or_default();
+            let _ = tx.send(Event::AutoFixPolicyConfig {
+                enabled: auto_fix.enabled,
+                opt_out_labels: auto_fix.opt_out_labels,
+            });
         }
         lazybox_ipc::Command::Spawn {
             session_key,

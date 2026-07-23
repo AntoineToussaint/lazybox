@@ -4383,6 +4383,29 @@ mod merge_focus_follow_tests {
         );
     }
 
+    /// The daemon's `AutoFixPolicyConfig` event overrides the
+    /// client-local auto-fix config so the policies menu reflects what
+    /// the *daemon* would do — the two configs diverge under `--connect`
+    /// (tracker #512). The glyph itself is proven off-when-disabled in
+    /// `modals::tests`; here we prove the event feeds those menu inputs.
+    #[test]
+    fn auto_fix_policy_config_event_updates_menu_inputs() {
+        let mut m = build_model();
+        // Client starts at the off-by-default (opt-in) settings.
+        assert!(!m.auto_fix_enabled);
+
+        m.handle_daemon_event(IpcEvent::AutoFixPolicyConfig {
+            enabled: true,
+            opt_out_labels: vec!["skip-fix".into()],
+        });
+        assert!(m.auto_fix_enabled, "daemon's enable flag is applied");
+        assert_eq!(
+            m.auto_fix_opt_out_labels,
+            vec!["skip-fix".to_string()],
+            "daemon's opt-out label set replaces the client-local one",
+        );
+    }
+
     /// The description-reader modal (#448): opening it for the focused
     /// workspace's body mounts `Id::DescriptionModal`, and dismissing it
     /// pops cleanly (it carries no pending model state).

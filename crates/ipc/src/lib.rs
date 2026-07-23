@@ -1120,6 +1120,23 @@ pub enum Event {
     ViewerIdentities {
         logins: Vec<(String, String)>,
     },
+    /// The daemon's authoritative auto-fix policy config: the global
+    /// enable switch and the label opt-out set. Emitted once per
+    /// subscribe, as the last of the post-`Snapshot` pushes (after
+    /// `ViewerIdentities`), so the policies menu (`g p`, issue #363)
+    /// reflects what the **daemon** would actually do — not what the
+    /// client's own local config happens to say. This matters in
+    /// `--connect` remote mode, where the client reads a different config
+    /// file than the daemon; without it an armed workspace could show a
+    /// lit glyph while the remote daemon has auto-fix globally off
+    /// (tracker #512). The per-session arm and the PR's labels already
+    /// arrive authoritatively (on the `Workspace` / its `Task`); this
+    /// supplies the remaining global inputs the client can't otherwise
+    /// know.
+    AutoFixPolicyConfig {
+        enabled: bool,
+        opt_out_labels: Vec<String>,
+    },
     /// A workspace was created or updated.
     /// Boxed because Workspace is several KB once activity is
     /// populated; keeping the `Event` enum slim avoids worst-case

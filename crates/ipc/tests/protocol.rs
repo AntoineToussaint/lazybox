@@ -393,6 +393,10 @@ fn all_events() -> Vec<Event> {
         Event::ViewerIdentities {
             logins: vec![("github".into(), "octocat".into())],
         },
+        Event::AutoFixPolicyConfig {
+            enabled: true,
+            opt_out_labels: vec!["no-auto-fix".into(), "do-not-lazybox".into()],
+        },
         Event::WorkspaceUpserted(Box::new(sample_workspace())),
         Event::WorkspaceRemoved(lazybox_core::WorkspaceKey::new(key.as_str())),
         Event::ProjectUpserted(Box::new(sample_project())),
@@ -828,6 +832,7 @@ fn event_tag(event: &Event) -> &'static str {
     match event {
         Event::Snapshot { .. } => "Snapshot",
         Event::ViewerIdentities { .. } => "ViewerIdentities",
+        Event::AutoFixPolicyConfig { .. } => "AutoFixPolicyConfig",
         Event::WorkspaceUpserted(_) => "WorkspaceUpserted",
         Event::WorkspaceRemoved(_) => "WorkspaceRemoved",
         Event::ProjectUpserted(_) => "ProjectUpserted",
@@ -902,7 +907,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
     );
     assert_eq!(
         event_tags.len(),
-        60,
+        61,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

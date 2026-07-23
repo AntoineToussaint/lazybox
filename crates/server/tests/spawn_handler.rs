@@ -93,6 +93,20 @@ async fn subscribed(config: ServerConfig) -> lazybox_ipc::Client {
     client
 }
 
+/// Drain the trailing `AutoFixPolicyConfig` push (last of the
+/// post-subscribe events, tracker #512). Tests that assert the stream
+/// is otherwise quiet call this after `subscribed`.
+async fn drain_auto_fix_config(client: &mut lazybox_ipc::Client) {
+    let cfg = timeout(Duration::from_secs(1), client.recv())
+        .await
+        .expect("auto-fix policy config deadline")
+        .expect("auto-fix policy config event");
+    assert!(
+        matches!(cfg, Event::AutoFixPolicyConfig { .. }),
+        "expected AutoFixPolicyConfig, got {cfg:?}"
+    );
+}
+
 async fn spawn_and_wait(
     client: &mut lazybox_ipc::Client,
     kind: TerminalKind,
@@ -1100,6 +1114,9 @@ async fn subscribe_does_not_warn_for_an_outdated_terminal_absent_from_its_snapsh
             .insert(lazybox_ipc::TerminalId(404));
 
         let mut client = subscribed(config).await;
+        // The auto-fix policy config still lands (it's unconditional);
+        // drain it, then assert no *warning* follows.
+        drain_auto_fix_config(&mut client).await;
         assert!(
             timeout(Duration::from_millis(100), client.recv())
                 .await

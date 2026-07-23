@@ -305,6 +305,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // must be classified here (does it carry workspaces
                 // needing the merge latch?) before this compiles.
                 IpcEvent::ViewerIdentities { .. }
+                | IpcEvent::AutoFixPolicyConfig { .. }
                 | IpcEvent::WorkspaceRemoved(_)
                 | IpcEvent::ProjectUpserted(_)
                 | IpcEvent::ProjectRemoved(_)
@@ -401,6 +402,20 @@ impl<T: TerminalAdapter> Model<T> {
                 self.viewer_logins.insert(source.clone(), login.clone());
             }
             self.right.set_viewer_logins(self.viewer_logins.clone());
+            self.redraw = true;
+            return;
+        }
+        // The daemon's authoritative auto-fix policy config (enable switch
+        // + opt-out labels), arriving among the post-subscribe pushes.
+        // Overrides the client-local config applied at startup so the
+        // policies menu (`g p`) reflects what the daemon would actually do
+        // — the two configs differ under `--connect` (tracker #512).
+        if let IpcEvent::AutoFixPolicyConfig {
+            enabled,
+            opt_out_labels,
+        } = &event
+        {
+            self.apply_auto_fix_config(*enabled, opt_out_labels.clone());
             self.redraw = true;
             return;
         }
@@ -845,6 +860,7 @@ impl<T: TerminalAdapter> Model<T> {
             // classified here before this compiles.
             IpcEvent::Snapshot { .. }
             | IpcEvent::ViewerIdentities { .. }
+            | IpcEvent::AutoFixPolicyConfig { .. }
             | IpcEvent::WorkspaceUpserted(_)
             | IpcEvent::WorkspaceRemoved(_)
             | IpcEvent::ProjectUpserted(_)
@@ -1029,6 +1045,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // compiles.
                 IpcEvent::Snapshot { .. }
                 | IpcEvent::ViewerIdentities { .. }
+                | IpcEvent::AutoFixPolicyConfig { .. }
                 | IpcEvent::WorkspaceUpserted(_)
                 | IpcEvent::WorkspaceRemoved(_)
                 | IpcEvent::ProjectUpserted(_)

@@ -139,7 +139,13 @@ async fn recv_workspace_upsert(client: &mut lazybox_ipc::Client) -> Event {
             .await
             .expect("client recv timeout")
             .expect("event");
-        if !matches!(evt, Event::ProjectUpserted(_)) {
+        // Skip the post-subscribe scaffolding events (project replay +
+        // the auto-fix policy config push) so callers see the workspace
+        // upsert they're waiting for.
+        if !matches!(
+            evt,
+            Event::ProjectUpserted(_) | Event::AutoFixPolicyConfig { .. }
+        ) {
             return evt;
         }
     }

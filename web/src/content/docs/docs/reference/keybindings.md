@@ -185,6 +185,7 @@ Press the leader key, then the second key. Every menu shows a which-key popup wh
 | --- | --- |
 | `x n` | new workspace |
 | `x p` | new project |
+| `x i` | import checkout |
 | `x a` | adopt sessions |
 | `x j` | join into PR |
 | `x z` | long snooze *(confirmed first)* |

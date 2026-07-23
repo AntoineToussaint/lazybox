@@ -446,6 +446,19 @@ async fn scan_git(path: &Path, args: &[&str]) -> Option<std::process::Output> {
     }
 }
 
+/// Describe a single on-disk path the way [`scan_external_checkouts`]
+/// describes each entry it finds. `None` when `path` is not the root
+/// of a git checkout (no `.git`), so the import handler can reject a
+/// path that has been moved or deleted since it was scanned. Read-only:
+/// runs the same cheap `git` probes as the scan, each under its own
+/// timeout.
+pub async fn describe_checkout_at(path: PathBuf) -> Option<DiscoveredCheckout> {
+    if !is_git_checkout(&path).await {
+        return None;
+    }
+    Some(describe_checkout(path).await)
+}
+
 /// Gather the read-only facts one discovered checkout carries.
 async fn describe_checkout(path: PathBuf) -> DiscoveredCheckout {
     let is_linked_worktree = tokio::fs::metadata(path.join(".git"))

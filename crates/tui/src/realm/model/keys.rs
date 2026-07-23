@@ -1590,6 +1590,7 @@ pub(super) fn action_from_kind(
         ActionKind::OpenEditor => Action::OpenEditor,
         ActionKind::NewWorkspace => Action::NewWorkspace,
         ActionKind::NewProject => Action::NewProject,
+        ActionKind::ImportCheckout => Action::ImportCheckout,
         ActionKind::MergePr => Action::MergePr,
         ActionKind::ToggleAutoMerge => Action::ToggleAutoMerge,
         ActionKind::ManagePolicies => Action::ManagePolicies,

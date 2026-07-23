@@ -338,6 +338,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::Notification { .. }
                 | IpcEvent::CleanWorktreesCompleted { .. }
                 | IpcEvent::WorktreesInspected { .. }
+                | IpcEvent::CheckoutsDiscovered { .. }
                 | IpcEvent::OrphanedWorktreeDeleted { .. }
                 | IpcEvent::AgentRunStarted { .. }
                 | IpcEvent::AgentRawJson { .. }
@@ -844,6 +845,7 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::Notification { .. }
             | IpcEvent::CleanWorktreesCompleted { .. }
             | IpcEvent::WorktreesInspected { .. }
+            | IpcEvent::CheckoutsDiscovered { .. }
             | IpcEvent::OrphanedWorktreeDeleted { .. }
             | IpcEvent::AgentRunStarted { .. }
             | IpcEvent::AgentRawJson { .. }
@@ -1007,6 +1009,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::Notification { .. }
                 | IpcEvent::CleanWorktreesCompleted { .. }
                 | IpcEvent::WorktreesInspected { .. }
+                | IpcEvent::CheckoutsDiscovered { .. }
                 | IpcEvent::OrphanedWorktreeDeleted { .. }
                 | IpcEvent::AgentRunStarted { .. }
                 | IpcEvent::AgentRawJson { .. }
@@ -1088,6 +1091,11 @@ impl<T: TerminalAdapter> Model<T> {
         // the inspector stays open across edits.
         if let IpcEvent::WorktreesInspected { inspections } = &event {
             self.mount_inspect_list(inspections.clone());
+        }
+        // Dev-folder scan replied. Swap the loading placeholder for the
+        // import picker listing every discovered checkout.
+        if let IpcEvent::CheckoutsDiscovered { checkouts } = &event {
+            self.mount_import_checkout_picker(checkouts.clone());
         }
         // One row removed (or refused). Surface the outcome in the
         // footer and re-inspect so the modal's list drops the row

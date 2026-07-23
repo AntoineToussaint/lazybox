@@ -69,7 +69,8 @@ impl CredentialChain {
     /// made a 2-second `gh auth token` hiccup indistinguishable from an
     /// unconfigured user, turning a transient error into a permanent-looking
     /// auth failure. Only a chain where *no* provider even ran (all absent)
-    /// stays `Exhausted`.
+    /// stays `Exhausted` — where "absent" covers both `NotFound` and a
+    /// provider echoing this chain's own `Exhausted` sentinel.
     pub async fn resolve(&self, scope: &str) -> Result<Credential, CredentialError> {
         let mut last_failure: Option<CredentialError> = None;
         for provider in &self.providers {
@@ -89,7 +90,11 @@ impl CredentialChain {
                 }
                 Err(e) => {
                     trace!(provider = provider.name(), error = %e, "provider skipped");
-                    if !matches!(e, CredentialError::NotFound(_)) {
+                    // `NotFound` is mere absence; `Exhausted` is this chain's
+                    // own sentinel (a provider returning it — e.g. a nested
+                    // chain — is signalling absence too). Neither is a real
+                    // failure worth surfacing, so neither may mask one.
+                    if !matches!(e, CredentialError::NotFound(_) | CredentialError::Exhausted) {
                         last_failure = Some(e);
                     }
                     continue;
@@ -140,6 +145,9 @@ mod tests {
     }
     fn provider_err() -> CredentialError {
         CredentialError::Provider("gh auth token: keyring locked".into())
+    }
+    fn exhausted() -> CredentialError {
+        CredentialError::Exhausted
     }
 
     #[tokio::test]
@@ -193,5 +201,25 @@ mod tests {
             chain.resolve("github").await,
             Err(CredentialError::Provider(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_sentinel_does_not_overwrite_an_earlier_failure() {
+        // A provider echoing this chain's own `Exhausted` sentinel (e.g. a
+        // nested chain that found nothing) signals absence, not a failure —
+        // it must not mask the real `Provider` error that preceded it.
+        let chain = CredentialChain::new()
+            .with(Failing {
+                name: "cmd",
+                err: provider_err,
+            })
+            .with(Failing {
+                name: "nested",
+                err: exhausted,
+            });
+        match chain.resolve("github").await {
+            Err(CredentialError::Provider(msg)) => assert!(msg.contains("keyring locked")),
+            other => panic!("expected the provider failure, got {other:?}"),
+        }
     }
 }

@@ -146,6 +146,8 @@ survived an upgrade. PTY launch generations are persisted with new sessions;
 when recovery finds an older generation, each client receives a persistent
 notice to close and reopen that terminal. The session stays attached until the
 user chooses to restart it, so an upgrade never kills in-flight agent work.
+Persisted generations newer than the running daemon are treated as compatible,
+so temporarily downgrading lazybox does not falsely condemn a newer session.
 
 ## The regression harness
 

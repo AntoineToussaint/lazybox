@@ -100,8 +100,19 @@ pub fn classify_status(status: u16) -> ErrorClass {
 /// keyword lists again.
 ///
 /// Auth wins over retryable (an expired token that also mentions
-/// "connection" is still an auth failure); retryable wins over
+/// "unauthorized" is still an auth failure); retryable wins over
 /// permanent.
+///
+/// The retryable phrases are deliberately qualified — `"connection
+/// refused"`, not a bare `"connection"`. A real transport failure
+/// reaches [`classify`] through the typed transport flag, never this
+/// probe, so the only strings that land here are opaque wrapper
+/// messages (notably GraphQL errors). GitHub's GraphQL schema names
+/// Relay pagination types `PullRequestConnection` / `IssueConnection`,
+/// so a *permanent* query error like "field 'x' doesn't exist on type
+/// 'PullRequestConnection'" contains the substring "connection": a bare
+/// keyword would retry that schema bug forever (the very failure mode
+/// #512 called out for Linear). Qualified phrases avoid it.
 pub fn classify_message(message: &str) -> ErrorClass {
     let lower = message.to_lowercase();
 
@@ -113,8 +124,14 @@ pub fn classify_message(message: &str) -> ErrorClass {
     const RETRYABLE: &[&str] = &[
         "timed out",
         "timeout",
-        "connection",
-        "network",
+        "connection refused",
+        "connection reset",
+        "connection closed",
+        "connection aborted",
+        "connection error",
+        "network is unreachable",
+        "network unreachable",
+        "network error",
         "rate limit",
         "temporarily",
         "hyper",
@@ -242,10 +259,34 @@ mod tests {
     }
 
     #[test]
-    fn auth_wins_over_retryable_in_message() {
-        // Both an auth word and a retryable word present → auth.
+    fn bare_connection_substring_is_not_retryable() {
+        // A permanent GraphQL schema error naming a Relay pagination
+        // type (`PullRequestConnection` / `IssueConnection`) contains
+        // the substring "connection" but is NOT transient — it must
+        // not retry forever. Only qualified phrases like "connection
+        // refused" are retryable. Regression guard for #512's
+        // "retried anything containing 'connection'" failure mode.
         assert_eq!(
-            classify_message("unauthorized: connection via proxy"),
+            classify_message("field 'foo' doesn't exist on type 'PullRequestConnection'"),
+            ErrorClass::Permanent
+        );
+        assert_eq!(
+            classify_message("cannot query field 'x' on type 'IssueConnection'"),
+            ErrorClass::Permanent
+        );
+        // "network" as a bare word (e.g. a policy/config error) is
+        // likewise not enough on its own.
+        assert_eq!(
+            classify_message("network policy 'default' rejected the mutation"),
+            ErrorClass::Permanent
+        );
+    }
+
+    #[test]
+    fn auth_wins_over_retryable_in_message() {
+        // Both an auth word and a qualified retryable phrase present → auth.
+        assert_eq!(
+            classify_message("unauthorized: connection refused by proxy"),
             ErrorClass::Auth
         );
     }

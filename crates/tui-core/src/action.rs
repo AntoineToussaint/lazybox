@@ -408,6 +408,7 @@ pub enum ActionKind {
     OpenSyncStatus,
     OpenMessages,
     DismissNotice,
+    InspectNotice,
     OpenSettings,
     OpenThemePicker,
     OpenSnippets,
@@ -447,6 +448,7 @@ impl ActionKind {
         Self::OpenSyncStatus,
         Self::OpenMessages,
         Self::DismissNotice,
+        Self::InspectNotice,
         // The three Jump actions sit together so the help panel reads
         // them as one coherent group.
         Self::JumpToWorkspace,
@@ -716,6 +718,13 @@ impl ActionDef {
                 default_keys: "Esc",
                 label: "dismiss",
                 describe: "Clear the current footer notice, whatever its severity — retryable, info, permanent, or auth. Severity still decides whether a notice auto-fades on its own; this clears it now. Yields to a live terminal (Esc reaches the program) and to a sidebar multi-select (Esc drops the selection first).",
+                section: Section::Global,
+            },
+            ActionKind::InspectNotice => &Self {
+                kind: ActionKind::InspectNotice,
+                default_keys: "Enter",
+                label: "detail",
+                describe: "Open the current footer error in a full-text detail modal. The footer pill width-caps its message, so a long error (a merge rejection, a spawn failure) shows truncated; this pops the whole thing, wrapped and readable. Only active while a sticky error notice is up; Enter keeps its normal pane meaning otherwise.",
                 section: Section::Global,
             },
             ActionKind::OpenSettings => &Self {
@@ -1668,6 +1677,7 @@ impl ActionKind {
             ActionKind::OpenSyncStatus => "open_sync_status",
             ActionKind::OpenMessages => "open_messages",
             ActionKind::DismissNotice => "dismiss_notice",
+            ActionKind::InspectNotice => "inspect_notice",
             ActionKind::OpenSettings => "open_settings",
             ActionKind::OpenThemePicker => "open_theme_picker",
             ActionKind::OpenSnippets => "open_snippets",
@@ -2352,6 +2362,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::OpenSyncStatus
         | ActionKind::OpenMessages
         | ActionKind::DismissNotice
+        | ActionKind::InspectNotice
         | ActionKind::OpenSettings
         | ActionKind::OpenThemePicker
         | ActionKind::OpenSnippets

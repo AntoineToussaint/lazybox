@@ -220,6 +220,29 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
             return;
         }
+        // ── Inspect the current sticky error (#453) ─────────────────
+        // The footer pill width-caps its message, so a merge rejection
+        // or spawn failure renders truncated and unreadable ("… never
+        // dismiss, offer no action, and truncate"). While a sticky
+        // error is pinned, the `InspectNotice` binding (default Enter,
+        // remappable) pops the full text in a wrapped detail modal.
+        // Gated on a *sticky* notice, not any: the transient Info/Hint
+        // notices auto-fade and are up too often for Enter to lose its
+        // pane meaning. Sequenced after the dismiss branch — an Esc/Enter
+        // remap collision resolves to dismiss first — and before the
+        // per-pane Enter arms, which it deliberately shadows only while
+        // an error is on screen.
+        if self
+            .status
+            .notice
+            .as_ref()
+            .is_some_and(|n| n.severity.is_sticky())
+            && self.resolve_focus_for_keys().is_some()
+            && self.matches_inspect_notice(&key)
+        {
+            self.inspect_notice();
+            return;
+        }
         match key.code {
             // Cycle panes — the catalog's `CyclePane` chord (Tab by
             // default, `Ctrl-w` under the vim preset, remappable via
@@ -913,6 +936,22 @@ impl<T: TerminalAdapter> Model<T> {
     fn matches_dismiss_notice(&self, key: &RealmKey) -> bool {
         use lazybox_tui_core::action::{ActionDef, ActionKind};
         let Some(chord) = ActionDef::for_kind(ActionKind::DismissNotice)
+            .effective_chord(&self.action_key_overrides)
+        else {
+            return false;
+        };
+        let Some(input) = key_event_to_stroke(realm_key_to_crossterm(key)) else {
+            return false;
+        };
+        &input == chord.head()
+    }
+
+    /// Whether `key` is the effective `InspectNotice` binding (default
+    /// `Enter`, overridable via `ui.action_keys.inspect_notice`). A
+    /// single keystroke — no `Seq` — so we compare the chord head.
+    fn matches_inspect_notice(&self, key: &RealmKey) -> bool {
+        use lazybox_tui_core::action::{ActionDef, ActionKind};
+        let Some(chord) = ActionDef::for_kind(ActionKind::InspectNotice)
             .effective_chord(&self.action_key_overrides)
         else {
             return false;
@@ -1837,6 +1876,11 @@ pub(super) const PANE_NATIVE_KINDS: &[(lazybox_tui_core::action::ActionKind, &st
         (
             K::DismissNotice,
             "handle_pane_key's dismiss-notice branch (keys.rs) — override honored",
+            true,
+        ),
+        (
+            K::InspectNotice,
+            "handle_pane_key's inspect-notice branch (keys.rs) — override honored",
             true,
         ),
         (

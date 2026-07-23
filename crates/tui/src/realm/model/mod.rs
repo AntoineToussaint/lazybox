@@ -334,6 +334,7 @@ impl Id {
             Id::WorktreeProgress
                 | Id::SyncStatus
                 | Id::Messages
+                | Id::Error
                 | Id::Help
                 | Id::HelpAsk
                 | Id::SnippetPicker
@@ -2568,8 +2569,7 @@ impl<T: TerminalAdapter> Model<T> {
         // Sticky severities own the footer slot: they never auto-fade
         // and demand an acknowledgment (Esc), so they must not be
         // displaced by a routine flash.
-        let sticky =
-            |s: NoticeSeverity| matches!(s, NoticeSeverity::Permanent | NoticeSeverity::Auth);
+        let sticky = NoticeSeverity::is_sticky;
         let msg = msg.into();
         // Severity-aware replacement: a lower-severity flash must not
         // displace a live sticky error — pre-fix, a Permanent
@@ -2603,6 +2603,52 @@ impl<T: TerminalAdapter> Model<T> {
         }
         self.status.notice = Some(Notice::new(msg, severity));
         self.redraw = true;
+    }
+
+    /// Pop the current sticky error into a full-text detail modal
+    /// (#453). The footer pill width-caps its message, so a long merge
+    /// rejection or spawn failure renders truncated ("actual error
+    /// unreadable"); this shows the whole thing wrapped. Bound to the
+    /// `InspectNotice` chord, offered only while a sticky notice is up
+    /// (see `handle_pane_key`). No-op if the notice cleared in between.
+    pub(super) fn inspect_notice(&mut self) {
+        use crate::realm::components::error::{Accent, ErrorModal};
+        let Some(notice) = self.status.notice.as_ref() else {
+            return;
+        };
+        let accent = match notice.severity {
+            crate::realm::components::footer::NoticeSeverity::Auth => Accent::warn("AUTH"),
+            _ => Accent::error("ERROR"),
+        };
+        let modal = ErrorModal::new("notice", accent, notice.message.clone()).title("Error detail");
+        self.mount_modal(Id::Error, modal);
+    }
+
+    /// Footer hints advertising the sticky-error lifecycle (#453):
+    /// `Enter detail` + `Esc dismiss`. Empty unless a sticky error is on
+    /// screen AND the inspect/dismiss keys will actually fire — a live
+    /// terminal swallows them (`resolve_focus_for_keys` is None), so the
+    /// hint would be a lie there, mirroring the key-branch gating.
+    pub(super) fn notice_action_hints(&self) -> Vec<crate::pane::Binding> {
+        use lazybox_tui_core::action::{ActionDef, ActionKind};
+        let sticky = self
+            .status
+            .notice
+            .as_ref()
+            .is_some_and(|n| n.severity.is_sticky());
+        if !sticky || self.resolve_focus_for_keys().is_none() {
+            return Vec::new();
+        }
+        [ActionKind::InspectNotice, ActionKind::DismissNotice]
+            .into_iter()
+            .map(|kind| {
+                let def = ActionDef::for_kind(kind);
+                crate::pane::Binding {
+                    keys: def.effective_keys_display(&self.action_key_overrides),
+                    label: std::borrow::Cow::Borrowed(def.label),
+                }
+            })
+            .collect()
     }
 
     /// Mount a modal under `id` with the standard "subscribe to any
@@ -3371,6 +3417,19 @@ impl<T: TerminalAdapter> Model<T> {
                     .collect()
             }
         };
+        // While a sticky error is pinned, advertise how to inspect its
+        // full text and dismiss it right in the hint bar (#453). Inserted
+        // just before `quit` so #100's quit guarantee survives narrow
+        // widths while the error's own actions still out-rank the
+        // tour/help hints.
+        let mut globals = globals;
+        let notice_hints = self.notice_action_hints();
+        if !notice_hints.is_empty() {
+            let pos = globals.len().saturating_sub(1);
+            for (i, hint) in notice_hints.into_iter().enumerate() {
+                globals.insert(pos + i, hint);
+            }
+        }
         let notice = self.status.notice.clone();
         // Which-key rows for an armed catalog leader — the
         // `(next-key, label)` continuations of the armed prefix, a pure

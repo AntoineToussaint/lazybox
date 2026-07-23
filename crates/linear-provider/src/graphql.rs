@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use lazybox_core::{
-    Activity, ActivityKind, CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState,
+    Activity, ActivityKind, CiStatus, ReviewStatus, Task, TaskId, TaskKind, TaskRole, TaskState,
 };
 use serde::Deserialize;
 
@@ -234,6 +234,7 @@ pub fn issue_to_task(issue: &Issue, viewer_id: &str) -> Task {
         additions: 0,
         deletions: 0,
         closes_issues: vec![],
+        kind: Some(TaskKind::Issue),
     }
 }
 

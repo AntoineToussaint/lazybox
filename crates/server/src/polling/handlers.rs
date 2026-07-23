@@ -1905,6 +1905,7 @@ mod github_target_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         }
     }
@@ -2107,6 +2108,7 @@ mod inspect_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         };
         let mut workspace = Workspace::from_task(task, chrono::Utc::now());
@@ -2410,6 +2412,7 @@ mod inspect_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         };
         let mut workspace = Workspace::from_task(task, chrono::Utc::now());
@@ -2467,6 +2470,7 @@ mod inspect_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         };
         let workspace = Workspace::from_task(task, chrono::Utc::now());
@@ -3051,6 +3055,7 @@ mod inspect_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         };
         let workspace = Workspace::from_task(task, chrono::Utc::now());

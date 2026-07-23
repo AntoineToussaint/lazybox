@@ -127,6 +127,22 @@ pub trait Agent: Send + Sync {
     /// Human-readable display name.
     fn display_name(&self) -> &'static str;
 
+    /// Single-letter badge for the sidebar runner column and any other
+    /// compact "which agent is live here" indicator. Declared by the
+    /// agent so identity lives in one place: the sidebar never
+    /// special-cases a kind, and a new agent can pick a letter that
+    /// doesn't collide instead of silently sharing the first char of a
+    /// name that's already taken (Codex vs Claude, both `C`). The
+    /// default derives the first char of [`Agent::id`] — fine for a
+    /// unique leading letter, overridden when it would collide.
+    fn badge(&self) -> char {
+        self.id()
+            .chars()
+            .next()
+            .map(|c| c.to_ascii_uppercase())
+            .unwrap_or('A')
+    }
+
     /// Which upstream LLM API this agent speaks. Drives base-URL env
     /// injection when an LLM gateway is configured. The default `None`
     /// covers agents whose upstream lazybox can't infer (a `GenericCli`
@@ -438,6 +454,9 @@ pub mod builtins {
         fn display_name(&self) -> &'static str {
             "Claude Code"
         }
+        fn badge(&self) -> char {
+            'C'
+        }
         fn llm_provider(&self) -> Option<LlmProvider> {
             Some(LlmProvider::Anthropic)
         }
@@ -540,6 +559,9 @@ pub mod builtins {
         }
         fn display_name(&self) -> &'static str {
             "Codex"
+        }
+        fn badge(&self) -> char {
+            'X'
         }
         fn llm_provider(&self) -> Option<LlmProvider> {
             Some(LlmProvider::OpenAI)
@@ -646,6 +668,9 @@ pub mod builtins {
         fn display_name(&self) -> &'static str {
             "Cursor Agent"
         }
+        fn badge(&self) -> char {
+            'U'
+        }
         fn llm_provider(&self) -> Option<LlmProvider> {
             Some(LlmProvider::OpenAI)
         }
@@ -741,6 +766,28 @@ mod tests {
             super::builtins::Cursor.llm_provider(),
             Some(LlmProvider::OpenAI)
         );
+    }
+
+    #[test]
+    fn builtins_declare_distinct_display_badges() {
+        // #440: the display badge lives on the agent, not a hardcoded
+        // sidebar match. Distinct letters guarantee two live agents in
+        // one workspace never collapse onto one column.
+        assert_eq!(Claude.badge(), 'C');
+        assert_eq!(super::builtins::Codex.badge(), 'X');
+        assert_eq!(super::builtins::Cursor.badge(), 'U');
+    }
+
+    #[test]
+    fn generic_cli_badge_defaults_to_first_char() {
+        let agent = super::builtins::GenericCli {
+            id: "aider",
+            display_name: "Aider",
+            spawn_cmd: vec!["aider".into()],
+            resume_cmd: None,
+            asking_patterns: vec![],
+        };
+        assert_eq!(agent.badge(), 'A');
     }
 
     #[test]

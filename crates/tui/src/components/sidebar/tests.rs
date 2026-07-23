@@ -2180,6 +2180,83 @@ mod rebadge_attention_tests {
         );
     }
 
+    #[test]
+    fn a_live_claude_and_codex_both_badge_in_the_columns() {
+        // #440: two agents in one workspace must each surface their own
+        // letter. Codex declares `X` on the `Agent` trait; Claude `C`.
+        // The pre-fix hardcoded match still special-cased codex, but the
+        // point of the fix is that identity is generic — a rebadge (next
+        // test) and any new agent inherit the same path.
+        let ws: SessionKey = (&WorkspaceKey::new("github:o/r#90")).into();
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.running_terminals.insert(
+            TerminalId(1),
+            (ws.clone(), TerminalKind::Agent("claude".to_string())),
+        );
+        sb.running_terminals.insert(
+            TerminalId(2),
+            (ws.clone(), TerminalKind::Agent("codex".to_string())),
+        );
+
+        assert_eq!(
+            sb.runner_badges(&ws),
+            vec![('C', 1), ('X', 1)],
+            "both the Claude (`C`) and Codex (`X`) badges must show",
+        );
+    }
+
+    #[test]
+    fn rebadge_preserves_both_the_claude_and_codex_badges() {
+        // #440 / #404: an issue→PR transfer must carry EVERY agent kind,
+        // codex included, onto the PR row — not just Claude.
+        let issue: SessionKey = (&WorkspaceKey::new("github:o/r#91")).into();
+        let pr: SessionKey = (&WorkspaceKey::new("github:o/r#92")).into();
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.running_terminals.insert(
+            TerminalId(1),
+            (issue.clone(), TerminalKind::Agent("claude".to_string())),
+        );
+        sb.running_terminals.insert(
+            TerminalId(2),
+            (issue.clone(), TerminalKind::Agent("codex".to_string())),
+        );
+
+        sb.on_event(&Event::TerminalsRebadged {
+            from: issue.clone(),
+            to: pr.clone(),
+        });
+
+        assert_eq!(sb.runner_badges(&issue), vec![], "issue row loses both");
+        assert_eq!(
+            sb.runner_badges(&pr),
+            vec![('C', 1), ('X', 1)],
+            "the PR row inherits BOTH the Claude and Codex badges",
+        );
+    }
+
+    #[test]
+    fn agent_badge_comes_from_the_trait_not_a_first_char_collision() {
+        // Cursor's id is `cursor-agent`; its first char is `C`, which
+        // would collide with Claude under the old first-char fallback.
+        // The trait declares `U`, so the generic lookup can't collide.
+        let ws: SessionKey = (&WorkspaceKey::new("github:o/r#93")).into();
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.running_terminals.insert(
+            TerminalId(1),
+            (ws.clone(), TerminalKind::Agent("claude".to_string())),
+        );
+        sb.running_terminals.insert(
+            TerminalId(2),
+            (ws.clone(), TerminalKind::Agent("cursor-agent".to_string())),
+        );
+
+        assert_eq!(
+            sb.runner_badges(&ws),
+            vec![('C', 1), ('U', 1)],
+            "Cursor declares `U`, so it never collapses onto Claude's `C`",
+        );
+    }
+
     fn agent_state(key: &SessionKey, state: AgentState) -> Event {
         Event::AgentState {
             session_key: key.clone(),

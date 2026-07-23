@@ -1229,14 +1229,32 @@ async fn validate_worktree_dir(
                     if tokio::fs::metadata(gitdir.join("index")).await.is_ok() {
                         return Ok(WorktreeDirState::Valid);
                     }
-                    tracing::warn!(
-                        path = %wt_path.display(),
-                        gitdir = %gitdir.display(),
-                        "worktree checkout incomplete (no index — interrupted \
-                         `git worktree add`?); repairing with reset --hard"
-                    );
-                    if run_git_in(wt_path, &["reset", "--hard"]).await.is_ok() {
-                        return Ok(WorktreeDirState::Valid);
+                    // `reset --hard` preserves untracked files but
+                    // *discards* edits to tracked files. If a fallback
+                    // session spawned after the failed provision (#446)
+                    // wrote content into a tracked file, repairing here
+                    // would silently destroy it (#512). Only repair when
+                    // no tracked-file edits are at risk; otherwise fall
+                    // through to the content check, which refuses loudly
+                    // (real work is non-pristine) rather than clobber.
+                    if worktree_has_tracked_edits(&gitdir, wt_path).await {
+                        tracing::warn!(
+                            path = %wt_path.display(),
+                            gitdir = %gitdir.display(),
+                            "worktree checkout incomplete (no index) but holds \
+                             tracked-file edits — refusing reset --hard, deferring \
+                             to the content check to avoid discarding user work"
+                        );
+                    } else {
+                        tracing::warn!(
+                            path = %wt_path.display(),
+                            gitdir = %gitdir.display(),
+                            "worktree checkout incomplete (no index — interrupted \
+                             `git worktree add`?); repairing with reset --hard"
+                        );
+                        if run_git_in(wt_path, &["reset", "--hard"]).await.is_ok() {
+                            return Ok(WorktreeDirState::Valid);
+                        }
                     }
                 } else {
                     tracing::warn!(
@@ -1290,6 +1308,82 @@ async fn validate_worktree_dir(
     // already used by worktree".
     let _ = run_git_in(bare_path, &["worktree", "prune"]).await;
     Ok(WorktreeDirState::Reprovision)
+}
+
+/// Whether the half-checked-out tree at `wt` (a `git worktree add`
+/// killed before its index landed) holds tracked-file edits that a
+/// repairing `reset --hard` would discard — a fallback session's work
+/// written after the failed provision (#446/#512).
+///
+/// `reset --hard` already preserves *untracked* additions and legitimately
+/// *restores* tracked files the interrupted checkout never wrote, so
+/// neither counts as work at risk. Only a tracked file present in the
+/// working tree with content differing from `HEAD` (a modification, not a
+/// deletion) would be silently clobbered. Detection runs against a
+/// throwaway index so it never mutates the worktree's own git state:
+/// `read-tree HEAD` loads the committed tree, then `diff-files` reports
+/// working-tree entries that differ from it — a pure deletion (`D`) is the
+/// interrupted checkout's own unwritten file and is ignored; any other
+/// status (a modification) means real work.
+///
+/// Any probe failure returns `true`: without a confident "no edits"
+/// verdict the caller must not run the destructive repair.
+async fn worktree_has_tracked_edits(gitdir: &Path, wt: &Path) -> bool {
+    static PROBE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = PROBE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let index = gitdir.join(format!(
+        "lazybox-edit-probe-{}-{seq}.index",
+        std::process::id()
+    ));
+    let gitdir_arg = gitdir.to_string_lossy().into_owned();
+    let wt_arg = wt.to_string_lossy().into_owned();
+    let index_env = vec![(
+        "GIT_INDEX_FILE".to_string(),
+        index.to_string_lossy().into_owned(),
+    )];
+
+    let loaded = run_git_in_env(
+        wt,
+        &[
+            "--git-dir",
+            &gitdir_arg,
+            "--work-tree",
+            &wt_arg,
+            "read-tree",
+            "HEAD",
+        ],
+        &index_env,
+    )
+    .await
+    .is_ok();
+    if !loaded {
+        let _ = tokio::fs::remove_file(&index).await;
+        return true;
+    }
+    let diff = run_git_in_env(
+        wt,
+        &[
+            "--git-dir",
+            &gitdir_arg,
+            "--work-tree",
+            &wt_arg,
+            "diff-files",
+            "--name-status",
+        ],
+        &index_env,
+    )
+    .await;
+    let _ = tokio::fs::remove_file(&index).await;
+    match diff {
+        // Each line is `<status>\t<path>`. A pure deletion (`D`) is the
+        // interrupted checkout's own missing file; anything else means a
+        // tracked file was edited in place.
+        Ok(out) => out
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .any(|l| !l.starts_with('D')),
+        Err(_) => true,
+    }
 }
 
 /// Whether the working-tree content at `wt` is a pristine checkout —
@@ -1748,9 +1842,9 @@ fn is_transfer_progress(line: &str) -> bool {
 ///    directory is gone (a leftover lazybox worktree, a reaped agent
 ///    run), the common recoverable case, without touching any live
 ///    checkout.
-/// 3. If the holder is a worktree nested *inside* the bare clone (a
-///    Claude Code agent worktree — never one of lazybox's own, which
-///    live under `<base>/worktrees/`), attach here with `--force`.
+/// 3. If the holder is a Claude Code agent worktree — one living under
+///    `<bare>/.claude/worktrees/`, never one of lazybox's own, which
+///    live under `<base>/worktrees/` — attach here with `--force`.
 ///    git overrides the "already checked out" refusal for the *add*,
 ///    but separately refuses to force-*reset* a branch (`-B`) held by
 ///    another worktree — so the force path drops `-B` and checks the
@@ -1787,7 +1881,15 @@ async fn add_worktree_resilient(
         return Ok(());
     }
 
-    if canonical_or_self(&holder).starts_with(canonical_or_self(bare_path)) {
+    // Only force-share the branch when the holder is a genuine Claude
+    // Code agent worktree — those live under `<bare>/.claude/worktrees/`
+    // (see the doc comment). A bare-path `starts_with` was too loose:
+    // any holder that merely canonicalized *somewhere* under the bare
+    // directory would get its branch silently co-opted (#512). Classify
+    // against the actual agent-worktree root instead; anything outside
+    // it falls through to the loud refusal below.
+    let agent_root = canonical_or_self(&bare_path.join(".claude").join("worktrees"));
+    if canonical_or_self(&holder).starts_with(&agent_root) {
         return run_git_transfer(bare_path, &forced, auth, None)
             .await
             .map_err(explain_promisor_failure);
@@ -2664,6 +2766,52 @@ mod health_probe_tests {
         );
     }
 
+    /// The destructive-repair guard (#512): a half-checked-out worktree
+    /// (no index) whose tracked file a fallback session *edited in place*
+    /// must NOT be repaired with `reset --hard` — that would discard the
+    /// edit. Validation refuses loudly (the edited tree is non-pristine)
+    /// and leaves the work untouched, exactly like a dangling-gitdir
+    /// dirty leftover.
+    #[tokio::test]
+    async fn half_checked_out_worktree_with_tracked_edits_is_preserved() {
+        let (tmp, bare) = local_bare_clone();
+        let wt = tmp.path().join("wt");
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                wt.to_str().expect("utf8 path"),
+                "-B",
+                "wt-branch",
+                "HEAD",
+            ],
+        );
+        // Simulate the killed add whose index never landed, then a
+        // fallback session editing a TRACKED file (not merely adding an
+        // untracked one) — the content `reset --hard` would silently
+        // revert to HEAD.
+        let gitdir = bare.join("worktrees").join("wt");
+        std::fs::remove_file(gitdir.join("index")).expect("drop index");
+        std::fs::write(wt.join("f.txt"), "important fallback-session edits\n")
+            .expect("edit tracked file");
+
+        let verdict = validate_worktree_dir(&wt, &bare).await;
+        assert!(
+            verdict.is_err(),
+            "a tracked-file edit must refuse (got {verdict:?}), never reset --hard it away"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.join("f.txt")).expect("still readable"),
+            "important fallback-session edits\n",
+            "refusal must not touch the edited tracked file"
+        );
+        assert!(
+            !gitdir.join("index").exists(),
+            "no repair ran, so no index was rebuilt"
+        );
+    }
+
     /// Resume decision for a `.partial` staging dir: a bare repo with
     /// a configured origin resumes (adopting that origin); a directory
     /// of junk — or a repo that never got its origin — restarts from
@@ -3061,6 +3209,47 @@ mod resilient_add_tests {
         assert!(
             external.join("f.txt").exists(),
             "the existing worktree is untouched"
+        );
+        assert!(
+            !target.exists(),
+            "no half-provisioned target is left behind"
+        );
+    }
+
+    /// A live holder that sits *inside the bare directory* but NOT under
+    /// the `.claude/worktrees/` agent root (#512) must not be force-shared
+    /// by the old bare-path `starts_with` heuristic: only genuine Claude
+    /// Code agent worktrees qualify. A checkout elsewhere in the bare
+    /// tree gets the same clear refusal as an external holder, and its
+    /// files are left intact.
+    #[tokio::test]
+    async fn nested_non_agent_holder_is_not_force_shared() {
+        let (tmp, bare) = local_bare_clone();
+        // Inside the bare directory, but not the agent-worktree root.
+        let rogue = bare.join("rogue-checkout");
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                rogue.to_str().unwrap(),
+                "-B",
+                "feat",
+                "HEAD",
+            ],
+        );
+        std::fs::write(rogue.join("f.txt"), "someone else's work\n").expect("edit rogue file");
+
+        let target = tmp.path().join("target");
+        let err = add_worktree_resilient(&bare, &target, "feat", "HEAD", &[])
+            .await
+            .expect_err("a non-agent holder inside the bare dir must not be force-stolen");
+        let msg = err.to_string();
+        assert!(msg.contains("already checked out at"), "{msg}");
+        assert_eq!(
+            std::fs::read_to_string(rogue.join("f.txt")).expect("still readable"),
+            "someone else's work\n",
+            "the non-agent holder's work is left untouched"
         );
         assert!(
             !target.exists(),

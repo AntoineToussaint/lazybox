@@ -65,6 +65,53 @@ impl RawPtyBackend {
         }
     }
 
+    /// Shared body for [`SessionBackend::spawn`] and
+    /// [`SessionBackend::spawn_persistent`]. `persist` selects an on-disk
+    /// scrollback file when the caller wants restart-durable history.
+    fn spawn_inner<'a>(
+        &'a self,
+        argv: &'a [String],
+        cwd: Option<&'a Path>,
+        env: &'a [(String, String)],
+        hint: &'a str,
+        persist: Option<std::path::PathBuf>,
+    ) -> Pin<Box<dyn Future<Output = Result<String, BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            let size = PtySize {
+                cols: DEFAULT_COLS,
+                rows: DEFAULT_ROWS,
+                pixel_width: 0,
+                pixel_height: 0,
+            };
+            let cwd = cwd.map(|p| p.to_path_buf());
+            let pty = match persist {
+                Some(path) => {
+                    DaemonPty::spawn_persistent(argv, size, cwd.as_ref(), env.to_vec(), path)
+                }
+                None => DaemonPty::spawn(argv, size, cwd.as_ref(), env.to_vec(), &[]),
+            }
+            .map_err(|e| BackendError::Spawn(e.to_string()))?;
+            let pty = Arc::new(pty);
+            let key = self.alloc_key(hint);
+            let slot = Slot {
+                pty: pty.clone(),
+                exit: Arc::new(Mutex::new(None)),
+            };
+            // Background task that watches for exit and caches the
+            // code. Without this, only ONE call to wait_exit ever
+            // succeeds (DaemonPty's oneshot is consumed). The trait
+            // contract is "call repeatedly, get the cached code".
+            let exit_slot = slot.exit.clone();
+            let pty_for_exit = pty.clone();
+            tokio::spawn(async move {
+                let code = pty_for_exit.wait_exit().await;
+                *exit_slot.lock().await = Some(code);
+            });
+            self.sessions.lock().await.insert(key.clone(), slot);
+            Ok(key)
+        })
+    }
+
     fn alloc_key(&self, hint: &str) -> String {
         let n = self.next_key.fetch_add(1, Ordering::Relaxed);
         // Sanitize the hint the same way the tmux backend does so
@@ -101,40 +148,24 @@ impl SessionBackend for RawPtyBackend {
         env: &'a [(String, String)],
         hint: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String, BackendError>> + Send + 'a>> {
-        Box::pin(async move {
-            let size = PtySize {
-                cols: DEFAULT_COLS,
-                rows: DEFAULT_ROWS,
-                pixel_width: 0,
-                pixel_height: 0,
-            };
-            let pty = DaemonPty::spawn(
-                argv,
-                size,
-                cwd.map(|p| p.to_path_buf()).as_ref(),
-                env.to_vec(),
-                &[],
-            )
-            .map_err(|e| BackendError::Spawn(e.to_string()))?;
-            let pty = Arc::new(pty);
-            let key = self.alloc_key(hint);
-            let slot = Slot {
-                pty: pty.clone(),
-                exit: Arc::new(Mutex::new(None)),
-            };
-            // Background task that watches for exit and caches the
-            // code. Without this, only ONE call to wait_exit ever
-            // succeeds (DaemonPty's oneshot is consumed). The trait
-            // contract is "call repeatedly, get the cached code".
-            let exit_slot = slot.exit.clone();
-            let pty_for_exit = pty.clone();
-            tokio::spawn(async move {
-                let code = pty_for_exit.wait_exit().await;
-                *exit_slot.lock().await = Some(code);
-            });
-            self.sessions.lock().await.insert(key.clone(), slot);
-            Ok(key)
-        })
+        self.spawn_inner(argv, cwd, env, hint, None)
+    }
+
+    /// Raw-PTY children die with the daemon, so a respawn after a restart
+    /// starts with an empty grid. When a persist key is supplied, seed
+    /// the fresh PTY from — and keep mirroring output to — the session's
+    /// durable scrollback file, so its history survives the restart
+    /// (#468).
+    fn spawn_persistent<'a>(
+        &'a self,
+        argv: &'a [String],
+        cwd: Option<&'a Path>,
+        env: &'a [(String, String)],
+        hint: &'a str,
+        persist_key: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = Result<String, BackendError>> + Send + 'a>> {
+        let persist = persist_key.map(|k| lazybox_core::paths::scrollback_dir().join(k));
+        self.spawn_inner(argv, cwd, env, hint, persist)
     }
 
     fn write<'a>(

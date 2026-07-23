@@ -330,6 +330,60 @@ Press `x a` on the source workspace; pick the target in the picker.
 
 ---
 
+## Import local checkout (linked, no-worktree workspace)
+
+**Status:** beta
+**Crate(s):** `tui`, `server`, `git-ops`, `core`
+**Config / flags:** `scan.roots`, `scan.max_depth`
+**Key bindings:** `x i`
+
+### What it does
+Meets your repos where they already live. If you keep a canonical dev folder
+(`~/development/<owner>/<repo>`, `~/code/…`) with one clone per repo, `x i`
+scans those roots, maps each checkout to its GitHub repo, and imports a chosen
+one as a **linked workspace**: lazybox points at the existing checkout and runs
+every agent/shell **directly in it** — no worktree provisioned, no bare clone,
+and the current branch is never switched. The row carries a `⎇ local` badge so
+it's always clear you're working in your real tree.
+
+### How to use it
+Set your dev roots in `~/.lazybox/config.yaml`:
+
+```yaml
+scan:
+  roots:
+    - ~/development
+    - ~/code
+```
+
+Press `x i`, pick a discovered checkout, and confirm the "runs in your real
+checkout" warning. The repo's PR/issue/CI activity groups under the same
+project header as any other workspace on that repo.
+
+### How it works (brief)
+`ImportCheckout` (`crates/tui-core/src/action.rs`) sends `ScanCheckouts`; the
+daemon walks `scan.roots` (`git-ops::scan_external_checkouts`) and replies with
+`CheckoutsDiscovered`. Picking one sends `ImportLocalCheckout`, which
+re-describes the path, maps `origin` → `owner/repo`
+(`core::github_owner_repo_from_url`), and creates a `Workspace` with
+`linked_checkout` set (`server::polling::import_local_checkout`). At spawn time
+`resolve_or_create_session` lands sessions straight in that path with no
+provisioning; the spawn is treated as on-main so one agent runs per checkout
+(no duplicate agents in your real tree) and no session is persisted that a
+cleanup path could delete.
+
+### Test checklist
+- [ ] `x i` scans `scan.roots` and lists discovered checkouts mapped to their repos.
+- [ ] Importing creates a `⎇ local` row; agents/shells run in the existing checkout.
+- [ ] The current branch is respected (no forced switch); dirty state is surfaced before import.
+- [ ] A second agent spawn reuses the first (no duplicate in the real tree).
+
+### Known sharp edges
+- Sessions edit your **real** working directory, not an isolated worktree — the import confirm + `⎇ local` badge are the guards.
+- The repo's PR/issue/CI activity flows in only when that repo is polled (you're involved in its PRs, or it's in a `watch` filter); the imported workspace itself is a tracking row, and polled PRs/issues appear as sibling workspaces under the shared project.
+
+---
+
 ## Collapse into PR
 
 **Status:** beta

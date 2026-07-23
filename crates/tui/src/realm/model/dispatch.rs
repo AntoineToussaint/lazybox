@@ -119,9 +119,16 @@ impl<T: TerminalAdapter> Model<T> {
                     return Vec::new();
                 }
                 match action {
-                    Action::Archive => vec![IpcCommand::Kill {
-                        session_key: session_key.clone(),
-                    }],
+                    Action::Archive => {
+                        // Optimistic: drop the row now so archive feels
+                        // instant instead of waiting for the daemon's
+                        // `WorkspaceRemoved` echo. A failed delete
+                        // re-inserts it (#476).
+                        self.optimistic_remove_workspace(session_key);
+                        vec![IpcCommand::Kill {
+                            session_key: session_key.clone(),
+                        }]
+                    }
                     Action::CloseIssue => match workspace.as_ref() {
                         // Re-check against the STASHED workspace — a poll
                         // could have closed the issue or attached a PR
@@ -287,9 +294,15 @@ impl<T: TerminalAdapter> Model<T> {
                     return Vec::new();
                 }
                 match action {
-                    Action::Archive => vec![IpcCommand::DeleteProject {
-                        project_key: project_key.clone(),
-                    }],
+                    Action::Archive => {
+                        // Optimistic: drop the project header + its child
+                        // rows now; a failed cascade re-inserts them all
+                        // (#476).
+                        self.optimistic_remove_project(project_key);
+                        vec![IpcCommand::DeleteProject {
+                            project_key: project_key.clone(),
+                        }]
+                    }
                     other => self.dispatch_action_unchecked(other),
                 }
             }
@@ -523,6 +536,9 @@ impl<T: TerminalAdapter> Model<T> {
             Action::NewProject => {
                 self.mount_new_workspace_repo_picker();
             }
+            Action::ImportCheckout => {
+                self.start_scan_checkouts();
+            }
             Action::MarkAllRead => {
                 // Context-sensitive: when the user has activities
                 // multi-selected in the right pane, `m` marks only
@@ -568,8 +584,10 @@ impl<T: TerminalAdapter> Model<T> {
                 // availability gate (`availability` in the catalog)
                 // already ensures one of the two has a target.
                 if let Some(sk) = session_key {
+                    self.optimistic_remove_workspace(&sk);
                     cmds.push(IpcCommand::Kill { session_key: sk });
                 } else if let Some(project_key) = self.sidebar.focused_project_key() {
+                    self.optimistic_remove_project(&project_key);
                     cmds.push(IpcCommand::DeleteProject { project_key });
                 }
             }
@@ -827,6 +845,15 @@ impl<T: TerminalAdapter> Model<T> {
                     self.mount_reply(session_key);
                 }
             }
+            Action::EditNotes => {
+                // Notes attach to the focused workspace (any workspace,
+                // even a session-less one). Section::Workspace, so this
+                // fires from both Sidebar and Right focus.
+                if let Some(ws) = self.sidebar.selected_workspace() {
+                    let session_key: lazybox_core::SessionKey = (&ws.key).into();
+                    self.mount_notes(session_key);
+                }
+            }
             Action::RequestReviewers => {
                 if let Some(ws) = self.sidebar.selected_workspace()
                     && ws.pr.is_some()
@@ -910,6 +937,23 @@ impl<T: TerminalAdapter> Model<T> {
                         );
                     }
                 }
+            }
+            Action::SyncWorkspace => {
+                // Targeted re-poll of just this workspace's PR / issue —
+                // cheaper than the global refresh when you're waiting on
+                // one PR's CI. The daemon deep-fetches the entity and
+                // upserts it, so the row's state + read markers update
+                // without a full sweep.
+                let Some(ws) = self.sidebar.selected_workspace() else {
+                    return cmds;
+                };
+                if ws.pr.is_none() && ws.gh_issues.is_empty() {
+                    self.flash_info("nothing to sync on this workspace");
+                    return cmds;
+                }
+                let workspace_key = ws.key.clone();
+                cmds.push(IpcCommand::SyncWorkspace { workspace_key });
+                self.flash_hint("syncing…");
             }
             Action::CyclePane => {
                 // The keyboard path normally consumes the chord in

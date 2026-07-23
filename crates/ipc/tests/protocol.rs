@@ -314,6 +314,18 @@ fn all_commands() -> Vec<Command> {
         Command::Refresh,
         Command::CleanWorktrees,
         Command::InspectWorktrees,
+        Command::ScanCheckouts { roots: vec![] },
+        Command::ScanCheckouts {
+            roots: vec![std::path::PathBuf::from("/home/dev/code")],
+        },
+        Command::ImportLocalCheckout {
+            path: std::path::PathBuf::from("/home/dev/code/acme/widget"),
+            spawn_agent: Some("claude".into()),
+        },
+        Command::ImportLocalCheckout {
+            path: std::path::PathBuf::from("/home/dev/code/acme/widget"),
+            spawn_agent: None,
+        },
         Command::DeleteOrphanedWorktree {
             path: std::path::PathBuf::from("/tmp/wt"),
             force: false,
@@ -325,12 +337,19 @@ fn all_commands() -> Vec<Command> {
         Command::FetchPrDetails {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
         },
+        Command::SyncWorkspace {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+        },
         Command::KeepMergedWorkspace { session_key: key },
         Command::FetchScrollback {
             terminal_id: TerminalId(12),
         },
         Command::CheckAgentCliUpdates,
         Command::UpdateAgentClis,
+        Command::SetNotes {
+            session_key: "github:o/r#1".into(),
+            notes: "check the flaky retry".into(),
+        },
         Command::Shutdown,
     ]
 }
@@ -657,6 +676,15 @@ fn all_events() -> Vec<Event> {
                 is_safe_to_delete: false,
             }],
         },
+        Event::CheckoutsDiscovered { checkouts: vec![] },
+        Event::CheckoutsDiscovered {
+            checkouts: vec![lazybox_ipc::DiscoveredCheckoutDto {
+                path: std::path::PathBuf::from("/home/dev/code/acme/widget"),
+                repo: Some("acme/widget".into()),
+                branch: Some("main".into()),
+                has_uncommitted_changes: true,
+            }],
+        },
         Event::OrphanedWorktreeDeleted {
             path: std::path::PathBuf::from("/tmp/wt"),
             ok: true,
@@ -699,6 +727,9 @@ fn all_events() -> Vec<Event> {
             installed_before: Some("0.46.0".into()),
             installed_after: None,
             message: "brew upgrade --cask codex failed: exit 1".into(),
+        },
+        Event::RecoveredTerminalsRequireRestart {
+            terminal_ids: vec![TerminalId(12), TerminalId(13)],
         },
     ]
 }
@@ -750,8 +781,11 @@ fn command_tag(command: &Command) -> &'static str {
         Command::FetchRepoLabels { .. } => "FetchRepoLabels",
         Command::CleanWorktrees => "CleanWorktrees",
         Command::InspectWorktrees => "InspectWorktrees",
+        Command::ScanCheckouts { .. } => "ScanCheckouts",
+        Command::ImportLocalCheckout { .. } => "ImportLocalCheckout",
         Command::DeleteOrphanedWorktree { .. } => "DeleteOrphanedWorktree",
         Command::FetchPrDetails { .. } => "FetchPrDetails",
+        Command::SyncWorkspace { .. } => "SyncWorkspace",
         Command::StartAgentRun { .. } => "StartAgentRun",
         Command::SendAgentInput { .. } => "SendAgentInput",
         Command::InterruptAgentRun { .. } => "InterruptAgentRun",
@@ -764,6 +798,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::FetchScrollback { .. } => "FetchScrollback",
         Command::CheckAgentCliUpdates => "CheckAgentCliUpdates",
         Command::UpdateAgentClis => "UpdateAgentClis",
+        Command::SetNotes { .. } => "SetNotes",
     }
 }
 
@@ -808,6 +843,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::Notification { .. } => "Notification",
         Event::CleanWorktreesCompleted { .. } => "CleanWorktreesCompleted",
         Event::WorktreesInspected { .. } => "WorktreesInspected",
+        Event::CheckoutsDiscovered { .. } => "CheckoutsDiscovered",
         Event::OrphanedWorktreeDeleted { .. } => "OrphanedWorktreeDeleted",
         Event::AgentRunStarted { .. } => "AgentRunStarted",
         Event::AgentRawJson { .. } => "AgentRawJson",
@@ -829,6 +865,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::TerminalScrollback { .. } => "TerminalScrollback",
         Event::AgentCliUpdatesChecked { .. } => "AgentCliUpdatesChecked",
         Event::AgentCliUpdateFinished { .. } => "AgentCliUpdateFinished",
+        Event::RecoveredTerminalsRequireRestart { .. } => "RecoveredTerminalsRequireRestart",
     }
 }
 
@@ -840,12 +877,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        56,
+        60,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(
         event_tags.len(),
-        56,
+        58,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

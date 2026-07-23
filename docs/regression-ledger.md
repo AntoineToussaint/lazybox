@@ -34,7 +34,14 @@ about it.
 | `crates/server/src/pty.rs::seed_survives_ring_churn_past_capacity` | #420 — the reattach seed lives outside the evictable replay ring; a snapshot taken after live churn wraps the ring capacity must still replay the seed first (unit, real PTY child) |
 | `crates/server/src/pty.rs::large_seed_leaves_full_ring_budget_for_live_output` | #420 — a near-capacity seed can't consume the ring's live-byte budget: snapshots stay `complete` (resync-servable) with the full seed leading |
 | `crates/server/src/pty.rs::seed_survives_while_child_holds_the_alt_screen` | #420 follow-up — no screen mode bypasses the durable slot: with the child parked on the **alternate screen** the seed still leads every snapshot and it stays resync-servable (pane-level alt-screen denial is #393/PR #427) |
-| `crates/server/tests/tmux_restart.rs::alt_screen_request_is_denied_so_agent_history_is_retained` | the root cause behind "scrollback dead on Claude": Claude ≥2.1 takes the pane to the alternate screen, which retains ZERO tmux history — the conf now denies it (real tmux, Claude-shaped smcup + output) |
+| `crates/agents/src/agent.rs::claude_requires_inline_renderer_for_pty_scrollback` | adapter contract — Claude's PTY launch requires its supported inline renderer and carries a compatibility generation for surviving-session detection |
+| `crates/server/tests/spawn_handler.rs::interactive_claude_spawn_keeps_permission_prompts` | full daemon spawn into the captured backend call — Claude's authoritative inline-renderer environment reaches the interactive PTY boundary |
+| `crates/server/tests/spawn_handler.rs::recovered_pre_generation_claude_requires_an_explicit_restart` | a surviving pre-fix Claude process cannot inherit new environment; every reconnect receives a persistent close-and-reopen warning instead of silently reproducing dead scrollback |
+| `crates/server/tests/spawn_handler.rs::recovered_claude_at_current_or_newer_generation_needs_no_restart` | PTY generations are monotonic: compatible sessions survive both ordinary restarts and binary downgrades without a false restart warning |
+| `crates/server/tests/e2e_real_paths.rs::e2e_real_claude_boots_ready_with_inline_spawn_env` | #454, **real shape** (opt-in) — the shipped Claude binary reaches a detected ready state through the serve loop, and its real tmux session contains the authoritative inline-renderer environment |
+| `crates/server/tests/e2e_real_paths.rs::e2e_real_claude_inline_renderer_retains_tmux_history` | #454, **real upstream boundary** (opt-in) — the shipped Claude binary opens its local release notes under the renderer environment and must grow retained tmux history without model input |
+| `crates/server/tests/tmux_restart.rs::alt_screen_request_is_denied_so_agent_history_is_retained` | pane-level backstop: an alternate-screen request is denied and ordinary line output remains in tmux history (real tmux, smcup + output) |
+| `crates/server/tests/tmux_restart.rs::capture_history_preserves_soft_wrapped_logical_lines` | real tmux capture joins soft-wrapped screen rows before replay so deep fetch/reconnect cannot turn display wrapping into hard line breaks |
 | `crates/server/tests/tmux_restart.rs::alt_screen_pane_serves_no_deep_scrollback` | a pane already on the alt screen (pre-fix server config) must fetch `None`, not a one-screen capture |
 | `crates/tui/src/components/terminal_stack.rs::shallow_capture_never_shrinks_the_grid` | "scrollbar disappears as soon as I start scrolling" — a rebuild that isn't strictly deeper than the current grid is a no-op |
 | `crates/server/tests/tmux_restart.rs::alt_screen_agent_retains_scrollable_history` | #445, **real shape** — an older tmux server is healed before a Claude-shaped spawn, whose smcup request still produces retained, fetchable history |
@@ -42,9 +49,8 @@ about it.
 | `crates/tui/src/realm/model/tests.rs::codex_and_claude_scroll_retained_history_locally` | #445 — primary-screen Codex and reconstructed alt-screen Claude both move the same lazybox viewport |
 
 **Narrowed gap (#393):** live-vs-restart *fidelity equivalence* — the
-capture path drops OSC 8 hyperlinks and flattens soft wraps relative to
-the raw stream. Depth parity is now guarded (above); styling/wrap
-parity is not.
+capture path still drops OSC 8 hyperlinks relative to the raw stream.
+Depth and soft-wrap parity are guarded above; hyperlink parity is not.
 
 ## Agent state / needs-input (#225, #357, #374, #397, #399)
 
@@ -62,7 +68,7 @@ parity is not.
 | `crates/agents/tests/agents.rs::guarded_composer_protocol_is_shared_by_claude_and_codex` | #397 — one PTY prompt protocol, not per-agent drift |
 | `crates/agents/tests/codex_fixtures.rs::codex_real_approval_round_trip_drives_the_chunk_detector` | #399 — the live-repaint approval round trip over **captured real Codex bytes** |
 | `crates/server/src/spawn_handler.rs::codex_approval_modal_surfaces_input_needed_immediately` | #399 — the current-chunk fast path through the pump |
-| `crates/server/tests/e2e_real_paths.rs::e2e_real_claude_boots_to_a_detected_ready_state` | #397/#399, **real shape** — the shipped `claude` binary, real tmux, serve loop, detected state |
+| `crates/server/tests/e2e_real_paths.rs::e2e_real_claude_boots_ready_with_inline_spawn_env` | #397/#399/#454, **real shape** — the shipped `claude` binary, real tmux, serve loop, detected state, and verified PTY renderer environment |
 | `crates/server/tests/e2e_real_paths.rs::e2e_real_codex_boots_to_a_detected_ready_state` | #399, **real shape** — real `codex`; its fresh-cwd trust chooser must surface as `?` |
 
 ## Issue→PR session transfer (#404)

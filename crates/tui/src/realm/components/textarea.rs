@@ -36,6 +36,10 @@ pub struct Textarea {
     cursor: usize,
     /// Last error (e.g. empty submit) — shown in the help row.
     error: Option<String>,
+    /// Allow submitting an empty buffer. Off by default (a reply or a
+    /// broadcast must carry text); the notes editor turns it on so an
+    /// emptied buffer submits as a "clear the scratchpad" (issue #458).
+    allow_empty: bool,
 }
 
 impl Textarea {
@@ -47,6 +51,7 @@ impl Textarea {
             buffer: String::new(),
             cursor: 0,
             error: None,
+            allow_empty: false,
         }
     }
 
@@ -54,6 +59,13 @@ impl Textarea {
     pub fn with_body(mut self, text: impl Into<String>) -> Self {
         self.buffer = text.into();
         self.cursor = self.buffer.len();
+        self
+    }
+
+    /// Permit submitting an empty buffer (default: rejected). Used by
+    /// the notes editor, where an emptied buffer means "clear the note".
+    pub fn allow_empty(mut self) -> Self {
+        self.allow_empty = true;
         self
     }
 
@@ -343,8 +355,7 @@ impl AppComponent<Msg, UserEvent> for Textarea {
         }
         // Submit keys (Ctrl-Enter / Ctrl-S).
         if ctrl && matches!(key.code, Key::Enter | Key::Char('s')) {
-            let trimmed = self.buffer.trim();
-            if trimmed.is_empty() {
+            if self.buffer.trim().is_empty() && !self.allow_empty {
                 self.error = Some("can't submit empty input".into());
                 return None;
             }
@@ -421,5 +432,38 @@ impl AppComponent<Msg, UserEvent> for Textarea {
             }
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tuirealm::event::KeyEvent;
+
+    fn ctrl_s() -> Event<UserEvent> {
+        Event::Keyboard(KeyEvent {
+            code: Key::Char('s'),
+            modifiers: KeyModifiers::CONTROL,
+        })
+    }
+
+    #[test]
+    fn empty_submit_is_rejected_by_default() {
+        let mut ta = Textarea::new("Reply");
+        assert!(ta.on(&ctrl_s()).is_none());
+        assert!(ta.error.is_some());
+    }
+
+    #[test]
+    fn allow_empty_submits_a_cleared_buffer() {
+        // Notes editor: an emptied buffer submits so the daemon clears
+        // the scratchpad (issue #458).
+        let mut ta = Textarea::new("Notes").with_body("old note").allow_empty();
+        // Clear the pre-filled body.
+        for _ in 0.."old note".len() {
+            ta.delete_back();
+        }
+        assert!(ta.buffer.is_empty());
+        assert!(matches!(ta.on(&ctrl_s()), Some(Msg::TextareaSubmitted(b)) if b.is_empty()));
     }
 }

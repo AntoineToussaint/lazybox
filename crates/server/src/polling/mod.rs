@@ -4905,6 +4905,20 @@ pub async fn set_notes(config: &ServerConfig, key: &WorkspaceKey, notes: String)
     commit_upsert_offloaded_reported(config, key, workspace, "set workspace notes").await;
 }
 
+/// Record a snippet key as sent to a workspace's agent (issue #463).
+/// Mirrors [`set_notes`]: load, push onto the MRU, commit (which
+/// persists the JSON blob and broadcasts `WorkspaceUpserted` so every
+/// TUI sees the updated per-session snippet history and its sidebar
+/// indicator). Local-only — never synced to any provider.
+pub async fn record_sent_snippet(config: &ServerConfig, key: &WorkspaceKey, snippet_key: String) {
+    let _ws_guard = config.lock_workspace(key.as_str()).await;
+    let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
+        return;
+    };
+    workspace.record_sent_snippet(snippet_key);
+    commit_upsert_offloaded_reported(config, key, workspace, "record sent snippet").await;
+}
+
 /// Persist the workspace's "auto-merge on green" arm. Mirrors
 /// [`set_snooze`]: load, flip the field, commit (which persists the
 /// JSON blob and broadcasts `WorkspaceUpserted` so every TUI sees the
@@ -6359,6 +6373,38 @@ mod rescope_collapse_tests {
         let cleared = load_workspace(&config, &key).expect("workspace survives");
         assert!(cleared.notes.is_empty());
         assert!(!cleared.has_notes());
+    }
+
+    /// `record_sent_snippet` prepends onto the workspace's MRU and
+    /// reloads verbatim; a re-send moves the key to the front rather
+    /// than duplicating it (issue #463).
+    #[tokio::test]
+    async fn record_sent_snippet_persists_as_mru() {
+        let store = Arc::new(lazybox_store::MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+
+        let task = gh_task(
+            "o/r#9",
+            "https://github.com/o/r/pull/9",
+            TaskState::Open,
+            vec![],
+        );
+        let ws = Workspace::from_task(task, Utc::now());
+        let key = ws.key.clone();
+        seed(&store, &ws);
+
+        record_sent_snippet(&config, &key, "rev".into()).await;
+        record_sent_snippet(&config, &key, "plan".into()).await;
+        let reloaded = load_workspace(&config, &key).expect("workspace survives");
+        assert_eq!(reloaded.sent_snippets, vec!["plan", "rev"], "newest-first");
+
+        record_sent_snippet(&config, &key, "rev".into()).await;
+        let reloaded = load_workspace(&config, &key).expect("workspace survives");
+        assert_eq!(
+            reloaded.sent_snippets,
+            vec!["rev", "plan"],
+            "a re-send moves the key to the front without duplicating",
+        );
     }
 
     /// A poll upsert overwrites upstream-derived fields but must leave

@@ -103,6 +103,7 @@ impl<T: TerminalAdapter> Model<T> {
         let mut cmds = Vec::new();
         let mut sent = 0usize;
         let mut skipped: Vec<String> = Vec::new();
+        let mut delivered: Vec<lazybox_core::SessionKey> = Vec::new();
         for key in &draft.targets {
             match self.sidebar.broadcast_terminal(key) {
                 Some((terminal_id, true)) => {
@@ -123,6 +124,7 @@ impl<T: TerminalAdapter> Model<T> {
                         submit: true,
                     });
                     sent += 1;
+                    delivered.push(key.clone());
                 }
                 Some((terminal_id, false)) => {
                     cmds.push(IpcCommand::Write {
@@ -130,6 +132,7 @@ impl<T: TerminalAdapter> Model<T> {
                         bytes: encode_snippet_for_pty(body),
                     });
                     sent += 1;
+                    delivered.push(key.clone());
                 }
                 None => skipped.push(
                     self.sidebar
@@ -141,7 +144,17 @@ impl<T: TerminalAdapter> Model<T> {
         }
         if sent > 0 {
             if let Some(snippet_key) = draft.snippet_key {
-                self.record_recent_snippet(snippet_key);
+                self.record_recent_snippet(snippet_key.clone());
+                // Pin the snippet onto every workspace it actually
+                // reached, so each agent's sidebar history records it
+                // (#463). Free-text broadcasts carry no key, so nothing
+                // to record there.
+                for session_key in delivered {
+                    cmds.push(IpcCommand::RecordSentSnippet {
+                        session_key,
+                        snippet_key: snippet_key.clone(),
+                    });
+                }
             }
             self.sidebar.clear_broadcast_selection();
         }
@@ -455,6 +468,15 @@ showing keybinding search only",
             // snippets, not abandoned ones. Ends the `snippet` borrow of
             // `self.snippets` above (NLL) before this `&mut self` call.
             self.record_recent_snippet(key.clone());
+            // Also pin it onto the target workspace's per-session history
+            // (#463) so the sidebar shows what this agent's been told.
+            // The focused terminal's session key is the workspace key.
+            if let Some(session_key) = self.terminals.active_session().cloned() {
+                cmds.push(IpcCommand::RecordSentSnippet {
+                    session_key,
+                    snippet_key: key.clone(),
+                });
+            }
             self.flash_info(format!("sent snippet ]{key}"));
             return cmds;
         }

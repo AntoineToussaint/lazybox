@@ -87,6 +87,11 @@ impl std::fmt::Display for SessionId {
 /// items past this.
 pub const MAX_ACTIVITY_ITEMS: usize = 500;
 
+/// Cap on [`Workspace::sent_snippets`] — enough to re-orient on what
+/// you've told an agent without letting the MRU grow the workspace JSON
+/// blob unbounded.
+pub const SENT_SNIPPETS_MAX: usize = 12;
+
 /// Content identity used to carry read/seen state across re-sorts
 /// and to de-duplicate node-id-less activity.
 fn activity_key(a: &Activity) -> (String, String, DateTime<Utc>) {
@@ -172,6 +177,14 @@ pub struct Workspace {
     /// upstream-derived state and leave this intact across polls.
     #[serde(default)]
     pub notes: String,
+    /// MRU of snippet shortcut keys sent to this workspace's agent(s)
+    /// (issue #463) — a per-session record of "what I've already told
+    /// this agent" so switching back is cheap. Most-recent first,
+    /// de-duplicated (a re-send moves the key to the front), capped at
+    /// [`SENT_SNIPPETS_MAX`]. Persisted in the workspace JSON blob
+    /// alongside [`Workspace::notes`]; never synced to any provider.
+    #[serde(default)]
+    pub sent_snippets: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub last_viewed_at: Option<DateTime<Utc>>,
 }
@@ -199,6 +212,7 @@ impl Workspace {
             auto_merge_on_green: false,
             policies: crate::AutomationPolicies::default(),
             notes: String::new(),
+            sent_snippets: Vec::new(),
             created_at: now,
             last_viewed_at: None,
         }
@@ -208,6 +222,17 @@ impl Workspace {
     /// sidebar's notes indicator; whitespace-only notes don't count.
     pub fn has_notes(&self) -> bool {
         !self.notes.trim().is_empty()
+    }
+
+    /// Record `key` as just-sent to this workspace's agent: move it to
+    /// the front of [`Workspace::sent_snippets`], de-duplicating and
+    /// capping at [`SENT_SNIPPETS_MAX`]. Mirrors the global picker MRU
+    /// but scoped per workspace, so the sidebar can show what you've
+    /// already told each agent (issue #463).
+    pub fn record_sent_snippet(&mut self, key: String) {
+        self.sent_snippets.retain(|k| k != &key);
+        self.sent_snippets.insert(0, key);
+        self.sent_snippets.truncate(SENT_SNIPPETS_MAX);
     }
 
     /// Append a fresh session and return its id. Sessions own a
@@ -2096,5 +2121,55 @@ mod tests {
         let legacy: Workspace = serde_json::from_value(value).unwrap();
         assert_eq!(legacy.notes, "");
         assert!(!legacy.has_notes());
+    }
+
+    /// `sent_snippets` (#463) is an MRU: a re-send moves the key to the
+    /// front, distinct keys stack newest-first, and the list is capped
+    /// at [`SENT_SNIPPETS_MAX`], dropping the oldest.
+    #[test]
+    fn sent_snippets_mru_dedups_and_caps() {
+        let mut w = Workspace::from_task(pr("o/r#1"), now());
+        assert!(w.sent_snippets.is_empty(), "nothing sent yet");
+
+        w.record_sent_snippet("rev".into());
+        w.record_sent_snippet("plan".into());
+        assert_eq!(w.sent_snippets, vec!["plan", "rev"], "most-recent first");
+
+        w.record_sent_snippet("rev".into());
+        assert_eq!(
+            w.sent_snippets,
+            vec!["rev", "plan"],
+            "a re-send moves the key to the front, no duplicate",
+        );
+
+        for i in 0..SENT_SNIPPETS_MAX {
+            w.record_sent_snippet(format!("k{i}"));
+        }
+        assert_eq!(w.sent_snippets.len(), SENT_SNIPPETS_MAX, "capped");
+        assert_eq!(
+            w.sent_snippets[0],
+            format!("k{}", SENT_SNIPPETS_MAX - 1),
+            "newest at the front",
+        );
+        assert!(
+            !w.sent_snippets.iter().any(|k| k == "plan"),
+            "the oldest keys evicted past the cap",
+        );
+    }
+
+    /// `sent_snippets` round-trips through the workspace JSON blob, and a
+    /// pre-#463 record (no key) reads back as an empty list.
+    #[test]
+    fn sent_snippets_default_when_absent_from_json() {
+        let mut w = Workspace::from_task(pr("o/r#1"), now());
+        w.record_sent_snippet("rev".into());
+        let json = serde_json::to_string(&w).unwrap();
+        let back: Workspace = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.sent_snippets, vec!["rev"]);
+
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        value.as_object_mut().unwrap().remove("sent_snippets");
+        let legacy: Workspace = serde_json::from_value(value).unwrap();
+        assert!(legacy.sent_snippets.is_empty());
     }
 }

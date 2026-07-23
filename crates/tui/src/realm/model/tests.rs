@@ -1549,6 +1549,37 @@ snippets:
         );
     }
 
+    /// Sending a snippet also emits `RecordSentSnippet` for the focused
+    /// terminal's workspace, so the daemon can persist a per-session
+    /// record of "what I've told this agent" (#463).
+    #[test]
+    fn sending_a_snippet_records_it_on_the_workspace() {
+        let mut m = model_with_active_terminal_and_snippet(
+            "sent-history",
+            "\nsnippets:\n  ls:\n    description: List\n    body: ls -la\n",
+            "ls",
+            lazybox_ipc::TerminalKind::Shell,
+        );
+        let cmds = m.handle_choice_picked(vec![0]);
+        match cmds
+            .iter()
+            .find(|c| matches!(c, IpcCommand::RecordSentSnippet { .. }))
+        {
+            Some(IpcCommand::RecordSentSnippet {
+                session_key,
+                snippet_key,
+            }) => {
+                assert_eq!(
+                    session_key.as_str(),
+                    "github:o/r#1",
+                    "the focused workspace"
+                );
+                assert_eq!(snippet_key, "ls", "the snippet just sent");
+            }
+            _ => panic!("a snippet send must record it on the workspace, got {cmds:?}"),
+        }
+    }
+
     /// The session MRU is most-recent-first, de-duplicated, and capped.
     #[test]
     fn recent_snippets_mru_dedups_and_caps() {
@@ -1696,6 +1727,43 @@ snippets:
             notice.message.contains("1 skipped"),
             "summary names the session-less target: {}",
             notice.message,
+        );
+    }
+
+    /// A broadcast carrying a snippet key pins it onto every workspace
+    /// it actually reached — one `RecordSentSnippet` per delivered
+    /// target, none for the session-less skip (#463).
+    #[test]
+    fn broadcast_with_a_snippet_records_it_on_each_delivered_target() {
+        let (mut m, keys) = model_with_broadcast_targets(&[
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+            Some(lazybox_ipc::TerminalKind::Shell),
+            None,
+        ]);
+        m.pending_broadcast = Some(BroadcastDraft {
+            targets: keys.clone(),
+            snippet_key: Some("rev".into()),
+        });
+        m.modal_stack.push(Id::BroadcastText);
+        let cmds = m.handle_textarea_submitted("review the diff".into());
+
+        let recorded: Vec<&str> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                IpcCommand::RecordSentSnippet {
+                    session_key,
+                    snippet_key,
+                } => {
+                    assert_eq!(snippet_key, "rev");
+                    Some(session_key.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            recorded,
+            vec![keys[0].as_str(), keys[1].as_str()],
+            "the two delivered targets are recorded, the skipped one is not",
         );
     }
 

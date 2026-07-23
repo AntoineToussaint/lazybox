@@ -1053,6 +1053,17 @@ pub enum Command {
     UpdateBranch {
         workspace_key: lazybox_core::WorkspaceKey,
     },
+    /// Record a snippet shortcut key as sent to a workspace's agent
+    /// (issue #463). The daemon prepends it to the workspace's MRU
+    /// `sent_snippets` (like `SetNotes`) and re-broadcasts
+    /// `WorkspaceUpserted`, giving every TUI a per-session record of
+    /// "what I've already told this agent" and its sidebar indicator.
+    /// Local-only — never synced to any provider. Appended last (bincode
+    /// is ordinal-sensitive).
+    RecordSentSnippet {
+        session_key: SessionKey,
+        snippet_key: String,
+    },
 }
 
 /// The terminal state a removable workspace's primary task reached,

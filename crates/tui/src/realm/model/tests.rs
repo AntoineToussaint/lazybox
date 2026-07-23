@@ -6970,6 +6970,62 @@ mod workspace_focus_memory_tests {
         );
     }
 
+    /// Regression for #441: a single click on a sidebar workspace only
+    /// selects it, while a double-click drops focus straight into its
+    /// live agent terminal — no extra keystrokes to reach the running
+    /// session. A workspace with no live terminal degrades gracefully
+    /// to the plain selection.
+    #[test]
+    fn double_click_enters_the_workspace_agent_terminal() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![empty_ws("github:o/r#1"), empty_ws("github:o/r#2")],
+            terminals: vec![],
+            projects: vec![],
+        });
+        let a = key_of("github:o/r#1");
+        let b = key_of("github:o/r#2");
+        // WS-A has a live agent terminal; WS-B has none.
+        spawn_terminal(&mut m, &a, 1);
+
+        let area = Rect::new(0, 0, 120, 40);
+        let (sidebar_rect, _, _) = m.effective_pane_rects(area);
+        let row_a = row_of(&mut m, sidebar_rect, &a);
+        let row_b = row_of(&mut m, sidebar_rect, &b);
+
+        // Single click on WS-A: selects the row, stays on the sidebar.
+        m.dispatch_mouse_in(left_down(sidebar_rect.x + 1, row_a), area);
+        assert_eq!(m.sidebar().selected_workspace_key(), Some(&a));
+        assert_eq!(
+            m.focus(),
+            PaneFocus::Sidebar,
+            "a single click only selects the workspace",
+        );
+
+        // Second click at the same spot (within the double-click
+        // window) enters WS-A's live agent terminal.
+        m.dispatch_mouse_in(left_down(sidebar_rect.x + 1, row_a), area);
+        assert_eq!(m.sidebar().selected_workspace_key(), Some(&a));
+        assert_eq!(
+            m.focus(),
+            PaneFocus::Terminals,
+            "a double click jumps into the agent terminal",
+        );
+        assert_eq!(m.terminals.active_terminal_id(), Some(TerminalId(1)));
+
+        // Double-click WS-B, which has no live session: it degrades to
+        // a plain selection rather than stranding focus in an empty
+        // terminal pane.
+        m.dispatch_mouse_in(left_down(sidebar_rect.x + 1, row_b), area);
+        m.dispatch_mouse_in(left_down(sidebar_rect.x + 1, row_b), area);
+        assert_eq!(m.sidebar().selected_workspace_key(), Some(&b));
+        assert_eq!(
+            m.focus(),
+            PaneFocus::Sidebar,
+            "double-clicking a session-less workspace just selects it",
+        );
+    }
+
     /// Regression for #268: a wheel event over the sidebar scrolls the
     /// list instead of being swallowed. Before the fix the
     /// `ScrollUp/ScrollDown` router only handled the activity pane and

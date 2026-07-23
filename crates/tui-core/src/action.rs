@@ -112,6 +112,10 @@ pub enum Action {
     /// surfaces for provider workspaces that have a merge concept
     /// (today: github PRs).
     MergePr,
+    /// Update the workspace's PR branch against its base — the "Update
+    /// branch" button on github.com. Only surfaces when the PR is behind
+    /// its base (the `BEHIND` status tag).
+    UpdateBranch,
     /// Toggle the workspace's "auto-merge on green" arm. When armed,
     /// the client auto-fires a merge the moment this workspace's own
     /// PR becomes merge-ready. Distinct from GitHub's native
@@ -197,6 +201,12 @@ pub enum Action {
     /// inject; a plain shell gets a direct write; workspaces with no
     /// session are skipped and reported.
     BroadcastToSelected,
+    /// Update the branch (merge base into head) of every multi-selected
+    /// workspace whose PR is behind its base — the bulk fan-out of
+    /// [`Action::UpdateBranch`] over the sidebar's multi-select set. Each
+    /// behind PR gets its own `Command::UpdateBranch`; up-to-date or
+    /// non-PR selections are skipped and reported.
+    UpdateBranchSelected,
 
     // ── Activity pane (right) ──────────────────────────────────────
     /// Toggle the activity-section collapse on the focused workspace.
@@ -364,6 +374,7 @@ pub enum ActionKind {
     Archive,
     CloseIssue,
     MergePr,
+    UpdateBranch,
     ToggleAutoMerge,
     ManagePolicies,
     AdoptSessions,
@@ -384,6 +395,7 @@ pub enum ActionKind {
     ToggleRepoGroup,
     SelectWorkspace,
     BroadcastToSelected,
+    UpdateBranchSelected,
     // Activity
     ToggleActivity,
     ToggleRow,
@@ -403,6 +415,7 @@ pub enum ActionKind {
     OpenSyncStatus,
     OpenMessages,
     DismissNotice,
+    InspectNotice,
     OpenSettings,
     OpenThemePicker,
     OpenSnippets,
@@ -442,6 +455,7 @@ impl ActionKind {
         Self::OpenSyncStatus,
         Self::OpenMessages,
         Self::DismissNotice,
+        Self::InspectNotice,
         // The three Jump actions sit together so the help panel reads
         // them as one coherent group.
         Self::JumpToWorkspace,
@@ -478,6 +492,7 @@ impl ActionKind {
         Self::CloseIssue,
         // GitHub menu.
         Self::MergePr,
+        Self::UpdateBranch,
         Self::ToggleAutoMerge,
         Self::ManagePolicies,
         Self::RequestReviewers,
@@ -496,6 +511,7 @@ impl ActionKind {
         Self::ToggleRepoGroup,
         Self::SelectWorkspace,
         Self::BroadcastToSelected,
+        Self::UpdateBranchSelected,
         // Activity
         Self::ToggleActivity,
         Self::ToggleRow,
@@ -575,6 +591,7 @@ impl Action {
             Action::Archive => ActionKind::Archive,
             Action::CloseIssue => ActionKind::CloseIssue,
             Action::MergePr => ActionKind::MergePr,
+            Action::UpdateBranch => ActionKind::UpdateBranch,
             Action::ToggleAutoMerge => ActionKind::ToggleAutoMerge,
             Action::ManagePolicies => ActionKind::ManagePolicies,
             Action::AdoptSessions => ActionKind::AdoptSessions,
@@ -593,6 +610,7 @@ impl Action {
             Action::ToggleRepoGroup => ActionKind::ToggleRepoGroup,
             Action::SelectWorkspace => ActionKind::SelectWorkspace,
             Action::BroadcastToSelected => ActionKind::BroadcastToSelected,
+            Action::UpdateBranchSelected => ActionKind::UpdateBranchSelected,
             Action::ToggleActivity => ActionKind::ToggleActivity,
             Action::ToggleRow => ActionKind::ToggleRow,
             Action::ActivityTop => ActionKind::ActivityTop,
@@ -709,6 +727,13 @@ impl ActionDef {
                 default_keys: "Esc",
                 label: "dismiss",
                 describe: "Clear the current footer notice, whatever its severity — retryable, info, permanent, or auth. Severity still decides whether a notice auto-fades on its own; this clears it now. Yields to a live terminal (Esc reaches the program) and to a sidebar multi-select (Esc drops the selection first).",
+                section: Section::Global,
+            },
+            ActionKind::InspectNotice => &Self {
+                kind: ActionKind::InspectNotice,
+                default_keys: "Enter",
+                label: "detail",
+                describe: "Open the current footer error in a full-text detail modal. The footer pill width-caps its message, so a long error (a merge rejection, a spawn failure) shows truncated; this pops the whole thing, wrapped and readable. Only active while a sticky error notice is up; Enter keeps its normal pane meaning otherwise.",
                 section: Section::Global,
             },
             ActionKind::OpenSettings => &Self {
@@ -922,6 +947,13 @@ impl ActionDef {
                 describe: "Merge the PR (only when CI green + approved + no conflicts).",
                 section: Section::Workspace,
             },
+            ActionKind::UpdateBranch => &Self {
+                kind: ActionKind::UpdateBranch,
+                default_keys: "g u",
+                label: "update branch",
+                describe: "Update the PR branch against its base — the \"Update branch\" button on github.com. Only when the PR is behind its base.",
+                section: Section::Workspace,
+            },
             ActionKind::ToggleAutoMerge => &Self {
                 kind: ActionKind::ToggleAutoMerge,
                 default_keys: "g g",
@@ -1047,6 +1079,13 @@ impl ActionDef {
                 default_keys: "Shift-B",
                 label: "broadcast",
                 describe: "Send one instruction — a snippet, free text, or both — to every multi-selected workspace at once. Running agents get the prompt injected; plain shells get a direct write; workspaces with no session are skipped and reported.",
+                section: Section::Sidebar,
+            },
+            ActionKind::UpdateBranchSelected => &Self {
+                kind: ActionKind::UpdateBranchSelected,
+                default_keys: "Shift-U",
+                label: "update branches",
+                describe: "Update the branch of every multi-selected PR that's behind its base, in one shot — the bulk \"Update branch\". Up-to-date or non-PR selections are skipped and reported.",
                 section: Section::Sidebar,
             },
             // ── Activity ────────────────────────────────────────────
@@ -1617,6 +1656,7 @@ impl ActionKind {
             ActionKind::Archive => "archive",
             ActionKind::CloseIssue => "close_issue",
             ActionKind::MergePr => "merge_pr",
+            ActionKind::UpdateBranch => "update_branch",
             ActionKind::ToggleAutoMerge => "toggle_auto_merge",
             ActionKind::ManagePolicies => "manage_policies",
             ActionKind::AdoptSessions => "adopt_sessions",
@@ -1635,6 +1675,7 @@ impl ActionKind {
             ActionKind::ToggleRepoGroup => "toggle_repo_group",
             ActionKind::SelectWorkspace => "select_workspace",
             ActionKind::BroadcastToSelected => "broadcast_to_selected",
+            ActionKind::UpdateBranchSelected => "update_branch_selected",
             ActionKind::ToggleActivity => "toggle_activity",
             ActionKind::ToggleRow => "toggle_row",
             ActionKind::ActivityTop => "activity_top",
@@ -1653,6 +1694,7 @@ impl ActionKind {
             ActionKind::OpenSyncStatus => "open_sync_status",
             ActionKind::OpenMessages => "open_messages",
             ActionKind::DismissNotice => "dismiss_notice",
+            ActionKind::InspectNotice => "inspect_notice",
             ActionKind::OpenSettings => "open_settings",
             ActionKind::OpenThemePicker => "open_theme_picker",
             ActionKind::OpenSnippets => "open_snippets",
@@ -1820,6 +1862,7 @@ pub fn tier_chord_stroke(alias: &str) -> Option<KeyStroke> {
 pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
     match kind {
         ActionKind::MergePr
+        | ActionKind::UpdateBranch
         | ActionKind::ToggleAutoMerge
         | ActionKind::ManagePolicies
         | ActionKind::RequestReviewers
@@ -2187,6 +2230,12 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
             intent::resolve_merge(workspace),
             intent::Intent::MergePr { .. },
         ),
+        // Only surfaces when the PR is behind its base — the same
+        // `BEHIND` signal the status tag reads, via the resolver.
+        ActionKind::UpdateBranch => matches!(
+            intent::resolve_update_branch(workspace),
+            intent::Intent::UpdateBranch { .. },
+        ),
         // Arming applies to a PR (armed or not — it toggles). Gate on
         // the workspace having a PR so `g g` only surfaces where it
         // can do something; the resolver Notices on non-PR workspaces
@@ -2317,7 +2366,10 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         // can't see), so the dispatcher gates on it and surfaces a
         // footer nudge when nothing is selected.
         ActionKind::SelectWorkspace => has_ws,
-        ActionKind::BroadcastToSelected => true,
+        // The bulk update-branch acts on the selection set (which the
+        // catalog can't see), so the dispatcher gates on it and surfaces
+        // a footer nudge when nothing behind-base is selected.
+        ActionKind::BroadcastToSelected | ActionKind::UpdateBranchSelected => true,
         // Global / no-workspace-needed actions.
         ActionKind::NewWorkspace
         | ActionKind::NewProject
@@ -2332,6 +2384,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::OpenSyncStatus
         | ActionKind::OpenMessages
         | ActionKind::DismissNotice
+        | ActionKind::InspectNotice
         | ActionKind::OpenSettings
         | ActionKind::OpenThemePicker
         | ActionKind::OpenSnippets
@@ -3111,6 +3164,66 @@ mod tests {
     }
 
     #[test]
+    fn update_branch_only_offered_on_behind_pr() {
+        use chrono::Utc;
+        use lazybox_core::{
+            CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace, WorkspaceKey,
+        };
+        let mut ws = Workspace::empty(
+            WorkspaceKey("github-acme-widget-8".into()),
+            "main",
+            Utc::now(),
+        );
+        let mut pr = Task {
+            id: TaskId {
+                source: "github".into(),
+                key: "acme/widget#8".into(),
+            },
+            title: "acme/widget#8".into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Author,
+            ci: CiStatus::Success,
+            review: ReviewStatus::Approved,
+            checks: vec![],
+            unread_count: 0,
+            url: String::new(),
+            repo: Some("acme/widget".into()),
+            branch: None,
+            base_branch: None,
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: Some("PR_node".into()),
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        };
+
+        // Up-to-date PR → not offered.
+        ws.pr = Some(pr.clone());
+        assert!(!availability(ActionKind::UpdateBranch, Some(&ws)));
+
+        // Behind its base → offered.
+        pr.is_behind_base = true;
+        ws.pr = Some(pr);
+        assert!(availability(ActionKind::UpdateBranch, Some(&ws)));
+
+        // No workspace → not offered.
+        assert!(!availability(ActionKind::UpdateBranch, None));
+    }
+
+    #[test]
     fn github_leader_chords_share_one_prefix() {
         // The github actions migrated off the `ActionGroup` table onto
         // catalog data: each carries a `g <key>` leader sequence as its
@@ -3121,6 +3234,7 @@ mod tests {
         let g = KeyStroke::new(false, false, false, ChordCode::Char('g'));
         let github = [
             ActionKind::MergePr,
+            ActionKind::UpdateBranch,
             ActionKind::ToggleAutoMerge,
             ActionKind::RequestReviewers,
             ActionKind::AddAssignees,

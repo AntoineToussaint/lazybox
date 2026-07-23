@@ -120,12 +120,35 @@ impl AgentObservation {
     }
 }
 
+/// The generic badge rule for an agent id: its first char, uppercased
+/// (`'A'` for the degenerate empty id). The single source of the
+/// fallback — [`Agent::badge`]'s default and [`Registry::badge_for`]'s
+/// unknown-id path both defer here so the rule never drifts.
+pub fn default_badge(id: &str) -> char {
+    id.chars()
+        .next()
+        .map(|c| c.to_ascii_uppercase())
+        .unwrap_or('A')
+}
+
 pub trait Agent: Send + Sync {
     /// Stable id used in config and IPC (`"claude"`, `"codex"`, etc.).
     fn id(&self) -> &'static str;
 
     /// Human-readable display name.
     fn display_name(&self) -> &'static str;
+
+    /// Single-letter badge for the sidebar runner column and any other
+    /// compact "which agent is live here" indicator. Declared by the
+    /// agent so identity lives in one place: the sidebar never
+    /// special-cases a kind, and a new agent can pick a letter that
+    /// doesn't collide instead of silently sharing the first char of a
+    /// name that's already taken (Codex vs Claude, both `C`). The
+    /// default is [`default_badge`] over [`Agent::id`] — fine for a
+    /// unique leading letter, overridden when it would collide.
+    fn badge(&self) -> char {
+        default_badge(self.id())
+    }
 
     /// Which upstream LLM API this agent speaks. Drives base-URL env
     /// injection when an LLM gateway is configured. The default `None`
@@ -355,10 +378,17 @@ pub trait Agent: Send + Sync {
     /// is the user's own parsed settings, merged in so we don't clobber
     /// their hooks.
     ///
-    /// The default returns `None`: most agents have no hook system, so
-    /// the daemon writes no settings file and keeps PTY detection. Only
-    /// Claude overrides this. The daemon writes the returned JSON to a
-    /// per-session file and sets [`SpawnCtx::hook_settings_path`].
+    /// One of two ways an agent wires up its authoritative state source
+    /// (see also [`Agent::hook_command_args`]). This one is for agents
+    /// that take a settings *file* — Claude launches with `--settings
+    /// <path>`, whose contents this method produces. The daemon writes
+    /// the returned JSON to a per-session file and sets
+    /// [`SpawnCtx::hook_settings_path`].
+    ///
+    /// The default returns `None`: an agent that overrides neither this
+    /// nor [`Agent::hook_command_args`] emits no authoritative signal, so
+    /// the daemon keeps the lower-confidence PTY detector (`detect_state`
+    /// and friends) as its only source.
     fn build_hook_settings(
         &self,
         hook_command: &str,
@@ -366,6 +396,26 @@ pub trait Agent: Send + Sync {
     ) -> Option<serde_json::Value> {
         let _ = (hook_command, user_settings);
         None
+    }
+
+    /// Extra spawn-argv fragments that wire lazybox's authoritative-state
+    /// hook command into an agent that configures hooks through CLI
+    /// overrides rather than a settings file. `hook_command` is the same
+    /// `hook-ingest` shell command Claude runs on each lifecycle event,
+    /// already correlated to this terminal.
+    ///
+    /// The daemon appends the returned args to the spawn argv. The
+    /// resulting hooks reach the daemon over the identical
+    /// [`crate::hook`] → `IngestHook` path Claude's settings-file hooks
+    /// use — the state machine consumes one normalized signal regardless
+    /// of how the agent was configured to emit it.
+    ///
+    /// The default returns an empty vec (no argv-based hooks). Codex
+    /// overrides it: its `hook_event_name` payloads are wire-compatible
+    /// with Claude's, so [`crate::hook::parse_claude_hook`] parses both.
+    fn hook_command_args(&self, hook_command: &str) -> Vec<String> {
+        let _ = hook_command;
+        Vec::new()
     }
 }
 
@@ -390,6 +440,16 @@ impl Registry {
 
     pub fn get(&self, id: &str) -> Option<Arc<dyn Agent>> {
         self.agents.get(id).cloned()
+    }
+
+    /// Display badge for an agent id: the registered agent's declared
+    /// [`Agent::badge`], or [`default_badge`] for an id this registry
+    /// doesn't know (a YAML `GenericCli`). Lets a consumer resolve a
+    /// badge from a bare id string without reaching for the fallback
+    /// itself.
+    pub fn badge_for(&self, id: &str) -> char {
+        self.get(id)
+            .map_or_else(|| default_badge(id), |a| a.badge())
     }
 
     pub fn ids(&self) -> impl Iterator<Item = &&'static str> {
@@ -455,6 +515,9 @@ pub mod builtins {
         }
         fn display_name(&self) -> &'static str {
             "Claude Code"
+        }
+        fn badge(&self) -> char {
+            'C'
         }
         fn llm_provider(&self) -> Option<LlmProvider> {
             Some(LlmProvider::Anthropic)
@@ -566,18 +629,43 @@ pub mod builtins {
     /// The flags that make an unattended (`skip_permissions`) Codex launch
     /// start clean, shared by [`Codex::spawn`] and [`Codex::resume`] so the
     /// two paths never drift. Empty unless `skip_permissions` is set.
+    ///
+    /// `--dangerously-bypass-hook-trust` is intentionally NOT here: it now
+    /// rides with the injected lifecycle hooks in
+    /// [`Codex::hook_command_args`] (needed for interactive spawns too, and
+    /// pointless without hooks), so keeping it here as well would pass it
+    /// twice on an autonomous hooked spawn.
     fn codex_unattended_flags(ctx: &SpawnCtx) -> Vec<String> {
         if !ctx.skip_permissions {
             return Vec::new();
         }
         vec![
             "--dangerously-bypass-approvals-and-sandbox".into(),
-            "--dangerously-bypass-hook-trust".into(),
             "-c".into(),
             codex_trusted_project_override(&ctx.worktree),
             "-c".into(),
             "check_for_update_on_startup=false".into(),
         ]
+    }
+
+    /// Escape a string for a TOML basic (`"…"`) string. Codex's `-c`
+    /// overrides are parsed as TOML, and the hook command embeds the
+    /// lazybox binary path plus quoted arguments, so its inner `"` and
+    /// `\` must be escaped or the override fails to parse.
+    fn toml_escape(s: &str) -> String {
+        s.replace('\\', "\\\\").replace('"', "\\\"")
+    }
+
+    /// A Codex `-c` config override registering `command` as a hook on one
+    /// lifecycle `event`. Mirrors the nested shape Codex's `hooks` table
+    /// expects (`hooks.<Event> = [{ hooks = [{ type = "command", command
+    /// = … }] }]`), the same matcher-group structure Claude's settings
+    /// file uses.
+    fn codex_hook_override(event: &str, command: &str) -> String {
+        format!(
+            "hooks.{event}=[{{hooks=[{{type=\"command\",command=\"{}\"}}]}}]",
+            toml_escape(command)
+        )
     }
 
     impl Agent for Codex {
@@ -586,6 +674,9 @@ pub mod builtins {
         }
         fn display_name(&self) -> &'static str {
             "Codex"
+        }
+        fn badge(&self) -> char {
+            'X'
         }
         fn llm_provider(&self) -> Option<LlmProvider> {
             Some(LlmProvider::OpenAI)
@@ -632,6 +723,29 @@ pub mod builtins {
 
         fn update_channel(&self) -> Option<crate::update::UpdateChannel> {
             Some(crate::update::codex_channel())
+        }
+
+        /// Wire lazybox's hook command into Codex through `-c` config
+        /// overrides — Codex's authoritative state source, replacing the
+        /// PTY screen-scraper as the primary signal. Codex's hooks (a
+        /// near-clone of Claude's: PascalCase `hook_event_name`, JSON on
+        /// stdin) fire `SessionStart` / `UserPromptSubmit` / `PreToolUse`
+        /// / `PostToolUse` / `Stop` / … which map through the same
+        /// [`crate::hook::hook_to_state`] transitions — so Codex reaches
+        /// `Done` on a real `Stop` signal instead of a scraper topping
+        /// out at `Idle`.
+        ///
+        /// `--dangerously-bypass-hook-trust` is required for the injected
+        /// hooks to run: without persisted per-source trust Codex silently
+        /// drops them (no prompt). lazybox is the hook source and vets it,
+        /// and the flag bypasses only hook trust, never approvals/sandbox.
+        fn hook_command_args(&self, hook_command: &str) -> Vec<String> {
+            let mut args = vec!["--dangerously-bypass-hook-trust".to_string()];
+            for event in crate::hook_settings::HOOKED_EVENTS {
+                args.push("-c".to_string());
+                args.push(codex_hook_override(event, hook_command));
+            }
+            args
         }
 
         /// Codex Code's three observable states. Delegates to the pure
@@ -695,6 +809,9 @@ pub mod builtins {
         }
         fn display_name(&self) -> &'static str {
             "Cursor Agent"
+        }
+        fn badge(&self) -> char {
+            'U'
         }
         fn llm_provider(&self) -> Option<LlmProvider> {
             Some(LlmProvider::OpenAI)
@@ -791,6 +908,39 @@ mod tests {
             super::builtins::Cursor.llm_provider(),
             Some(LlmProvider::OpenAI)
         );
+    }
+
+    #[test]
+    fn builtins_declare_distinct_display_badges() {
+        // #440: the display badge lives on the agent, not a hardcoded
+        // sidebar match. Distinct letters guarantee two live agents in
+        // one workspace never collapse onto one column.
+        assert_eq!(Claude.badge(), 'C');
+        assert_eq!(super::builtins::Codex.badge(), 'X');
+        assert_eq!(super::builtins::Cursor.badge(), 'U');
+    }
+
+    #[test]
+    fn generic_cli_badge_defaults_to_first_char() {
+        let agent = super::builtins::GenericCli {
+            id: "aider",
+            display_name: "Aider",
+            spawn_cmd: vec!["aider".into()],
+            resume_cmd: None,
+            asking_patterns: vec![],
+        };
+        assert_eq!(agent.badge(), 'A');
+    }
+
+    #[test]
+    fn registry_badge_for_resolves_known_ids_and_falls_back_otherwise() {
+        let reg = super::Registry::default_builtins();
+        assert_eq!(reg.badge_for("codex"), 'X', "known id → declared badge");
+        assert_eq!(reg.badge_for("cursor-agent"), 'U');
+        // Unknown id (a YAML GenericCli the built-in registry never saw)
+        // falls back to the same first-char rule the trait default uses.
+        assert_eq!(reg.badge_for("aider"), 'A');
+        assert_eq!(reg.badge_for(""), 'A', "empty id degenerates to 'A'");
     }
 
     #[test]
@@ -962,7 +1112,10 @@ mod tests {
         let resumed = codex.resume(&on);
         assert_eq!(resumed[..3], ["codex", "resume", "--last"]);
         assert!(resumed.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
-        assert!(resumed.contains(&"--dangerously-bypass-hook-trust".to_string()));
+        // Hook trust is bypassed alongside the injected hooks
+        // (`hook_command_args`), not in the unattended flags — so the bare
+        // spawn/resume argv no longer carries it.
+        assert!(!resumed.contains(&"--dangerously-bypass-hook-trust".to_string()));
         // The unattended tail matches spawn's exactly.
         assert_eq!(resumed[3..], codex.spawn(&on)[1..]);
     }

@@ -91,6 +91,11 @@ pub struct WorkspaceRowCtx<'a> {
     /// (`Workspace::has_notes` — issue #458). Renders a small ` ✎ ` pill
     /// so the user can see, at a glance, which rows have a scratchpad.
     pub has_notes: bool,
+    /// Count of distinct snippets sent to this workspace's agent
+    /// (`Workspace::sent_snippets` — issue #463). Renders a dim ` ]N `
+    /// pill so the user can see, at a glance, how much they've already
+    /// directed each agent. `0` renders nothing.
+    pub sent_snippet_count: usize,
 }
 
 impl<'a> WorkspaceRowCtx<'a> {
@@ -628,6 +633,7 @@ fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         && !ctx.auto_fix_armed
         && !linked
         && !ctx.has_notes
+        && ctx.sent_snippet_count == 0
     {
         return Cell::empty();
     }
@@ -658,6 +664,19 @@ fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
             Style::default().fg(ctx.theme.text_dim)
         };
         spans.push(Span::styled(" ✎ ", notes_style));
+    }
+    if ctx.sent_snippet_count > 0 {
+        // Passive info like the notes glyph: a dim ` ]N ` recording how
+        // many snippets this agent's been sent (#463).
+        let snip_style = if ctx.is_cursor {
+            ctx.row_style()
+        } else {
+            Style::default().fg(ctx.theme.text_dim)
+        };
+        spans.push(Span::styled(
+            format!(" ]{} ", ctx.sent_snippet_count),
+            snip_style,
+        ));
     }
     if ctx.auto_merge_armed {
         let arm_style = if ctx.is_cursor {
@@ -800,6 +819,7 @@ mod tests {
             auto_merge_armed: false,
             auto_fix_armed: false,
             has_notes: false,
+            sent_snippet_count: 0,
         }
     }
 
@@ -1118,6 +1138,7 @@ mod tests {
             auto_merge_armed: false,
             auto_fix_armed: false,
             has_notes: false,
+            sent_snippet_count: 0,
         };
         assert_eq!(cell_type(&ctx).width(), 0);
     }
@@ -1300,6 +1321,7 @@ mod tests {
             auto_merge_armed: false,
             auto_fix_armed: false,
             has_notes: false,
+            sent_snippet_count: 0,
         };
         assert_eq!(cell_title(&ctx).spans[0].content.as_ref(), "lonely");
     }
@@ -1397,6 +1419,28 @@ mod tests {
         assert!(
             cell.spans.iter().any(|s| s.content.as_ref() == " ✎ "),
             "notes marker present"
+        );
+    }
+
+    /// A workspace that's been sent snippets surfaces a ` ]N ` pill
+    /// (issue #463); a row with none shows no such pill.
+    #[test]
+    fn cell_status_shows_sent_snippet_pill() {
+        let ws = Workspace::empty(
+            lazybox_core::WorkspaceKey("scratch".into()),
+            "main",
+            fixed_time(),
+        );
+        let theme = theme();
+        let placeholder = make_task("owner/repo#1", "x");
+        let mut ctx = ctx_for(&ws, &placeholder, &theme);
+        ctx.task = None;
+        assert_eq!(cell_status(&ctx).width(), 0, "no snippets, no pill");
+        ctx.sent_snippet_count = 3;
+        let cell = cell_status(&ctx);
+        assert!(
+            cell.spans.iter().any(|s| s.content.as_ref() == " ]3 "),
+            "sent-snippet marker present"
         );
     }
 
@@ -2125,6 +2169,7 @@ mod tests {
             auto_merge_armed: false,
             auto_fix_armed: false,
             has_notes: false,
+            sent_snippet_count: 0,
         };
         let columns = build_columns(4);
         let rows = vec![build_row(&ctx_task), build_row(&ctx_scratch)];

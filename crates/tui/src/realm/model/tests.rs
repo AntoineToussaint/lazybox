@@ -1549,6 +1549,37 @@ snippets:
         );
     }
 
+    /// Sending a snippet also emits `RecordSentSnippet` for the focused
+    /// terminal's workspace, so the daemon can persist a per-session
+    /// record of "what I've told this agent" (#463).
+    #[test]
+    fn sending_a_snippet_records_it_on_the_workspace() {
+        let mut m = model_with_active_terminal_and_snippet(
+            "sent-history",
+            "\nsnippets:\n  ls:\n    description: List\n    body: ls -la\n",
+            "ls",
+            lazybox_ipc::TerminalKind::Shell,
+        );
+        let cmds = m.handle_choice_picked(vec![0]);
+        match cmds
+            .iter()
+            .find(|c| matches!(c, IpcCommand::RecordSentSnippet { .. }))
+        {
+            Some(IpcCommand::RecordSentSnippet {
+                session_key,
+                snippet_key,
+            }) => {
+                assert_eq!(
+                    session_key.as_str(),
+                    "github:o/r#1",
+                    "the focused workspace"
+                );
+                assert_eq!(snippet_key, "ls", "the snippet just sent");
+            }
+            _ => panic!("a snippet send must record it on the workspace, got {cmds:?}"),
+        }
+    }
+
     /// The session MRU is most-recent-first, de-duplicated, and capped.
     #[test]
     fn recent_snippets_mru_dedups_and_caps() {
@@ -1696,6 +1727,43 @@ snippets:
             notice.message.contains("1 skipped"),
             "summary names the session-less target: {}",
             notice.message,
+        );
+    }
+
+    /// A broadcast carrying a snippet key pins it onto every workspace
+    /// it actually reached — one `RecordSentSnippet` per delivered
+    /// target, none for the session-less skip (#463).
+    #[test]
+    fn broadcast_with_a_snippet_records_it_on_each_delivered_target() {
+        let (mut m, keys) = model_with_broadcast_targets(&[
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+            Some(lazybox_ipc::TerminalKind::Shell),
+            None,
+        ]);
+        m.pending_broadcast = Some(BroadcastDraft {
+            targets: keys.clone(),
+            snippet_key: Some("rev".into()),
+        });
+        m.modal_stack.push(Id::BroadcastText);
+        let cmds = m.handle_textarea_submitted("review the diff".into());
+
+        let recorded: Vec<&str> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                IpcCommand::RecordSentSnippet {
+                    session_key,
+                    snippet_key,
+                } => {
+                    assert_eq!(snippet_key, "rev");
+                    Some(session_key.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            recorded,
+            vec![keys[0].as_str(), keys[1].as_str()],
+            "the two delivered targets are recorded, the skipped one is not",
         );
     }
 
@@ -4087,6 +4155,76 @@ mod merge_focus_follow_tests {
         )
     }
 
+    /// `Shift-U` on a multi-select fans out one `UpdateBranch` per
+    /// selected PR that's actually behind its base; up-to-date PRs are
+    /// skipped, and the selection clears afterward.
+    #[test]
+    fn bulk_update_branch_fans_out_over_behind_prs_only() {
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+
+        let mut behind_a = workspace("owner/repo#1", true, Duration::hours(1));
+        behind_a.pr.as_mut().unwrap().is_behind_base = true;
+        let up_to_date = workspace("owner/repo#2", true, Duration::hours(2));
+        let mut behind_b = workspace("owner/repo#3", true, Duration::hours(3));
+        behind_b.pr.as_mut().unwrap().is_behind_base = true;
+
+        let key_a = behind_a.key.clone();
+        let key_b = behind_b.key.clone();
+
+        for ws in [behind_a, up_to_date.clone(), behind_b] {
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        }
+
+        // Mark all three rows.
+        for key in [&key_a, &up_to_date.key, &key_b] {
+            assert!(m.sidebar.focus_workspace_key(&SessionKey::from(key)));
+            m.sidebar.toggle_broadcast_select();
+        }
+        assert_eq!(m.sidebar.broadcast_selected_count(), 3);
+
+        let cmds = m.dispatch_action(&Action::UpdateBranchSelected);
+
+        let targets: Vec<lazybox_core::WorkspaceKey> = cmds
+            .into_iter()
+            .map(|c| match c {
+                IpcCommand::UpdateBranch { workspace_key } => workspace_key,
+                other => panic!("expected UpdateBranch, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(targets.len(), 2, "only the two behind PRs fan out");
+        assert!(targets.contains(&key_a));
+        assert!(targets.contains(&key_b));
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "selection clears after the bulk fire",
+        );
+    }
+
+    /// `Shift-U` with no behind-base PR selected fires nothing and
+    /// leaves the selection intact for another action.
+    #[test]
+    fn bulk_update_branch_with_no_behind_pr_is_noop() {
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        let up_to_date = workspace("owner/repo#2", true, Duration::hours(2));
+        let key = up_to_date.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(up_to_date)));
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&key)));
+        m.sidebar.toggle_broadcast_select();
+
+        let cmds = m.dispatch_action(&Action::UpdateBranchSelected);
+        assert!(cmds.is_empty(), "no behind PR → no command");
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            1,
+            "selection survives a no-op bulk update",
+        );
+    }
+
     #[test]
     fn merge_while_viewing_issue_follows_focus_to_pr() {
         let mut m = build_model();
@@ -5195,9 +5333,24 @@ mod chord_resolution_tests {
     /// here that collides is a shipped ambiguity.
     fn known_aliases() -> Vec<(Chord, Vec<ActionKind>)> {
         vec![
+            // `Enter` also drives the Global `InspectNotice` (rank 0),
+            // but only ever fires from the explicit sticky-error branch
+            // in `handle_pane_key`; it is pane-native (not catalog-
+            // dispatched), so it falls through to the pane's own Enter
+            // when no error is up — exactly like Esc/DismissNotice.
+            // Sidebar sees InspectNotice + OpenWorkspace; the activity
+            // pane adds its own ToggleActivity.
             (
                 Chord::Key(stroke("Enter")),
-                vec![ActionKind::OpenWorkspace, ActionKind::ToggleActivity],
+                vec![ActionKind::InspectNotice, ActionKind::OpenWorkspace],
+            ),
+            (
+                Chord::Key(stroke("Enter")),
+                vec![
+                    ActionKind::InspectNotice,
+                    ActionKind::OpenWorkspace,
+                    ActionKind::ToggleActivity,
+                ],
             ),
             (
                 Chord::Key(stroke("z")),
@@ -7392,6 +7545,94 @@ mod workspace_focus_memory_tests {
             m.terminals.active_terminal_id(),
             Some(TerminalId(1)),
             "restored focus lands on WS-A's active session, not WS-B's",
+        );
+    }
+
+    /// Regression for #441: a single click on a sidebar workspace only
+    /// selects it, while a double-click drops focus straight into its
+    /// live agent terminal — no extra keystrokes to reach the running
+    /// session. A workspace with no live terminal degrades gracefully
+    /// to the plain selection.
+    #[test]
+    fn double_click_enters_the_workspace_agent_terminal() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![empty_ws("github:o/r#1"), empty_ws("github:o/r#2")],
+            terminals: vec![],
+            projects: vec![],
+        });
+        let a = key_of("github:o/r#1");
+        let b = key_of("github:o/r#2");
+        // WS-A has a live agent terminal; WS-B has none.
+        spawn_terminal(&mut m, &a, 1);
+
+        let area = Rect::new(0, 0, 120, 40);
+        let (sidebar_rect, _, _) = m.effective_pane_rects(area);
+        let row_a = row_of(&mut m, sidebar_rect, &a);
+        let row_b = row_of(&mut m, sidebar_rect, &b);
+
+        // Single click on WS-A: selects the row, stays on the sidebar.
+        m.dispatch_mouse_in(left_down(sidebar_rect.x + 1, row_a), area);
+        assert_eq!(m.sidebar().selected_workspace_key(), Some(&a));
+        assert_eq!(
+            m.focus(),
+            PaneFocus::Sidebar,
+            "a single click only selects the workspace",
+        );
+
+        // Second click at the same spot (within the double-click
+        // window) enters WS-A's live agent terminal.
+        m.dispatch_mouse_in(left_down(sidebar_rect.x + 1, row_a), area);
+        assert_eq!(m.sidebar().selected_workspace_key(), Some(&a));
+        assert_eq!(
+            m.focus(),
+            PaneFocus::Terminals,
+            "a double click jumps into the agent terminal",
+        );
+        assert_eq!(m.terminals.active_terminal_id(), Some(TerminalId(1)));
+
+        // Double-click WS-B, which has no live session: it degrades to
+        // a plain selection rather than stranding focus in an empty
+        // terminal pane.
+        m.dispatch_mouse_in(left_down(sidebar_rect.x + 1, row_b), area);
+        m.dispatch_mouse_in(left_down(sidebar_rect.x + 1, row_b), area);
+        assert_eq!(m.sidebar().selected_workspace_key(), Some(&b));
+        assert_eq!(
+            m.focus(),
+            PaneFocus::Sidebar,
+            "double-clicking a session-less workspace just selects it",
+        );
+    }
+
+    /// Companion to #441: double-clicking a workspace with no live
+    /// terminal but a visible activity pane falls back to opening that
+    /// pane rather than stranding focus in an empty terminal slot.
+    #[test]
+    fn double_click_without_a_terminal_opens_the_activity_pane() {
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers as TuiMods};
+
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![empty_ws("github:o/r#1")],
+            terminals: vec![],
+            projects: vec![],
+        });
+        let a = key_of("github:o/r#1");
+        // No terminal spawned; force the (otherwise auto-hidden)
+        // activity pane visible so the fallback has somewhere to land.
+        m.dispatch_key(KeyEvent::new(Key::Char('P'), TuiMods::SHIFT));
+        assert!(m.activity_pane_visible());
+
+        let area = Rect::new(0, 0, 120, 40);
+        let (sidebar_rect, _, _) = m.effective_pane_rects(area);
+        let row_a = row_of(&mut m, sidebar_rect, &a);
+
+        m.dispatch_mouse_in(left_down(sidebar_rect.x + 1, row_a), area);
+        m.dispatch_mouse_in(left_down(sidebar_rect.x + 1, row_a), area);
+        assert_eq!(
+            m.focus(),
+            PaneFocus::Right,
+            "with no terminal the double-click opens the activity pane",
         );
     }
 
@@ -9942,6 +10183,77 @@ mod dismiss_and_messages_tests {
         assert!(m.status.notice.is_none());
         m.dispatch_key(key(Key::Esc));
         assert!(m.status.notice.is_none());
+    }
+
+    /// #453: a sticky error is a dead end unless its full text is
+    /// reachable. Enter (the `InspectNotice` binding) pops the whole
+    /// message — which the footer pill would otherwise truncate — into a
+    /// detail modal, without dismissing the notice.
+    #[test]
+    fn enter_inspects_a_sticky_error_into_a_detail_modal() {
+        let mut m = build_model();
+        m.flash_error("merge failed — owner/repo#1: Pull Request is not mergeable");
+        m.dispatch_key(key(Key::Enter));
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::Error),
+            "Enter must open the error detail modal while a sticky error is up",
+        );
+        assert!(
+            m.status.notice.is_some(),
+            "inspecting must not clear the notice — only Esc does that",
+        );
+    }
+
+    /// Gated on *sticky* severity: a transient Info notice auto-fades
+    /// and is up too often for Enter to lose its pane meaning, so Enter
+    /// passes through (no detail modal).
+    #[test]
+    fn enter_is_inert_for_a_non_sticky_notice() {
+        let mut m = build_model();
+        m.flash_info("saved");
+        m.dispatch_key(key(Key::Enter));
+        assert!(
+            !m.modal_stack.contains(&Id::Error),
+            "Enter must not open a detail modal for a non-sticky notice",
+        );
+    }
+
+    /// With a quiet footer, Enter keeps its normal pane meaning — the
+    /// inspect path is gated on a sticky notice being up.
+    #[test]
+    fn enter_is_inert_when_no_notice_is_up() {
+        let mut m = build_model();
+        assert!(m.status.notice.is_none());
+        m.dispatch_key(key(Key::Enter));
+        assert!(!m.modal_stack.contains(&Id::Error));
+    }
+
+    /// The lifecycle is discoverable: while a sticky error is pinned the
+    /// footer advertises both `detail` (inspect) and `dismiss`. A
+    /// non-sticky notice — and a quiet footer — advertise neither.
+    #[test]
+    fn footer_advertises_inspect_and_dismiss_for_sticky_errors() {
+        let mut m = build_model();
+        assert!(m.notice_action_hints().is_empty(), "quiet footer: no hints");
+
+        m.flash_info("saved");
+        assert!(
+            m.notice_action_hints().is_empty(),
+            "non-sticky Info notice must not advertise inspect/dismiss",
+        );
+
+        m.flash_error("boom");
+        let labels: Vec<_> = m
+            .notice_action_hints()
+            .into_iter()
+            .map(|b| b.label.to_string())
+            .collect();
+        assert_eq!(
+            labels,
+            vec!["detail".to_string(), "dismiss".to_string()],
+            "sticky error must advertise inspect then dismiss",
+        );
     }
 
     /// The collision the guard defends against: with a sidebar

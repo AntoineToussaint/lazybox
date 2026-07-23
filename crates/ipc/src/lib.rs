@@ -1044,6 +1044,26 @@ pub enum Command {
         session_key: SessionKey,
         notes: String,
     },
+    /// Update the workspace's PR branch against its base — the "Update
+    /// branch" button on github.com. Fires from the sidebar's `g u`
+    /// shortcut on a `BEHIND` row (and the bulk `Shift-U` fan-out). The
+    /// daemon looks up the PR's `node_id` and calls the GraphQL
+    /// `updatePullRequestBranch` mutation, then wakes the poll so the
+    /// `BEHIND` tag clears. Appended last (bincode is ordinal-sensitive).
+    UpdateBranch {
+        workspace_key: lazybox_core::WorkspaceKey,
+    },
+    /// Record a snippet shortcut key as sent to a workspace's agent
+    /// (issue #463). The daemon prepends it to the workspace's MRU
+    /// `sent_snippets` (like `SetNotes`) and re-broadcasts
+    /// `WorkspaceUpserted`, giving every TUI a per-session record of
+    /// "what I've already told this agent" and its sidebar indicator.
+    /// Local-only — never synced to any provider. Appended last (bincode
+    /// is ordinal-sensitive).
+    RecordSentSnippet {
+        session_key: SessionKey,
+        snippet_key: String,
+    },
 }
 
 /// The terminal state a removable workspace's primary task reached,
@@ -1621,6 +1641,24 @@ pub enum Event {
     /// [`PROTOCOL_FINGERPRINT`].
     RecoveredTerminalsRequireRestart {
         terminal_ids: Vec<TerminalId>,
+    },
+    /// The PR branch for `workspace_key` was just updated against its
+    /// base via `Command::UpdateBranch`. The local Task still reflects
+    /// the stale `mergeStateStatus` until the next poll, so the TUI
+    /// flashes a footer notice so the keypress doesn't look like a no-op.
+    /// Appended last; see `AgentCliUpdateFinished`.
+    BranchUpdated {
+        workspace_key: lazybox_core::WorkspaceKey,
+        pr_label: String,
+    },
+    /// `Command::UpdateBranch` failed at the GitHub API — the update did
+    /// NOT happen. Surfaced as a prominent, persistent error naming the
+    /// reason (conflict, permissions), mirroring `PrMergeFailed`. The PR
+    /// stays actionable. Appended last.
+    BranchUpdateFailed {
+        workspace_key: lazybox_core::WorkspaceKey,
+        pr_label: String,
+        reason: String,
     },
 }
 

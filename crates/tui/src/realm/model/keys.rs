@@ -220,6 +220,29 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
             return;
         }
+        // ── Inspect the current sticky error (#453) ─────────────────
+        // The footer pill width-caps its message, so a merge rejection
+        // or spawn failure renders truncated and unreadable ("… never
+        // dismiss, offer no action, and truncate"). While a sticky
+        // error is pinned, the `InspectNotice` binding (default Enter,
+        // remappable) pops the full text in a wrapped detail modal.
+        // Gated on a *sticky* notice, not any: the transient Info/Hint
+        // notices auto-fade and are up too often for Enter to lose its
+        // pane meaning. Sequenced after the dismiss branch — an Esc/Enter
+        // remap collision resolves to dismiss first — and before the
+        // per-pane Enter arms, which it deliberately shadows only while
+        // an error is on screen.
+        if self
+            .status
+            .notice
+            .as_ref()
+            .is_some_and(|n| n.severity.is_sticky())
+            && self.resolve_focus_for_keys().is_some()
+            && self.matches_inspect_notice(&key)
+        {
+            self.inspect_notice();
+            return;
+        }
         match key.code {
             // Cycle panes — the catalog's `CyclePane` chord (Tab by
             // default, `Ctrl-w` under the vim preset, remappable via
@@ -923,6 +946,22 @@ impl<T: TerminalAdapter> Model<T> {
         &input == chord.head()
     }
 
+    /// Whether `key` is the effective `InspectNotice` binding (default
+    /// `Enter`, overridable via `ui.action_keys.inspect_notice`). A
+    /// single keystroke — no `Seq` — so we compare the chord head.
+    fn matches_inspect_notice(&self, key: &RealmKey) -> bool {
+        use lazybox_tui_core::action::{ActionDef, ActionKind};
+        let Some(chord) = ActionDef::for_kind(ActionKind::InspectNotice)
+            .effective_chord(&self.action_key_overrides)
+        else {
+            return false;
+        };
+        let Some(input) = key_event_to_stroke(realm_key_to_crossterm(key)) else {
+            return false;
+        };
+        &input == chord.head()
+    }
+
     /// Matches the FIRST keystroke of the Quit chord (the entry-point
     /// for the latch). For a `Seq` (`q q`) this is its first stroke;
     /// for a `Key` it is the stroke itself.
@@ -1218,6 +1257,17 @@ impl<T: TerminalAdapter> Model<T> {
                     self.redraw = true;
                 }
 
+                // A click landing in the terminal pane (or nowhere)
+                // breaks any pending sidebar / activity double-click
+                // sequence, so the next click there starts fresh. This
+                // keeps the #182 escape hatch — click into a terminal,
+                // then click that workspace's row to step back out to
+                // the sidebar — from being read as a sidebar
+                // double-click-to-enter gesture (#441).
+                if !matches!(target, Some(PaneFocus::Sidebar) | Some(PaneFocus::Right)) {
+                    self.last_click = None;
+                }
+
                 // A left-click in the terminal pane ALWAYS starts a
                 // potential lazybox selection — we commit to that
                 // even when the inner program is mouse-tracking.
@@ -1278,10 +1328,10 @@ impl<T: TerminalAdapter> Model<T> {
                         if handled {
                             // Double-click on a repo header → toggle
                             // its collapsed state (same effect as
-                            // Space). Cursor already moved via
-                            // click_to_select above so
-                            // `toggle_repo_at_cursor` operates on
-                            // the just-clicked header.
+                            // Space); on a workspace row → jump into
+                            // its live agent terminal (#441). Cursor
+                            // already moved via click_to_select above,
+                            // so both operate on the just-clicked row.
                             let is_double = matches!(button, crossterm::event::MouseButton::Left)
                                 && self
                                     .last_click
@@ -1291,23 +1341,34 @@ impl<T: TerminalAdapter> Model<T> {
                                             && t.elapsed() <= crate::realm::DOUBLE_CLICK_WINDOW
                                     })
                                     .unwrap_or(false);
-                            if is_double && self.sidebar.cursor_on_repo_header() {
-                                self.last_click = None;
-                                self.sidebar.toggle_repo_at_cursor();
+                            let double_on_workspace =
+                                is_double && !self.sidebar.cursor_on_repo_header();
+                            if is_double {
+                                self.last_click = None; // consume the pair
+                                if self.sidebar.cursor_on_repo_header() {
+                                    self.sidebar.toggle_repo_at_cursor();
+                                }
                             } else {
                                 self.last_click =
                                     Some((m.column, m.row, std::time::Instant::now()));
                             }
                             self.sync_panes();
-                            // Clicking onto a *different* workspace restores
-                            // the pane it was last focused in — so clicking
-                            // back to a workspace whose agent you were typing
-                            // into returns focus to that terminal instead of
-                            // stranding it on the sidebar (#182). A click on
-                            // the already-selected row keeps the sidebar
-                            // focus the click just set, leaving an explicit
-                            // way to step out of the terminal.
-                            if self.sidebar.selected_workspace_key() != prev_key.as_ref() {
+                            // A double-click drops focus straight into
+                            // the workspace's live terminal — "select
+                            // and enter the agent" in one gesture
+                            // (#441). A single click instead restores
+                            // the pane the workspace was last focused
+                            // in whenever the selection changes — so
+                            // clicking back to a workspace whose agent
+                            // you were typing into returns focus to
+                            // that terminal instead of stranding it on
+                            // the sidebar (#182). A click on the
+                            // already-selected row keeps the sidebar
+                            // focus the click just set, leaving an
+                            // explicit way to step out of the terminal.
+                            if double_on_workspace {
+                                self.enter_selected_workspace_terminal();
+                            } else if self.sidebar.selected_workspace_key() != prev_key.as_ref() {
                                 self.restore_workspace_focus();
                             }
                             self.redraw = true;
@@ -1699,6 +1760,7 @@ pub(super) fn action_from_kind(
         ActionKind::NewProject => Action::NewProject,
         ActionKind::ImportCheckout => Action::ImportCheckout,
         ActionKind::MergePr => Action::MergePr,
+        ActionKind::UpdateBranch => Action::UpdateBranch,
         ActionKind::ToggleAutoMerge => Action::ToggleAutoMerge,
         ActionKind::ManagePolicies => Action::ManagePolicies,
         ActionKind::Archive => Action::Archive,
@@ -1739,6 +1801,7 @@ pub(super) fn action_from_kind(
         ActionKind::ToggleRepoGroup => Action::ToggleRepoGroup,
         ActionKind::SelectWorkspace => Action::SelectWorkspace,
         ActionKind::BroadcastToSelected => Action::BroadcastToSelected,
+        ActionKind::UpdateBranchSelected => Action::UpdateBranchSelected,
         ActionKind::OpenHelp => Action::OpenHelp,
         ActionKind::OpenTour => Action::OpenTour,
         ActionKind::OpenSyncStatus => Action::OpenSyncStatus,
@@ -1814,6 +1877,11 @@ pub(super) const PANE_NATIVE_KINDS: &[(lazybox_tui_core::action::ActionKind, &st
         (
             K::DismissNotice,
             "handle_pane_key's dismiss-notice branch (keys.rs) — override honored",
+            true,
+        ),
+        (
+            K::InspectNotice,
+            "handle_pane_key's inspect-notice branch (keys.rs) — override honored",
             true,
         ),
         (

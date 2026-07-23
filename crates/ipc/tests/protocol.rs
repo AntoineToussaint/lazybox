@@ -350,6 +350,13 @@ fn all_commands() -> Vec<Command> {
             session_key: "github:o/r#1".into(),
             notes: "check the flaky retry".into(),
         },
+        Command::UpdateBranch {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+        },
+        Command::RecordSentSnippet {
+            session_key: "github:o/r#1".into(),
+            snippet_key: "rev".into(),
+        },
         Command::Shutdown,
     ]
 }
@@ -731,6 +738,15 @@ fn all_events() -> Vec<Event> {
         Event::RecoveredTerminalsRequireRestart {
             terminal_ids: vec![TerminalId(12), TerminalId(13)],
         },
+        Event::BranchUpdated {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            pr_label: "o/r#2".into(),
+        },
+        Event::BranchUpdateFailed {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            pr_label: "o/r#2".into(),
+            reason: "merge conflict".into(),
+        },
     ]
 }
 
@@ -799,6 +815,8 @@ fn command_tag(command: &Command) -> &'static str {
         Command::CheckAgentCliUpdates => "CheckAgentCliUpdates",
         Command::UpdateAgentClis => "UpdateAgentClis",
         Command::SetNotes { .. } => "SetNotes",
+        Command::UpdateBranch { .. } => "UpdateBranch",
+        Command::RecordSentSnippet { .. } => "RecordSentSnippet",
     }
 }
 
@@ -866,6 +884,8 @@ fn event_tag(event: &Event) -> &'static str {
         Event::AgentCliUpdatesChecked { .. } => "AgentCliUpdatesChecked",
         Event::AgentCliUpdateFinished { .. } => "AgentCliUpdateFinished",
         Event::RecoveredTerminalsRequireRestart { .. } => "RecoveredTerminalsRequireRestart",
+        Event::BranchUpdated { .. } => "BranchUpdated",
+        Event::BranchUpdateFailed { .. } => "BranchUpdateFailed",
     }
 }
 
@@ -877,12 +897,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        60,
+        62,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(
         event_tags.len(),
-        58,
+        60,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

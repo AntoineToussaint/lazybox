@@ -931,6 +931,7 @@ impl Server {
                         lazybox_ipc::Command::SyncWorkspace { .. } => "SyncWorkspace",
                         lazybox_ipc::Command::PostReply { .. } => "PostReply",
                         lazybox_ipc::Command::MergePr { .. } => "MergePr",
+                        lazybox_ipc::Command::UpdateBranch { .. } => "UpdateBranch",
                         lazybox_ipc::Command::CloseIssue { .. } => "CloseIssue",
                         lazybox_ipc::Command::DeleteOrClose { .. } => "DeleteOrClose",
                         lazybox_ipc::Command::ConfirmMerge { .. } => "ConfirmMerge",
@@ -969,6 +970,7 @@ impl Server {
                         lazybox_ipc::Command::CheckAgentCliUpdates => "CheckAgentCliUpdates",
                         lazybox_ipc::Command::UpdateAgentClis => "UpdateAgentClis",
                         lazybox_ipc::Command::SetNotes { .. } => "SetNotes",
+                        lazybox_ipc::Command::RecordSentSnippet { .. } => "RecordSentSnippet",
                         lazybox_ipc::Command::Shutdown => "Shutdown",
                     };
                     // `Write` fires on every keystroke — at info it floods
@@ -1538,6 +1540,13 @@ pub async fn dispatch_command(
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
             polling::set_notes(config, &key, notes).await;
         }
+        lazybox_ipc::Command::RecordSentSnippet {
+            session_key,
+            snippet_key,
+        } => {
+            let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
+            polling::record_sent_snippet(config, &key, snippet_key).await;
+        }
         lazybox_ipc::Command::SetAutoMergeOnGreen {
             session_key,
             enabled,
@@ -1621,6 +1630,9 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::MergePr { workspace_key } => {
             polling::handle_merge_pr(config, workspace_key).await;
+        }
+        lazybox_ipc::Command::UpdateBranch { workspace_key } => {
+            polling::handle_update_branch(config, workspace_key).await;
         }
         lazybox_ipc::Command::CloseIssue { workspace_key } => {
             polling::handle_close_issue(config, workspace_key).await;

@@ -244,7 +244,10 @@ instruction to every selected workspace: a snippet picker (`Ctrl-F`
 skips it for free text) feeds a compose textarea pre-filled with the
 snippet body, and submit delivers per target — running agents via the
 settle-gated inject, plain shells via a direct write, session-less
-workspaces skipped and named in the summary notice. `a` is a leader
+workspaces skipped and named in the summary notice. `Shift-U`
+bulk-updates the branch (rebase/merge base into head) of every
+selected PR that's behind `main` — one `UpdateBranch` per behind PR,
+up-to-date and non-PR selections skipped and counted (#484). `a` is a leader
 for the **agent** group (which-key popup): `a c` claude, `a x` codex,
 `a u` cursor — no top-level `c`/`x`/`u` aliases (re-add via
 `ui.action_keys`, keyed `spawn_agent.<id>`). Both the `w` and `a`
@@ -257,7 +260,9 @@ Claude ships a built-in Haiku/Sonnet/Opus menu, other agents define
 their own. The alias is agent-agnostic at the chord — the daemon maps
 it to whatever agent the spawn targets — and the picked tier's label
 rides a `◆ Opus` tab badge. `g` is a leader that
-opens the **github** group the same way: `g m` merge, `g g` toggle
+opens the **github** group the same way: `g m` merge, `g u` update
+branch (the "Update branch" button — merge base into head; only on a
+PR behind its base, #484), `g g` toggle
 auto-merge on green (lazybox merges automatically once CI passes —
 own PR, no conflicts, no changes requested; only while lazybox runs),
 `g p` policies (the unified automation-policies menu — one surface

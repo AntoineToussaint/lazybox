@@ -119,9 +119,16 @@ impl<T: TerminalAdapter> Model<T> {
                     return Vec::new();
                 }
                 match action {
-                    Action::Archive => vec![IpcCommand::Kill {
-                        session_key: session_key.clone(),
-                    }],
+                    Action::Archive => {
+                        // Optimistic: drop the row now so archive feels
+                        // instant instead of waiting for the daemon's
+                        // `WorkspaceRemoved` echo. A failed delete
+                        // re-inserts it (#476).
+                        self.optimistic_remove_workspace(session_key);
+                        vec![IpcCommand::Kill {
+                            session_key: session_key.clone(),
+                        }]
+                    }
                     Action::CloseIssue => match workspace.as_ref() {
                         // Re-check against the STASHED workspace — a poll
                         // could have closed the issue or attached a PR
@@ -287,9 +294,15 @@ impl<T: TerminalAdapter> Model<T> {
                     return Vec::new();
                 }
                 match action {
-                    Action::Archive => vec![IpcCommand::DeleteProject {
-                        project_key: project_key.clone(),
-                    }],
+                    Action::Archive => {
+                        // Optimistic: drop the project header + its child
+                        // rows now; a failed cascade re-inserts them all
+                        // (#476).
+                        self.optimistic_remove_project(project_key);
+                        vec![IpcCommand::DeleteProject {
+                            project_key: project_key.clone(),
+                        }]
+                    }
                     other => self.dispatch_action_unchecked(other),
                 }
             }
@@ -571,8 +584,10 @@ impl<T: TerminalAdapter> Model<T> {
                 // availability gate (`availability` in the catalog)
                 // already ensures one of the two has a target.
                 if let Some(sk) = session_key {
+                    self.optimistic_remove_workspace(&sk);
                     cmds.push(IpcCommand::Kill { session_key: sk });
                 } else if let Some(project_key) = self.sidebar.focused_project_key() {
+                    self.optimistic_remove_project(&project_key);
                     cmds.push(IpcCommand::DeleteProject { project_key });
                 }
             }

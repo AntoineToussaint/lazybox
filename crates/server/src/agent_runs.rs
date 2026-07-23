@@ -624,8 +624,12 @@ impl StreamEventMapper {
                 // phantom `tool-index-N` finished-call in every client.
                 // `remove` consumes the mapping — Claude resets block
                 // indices per message, so a reused index in a later message
-                // must not re-resolve a prior turn's tool.
-                let call_id = id.or_else(|| index.and_then(|i| self.tool_ids_by_index.remove(&i)));
+                // must not re-resolve a prior turn's tool. Remove
+                // unconditionally (even when an explicit `id` wins) so a
+                // provider that ever sets both fields can't leave a stale
+                // entry behind to mis-resolve a later reuse of the index.
+                let by_index = index.and_then(|i| self.tool_ids_by_index.remove(&i));
+                let call_id = id.or(by_index);
                 if let Some(call_id) = call_id {
                     events.push(Event::AgentToolCallFinished {
                         run_id,
@@ -850,6 +854,40 @@ mod tests {
             vec!["toolu_first".to_string()]
         );
         // Message 2's text block reuses index 0 — its stop resolves nothing.
+        assert!(tool_finished_ids(&m.map(run, tool_stop(0))).is_empty());
+    }
+
+    /// A stop that carries BOTH an explicit id and an index prefers the id,
+    /// yet must still consume the index mapping — otherwise a later reuse of
+    /// that index would mis-resolve to the stale entry. No provider sets both
+    /// today, but the mapper stays correct if one ever does.
+    #[test]
+    fn stop_with_explicit_id_still_consumes_the_index_mapping() {
+        let run = AgentRunId(1);
+        let mut m = StreamEventMapper::default();
+        m.map(
+            run,
+            ParsedAgentEvent::ToolUseStart {
+                index: Some(0),
+                id: Some("toolu_indexed".into()),
+                name: Some("Bash".into()),
+                input: None,
+                raw: json!({}),
+            },
+        );
+        // Explicit id wins for the emitted finished-call...
+        let stopped = m.map(
+            run,
+            ParsedAgentEvent::ToolUseStop {
+                index: Some(0),
+                id: Some("explicit".into()),
+                output: None,
+                error: None,
+                raw: json!({}),
+            },
+        );
+        assert_eq!(tool_finished_ids(&stopped), vec!["explicit".to_string()]);
+        // ...but index 0's mapping was consumed, so a later reuse resolves nothing.
         assert!(tool_finished_ids(&m.map(run, tool_stop(0))).is_empty());
     }
 

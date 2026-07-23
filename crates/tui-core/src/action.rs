@@ -1847,6 +1847,33 @@ pub fn unknown_preset_warning(name: &str) -> Option<String> {
     ))
 }
 
+/// Startup-validation helper: one warning line per chord alternative in
+/// a raw `ui.action_keys` value that fails to parse. Resolution
+/// (`effective_chords`, and the generated-row paths) keeps every
+/// alternative that parses and silently drops the rest, so a *partial*
+/// typo like `"g v | Shft-V"` binds `g v` and loses the misspelled
+/// second alternative with no feedback. This surfaces each dropped
+/// alternative so a malformed remap isn't swallowed — the all-fail case
+/// still falls back to the default binding, but that fallback is now
+/// visible rather than mute. A whitespace-only alternative (a stray
+/// trailing `|`) is not a typo worth flagging and is skipped. Returns an
+/// empty vec when every non-empty alternative parses. `key` names the
+/// config row for the message; the caller records these alongside the
+/// other keymap warnings (footer notice + messages log).
+pub fn unparseable_chord_warnings(key: &str, raw: &str) -> Vec<String> {
+    raw.split('|')
+        .filter(|alt| !alt.trim().is_empty())
+        .filter(|alt| Chord::parse(alt).is_none())
+        .map(|alt| {
+            format!(
+                "ui.action_keys.{key}: chord alternative {:?} is not a valid key spec — \
+                 it was dropped (any other alternatives still apply)",
+                alt.trim()
+            )
+        })
+        .collect()
+}
+
 /// The in-group key a known agent binds to under the `a` agent leader
 /// (`a c` spawns claude) — also the second stroke of the scoped
 /// `w <key>` / `b <key>` chords. `None` for agents lazybox doesn't
@@ -3960,6 +3987,38 @@ mod tests {
             warning.contains("vim"),
             "names the known presets: {warning}"
         );
+    }
+
+    #[test]
+    fn unparseable_chord_warnings_flags_partial_typo_but_keeps_valid_alt() {
+        // A partially-malformed spec: the first alternative parses, the
+        // second is a typo. Resolution keeps the good one; the warning
+        // names the dropped one so the typo isn't silent.
+        let def = ActionDef::for_kind(ActionKind::Work);
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert("work".to_string(), "g v | Shft-V".to_string());
+        let chords = def.effective_chords(&overrides);
+        assert_eq!(
+            chords,
+            vec![Chord::parse("g v").expect("valid alt parses")],
+            "the valid alternative survives: {chords:?}"
+        );
+
+        let warnings = unparseable_chord_warnings("work", "g v | Shft-V");
+        assert_eq!(warnings.len(), 1, "one dropped alternative: {warnings:?}");
+        assert!(
+            warnings[0].contains("Shft-V"),
+            "names the typo: {warnings:?}"
+        );
+        assert!(
+            warnings[0].contains("work"),
+            "names the config row: {warnings:?}"
+        );
+
+        // A fully-valid spec warns for nothing; a whitespace-only
+        // trailing alternative is not flagged.
+        assert!(unparseable_chord_warnings("work", "g v | Shift-V").is_empty());
+        assert!(unparseable_chord_warnings("work", "g v | ").is_empty());
     }
 
     #[test]

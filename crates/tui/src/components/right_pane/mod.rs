@@ -277,6 +277,15 @@ fn more_lines_trailer(dropped: usize, theme: &crate::theme::Theme) -> Line<'stat
     ])
 }
 
+/// A short clickable-link label for a task in the reader modal —
+/// `#123` when the number is known, else the full task key.
+fn task_ref_label(task: &lazybox_core::Task) -> String {
+    match crate::components::task_label::pr_number(task) {
+        Some(n) => format!("#{n}"),
+        None => task.id.key.clone(),
+    }
+}
+
 /// Stable enough identifier for one activity row, used by the `z`
 /// undo flow to find the row's *current* index after a poll that
 /// reshuffled the list (a new top-of-feed comment shifts every
@@ -2094,7 +2103,35 @@ impl RightPane {
     /// is a pure function of the body, so a rich body is offered the
     /// reader even before a truncating render has run.
     fn wants_full_modal(&self) -> bool {
-        self.body_overflows || self.body_wants_rich_modal()
+        // A PR with a linked issue always earns the reader modal: that's
+        // where both descriptions are shown together (#462), even when
+        // the PR's own body is short and plain.
+        self.body_overflows || self.body_wants_rich_modal() || !self.linked_issue_tasks().is_empty()
+    }
+
+    /// Linked issues whose descriptions the reader modal appends after
+    /// the PR's own (#462). Only for a PR workspace — the `x j` join /
+    /// auto-collapse folds them into `gh_issues` / `linear_issues`, so
+    /// they ride the same workspace and need no cross-workspace lookup.
+    /// Issue-only workspaces return nothing: their primary *is* the
+    /// issue, already shown.
+    fn linked_issue_tasks(&self) -> Vec<&lazybox_core::Task> {
+        let Some(ws) = self.workspace.as_ref() else {
+            return Vec::new();
+        };
+        if ws.pr.is_none() {
+            return Vec::new();
+        }
+        ws.gh_issues
+            .iter()
+            .chain(ws.linear_issues.iter())
+            .filter(|t| {
+                t.body
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|b| !b.is_empty())
+            })
+            .collect()
     }
 
     /// Cheap scan for markdown the inline teaser degrades badly enough
@@ -2133,7 +2170,7 @@ impl RightPane {
     /// Queue the reader modal for the focused body and fold the inline
     /// teaser away — after the modal closes, the pane reads compact.
     fn request_open_description(&mut self) {
-        if self.task_body_str().is_none() {
+        if self.task_body().is_none() {
             return;
         }
         self.pending_open_description = true;
@@ -2148,9 +2185,40 @@ impl RightPane {
         std::mem::take(&mut self.pending_open_description)
     }
 
-    /// The focused task's raw markdown body, for the reader modal.
+    /// The reader-modal source for the focused workspace. Normally the
+    /// primary task's raw markdown body; when the primary is a PR with
+    /// linked issue(s), each linked issue's description is appended as
+    /// its own section, and clickable links to the PR and every linked
+    /// issue are embedded so the modal surfaces both without leaving it
+    /// (#462). The modal renders markdown links as click targets
+    /// (`Msg::OpenUrl`), so the embedded `[#N ↗](url)` lines open in the
+    /// browser.
     pub fn task_body(&self) -> Option<String> {
-        self.task_body_str().map(str::to_string)
+        let primary_body = self.task_body_str();
+        let linked = self.linked_issue_tasks();
+        if linked.is_empty() {
+            return primary_body.map(str::to_string);
+        }
+        let primary = self.workspace.as_ref()?.primary_task()?;
+        let mut out = format!(
+            "[Open {} in browser ↗]({})\n",
+            task_ref_label(primary),
+            primary.url,
+        );
+        if let Some(body) = primary_body {
+            out.push('\n');
+            out.push_str(body);
+            out.push('\n');
+        }
+        for issue in linked {
+            let body = issue.body.as_deref().map(str::trim).unwrap_or_default();
+            out.push_str(&format!(
+                "\n---\n\n## Linked issue {label}\n\n[Open {label} in browser ↗]({url})\n\n{body}\n",
+                label = task_ref_label(issue),
+                url = issue.url,
+            ));
+        }
+        Some(out.trim_end().to_string())
     }
 
     /// A concise title for the reader modal: the task key (e.g.

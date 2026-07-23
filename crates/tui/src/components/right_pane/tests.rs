@@ -1132,3 +1132,114 @@ mod description_expand_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod linked_issue_modal_tests {
+    use super::super::{PaneId, RightPane, TaskBodyView};
+    use chrono::Utc;
+    use lazybox_core::{Task, TaskId, Workspace};
+
+    fn task(kind: &str, number: u64, body: &str) -> Task {
+        Task {
+            id: TaskId {
+                source: "github".into(),
+                key: format!("github:o/r#{number}"),
+            },
+            title: format!("a {kind}"),
+            body: Some(body.into()),
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: format!("https://github.com/o/r/{kind}/{number}"),
+            repo: Some("o/r".into()),
+            branch: Some("main".into()),
+            base_branch: None,
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        }
+    }
+
+    /// A PR workspace that has folded in its linked issue — the state
+    /// after `x j` (join into PR) / auto-collapse.
+    fn pr_with_linked_issue(pr_body: &str, issue_body: &str) -> RightPane {
+        let mut ws = Workspace::from_task(task("pull", 100, pr_body), Utc::now());
+        ws.attach_task(task("issues", 42, issue_body));
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        pane
+    }
+
+    #[test]
+    fn modal_source_shows_both_bodies_and_clickable_links() {
+        let pane = pr_with_linked_issue("the pr context", "the original brief");
+        let src = pane.task_body().expect("a PR-with-issue has a modal body");
+        assert!(src.contains("the pr context"), "PR body present:\n{src}");
+        assert!(
+            src.contains("Linked issue #42"),
+            "issue section header:\n{src}"
+        );
+        assert!(
+            src.contains("the original brief"),
+            "issue body present:\n{src}"
+        );
+        // Clickable markdown links to BOTH tasks — the modal renders
+        // these as `Msg::OpenUrl` click targets.
+        assert!(
+            src.contains("](https://github.com/o/r/pull/100)"),
+            "clickable PR link:\n{src}",
+        );
+        assert!(
+            src.contains("](https://github.com/o/r/issues/42)"),
+            "clickable issue link:\n{src}",
+        );
+    }
+
+    #[test]
+    fn pr_without_linked_issue_keeps_the_plain_body() {
+        let ws = Workspace::from_task(task("pull", 100, "just the pr body"), Utc::now());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        // Unchanged behavior: the raw body, no link scaffolding.
+        assert_eq!(pane.task_body().as_deref(), Some("just the pr body"));
+    }
+
+    #[test]
+    fn issue_only_workspace_keeps_the_plain_body() {
+        let ws = Workspace::from_task(task("issues", 7, "issue body"), Utc::now());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        assert_eq!(pane.task_body().as_deref(), Some("issue body"));
+    }
+
+    #[test]
+    fn linked_issue_offers_the_modal_even_for_a_short_plain_pr_body() {
+        // A short, non-rich PR body would normally just collapse the
+        // teaser; with a linked issue it must open the reader modal so
+        // the issue description is reachable (#462).
+        let mut pane = pr_with_linked_issue("short", "the issue brief");
+        pane.task_body_view = TaskBodyView::Preview;
+        pane.toggle_task_body();
+        assert!(
+            pane.take_open_description(),
+            "toggling a linked-issue PR opens the reader modal",
+        );
+    }
+}

@@ -3902,18 +3902,35 @@ struct PendingIssueMerge {
 }
 
 /// Issue id a lazybox-named branch implies. Issue spawns check out
-/// `lazybox/issue-<n>` (see `spawn_handler::derive_branch_for_branchless`),
-/// so a PR opened from that worktree closes issue `<repo>#<n>` even
-/// when neither GitHub's `closingIssuesReferences` nor the body text
-/// says so yet (the agent forgot the "Closes #N" line, or the lazy
-/// details fetch hasn't run). Used as an extra collapse candidate —
-/// the "target must be an ISSUE workspace" filter downstream keeps a
-/// false positive harmless.
+/// `<prefix>/issue-<n>-<title-slug>` (see
+/// `spawn_handler::derive_branch_for_branchless`), so a PR opened from that
+/// worktree closes issue `<repo>#<n>` even when neither GitHub's
+/// `closingIssuesReferences` nor the body text says so yet (the agent forgot
+/// the "Closes #N" line, or the lazy details fetch hasn't run). Used as an
+/// extra collapse candidate — the "target must be an ISSUE workspace" filter
+/// downstream keeps a false positive harmless.
+///
+/// The id lives in the `issue-<n>` stem of the branch's last path segment,
+/// not in a fixed `lazybox/issue-<n>` string: the branch prefix is empty by
+/// default (#108) and a title slug is appended after the number (#109), so
+/// the match reads the leading numeric component of the stem and ignores
+/// both the prefix and the slug.
+///
+/// GitHub-only: the `issue-<n>` stem and the `<repo>#<n>` key it rebuilds are
+/// GitHub conventions (`derive_branch_for_branchless` only emits that stem for
+/// GitHub tasks). Gating on the source both keeps the heuristic off other
+/// providers — whose keys aren't `<repo>#<n>` — and narrows the branch shapes
+/// a stray match could fire on.
 fn issue_id_from_branch(pr: &Task) -> Option<lazybox_core::TaskId> {
-    let number = pr
-        .branch
-        .as_deref()?
-        .strip_prefix("lazybox/issue-")
+    if !pr.id.source.eq_ignore_ascii_case("github") {
+        return None;
+    }
+    let branch = pr.branch.as_deref()?;
+    let stem = branch.rsplit('/').next().unwrap_or(branch);
+    let number = stem
+        .strip_prefix("issue-")?
+        .split('-')
+        .next()
         .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))?;
     let repo = pr.repo.as_deref().filter(|r| !r.is_empty())?;
     Some(lazybox_core::TaskId {
@@ -5778,6 +5795,70 @@ mod merge_detection_tests {
         let prev = Workspace::from_task(pr("o/r#7", TaskState::Open), Utc::now());
         let incoming = pr("o/r#7", TaskState::Closed);
         assert_eq!(closed_issue_transition(Some(&prev), &incoming), None);
+    }
+
+    fn pr_on_branch(branch: &str) -> Task {
+        let mut t = pr("o/r#99", TaskState::Open);
+        t.branch = Some(branch.into());
+        t
+    }
+
+    #[test]
+    fn issue_id_from_branch_reads_slug_suffixed_stem() {
+        // The default (empty) branch prefix plus the #109 title slug: the
+        // fallback must still recover the issue number from the stem.
+        let id = issue_id_from_branch(&pr_on_branch("issue-42-fix-the-thing"))
+            .expect("issue number in slug-suffixed branch");
+        assert_eq!(id.source, "github");
+        assert_eq!(id.key, "o/r#42");
+    }
+
+    #[test]
+    fn issue_id_from_branch_reads_prefixed_stem() {
+        // A non-empty prefix (`worktree.branch_prefix`, possibly
+        // multi-segment) sits ahead of the stem and must be ignored.
+        let id = issue_id_from_branch(&pr_on_branch("team/feat/issue-7-do-it"))
+            .expect("issue number behind a multi-segment prefix");
+        assert_eq!(id.key, "o/r#7");
+    }
+
+    #[test]
+    fn issue_id_from_branch_reads_bare_number_stem() {
+        // Empty title slug → the stem is just `issue-<n>`.
+        let id = issue_id_from_branch(&pr_on_branch("issue-5")).expect("bare issue stem");
+        assert_eq!(id.key, "o/r#5");
+    }
+
+    #[test]
+    fn issue_id_from_branch_ignores_non_issue_branches() {
+        assert!(issue_id_from_branch(&pr_on_branch("linear-eng-456-ship")).is_none());
+        assert!(issue_id_from_branch(&pr_on_branch("issue-fix-thing")).is_none());
+        assert!(issue_id_from_branch(&pr_on_branch("feat")).is_none());
+    }
+
+    #[test]
+    fn issue_id_from_branch_ignores_non_github_sources() {
+        // The `issue-<n>` stem is a GitHub spawn convention; a non-GitHub
+        // PR on such a branch must not be rebuilt into a `<repo>#<n>` key.
+        let mut t = pr_on_branch("issue-5");
+        t.id.source = "linear".into();
+        assert!(issue_id_from_branch(&t).is_none());
+    }
+
+    #[test]
+    fn closing_issue_workspace_keys_includes_branch_fallback() {
+        // With no `closes_issues`, the branch-derived candidate is the
+        // only thing linking the PR to its issue workspace.
+        let pr = pr_on_branch("issue-42-fix-the-thing");
+        let keys = closing_issue_workspace_keys(&pr);
+        let expected = issue_id_to_workspace_key(&TaskId {
+            source: "github".into(),
+            key: "o/r#42".into(),
+        });
+        assert!(
+            keys.contains(&expected),
+            "branch fallback must surface the issue workspace key, got {keys:?}"
+        );
     }
 }
 

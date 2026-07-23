@@ -1648,34 +1648,74 @@ impl TerminalStack {
         }
     }
 
-    /// Scroll the focused terminal by `delta` rows. Returns a
-    /// `ScrollOutcome` describing what actually happened so the
-    /// caller can surface a clear notice — lazybox's scroll bug
-    /// turned out to be "total == len, no scrollback to scroll
-    /// into" silently looking identical to "delta is broken."
-    /// Read the text content of the focused terminal's grid between
-    /// two cell coordinates expressed in absolute viewport (frame)
-    /// space. `rect` is the terminal pane's rect — used to translate
-    /// the absolute `(col, row)` pair into cell offsets within the
-    /// grid. Returns plain text joined with newlines between rows.
-    /// Empty when nothing's focused or the range is degenerate.
+    /// Screen-absolute grid bounds of the focused terminal's cell grid
+    /// within pane `rect`: `(inner_x, inner_y, last_col, last_row)` in
+    /// crossterm screen coordinates, undoing the left border, the 3-row
+    /// top chrome (tab strip + divider + blank), and any recap rows the
+    /// renderer inset. `None` when nothing is focused or the pane is too
+    /// small to hold a single grid cell. Mirrors the mapping in
+    /// [`Self::screen_to_cell`] / [`Self::target_at`].
+    fn grid_bounds(&self, rect: tuirealm::ratatui::layout::Rect) -> Option<(u16, u16, u16, u16)> {
+        let id = self.focused_terminal_id()?;
+        let slot = self.terminals.get(&id)?;
+        let inner_x = rect.x.saturating_add(1);
+        // Use the SAME body height the renderer feeds `recap_rows` — the
+        // pane minus 3 top-chrome rows AND the 1 held-back bottom margin
+        // (`render()` insets to `area.height - 4` before calling
+        // `render_one_terminal`).
+        let body_height = rect.height.saturating_sub(4);
+        let recap = Self::recap_rows(slot, body_height);
+        let inner_y = rect.y.saturating_add(3).saturating_add(recap);
+        // The right border column and the bottom border row are chrome,
+        // never grid cells (see `screen_to_cell`'s upper-bound guards).
+        let last_col = rect.x.saturating_add(rect.width).saturating_sub(2);
+        let last_row = rect.y.saturating_add(rect.height).saturating_sub(2);
+        if last_col < inner_x || last_row < inner_y {
+            return None;
+        }
+        Some((inner_x, inner_y, last_col, last_row))
+    }
+
+    /// Translate a crossterm `(col, row)` into **screen-absolute grid
+    /// coordinates** `(grid_col, screen_row)` for the focused terminal,
+    /// where `screen_row` counts from the top of the scrollback (the
+    /// libghostty `Point::Screen` space). The point is clamped into the
+    /// grid, so an edge / chrome position resolves to the nearest cell —
+    /// exactly what an edge-drag auto-scroll needs. Returns `None` when
+    /// nothing is focused or the scrollbar state is unavailable.
     ///
-    /// **Flowing-text selection** (mailer / browser style):
-    /// - Same row: copy cells `[sx, ex]` on that row.
-    /// - Multi-row: first row goes from `sx` to end-of-row; full
-    ///   middle rows are copied whole; last row goes from start
-    ///   to `ex`.
-    ///
-    /// This matches what users expect from "drag from word X on
-    /// line 2 to word Y on line 5" — they get EVERYTHING in
-    /// between, not just the rectangular cells `[sx..ex] × [sy..ey]`
-    /// which is what the previous version produced.
-    pub fn extract_text(
-        &mut self,
+    /// Storing a drag-selection in this space (rather than on-screen
+    /// crossterm cells) is what lets the anchor stay pinned to its
+    /// content while the viewport auto-scrolls under the drag (#432).
+    pub fn selection_point(
+        &self,
         rect: tuirealm::ratatui::layout::Rect,
-        start: (u16, u16),
-        end: (u16, u16),
-    ) -> String {
+        col: u16,
+        row: u16,
+    ) -> Option<(u16, u32)> {
+        let (inner_x, inner_y, last_col, last_row) = self.grid_bounds(rect)?;
+        let id = self.focused_terminal_id()?;
+        let slot = self.terminals.get(&id)?;
+        let bar = slot.vt.terminal.scrollbar().ok()?;
+        let vx = col.clamp(inner_x, last_col) - inner_x;
+        let vy = u64::from(row.clamp(inner_y, last_row) - inner_y);
+        // `offset` is the viewport top's row in the total scrollable area,
+        // i.e. the screen row of viewport row 0. Adding the in-viewport
+        // offset yields the content's absolute screen row.
+        Some((vx, (bar.offset + vy) as u32))
+    }
+
+    /// Extract the plain text of the selection spanning two
+    /// screen-absolute grid points (see [`Self::selection_point`]) from
+    /// the focused terminal. Unlike a viewport read, this covers rows
+    /// that have scrolled off-screen, so a passage longer than one screen
+    /// copies in a single gesture (#432).
+    ///
+    /// Uses libghostty's own flowing-text selection + plain formatter, so
+    /// the semantics (first row from the anchor, whole middle rows, last
+    /// row to the focus; wide glyphs and trailing blanks handled) match
+    /// what the terminal itself would copy. Empty on any error.
+    pub fn extract_selection(&mut self, a: (u16, u32), b: (u16, u32)) -> String {
         let Some(id) = self.focused_terminal_id() else {
             return String::new();
         };
@@ -1684,125 +1724,73 @@ impl TerminalStack {
         };
         // The grid must reflect every byte received, not just those that
         // arrived while on screen — copy can fire on a terminal that
-        // gained focus but hasn't re-rendered yet. A no-op when nothing
-        // was buffered.
+        // gained focus but hasn't re-rendered yet.
         slot.flush_pending();
-        // Translate from screen-absolute crossterm coords to the
-        // terminal's CONTENT-area coords. The render path puts the
-        // terminal grid at `inner = Rect { x: rect.x + 1, y: rect.y
-        // + 3 }` (border on the left, tab strip + divider on top —
-        // see `TerminalStack::render`), then `render_one_terminal`
-        // carves the recap rows off the top of that body. Selection
-        // coords came from crossterm in screen-absolute space, so we
-        // undo every offset the renderer applied — skipping the recap
-        // rows is what keeps an agent terminal's copy aligned with the
-        // highlight instead of pulling the row below it.
-        let inner_x = rect.x.saturating_add(1);
-        // Use the SAME body height the renderer feeds `recap_rows` — the
-        // pane minus 3 top-chrome rows AND the 1 held-back bottom margin
-        // (`render()` insets to `area.height - 4` before calling
-        // `render_one_terminal`). Using `- 3` here diverged from the
-        // renderer at exactly height 6, where `recap_rows` flips.
-        let body_height = rect.height.saturating_sub(4);
-        let recap = Self::recap_rows(slot, body_height);
-        let inner_y = rect.y.saturating_add(3).saturating_add(recap);
-        // Normalize: anchor (anchor_x, anchor_y) is the row-then-
-        // column "earlier" endpoint of the selection — i.e. the
-        // smaller (y, x) pair. The other endpoint is the focus.
-        // This is the *row-major* normalization the flowing-text
-        // model needs (sort by y first, then x), distinct from the
-        // axis-independent normalization the rectangle model used.
-        let (anchor_x, anchor_y, focus_x, focus_y) = if (start.1, start.0) <= (end.1, end.0) {
-            (start.0, start.1, end.0, end.1)
+        // Row-major normalize so `start` is the earlier endpoint.
+        let (a, b) = if (a.1, a.0) <= (b.1, b.0) {
+            (a, b)
         } else {
-            (end.0, end.1, start.0, start.1)
+            (b, a)
         };
-        let anchor_col = anchor_x.saturating_sub(inner_x);
-        let focus_col = focus_x.saturating_sub(inner_x);
-        let row_start = anchor_y.saturating_sub(inner_y);
-        let row_end = focus_y.saturating_sub(inner_y);
-        let single_row = row_start == row_end;
-        let Ok(snapshot) = slot.vt.render_state.update(&slot.vt.terminal) else {
+        let terminal = &slot.vt.terminal;
+        let point = |p: (u16, u32)| {
+            vt::terminal::Point::Screen(vt::terminal::PointCoordinate { x: p.0, y: p.1 })
+        };
+        let (Ok(start), Ok(end)) = (terminal.grid_ref(point(a)), terminal.grid_ref(point(b)))
+        else {
             return String::new();
         };
-        let Ok(mut row_iter) = slot.vt.row_iter.update(&snapshot) else {
+        let selection = vt::screen::Selection {
+            start,
+            end,
+            rectangle: false,
+        };
+        let Ok(mut formatter) = vt::fmt::Formatter::new(
+            terminal,
+            vt::fmt::FormatterOptions {
+                format: vt::fmt::Format::Plain,
+                trim: true,
+                unwrap: false,
+                selection: Some(selection),
+            },
+        ) else {
             return String::new();
         };
-        let mut out = String::new();
-        let mut y: u16 = 0;
-        while let Some(row) = row_iter.next() {
-            if y > row_end {
-                break;
-            }
-            if y >= row_start {
-                // Decide which column range applies to THIS row.
-                // Single-row selection → strict [anchor_col, focus_col].
-                // Multi-row selection:
-                //   - first row → [anchor_col, ∞)
-                //   - middle row → [0, ∞)
-                //   - last row → [0, focus_col]
-                let (col_start, col_end): (u16, Option<u16>) = if single_row {
-                    let (a, b) = if anchor_col <= focus_col {
-                        (anchor_col, focus_col)
-                    } else {
-                        (focus_col, anchor_col)
-                    };
-                    (a, Some(b))
-                } else if y == row_start {
-                    (anchor_col, None)
-                } else if y == row_end {
-                    (0, Some(focus_col))
-                } else {
-                    (0, None)
-                };
-                let mut line = String::new();
-                if let Ok(mut cell_iter) = slot.vt.cell_iter.update(row) {
-                    let mut x: u16 = 0;
-                    while let Some(cell) = cell_iter.next() {
-                        if let Some(end_col) = col_end
-                            && x > end_col
-                        {
-                            break;
-                        }
-                        if x >= col_start {
-                            // The blank spacer cell of a wide glyph carries
-                            // no graphemes; emitting it as a space turns
-                            // "日本語" into "日 本 語". Skip it. `SpacerTail`
-                            // follows a wide glyph; `SpacerHead` pads the
-                            // end of a soft-wrapped row where a wide glyph
-                            // couldn't fit — both are non-text.
-                            if matches!(
-                                cell.wide(),
-                                Ok(vt::screen::CellWide::SpacerTail
-                                    | vt::screen::CellWide::SpacerHead)
-                            ) {
-                                x += 1;
-                                continue;
-                            }
-                            let graphemes = cell.graphemes().unwrap_or_default();
-                            if graphemes.is_empty() {
-                                line.push(' ');
-                            } else {
-                                for g in graphemes {
-                                    line.push(g);
-                                }
-                            }
-                        }
-                        x += 1;
-                    }
-                }
-                // Trim trailing spaces so the copy doesn't include
-                // the row's blank tail — terminals pad rows with
-                // spaces but the user expects "just the text."
-                let line = line.trim_end().to_string();
-                if !out.is_empty() {
-                    out.push('\n');
-                }
-                out.push_str(&line);
-            }
-            y += 1;
+        match formatter.format_alloc(None) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes)
+                .trim_end_matches('\n')
+                .to_string(),
+            Err(_) => String::new(),
         }
-        out
+    }
+
+    /// Project a screen-absolute selection span back to the on-screen
+    /// crossterm cells currently visible in `rect`, for the reverse-video
+    /// highlight. Endpoints scrolled outside the viewport clamp to the
+    /// pane edges so the visible portion of a scrollback-spanning
+    /// selection still highlights. `None` when nothing is focused.
+    pub fn selection_screen_span(
+        &self,
+        rect: tuirealm::ratatui::layout::Rect,
+        a: (u16, u32),
+        b: (u16, u32),
+    ) -> Option<((u16, u16), (u16, u16))> {
+        let (inner_x, inner_y, _last_col, _last_row) = self.grid_bounds(rect)?;
+        let id = self.focused_terminal_id()?;
+        let slot = self.terminals.get(&id)?;
+        let bar = slot.vt.terminal.scrollbar().ok()?;
+        let offset = bar.offset as i64;
+        let max_x = i64::from(rect.x.saturating_add(rect.width.saturating_sub(1)));
+        let max_y = i64::from(rect.y.saturating_add(rect.height.saturating_sub(1)));
+        let project = |p: (u16, u32)| -> (u16, u16) {
+            let sx = i64::from(inner_x) + i64::from(p.0);
+            let sy = i64::from(inner_y) + (i64::from(p.1) - offset);
+            (
+                sx.clamp(i64::from(rect.x), max_x) as u16,
+                sy.clamp(i64::from(rect.y), max_y) as u16,
+            )
+        };
+        Some((project(a), project(b)))
     }
 
     /// If the cell at frame-space `(col, row)` lies inside a URL,
@@ -1810,7 +1798,7 @@ impl TerminalStack {
     /// row, return the matching [`ClickTarget`]. Otherwise `None`.
     /// Drives right-click-to-open: the click coordinates arrive in
     /// the same frame-space the renderer used, so we translate the
-    /// same way `extract_text` does (skip the pane border + tab strip
+    /// same way `grid_bounds` does (skip the pane border + tab strip
     /// + any recap rows via `recap_rows`). Single-row only — wrapped
     /// tokens aren't detected (per the issue: "stay simple, terminal
     /// URLs/paths are virtually always on one row").
@@ -1900,9 +1888,9 @@ impl TerminalStack {
     /// strip / recap (left of or above the grid) so callers forwarding a
     /// click to a mouse-tracking inner program never feed it a
     /// cell the renderer never drew there. Mirrors `target_at` /
-    /// `extract_text`, which previously were the ONLY paths that undid
-    /// this offset — the forward path used the raw pane origin and so
-    /// landed every event 1 column right and 3+ rows high.
+    /// `grid_bounds`, the other paths that undo this offset — the
+    /// forward path used the raw pane origin and so landed every event
+    /// 1 column right and 3+ rows high.
     pub fn screen_to_cell(
         &self,
         rect: tuirealm::ratatui::layout::Rect,
@@ -4830,7 +4818,7 @@ mod osc52_tests {
 }
 
 #[cfg(test)]
-mod extract_text_offset_tests {
+mod selection_offset_tests {
     use super::*;
     use ratatui::layout::Rect;
 
@@ -4866,6 +4854,21 @@ mod extract_text_offset_tests {
         stack
     }
 
+    /// Map two crossterm points through `selection_point` and copy the
+    /// span via `extract_selection` — the whole mouse-up copy chain.
+    fn copy_between(
+        stack: &mut TerminalStack,
+        rect: Rect,
+        start: (u16, u16),
+        end: (u16, u16),
+    ) -> String {
+        let a = stack
+            .selection_point(rect, start.0, start.1)
+            .expect("anchor");
+        let b = stack.selection_point(rect, end.0, end.1).expect("focus");
+        stack.extract_selection(a, b)
+    }
+
     #[test]
     fn agent_recap_maps_selection_to_highlighted_row() {
         let mut stack = stack_with(
@@ -4877,7 +4880,7 @@ mod extract_text_offset_tests {
         // the grid top at screen row 5, so a click there is grid row 0.
         // Before the recap rows were accounted for this returned
         // "line2" — the row two below the highlight.
-        let text = stack.extract_text(Rect::new(0, 0, 80, 30), (1, 5), (10, 5));
+        let text = copy_between(&mut stack, Rect::new(0, 0, 80, 30), (1, 5), (10, 5));
         assert_eq!(text, "line0");
     }
 
@@ -4885,8 +4888,94 @@ mod extract_text_offset_tests {
     fn shell_maps_selection_to_highlighted_row() {
         let mut stack = stack_with(TerminalKind::Shell, None, &["line0", "line1", "line2"]);
         // No recap: grid top stays at screen row 3.
-        let text = stack.extract_text(Rect::new(0, 0, 80, 30), (1, 3), (10, 3));
+        let text = copy_between(&mut stack, Rect::new(0, 0, 80, 30), (1, 3), (10, 3));
         assert_eq!(text, "line0");
+    }
+
+    #[test]
+    fn multi_row_selection_copies_flowing_span() {
+        let mut stack = stack_with(TerminalKind::Shell, None, &["line0", "line1", "line2"]);
+        // Grid row 0 (screen row 3) through grid row 2: a flowing
+        // selection copies each visual row on its own line.
+        let text = copy_between(&mut stack, Rect::new(0, 0, 80, 30), (1, 3), (5, 5));
+        assert_eq!(text, "line0\nline1\nline2");
+    }
+
+    #[test]
+    fn selection_spans_scrollback_beyond_the_viewport() {
+        // Feed far more lines than the ~32-row default viewport so most
+        // of the passage lives in scrollback, not the visible screen —
+        // the exact case host-native selection could never reach (#432).
+        let lines: Vec<String> = (0..100).map(|i| format!("row{i:03}")).collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let mut stack = stack_with(TerminalKind::Shell, None, &refs);
+        // Screen-absolute rows: `row000` is screen row 0, so rows 10..=19
+        // are deep in scrollback, well above the live viewport.
+        let text = stack.extract_selection((0, 10), (6, 19));
+        let want: String = (10..=19)
+            .map(|i| format!("row{i:03}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(text, want);
+    }
+
+    #[test]
+    fn selection_screen_span_round_trips_visible_cells() {
+        // For a selection entirely inside the viewport, projecting the
+        // screen-absolute endpoints back to crossterm cells returns the
+        // very cells `selection_point` mapped them from.
+        let stack = stack_with(TerminalKind::Shell, None, &["line0", "line1", "line2"]);
+        let rect = Rect::new(0, 0, 80, 30);
+        let a = stack.selection_point(rect, 3, 3).expect("anchor");
+        let b = stack.selection_point(rect, 5, 5).expect("focus");
+        let (pa, pb) = stack.selection_screen_span(rect, a, b).expect("span");
+        assert_eq!(pa, (3, 3));
+        assert_eq!(pb, (5, 5));
+    }
+
+    #[test]
+    fn selection_screen_span_clamps_offscreen_endpoints_to_the_pane() {
+        // With scrollback present and the viewport at the live bottom,
+        // an anchor at the oldest screen row sits far above the viewport;
+        // it clamps to the top of the pane so the visible portion of a
+        // scrollback-spanning selection still highlights (#432).
+        let lines: Vec<String> = (0..100).map(|i| format!("row{i:03}")).collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let stack = stack_with(TerminalKind::Shell, None, &refs);
+        let rect = Rect::new(0, 10, 80, 20);
+        let visible = stack.selection_point(rect, 3, 13).expect("focus");
+        let ((_ax, ay), _b) = stack
+            .selection_screen_span(rect, (0, 0), visible)
+            .expect("span");
+        assert_eq!(
+            ay, rect.y,
+            "an anchor above the viewport clamps to the pane top"
+        );
+    }
+
+    #[test]
+    fn selection_point_tracks_scroll_offset() {
+        // Scrollback present: the same on-screen cell resolves to an
+        // older (smaller) screen-absolute row after scrolling up, which
+        // is what pins a drag anchor to its content across auto-scroll.
+        let lines: Vec<String> = (0..100).map(|i| format!("row{i:03}")).collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let mut stack = stack_with(TerminalKind::Shell, None, &refs);
+        let rect = Rect::new(0, 0, 80, 30);
+        let bottom = stack.selection_point(rect, 1, 3).expect("at live bottom");
+        let _ = stack.scroll_active(-5);
+        let scrolled = stack
+            .selection_point(rect, 1, 3)
+            .expect("after scrolling up");
+        assert_eq!(
+            bottom.0, scrolled.0,
+            "column is unaffected by a vertical scroll",
+        );
+        assert_eq!(
+            bottom.1 - scrolled.1,
+            5,
+            "scrolling up 5 rows moves the same cell 5 rows earlier in screen space",
+        );
     }
 
     #[test]
@@ -4919,7 +5008,7 @@ mod extract_text_offset_tests {
         // The spacer must be skipped on copy, or this comes back as
         // "日 本 語  s p a c e d".
         let mut stack = stack_with(TerminalKind::Shell, None, &["日本語"]);
-        let text = stack.extract_text(Rect::new(0, 0, 80, 30), (1, 3), (40, 3));
+        let text = copy_between(&mut stack, Rect::new(0, 0, 80, 30), (1, 3), (40, 3));
         assert_eq!(text, "日本語");
     }
 
@@ -4945,7 +5034,7 @@ mod extract_text_offset_tests {
             None,
             &["line0", "line1"],
         );
-        let text = stack.extract_text(Rect::new(0, 0, 80, 30), (1, 3), (10, 3));
+        let text = copy_between(&mut stack, Rect::new(0, 0, 80, 30), (1, 3), (10, 3));
         assert_eq!(text, "line0");
     }
 
@@ -5028,7 +5117,10 @@ mod resync_tests {
     }
 
     fn row(stack: &mut TerminalStack, at: (u16, u16)) -> String {
-        stack.extract_text(Rect::new(0, 0, 80, 30), at, (20, at.1))
+        let rect = Rect::new(0, 0, 80, 30);
+        let a = stack.selection_point(rect, at.0, at.1).expect("anchor");
+        let b = stack.selection_point(rect, 20, at.1).expect("focus");
+        stack.extract_selection(a, b)
     }
 
     #[test]
@@ -5641,7 +5733,10 @@ mod hidden_feed_tests {
     }
 
     fn row0(stack: &mut TerminalStack) -> String {
-        stack.extract_text(Rect::new(0, 0, W, H), ROW0, (20, ROW0.1))
+        let rect = Rect::new(0, 0, W, H);
+        let a = stack.selection_point(rect, ROW0.0, ROW0.1).expect("anchor");
+        let b = stack.selection_point(rect, 20, ROW0.1).expect("focus");
+        stack.extract_selection(a, b)
     }
 
     /// Two sessions, one terminal each; A is active. After a render, A's

@@ -332,6 +332,11 @@ pub struct Sidebar {
     /// one Claude + two shells running). Populated from `Event::Snapshot`
     /// and kept in sync via `TerminalSpawned` / `TerminalExited`.
     running_terminals: HashMap<TerminalId, (SessionKey, TerminalKind)>,
+    /// Built-in agent registry, consulted so an agent's display badge
+    /// (`C` / `X` / `U`) comes from the agent itself rather than a
+    /// hardcoded match here — a new agent declares its own letter and
+    /// can't silently collide (#440).
+    agent_registry: lazybox_agents::Registry,
     /// Threshold config for the per-repo "needs attention" counter.
     /// Loaded from `~/.lazybox/config.yaml::attention` at startup;
     /// toggle individual signals there to customize.
@@ -453,6 +458,7 @@ impl Sidebar {
             filters: FilterSet::default(),
             sort_mode: SortMode::default(),
             running_terminals: HashMap::new(),
+            agent_registry: lazybox_agents::registry(),
             attention: lazybox_config::AttentionConfig::default(),
             projects: BTreeMap::new(),
             default_agent: "claude".to_string(),
@@ -981,6 +987,31 @@ impl Sidebar {
     /// worktree of a specific workspace, not the focused one).
     pub fn workspace_by_key(&self, key: &SessionKey) -> Option<&Workspace> {
         self.workspaces.get(key)
+    }
+
+    /// Remove a workspace row locally, without waiting for the daemon's
+    /// `WorkspaceRemoved` echo — the optimistic half of an archive /
+    /// delete (#476). Returns the removed workspace so the caller can
+    /// restore it if the round-trip fails. Mirrors the cleanup the
+    /// `WorkspaceRemoved` event handler does so a later echo is a no-op.
+    pub fn take_workspace(&mut self, key: &SessionKey) -> Option<Workspace> {
+        let removed = self.workspaces.remove(key);
+        if removed.is_some() {
+            self.broadcast_selected.remove(key);
+            self.agents.remove(key);
+            self.recompute_visible();
+        }
+        removed
+    }
+
+    /// Re-insert (or replace) a workspace optimistically edited or
+    /// removed, to roll back a failed round-trip (#476). Unlike the
+    /// `WorkspaceUpserted` event path this fires no desktop
+    /// notification — it restores state the user already saw.
+    pub fn restore_workspace(&mut self, workspace: Workspace) {
+        let key: SessionKey = (&workspace.key).into();
+        self.workspaces.insert(key, workspace);
+        self.recompute_visible();
     }
 
     /// Move the cursor onto the workspace row matching `key`. Returns
@@ -1607,20 +1638,15 @@ impl Sidebar {
     }
 
     /// Stable single-letter key for a runner kind. Drives the workspace
-    /// row badge — `claude` → `C`, `codex` → `X`, `cursor` → `U`,
-    /// `shell` → `S`, log tail → `L`, generic agent → `A`.
-    fn badge_letter(kind: &TerminalKind) -> char {
+    /// row badge. Agent letters are declared by the agent itself
+    /// ([`lazybox_agents::Agent::badge`]) — `claude` → `C`, `codex` →
+    /// `X`, `cursor` → `U` — so identity lives in one place and a new
+    /// agent can't silently collide (#440). Resolution (registered badge
+    /// or first-char fallback) belongs to the registry, not here.
+    /// Non-agent kinds: `shell` → `S`, log tail → `L`.
+    fn badge_letter(&self, kind: &TerminalKind) -> char {
         match kind {
-            TerminalKind::Agent(id) => match id.as_str() {
-                "claude" => 'C',
-                "codex" => 'X',
-                "cursor" => 'U',
-                _ => id
-                    .chars()
-                    .next()
-                    .map(|c| c.to_ascii_uppercase())
-                    .unwrap_or('A'),
-            },
+            TerminalKind::Agent(id) => self.agent_registry.badge_for(id),
             TerminalKind::Shell => 'S',
             TerminalKind::LogTail { .. } => 'L',
         }
@@ -1635,7 +1661,7 @@ impl Sidebar {
         let mut counts: HashMap<char, usize> = HashMap::new();
         for (sk, kind) in self.running_terminals.values() {
             if sk == key {
-                *counts.entry(Self::badge_letter(kind)).or_default() += 1;
+                *counts.entry(self.badge_letter(kind)).or_default() += 1;
             }
         }
         let mut entries: Vec<(char, usize)> = counts.into_iter().collect();
@@ -1885,8 +1911,24 @@ impl Sidebar {
 
         // A live multi-select makes the broadcast THE next action —
         // surface it first so the `v` marks visibly lead somewhere.
+        // When any marked row is a PR behind its base, the bulk
+        // update-branch rides alongside it.
         if !self.broadcast_selected.is_empty() {
             actions.push(Action::BroadcastToSelected);
+            if self
+                .broadcast_selected
+                .iter()
+                .filter_map(|k| self.workspace_by_key(k))
+                .any(|w| w.pr.as_ref().is_some_and(|p| p.is_behind_base))
+            {
+                actions.push(Action::UpdateBranchSelected);
+            }
+        }
+
+        // A PR behind its base can update its branch (the `g u` /
+        // "Update branch" affordance).
+        if workspace.is_some_and(|w| w.pr.as_ref().is_some_and(|p| p.is_behind_base)) {
+            actions.push(Action::UpdateBranch);
         }
 
         // Primary action: what's most likely useful on THIS row.

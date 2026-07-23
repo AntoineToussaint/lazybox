@@ -67,6 +67,10 @@ pub enum Intent {
     /// workspace's PR. Two-press confirm latch is the model's job;
     /// this Intent is the fire-side payload.
     MergePr { workspace_key: WorkspaceKey },
+    /// Update the workspace's PR branch against its base — the "Update
+    /// branch" button on github.com. Only resolves when the PR is behind
+    /// its base; the model ships `Command::UpdateBranch`.
+    UpdateBranch { workspace_key: WorkspaceKey },
     /// Flip the workspace's "auto-merge on green" arm and persist it.
     /// `enabled` is the new state (the resolver reads the current flag
     /// and inverts it). The model ships `Command::SetAutoMergeOnGreen`.
@@ -406,6 +410,25 @@ pub fn resolve_merge(workspace: Option<&Workspace>) -> Intent {
         return Intent::NoOp;
     }
     Intent::MergePr {
+        workspace_key: ws.key.clone(),
+    }
+}
+
+/// Resolve `g u` (update branch). Only fires when the workspace's PR is
+/// behind its base — the same `BEHIND` signal that drives the status
+/// tag — so the action only surfaces where GitHub's "Update branch"
+/// button would be live.
+pub fn resolve_update_branch(workspace: Option<&Workspace>) -> Intent {
+    let Some(ws) = workspace else {
+        return Intent::NoOp;
+    };
+    let Some(pr) = ws.pr.as_ref() else {
+        return Intent::NoOp;
+    };
+    if !pr.is_behind_base {
+        return Intent::NoOp;
+    }
+    Intent::UpdateBranch {
         workspace_key: ws.key.clone(),
     }
 }
@@ -1056,6 +1079,32 @@ mod tests {
             Intent::MountAdoptPicker { source_key } => assert_eq!(source_key, ws.key),
             other => panic!("expected MountAdoptPicker, got {other:?}"),
         }
+    }
+
+    // ── Update branch ────────────────────────────────────────────
+
+    #[test]
+    fn update_branch_on_behind_pr_returns_intent() {
+        let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::Approved);
+        ws.pr.as_mut().unwrap().is_behind_base = true;
+        match resolve_update_branch(Some(&ws)) {
+            Intent::UpdateBranch { workspace_key } => assert_eq!(workspace_key, ws.key),
+            other => panic!("expected UpdateBranch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_branch_on_up_to_date_pr_is_noop() {
+        let ws = pr("o/r#1", CiStatus::Success, ReviewStatus::Approved);
+        assert!(!ws.pr.as_ref().unwrap().is_behind_base);
+        assert_eq!(resolve_update_branch(Some(&ws)), Intent::NoOp);
+    }
+
+    #[test]
+    fn update_branch_on_issue_or_none_is_noop() {
+        assert_eq!(resolve_update_branch(None), Intent::NoOp);
+        let issue = issue("o/r#2");
+        assert_eq!(resolve_update_branch(Some(&issue)), Intent::NoOp);
     }
 
     // ── Merge ────────────────────────────────────────────────────

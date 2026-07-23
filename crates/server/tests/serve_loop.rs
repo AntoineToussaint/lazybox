@@ -446,6 +446,9 @@ fn all_non_shutdown_commands() -> Vec<Command> {
         Command::FetchPrDetails {
             workspace_key: wkey(),
         },
+        Command::SyncWorkspace {
+            workspace_key: wkey(),
+        },
         Command::StartAgentRun {
             session_key: "test:ws".into(),
             session_id: None,

@@ -36,8 +36,9 @@ pub use handlers::{
     ProviderHandle, apply_pr_details, handle_add_assignees, handle_clean_worktrees,
     handle_close_issue, handle_delete_or_close, handle_delete_orphaned_worktree,
     handle_fetch_pr_details, handle_fetch_repo_labels, handle_inspect_worktrees, handle_merge_pr,
-    handle_request_reviewers, handle_set_assignees, handle_set_labels, post_reply,
-    prefetch_top_pr_details, remove_merged_workspace,
+    handle_request_reviewers, handle_scan_checkouts, handle_set_assignees, handle_set_labels,
+    handle_sync_workspace, handle_update_branch, post_reply, prefetch_top_pr_details,
+    remove_merged_workspace,
 };
 pub use mutate::{MutationOutcome, apply_and_commit, fetch_and_apply};
 
@@ -921,6 +922,8 @@ async fn dispatch_action(
                 false,
                 // Autonomous spawns use the agent's default model.
                 None,
+                // Fresh spawn, not a session restore.
+                false,
             )
             .await;
         }
@@ -1094,6 +1097,8 @@ async fn dispatch_action(
                         false,
                         // Auto-fix uses the agent's default model.
                         None,
+                        // Fresh spawn, not a session restore.
+                        false,
                     )
                     .await;
                 }
@@ -4651,15 +4656,29 @@ pub fn create_empty_workspace(
     name: &str,
     project_key: lazybox_core::ProjectKey,
 ) -> WorkspaceKey {
+    let key = allocate_workspace_key(config, name);
+    let mut workspace = Workspace::empty(key.clone(), "main", Utc::now());
+    if !name.trim().is_empty() {
+        workspace.name = name.trim().to_string();
+    }
+    workspace.project_key = Some(project_key);
+    workspace.local = true;
+    commit_upsert_reported(config, &key, workspace, "create empty workspace");
+    key
+}
+
+/// Allocate a fresh, collision-free workspace key from a display name:
+/// slugify, then try `<base>`, `<base>-2`, … until the store reports no
+/// existing record. Falls back to `workspace` for an empty slug so the
+/// key is always non-empty.
+fn allocate_workspace_key(config: &ServerConfig, name: &str) -> WorkspaceKey {
     let base = lazybox_core::slug::slugify(name);
     let base = if base.is_empty() {
         "workspace".to_string()
     } else {
         base
     };
-    // Collision: try `<base>`, `<base>-2`, `<base>-3`, ... until the
-    // store reports no existing record.
-    let key = (1..)
+    (1..)
         .map(|i| {
             if i == 1 {
                 WorkspaceKey::new(base.clone())
@@ -4676,15 +4695,81 @@ pub fn create_empty_workspace(
                 .and_then(|r| r.workspace_json)
                 .is_none()
         })
-        .expect("infinite range yields a free key");
+        .expect("infinite range yields a free key")
+}
 
-    let mut workspace = Workspace::empty(key.clone(), "main", Utc::now());
+/// Import an on-disk checkout as a **linked (no-worktree) workspace**.
+/// Re-describes `path` read-only to derive its `origin` repo and current
+/// branch, then creates a workspace that points straight at `path` — no
+/// worktree provisioned, no bare clone. A checkout whose `origin` maps to
+/// a GitHub `owner/repo` lands under that repo's project so its
+/// PR/issue/CI activity groups with it; one without a usable origin falls
+/// back to a `local-<dir>` project. Returns the new key, or `None` when
+/// `path` is no longer a git checkout (moved/deleted since the scan).
+pub async fn import_local_checkout(
+    config: &ServerConfig,
+    path: std::path::PathBuf,
+) -> Option<WorkspaceKey> {
+    let Some(checkout) = lazybox_git_ops::describe_checkout_at(path.clone()).await else {
+        let _ = config.bus.send(Event::provider_error_permanent(
+            "import",
+            format!("{} is no longer a git checkout", path.display()),
+        ));
+        return None;
+    };
+
+    let repo = checkout
+        .remote_url
+        .as_deref()
+        .and_then(lazybox_core::github_owner_repo_from_url);
+    let (project_key, name) = match repo {
+        Some((owner, repo)) => (
+            lazybox_core::ProjectKey::github(&owner, &repo),
+            format!("{owner}/{repo}"),
+        ),
+        None => {
+            let dir = path
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "checkout".to_string());
+            (
+                lazybox_core::ProjectKey::local(&lazybox_core::slug::slugify(&dir)),
+                dir,
+            )
+        }
+    };
+    let branch = checkout.branch.unwrap_or_else(|| "main".to_string());
+    Some(create_linked_workspace(
+        config,
+        &name,
+        project_key,
+        path,
+        &branch,
+    ))
+}
+
+/// Create a linked (no-worktree) workspace pointing at `path`. Sibling
+/// of [`create_empty_workspace`]; the difference is `linked_checkout`
+/// set (so the spawn path lands sessions in the existing checkout) and
+/// the workspace's `branch` taken from the checkout's current branch
+/// rather than a fixed `main`. `local = true` protects it from the
+/// reconcile prune, like every hand-created workspace.
+pub fn create_linked_workspace(
+    config: &ServerConfig,
+    name: &str,
+    project_key: lazybox_core::ProjectKey,
+    path: std::path::PathBuf,
+    branch: &str,
+) -> WorkspaceKey {
+    let key = allocate_workspace_key(config, name);
+    let mut workspace = Workspace::empty(key.clone(), branch, Utc::now());
     if !name.trim().is_empty() {
         workspace.name = name.trim().to_string();
     }
     workspace.project_key = Some(project_key);
     workspace.local = true;
-    commit_upsert_reported(config, &key, workspace, "create empty workspace");
+    workspace.linked_checkout = Some(path);
+    commit_upsert_reported(config, &key, workspace, "import linked checkout");
     key
 }
 
@@ -4805,6 +4890,19 @@ pub async fn set_snooze(
     };
     workspace.snoozed_until = until;
     commit_upsert_offloaded_reported(config, key, workspace, "set workspace snooze").await;
+}
+
+/// Persist the workspace's free-form local note (issue #458). Mirrors
+/// [`set_snooze`]: load, replace the field, commit (which persists the
+/// JSON blob and broadcasts `WorkspaceUpserted` so every TUI sees the
+/// new note). The note never leaves lazybox — no provider sync.
+pub async fn set_notes(config: &ServerConfig, key: &WorkspaceKey, notes: String) {
+    let _ws_guard = config.lock_workspace(key.as_str()).await;
+    let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
+        return;
+    };
+    workspace.notes = notes;
+    commit_upsert_offloaded_reported(config, key, workspace, "set workspace notes").await;
 }
 
 /// Persist the workspace's "auto-merge on green" arm. Mirrors
@@ -4991,7 +5089,9 @@ async fn delete_workspace_internal(
                 // Preserve the workspace and every live mapping so the user
                 // can retry. The backend contract deliberately keeps a slot
                 // after a transport/timeout failure; deleting our metadata
-                // here would orphan an agent we failed to stop.
+                // here would orphan an agent we failed to stop. The client
+                // rolls back its optimistic row removal off this "terminal"
+                // error (#476).
                 config.deleted_workspaces.lock().remove(key_str);
                 return false;
             }
@@ -6229,6 +6329,63 @@ mod rescope_collapse_tests {
             load_workspace(&config, &issue_key).is_none(),
             "the closing issue must collapse into the tracked PR workspace"
         );
+    }
+
+    /// `set_notes` persists the free-form local note into the workspace
+    /// blob and it reloads verbatim (issue #458).
+    #[tokio::test]
+    async fn set_notes_persists_and_reloads() {
+        let store = Arc::new(lazybox_store::MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+
+        let task = gh_task(
+            "o/r#7",
+            "https://github.com/o/r/pull/7",
+            TaskState::Open,
+            vec![],
+        );
+        let ws = Workspace::from_task(task, Utc::now());
+        let key = ws.key.clone();
+        seed(&store, &ws);
+
+        set_notes(&config, &key, "check the flaky retry".into()).await;
+
+        let reloaded = load_workspace(&config, &key).expect("workspace survives");
+        assert_eq!(reloaded.notes, "check the flaky retry");
+        assert!(reloaded.has_notes());
+
+        // Clearing to empty removes the indicator but leaves the row.
+        set_notes(&config, &key, String::new()).await;
+        let cleared = load_workspace(&config, &key).expect("workspace survives");
+        assert!(cleared.notes.is_empty());
+        assert!(!cleared.has_notes());
+    }
+
+    /// A poll upsert overwrites upstream-derived fields but must leave
+    /// the local note intact — it's user-owned, like snooze (#458).
+    #[tokio::test]
+    async fn notes_survive_upsert() {
+        let store = Arc::new(lazybox_store::MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+
+        let mut task = gh_task(
+            "o/r#8",
+            "https://github.com/o/r/pull/8",
+            TaskState::Open,
+            vec![],
+        );
+        let mut ws = Workspace::from_task(task.clone(), Utc::now());
+        ws.notes = "keep me across polls".into();
+        let key = ws.key.clone();
+        seed(&store, &ws);
+
+        // A later poll delivers a fresher copy of the same task.
+        task.title = "renamed upstream".into();
+        task.updated_at = Utc::now();
+        upsert(&config, task).await;
+
+        let after = load_workspace(&config, &key).expect("workspace survives");
+        assert_eq!(after.notes, "keep me across polls");
     }
 }
 

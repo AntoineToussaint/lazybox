@@ -264,6 +264,19 @@ impl Sidebar {
         self.inner.workspace_by_key(key)
     }
 
+    /// See `Sidebar::take_workspace` — optimistic archive/delete (#476).
+    pub fn take_workspace(
+        &mut self,
+        key: &lazybox_core::SessionKey,
+    ) -> Option<lazybox_core::Workspace> {
+        self.inner.take_workspace(key)
+    }
+
+    /// See `Sidebar::restore_workspace` — optimistic rollback (#476).
+    pub fn restore_workspace(&mut self, workspace: lazybox_core::Workspace) {
+        self.inner.restore_workspace(workspace);
+    }
+
     /// Iterate every known workspace. The adopt-sessions picker uses
     /// this to build its candidate list.
     pub fn workspace_iter(

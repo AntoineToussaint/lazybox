@@ -599,13 +599,59 @@ pub fn update_branch_body(pull_request_node_id: &str) -> serde_json::Value {
     })
 }
 
+/// GraphQL query for a PR's repository merge default — the same
+/// method github.com's "Merge pull request" button pre-selects. A repo
+/// that disables merge commits (squash/rebase only) reports SQUASH or
+/// REBASE here; we feed it straight into the merge mutation.
+const PR_MERGE_METHOD_QUERY: &str = r#"
+query($id: ID!) {
+  node(id: $id) {
+    ... on PullRequest {
+      repository { viewerDefaultMergeMethod }
+    }
+  }
+}
+"#;
+
+pub fn pr_merge_method_body(pull_request_node_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "query": PR_MERGE_METHOD_QUERY,
+        "variables": { "id": pull_request_node_id },
+    })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GqlMergeMethodResponse {
+    pub data: Option<GqlMergeMethodData>,
+    #[serde(default)]
+    pub errors: Option<Vec<GqlError>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GqlMergeMethodData {
+    pub node: Option<GqlMergeMethodNode>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GqlMergeMethodNode {
+    pub repository: GqlMergeMethodRepository,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GqlMergeMethodRepository {
+    pub viewer_default_merge_method: String,
+}
+
 /// GraphQL mutation that merges the PR — same effect as clicking
-/// "Merge pull request" on github.com. Default method is what the
-/// repo's settings allow (MERGE / SQUASH / REBASE); we don't pin
-/// here so the repo's enforced method wins.
+/// "Merge pull request" on github.com. `mergeMethod` MUST be pinned:
+/// GitHub defaults an omitted method to MERGE (a merge commit), which
+/// fails outright on repos that disallow merge commits — it does not
+/// fall back to the repo's allowed method. Callers pass the repo's
+/// `viewerDefaultMergeMethod` (see `PR_MERGE_METHOD_QUERY`).
 const MERGE_PR_MUTATION: &str = r#"
-mutation($id: ID!) {
-  mergePullRequest(input: { pullRequestId: $id }) {
+mutation($id: ID!, $method: PullRequestMergeMethod!) {
+  mergePullRequest(input: { pullRequestId: $id, mergeMethod: $method }) {
     pullRequest { id state merged }
   }
 }
@@ -717,10 +763,10 @@ pub fn remove_assignees_body(
     })
 }
 
-pub fn merge_pr_body(pull_request_node_id: &str) -> serde_json::Value {
+pub fn merge_pr_body(pull_request_node_id: &str, merge_method: &str) -> serde_json::Value {
     serde_json::json!({
         "query": MERGE_PR_MUTATION,
-        "variables": { "id": pull_request_node_id },
+        "variables": { "id": pull_request_node_id, "method": merge_method },
     })
 }
 

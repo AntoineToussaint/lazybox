@@ -73,6 +73,14 @@ pub fn worktrees_root() -> PathBuf {
     state_root().join("worktrees")
 }
 
+/// Durable per-terminal scrollback. `<home>/v2/scrollback/`. Each file
+/// holds the recent raw output bytes of one session's terminal so its
+/// history survives a daemon restart; the in-memory replay ring alone
+/// is destroyed when the daemon exits.
+pub fn scrollback_dir() -> PathBuf {
+    state_root().join("scrollback")
+}
+
 /// Sandbox workspaces — repo-less scratch directories the user
 /// creates via `x p`. Lives next to the worktree base under
 /// `<home>/v2/sandboxes/<slug>/`. Survives across lazybox restarts

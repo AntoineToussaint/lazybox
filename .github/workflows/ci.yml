@@ -131,7 +131,7 @@ jobs:
       # Pinned to a tagged release rather than `@master` so CI is
       # reproducible across re-runs and a silent upstream change
       # can't flip behavior. Bump when typos.dev cuts a new release.
-      - uses: crate-ci/typos@v1.46.3
+      - uses: crate-ci/typos@v1.48.0
 
   machete:
     # Dependency hygiene is a real gate: a stale direct dependency expands

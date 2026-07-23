@@ -193,7 +193,7 @@ mod click_dispatch_tests {
     }
 
     #[test]
-    fn body_header_row_click_cycles_view() {
+    fn body_header_row_click_toggles_view() {
         use super::super::TaskBodyView;
         let mut pane = RightPane::new(PaneId::new(0));
         pane.click_hits.body_header_row = Some(5);
@@ -202,10 +202,7 @@ mod click_dispatch_tests {
         // Click: Collapsed → Preview.
         assert!(pane.handle_mouse_click(0, 5));
         assert_eq!(pane.task_body_view, TaskBodyView::Preview);
-        // Click: Preview → Full.
-        assert!(pane.handle_mouse_click(0, 5));
-        assert_eq!(pane.task_body_view, TaskBodyView::Full);
-        // Click: Full → Collapsed (wraps).
+        // Click again (nothing overflowing): Preview → Collapsed.
         assert!(pane.handle_mouse_click(0, 5));
         assert_eq!(pane.task_body_view, TaskBodyView::Collapsed);
     }
@@ -874,9 +871,10 @@ mod mark_workspace_merged_tests {
 
 #[cfg(test)]
 mod description_expand_tests {
-    //! Issue #344: the `+N more lines` trailer closing a capped Preview
-    //! is a click target that jumps straight to Full, and it spells out
-    //! the affordance so it stops reading as a dead end.
+    //! Issue #344 / #448: the `+N more lines` trailer closing a capped
+    //! Preview is a click target that opens the full body in the reader
+    //! modal, and it spells out the affordance so it stops reading as a
+    //! dead end.
     use super::super::{PaneId, RightPane, TaskBodyView, more_lines_trailer};
     use chrono::Utc;
     use lazybox_core::{Task, TaskId, Workspace};
@@ -941,7 +939,7 @@ mod description_expand_tests {
     }
 
     #[test]
-    fn preview_trailer_is_a_clickable_jump_to_full() {
+    fn preview_trailer_click_opens_reader_modal() {
         let mut pane = pane_showing(&long_body());
         pane.toggle_task_body(); // Collapsed → Preview
         assert_eq!(pane.task_body_view, TaskBodyView::Preview);
@@ -954,43 +952,123 @@ mod description_expand_tests {
             .body_more_row
             .expect("a capped preview registers the trailer as a click target");
         assert!(pane.handle_mouse_click(0, row));
+        assert!(
+            pane.take_open_description(),
+            "clicking the trailer requests the full-description modal",
+        );
         assert_eq!(
             pane.task_body_view,
-            TaskBodyView::Full,
-            "clicking the trailer jumps straight to Full, not one cycle step",
+            TaskBodyView::Collapsed,
+            "opening the reader folds the inline teaser away",
         );
     }
 
     #[test]
-    fn full_view_trailer_is_not_a_click_target() {
-        // Full is already uncapped; if a short pane still truncates,
-        // the trailer must not offer a jump (there's nowhere to go).
+    fn second_d_on_overflowing_preview_opens_reader_modal() {
+        // `d` on an overflowing Preview reads the whole thing in the
+        // modal rather than collapsing.
         let mut pane = pane_showing(&long_body());
-        pane.toggle_task_body();
-        pane.toggle_task_body(); // → Full
-        assert_eq!(pane.task_body_view, TaskBodyView::Full);
-
+        pane.toggle_task_body(); // Collapsed → Preview
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
         draw(&mut pane, &mut term);
-        assert!(pane.click_hits.body_more_row.is_none());
+        assert!(pane.click_hits.body_more_row.is_some());
+
+        pane.toggle_task_body(); // Preview + overflow → open modal
+        assert!(pane.take_open_description());
+        assert_eq!(pane.task_body_view, TaskBodyView::Collapsed);
     }
 
     #[test]
-    fn short_body_has_no_trailer() {
+    fn short_body_toggles_without_opening_modal() {
         let mut pane = pane_showing("one line only");
-        pane.toggle_task_body(); // Preview — but nothing to truncate
+        pane.toggle_task_body(); // Collapsed → Preview (nothing to truncate)
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
         draw(&mut pane, &mut term);
         assert!(pane.click_hits.body_more_row.is_none());
+        // A second toggle collapses (no modal, since it all fits).
+        pane.toggle_task_body();
+        assert!(!pane.take_open_description());
+        assert_eq!(pane.task_body_view, TaskBodyView::Collapsed);
+    }
+
+    #[test]
+    fn short_rich_body_opens_reader_modal() {
+        // A tiny table fits inline (no `+N more` trailer) but the teaser
+        // flattens it — so the reader is still offered on a second `d`.
+        let mut pane = pane_showing("| A | B |\n| - | - |");
+        pane.toggle_task_body(); // Collapsed → Preview
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        draw(&mut pane, &mut term);
+        assert!(
+            pane.click_hits.body_more_row.is_none(),
+            "the table isn't truncated — this is the rich, not overflow, path",
+        );
+        pane.toggle_task_body(); // d again → open modal (rich), not collapse
+        assert!(pane.take_open_description());
+        assert_eq!(pane.task_body_view, TaskBodyView::Collapsed);
+    }
+
+    #[test]
+    fn table_shaped_line_in_indented_code_is_not_treated_as_a_table() {
+        // A `| --- |`-shaped line indented into a code block (4 spaces)
+        // is literal text the teaser handles fine — it must NOT trip the
+        // rich-modal heuristic, so a short body like this just collapses
+        // on a second `d` rather than opening the reader.
+        let mut pane = pane_showing("run this:\n\n    | --- | :--: |\n\ndone");
+        pane.toggle_task_body(); // Collapsed → Preview
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        draw(&mut pane, &mut term);
+        assert!(
+            pane.click_hits.body_more_row.is_none(),
+            "the short body isn't truncated",
+        );
+        pane.toggle_task_body(); // d again → collapse (not a real table)
+        assert!(
+            !pane.take_open_description(),
+            "an indented code line must not be mistaken for a table",
+        );
+        assert_eq!(pane.task_body_view, TaskBodyView::Collapsed);
+    }
+
+    fn description_header_text(pane: &mut RightPane, w: u16, h: u16) -> String {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| pane.render(Rect::new(0, 0, w, h), f, true))
+            .unwrap();
+        let buf = term.backend().buffer();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .find(|row| row.contains("Description"))
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn preview_header_hint_matches_what_d_does() {
+        // Plain short body: `d` collapses, so the hint must say collapse.
+        let mut plain = pane_showing("just one short line");
+        plain.toggle_task_body();
+        let header = description_header_text(&mut plain, 80, 24);
+        assert!(
+            header.contains("collapse") && !header.contains("read full"),
+            "plain preview hint: {header}",
+        );
+
+        // Overflowing body: `d` opens the reader, so the hint must say so.
+        let mut long = pane_showing(&long_body());
+        long.toggle_task_body();
+        let header = description_header_text(&mut long, 80, 24);
+        assert!(
+            header.contains("read full"),
+            "overflow preview hint: {header}"
+        );
     }
 
     #[test]
     fn click_row_matches_the_trailer_even_when_the_header_would_wrap() {
-        // A pane narrower than the `▼ Description  (d · full)` header:
-        // a wrapping Paragraph would push the trailer down a row and
-        // desync the recorded click target from where the trailer
+        // A pane narrower than the `▼ Description  (d · collapse)`
+        // header: a wrapping Paragraph would push the trailer down a row
+        // and desync the recorded click target from where the trailer
         // actually paints. The recorded row must equal the trailer's
-        // real screen row, and clicking it must still reach Full.
+        // real screen row, and clicking it must still open the modal.
         let mut pane = pane_showing(&long_body());
         pane.toggle_task_body(); // Collapsed → Preview
         let w = 24u16;
@@ -1016,26 +1094,152 @@ mod description_expand_tests {
             "click target must match the trailer's real screen row",
         );
         assert!(pane.handle_mouse_click(0, recorded));
-        assert_eq!(pane.task_body_view, TaskBodyView::Full);
+        assert!(pane.take_open_description());
     }
 
     #[test]
-    fn trailer_spells_out_the_expand_affordance() {
+    fn switching_workspace_resets_the_description_teaser() {
+        // An open Preview on PR A must not silently expand PR B's
+        // description the moment B is selected — the teaser state is
+        // per-workspace, like every other per-workspace UI bit reset in
+        // `set_workspace`.
+        let mut pane = pane_showing(&long_body());
+        pane.toggle_task_body(); // Collapsed → Preview on A
+        assert_eq!(pane.task_body_view, TaskBodyView::Preview);
+
+        // A distinct second workspace (different task key).
+        let mut task_b = task_with_body("some other body");
+        task_b.id.key = "github:o/r#2".into();
+        let ws_b = Workspace::from_task(task_b, Utc::now());
+        pane.set_workspace(Some(ws_b));
+
+        assert_eq!(
+            pane.task_body_view,
+            TaskBodyView::Collapsed,
+            "a new workspace starts with its description collapsed",
+        );
+    }
+
+    #[test]
+    fn trailer_spells_out_the_read_full_affordance() {
         let theme = crate::theme::current();
-        let expandable = more_lines_trailer(44, true, theme);
-        let text: String = expandable
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
+        let trailer = more_lines_trailer(44, theme);
+        let text: String = trailer.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.starts_with("+44 more lines"));
         assert!(
-            text.contains("expand"),
-            "an expandable trailer names the affordance: {text}",
+            text.contains("read full"),
+            "the trailer names the read-full affordance: {text}",
         );
-        // Full's trailer is inert — just the count, no false promise.
-        let inert = more_lines_trailer(44, false, theme);
-        let inert_text: String = inert.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(inert_text, "+44 more lines");
+    }
+}
+
+#[cfg(test)]
+mod linked_issue_modal_tests {
+    use super::super::{PaneId, RightPane, TaskBodyView};
+    use chrono::Utc;
+    use lazybox_core::{Task, TaskId, Workspace};
+
+    fn task(kind: &str, number: u64, body: &str) -> Task {
+        Task {
+            id: TaskId {
+                source: "github".into(),
+                key: format!("github:o/r#{number}"),
+            },
+            title: format!("a {kind}"),
+            body: Some(body.into()),
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: format!("https://github.com/o/r/{kind}/{number}"),
+            repo: Some("o/r".into()),
+            branch: Some("main".into()),
+            base_branch: None,
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        }
+    }
+
+    /// A PR workspace that has folded in its linked issue — the state
+    /// after `x j` (join into PR) / auto-collapse.
+    fn pr_with_linked_issue(pr_body: &str, issue_body: &str) -> RightPane {
+        let mut ws = Workspace::from_task(task("pull", 100, pr_body), Utc::now());
+        ws.attach_task(task("issues", 42, issue_body));
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        pane
+    }
+
+    #[test]
+    fn modal_source_shows_both_bodies_and_clickable_links() {
+        let pane = pr_with_linked_issue("the pr context", "the original brief");
+        let src = pane.task_body().expect("a PR-with-issue has a modal body");
+        assert!(src.contains("the pr context"), "PR body present:\n{src}");
+        assert!(
+            src.contains("Linked issue #42"),
+            "issue section header:\n{src}"
+        );
+        assert!(
+            src.contains("the original brief"),
+            "issue body present:\n{src}"
+        );
+        // Clickable markdown links to BOTH tasks — the modal renders
+        // these as `Msg::OpenUrl` click targets.
+        assert!(
+            src.contains("](https://github.com/o/r/pull/100)"),
+            "clickable PR link:\n{src}",
+        );
+        assert!(
+            src.contains("](https://github.com/o/r/issues/42)"),
+            "clickable issue link:\n{src}",
+        );
+    }
+
+    #[test]
+    fn pr_without_linked_issue_keeps_the_plain_body() {
+        let ws = Workspace::from_task(task("pull", 100, "just the pr body"), Utc::now());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        // Unchanged behavior: the raw body, no link scaffolding.
+        assert_eq!(pane.task_body().as_deref(), Some("just the pr body"));
+    }
+
+    #[test]
+    fn issue_only_workspace_keeps_the_plain_body() {
+        let ws = Workspace::from_task(task("issues", 7, "issue body"), Utc::now());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        assert_eq!(pane.task_body().as_deref(), Some("issue body"));
+    }
+
+    #[test]
+    fn linked_issue_offers_the_modal_even_for_a_short_plain_pr_body() {
+        // A short, non-rich PR body would normally just collapse the
+        // teaser; with a linked issue it must open the reader modal so
+        // the issue description is reachable (#462).
+        let mut pane = pr_with_linked_issue("short", "the issue brief");
+        pane.task_body_view = TaskBodyView::Preview;
+        pane.toggle_task_body();
+        assert!(
+            pane.take_open_description(),
+            "toggling a linked-issue PR opens the reader modal",
+        );
     }
 }

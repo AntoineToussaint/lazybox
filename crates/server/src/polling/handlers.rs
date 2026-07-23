@@ -104,6 +104,15 @@ impl ProviderHandle {
             Self::Linear(c) => lazybox_core::TaskProvider::merge(c, ws).await,
         }
     }
+    pub async fn update_branch(
+        &self,
+        ws: &lazybox_core::Workspace,
+    ) -> Result<(), lazybox_core::ProviderError> {
+        match self {
+            Self::Github(c) => lazybox_core::TaskProvider::update_branch(c, ws).await,
+            Self::Linear(c) => lazybox_core::TaskProvider::update_branch(c, ws).await,
+        }
+    }
     pub async fn close_issue(
         &self,
         ws: &lazybox_core::Workspace,
@@ -298,6 +307,64 @@ pub async fn handle_merge_pr(config: &ServerConfig, workspace_key: WorkspaceKey)
         });
     }
     // Wake the poll loop so MERGED state lands in <5s instead of
+    // waiting out the full interval.
+    config.poll_wake.notify_one();
+}
+
+/// Handle `Command::UpdateBranch`: load the workspace, recover the PR's
+/// GraphQL node id from its primary task, and ship an
+/// `updatePullRequestBranch` mutation — the "Update branch" button on
+/// github.com. On success the next poll cycle picks up the fresh
+/// `mergeStateStatus` and the `BEHIND` tag clears.
+///
+/// Errors surface as a distinct, persistent `Event::BranchUpdateFailed`
+/// (mirroring the merge path) so a rejected update can't be mistaken for
+/// "the keypress did nothing." The PR stays actionable.
+pub async fn handle_update_branch(config: &ServerConfig, workspace_key: WorkspaceKey) {
+    let emit_err = |msg: &str| {
+        let _ = config
+            .bus
+            .send(Event::provider_error_retryable("update-branch", msg));
+    };
+
+    let Some(ws) = load_workspace(config, &workspace_key) else {
+        emit_err(&format!(
+            "update-branch: workspace {workspace_key} not found"
+        ));
+        return;
+    };
+    let pr_label = ws
+        .pr
+        .as_ref()
+        .map(|p| p.id.key.clone())
+        .unwrap_or_else(|| workspace_key.as_str().to_string());
+
+    let provider = match build_provider_for_workspace(&workspace_key).await {
+        Ok(p) => p,
+        Err(e) => {
+            emit_err(&e);
+            return;
+        }
+    };
+    if let Err(e) = provider.update_branch(&ws).await {
+        tracing::warn!("update-branch {workspace_key}: {e:?}");
+        let _ = config.bus.send(Event::BranchUpdateFailed {
+            workspace_key: workspace_key.clone(),
+            pr_label,
+            reason: e.to_string(),
+        });
+        return;
+    }
+    tracing::info!("updated branch for workspace {workspace_key}");
+
+    // The BEHIND tag won't clear until the next poll re-reads
+    // `mergeStateStatus`. Broadcast `BranchUpdated` so the TUI flashes a
+    // footer notice and the user doesn't think the keypress did nothing.
+    let _ = config.bus.send(Event::BranchUpdated {
+        workspace_key: workspace_key.clone(),
+        pr_label,
+    });
+    // Wake the poll loop so the refreshed state lands in <5s instead of
     // waiting out the full interval.
     config.poll_wake.notify_one();
 }
@@ -658,6 +725,96 @@ pub async fn handle_fetch_repo_labels(config: &ServerConfig, workspace_key: Work
     }
 }
 
+/// Clone the persistent `GhClient` out of the cache, building one on
+/// a cold cache. The std-lock is released before any `.await` so a
+/// cold build never holds it across the `from_credential` network
+/// call (issue #92); the cache lives outside `poll_state` so this
+/// never contends with a running poll tick. `None` means credentials
+/// or client init failed — the caller skips the user-triggered fetch.
+async fn resolve_gh_client(config: &ServerConfig) -> Option<GhClient> {
+    if let Some(client) = config.gh_client_cache.lock().clone() {
+        return Some(client);
+    }
+    let cred = match lazybox_gh::credential_chain()
+        .resolve(lazybox_gh::SOURCE)
+        .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("gh client credentials: {e}");
+            return None;
+        }
+    };
+    match GhClient::from_credential(cred).await {
+        Ok(client) => {
+            *config.gh_client_cache.lock() = Some(client.clone());
+            Some(client)
+        }
+        Err(e) => {
+            tracing::warn!("gh client init: {e}");
+            None
+        }
+    }
+}
+
+/// Recover `(owner, repo, number)` for a GitHub task from its `repo`
+/// (`"owner/repo"`) and the trailing `#N` of its `TaskId` key. `None`
+/// for a task that isn't GitHub-shaped — no repo, or an unparseable
+/// number.
+fn github_target(task: &lazybox_core::Task) -> Option<(String, String, u64)> {
+    let (owner, name) = task.repo.as_deref()?.split_once('/')?;
+    let number = task
+        .id
+        .key
+        .rsplit_once('#')
+        .and_then(|(_, n)| n.parse::<u64>().ok())?;
+    Some((owner.to_string(), name.to_string(), number))
+}
+
+/// Handle `Command::SyncWorkspace`: a targeted re-poll of one
+/// workspace's own GitHub entities — the "sync this" action. Instead
+/// of the global `Refresh` sweep, deep-fetch the workspace's PR and
+/// each linked GitHub issue by `(owner, repo, number)` and upsert the
+/// fresh `Task`, so exactly that row's state and read markers refresh
+/// at a fraction of a full sweep's cost.
+///
+/// Reuses the shared [`upsert`](super::upsert) ingestion path (merge +
+/// persist + `WorkspaceUpserted` broadcast), so read state is
+/// preserved just as it is on a normal poll. No-op for a workspace
+/// with no GitHub PR/issue; per-entity fetch failures are logged and
+/// skipped so one bad entity never poisons the rest.
+pub async fn handle_sync_workspace(config: &ServerConfig, workspace_key: WorkspaceKey) {
+    let Some(client) = resolve_gh_client(config).await else {
+        return;
+    };
+    let Some(workspace) = load_workspace(config, &workspace_key) else {
+        return;
+    };
+
+    if let Some(pr) = workspace.pr.as_ref()
+        && let Some((owner, repo, number)) = github_target(pr)
+    {
+        match client.fetch_single_pr(&owner, &repo, number).await {
+            Ok(Some(task)) => super::upsert(config, task).await,
+            Ok(None) => {}
+            Err(e) => tracing::warn!("sync_workspace {owner}/{repo}#{number} (pr): {e}"),
+        }
+    }
+
+    for issue in &workspace.gh_issues {
+        let Some((owner, repo, number)) = github_target(issue) else {
+            continue;
+        };
+        match client.fetch_single_issue(&owner, &repo, number).await {
+            Ok(Some(task)) => super::upsert(config, task).await,
+            Ok(None) => {}
+            Err(e) => tracing::warn!("sync_workspace {owner}/{repo}#{number} (issue): {e}"),
+        }
+    }
+
+    tracing::info!(workspace = %workspace_key, "sync_workspace: targeted re-poll complete");
+}
+
 /// Handle `Command::FetchPrDetails`: pull the workspace's PR
 /// review-thread activity from GitHub (the field the inbox-scan
 /// query deliberately omits), merge it into the workspace's
@@ -674,40 +831,12 @@ pub async fn handle_fetch_repo_labels(config: &ServerConfig, workspace_key: Work
 /// failure shouldn't pop a modal. The diagnostic still lands in
 /// `/tmp/lazybox.log`.
 pub async fn handle_fetch_pr_details(config: &ServerConfig, workspace_key: WorkspaceKey) {
-    // Use the persistent client from TickState so the rate budget
-    // and observations carry across calls — same logic as the
-    // long-lived poll loop. Without this we'd build a fresh client
-    // for every user-triggered fetch.
-    // Clone the cached client out under a brief std-lock. The lock is
-    // released before any `.await` — building a fresh client on a cold
-    // cache must not hold a lock across the `from_credential` network
-    // call (issue #92). The cache lives outside `poll_state` so this
-    // never contends with a running poll tick.
-    let cached = config.gh_client_cache.lock().clone();
-    let client = match cached {
-        Some(c) => c,
-        None => {
-            let cred = match lazybox_gh::credential_chain()
-                .resolve(lazybox_gh::SOURCE)
-                .await
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!("fetch_pr_details credentials: {e}");
-                    return;
-                }
-            };
-            match GhClient::from_credential(cred).await {
-                Ok(c) => {
-                    *config.gh_client_cache.lock() = Some(c.clone());
-                    c
-                }
-                Err(e) => {
-                    tracing::warn!("fetch_pr_details client init: {e}");
-                    return;
-                }
-            }
-        }
+    // Use the persistent client from TickState so the rate budget and
+    // observations carry across calls — same logic as the long-lived
+    // poll loop. Without this we'd build a fresh client for every
+    // user-triggered fetch.
+    let Some(client) = resolve_gh_client(config).await else {
+        return;
     };
 
     // The node id comes from the workspace snapshot at call time; the
@@ -1013,6 +1142,90 @@ pub(crate) async fn inspect_worktrees_with(
         }
     };
     let _ = config.bus.send(Event::WorktreesInspected { inspections });
+}
+
+/// Expand a leading `~/` against `$HOME`. Mirrors the daemon's mount /
+/// scan path expansion so `scan.roots: [~/development]` resolves the
+/// same way the CLI `lazybox scan` does.
+fn expand_tilde(p: &std::path::Path) -> std::path::PathBuf {
+    if let Some(rest) = p.to_str().and_then(|s| s.strip_prefix("~/"))
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return std::path::PathBuf::from(home).join(rest);
+    }
+    p.to_path_buf()
+}
+
+/// Scan the dev roots for on-disk git checkouts and reply with
+/// `Event::CheckoutsDiscovered`. `roots` overrides `scan.roots` when
+/// the user pointed the scan at an explicit folder; empty ⇒ config
+/// roots. Read-only — importing is the separate `ImportLocalCheckout`
+/// step. Checkouts already backing a linked workspace are dropped so a
+/// re-scan doesn't re-offer them.
+pub async fn handle_scan_checkouts(config: &ServerConfig, roots: Vec<std::path::PathBuf>) {
+    let cfg = lazybox_config::Config::load().unwrap_or_default();
+    let roots: Vec<std::path::PathBuf> = if roots.is_empty() {
+        cfg.scan.roots.clone()
+    } else {
+        roots
+    }
+    .iter()
+    .map(|p| expand_tilde(p))
+    .collect();
+
+    // Skip anything under lazybox's own managed base — those are its
+    // provisioned worktrees, not external dev-folder checkouts.
+    let exclude = lazybox_core::paths::state_root();
+    let found = if roots.is_empty() {
+        Vec::new()
+    } else {
+        lazybox_git_ops::scan_external_checkouts(&roots, cfg.scan.max_depth, false, &exclude).await
+    };
+
+    let already_linked = linked_checkout_paths(config);
+    let checkouts = found
+        .into_iter()
+        .filter(|c| !already_linked.contains(&canonicalize(&c.path)))
+        .map(|c| lazybox_ipc::DiscoveredCheckoutDto {
+            repo: c
+                .remote_url
+                .as_deref()
+                .and_then(lazybox_core::github_owner_repo_from_url)
+                .map(|(owner, repo)| format!("{owner}/{repo}")),
+            path: c.path,
+            branch: c.branch,
+            has_uncommitted_changes: c.has_uncommitted_changes,
+        })
+        .collect::<Vec<_>>();
+
+    let _ = config.bus.send(Event::CheckoutsDiscovered { checkouts });
+}
+
+/// Canonical `linked_checkout` paths of every linked workspace lazybox
+/// already tracks, so the scan doesn't re-offer an imported checkout.
+/// Best-effort — a store read failure yields an empty set, degrading to
+/// "may re-offer" rather than failing the scan.
+fn linked_checkout_paths(config: &ServerConfig) -> std::collections::HashSet<std::path::PathBuf> {
+    let mut out = std::collections::HashSet::new();
+    let Ok(records) = config.store.list_workspaces() else {
+        return out;
+    };
+    for record in records {
+        let Some(json) = record.workspace_json else {
+            continue;
+        };
+        let Ok(ws) = serde_json::from_str::<Workspace>(&json) else {
+            continue;
+        };
+        if let Some(path) = ws.linked_checkout {
+            out.insert(canonicalize(&path));
+        }
+    }
+    out
+}
+
+fn canonicalize(p: &std::path::Path) -> std::path::PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
 /// Delete a single worktree by path. Re-runs a fresh inspection of
@@ -1641,6 +1854,71 @@ pub async fn prefetch_top_pr_details(
         "prefetch_top_pr_details: {total} PRs prefetched in {}ms, {merged} activities merged",
         started.elapsed().as_millis()
     );
+}
+
+#[cfg(test)]
+mod github_target_tests {
+    use super::github_target;
+    use lazybox_core::{CiStatus, Mergeable, ReviewStatus, Task, TaskId, TaskRole, TaskState};
+
+    fn task(repo: Option<&str>, key: &str) -> Task {
+        Task {
+            id: TaskId {
+                source: "github".into(),
+                key: key.into(),
+            },
+            title: "t".into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Author,
+            ci: CiStatus::None,
+            review: ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: "https://github.com/o/r/pull/42".into(),
+            repo: repo.map(Into::into),
+            branch: None,
+            base_branch: None,
+            updated_at: chrono::Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        }
+    }
+
+    #[test]
+    fn recovers_owner_repo_number_from_a_github_task() {
+        let t = task(Some("octo/widgets"), "octo/widgets#42");
+        assert_eq!(
+            github_target(&t),
+            Some(("octo".into(), "widgets".into(), 42))
+        );
+    }
+
+    #[test]
+    fn none_without_a_repo() {
+        let t = task(None, "octo/widgets#42");
+        assert_eq!(github_target(&t), None);
+    }
+
+    #[test]
+    fn none_when_the_key_has_no_parseable_number() {
+        let t = task(Some("octo/widgets"), "octo/widgets");
+        assert_eq!(github_target(&t), None);
+    }
 }
 
 #[cfg(test)]
@@ -2661,6 +2939,29 @@ mod inspect_tests {
         assert!(
             load_workspace(&config, &key).is_none(),
             "row should be removed"
+        );
+    }
+
+    /// #476: deleting a workspace with no backing terminals broadcasts
+    /// `WorkspaceRemoved` and records the archive tombstone. The reorder
+    /// (emit the echo before terminal teardown, so the row's
+    /// disappearance isn't gated on killing terminals) must not regress
+    /// the happy path.
+    #[tokio::test]
+    async fn delete_workspace_emits_removed_and_archives() {
+        let store = Arc::new(MemoryStore::new());
+        let wt = std::env::temp_dir().join(format!("lb-del-{}", std::process::id()));
+        seed_workspace(&store, wt, /*stopped=*/ true);
+        let config = fresh_config(store);
+        let mut rx = config.bus.subscribe();
+        let key = lazybox_core::WorkspaceKey::new("github:o/r#1".to_string());
+
+        assert!(crate::polling::delete_workspace(&config, &key).await);
+        drain_until(&mut rx, |e| matches!(e, Event::WorkspaceRemoved(_))).await;
+        assert!(load_workspace(&config, &key).is_none(), "store row removed");
+        assert!(
+            crate::polling::load_archived_set(&config).contains(key.as_str()),
+            "archive tombstone recorded so the next poll won't resurrect it",
         );
     }
 

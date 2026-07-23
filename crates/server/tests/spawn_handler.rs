@@ -7,7 +7,7 @@
 use lazybox_ipc::{Command, Event, TerminalKind, channel};
 use lazybox_server::backend::{MockBackend, SessionBackend};
 use lazybox_server::{Server, ServerConfig};
-use lazybox_store::MemoryStore;
+use lazybox_store::{MemoryStore, Store};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -695,6 +695,12 @@ async fn interactive_claude_spawn_keeps_permission_prompts() {
             argv.iter().any(|a| a == "--settings"),
             "claude must launch with --settings for hook injection: {argv:?}",
         );
+        let env = mock.env_for(&key).await.expect("captured spawn env");
+        assert!(
+            env.iter()
+                .any(|(key, value)| key == "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN" && value == "1"),
+            "the interactive spawn boundary must receive Claude's inline renderer env: {env:?}",
+        );
     })
     .await
     .expect("deadline");
@@ -722,6 +728,7 @@ async fn autonomous_spawn_wires_no_permission_consistently() {
             true,  // autonomous
             false, // on_main
             None,  // model_alias
+            false,
         )
         .await;
 
@@ -735,6 +742,15 @@ async fn autonomous_spawn_wires_no_permission_consistently() {
         let event_flag = event_flag.expect("TerminalSpawned broadcast");
 
         let key = mock.list().await.unwrap().into_iter().next().unwrap();
+        assert_eq!(
+            config
+                .store
+                .get_kv(&format!("terminal-pty-generation:{key}"))
+                .expect("launch generation read")
+                .as_deref(),
+            Some("1"),
+            "fresh Claude PTYs persist the renderer compatibility generation"
+        );
         let argv_flag = mock
             .argv_for(&key)
             .await
@@ -1038,6 +1054,106 @@ async fn recover_sessions_reattaches_survivors() {
     .expect("deadline");
 }
 
+#[tokio::test]
+async fn recovered_pre_generation_claude_requires_an_explicit_restart() {
+    timeout(TEST_DEADLINE, async {
+        let backend = MockBackend::new();
+        let backend_key = backend
+            .spawn(&["claude".into()], None, &[], "legacy-claude")
+            .await
+            .expect("pre-existing backend session");
+        let store = Arc::new(MemoryStore::new());
+        let metadata =
+            serde_json::to_string(&("test:legacy-claude", TerminalKind::Agent("claude".into())))
+                .expect("metadata");
+        store
+            .set_kv(&format!("terminal:{backend_key}"), &metadata)
+            .expect("persist legacy metadata");
+
+        let config = ServerConfig::with_store_and_backend(store, Arc::new(backend));
+        lazybox_server::spawn_handler::recover_sessions(&config).await;
+        assert_eq!(config.outdated_agent_terminals.lock().await.len(), 1);
+
+        let mut client = subscribed(config).await;
+        let warning = timeout(Duration::from_secs(1), client.recv())
+            .await
+            .expect("restart warning deadline")
+            .expect("restart warning event");
+        assert!(matches!(
+            warning,
+            Event::RecoveredTerminalsRequireRestart { terminal_ids }
+                if terminal_ids.len() == 1
+        ));
+    })
+    .await
+    .expect("deadline");
+}
+
+#[tokio::test]
+async fn subscribe_does_not_warn_for_an_outdated_terminal_absent_from_its_snapshot() {
+    timeout(TEST_DEADLINE, async {
+        let config = ServerConfig::in_memory();
+        config
+            .outdated_agent_terminals
+            .lock()
+            .await
+            .insert(lazybox_ipc::TerminalId(404));
+
+        let mut client = subscribed(config).await;
+        assert!(
+            timeout(Duration::from_millis(100), client.recv())
+                .await
+                .is_err(),
+            "an auxiliary teardown marker without a snapshotted terminal must not emit a warning"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
+#[tokio::test]
+async fn recovered_claude_at_current_or_newer_generation_needs_no_restart() {
+    timeout(TEST_DEADLINE, async {
+        let backend = MockBackend::new();
+        let store = Arc::new(MemoryStore::new());
+        for generation in [1, 2] {
+            let backend_key = backend
+                .spawn(
+                    &["claude".into()],
+                    None,
+                    &[],
+                    &format!("claude-generation-{generation}"),
+                )
+                .await
+                .expect("pre-existing backend session");
+            let metadata = serde_json::to_string(&(
+                format!("test:claude-generation-{generation}"),
+                TerminalKind::Agent("claude".into()),
+            ))
+            .expect("metadata");
+            store
+                .set_kv(&format!("terminal:{backend_key}"), &metadata)
+                .expect("persist terminal metadata");
+            store
+                .set_kv(
+                    &format!("terminal-pty-generation:{backend_key}"),
+                    &generation.to_string(),
+                )
+                .expect("persist launch generation");
+        }
+
+        let config = ServerConfig::with_store_and_backend(store, Arc::new(backend));
+        lazybox_server::spawn_handler::recover_sessions(&config).await;
+
+        assert!(
+            config.outdated_agent_terminals.lock().await.is_empty(),
+            "a recovered process at least as new as this daemon's PTY contract is compatible"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
 /// Regression / smoke check for the **ingest-into-agent** path
 /// (issue #50). When work is handed to an agent — either by the user
 /// pressing `w` or by the `@lazybox`-mention auto-spawn — the agent is
@@ -1277,6 +1393,86 @@ async fn spawn_onto_existing_singleton_injects_the_prompt() {
             joined.contains(&b'\r'),
             "prompt was pasted into the singleton but never submitted; writes = {text:?}"
         );
+    })
+    .await
+    .expect("deadline");
+}
+
+/// A linked (no-worktree) workspace lands every session in its on-disk
+/// checkout AND enforces the agent singleton: a second `a c` on the same
+/// linked workspace reuses the first agent (focus, not a duplicate),
+/// even though the client sends `on_main: false`. Regression guard for
+/// the request/landed on-main mismatch that would otherwise launch two
+/// Claudes into the user's real tree.
+#[tokio::test]
+async fn linked_workspace_agent_spawn_is_a_singleton() {
+    timeout(TEST_DEADLINE, async {
+        let _home = IsolatedConfigHome::new();
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+
+        // Persist a linked workspace pointing at a real on-disk dir.
+        let checkout = tempfile::tempdir().unwrap();
+        let mut ws = lazybox_core::Workspace::empty(
+            lazybox_core::WorkspaceKey::new("acme-widget"),
+            "feature-x",
+            chrono::Utc::now(),
+        );
+        ws.local = true;
+        ws.linked_checkout = Some(checkout.path().to_path_buf());
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: ws.key.as_str().to_string(),
+                created_at: ws.created_at,
+                workspace_json: Some(serde_json::to_string(&ws).unwrap()),
+            })
+            .unwrap();
+
+        let mut client = subscribed(config.clone()).await;
+        let spawn = |c: &mut lazybox_ipc::Client| {
+            c.send(Command::Spawn {
+                model_alias: None,
+                session_key: "acme-widget".into(),
+                session_id: None,
+                kind: TerminalKind::Agent("claude".into()),
+                cwd: None,
+                initial_prompt: None,
+                on_main: false,
+            })
+            .unwrap();
+        };
+
+        // First spawn: an agent starts, rooted in the real checkout.
+        spawn(&mut client);
+        let first = wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalSpawned { .. }),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("first agent spawns");
+        let backend_key = mock.list().await.unwrap().into_iter().next().unwrap();
+        assert_eq!(
+            mock.cwd_for(&backend_key).await.as_deref(),
+            Some(checkout.path()),
+            "the agent runs in the linked checkout, not a worktree",
+        );
+
+        // Second spawn: reuse, not a duplicate.
+        spawn(&mut client);
+        let focused = wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalFocusRequested { .. }),
+            Duration::from_secs(2),
+        )
+        .await;
+        assert!(focused.is_some(), "second spawn must request focus");
+        assert_eq!(
+            mock.list().await.unwrap().len(),
+            1,
+            "a linked workspace must run one Claude, not two, in the real tree",
+        );
+        let _ = first;
     })
     .await
     .expect("deadline");
@@ -1757,6 +1953,7 @@ async fn concurrent_spawns_collapse_onto_one_backend_session() {
                 false,
                 false, // on_main
                 None,  // model_alias
+                false,
             )
             .await;
         });
@@ -1776,6 +1973,7 @@ async fn concurrent_spawns_collapse_onto_one_backend_session() {
                 true,
                 false, // on_main
                 None,  // model_alias
+                false,
             )
             .await;
         });
@@ -1852,6 +2050,7 @@ async fn spawn_aborts_when_workspace_was_deleted_mid_flight() {
             false,
             false, // on_main
             None,  // model_alias
+            false,
         )
         .await;
 
@@ -1894,6 +2093,7 @@ async fn spawn_aborts_when_workspace_does_not_exist() {
             false,
             false,
             None,
+            false,
         )
         .await;
 
@@ -2577,6 +2777,7 @@ async fn many_concurrent_prompt_spawns_all_deliver() {
                     false,
                     false, // on_main
                     None,  // model_alias
+                    false,
                 )
                 .await;
             }));

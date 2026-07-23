@@ -12,8 +12,8 @@ use tokio::process::Command;
 
 mod inspect;
 pub use inspect::{
-    DiscoveredCheckout, OrphanReason, TrackedSession, WorktreeInspection, scan_external_checkouts,
-    worktree_is_pristine,
+    DiscoveredCheckout, OrphanReason, TrackedSession, WorktreeInspection, describe_checkout_at,
+    scan_external_checkouts, worktree_is_pristine,
 };
 
 /// Process-wide per-repo serialization. Keyed by the bare-clone path:
@@ -1273,9 +1273,20 @@ async fn validate_worktree_dir(
             }
         }
     }
-    // Not a worktree of our bare clone. Empty-ish dirs (at most a
-    // stray `.git` entry) are leftovers from a failed provision —
-    // clear and re-provision. Anything with real content is refused.
+    // Not a worktree of our bare clone. Every dir reaching here sits
+    // at a lazybox-managed worktree path, so it's debris lazybox
+    // created — reclaimable — with one exception: a dir holding
+    // uncommitted work a fallback session wrote after the failed
+    // provision (issue #446), which must be preserved.
+    //
+    // Empty-ish leftovers (at most a stray `.git`) never held work;
+    // clear them outright. A content-full leftover is the rapid-`w w`
+    // orphan (issue #447): a `worktree add` that checked files out but
+    // lost its registration — killed mid-checkout by the #422 timeout,
+    // or a bare re-clone that wiped `worktrees/` metadata. It's
+    // disposable only when its checkout is pristine (byte-identical to
+    // a commit we already have); real edits make it non-pristine and
+    // it is refused, never clobbered.
     let mut has_real_content = false;
     let mut entries = tokio::fs::read_dir(wt_path).await?;
     while let Some(entry) = entries.next_entry().await? {
@@ -1284,20 +1295,123 @@ async fn validate_worktree_dir(
             break;
         }
     }
-    if has_real_content {
+    if has_real_content && !leftover_is_pristine_checkout(bare_path, wt_path).await {
         return Err(GitError::Command(format!(
-            "{} exists but is not a worktree of {} — refusing to reuse or overwrite it; \
-             move the directory aside and retry",
+            "{} exists but is not a worktree of {} and holds uncommitted work — \
+             refusing to reuse or overwrite it; move the directory aside and retry",
             wt_path.display(),
             bare_path.display()
         )));
     }
     tracing::warn!(
         path = %wt_path.display(),
-        "removing invalid empty worktree directory (failed earlier provision?) before re-provisioning"
+        "reclaiming invalid worktree directory (failed earlier provision?) before re-provisioning"
     );
     tokio::fs::remove_dir_all(wt_path).await?;
+    // A killed `worktree add` registers `<bare>/worktrees/<name>`
+    // before the checkout finishes; with the directory now gone that
+    // entry is prunable, and clearing it keeps the re-provision's
+    // `worktree add -B <branch>` from failing with "'<branch>' is
+    // already used by worktree".
+    let _ = run_git_in(bare_path, &["worktree", "prune"]).await;
     Ok(WorktreeDirState::Reprovision)
+}
+
+/// Whether the working-tree content at `wt` is a pristine checkout —
+/// byte-identical to a commit already in `bare`, carrying no
+/// uncommitted work. This is what distinguishes a failed-`worktree add`
+/// leftover (disposable debris lazybox created) from a directory
+/// holding real edits a fallback session made, which must be preserved
+/// (issue #446).
+///
+/// Linkage-free and branch-agnostic: the worktree's own `.git` may be
+/// dangling (its `worktrees/<name>` metadata pruned, or a bare re-clone
+/// wiped it), so this never runs git *inside* `wt`. Instead it hashes
+/// the directory through a throwaway index against `bare`'s object
+/// store and checks the resulting tree against the tree of every ref.
+/// `.gitignore` is honored, so build debris doesn't read as work. A
+/// checkout whose tree matches no ref (real edits, or a start point
+/// that has since advanced off every tip) reads as non-pristine — the
+/// conservative direction, since the cost of a wrong "pristine" verdict
+/// is deleting user work.
+///
+/// Any probe failure returns `false`: without a confident "pristine"
+/// verdict the caller refuses rather than risk clobbering.
+async fn leftover_is_pristine_checkout(bare: &Path, wt: &Path) -> bool {
+    // A per-call throwaway index. The name is process-and-sequence
+    // unique so two probes on the same bare can never share it — the
+    // one shared-state hazard of this otherwise read-only inspection,
+    // and the interleaving that could corrupt it is exactly the one
+    // that would mislabel a dirty leftover as pristine and delete it.
+    static PROBE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = PROBE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let index = bare.join(format!(
+        "lazybox-recover-{}-{seq}.index",
+        std::process::id()
+    ));
+    let index_env = vec![(
+        "GIT_INDEX_FILE".to_string(),
+        index.to_string_lossy().into_owned(),
+    )];
+    let bare_arg = bare.to_string_lossy().into_owned();
+    let wt_arg = wt.to_string_lossy().into_owned();
+
+    // Stage every working file (respecting `.gitignore`) into the
+    // throwaway index, then snapshot it as a tree. `add` writes the
+    // blobs into `bare`'s object store — for a pristine checkout they
+    // already exist (no-op dedup); for a dirty one the extra loose
+    // objects are unreachable and reaped by the next `git gc`.
+    let staged = run_git_in_env(
+        wt,
+        &["--git-dir", &bare_arg, "--work-tree", &wt_arg, "add", "-A"],
+        &index_env,
+    )
+    .await
+    .is_ok();
+    let tree = if staged {
+        run_git_in_env(wt, &["--git-dir", &bare_arg, "write-tree"], &index_env).await
+    } else {
+        Err(GitError::Command(
+            "staging the leftover checkout failed".into(),
+        ))
+    };
+    let _ = tokio::fs::remove_file(&index).await;
+    let Ok(tree) = tree else { return false };
+    let tree = tree.trim();
+    if tree.is_empty() {
+        return false;
+    }
+
+    // Peel every branch tip to its tree in one `rev-parse`. A pristine
+    // checkout's tree is among these; anything else carries real work.
+    // Only `refs/heads` and `refs/remotes` — a worktree checkout always
+    // derives from a branch, never a tag, so tags add no legitimate
+    // match while a single non-peelable tag (e.g. git.git's blob-valued
+    // `refs/tags/junio-gpg-pub`) would fail the whole batched
+    // `rev-parse` and disable recovery for the entire repo.
+    let Ok(specs) = run_git_in(
+        bare,
+        &[
+            "for-each-ref",
+            "--format=%(objectname)^{tree}",
+            "refs/heads",
+            "refs/remotes",
+        ],
+    )
+    .await
+    else {
+        return false;
+    };
+    let specs: Vec<&str> = specs.lines().filter(|l| !l.is_empty()).collect();
+    if specs.is_empty() {
+        return false;
+    }
+    let mut args: Vec<&str> = vec!["rev-parse"];
+    args.extend(specs);
+    match run_git_in(bare, &args).await {
+        Ok(out) => out.lines().any(|l| l.trim() == tree),
+        Err(_) => false,
+    }
 }
 
 /// Canonicalize when possible (resolves macOS `/var` → `/private/var`
@@ -2515,10 +2629,11 @@ mod health_probe_tests {
     /// bare clone's `worktrees/` metadata vanishes (bare deleted /
     /// re-cloned), the same directory must STOP reporting `Valid` —
     /// its `.git` gitdir pointer is dangling and every git command in
-    /// it would fail. With real content present, validation refuses
-    /// loudly instead of deleting user data.
+    /// it would fail. The checkout is pristine (a failed-provision
+    /// leftover), so validation reclaims it for re-provision (#447)
+    /// instead of wedging on "move the directory aside and retry".
     #[tokio::test]
-    async fn dangling_gitdir_target_is_not_valid() {
+    async fn dangling_gitdir_pristine_leftover_is_reclaimed() {
         let (tmp, bare) = local_bare_clone();
         let wt = tmp.path().join("wt");
         git(
@@ -2541,14 +2656,138 @@ mod health_probe_tests {
 
         std::fs::remove_dir_all(bare.join("worktrees")).expect("nuke worktree metadata");
 
+        assert_eq!(
+            validate_worktree_dir(&wt, &bare).await.unwrap(),
+            WorktreeDirState::Reprovision,
+            "a pristine dangling leftover is reclaimed, never wedged"
+        );
+        assert!(
+            !wt.exists(),
+            "reclaim removes the leftover so the caller can re-provision"
+        );
+    }
+
+    /// The safety half of #447: a dangling-gitdir leftover carrying
+    /// genuine uncommitted work (a fallback session's edits, #446) is
+    /// NOT pristine — validation must refuse and leave the files
+    /// untouched, never mistaking real work for disposable debris.
+    #[tokio::test]
+    async fn dangling_gitdir_dirty_leftover_is_preserved() {
+        let (tmp, bare) = local_bare_clone();
+        let wt = tmp.path().join("wt");
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                wt.to_str().expect("utf8 path"),
+                "-B",
+                "wt-branch",
+                "HEAD",
+            ],
+        );
+        // A fallback session's uncommitted work: an edit to a tracked
+        // file plus a brand-new untracked file.
+        std::fs::write(wt.join("f.txt"), "edited by the user\n").expect("edit tracked file");
+        std::fs::write(wt.join("notes.md"), "keep me").expect("write untracked");
+
+        std::fs::remove_dir_all(bare.join("worktrees")).expect("nuke worktree metadata");
+
         let verdict = validate_worktree_dir(&wt, &bare).await;
         assert!(
             verdict.is_err(),
-            "dangling gitdir + real content must refuse (got {verdict:?}), never report Valid"
+            "a dirty dangling leftover must refuse (got {verdict:?}), never delete work"
         );
-        assert!(
-            wt.join("f.txt").exists(),
-            "validation must not delete the user's files"
+        assert_eq!(
+            std::fs::read_to_string(wt.join("notes.md")).expect("still readable"),
+            "keep me",
+            "refusal must not touch the user's uncommitted work"
+        );
+    }
+
+    /// `.gitignore`d build debris is not "real work": a pristine
+    /// checkout that only grew ignored files (a `target/` a session
+    /// built) is still reclaimable, so ignored artifacts never wedge a
+    /// re-provision.
+    #[tokio::test]
+    async fn dangling_gitdir_ignored_debris_is_reclaimed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src = tmp.path().join("src");
+        std::fs::create_dir(&src).expect("mkdir src");
+        git(&src, &["init", "-q"]);
+        std::fs::write(src.join("f.txt"), "content\n").expect("write f.txt");
+        std::fs::write(src.join(".gitignore"), "target/\n").expect("write gitignore");
+        git(&src, &["add", "."]);
+        git(&src, &["commit", "-q", "-m", "init"]);
+        git(tmp.path(), &["clone", "-q", "--bare", "src", "bare.git"]);
+        let bare = tmp.path().join("bare.git");
+
+        let wt = tmp.path().join("wt");
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                wt.to_str().expect("utf8 path"),
+                "-B",
+                "wt-branch",
+                "HEAD",
+            ],
+        );
+        std::fs::create_dir(wt.join("target")).expect("mkdir target");
+        std::fs::write(wt.join("target").join("out.o"), "built").expect("write artifact");
+
+        std::fs::remove_dir_all(bare.join("worktrees")).expect("nuke worktree metadata");
+
+        assert_eq!(
+            validate_worktree_dir(&wt, &bare).await.unwrap(),
+            WorktreeDirState::Reprovision,
+            "only-ignored-debris leftover is pristine and reclaimable"
+        );
+    }
+
+    /// A ref that doesn't peel to a tree — a blob-valued tag, as
+    /// git.git's own `refs/tags/junio-gpg-pub` — must not disable
+    /// recovery. The pristine probe peels only `refs/heads` /
+    /// `refs/remotes`, so such a ref is never in the batch that would
+    /// otherwise fail wholesale and refuse every pristine leftover.
+    #[tokio::test]
+    async fn blob_valued_tag_does_not_break_recovery() {
+        let (tmp, bare) = local_bare_clone();
+        // A tag pointing straight at a blob (no commit to peel through).
+        let blob = {
+            let out = std::process::Command::new("git")
+                .current_dir(&bare)
+                .args(["hash-object", "-w", "--stdin"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .expect("spawn hash-object");
+            use std::io::Write;
+            out.stdin.as_ref().unwrap().write_all(b"gpg key").unwrap();
+            let out = out.wait_with_output().expect("hash-object");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&bare, &["update-ref", "refs/tags/blob-tag", &blob]);
+
+        let wt = tmp.path().join("wt");
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                wt.to_str().expect("utf8 path"),
+                "-B",
+                "wt-branch",
+                "HEAD",
+            ],
+        );
+        std::fs::remove_dir_all(bare.join("worktrees")).expect("nuke worktree metadata");
+
+        assert_eq!(
+            validate_worktree_dir(&wt, &bare).await.unwrap(),
+            WorktreeDirState::Reprovision,
+            "a non-peelable tag must not wedge recovery of a pristine leftover"
         );
     }
 }

@@ -120,6 +120,33 @@ impl std::fmt::Display for ProjectKey {
     }
 }
 
+/// Parse the `owner/repo` slug out of a GitHub `origin` remote URL —
+/// the string an on-disk checkout carries in `remote.origin.url`.
+/// Recognizes the SCP-style SSH form (`git@github.com:owner/repo.git`),
+/// the `ssh://` form, and the `https://` form, with a trailing `.git`
+/// and any trailing slash stripped. Returns `None` for a non-GitHub
+/// host or a URL with no `owner/repo` tail, so a checkout whose origin
+/// points elsewhere (GitLab, a fork mirror) is simply not mapped rather
+/// than mis-mapped.
+pub fn github_owner_repo_from_url(url: &str) -> Option<(String, String)> {
+    let url = url.trim();
+    // Reduce every remote form to the `owner/repo…` path after the host.
+    let rest = url
+        .strip_prefix("git@github.com:")
+        .or_else(|| url.strip_prefix("https://github.com/"))
+        .or_else(|| url.strip_prefix("http://github.com/"))
+        .or_else(|| url.strip_prefix("ssh://git@github.com/"))
+        .or_else(|| url.strip_prefix("git://github.com/"))?;
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    let rest = rest.strip_suffix(".git").unwrap_or(rest);
+    let (owner, repo) = rest.split_once('/')?;
+    // `repo` may itself contain further path segments on a malformed
+    // URL; keep only the first segment so `owner/repo/extra` still
+    // yields `owner/repo` rather than a bogus name.
+    let repo = repo.split('/').next().unwrap_or(repo);
+    (!owner.is_empty() && !repo.is_empty()).then(|| (owner.to_string(), repo.to_string()))
+}
+
 /// A top-level Project — a container that holds Workspaces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Project {
@@ -253,6 +280,53 @@ mod tests {
         // A proper name is left untouched.
         let good = Project::new(key, "AntoineToussaint/lazybox", Utc::now());
         assert_eq!(good.display_name(), "AntoineToussaint/lazybox");
+    }
+
+    #[test]
+    fn github_owner_repo_from_url_parses_every_remote_form() {
+        let want = Some(("AntoineToussaint".to_string(), "lazybox".to_string()));
+        assert_eq!(
+            github_owner_repo_from_url("git@github.com:AntoineToussaint/lazybox.git"),
+            want
+        );
+        assert_eq!(
+            github_owner_repo_from_url("git@github.com:AntoineToussaint/lazybox"),
+            want
+        );
+        assert_eq!(
+            github_owner_repo_from_url("https://github.com/AntoineToussaint/lazybox.git"),
+            want
+        );
+        assert_eq!(
+            github_owner_repo_from_url("https://github.com/AntoineToussaint/lazybox"),
+            want
+        );
+        assert_eq!(
+            github_owner_repo_from_url("ssh://git@github.com/AntoineToussaint/lazybox.git"),
+            want
+        );
+        // Trailing slash + surrounding whitespace tolerated.
+        assert_eq!(
+            github_owner_repo_from_url("  https://github.com/AntoineToussaint/lazybox/  "),
+            want
+        );
+        // Hyphenated owner and repo round-trip (the boundary is the
+        // first `/`, not a guessed `-`).
+        assert_eq!(
+            github_owner_repo_from_url("git@github.com:codefly-dev/warden-platform.git"),
+            Some(("codefly-dev".to_string(), "warden-platform".to_string()))
+        );
+    }
+
+    #[test]
+    fn github_owner_repo_from_url_rejects_non_github_and_malformed() {
+        assert_eq!(
+            github_owner_repo_from_url("git@gitlab.com:acme/widget.git"),
+            None
+        );
+        assert_eq!(github_owner_repo_from_url("https://github.com/acme"), None);
+        assert_eq!(github_owner_repo_from_url("not a url"), None);
+        assert_eq!(github_owner_repo_from_url(""), None);
     }
 
     #[test]

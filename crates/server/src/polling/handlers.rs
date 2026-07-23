@@ -1015,6 +1015,90 @@ pub(crate) async fn inspect_worktrees_with(
     let _ = config.bus.send(Event::WorktreesInspected { inspections });
 }
 
+/// Expand a leading `~/` against `$HOME`. Mirrors the daemon's mount /
+/// scan path expansion so `scan.roots: [~/development]` resolves the
+/// same way the CLI `lazybox scan` does.
+fn expand_tilde(p: &std::path::Path) -> std::path::PathBuf {
+    if let Some(rest) = p.to_str().and_then(|s| s.strip_prefix("~/"))
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return std::path::PathBuf::from(home).join(rest);
+    }
+    p.to_path_buf()
+}
+
+/// Scan the dev roots for on-disk git checkouts and reply with
+/// `Event::CheckoutsDiscovered`. `roots` overrides `scan.roots` when
+/// the user pointed the scan at an explicit folder; empty ⇒ config
+/// roots. Read-only — importing is the separate `ImportLocalCheckout`
+/// step. Checkouts already backing a linked workspace are dropped so a
+/// re-scan doesn't re-offer them.
+pub async fn handle_scan_checkouts(config: &ServerConfig, roots: Vec<std::path::PathBuf>) {
+    let cfg = lazybox_config::Config::load().unwrap_or_default();
+    let roots: Vec<std::path::PathBuf> = if roots.is_empty() {
+        cfg.scan.roots.clone()
+    } else {
+        roots
+    }
+    .iter()
+    .map(|p| expand_tilde(p))
+    .collect();
+
+    // Skip anything under lazybox's own managed base — those are its
+    // provisioned worktrees, not external dev-folder checkouts.
+    let exclude = lazybox_core::paths::state_root();
+    let found = if roots.is_empty() {
+        Vec::new()
+    } else {
+        lazybox_git_ops::scan_external_checkouts(&roots, cfg.scan.max_depth, false, &exclude).await
+    };
+
+    let already_linked = linked_checkout_paths(config);
+    let checkouts = found
+        .into_iter()
+        .filter(|c| !already_linked.contains(&canonicalize(&c.path)))
+        .map(|c| lazybox_ipc::DiscoveredCheckoutDto {
+            repo: c
+                .remote_url
+                .as_deref()
+                .and_then(lazybox_core::github_owner_repo_from_url)
+                .map(|(owner, repo)| format!("{owner}/{repo}")),
+            path: c.path,
+            branch: c.branch,
+            has_uncommitted_changes: c.has_uncommitted_changes,
+        })
+        .collect::<Vec<_>>();
+
+    let _ = config.bus.send(Event::CheckoutsDiscovered { checkouts });
+}
+
+/// Canonical `linked_checkout` paths of every linked workspace lazybox
+/// already tracks, so the scan doesn't re-offer an imported checkout.
+/// Best-effort — a store read failure yields an empty set, degrading to
+/// "may re-offer" rather than failing the scan.
+fn linked_checkout_paths(config: &ServerConfig) -> std::collections::HashSet<std::path::PathBuf> {
+    let mut out = std::collections::HashSet::new();
+    let Ok(records) = config.store.list_workspaces() else {
+        return out;
+    };
+    for record in records {
+        let Some(json) = record.workspace_json else {
+            continue;
+        };
+        let Ok(ws) = serde_json::from_str::<Workspace>(&json) else {
+            continue;
+        };
+        if let Some(path) = ws.linked_checkout {
+            out.insert(canonicalize(&path));
+        }
+    }
+    out
+}
+
+fn canonicalize(p: &std::path::Path) -> std::path::PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
 /// Delete a single worktree by path. Re-runs a fresh inspection of
 /// that one row so the safety check uses live state (the inspector
 /// result the TUI is acting on may be seconds old). `force = true`
@@ -2661,6 +2745,29 @@ mod inspect_tests {
         assert!(
             load_workspace(&config, &key).is_none(),
             "row should be removed"
+        );
+    }
+
+    /// #476: deleting a workspace with no backing terminals broadcasts
+    /// `WorkspaceRemoved` and records the archive tombstone. The reorder
+    /// (emit the echo before terminal teardown, so the row's
+    /// disappearance isn't gated on killing terminals) must not regress
+    /// the happy path.
+    #[tokio::test]
+    async fn delete_workspace_emits_removed_and_archives() {
+        let store = Arc::new(MemoryStore::new());
+        let wt = std::env::temp_dir().join(format!("lb-del-{}", std::process::id()));
+        seed_workspace(&store, wt, /*stopped=*/ true);
+        let config = fresh_config(store);
+        let mut rx = config.bus.subscribe();
+        let key = lazybox_core::WorkspaceKey::new("github:o/r#1".to_string());
+
+        assert!(crate::polling::delete_workspace(&config, &key).await);
+        drain_until(&mut rx, |e| matches!(e, Event::WorkspaceRemoved(_))).await;
+        assert!(load_workspace(&config, &key).is_none(), "store row removed");
+        assert!(
+            crate::polling::load_archived_set(&config).contains(key.as_str()),
+            "archive tombstone recorded so the next poll won't resurrect it",
         );
     }
 

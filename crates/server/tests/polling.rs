@@ -1011,6 +1011,89 @@ async fn create_empty_workspace_broadcasts_upserted() {
         other => panic!("expected WorkspaceUpserted, got {other:?}"),
     }
 }
+// ── Import local checkout (linked, no-worktree workspace) ────────────
+
+/// `git` in fixtures must not inherit the developer's signing setup —
+/// a locked gpg/1Password agent would hang fixture commits.
+fn no_signing(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    cmd.env("GIT_CONFIG_COUNT", "2")
+        .env("GIT_CONFIG_KEY_0", "commit.gpgsign")
+        .env("GIT_CONFIG_VALUE_0", "false")
+        .env("GIT_CONFIG_KEY_1", "tag.gpgsign")
+        .env("GIT_CONFIG_VALUE_1", "false")
+}
+
+fn git(dir: &std::path::Path, args: &[&str]) {
+    let out = no_signing(
+        std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args),
+    )
+    .output()
+    .unwrap();
+    assert!(out.status.success(), "git {args:?} failed");
+}
+
+/// A real on-disk clone on `branch` with one commit and an `origin`.
+fn init_checkout(dir: &std::path::Path, branch: &str, origin: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    git(dir, &["init", "-q", "-b", branch]);
+    git(dir, &["config", "user.email", "t@e.st"]);
+    git(dir, &["config", "user.name", "tester"]);
+    git(dir, &["remote", "add", "origin", origin]);
+    std::fs::write(dir.join("README.md"), "hi\n").unwrap();
+    git(dir, &["add", "."]);
+    git(dir, &["commit", "-q", "-m", "init"]);
+}
+
+#[tokio::test]
+async fn import_local_checkout_creates_linked_workspace_mapped_to_repo() {
+    let config = ServerConfig::in_memory();
+    let tmp = tempfile::tempdir().unwrap();
+    let checkout = tmp.path().join("acme").join("widget");
+    init_checkout(&checkout, "feature-x", "git@github.com:acme/widget.git");
+
+    let key = polling::import_local_checkout(&config, checkout.clone())
+        .await
+        .expect("import succeeds for a real checkout");
+
+    let stored: lazybox_core::Workspace = serde_json::from_str(
+        &config
+            .store
+            .get_workspace(&key)
+            .unwrap()
+            .unwrap()
+            .workspace_json
+            .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(stored.linked_checkout.as_deref(), Some(checkout.as_path()));
+    assert!(stored.is_linked());
+    assert!(stored.local, "linked workspaces are prune-protected");
+    assert_eq!(
+        stored.project_key,
+        Some(lazybox_core::ProjectKey::github("acme", "widget")),
+        "origin maps the workspace to its GitHub repo project",
+    );
+    assert_eq!(stored.name, "acme/widget");
+    assert_eq!(stored.branch, "feature-x", "current branch is respected");
+}
+
+#[tokio::test]
+async fn import_local_checkout_rejects_a_non_checkout() {
+    let config = ServerConfig::in_memory();
+    let tmp = tempfile::tempdir().unwrap();
+    let plain = tmp.path().join("not-a-repo");
+    std::fs::create_dir_all(&plain).unwrap();
+    assert!(
+        polling::import_local_checkout(&config, plain)
+            .await
+            .is_none(),
+        "a path that isn't a git checkout can't be imported",
+    );
+}
+
 // ── Legacy sandbox migration ─────────────────────────────────────────
 
 #[tokio::test]

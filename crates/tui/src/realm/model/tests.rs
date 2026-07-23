@@ -60,6 +60,48 @@ mod effects_tests {
         assert!(matches!(cmds[1], IpcCommand::Refresh));
     }
 
+    /// Notes share the Textarea component with Reply/Broadcast, so the
+    /// submit handler routes on the modal id that was on top. A
+    /// non-empty note persists via `SetNotes` and clears the pending
+    /// target (issue #458).
+    #[test]
+    fn textarea_submitted_notes_persists_setnotes() {
+        let mut m = build_model();
+        let key = SessionKey::from("github:o/r#1");
+        m.pending_notes = Some(key.clone());
+        m.modal_stack.push(Id::Notes);
+        let cmds = m.handle_textarea_submitted("check the flaky retry".into());
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IpcCommand::SetNotes { session_key, notes } => {
+                assert_eq!(session_key, &key);
+                assert_eq!(notes, "check the flaky retry");
+            }
+            other => panic!("expected SetNotes, got {other:?}"),
+        }
+        assert!(m.pending_notes.is_none());
+    }
+
+    /// An empty/whitespace note is a valid submit — it clears the
+    /// scratchpad — so it still emits `SetNotes` rather than being
+    /// dropped the way an empty reply is.
+    #[test]
+    fn textarea_submitted_empty_notes_clears_scratchpad() {
+        let mut m = build_model();
+        let key = SessionKey::from("github:o/r#1");
+        m.pending_notes = Some(key.clone());
+        m.modal_stack.push(Id::Notes);
+        let cmds = m.handle_textarea_submitted("   ".into());
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IpcCommand::SetNotes { session_key, notes } => {
+                assert_eq!(session_key, &key);
+                assert!(notes.trim().is_empty());
+            }
+            other => panic!("expected SetNotes, got {other:?}"),
+        }
+    }
+
     /// Arm a sticky "✗ sync failed" banner for `source` the way a
     /// failed manual refresh (Shift-R) does, and assert it landed.
     /// Returns the model ready for the recovery half of each test.
@@ -438,6 +480,43 @@ mod effects_tests {
             m.start_agent_project_choices.is_empty(),
             "choices drained after pick"
         );
+    }
+
+    /// `f` mounts the composable filter menu with a row per filter,
+    /// and picking rows replaces the sidebar's active set (no IPC —
+    /// filtering is client-local).
+    #[test]
+    fn filter_menu_pick_sets_the_active_filter_set() {
+        use crate::components::sidebar::Filter;
+        use lazybox_tui_core::action::Action;
+        let mut m = build_model();
+        m.dispatch_action(&Action::OpenFilterMenu);
+        assert_eq!(m.modal_stack.last(), Some(&Id::FilterMenu));
+        assert_eq!(m.filter_choices, Filter::ALL.to_vec());
+
+        let author = Filter::ALL
+            .iter()
+            .position(|f| *f == Filter::Author)
+            .unwrap();
+        let pr = Filter::ALL.iter().position(|f| *f == Filter::Pr).unwrap();
+        let cmds = m.handle_choice_picked(vec![author, pr]);
+        assert!(cmds.is_empty(), "filtering sends no IPC");
+        assert!(m.modal_stack.is_empty(), "menu closes on pick");
+        assert!(m.filter_choices.is_empty(), "choices drained after pick");
+        let active: Vec<Filter> = m.sidebar.filters().iter().collect();
+        assert_eq!(active, vec![Filter::Author, Filter::Pr]);
+    }
+
+    /// An empty pick clears every active filter.
+    #[test]
+    fn filter_menu_empty_pick_clears_filters() {
+        use crate::components::sidebar::Filter;
+        let mut m = build_model();
+        m.sidebar.set_filters([Filter::Unread]);
+        m.mount_filter_menu();
+        let cmds = m.handle_choice_picked(vec![]);
+        assert!(cmds.is_empty());
+        assert!(m.sidebar.filters().is_empty(), "empty pick clears filters");
     }
 
     /// `x p` with no tracked repos has nothing to pick, so it
@@ -7731,6 +7810,52 @@ mod spawn_spinner_projection_tests {
             "spinner cleared by its own terminal"
         );
     }
+
+    #[test]
+    fn recovered_agent_restart_warning_isolated_from_polling_refresh_and_spawns() {
+        let mut m = build_model();
+        let target = SessionKey::new("github:o/r#1");
+        m.status
+            .note_spawning("codex", target, TerminalKind::Agent("codex".into()), 0);
+        m.show_polling(vec!["github".into()]);
+
+        m.handle_daemon_event(IpcEvent::RecoveredTerminalsRequireRestart {
+            terminal_ids: vec![TerminalId(7)],
+        });
+
+        assert!(
+            m.status.spawning.is_some(),
+            "a recovery warning must not cancel an unrelated active spawn"
+        );
+        assert!(
+            m.status.polling.is_some(),
+            "terminal compatibility must not terminate first-poll feedback"
+        );
+        m.status.polling_last_tick =
+            std::time::Instant::now() - std::time::Duration::from_millis(100);
+        assert!(
+            m.polling_tick().is_none(),
+            "terminal compatibility must not queue a delayed polling failure"
+        );
+        assert!(m.status.dismiss_polling());
+
+        m.pending_refresh_ack = true;
+        m.handle_daemon_event(IpcEvent::RecoveredTerminalsRequireRestart {
+            terminal_ids: vec![TerminalId(7)],
+        });
+        assert!(
+            m.pending_refresh_ack,
+            "terminal compatibility must not consume a manual refresh acknowledgement"
+        );
+        let notice = m.status.notice.as_ref().expect("restart notice");
+        assert!(notice.message.contains("restart required"));
+        assert!(!notice.message.contains("spawn failed"));
+        assert!(!notice.message.contains("sync failed"));
+        assert_eq!(
+            notice.severity,
+            crate::realm::components::footer::NoticeSeverity::Permanent
+        );
+    }
 }
 
 #[cfg(test)]
@@ -11688,5 +11813,328 @@ mod agent_cli_update_tests {
             cmd_rx.try_recv().expect("update command sent"),
             lazybox_ipc::Command::UpdateAgentClis
         ));
+    }
+}
+
+#[cfg(test)]
+mod optimistic_mutation_tests {
+    //! #476: mutating actions apply locally on the keystroke, reconcile
+    //! on the daemon's success echo, and roll back on its failure event.
+    //! No user-visible wait on a round-trip; a rejected mutation never
+    //! leaves a lie on screen.
+    use super::super::*;
+    use crate::realm::components::footer::NoticeSeverity;
+    use chrono::Utc;
+    use lazybox_core::{SessionKey, Task, TaskId, Workspace, WorkspaceKey};
+    use lazybox_ipc::{Command as IpcCommand, Event as IpcEvent, channel};
+    use lazybox_tui_core::action::Action;
+    use tuirealm::ratatui::layout::Size;
+
+    type TestModel = Model<tuirealm::terminal::TestTerminalAdapter>;
+
+    fn build_model() -> TestModel {
+        let (client, _server) = channel::pair();
+        // A live polling modal swallows footer notices; clear it so
+        // rollback errors surface in `status.notice`.
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        m.status.polling = None;
+        m
+    }
+
+    fn provider_error(source: &str, message: &str) -> IpcEvent {
+        IpcEvent::ProviderError {
+            source: source.into(),
+            message: message.into(),
+            detail: String::new(),
+            kind: "retryable".into(),
+        }
+    }
+
+    fn pr_task(key: &str) -> Task {
+        let (path, num) = key.rsplit_once('#').unwrap_or((key, "1"));
+        Task {
+            id: TaskId {
+                source: "github".into(),
+                key: key.into(),
+            },
+            title: format!("task: {key}"),
+            body: None,
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: format!("https://github.com/{path}/pull/{num}"),
+            repo: Some("owner/repo".into()),
+            branch: Some("feature".into()),
+            base_branch: None,
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: Some("PR_node".into()),
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        }
+    }
+
+    fn seed_pr_workspace(m: &mut TestModel, key: &str) -> WorkspaceKey {
+        let ws = Workspace::from_task(pr_task(key), Utc::now());
+        let ws_key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        ws_key
+    }
+
+    fn reviewers_of(m: &TestModel, sk: &SessionKey) -> Vec<String> {
+        m.sidebar
+            .workspace_by_key(sk)
+            .and_then(|w| w.pr.as_ref())
+            .map(|p| p.reviewers.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn archive_removes_row_instantly_then_reconciles() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#1");
+        let sk: SessionKey = (&ws_key).into();
+        assert!(m.sidebar.workspace_by_key(&sk).is_some());
+
+        let cmds = m.dispatch_action_confirmed(
+            &Action::Archive,
+            &ActionConfirmTarget::Workspace(sk.clone()),
+        );
+        assert!(matches!(cmds.as_slice(), [IpcCommand::Kill { .. }]));
+        assert!(
+            m.sidebar.workspace_by_key(&sk).is_none(),
+            "row must vanish on confirm, not wait for WorkspaceRemoved"
+        );
+        assert_eq!(m.pending_mutations.len(), 1, "rollback stash held");
+
+        m.handle_daemon_event(IpcEvent::WorkspaceRemoved(ws_key));
+        assert!(
+            m.pending_mutations.is_empty(),
+            "the removed echo reconciles the stash"
+        );
+        assert!(m.sidebar.workspace_by_key(&sk).is_none());
+    }
+
+    #[test]
+    fn archive_rolls_back_on_store_failure() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#2");
+        let sk: SessionKey = (&ws_key).into();
+        m.dispatch_action_confirmed(
+            &Action::Archive,
+            &ActionConfirmTarget::Workspace(sk.clone()),
+        );
+        assert!(m.sidebar.workspace_by_key(&sk).is_none());
+
+        m.handle_daemon_event(provider_error(
+            "store",
+            &format!("could not delete workspace {ws_key}: disk full"),
+        ));
+        assert!(
+            m.sidebar.workspace_by_key(&sk).is_some(),
+            "a rejected delete must re-insert the row"
+        );
+        assert!(m.pending_mutations.is_empty());
+        let n = m.status.notice.as_ref().expect("rollback flashes an error");
+        assert_eq!(n.severity, NoticeSeverity::Permanent);
+        assert!(n.message.contains("delete failed"), "got {:?}", n.message);
+    }
+
+    #[test]
+    fn archive_rolls_back_on_terminal_kill_failure() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#8");
+        let sk: SessionKey = (&ws_key).into();
+        m.dispatch_action_confirmed(
+            &Action::Archive,
+            &ActionConfirmTarget::Workspace(sk.clone()),
+        );
+        assert!(m.sidebar.workspace_by_key(&sk).is_none());
+
+        // The daemon couldn't stop a backing agent, so it preserved the
+        // workspace and emitted a `terminal` error naming the key.
+        m.handle_daemon_event(provider_error(
+            "terminal",
+            &format!(
+                "could not stop terminal x; workspace {ws_key} was not deleted: tmux timed out"
+            ),
+        ));
+        assert!(
+            m.sidebar.workspace_by_key(&sk).is_some(),
+            "an un-killable agent must bring the row back"
+        );
+        assert!(m.pending_mutations.is_empty());
+        let n = m.status.notice.as_ref().expect("rollback flashes");
+        assert!(n.message.contains("delete failed"), "got {:?}", n.message);
+    }
+
+    #[test]
+    fn unrelated_store_error_does_not_roll_back() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#9");
+        let sk: SessionKey = (&ws_key).into();
+        m.dispatch_action_confirmed(
+            &Action::Archive,
+            &ActionConfirmTarget::Workspace(sk.clone()),
+        );
+
+        // A store error naming a DIFFERENT workspace must not resurrect
+        // this row.
+        m.handle_daemon_event(provider_error(
+            "store",
+            "could not delete workspace github:owner/repo#99: nope",
+        ));
+        assert!(
+            m.sidebar.workspace_by_key(&sk).is_none(),
+            "rollback keys off the named workspace, not any store error"
+        );
+        assert_eq!(m.pending_mutations.len(), 1, "stash still armed");
+    }
+
+    #[test]
+    fn reviewers_update_chip_instantly_then_reconcile() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#3");
+        let sk: SessionKey = (&ws_key).into();
+        m.pending_review_request = Some(ws_key.clone());
+        m.review_choices = vec!["alice".into(), "bob".into()];
+        m.modal_stack.push(Id::RequestReviewers);
+
+        let cmds = m.handle_choice_picked(vec![0, 1]);
+        assert!(matches!(
+            cmds.as_slice(),
+            [IpcCommand::RequestReviewers { .. }]
+        ));
+        assert_eq!(
+            reviewers_of(&m, &sk),
+            vec!["alice".to_string(), "bob".to_string()]
+        );
+        assert_eq!(m.pending_mutations.len(), 1);
+
+        // The daemon's fresh copy reconciles the stash.
+        let mut updated = Workspace::from_task(pr_task("github:owner/repo#3"), Utc::now());
+        updated.pr.as_mut().unwrap().reviewers = vec!["alice".into(), "bob".into()];
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(updated)));
+        assert!(m.pending_mutations.is_empty());
+        assert_eq!(
+            reviewers_of(&m, &sk),
+            vec!["alice".to_string(), "bob".to_string()]
+        );
+    }
+
+    #[test]
+    fn reviewers_roll_back_on_failure() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#4");
+        let sk: SessionKey = (&ws_key).into();
+        m.pending_review_request = Some(ws_key.clone());
+        m.review_choices = vec!["alice".into()];
+        m.modal_stack.push(Id::RequestReviewers);
+        m.handle_choice_picked(vec![0]);
+        assert_eq!(reviewers_of(&m, &sk), vec!["alice".to_string()]);
+
+        m.handle_daemon_event(provider_error(
+            "reviewers",
+            "request reviewers failed: nope",
+        ));
+        assert!(
+            reviewers_of(&m, &sk).is_empty(),
+            "a rejected reviewer request must roll the chip back"
+        );
+        assert!(m.pending_mutations.is_empty());
+        let n = m.status.notice.as_ref().expect("failure flashes");
+        assert_eq!(n.severity, NoticeSeverity::Permanent);
+        assert!(
+            n.message.contains("request reviewers failed"),
+            "got {:?}",
+            n.message
+        );
+    }
+
+    #[test]
+    fn labels_apply_then_roll_back_on_failure() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#5");
+        let sk: SessionKey = (&ws_key).into();
+        m.pending_labels_request = Some(ws_key.clone());
+        m.labels_choices = vec!["bug".into(), "urgent".into()];
+        m.modal_stack.push(Id::ManageLabels);
+        m.handle_choice_picked(vec![0, 1]);
+        let names: Vec<String> = m
+            .sidebar
+            .workspace_by_key(&sk)
+            .unwrap()
+            .pr
+            .as_ref()
+            .unwrap()
+            .labels
+            .iter()
+            .map(|l| l.name.clone())
+            .collect();
+        assert_eq!(names, vec!["bug".to_string(), "urgent".to_string()]);
+
+        m.handle_daemon_event(provider_error("labels", "update labels failed: boom"));
+        assert!(
+            m.sidebar
+                .workspace_by_key(&sk)
+                .unwrap()
+                .pr
+                .as_ref()
+                .unwrap()
+                .labels
+                .is_empty(),
+            "a rejected label set must roll back"
+        );
+        assert!(m.pending_mutations.is_empty());
+    }
+
+    #[test]
+    fn assignees_apply_then_roll_back_on_failure() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#6");
+        let sk: SessionKey = (&ws_key).into();
+        m.pending_assignees_request = Some(ws_key.clone());
+        m.assignees_choices = vec!["alice".into(), "bob".into()];
+        m.modal_stack.push(Id::AddAssignees);
+        m.handle_choice_picked(vec![0]);
+        assert_eq!(
+            m.sidebar
+                .workspace_by_key(&sk)
+                .unwrap()
+                .pr
+                .as_ref()
+                .unwrap()
+                .assignees,
+            vec!["alice".to_string()]
+        );
+
+        m.handle_daemon_event(provider_error("assignees", "update assignees failed: no"));
+        assert!(
+            m.sidebar
+                .workspace_by_key(&sk)
+                .unwrap()
+                .pr
+                .as_ref()
+                .unwrap()
+                .assignees
+                .is_empty(),
+            "a rejected assignee set must roll back"
+        );
+        assert!(m.pending_mutations.is_empty());
     }
 }

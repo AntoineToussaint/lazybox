@@ -158,14 +158,16 @@ impl Sidebar {
         let row0 = Rect::new(area.x + l_pad, area.y, inner_width, 1.min(area.height));
         frame.render_widget(Paragraph::new(Line::from(header_spans)), row0);
 
-        // Row 1 — role filter + sort chips, both clickable. Each
-        // chip is dim while at its default, accent-bold when the
-        // user has selected a non-default value, so the row stays
-        // quiet by default but visually shouts when a filter is on.
+        // Row 1 — filter + sort chips, both clickable. Each chip is
+        // dim while at its default, accent-bold when the user has
+        // selected a non-default value, so the row stays quiet by
+        // default but visually shouts when a filter is on. The filter
+        // chip lists every active filter (comma-joined) — clicking it
+        // opens the filter menu.
         if area.height >= 2 {
             let row1 = Rect::new(area.x + l_pad, area.y + 1, inner_width, 1);
 
-            let filter_active = self.role_filter != RoleFilter::All;
+            let filter_active = !self.filters.is_empty();
             let sort_active = self.sort_mode != SortMode::Recent;
             let active_style = Style::default()
                 .fg(theme.accent)
@@ -174,7 +176,20 @@ impl Sidebar {
             let key_style = active_style;
 
             let filter_prefix = "f ";
-            let filter_chip = format!("[{}]", self.role_filter.chip_label());
+            // Collapse past two chips to `a, b, +N` so a wide active
+            // set can't push the sort chip off the row or truncate a
+            // label mid-word — the full set is one `f` away.
+            let filter_chip = if filter_active {
+                let chips = self.filters.chips();
+                let shown = if chips.len() <= 2 {
+                    chips.join(", ")
+                } else {
+                    format!("{}, +{}", chips[..2].join(", "), chips.len() - 2)
+                };
+                format!("[{shown}]")
+            } else {
+                "[filter]".to_string()
+            };
             let sep = "  ";
             let sort_prefix = "o ";
             let sort_chip = format!("[{}]", self.sort_mode.chip_label());
@@ -697,6 +712,7 @@ impl Sidebar {
                 ascii_glyphs: self.ascii_glyphs,
                 auto_merge_armed: workspace.is_some_and(|w| w.auto_merge_on_green),
                 auto_fix_armed: workspace.is_some_and(|w| w.policies.any_auto_fix_armed()),
+                has_notes: workspace.is_some_and(|w| w.has_notes()),
             };
             positions.push(i);
             rows.push(build_workspace_row(&ctx));

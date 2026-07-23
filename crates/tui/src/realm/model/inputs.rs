@@ -42,6 +42,27 @@ impl<T: TerminalAdapter> Model<T> {
             self.drain_queued_daemon_prompts();
             return cmds;
         }
+        // Notes also share the Textarea component. Unlike Reply, an
+        // empty body is a valid submit — it clears the scratchpad — so
+        // we persist whatever the user left rather than gating on
+        // non-empty (issue #458).
+        if matches!(top, Some(Id::Notes)) {
+            let mut cmds = Vec::new();
+            if let Some(session_key) = self.pending_notes.take() {
+                let cleared = body.trim().is_empty();
+                cmds.push(IpcCommand::SetNotes {
+                    session_key,
+                    notes: body,
+                });
+                if cleared {
+                    self.flash_info("Notes cleared");
+                } else {
+                    self.flash_info("Notes saved");
+                }
+            }
+            self.drain_queued_daemon_prompts();
+            return cmds;
+        }
         let mut cmds = Vec::new();
         let target = self.pending_reply.take();
         if let Some(session_key) = target
@@ -648,6 +669,19 @@ showing keybinding search only",
             let workspace_key = self.pending_review_request.take();
             if let (Some(workspace_key), false) = (workspace_key, logins.is_empty()) {
                 let count = logins.len();
+                // Optimistic: union the picked logins onto the PR's
+                // reviewer chips now (the mutation uses `union: true`),
+                // reconciled by the next poll's `WorkspaceUpserted` and
+                // rolled back if GitHub rejects it (#476).
+                self.optimistic_chip_edit(&workspace_key, "reviewers", |ws| {
+                    if let Some(pr) = ws.pr.as_mut() {
+                        for login in &logins {
+                            if !pr.reviewers.contains(login) {
+                                pr.reviewers.push(login.clone());
+                            }
+                        }
+                    }
+                });
                 cmds.push(IpcCommand::RequestReviewers {
                     workspace_key,
                     logins,
@@ -783,6 +817,37 @@ showing keybinding search only",
                 } else {
                     format!("set labels ({count})")
                 };
+                // Optimistic: replace the task's label chips now. Keep
+                // any color already known for a name so the chips don't
+                // flash colorless; the next poll fills the rest.
+                // Reconciled by `WorkspaceUpserted`, rolled back on
+                // failure (#476).
+                self.optimistic_chip_edit(&workspace_key, "labels", |ws| {
+                    let known: std::collections::HashMap<String, String> = ws
+                        .pr
+                        .iter()
+                        .flat_map(|p| p.labels.iter())
+                        .chain(
+                            ws.gh_issues
+                                .first()
+                                .into_iter()
+                                .flat_map(|i| i.labels.iter()),
+                        )
+                        .map(|l| (l.name.clone(), l.color.clone()))
+                        .collect();
+                    let next: Vec<lazybox_core::Label> = names
+                        .iter()
+                        .map(|name| lazybox_core::Label {
+                            name: name.clone(),
+                            color: known.get(name).cloned().unwrap_or_default(),
+                        })
+                        .collect();
+                    if let Some(pr) = ws.pr.as_mut() {
+                        pr.labels = next;
+                    } else if let Some(issue) = ws.gh_issues.first_mut() {
+                        issue.labels = next;
+                    }
+                });
                 cmds.push(IpcCommand::SetLabels {
                     workspace_key,
                     names,
@@ -811,11 +876,50 @@ showing keybinding search only",
                 } else {
                     format!("set assignees ({count})")
                 };
+                // Optimistic: replace the task's assignee chips now,
+                // reconciled by `WorkspaceUpserted` and rolled back on
+                // failure (#476).
+                self.optimistic_chip_edit(&workspace_key, "assignees", |ws| {
+                    if let Some(pr) = ws.pr.as_mut() {
+                        pr.assignees = logins.clone();
+                    } else if let Some(issue) = ws.gh_issues.first_mut() {
+                        issue.assignees = logins.clone();
+                    }
+                });
                 cmds.push(IpcCommand::SetAssignees {
                     workspace_key,
                     logins,
                 });
                 self.flash_info(msg);
+            }
+            return cmds;
+        }
+        // Import picker (Id::ImportCheckoutList) — pick a discovered
+        // checkout, then mount the real-checkout warning confirm.
+        if matches!(self.modal_stack.last(), Some(Id::ImportCheckoutList)) {
+            self.pop_modal();
+            let rows = std::mem::take(&mut self.pending_import_rows);
+            if let Some(target) = picks.first().and_then(|&i| rows.get(i).cloned()) {
+                self.mount_import_checkout_confirm(target);
+            }
+            return cmds;
+        }
+        // Filter menu (Id::FilterMenu) — picker is pre-checked with
+        // the active filters, so the submitted selection IS the new
+        // full set. An empty pick is meaningful ("clear all filters").
+        if matches!(self.modal_stack.last(), Some(Id::FilterMenu)) {
+            let filters: Vec<crate::components::sidebar::Filter> = picks
+                .iter()
+                .filter_map(|i| self.filter_choices.get(*i).copied())
+                .collect();
+            self.filter_choices.clear();
+            self.pop_modal();
+            let count = filters.len();
+            self.sidebar.set_filters(filters);
+            if count == 0 {
+                self.flash_info("filters cleared");
+            } else {
+                self.flash_info(format!("{count} filter(s) active"));
             }
             return cmds;
         }
@@ -1005,6 +1109,12 @@ showing keybinding search only",
             Some(Id::InspectConfirm) => {
                 self.pending_inspect_target = None;
             }
+            Some(Id::ImportCheckoutList) => {
+                self.pending_import_rows.clear();
+            }
+            Some(Id::ImportCheckoutConfirm) => {
+                self.pending_import_target = None;
+            }
             Some(Id::HelpActionConfirm) => {
                 // Esc = decline the proposed action; drop the stash,
                 // change nothing (#353).
@@ -1035,6 +1145,10 @@ showing keybinding search only",
             Some(Id::PolicyPicker) => {
                 self.pending_policy_workspace = None;
                 self.policy_choices.clear();
+            }
+            Some(Id::FilterMenu) => {
+                // Esc = leave the active filters untouched.
+                self.filter_choices.clear();
             }
             Some(Id::WorktreeProgress) => {
                 // Esc on the checklist — remember WHICH provisioning op
@@ -1194,6 +1308,16 @@ showing keybinding search only",
                         path: row.path,
                         force,
                     });
+                }
+            }
+            Some(Id::ImportCheckoutConfirm) => {
+                let target = self.pending_import_target.take();
+                if yes && let Some(row) = target {
+                    cmds.push(IpcCommand::ImportLocalCheckout {
+                        path: row.path,
+                        spawn_agent: None,
+                    });
+                    self.flash_info("importing checkout…");
                 }
             }
             Some(Id::HelpActionConfirm) => {

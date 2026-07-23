@@ -264,6 +264,19 @@ impl Sidebar {
         self.inner.workspace_by_key(key)
     }
 
+    /// See `Sidebar::take_workspace` — optimistic archive/delete (#476).
+    pub fn take_workspace(
+        &mut self,
+        key: &lazybox_core::SessionKey,
+    ) -> Option<lazybox_core::Workspace> {
+        self.inner.take_workspace(key)
+    }
+
+    /// See `Sidebar::restore_workspace` — optimistic rollback (#476).
+    pub fn restore_workspace(&mut self, workspace: lazybox_core::Workspace) {
+        self.inner.restore_workspace(workspace);
+    }
+
     /// Iterate every known workspace. The adopt-sessions picker uses
     /// this to build its candidate list.
     pub fn workspace_iter(
@@ -407,10 +420,11 @@ impl Sidebar {
         self.inner.reanchor_viewport()
     }
 
-    /// Click the role-filter chip in the sidebar header → cycle it.
-    /// Returns true on a hit (caller should mark a redraw).
-    pub fn click_to_cycle_filter(&mut self, col: u16, row: u16) -> bool {
-        self.inner.click_to_cycle_filter(col, row)
+    /// True when a click at `(col, row)` lands on the header filter
+    /// chip. The orchestrator opens the filter menu on a hit — the
+    /// menu is a modal it owns, so this is a pure hit test.
+    pub fn filter_chip_hit(&self, col: u16, row: u16) -> bool {
+        self.inner.filter_chip_hit(col, row)
     }
 
     /// Click the sort chip in the sidebar header → cycle it.
@@ -444,9 +458,22 @@ impl Sidebar {
         self.inner.toggle_repo_at_cursor()
     }
 
-    /// Cycle the role filter (catalog `CycleRoleFilter`, default `f`).
-    pub fn cycle_role_filter(&mut self) {
-        self.inner.cycle_role_filter();
+    /// Replace the active filter set from the filter menu's picks.
+    pub fn set_filters(
+        &mut self,
+        filters: impl IntoIterator<Item = crate::components::sidebar::Filter>,
+    ) {
+        self.inner.set_filters(filters);
+    }
+
+    /// The active filter set — read to pre-check the filter menu.
+    pub fn filters(&self) -> &crate::components::sidebar::FilterSet {
+        self.inner.filters()
+    }
+
+    /// Per-filter match counts for the current mailbox, in menu order.
+    pub fn filter_counts(&self) -> Vec<(crate::components::sidebar::Filter, usize)> {
+        self.inner.filter_counts()
     }
 
     /// Cycle the sort order (catalog `CycleSort`, default `o`).

@@ -46,7 +46,7 @@ storage:
   the render surface. tmux is kept off the alt screen (`smcup@/rmcup@`)
   so scrolled-out lines land in the client grid.
 - **Restart path** — after a daemon restart, `TmuxBackend` reconstructs
-  history from `tmux capture-pane -e -S -10000`
+  history from `tmux capture-pane -e -J -S -10000`
   (`crates/server/src/backend/tmux.rs`), i.e. *rendered cells with
   re-synthesized SGR*, not the original byte stream. Since #420 the
   capture is held in a durable seed slot on `DaemonPty` — outside the
@@ -54,10 +54,10 @@ storage:
   neither evict it nor let it eat the ring's live-byte budget.
 
 **Where they diverge** (#393's finding, confirmed): escape fidelity
-(OSC 8 hyperlinks survive live, are dropped by capture), soft-wrap
-geometry (capture without `-J` flattens wrapped lines), and budget
-units (live = 2 MiB of *bytes*; restart = 10 000 *lines*; client grid =
-10 000 *rows* — three independent constants no type reconciles).
+(OSC 8 hyperlinks survive live, are dropped by capture) and budget units
+(live = 2 MiB of *bytes*; restart = 10 000 *lines*; client grid = 10 000
+*rows* — three independent constants no type reconciles). Soft-wrapped
+rows are joined back into logical lines by `capture-pane -J`.
 
 **Invariants and enforcement.** Enforced: single scroll owner + typed
 outcomes (#371 tests), ring arithmetic (`pty.rs` unit tests), capture
@@ -78,8 +78,8 @@ path against real tmux with no restart
 libghostty-level test pins the invariant that makes parking in deep
 scrollback usable at all (a streamed chunk never snaps a scrolled-up
 viewport to the bottom). Remaining divergence, deliberately accepted
-for now: capture fidelity (OSC 8 hyperlinks, soft-wrap geometry) and
-byte↔line budget parity are not equivalence-tested — depth is.
+for now: OSC 8 capture fidelity and byte↔line budget parity are not
+equivalence-tested — depth and soft-wrap fidelity are.
 
 **Post-#395 regression, root-caused live (2026-07-20):** with #395 in
 the running build, scrolling a Claude session made the scrollbar
@@ -96,11 +96,16 @@ layers, all in this PR: `alternate-screen off` at the pane level (conf
 the attach-side `smcup@` stripping, i.e. the design invariant finally
 enforced where it was being violated); the backend refuses to serve a
 fetch for a no-history pane; and the client never adopts a rebuild
-that isn't strictly deeper than its current grid.
+that isn't strictly deeper than its current grid. #454 found the remaining
+Claude-specific half: denying the alternate screen still leaves Claude's
+bounded full-screen repaint loop with zero history. Claude PTYs now force its
+supported inline renderer, which emits the transcript as ordinary lines.
 
-**Operational note:** panes already inside the alt screen under the old
-config stay there until their agent restarts — existing Claude
-terminals need a respawn to pick up retained history.
+**Operational note:** a running process cannot inherit the new renderer
+environment. New PTYs persist their launch generation; a recovered older
+Claude session stays alive but every reconnect receives a persistent notice
+to close and reopen it, avoiding both silent failure and an automatic kill of
+in-flight work.
 
 ---
 
@@ -130,7 +135,7 @@ and Codex (`detect_fixtures.rs`, `codex_fixtures.rs` — including the
 #399 live-repaint round trip), and the pump-level ordered-sequence
 tests cover the serve-side flow. What #399 exposed was the last gap:
 none of that ever ran the *shipped binary*. Closed by the live tier:
-`e2e_real_claude_boots_to_a_detected_ready_state` /
+`e2e_real_claude_boots_ready_with_inline_spawn_env` /
 `e2e_real_codex_boots_to_a_detected_ready_state` boot the real CLIs in
 real tmux through the serve loop and require a detected ready/asking
 state (codex's fresh-cwd trust chooser must surface as `?`).

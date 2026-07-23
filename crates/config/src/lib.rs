@@ -477,15 +477,18 @@ pub struct WorktreeConfig {
     pub branch_prefix: String,
 }
 
-/// `scan:` block — where `lazybox scan` looks for pre-existing git
-/// checkouts to import. Read by the CLI; roots passed on the command
-/// line take precedence over `roots` here.
+/// `scan:` block — the canonical dev folders (`~/development`, `~/code`,
+/// …) where you keep one clone per repo. Both the `lazybox scan` CLI and
+/// the in-app `x i` "import checkout" flow walk these roots to discover
+/// pre-existing git checkouts and map them to their GitHub repos; the
+/// import turns a chosen one into a linked, no-worktree workspace. Roots
+/// passed on the `scan` command line take precedence over `roots` here.
 ///
 /// ```yaml
 /// scan:
 ///   roots:
+///     - ~/development
 ///     - ~/code
-///     - ~/work
 ///   max_depth: 4
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

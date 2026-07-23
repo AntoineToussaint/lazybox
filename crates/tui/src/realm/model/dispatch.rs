@@ -523,6 +523,9 @@ impl<T: TerminalAdapter> Model<T> {
             Action::NewProject => {
                 self.mount_new_workspace_repo_picker();
             }
+            Action::ImportCheckout => {
+                self.start_scan_checkouts();
+            }
             Action::MarkAllRead => {
                 // Context-sensitive: when the user has activities
                 // multi-selected in the right pane, `m` marks only

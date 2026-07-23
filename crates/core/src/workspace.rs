@@ -114,6 +114,17 @@ pub struct Workspace {
     /// derived workspaces leave this `false`.
     #[serde(default)]
     pub local: bool,
+    /// When `Some`, this is a **linked (no-worktree) checkout**: the
+    /// workspace points directly at an existing clone on disk (a
+    /// canonical `~/development/<owner>/<repo>` folder imported via the
+    /// dev-folder scan) rather than a lazybox-provisioned worktree.
+    /// Every session spawns straight into this path on whatever branch
+    /// it already sits on — lazybox never provisions a worktree, never
+    /// bare-clones, and never switches the branch. Always paired with
+    /// `local = true` so the reconcile sweep can't prune it. `None` for
+    /// every ordinary workspace, whose sessions get isolated worktrees.
+    #[serde(default)]
+    pub linked_checkout: Option<PathBuf>,
     /// Display name. Defaults to the PR title or the first issue's
     /// title when first created; user can rename.
     pub name: String,
@@ -168,6 +179,7 @@ impl Workspace {
             key,
             project_key: None,
             local: false,
+            linked_checkout: None,
             branch,
             sessions: Vec::new(),
             pr: None,
@@ -214,6 +226,13 @@ impl Workspace {
 
     pub fn session_count(&self) -> usize {
         self.sessions.len()
+    }
+
+    /// `true` when this workspace is a linked (no-worktree) checkout —
+    /// its sessions run in the user's existing clone on disk, not in a
+    /// lazybox-provisioned worktree. See [`Workspace::linked_checkout`].
+    pub fn is_linked(&self) -> bool {
+        self.linked_checkout.is_some()
     }
 
     /// The session lazybox should target when the user issues a workspace-
@@ -1690,6 +1709,30 @@ mod tests {
         // Re-mark and the workspace is fully read again.
         ws.mark_activity_read(1);
         assert_eq!(ws.unread_count(), 0);
+    }
+
+    #[test]
+    fn is_linked_reflects_linked_checkout_and_survives_serde() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("acme-widget"), "feature", now());
+        assert!(!ws.is_linked(), "a plain workspace is not linked");
+        ws.linked_checkout = Some(std::path::PathBuf::from("/home/dev/code/acme/widget"));
+        assert!(ws.is_linked());
+
+        // Round-trips through JSON (the store's persistence format).
+        let json = serde_json::to_string(&ws).unwrap();
+        let back: Workspace = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.linked_checkout,
+            Some(std::path::PathBuf::from("/home/dev/code/acme/widget"))
+        );
+
+        // Back-compat: a pre-feature record with no `linked_checkout`
+        // field deserializes to `None` (not an error).
+        let legacy = r#"{"key":"old","name":"old","branch":"main","pr":null,
+            "gh_issues":[],"linear_issues":[],"activity":[],"seen_count":0,
+            "created_at":"2024-01-01T00:00:00Z","last_viewed_at":null}"#;
+        let old: Workspace = serde_json::from_str(legacy).unwrap();
+        assert!(!old.is_linked());
     }
 
     #[test]

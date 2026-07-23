@@ -952,6 +952,7 @@ pub async fn handle_spawn(
     // copy of the spawn origin for the timing trace.
     let t0_for_pump = t0;
     let watchdog_after = working_watchdog_after(&cfg);
+    let quiet_after = pty_quiet_classify_after(&cfg);
     // Broadcast BEFORE spawning the pump task. Otherwise a
     // fast-exiting terminal (e.g. a command that immediately
     // errors) can fire `TerminalExited` from the pump before this
@@ -1099,7 +1100,7 @@ pub async fn handle_spawn(
                 .await;
                 last_chunk_len = sub.replay.len();
                 if agent_for_pump.is_some() {
-                    quiet_deadline = Some(tokio::time::Instant::now() + PTY_QUIET_CLASSIFY_AFTER);
+                    quiet_deadline = Some(tokio::time::Instant::now() + quiet_after);
                     if progress {
                         watchdog_anchor = tokio::time::Instant::now();
                     }
@@ -1213,8 +1214,7 @@ pub async fn handle_spawn(
                     .await;
                     last_chunk_len = snapshot.replay.len();
                     if agent_for_pump.is_some() {
-                        quiet_deadline =
-                            Some(tokio::time::Instant::now() + PTY_QUIET_CLASSIFY_AFTER);
+                        quiet_deadline = Some(tokio::time::Instant::now() + quiet_after);
                         if progress {
                             watchdog_anchor = tokio::time::Instant::now();
                         }
@@ -1280,8 +1280,7 @@ pub async fn handle_spawn(
                 .await;
                 last_chunk_len = chunk.bytes.len();
                 if agent_for_pump.is_some() {
-                    quiet_deadline =
-                        Some(tokio::time::Instant::now() + PTY_QUIET_CLASSIFY_AFTER);
+                    quiet_deadline = Some(tokio::time::Instant::now() + quiet_after);
                     if progress {
                         watchdog_anchor = tokio::time::Instant::now();
                     }
@@ -2409,7 +2408,9 @@ const HOOK_STALENESS: Duration = Duration::from_secs(30);
 /// Claude repaints its status-line ticker about once a second while
 /// busy, so a genuinely working agent never goes quiet this long — and
 /// a blocking dialog freezes all output, so a parked prompt always
-/// does.
+/// does. Default; override with `agent.quiet_classify_secs` (unset or
+/// `0` → this default). Unlike the watchdog it can't be disabled — a
+/// hookless agent has no other path to `Done`.
 pub(crate) const PTY_QUIET_CLASSIFY_AFTER: Duration = Duration::from_secs(5);
 
 /// Fail-safe watchdog for `Working` (#398). The quiet timer above
@@ -2432,6 +2433,18 @@ pub(crate) fn working_watchdog_after(cfg: &lazybox_config::Config) -> Option<Dur
         Some(0) => None,
         Some(secs) => Some(Duration::from_secs(secs)),
         None => Some(WORKING_WATCHDOG_AFTER),
+    }
+}
+
+/// The per-spawn quiet-classify window: the `agent.quiet_classify_secs`
+/// override when set to a positive value, else [`PTY_QUIET_CLASSIFY_AFTER`].
+/// `0` (or unset) falls back to the default rather than disabling — a
+/// zero window would busy-classify every idle loop, and the timer is a
+/// hookless agent's only route to `Done`.
+pub(crate) fn pty_quiet_classify_after(cfg: &lazybox_config::Config) -> Duration {
+    match cfg.agent.quiet_classify_secs {
+        Some(secs) if secs > 0 => Duration::from_secs(secs),
+        _ => PTY_QUIET_CLASSIFY_AFTER,
     }
 }
 
@@ -9145,6 +9158,24 @@ mod tests {
             working_watchdog_after(&cfg),
             None,
             "0 disables the watchdog"
+        );
+    }
+
+    #[test]
+    fn quiet_classify_window_reads_config() {
+        let mut cfg = lazybox_config::Config::default();
+        assert_eq!(pty_quiet_classify_after(&cfg), PTY_QUIET_CLASSIFY_AFTER);
+        cfg.agent.quiet_classify_secs = Some(45);
+        assert_eq!(
+            pty_quiet_classify_after(&cfg),
+            Duration::from_secs(45),
+            "a positive override sets the quiet window",
+        );
+        cfg.agent.quiet_classify_secs = Some(0);
+        assert_eq!(
+            pty_quiet_classify_after(&cfg),
+            PTY_QUIET_CLASSIFY_AFTER,
+            "0 falls back to the default rather than disabling the timer",
         );
     }
 

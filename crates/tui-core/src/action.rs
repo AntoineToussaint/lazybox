@@ -153,8 +153,8 @@ pub enum Action {
     // They only resolve when the sidebar has focus (Section::Sidebar)
     // so they never bleed into the activity pane the way the
     // workspace-scoped actions deliberately do.
-    /// Cycle the role filter (All → Author → Reviewer → …).
-    CycleRoleFilter,
+    /// Open the composable filter menu (state / role / kind predicates).
+    OpenFilterMenu,
     /// Cycle the sort order (Default → ByRole → ByRoleSplit).
     CycleSort,
     /// Cycle the mailbox view (Inbox → Inactive → Snoozed).
@@ -353,7 +353,7 @@ pub enum ActionKind {
     OpenInBrowser,
     DeleteOrClose,
     // Sidebar list management
-    CycleRoleFilter,
+    OpenFilterMenu,
     CycleSort,
     CycleMailbox,
     OpenSearch,
@@ -461,7 +461,7 @@ impl ActionKind {
         Self::DeleteOrClose,
         Self::Reply,
         // Sidebar list management
-        Self::CycleRoleFilter,
+        Self::OpenFilterMenu,
         Self::CycleSort,
         Self::CycleMailbox,
         Self::OpenSearch,
@@ -555,7 +555,7 @@ impl Action {
             Action::ManageLabels => ActionKind::ManageLabels,
             Action::OpenInBrowser => ActionKind::OpenInBrowser,
             Action::DeleteOrClose => ActionKind::DeleteOrClose,
-            Action::CycleRoleFilter => ActionKind::CycleRoleFilter,
+            Action::OpenFilterMenu => ActionKind::OpenFilterMenu,
             Action::CycleSort => ActionKind::CycleSort,
             Action::CycleMailbox => ActionKind::CycleMailbox,
             Action::OpenSearch => ActionKind::OpenSearch,
@@ -947,11 +947,11 @@ impl ActionDef {
                 section: Section::Workspace,
             },
             // ── Sidebar list management ─────────────────────────────
-            ActionKind::CycleRoleFilter => &Self {
-                kind: ActionKind::CycleRoleFilter,
+            ActionKind::OpenFilterMenu => &Self {
+                kind: ActionKind::OpenFilterMenu,
                 default_keys: "f",
                 label: "filter",
-                describe: "Cycle the role filter (All → Author → Reviewer → Assignee → Mentioned).",
+                describe: "Open the filter menu — toggle state (with-agent, CI-failing, conflict, unread, asking, …), role, and kind predicates. Filters combine and compose with search.",
                 section: Section::Sidebar,
             },
             ActionKind::CycleSort => &Self {
@@ -1565,7 +1565,7 @@ impl ActionKind {
             ActionKind::ManageLabels => "manage_labels",
             ActionKind::OpenInBrowser => "open_in_browser",
             ActionKind::DeleteOrClose => "delete_or_close",
-            ActionKind::CycleRoleFilter => "cycle_role_filter",
+            ActionKind::OpenFilterMenu => "open_filter_menu",
             ActionKind::CycleSort => "cycle_sort",
             ActionKind::CycleMailbox => "cycle_mailbox",
             ActionKind::OpenSearch => "open_search",
@@ -2228,7 +2228,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         // has focus (which `section_rank` already gates). Repo-group
         // collapse walks back to the nearest header, so it's usable
         // from any row (the resolver no-ops on an empty list).
-        ActionKind::CycleRoleFilter
+        ActionKind::OpenFilterMenu
         | ActionKind::CycleSort
         | ActionKind::CycleMailbox
         | ActionKind::OpenSearch

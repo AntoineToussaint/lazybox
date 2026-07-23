@@ -819,6 +819,25 @@ showing keybinding search only",
             }
             return cmds;
         }
+        // Filter menu (Id::FilterMenu) — picker is pre-checked with
+        // the active filters, so the submitted selection IS the new
+        // full set. An empty pick is meaningful ("clear all filters").
+        if matches!(self.modal_stack.last(), Some(Id::FilterMenu)) {
+            let filters: Vec<crate::components::sidebar::Filter> = picks
+                .iter()
+                .filter_map(|i| self.filter_choices.get(*i).copied())
+                .collect();
+            self.filter_choices.clear();
+            self.pop_modal();
+            let count = filters.len();
+            self.sidebar.set_filters(filters);
+            if count == 0 {
+                self.flash_info("filters cleared");
+            } else {
+                self.flash_info(format!("{count} filter(s) active"));
+            }
+            return cmds;
+        }
         // Worktree inspector (Id::InspectList) — pick a row, then
         // either fire the bulk shortcut or mount a per-row confirm.
         if matches!(self.modal_stack.last(), Some(Id::InspectList)) {
@@ -1035,6 +1054,10 @@ showing keybinding search only",
             Some(Id::PolicyPicker) => {
                 self.pending_policy_workspace = None;
                 self.policy_choices.clear();
+            }
+            Some(Id::FilterMenu) => {
+                // Esc = leave the active filters untouched.
+                self.filter_choices.clear();
             }
             Some(Id::WorktreeProgress) => {
                 // Esc on the checklist — remember WHICH provisioning op

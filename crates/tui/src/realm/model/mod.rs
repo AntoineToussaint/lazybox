@@ -149,6 +149,13 @@ pub enum Id {
     /// Works on issues too — both PRs and issues implement GraphQL's
     /// `Labelable` interface.
     ManageLabels,
+    /// Composable sidebar filter menu mounted on `f` (`OpenFilterMenu`).
+    /// Multi-select `Choice` over every [`Filter`](crate::components::sidebar::Filter)
+    /// (state / role / kind), each row showing its match count, with the
+    /// currently-active filters pre-checked. Submit replaces the
+    /// sidebar's active set; the picked→filter index map lives in
+    /// `filter_choices`. `Msg::ChoicePicked` resolves it.
+    FilterMenu,
     /// Automation-policies menu mounted on `g p` (`ManagePolicies`,
     /// issue #363). Single-pick `Choice` listing every policy on the
     /// focused PR/issue with its on/off state; picking a row toggles
@@ -706,6 +713,11 @@ pub struct Model<T: TerminalAdapter> {
     /// The toggle each policy-menu row maps to, in row order. Order
     /// MUST match the labels rendered in `mount_policy_picker`.
     policy_choices: Vec<crate::realm::model::modals::PolicyToggle>,
+    /// The filter each `FilterMenu` row maps to, in row order. Order
+    /// MUST match the labels rendered in `mount_filter_menu` so
+    /// `Msg::ChoicePicked(indices)` resolves back to the picked
+    /// filters. Cleared on submit / dismiss.
+    filter_choices: Vec<crate::components::sidebar::Filter>,
     /// Queued workspace-removal prompts — either out-of-scope
     /// workspaces with running terminals (`WorkspaceOutOfScope`) or
     /// merged PRs (`MergedPrRemovable`). The daemon won't auto-remove
@@ -1210,6 +1222,7 @@ impl<T: TerminalAdapter> Model<T> {
             pending_work_picker: None,
             pending_policy_workspace: None,
             policy_choices: Vec::new(),
+            filter_choices: Vec::new(),
             pending_removal_prompts: std::collections::VecDeque::new(),
             active_removal_prompt: None,
             pending_merge_prompts: std::collections::VecDeque::new(),

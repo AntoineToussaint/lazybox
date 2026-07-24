@@ -92,6 +92,10 @@ pub enum Action {
     /// clones and import a chosen one as a **linked (no-worktree)**
     /// workspace — lazybox works directly in the existing checkout.
     ImportCheckout,
+    /// Register a directory as a `scan.roots` entry (persisted to
+    /// config) and immediately scan it for on-disk git checkouts to
+    /// import — the discoverable counterpart to hand-editing YAML.
+    AddScanRoot,
     /// Mark every activity row on the focused workspace read.
     MarkAllRead,
     /// Toggle snooze on the focused workspace (short snooze, ~4h).
@@ -379,6 +383,7 @@ pub enum ActionKind {
     NewWorkspace,
     NewProject,
     ImportCheckout,
+    AddScanRoot,
     MarkAllRead,
     ToggleSnooze,
     LongSnooze,
@@ -497,6 +502,7 @@ impl ActionKind {
         Self::NewWorkspace,
         Self::NewProject,
         Self::ImportCheckout,
+        Self::AddScanRoot,
         Self::AdoptSessions,
         Self::SendToSession,
         Self::CollapseIntoPr,
@@ -600,6 +606,7 @@ impl Action {
             Action::NewWorkspace => ActionKind::NewWorkspace,
             Action::NewProject => ActionKind::NewProject,
             Action::ImportCheckout => ActionKind::ImportCheckout,
+            Action::AddScanRoot => ActionKind::AddScanRoot,
             Action::MarkAllRead => ActionKind::MarkAllRead,
             Action::ToggleSnooze => ActionKind::ToggleSnooze,
             Action::LongSnooze => ActionKind::LongSnooze,
@@ -934,6 +941,13 @@ impl ActionDef {
                 default_keys: "x i",
                 label: "import checkout",
                 describe: "Scan the configured dev roots (scan.roots) for on-disk git clones and import one as a linked, no-worktree workspace — lazybox works directly in the existing checkout.",
+                section: Section::Workspace,
+            },
+            ActionKind::AddScanRoot => &Self {
+                kind: ActionKind::AddScanRoot,
+                default_keys: "x r",
+                label: "add scan root",
+                describe: "Add a directory to scan.roots and immediately scan it for on-disk git checkouts to import. Persisted to config so it survives restart — no YAML editing. Pairs with import checkout (x i), which walks the roots you add here.",
                 section: Section::Workspace,
             },
             ActionKind::MarkAllRead => &Self {
@@ -1676,6 +1690,7 @@ impl ActionKind {
             ActionKind::NewWorkspace => "new_workspace",
             ActionKind::NewProject => "new_project",
             ActionKind::ImportCheckout => "import_checkout",
+            ActionKind::AddScanRoot => "add_scan_root",
             ActionKind::MarkAllRead => "mark_all_read",
             ActionKind::ToggleSnooze => "toggle_snooze",
             ActionKind::LongSnooze => "long_snooze",
@@ -1928,6 +1943,7 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         ActionKind::NewWorkspace
         | ActionKind::NewProject
         | ActionKind::ImportCheckout
+        | ActionKind::AddScanRoot
         | ActionKind::LongSnooze
         | ActionKind::Archive
         | ActionKind::CloseIssue
@@ -2425,6 +2441,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         ActionKind::NewWorkspace
         | ActionKind::NewProject
         | ActionKind::ImportCheckout
+        | ActionKind::AddScanRoot
         | ActionKind::StartAgent
         | ActionKind::CyclePane
         // Directional focus moves — always usable from the pane that
@@ -3800,6 +3817,7 @@ mod tests {
             (ActionKind::NewWorkspace, 'n'),
             (ActionKind::NewProject, 'p'),
             (ActionKind::ImportCheckout, 'i'),
+            (ActionKind::AddScanRoot, 'r'),
             (ActionKind::AdoptSessions, 'a'),
             (ActionKind::SendToSession, 's'),
             (ActionKind::CollapseIntoPr, 'j'),
@@ -3819,6 +3837,31 @@ mod tests {
             );
             assert_eq!(leader_group_label(kind), Some("workspace"));
         }
+    }
+
+    /// The "add scan root" action (#534) must be discoverable: in the
+    /// catalog (so it renders in `?` help), usable without a workspace
+    /// selected (it edits config), and reachable via the `x r` chord.
+    #[test]
+    fn add_scan_root_is_catalog_visible_and_workspace_free() {
+        let def = ActionDef::for_kind(ActionKind::AddScanRoot);
+        assert_eq!(def.default_keys, "x r");
+        assert_eq!(def.section, Section::Workspace);
+        assert_eq!(
+            leader_group_label(ActionKind::AddScanRoot),
+            Some("workspace")
+        );
+
+        // Present in the generated catalog (what `?` help reads).
+        let catalog = ActionDef::catalog(&[], &std::collections::BTreeMap::new());
+        assert!(
+            catalog.iter().any(|e| e.kind == ActionKind::AddScanRoot),
+            "add scan root must appear in the runtime catalog",
+        );
+
+        // Editing config needs no selected workspace, unlike the rest of
+        // the workspace-menu actions.
+        assert!(availability(ActionKind::AddScanRoot, None));
     }
 
     /// Regression (advertised-but-ignored namespaces): each generated

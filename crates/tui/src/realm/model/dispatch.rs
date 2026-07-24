@@ -541,6 +541,9 @@ impl<T: TerminalAdapter> Model<T> {
             Action::ImportCheckout => {
                 self.start_scan_checkouts();
             }
+            Action::AddScanRoot => {
+                self.mount_add_scan_root_input();
+            }
             Action::MarkAllRead => {
                 // Context-sensitive: when the user has activities
                 // multi-selected in the right pane, `m` marks only

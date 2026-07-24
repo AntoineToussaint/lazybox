@@ -1801,6 +1801,7 @@ pub(super) fn action_from_kind(
         ActionKind::NewWorkspace => Action::NewWorkspace,
         ActionKind::NewProject => Action::NewProject,
         ActionKind::ImportCheckout => Action::ImportCheckout,
+        ActionKind::AddScanRoot => Action::AddScanRoot,
         ActionKind::MergePr => Action::MergePr,
         ActionKind::UpdateBranch => Action::UpdateBranch,
         ActionKind::ToggleAutoMerge => Action::ToggleAutoMerge,

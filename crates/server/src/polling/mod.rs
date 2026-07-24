@@ -2955,8 +2955,26 @@ async fn run_tick_inner(
     // trivial against a multi-second sweep and the 5000/hr budget. Skip
     // it on a failed tick — `polled` is empty and the client may be
     // rate-limited.
+    //
+    // Bounded by its own cap: this runs OUTSIDE the tick's overall
+    // timeout, and a pathological hang (per-detail 25s × 3 retries,
+    // several in flight) could otherwise stall the next tick. On elapse
+    // the future is dropped — the up-front dedup marks already landed,
+    // and any un-warmed row still lazy-fetches on focus.
     if outcome.any_source_succeeded {
-        prefetch_top_pr_details(config, &outcome.polled, state).await;
+        const PREFETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+        if tokio::time::timeout(
+            PREFETCH_TIMEOUT,
+            prefetch_top_pr_details(config, &outcome.polled, state),
+        )
+        .await
+        .is_err()
+        {
+            tracing::warn!(
+                "prefetch_top_pr_details exceeded {}s — abandoning; rows lazy-fetch on focus",
+                PREFETCH_TIMEOUT.as_secs()
+            );
+        }
     }
     summary
 }

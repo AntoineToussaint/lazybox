@@ -203,6 +203,16 @@ pub(crate) struct NotificationsState {
     /// #14). Captured before the fetch so PRs touched mid-sweep are
     /// caught next time. `None` until the first global sweep completes.
     pub(crate) last_pr_sweep_at_utc: Option<DateTime<Utc>>,
+    /// Start time of the most recent GLOBAL merged-sweep that actually
+    /// SUCCEEDED, used as the `updated:>=` floor for the next windowed
+    /// merged sweep (issue #530). Tracked separately from
+    /// `last_pr_sweep_at_utc` because the merged branch is best-effort:
+    /// the main branch can succeed (advancing that floor) while the
+    /// merged branch fails, and reusing the main floor would then window
+    /// past a merge the failed branch never reported, stranding the PR
+    /// on `OPEN` until the next reconcile. `None` until the first
+    /// successful global merged sweep.
+    pub(crate) last_merged_sweep_at_utc: Option<DateTime<Utc>>,
     /// When the last UNWINDOWED reconcile sweep completed. `None` means
     /// "never" — the first global sweep is always a reconcile. Drives
     /// [`is_full_reconcile_due`](Self::is_full_reconcile_due): most

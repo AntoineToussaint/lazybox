@@ -1737,6 +1737,31 @@ pub(crate) async fn reap_safe_workspace_worktrees_with(
     }
 }
 
+/// Attention score for prefetch selection (higher = warm sooner). The
+/// base of 1 marks a PR as *fetchable*; anything above it clears the
+/// `score > 1` threshold `prefetch_top_pr_details` applies and earns a
+/// prefetch.
+///
+/// Scoring (descending):
+/// - CI failing → +100 (highest-actionability — user wants to fix)
+/// - Review pending / changes-requested → +50
+/// - Unread activity → +10 per item (capped at +50)
+/// - Base +1 (fetchable — the caller drops PRs without a `node_id`)
+pub(crate) fn prefetch_score(pr: &Task) -> i32 {
+    let mut score: i32 = 1;
+    if matches!(pr.ci, CiStatus::Failure | CiStatus::Mixed) {
+        score += 100;
+    }
+    if matches!(
+        pr.review,
+        ReviewStatus::ChangesRequested | ReviewStatus::Pending
+    ) {
+        score += 50;
+    }
+    score += (pr.unread_count.min(5) as i32) * 10;
+    score
+}
+
 /// Post-tick prefetch: after a successful poll, pick the top-N PRs
 /// most likely to be clicked next and concurrently fetch their
 /// review-thread details so the right pane is hot when the user
@@ -1759,33 +1784,8 @@ pub(crate) async fn reap_safe_workspace_worktrees_with(
 /// quiet after warm-up and won't dominate the tick even once
 /// incremental sync (#14) makes the main poll cheap.
 ///
-/// Scoring (descending):
-/// - CI failing → +100 (highest-actionability — user wants to fix)
-/// - Review pending / changes-requested → +50
-/// - Unread activity → +10 per item (capped at +50)
-/// - PR has `node_id` → +1 (otherwise we couldn't fetch anyway)
-///
-/// 0-score workspaces are skipped — they don't need the prefetch.
-///
-/// Attention score for prefetch selection (higher = warm sooner). The
-/// base of 1 marks a PR as *fetchable*; anything above it clears the
-/// `score > 1` threshold and earns a prefetch. See
-/// [`prefetch_top_pr_details`] for the weighting rationale.
-pub(crate) fn prefetch_score(pr: &Task) -> i32 {
-    let mut score: i32 = 1;
-    if matches!(pr.ci, CiStatus::Failure | CiStatus::Mixed) {
-        score += 100;
-    }
-    if matches!(
-        pr.review,
-        ReviewStatus::ChangesRequested | ReviewStatus::Pending
-    ) {
-        score += 50;
-    }
-    score += (pr.unread_count.min(5) as i32) * 10;
-    score
-}
-
+/// Ranks candidates with [`prefetch_score`]; 0-above-base workspaces
+/// are skipped — they don't need the prefetch.
 pub async fn prefetch_top_pr_details(
     config: &ServerConfig,
     polled: &[WorkspaceKey],

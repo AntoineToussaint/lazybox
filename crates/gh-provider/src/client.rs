@@ -1196,25 +1196,49 @@ impl GhClient {
             ))
         })?;
 
-        // Persist the new `Last-Modified` for the next call's
-        // conditional. Skip the write when GitHub didn't send one
-        // (rare; happens on test fixtures) — leaving the old value
-        // alone is safer than clearing it and re-pulling the world.
-        // `take`-into-the-Mutex avoids the double-copy a `clone` +
-        // move return would have paid for.
-        if let Some(lm) = new_last_modified {
+        // Do NOT commit the new `Last-Modified` here (#512). Advancing
+        // the cursor the instant the LIST parses — before the per-entry
+        // deep-fetches run — is exactly the bug: if a deep-fetch times
+        // out this tick, the cursor has already moved past its entry, so
+        // the next heartbeat answers 304 and the entry is never re-listed
+        // until its `updated_at` bumps again (a CI failure / new comment
+        // can stay invisible until the ≤10-min full sweep). Instead we
+        // hand the pending cursor back to the polling layer, which
+        // commits it via `commit_notifications_cursor` only after the
+        // fan-out reports every entry handled. A failed entry holds the
+        // cursor so it re-lists next tick.
+        Ok(NotificationsPoll::Modified {
+            entries,
+            last_modified: new_last_modified,
+        })
+    }
+
+    /// Commit the notifications cursor (`Last-Modified`) captured from a
+    /// [`NotificationsPoll::Modified`] poll, echoed back as
+    /// `If-Modified-Since` on the next `GET /notifications` so the steady
+    /// state answers 304 cheaply.
+    ///
+    /// Called by the polling layer AFTER the per-entry deep-fetch fan-out
+    /// finishes with no transient failures — coupling the at-most-once
+    /// cursor advance to work completion (#512). Skips the write when
+    /// GitHub didn't send a `Last-Modified` (rare; some test fixtures):
+    /// leaving the old value alone is safer than clearing it and
+    /// re-pulling the world.
+    pub fn commit_notifications_cursor(&self, last_modified: Option<String>) {
+        if let Some(lm) = last_modified {
             self.notifications_state.lock().last_modified = Some(lm);
         }
-
-        Ok(NotificationsPoll::Modified { entries })
     }
 
     /// Targeted deep-fetch: pull one PR by `(owner, repo, number)` via
     /// the single-node GraphQL query. ~85 cost units total (vs. the
     /// 1000s the inbox-scan query burns when re-walking every PR).
     /// Returns `Ok(None)` when GitHub can't find / no longer exposes
-    /// the PR (deleted, scope changed, transferred); the caller treats
-    /// that as "skip this entry."
+    /// the PR (deleted, scope changed, transferred) — whether that
+    /// surfaces as a null `pullRequest` node in an accessible repo or as
+    /// a top-level `NOT_FOUND`/`FORBIDDEN` GraphQL error on the repo
+    /// itself. The caller treats `Ok(None)` as "skip this entry"; only a
+    /// genuinely transient `Err` holds the notifications cursor (#512).
     pub async fn fetch_single_pr(
         &self,
         owner: &str,
@@ -1225,6 +1249,20 @@ impl GhClient {
         let body = graphql::single_pr_body(owner, repo, number);
         let response: graphql::GqlSinglePrResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(errors) = response.errors {
+            // A definitive "not visible" answer (NOT_FOUND / FORBIDDEN:
+            // deleted, transferred, private, scope revoked) is NOT a
+            // transient failure. GitHub returns it as a top-level GraphQL
+            // error alongside `data.repository = null`, so it lands here
+            // rather than the `Ok(None)` null-node path below. Map it to
+            // `Ok(None)` so the notifications-cursor caller treats the
+            // entry as handled and can advance — otherwise a
+            // permanently-gone entry would pin the heartbeat off its
+            // cheap 304 forever (#512). Any other error is transient →
+            // `Err` holds the cursor so the entry re-lists next tick.
+            if gql_errors_all_not_visible(&errors) {
+                tracing::debug!("fetch_single_pr {owner}/{repo}#{number}: not visible — skipping");
+                return Ok(None);
+            }
             let joined = errors
                 .iter()
                 .map(|e| e.full())
@@ -1255,6 +1293,15 @@ impl GhClient {
         let body = graphql::single_issue_body(owner, repo, number);
         let response: graphql::GqlSingleIssueResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(errors) = response.errors {
+            // See `fetch_single_pr`: a definitive NOT_FOUND / FORBIDDEN
+            // is "not visible" (`Ok(None)`), never a cursor-holding
+            // transient failure (#512).
+            if gql_errors_all_not_visible(&errors) {
+                tracing::debug!(
+                    "fetch_single_issue {owner}/{repo}#{number}: not visible — skipping"
+                );
+                return Ok(None);
+            }
             let joined = errors
                 .iter()
                 .map(|e| e.full())
@@ -3174,6 +3221,17 @@ fn gql_errors_all_match(errors: &[graphql::GqlError], markers: &[&str]) -> bool 
         })
 }
 
+/// True when the error list is non-empty and EVERY entry means the
+/// queried node is definitively not visible (NOT_FOUND / FORBIDDEN).
+/// All-of, not any-of: a response mixing a not-found with a genuinely
+/// transient error must still surface as `Err` so the deep-fetch caller
+/// holds the notifications cursor and re-lists the entry next tick
+/// (#512). A permanently-gone entry, by contrast, resolves to `Ok(None)`
+/// so it can't pin the cursor off the cheap 304 steady state forever.
+fn gql_errors_all_not_visible(errors: &[graphql::GqlError]) -> bool {
+    !errors.is_empty() && errors.iter().all(graphql::GqlError::is_not_visible)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3240,6 +3298,61 @@ mod tests {
         );
         assert!(!gql_errors_all_match(&errors, ALREADY_MERGED_MARKERS));
         assert!(!gql_errors_all_match(&[], ALREADY_MERGED_MARKERS));
+    }
+
+    /// #512: a repo-level `NOT_FOUND` / `FORBIDDEN` GraphQL error
+    /// (deleted, transferred, private, scope revoked) is a *definitive*
+    /// "not visible" answer — the deep-fetch must map it to `Ok(None)`
+    /// so the notifications cursor can advance. Only a genuinely
+    /// transient error (or a not-found mixed with one) holds the cursor.
+    /// Without this, a lingering notification for a now-inaccessible repo
+    /// returns `Err` every tick and pins the heartbeat off its cheap 304
+    /// forever.
+    #[test]
+    fn gql_not_found_and_forbidden_classify_as_not_visible() {
+        fn single_pr_errors(payload: &str) -> Vec<graphql::GqlError> {
+            serde_json::from_str::<graphql::GqlSinglePrResponse>(payload)
+                .expect("payload parses")
+                .errors
+                .unwrap_or_default()
+        }
+
+        // Top-level NOT_FOUND on the repository node (repo gone / private),
+        // carried alongside `data.repository = null`.
+        let errs = single_pr_errors(
+            r#"{"data":{"repository":null},
+                "errors":[{"type":"NOT_FOUND","path":["repository"],
+                           "message":"Could not resolve to a Repository with the name 'o/r'."}]}"#,
+        );
+        assert!(gql_errors_all_not_visible(&errs));
+
+        // FORBIDDEN (token scope revoked) is also definitively not visible.
+        let errs = single_pr_errors(
+            r#"{"errors":[{"type":"FORBIDDEN","message":"Resource not accessible by integration"}]}"#,
+        );
+        assert!(gql_errors_all_not_visible(&errs));
+
+        // Message fallback when GitHub omits the `type` field (GHES).
+        let errs = single_pr_errors(
+            r#"{"errors":[{"message":"Could not resolve to a PullRequest with the number of 123."}]}"#,
+        );
+        assert!(gql_errors_all_not_visible(&errs));
+
+        // A transient/unknown error must NOT be swallowed — it holds the cursor.
+        let errs = single_pr_errors(
+            r#"{"errors":[{"type":"INTERNAL","message":"Something went wrong while executing your query."}]}"#,
+        );
+        assert!(!gql_errors_all_not_visible(&errs));
+
+        // All-of: not-found mixed with a transient error still fails.
+        let errs = single_pr_errors(
+            r#"{"errors":[{"type":"NOT_FOUND","message":"Could not resolve to a Repository"},
+                          {"type":"INTERNAL","message":"timeout"}]}"#,
+        );
+        assert!(!gql_errors_all_not_visible(&errs));
+
+        // Empty error list is the plain success path, not "not visible".
+        assert!(!gql_errors_all_not_visible(&[]));
     }
 
     /// `updatePullRequestBranch` retried after its first attempt
@@ -3855,6 +3968,145 @@ mod tests {
         assert!(
             !msg.contains("mergePullRequest") && !msg.contains("MERGED"),
             "parse-failure notice must not echo the raw response body: {msg}"
+        );
+    }
+
+    /// Spin up a `/notifications`-style conditional-GET server: a request
+    /// WITHOUT a matching `If-Modified-Since` gets a `200` carrying
+    /// `Last-Modified: <last_modified>` and `body`; a request whose
+    /// `If-Modified-Since` echoes that exact value gets a `304`. Lets the
+    /// cursor-lifecycle test drive the 200 → 304 transition without
+    /// pulling in `wiremock`.
+    async fn spawn_conditional_notifications_server(
+        last_modified: &'static str,
+        body: &'static str,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => continue,
+                };
+                tokio::spawn(async move {
+                    // Read until the blank line that ends the request
+                    // headers (these are bodyless GETs). A single `read`
+                    // could return before the `If-Modified-Since` header
+                    // arrives if the request spans TCP segments — rare on
+                    // localhost, but that would flake the 304 assertion.
+                    let mut data = Vec::new();
+                    let mut buf = [0u8; 8192];
+                    loop {
+                        match sock.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => data.extend_from_slice(&buf[..n]),
+                        }
+                        if data.windows(4).any(|w| w == b"\r\n\r\n") || data.len() > 65536 {
+                            break;
+                        }
+                    }
+                    let req = String::from_utf8_lossy(&data);
+                    // First colon splits header name from value; the time
+                    // colons in the date stay in the value half.
+                    let ims_matches =
+                        req.lines()
+                            .filter_map(|l| l.split_once(':'))
+                            .any(|(name, val)| {
+                                name.trim().eq_ignore_ascii_case("if-modified-since")
+                                    && val.trim() == last_modified
+                            });
+                    let response = if ims_matches {
+                        "HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n".to_string()
+                    } else {
+                        format!(
+                            "HTTP/1.1 200 OK\r\n\
+                             Content-Type: application/json\r\n\
+                             Last-Modified: {last_modified}\r\n\
+                             Content-Length: {}\r\n\
+                             Connection: close\r\n\r\n{body}",
+                            body.len(),
+                        )
+                    };
+                    let _ = sock.write_all(response.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// #512 regression: parsing the notification LIST must NOT advance
+    /// the `Last-Modified` cursor. The bug was that the cursor committed
+    /// the instant the list parsed — before the per-item deep-fetches
+    /// ran — so an entry whose deep-fetch failed this tick was skipped
+    /// forever (the next heartbeat answered 304 and never re-listed it).
+    /// The cursor must only advance through an explicit
+    /// `commit_notifications_cursor`, which the polling layer calls after
+    /// the fan-out reports every entry handled.
+    #[tokio::test(flavor = "current_thread")]
+    async fn notifications_list_does_not_advance_cursor_until_committed() {
+        const LAST_MODIFIED: &str = "Sun, 06 Nov 2026 08:49:37 GMT";
+        const BODY: &str = r#"[{
+            "reason": "ci_activity",
+            "updated_at": "2026-05-28T12:00:00Z",
+            "subject": {
+                "title": "PR 123",
+                "url": "https://api.github.com/repos/o/r/pulls/123",
+                "type": "PullRequest"
+            },
+            "repository": { "full_name": "o/r" }
+        }]"#;
+        let base_uri = spawn_conditional_notifications_server(LAST_MODIFIED, BODY).await;
+        let client = make_client(&base_uri);
+
+        // Tick 1: a fresh 200 lists PR #123 and hands the pending cursor
+        // BACK to the caller instead of committing it.
+        let poll = client.fetch_notifications().await.expect("first poll ok");
+        let pending = match poll {
+            NotificationsPoll::Modified {
+                entries,
+                last_modified,
+            } => {
+                assert_eq!(entries.len(), 1, "the one PR notification must be listed");
+                assert_eq!(
+                    last_modified.as_deref(),
+                    Some(LAST_MODIFIED),
+                    "the pending cursor rides the poll result, not the shared state",
+                );
+                last_modified
+            }
+            NotificationsPoll::NotModified => panic!("first poll must be 200, not 304"),
+        };
+        assert!(
+            !client.notifications_snapshot().has_last_modified,
+            "listing alone must NOT commit the cursor (#512)",
+        );
+
+        // Tick 2 WITHOUT committing — this is the un-fetched entry's
+        // retry. The heartbeat still sends no `If-Modified-Since`, so
+        // GitHub re-serves the 200 and PR #123 re-lists rather than being
+        // lost to a premature 304.
+        let poll2 = client.fetch_notifications().await.expect("second poll ok");
+        assert!(
+            matches!(poll2, NotificationsPoll::Modified { ref entries, .. } if entries.len() == 1),
+            "an un-committed cursor must re-list the entry next tick, not 304 it away",
+        );
+
+        // Commit (the fan-out reported every entry handled) → the cursor
+        // finally advances.
+        client.commit_notifications_cursor(pending);
+        assert!(
+            client.notifications_snapshot().has_last_modified,
+            "commit_notifications_cursor advances the cursor",
+        );
+
+        // Tick 3: the committed cursor is echoed as `If-Modified-Since`,
+        // so the server answers the cheap steady-state 304.
+        let poll3 = client.fetch_notifications().await.expect("third poll ok");
+        assert!(
+            matches!(poll3, NotificationsPoll::NotModified),
+            "a committed cursor reaches the 304 steady state",
         );
     }
 }

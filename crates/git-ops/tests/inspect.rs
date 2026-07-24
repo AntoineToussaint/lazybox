@@ -17,7 +17,7 @@
 //! inside `WorktreeManager` paths that are already bounded by the
 //! 30s per-call timeout in `lib.rs`. No additional wrapper required.
 
-use lazybox_git_ops::{OrphanReason, TrackedSession, WorktreeManager};
+use lazybox_git_ops::{OrphanReason, TrackedSession, WorktreeInspection, WorktreeManager};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
@@ -329,6 +329,112 @@ async fn uncommitted_changes_block_safe_delete() {
         .await
         .expect("force delete");
     assert!(!wt.exists(), "dir removed");
+}
+
+/// A "ghost on disk" with a severed `.git` (its bare clone was deleted)
+/// but real files must NOT be `rm -rf`'d on a non-force delete. Its
+/// `uncommitted`/`unpushed` probes run git inside the worktree, fail on
+/// the dangling gitdir, and default to "clean" — so `is_safe_to_delete`
+/// is true even though the directory holds unverifiable work. The bare
+/// clone is gone, so there's nothing to verify the checkout against;
+/// refuse rather than destroy it.
+#[tokio::test]
+async fn content_bearing_ghost_without_bare_is_not_rm_rfed() {
+    let fx = setup_fixture().await;
+    let dir = fx.base.path().join("severed-ghost");
+    std::fs::create_dir_all(&dir).unwrap();
+    // A dangling gitfile (its target does not exist) + real user work.
+    std::fs::write(dir.join(".git"), "gitdir: /nonexistent/deleted-bare\n").unwrap();
+    std::fs::write(dir.join("important.txt"), "work I have not lost").unwrap();
+
+    // The classification the buggy probes produce: safe to delete.
+    let row = WorktreeInspection {
+        path: dir.clone(),
+        bare_path: None,
+        branch: Some("ghost".into()),
+        session_id: None,
+        reasons: vec![OrphanReason::Untracked],
+        size_bytes: 42,
+        last_modified: None,
+        has_uncommitted_changes: false,
+        has_unpushed_commits: false,
+        is_safe_to_delete: true,
+    };
+
+    let err = mgr(&fx)
+        .delete_inspected(&row, /*force=*/ false)
+        .await
+        .expect_err("must refuse to rm -rf unverifiable content");
+    assert!(err.to_string().contains("no bare clone"), "got: {err}");
+    assert!(
+        dir.exists(),
+        "the ghost's files must survive a non-force delete"
+    );
+    assert!(dir.join("important.txt").exists());
+
+    // Force still proceeds.
+    mgr(&fx)
+        .delete_inspected(&row, /*force=*/ true)
+        .await
+        .expect("force delete");
+    assert!(!dir.exists());
+}
+
+/// The empty-ghost cleanup still works: a bare-less dir holding at most a
+/// `.git` is disposable debris and is cleared even without force.
+#[tokio::test]
+async fn empty_ghost_without_bare_is_still_cleaned() {
+    let fx = setup_fixture().await;
+    let dir = fx.base.path().join("empty-ghost");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(".git"), "gitdir: /nonexistent/deleted-bare\n").unwrap();
+
+    let row = WorktreeInspection {
+        path: dir.clone(),
+        bare_path: None,
+        branch: None,
+        session_id: None,
+        reasons: vec![OrphanReason::Untracked],
+        size_bytes: 0,
+        last_modified: None,
+        has_uncommitted_changes: false,
+        has_unpushed_commits: false,
+        is_safe_to_delete: true,
+    };
+    mgr(&fx)
+        .delete_inspected(&row, /*force=*/ false)
+        .await
+        .expect("empty ghost debris is cleared");
+    assert!(!dir.exists());
+}
+
+/// A bare-less ghost whose directory already vanished between inspection
+/// and delete must no-op cleanly, not raise a spurious "holds files"
+/// refusal. `read_dir` returns `NotFound`, which the content probe reads
+/// as "nothing to refuse" (distinct from an unreadable directory, which
+/// still fails safe to content-bearing).
+#[tokio::test]
+async fn vanished_ghost_without_bare_is_a_clean_noop() {
+    let fx = setup_fixture().await;
+    let dir = fx.base.path().join("gone-ghost");
+    // Never created on disk — the path is already absent.
+    let row = WorktreeInspection {
+        path: dir.clone(),
+        bare_path: None,
+        branch: None,
+        session_id: None,
+        reasons: vec![OrphanReason::Untracked],
+        size_bytes: 0,
+        last_modified: None,
+        has_uncommitted_changes: false,
+        has_unpushed_commits: false,
+        is_safe_to_delete: true,
+    };
+    mgr(&fx)
+        .delete_inspected(&row, /*force=*/ false)
+        .await
+        .expect("an already-gone ghost is a clean no-op, not a refusal");
+    assert!(!dir.exists());
 }
 
 /// Unpushed commits (HEAD ahead of upstream) block safe-delete.

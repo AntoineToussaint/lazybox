@@ -4136,6 +4136,7 @@ mod merge_focus_follow_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         }
     }
@@ -6790,6 +6791,7 @@ mod destructive_confirm_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         };
         Workspace::from_task(task, Utc::now())
@@ -8127,6 +8129,7 @@ mod focus_mode_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         };
         let mut ws = Workspace::from_task(task, Utc::now());
@@ -8384,6 +8387,7 @@ mod jump_to_workspace_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         }
     }
@@ -9300,6 +9304,7 @@ mod auto_merge_on_green_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         };
         let mut ws = Workspace::from_task(task, Utc::now());
@@ -9470,6 +9475,7 @@ mod merge_latch_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         };
         Workspace::from_task(task, Utc::now())
@@ -11486,6 +11492,7 @@ mod spawn_focus_steal_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         };
         lazybox_core::Workspace::from_task(task, Utc::now())
@@ -11593,6 +11600,7 @@ mod repo_labels_failure_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         }
     }
@@ -11968,6 +11976,7 @@ mod keybinding_audit_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         };
         let mut ws = Workspace::from_task(task, Utc::now());
@@ -12905,6 +12914,7 @@ mod optimistic_mutation_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: None,
             closes_issues: vec![],
         }
     }

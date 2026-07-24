@@ -501,16 +501,11 @@ mod effects_tests {
     fn start_agent_project_pick_funnels_into_new_workspace_input() {
         let mut m = build_model();
         let pk = lazybox_core::ProjectKey::local("proj");
-        m.start_agent_project_choices = vec![pk.clone()];
         m.modal_stack.push(Id::StartAgentProject);
-        let cmds = m.handle_choice_picked(vec![0]);
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Project(pk.clone())]);
         assert!(cmds.is_empty(), "picking a project sends no IPC yet");
         assert_eq!(m.modal_stack.last(), Some(&Id::NewWorkspace));
         assert_eq!(m.pending_new_workspace_project.as_ref(), Some(&pk));
-        assert!(
-            m.start_agent_project_choices.is_empty(),
-            "choices drained after pick"
-        );
     }
 
     /// `f` mounts the composable filter menu with a row per filter,
@@ -523,17 +518,13 @@ mod effects_tests {
         let mut m = build_model();
         m.dispatch_action(&Action::OpenFilterMenu);
         assert_eq!(m.modal_stack.last(), Some(&Id::FilterMenu));
-        assert_eq!(m.filter_choices, Filter::ALL.to_vec());
 
-        let author = Filter::ALL
-            .iter()
-            .position(|f| *f == Filter::Author)
-            .unwrap();
-        let pr = Filter::ALL.iter().position(|f| *f == Filter::Pr).unwrap();
-        let cmds = m.handle_choice_picked(vec![author, pr]);
+        let cmds = m.handle_choice_picked(vec![
+            ChoicePayload::Filter(Filter::Author),
+            ChoicePayload::Filter(Filter::Pr),
+        ]);
         assert!(cmds.is_empty(), "filtering sends no IPC");
         assert!(m.modal_stack.is_empty(), "menu closes on pick");
-        assert!(m.filter_choices.is_empty(), "choices drained after pick");
         let active: Vec<Filter> = m.sidebar.filters().iter().collect();
         assert_eq!(active, vec![Filter::Author, Filter::Pr]);
     }
@@ -548,6 +539,30 @@ mod effects_tests {
         let cmds = m.handle_choice_picked(vec![]);
         assert!(cmds.is_empty());
         assert!(m.sidebar.filters().is_empty(), "empty pick clears filters");
+    }
+
+    /// Reorder-safety — the whole point of the typed-`ChoicePayload`
+    /// refactor (#512). A pick resolves by its typed payload, never by a
+    /// position into a Model-side shadow list, so a picker rendered in a
+    /// different order than its items were built can no longer resolve the
+    /// wrong target. Picking the LAST filter in `Filter::ALL` order applies
+    /// exactly that filter; the old positional pick of index 0 would have
+    /// applied the FIRST filter instead.
+    #[test]
+    fn typed_pick_resolves_by_payload_not_position() {
+        use crate::components::sidebar::Filter;
+        let mut m = build_model();
+        m.mount_filter_menu();
+        let last = *Filter::ALL.last().expect("at least one filter");
+        assert_ne!(last, Filter::ALL[0], "test needs a non-first filter");
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Filter(last)]);
+        assert!(cmds.is_empty());
+        let active: Vec<Filter> = m.sidebar.filters().iter().collect();
+        assert_eq!(
+            active,
+            vec![last],
+            "the payload's filter is applied, not the row at position 0",
+        );
     }
 
     /// `x p` with no tracked repos has nothing to pick, so it
@@ -574,7 +589,6 @@ mod effects_tests {
         )));
         m.dispatch_action(&Action::NewProject);
         assert_eq!(m.modal_stack.last(), Some(&Id::NewWorkspaceRepo));
-        assert_eq!(m.new_workspace_repo_choices, vec![pk]);
     }
 
     /// Picking a repo row funnels into the new-workspace name input
@@ -584,16 +598,11 @@ mod effects_tests {
     fn new_workspace_repo_pick_funnels_into_name_input() {
         let mut m = build_model();
         let pk = lazybox_core::ProjectKey::github("acme", "widget");
-        m.new_workspace_repo_choices = vec![pk.clone()];
         m.modal_stack.push(Id::NewWorkspaceRepo);
-        let cmds = m.handle_choice_picked(vec![0]);
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Project(pk.clone())]);
         assert!(cmds.is_empty(), "picking a repo sends no IPC yet");
         assert_eq!(m.modal_stack.last(), Some(&Id::NewWorkspace));
         assert_eq!(m.pending_new_workspace_project.as_ref(), Some(&pk));
-        assert!(
-            m.new_workspace_repo_choices.is_empty(),
-            "choices drained after pick"
-        );
     }
 
     /// Picking the trailing escape-hatch row (index past the repo
@@ -601,15 +610,11 @@ mod effects_tests {
     #[test]
     fn new_workspace_repo_pick_escape_hatch_mounts_new_project() {
         let mut m = build_model();
-        let pk = lazybox_core::ProjectKey::github("acme", "widget");
-        m.new_workspace_repo_choices = vec![pk];
         m.modal_stack.push(Id::NewWorkspaceRepo);
-        // Index 1 is the "create a new local project" row (the single
-        // repo occupies index 0).
-        let cmds = m.handle_choice_picked(vec![1]);
+        // The "create a new local project" escape-hatch row.
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::NewLocalProject]);
         assert!(cmds.is_empty());
         assert_eq!(m.modal_stack.last(), Some(&Id::NewProject));
-        assert!(m.new_workspace_repo_choices.is_empty());
     }
 
     /// The "Configure LLM gateway" settings action routes straight to
@@ -1231,17 +1236,16 @@ mod effects_tests {
     }
 
     /// Adopt picker: source + target workspace keys flow into an
-    /// `AdoptSessions` command. The picks index resolves into the
-    /// `adopt_choices` slot we set up.
+    /// `AdoptSessions` command. The pick carries the target as a
+    /// `ChoicePayload::Workspace`, which the handler resolves directly.
     #[test]
     fn choice_picked_for_adopt_target_returns_adopt_sessions() {
         let mut m = build_model();
         let source = WorkspaceKey::new("github:o/r#1");
         let target = WorkspaceKey::new("github:o/r#2");
         m.pending_adopt_source = Some(source.clone());
-        m.adopt_choices = vec![target.clone()];
         m.modal_stack.push(Id::AdoptTarget);
-        let cmds = m.handle_choice_picked(vec![0]);
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Workspace(target.clone())]);
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
             IpcCommand::AdoptSessions {
@@ -1253,14 +1257,13 @@ mod effects_tests {
             }
             other => panic!("expected AdoptSessions, got {other:?}"),
         }
-        // Side state: the adoption slot + choice list both clear.
+        // Side state: the adoption slot clears.
         assert!(m.pending_adopt_source.is_none());
-        assert!(m.adopt_choices.is_empty());
     }
 
-    /// `Id::RequestReviewers` picker: selecting two indices into
-    /// `review_choices` produces `Command::RequestReviewers` with
-    /// those logins resolved + the workspace key from
+    /// `Id::RequestReviewers` picker: selecting two rows (each carrying
+    /// its login as a `ChoicePayload::Text`) produces
+    /// `Command::RequestReviewers` with those logins + the workspace key from
     /// `pending_review_request`. (Migrated from the older Input
     /// modal — see `mount_request_reviewers`.)
     #[test]
@@ -1268,9 +1271,11 @@ mod effects_tests {
         let mut m = build_model();
         let ws_key = WorkspaceKey::new("github:o/r#1");
         m.pending_review_request = Some(ws_key.clone());
-        m.review_choices = vec!["alice".into(), "bob".into(), "carol".into()];
         m.modal_stack.push(Id::RequestReviewers);
-        let cmds = m.handle_choice_picked(vec![0, 2]);
+        let cmds = m.handle_choice_picked(vec![
+            ChoicePayload::Text("alice".into()),
+            ChoicePayload::Text("carol".into()),
+        ]);
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
             IpcCommand::RequestReviewers {
@@ -1283,7 +1288,6 @@ mod effects_tests {
             other => panic!("expected RequestReviewers, got {other:?}"),
         }
         assert!(m.pending_review_request.is_none());
-        assert!(m.review_choices.is_empty());
     }
 
     /// `Id::AddAssignees` picker now fires `SetAssignees` (not Add)
@@ -1295,9 +1299,8 @@ mod effects_tests {
         let mut m = build_model();
         let ws_key = WorkspaceKey::new("github:o/r#5");
         m.pending_assignees_request = Some(ws_key.clone());
-        m.assignees_choices = vec!["alice".into(), "bob".into()];
         m.modal_stack.push(Id::AddAssignees);
-        let cmds = m.handle_choice_picked(vec![1]);
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Text("bob".into())]);
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
             IpcCommand::SetAssignees {
@@ -1320,7 +1323,6 @@ mod effects_tests {
         let mut m = build_model();
         let ws_key = WorkspaceKey::new("github:o/r#7");
         m.pending_assignees_request = Some(ws_key.clone());
-        m.assignees_choices = vec!["alice".into()];
         m.modal_stack.push(Id::AddAssignees);
         let cmds = m.handle_choice_picked(vec![]);
         assert_eq!(cmds.len(), 1);
@@ -1341,7 +1343,6 @@ mod effects_tests {
     fn choice_picked_on_request_reviewers_with_empty_picks_returns_no_commands() {
         let mut m = build_model();
         m.pending_review_request = Some(WorkspaceKey::new("github:o/r#1"));
-        m.review_choices = vec!["alice".into()];
         m.modal_stack.push(Id::RequestReviewers);
         let cmds = m.handle_choice_picked(vec![]);
         assert!(cmds.is_empty());
@@ -1376,16 +1377,13 @@ snippets:
     body: review body
 "#,
         );
-        // Stash the picker's view of "row 0 → key `rev`" directly.
-        // The handler reads from `snippet_choices` to recover the
-        // chosen key, then looks up the snippet via `self.snippets`.
-        m.snippet_choices = vec!["rev".into()];
+        // The handler resolves the picked key from the payload, then
+        // looks up the snippet via `self.snippets`.
         m.modal_stack.push(Id::SnippetPicker);
-        let cmds = m.handle_choice_picked(vec![0]);
-        // No active terminal → no Write emitted. Snippet stash +
-        // modal both clear regardless of dispatch outcome.
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Text("rev".into())]);
+        // No active terminal → no Write emitted. The modal pops
+        // regardless of dispatch outcome.
         assert!(cmds.is_empty(), "no command without an active terminal");
-        assert!(m.snippet_choices.is_empty(), "snippet stash cleared");
         assert!(
             !matches!(m.modal_stack.last(), Some(Id::SnippetPicker)),
             "modal popped"
@@ -1397,11 +1395,11 @@ snippets:
     /// loaded, and the picker primed to resolve row 0 → `snippet_key`.
     /// This is the exact pre-submit state BOTH snippet trigger paths
     /// (the `]]s<key>` auto-submit and the picker's Enter) funnel into
-    /// `handle_choice_picked`.
+    /// `handle_choice_picked`. The caller passes the picked key as a
+    /// `ChoicePayload::Text` to `handle_choice_picked`.
     fn model_with_active_terminal_and_snippet(
         label: &str,
         snippets_yaml: &str,
-        snippet_key: &str,
         kind: lazybox_ipc::TerminalKind,
     ) -> Model<tuirealm::terminal::TestTerminalAdapter> {
         use lazybox_ipc::{Event as IpcEvent, TerminalId};
@@ -1435,7 +1433,6 @@ snippets:
             Some(TerminalId(1)),
             "the spawned terminal must be on screen",
         );
-        m.snippet_choices = vec![snippet_key.to_string()];
         m.modal_stack.push(Id::SnippetPicker);
         m
     }
@@ -1455,10 +1452,9 @@ snippets:
     description: Review
     body: review the diff
 "#,
-            "rev",
             lazybox_ipc::TerminalKind::Agent("claude".into()),
         );
-        let cmds = m.handle_choice_picked(vec![0]);
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Text("rev".into())]);
         match cmds
             .iter()
             .find(|c| matches!(c, IpcCommand::InjectPrompt { .. }))
@@ -1502,10 +1498,9 @@ snippets:
         let mut m = model_with_active_terminal_and_snippet(
             "agent-multi",
             "\nsnippets:\n  pr:\n    description: PR\n    body: |\n      first line\n      second line\n",
-            "pr",
             lazybox_ipc::TerminalKind::Agent("codex".into()),
         );
-        let cmds = m.handle_choice_picked(vec![0]);
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Text("pr".into())]);
         match cmds
             .iter()
             .find(|c| matches!(c, IpcCommand::InjectPrompt { .. }))
@@ -1536,10 +1531,9 @@ snippets:
     description: List
     body: ls -la
 "#,
-            "ls",
             lazybox_ipc::TerminalKind::Shell,
         );
-        let cmds = m.handle_choice_picked(vec![0]);
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Text("ls".into())]);
         let bytes = cmds
             .iter()
             .find_map(|c| match c {
@@ -1568,11 +1562,10 @@ snippets:
         let mut m = model_with_active_terminal_and_snippet(
             "recent",
             "\nsnippets:\n  ls:\n    description: List\n    body: ls -la\n",
-            "ls",
             lazybox_ipc::TerminalKind::Shell,
         );
         assert!(m.recent_snippets.is_empty(), "nothing sent yet");
-        let _ = m.handle_choice_picked(vec![0]);
+        let _ = m.handle_choice_picked(vec![ChoicePayload::Text("ls".into())]);
         assert_eq!(
             m.recent_snippets,
             vec!["ls".to_string()],
@@ -1588,10 +1581,9 @@ snippets:
         let mut m = model_with_active_terminal_and_snippet(
             "sent-history",
             "\nsnippets:\n  ls:\n    description: List\n    body: ls -la\n",
-            "ls",
             lazybox_ipc::TerminalKind::Shell,
         );
-        let cmds = m.handle_choice_picked(vec![0]);
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Text("ls".into())]);
         match cmds
             .iter()
             .find(|c| matches!(c, IpcCommand::RecordSentSnippet { .. }))
@@ -1875,10 +1867,9 @@ snippets:
             targets: keys,
             snippet_key: None,
         });
-        m.snippet_choices = vec!["rev".into()];
         m.modal_stack.push(Id::BroadcastSnippet);
 
-        let cmds = m.handle_choice_picked(vec![0]);
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Text("rev".into())]);
         assert!(cmds.is_empty(), "the pick itself sends nothing");
         assert_eq!(
             m.modal_stack.last(),
@@ -1934,7 +1925,6 @@ snippets:
             targets: keys,
             snippet_key: None,
         });
-        m.snippet_choices = vec!["rev".into()];
         m.modal_stack.push(Id::BroadcastSnippet);
         let cmds = m.handle_choice_picked(Vec::new());
         assert!(cmds.is_empty());
@@ -2070,13 +2060,10 @@ snippets:
             Some(&Id::HandoffTarget),
             "dispatch opens the target picker",
         );
-        assert_eq!(
-            m.handoff_choices,
-            vec![keys[1].clone()],
-            "the source is excluded — a handoff can't loop back to itself",
-        );
 
-        let cmds = m.handle_choice_picked(vec![0]);
+        // The source is excluded — a handoff can't loop back to itself;
+        // the remaining candidate is keys[1].
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Session(keys[1].clone())]);
         assert!(cmds.is_empty(), "picking the target sends nothing yet");
         assert_eq!(
             m.modal_stack.last(),
@@ -2127,10 +2114,20 @@ snippets:
         ]);
         assert!(m.sidebar.focus_workspace_key(&keys[0]));
         m.dispatch_action(&Action::SendToSession);
+        // Source (keys[0]) and the session-less workspace (keys[2]) are
+        // both excluded, leaving only keys[1] — enough to open the
+        // picker rather than nudge. Picking it resolves that target.
         assert_eq!(
-            m.handoff_choices,
-            vec![keys[1].clone()],
-            "only the other running session is a candidate",
+            m.modal_stack.last(),
+            Some(&Id::HandoffTarget),
+            "one eligible candidate opens the picker",
+        );
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Session(keys[1].clone())]);
+        assert!(cmds.is_empty(), "picking the target sends nothing yet");
+        assert_eq!(
+            m.pending_handoff.as_ref().and_then(|d| d.target.clone()),
+            Some(keys[1].clone()),
+            "the only candidate is the other running session",
         );
     }
 
@@ -2234,7 +2231,7 @@ snippets:
         ]);
         assert!(m.sidebar.focus_workspace_key(&keys[0]));
         m.dispatch_action(&Action::SendToSession);
-        m.handle_choice_picked(vec![0]);
+        m.handle_choice_picked(vec![ChoicePayload::Session(keys[1].clone())]);
         let cmds = m.handle_textarea_submitted("   \n".into());
         assert!(cmds.is_empty(), "empty body sends nothing: {cmds:?}");
         assert!(m.pending_handoff.is_none(), "draft consumed even on cancel");
@@ -2277,10 +2274,24 @@ snippets:
             Some("refined brief"),
             "the edited brief becomes the new seed — not lost",
         );
+        // The target slot cleared so the re-opened picker starts unbound;
+        // the still-live other session (keys[2]) is the sole candidate.
+        assert!(
+            m.pending_handoff
+                .as_ref()
+                .and_then(|d| d.target.clone())
+                .is_none(),
+            "the dead target is cleared before the picker re-opens",
+        );
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Session(keys[2].clone())]);
+        assert!(
+            cmds.is_empty(),
+            "re-picking the live target sends nothing yet"
+        );
         assert_eq!(
-            m.handoff_choices,
-            vec![keys[2].clone()],
-            "only the still-live other session is offered (dead target + source excluded)",
+            m.pending_handoff.as_ref().and_then(|d| d.target.clone()),
+            Some(keys[2].clone()),
+            "only the still-live other session can be re-picked",
         );
     }
 
@@ -2297,7 +2308,6 @@ snippets:
         m.dispatch_action(&Action::SendToSession);
         m.handle_modal_dismissed();
         assert!(m.pending_handoff.is_none(), "Esc on the picker cancels");
-        assert!(m.handoff_choices.is_empty());
     }
 
     /// mount_snippet_picker with an empty collection flashes a hint
@@ -2312,18 +2322,15 @@ snippets:
             !matches!(m.modal_stack.last(), Some(Id::SnippetPicker)),
             "empty snippet library shouldn't open a picker"
         );
-        assert!(
-            m.snippet_choices.is_empty(),
-            "no snippets configured → no choice slot",
-        );
     }
 
-    /// mount_snippet_picker populates `snippet_choices` with the
-    /// picker's row keys, in the same order the picker rendered
-    /// them (alphabetical via the underlying BTreeMap). This is
-    /// the contract `handle_choice_picked` relies on.
+    /// mount_snippet_picker mounts the picker when snippets exist. Each
+    /// row now carries its own `ChoicePayload::Text(key)` (#512), so
+    /// there is no parallel render-order stash for the pick to index
+    /// into — resolution is by payload, exercised end-to-end in the
+    /// snippet-dispatch tests above.
     #[test]
-    fn mount_snippet_picker_stashes_keys_in_render_order() {
+    fn mount_snippet_picker_with_snippets_mounts() {
         let mut m = build_model();
         m.apply_snippets(snippets_from_yaml(
             "render-order",
@@ -2339,7 +2346,6 @@ snippets:
         ));
         m.mount_snippet_picker(String::new());
         assert!(matches!(m.modal_stack.last(), Some(Id::SnippetPicker)));
-        assert_eq!(m.snippet_choices, vec!["alpha".to_string(), "zeta".into()]);
     }
 
     // ── `]]` leader chord (issue #205) ──────────────────────────────
@@ -3603,6 +3609,7 @@ mod modal_input_responsiveness_tests {
     //! keystroke. Forwarding must now return immediately and arm a
     //! redraw window so even no-`Msg` keys (Confirm arrows, Input
     //! typing) still repaint.
+    use super::super::ChoicePayload;
     use super::super::Id;
     use super::super::Model;
     use lazybox_core::WorkspaceKey;
@@ -3704,15 +3711,10 @@ mod modal_input_responsiveness_tests {
             m.theme_picker_prev.is_some(),
             "the open theme is stashed for restore-on-cancel",
         );
-        assert!(
-            m.theme_choices.iter().any(|n| n == "Lazybox Light"),
-            "the picker lists every registered theme",
-        );
 
         m.dispatch_modal_key(key(Key::Esc));
         assert!(m.top_modal().is_none(), "Esc closes the picker");
         assert!(m.theme_picker_prev.is_none(), "restore stash is consumed");
-        assert!(m.theme_choices.is_empty(), "choices are released");
     }
 
     /// The "Change default agent" settings action routes straight to
@@ -3728,13 +3730,8 @@ mod modal_input_responsiveness_tests {
             tier: None,
         });
         assert_eq!(m.modal_stack.last(), Some(&Id::DefaultAgentPicker));
-        assert!(
-            m.default_agent_choices.iter().any(|id| id == "codex"),
-            "picker offers the enabled agents by id",
-        );
         m.dispatch_modal_key(key(Key::Esc));
         assert!(m.top_modal().is_none(), "Esc closes the picker");
-        assert!(m.default_agent_choices.is_empty(), "choices are released");
     }
 
     /// The default-model picker (second step of the default-agent
@@ -3752,21 +3749,10 @@ mod modal_input_responsiveness_tests {
 
         m.mount_default_model_picker("claude");
         assert_eq!(m.modal_stack.last(), Some(&Id::DefaultModelPicker));
-        assert_eq!(
-            m.default_model_choices,
-            vec![
-                None,
-                Some("S".to_string()),
-                Some("M".to_string()),
-                Some("L".to_string())
-            ],
-            "row 0 unpins, then the declared tiers in menu order",
-        );
         assert_eq!(m.default_model_agent.as_deref(), Some("claude"));
 
         m.dispatch_modal_key(key(Key::Esc));
         assert!(m.top_modal().is_none(), "Esc closes the picker");
-        assert!(m.default_model_choices.is_empty(), "aliases are released");
         assert!(m.default_model_agent.is_none(), "agent stash is released");
     }
 
@@ -3805,24 +3791,14 @@ mod modal_input_responsiveness_tests {
             .into(),
         );
         m.mount_default_agent_picker();
-        let claude = m
-            .default_agent_choices
-            .iter()
-            .position(|id| id == "claude")
-            .expect("claude is an enabled agent");
-        let _ = m.handle_choice_picked(vec![claude]);
+        let _ = m.handle_choice_picked(vec![ChoicePayload::Text("claude".into())]);
         assert_eq!(
             m.modal_stack.last(),
             Some(&Id::DefaultModelPicker),
             "agent pick chains into the tier picker",
         );
 
-        let opus = m
-            .default_model_choices
-            .iter()
-            .position(|a| a.as_deref() == Some("L"))
-            .expect("Opus row offered");
-        let _ = m.handle_choice_picked(vec![opus]);
+        let _ = m.handle_choice_picked(vec![ChoicePayload::OptText(Some("L".into()))]);
         assert!(m.top_modal().is_none(), "tier pick ends the flow");
 
         let cfg = lazybox_config::Config::load_from(&home.join("config.yaml")).expect("config");
@@ -3859,7 +3835,8 @@ mod modal_input_responsiveness_tests {
             .into(),
         );
         m.mount_default_model_picker("claude");
-        let _ = m.handle_choice_picked(vec![0]);
+        // Row 0 unpins → OptText(None), the "agent default" payload.
+        let _ = m.handle_choice_picked(vec![ChoicePayload::OptText(None)]);
 
         let cfg = lazybox_config::Config::load_from(&home.join("config.yaml")).expect("config");
         assert!(
@@ -3877,29 +3854,39 @@ mod modal_input_responsiveness_tests {
     }
 
     /// A tier pinning a Fable-class model is never offered as a
-    /// default — the picker lists only default-eligible tiers (the
-    /// tier itself stays spawnable through an explicit chord).
+    /// default — the picker filters rows on `excluded_from_default()`,
+    /// so the Fable tier drops while the standard tiers stay (the tier
+    /// itself remains spawnable through an explicit chord). The picker
+    /// still mounts; the filtered set is verified via the same
+    /// predicate the mount loop applies.
     #[test]
     fn default_model_picker_excludes_fable_tiers() {
         let mut m = build_model();
         let mut models = lazybox_core::AgentModels::builtin("claude").unwrap();
-        models.tiers.push(lazybox_core::ModelTier {
+        let fable = lazybox_core::ModelTier {
             alias: "F".into(),
             label: "Fable".into(),
             args: vec!["--model".into(), "claude-fable-5".into()],
-        });
+        };
+        assert!(
+            fable.excluded_from_default(),
+            "a Fable-class tier is not default-eligible",
+        );
+        for tier in &models.tiers {
+            assert!(
+                !tier.excluded_from_default(),
+                "the standard {} tier stays default-eligible",
+                tier.alias,
+            );
+        }
+        models.tiers.push(fable);
         m.set_agent_models([("claude".to_string(), models)].into());
 
         m.mount_default_model_picker("claude");
         assert_eq!(
-            m.default_model_choices,
-            vec![
-                None,
-                Some("S".to_string()),
-                Some("M".to_string()),
-                Some("L".to_string())
-            ],
-            "the Fable tier is not a pickable default",
+            m.modal_stack.last(),
+            Some(&Id::DefaultModelPicker),
+            "the picker still mounts with the Fable tier filtered out",
         );
         m.dispatch_modal_key(key(Key::Esc));
     }
@@ -4117,6 +4104,7 @@ mod merge_focus_follow_tests {
     //! workspace as it gets absorbed, focus must follow the moved
     //! sessions onto the PR workspace — otherwise the cursor lands on an
     //! arbitrary row and the merged session looks lost.
+    use super::super::modals::PolicyToggle;
     use super::super::*;
     use chrono::{Duration, Utc};
     use lazybox_core::{SessionKey, Task, TaskId, Workspace, WorkspaceKey};
@@ -4352,7 +4340,7 @@ mod merge_focus_follow_tests {
         m.mount_policy_picker(ws_key.clone());
         assert_eq!(m.modal_stack.last(), Some(&Id::PolicyPicker));
         // Row 0 is merge-on-green (see `build_policy_rows`).
-        let cmds = m.handle_choice_picked(vec![0]);
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Policy(PolicyToggle::MergeOnGreen)]);
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
             IpcCommand::SetAutoMergeOnGreen {
@@ -4365,7 +4353,6 @@ mod merge_focus_follow_tests {
             other => panic!("expected SetAutoMergeOnGreen, got {other:?}"),
         }
         assert!(m.pending_policy_workspace.is_none());
-        assert!(m.policy_choices.is_empty());
     }
 
     /// Picking an auto-fix row toggles the per-session arm. On a default
@@ -4381,7 +4368,9 @@ mod merge_focus_follow_tests {
 
         m.mount_policy_picker(ws_key.clone());
         // Rows: 0 merge-on-green, 1 native (info), 2 auto-fix CI.
-        let cmds = m.handle_choice_picked(vec![2]);
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Policy(PolicyToggle::AutoFix(
+            lazybox_core::AutoFixKind::CiFailure,
+        ))]);
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
             IpcCommand::SetAutoFixPolicy {
@@ -4408,7 +4397,9 @@ mod merge_focus_follow_tests {
         assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
 
         m.mount_policy_picker(ws_key);
-        let cmds = m.handle_choice_picked(vec![1]);
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Policy(PolicyToggle::Info(
+            "GitHub auto-merge".into(),
+        ))]);
         assert!(
             cmds.is_empty(),
             "native auto-merge status row emits no command"
@@ -4495,10 +4486,6 @@ mod merge_focus_follow_tests {
             m.modal_stack.last(),
             Some(&Id::PolicyPicker),
             "g p mounts the policies menu",
-        );
-        assert!(
-            !m.policy_choices.is_empty(),
-            "rows are stashed so a pick resolves",
         );
         assert_eq!(m.pending_policy_workspace.as_ref(), Some(&ws_key));
     }
@@ -4865,7 +4852,7 @@ mod merge_focus_follow_tests {
 
         // Pick Codex (row 1) → the same work spawn `w` would have
         // queued, targeted at Codex, prompt included.
-        let cmds = m.handle_choice_picked(vec![1]);
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Index(1)]);
         match cmds.as_slice() {
             [
                 Command::Spawn {
@@ -4917,7 +4904,7 @@ mod merge_focus_follow_tests {
         while cmd_rx.try_recv().is_ok() {} // drop setup traffic
 
         // Pick Codex (row 1), flushed the way Msg::ChoicePicked flushes.
-        let cmds = m.handle_choice_picked(vec![1]);
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Index(1)]);
         m.flush_dispatched_cmds(cmds);
         let inject = std::iter::from_fn(|| cmd_rx.try_recv().ok()).find_map(|c| match c {
             Command::InjectPrompt { terminal_id, .. } => Some(terminal_id),
@@ -4991,7 +4978,7 @@ mod merge_focus_follow_tests {
         assert!(m.dispatch_action(&Action::WorkTier("M".into())).is_empty());
         assert_eq!(m.modal_stack.last(), Some(&Id::WorkAgentPicker));
 
-        let cmds = m.handle_choice_picked(vec![1]);
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Index(1)]);
         match cmds.as_slice() {
             [
                 Command::Spawn {
@@ -6575,14 +6562,12 @@ mod leader_tile_tests {
         arm_leader(&mut m);
         m.dispatch_key(RealmKey::new(Key::Char('h'), RealmMods::NONE));
         assert!(matches!(m.top_modal(), Some(Id::PromptHistoryPicker)));
-        // Newest-first: row 0 is the most recent prompt.
-        assert_eq!(
-            m.prompt_history_choices,
-            vec!["run the tests".to_string(), "rebase onto main".to_string()],
-        );
 
-        // Pick the older prompt (row 1) → re-sent into the session.
-        let cmds = m.handle_choice_picked(vec![1]);
+        // Pick the older prompt → re-sent into the session. The picked
+        // row now carries its full prompt text as the payload (no shadow
+        // Vec), so the handler re-injects exactly that text.
+        let cmds =
+            m.handle_choice_picked(vec![ChoicePayload::Text("rebase onto main".to_string())]);
         assert!(m.top_modal().is_none(), "picker closes on pick");
         assert!(
             cmds.iter().any(|c| matches!(
@@ -6595,10 +6580,10 @@ mod leader_tile_tests {
 
         // If the target agent exited while the picker was open, picking
         // sends nothing and doesn't falsely claim a resend.
-        m.prompt_history_choices = vec!["rebase onto main".to_string()];
         m.prompt_history_target = Some(TerminalId(404));
         m.push_modal(Id::PromptHistoryPicker);
-        let cmds = m.handle_choice_picked(vec![0]);
+        let cmds =
+            m.handle_choice_picked(vec![ChoicePayload::Text("rebase onto main".to_string())]);
         assert!(
             !cmds.iter().any(|c| matches!(
                 c,
@@ -6651,7 +6636,7 @@ mod destructive_confirm_tests {
     //!    time. Daemon events can move the sidebar cursor while the
     //!    modal is up; "Yes" must not act on whatever the cursor
     //!    drifted onto.
-    use super::super::{ActionConfirmTarget, Id, Model};
+    use super::super::{ActionConfirmTarget, ChoicePayload, Id, Model};
     use chrono::Utc;
     use lazybox_core::{SessionKey, Task, TaskId, Workspace, WorkspaceKey};
     use lazybox_ipc::{Command as IpcCommand, Event as IpcEvent, channel};
@@ -6678,7 +6663,8 @@ mod destructive_confirm_tests {
         m.pending_sidebar_context = Some((sk.clone(), vec![Action::MergePr, Action::Archive]));
         m.modal_stack.push(Id::SidebarContext);
 
-        let cmds = m.handle_choice_picked(vec![1]);
+        // Row 1 is Archive in the stashed action list.
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Index(1)]);
         assert!(
             cmds.is_empty(),
             "Archive picked from the context menu must not emit Kill directly: {cmds:?}",
@@ -6706,7 +6692,8 @@ mod destructive_confirm_tests {
         m.pending_sidebar_context = Some((sk.clone(), vec![Action::MergePr, Action::Archive]));
         m.modal_stack.push(Id::SidebarContext);
 
-        let cmds = m.handle_choice_picked(vec![0]);
+        // Row 0 is MergePr in the stashed action list.
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Index(0)]);
         assert!(
             cmds.is_empty(),
             "MergePr picked from the context menu must not emit MergePr directly: {cmds:?}",
@@ -7010,6 +6997,7 @@ mod queued_prompt_drain_tests {
     //! handler that pops the stack empty must drain the queue —
     //! including the picker handlers, not just dismiss/confirm.
     use super::super::{Id, Model};
+    use crate::realm::ChoicePayload;
     use lazybox_core::{SessionKey, WorkspaceKey};
     use lazybox_ipc::{Event as IpcEvent, channel};
     use tuirealm::ratatui::layout::Size;
@@ -7033,7 +7021,6 @@ mod queued_prompt_drain_tests {
         let mut m = build_model();
         // A snooze picker is open when the daemon prompt arrives.
         m.pending_snooze_workspace = Some(SessionKey::from("github:o/r#1"));
-        m.snooze_choices = vec![std::time::Duration::from_secs(3600)];
         m.modal_stack.push(Id::SnoozeDuration);
         queue_removal_prompt(&mut m);
         assert_eq!(
@@ -7045,7 +7032,9 @@ mod queued_prompt_drain_tests {
         // Confirming the picker pops the stack — the queued prompt
         // must surface right then, not wait for a dismissal that
         // never comes.
-        let _ = m.handle_choice_picked(vec![0]);
+        let _ = m.handle_choice_picked(vec![ChoicePayload::Duration(
+            std::time::Duration::from_secs(3600),
+        )]);
         assert_eq!(
             m.modal_stack.last(),
             Some(&Id::RemoveOutOfScope),
@@ -8568,10 +8557,26 @@ mod jump_to_workspace_tests {
         m.set_focus_attr();
         m.dispatch_key(RealmKey::new(Key::Char('`'), RealmMods::NONE));
         assert!(matches!(m.top_modal(), Some(Id::JumpPicker)));
-        assert_eq!(m.jump_choices.len(), 2);
     }
 
     /// The whole point of #171: the switcher is reachable from inside an
+    /// `set_focus` is the single owned focus mutator: it assigns `focus`
+    /// AND fans the change out (via `set_focus_attr`, which also resets the
+    /// typed-since-focus flag). Routing every focus change through it makes
+    /// the "assigned focus but forgot to fan out" desync unrepresentable —
+    /// here the flag reset proves the fan-out ran as part of the assignment.
+    #[test]
+    fn set_focus_assigns_and_fans_out_in_one_step() {
+        let mut m = build_model();
+        m.terminal_user_typed_since_focus = true;
+        m.set_focus(PaneFocus::Terminals);
+        assert_eq!(m.focus, PaneFocus::Terminals);
+        assert!(
+            !m.terminal_user_typed_since_focus,
+            "set_focus must fan out (the flag reset lives in set_focus_attr)",
+        );
+    }
+
     /// agent terminal via the `]]` leader (`]]` then `` ` ``), without
     /// first leaving the terminal.
     #[test]
@@ -8595,12 +8600,7 @@ mod jump_to_workspace_tests {
         let mut m = build_model();
         let (_a, bk) = seed_two(&mut m);
         m.mount_jump_picker();
-        let idx = m
-            .jump_choices
-            .iter()
-            .position(|k| *k == bk)
-            .expect("seeded workspace is a jump target");
-        m.handle_choice_picked(vec![idx]);
+        m.handle_choice_picked(vec![ChoicePayload::Session(bk.clone())]);
         assert!(m.top_modal().is_none(), "modal popped after the pick");
         assert_eq!(m.sidebar.selected_workspace_key(), Some(&bk));
     }
@@ -8612,7 +8612,6 @@ mod jump_to_workspace_tests {
         let mut m = build_model();
         m.mount_jump_picker();
         assert!(m.top_modal().is_none());
-        assert!(m.jump_choices.is_empty());
     }
 }
 
@@ -11787,7 +11786,6 @@ mod repo_labels_failure_tests {
             Some(&Id::ManageLabels),
             "the documented fallback: picker over the task's own labels"
         );
-        assert_eq!(m.labels_choices, vec!["bug".to_string(), "p1".to_string()]);
     }
 
     #[test]
@@ -12710,7 +12708,7 @@ mod settings_window_tests {
             .iter()
             .position(|a| matches!(a, SettingsAction::EditTheme { .. }))
             .expect("theme row present");
-        let _ = m.handle_choice_picked(vec![theme_idx]);
+        let _ = m.handle_choice_picked(vec![ChoicePayload::Index(theme_idx)]);
         assert_eq!(
             m.modal_stack.last(),
             Some(&Id::ThemePicker),
@@ -13196,10 +13194,12 @@ mod optimistic_mutation_tests {
         let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#3");
         let sk: SessionKey = (&ws_key).into();
         m.pending_review_request = Some(ws_key.clone());
-        m.review_choices = vec!["alice".into(), "bob".into()];
         m.modal_stack.push(Id::RequestReviewers);
 
-        let cmds = m.handle_choice_picked(vec![0, 1]);
+        let cmds = m.handle_choice_picked(vec![
+            ChoicePayload::Text("alice".into()),
+            ChoicePayload::Text("bob".into()),
+        ]);
         assert!(matches!(
             cmds.as_slice(),
             [IpcCommand::RequestReviewers { .. }]
@@ -13227,9 +13227,8 @@ mod optimistic_mutation_tests {
         let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#4");
         let sk: SessionKey = (&ws_key).into();
         m.pending_review_request = Some(ws_key.clone());
-        m.review_choices = vec!["alice".into()];
         m.modal_stack.push(Id::RequestReviewers);
-        m.handle_choice_picked(vec![0]);
+        m.handle_choice_picked(vec![ChoicePayload::Text("alice".into())]);
         assert_eq!(reviewers_of(&m, &sk), vec!["alice".to_string()]);
 
         m.handle_daemon_event(provider_error(
@@ -13256,9 +13255,11 @@ mod optimistic_mutation_tests {
         let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#5");
         let sk: SessionKey = (&ws_key).into();
         m.pending_labels_request = Some(ws_key.clone());
-        m.labels_choices = vec!["bug".into(), "urgent".into()];
         m.modal_stack.push(Id::ManageLabels);
-        m.handle_choice_picked(vec![0, 1]);
+        m.handle_choice_picked(vec![
+            ChoicePayload::Text("bug".into()),
+            ChoicePayload::Text("urgent".into()),
+        ]);
         let names: Vec<String> = m
             .sidebar
             .workspace_by_key(&sk)
@@ -13293,9 +13294,8 @@ mod optimistic_mutation_tests {
         let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#6");
         let sk: SessionKey = (&ws_key).into();
         m.pending_assignees_request = Some(ws_key.clone());
-        m.assignees_choices = vec!["alice".into(), "bob".into()];
         m.modal_stack.push(Id::AddAssignees);
-        m.handle_choice_picked(vec![0]);
+        m.handle_choice_picked(vec![ChoicePayload::Text("alice".into())]);
         assert_eq!(
             m.sidebar
                 .workspace_by_key(&sk)

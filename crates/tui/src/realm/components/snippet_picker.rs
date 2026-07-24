@@ -14,10 +14,12 @@
 //! total/visible count.
 //!
 //! Modal returns:
-//! - `Msg::ChoicePicked(vec![idx])` — index into the picker's
-//!   row vec (NOT into the visible-after-filter subset). The
-//!   model snapshots the same row keys in `snippet_choices`, so
-//!   the handler resolves idx → key with a single index.
+//! - `Msg::ChoicePicked(vec![ChoicePayload::Text(key)])` — the chosen
+//!   snippet's key, read straight off the highlighted row. The key
+//!   travels with the row, so a filtered / re-grouped display can't
+//!   resolve to the wrong snippet and there's no model-side stash
+//!   (issue #512). An empty pick (`Ctrl-F`, free-text) is
+//!   `ChoicePicked(vec![])`.
 //! - `Msg::ModalDismissed` — Esc or Ctrl-C.
 //!
 //! Entry + fast path (#252): the terminal `]]` leader opens this
@@ -34,6 +36,7 @@
 //! one is `]]s` + `Enter`. Any filter text steps the group aside.
 
 use crate::components::comment_render::wrap_one;
+use crate::realm::ChoicePayload;
 use crate::realm::Msg;
 use crate::realm::UserEvent;
 use crate::theme::Theme;
@@ -407,7 +410,8 @@ impl SnippetPicker {
             Key::Enter => {
                 let c = self.cursor?;
                 let row_idx = *self.visible_indices.get(c)?;
-                Some(Msg::ChoicePicked(vec![row_idx]))
+                let key = self.rows.get(row_idx)?.key.clone();
+                Some(Msg::ChoicePicked(vec![ChoicePayload::Text(key)]))
             }
             // "No snippet — free text only": an empty pick the
             // broadcast handler reads as "skip straight to compose".
@@ -421,7 +425,8 @@ impl SnippetPicker {
                 self.filter.push(c);
                 self.refilter();
                 self.auto_submit_index()
-                    .map(|idx| Msg::ChoicePicked(vec![idx]))
+                    .and_then(|idx| self.rows.get(idx))
+                    .map(|row| Msg::ChoicePicked(vec![ChoicePayload::Text(row.key.clone())]))
             }
             _ => None,
         }
@@ -839,7 +844,9 @@ mod tests {
         assert!(picker.on_key(&ke('r')).is_none());
         assert!(picker.on_key(&ke('e')).is_none());
         match picker.on_key(&ke('v')) {
-            Some(Msg::ChoicePicked(v)) => assert_eq!(picker.rows[v[0]].key, "rev"),
+            Some(Msg::ChoicePicked(v)) => {
+                assert_eq!(v, vec![ChoicePayload::Text("rev".into())])
+            }
             other => panic!("expected `]]rev` to auto-submit, got {other:?}"),
         }
     }
@@ -909,8 +916,7 @@ mod tests {
         let out = picker.on_key(&ke('v'));
         match out {
             Some(Msg::ChoicePicked(v)) => {
-                assert_eq!(v.len(), 1);
-                assert_eq!(picker.rows[v[0]].key, "rev");
+                assert_eq!(v, vec![ChoicePayload::Text("rev".into())]);
             }
             other => panic!("expected ChoicePicked, got {other:?}"),
         }
@@ -949,7 +955,9 @@ mod tests {
         // but only `rev`'s key prefixes "rev", so it auto-submits.
         let out = picker.on_key(&ke('v'));
         match out {
-            Some(Msg::ChoicePicked(v)) => assert_eq!(picker.rows[v[0]].key, "rev"),
+            Some(Msg::ChoicePicked(v)) => {
+                assert_eq!(v, vec![ChoicePayload::Text("rev".into())])
+            }
             other => panic!("expected ChoicePicked, got {other:?}"),
         }
     }
@@ -981,7 +989,9 @@ mod tests {
                 .any(|&i| picker.rows[i].key == "rev")
         );
         match picker.on_key(&ke('v')) {
-            Some(Msg::ChoicePicked(v)) => assert_eq!(picker.rows[v[0]].key, "rev"),
+            Some(Msg::ChoicePicked(v)) => {
+                assert_eq!(v, vec![ChoicePayload::Text("rev".into())])
+            }
             other => panic!("expected ChoicePicked, got {other:?}"),
         }
     }
@@ -1016,7 +1026,9 @@ mod tests {
         assert_eq!(picker.visible_indices.len(), 2);
         let _ = picker.on_key(&key(Key::Down));
         match picker.on_key(&key(Key::Enter)) {
-            Some(Msg::ChoicePicked(v)) => assert_eq!(picker.rows[v[0]].key, "pr"),
+            Some(Msg::ChoicePicked(v)) => {
+                assert_eq!(v, vec![ChoicePayload::Text("pr".into())])
+            }
             other => panic!("expected ChoicePicked, got {other:?}"),
         }
     }
@@ -1079,7 +1091,9 @@ mod tests {
         assert!(picker.on_key(&ke('r')).is_none());
         assert!(picker.on_key(&ke('e')).is_none());
         match picker.on_key(&ke('v')) {
-            Some(Msg::ChoicePicked(v)) => assert_eq!(picker.rows[v[0]].key, "rev"),
+            Some(Msg::ChoicePicked(v)) => {
+                assert_eq!(v, vec![ChoicePayload::Text("rev".into())])
+            }
             other => panic!("expected exact-case auto-submit of `rev`, got {other:?}"),
         }
         // Uppercase `Rev` typed → the uppercase key submits.
@@ -1088,7 +1102,9 @@ mod tests {
             assert!(picker.on_key(&ke(c)).is_none());
         }
         match picker.on_key(&ke('v')) {
-            Some(Msg::ChoicePicked(v)) => assert_eq!(picker.rows[v[0]].key, "Rev"),
+            Some(Msg::ChoicePicked(v)) => {
+                assert_eq!(v, vec![ChoicePayload::Text("Rev".into())])
+            }
             other => panic!("expected exact-case auto-submit of `Rev`, got {other:?}"),
         }
     }
@@ -1099,7 +1115,7 @@ mod tests {
         for c in ['R', 'E', 'V'] {
             let out = picker.on_key(&ke(c));
             if let Some(Msg::ChoicePicked(v)) = out {
-                assert_eq!(picker.rows[v[0]].key, "rev");
+                assert_eq!(v, vec![ChoicePayload::Text("rev".into())]);
                 return;
             }
         }
@@ -1183,7 +1199,9 @@ mod tests {
         let mut picker =
             SnippetPicker::new(make_rows(), String::new()).with_recent(vec!["rev".into()]);
         match picker.on_key(&key(Key::Enter)) {
-            Some(Msg::ChoicePicked(v)) => assert_eq!(picker.rows[v[0]].key, "rev"),
+            Some(Msg::ChoicePicked(v)) => {
+                assert_eq!(v, vec![ChoicePayload::Text("rev".into())])
+            }
             other => panic!("expected most-recent submit, got {other:?}"),
         }
     }

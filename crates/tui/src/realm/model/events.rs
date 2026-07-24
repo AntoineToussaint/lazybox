@@ -44,6 +44,20 @@ impl<T: TerminalAdapter> Model<T> {
         self.flash_hint(msg);
     }
 
+    /// The single owned mutator for `focus`. Assigns the focused pane AND
+    /// fans the change out to the panes' `focused` flags (via
+    /// `set_focus_attr`), so the derived per-pane flag — and the
+    /// typed-since-focus reset — can never drift from `self.focus`. Every
+    /// focus change routes through here; the old "assigned `self.focus` but
+    /// forgot `set_focus_attr()`" footgun (a pane highlighting focus while
+    /// keys route elsewhere) is now unrepresentable. `set_focus_attr` stays
+    /// callable on its own for the rare re-fan with no focus change (initial
+    /// mount, a pane-visibility toggle).
+    pub(super) fn set_focus(&mut self, focus: PaneFocus) {
+        self.focus = focus;
+        self.set_focus_attr();
+    }
+
     pub(super) fn set_focus_attr(&mut self) {
         self.sidebar.set_focused(self.focus == PaneFocus::Sidebar);
         self.right.set_focused(self.focus == PaneFocus::Right);
@@ -1273,8 +1287,7 @@ impl<T: TerminalAdapter> Model<T> {
                 .iter()
                 .any(|id| *id != Id::WorktreeProgress);
             if requested_here && !interactive_modal_up && !self.sidebar.search_editing() {
-                self.focus = PaneFocus::Terminals;
-                self.set_focus_attr();
+                self.set_focus(PaneFocus::Terminals);
             }
             // Clear any legacy "Spawning…" footer notice that was set
             // when the matching Spawn command was sent. The animated
@@ -1332,8 +1345,7 @@ impl<T: TerminalAdapter> Model<T> {
         {
             self.focus_mode = false;
             if self.focus == PaneFocus::Terminals {
-                self.focus = PaneFocus::Sidebar;
-                self.set_focus_attr();
+                self.set_focus(PaneFocus::Sidebar);
             }
             self.flash_hint("terminal exited — left focus mode");
         }
@@ -1700,8 +1712,7 @@ impl<T: TerminalAdapter> Model<T> {
             PaneFocus::Sidebar => true,
         };
         if available && self.focus != remembered {
-            self.focus = remembered;
-            self.set_focus_attr();
+            self.set_focus(remembered);
             self.redraw = true;
         }
     }
@@ -1719,8 +1730,7 @@ impl<T: TerminalAdapter> Model<T> {
             PaneFocus::Sidebar
         };
         if self.focus != target {
-            self.focus = target;
-            self.set_focus_attr();
+            self.set_focus(target);
             self.redraw = true;
         }
     }
@@ -1805,8 +1815,7 @@ impl<T: TerminalAdapter> Model<T> {
         {
             let _ = self.sidebar.focus_session_id(lazybox_core::SessionId(uuid));
             // Move focus to terminals so the user can type immediately.
-            self.focus = PaneFocus::Terminals;
-            self.set_focus_attr();
+            self.set_focus(PaneFocus::Terminals);
         }
     }
 }

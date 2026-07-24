@@ -7,14 +7,17 @@
 //! cursor on the chosen workspace via `focus_workspace_key`.
 //!
 //! Modal returns:
-//! - `Msg::ChoicePicked(vec![idx])` — index into the picker's row
-//!   vec; the model holds the parallel `jump_choices` session keys.
+//! - `Msg::ChoicePicked(vec![ChoicePayload::Session(key)])` — the
+//!   chosen workspace's session key, carried on the row itself so a
+//!   filtered/re-ordered display can't resolve to the wrong workspace
+//!   (issue #512). No parallel model-side stash.
 //! - `Msg::ModalDismissed` — Esc or Ctrl-C.
 //!
 //! Unlike the snippet picker this never auto-submits: a workspace
 //! label rarely equals the filter exactly, and a stray auto-jump
 //! mid-type would be jarring. The user always confirms with Enter.
 
+use crate::realm::ChoicePayload;
 use crate::realm::Msg;
 use crate::realm::UserEvent;
 use tuirealm::command::{Cmd, CmdResult};
@@ -44,9 +47,13 @@ fn subsequence_icase(haystack: &str, needle: &str) -> bool {
 }
 
 pub struct JumpPicker {
-    /// Display labels, in the order the model stashed the parallel
-    /// session keys. A picked index maps straight back to a key.
+    /// Display labels, index-aligned with [`Self::keys`]. A picked row
+    /// maps straight to its key — the two Vecs are built together and
+    /// never re-ordered, so the filtered display can't desync them.
     labels: Vec<String>,
+    /// Session key for each label (same length / order). Reported as
+    /// the pick's [`ChoicePayload::Session`].
+    keys: Vec<lazybox_core::SessionKey>,
     /// Current filter string.
     filter: String,
     /// Cursor index into `visible_indices`. `None` when empty.
@@ -56,9 +63,14 @@ pub struct JumpPicker {
 }
 
 impl JumpPicker {
-    pub fn new(labels: Vec<String>) -> Self {
+    /// `rows` pairs each display label with the workspace session key
+    /// it jumps to. The pairing travels through the picker so Enter
+    /// always resolves to the key of the row the user highlighted.
+    pub fn new(rows: Vec<(String, lazybox_core::SessionKey)>) -> Self {
+        let (labels, keys): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
         let mut picker = Self {
             labels,
+            keys,
             filter: String::new(),
             cursor: None,
             visible_indices: Vec::new(),
@@ -118,7 +130,8 @@ impl JumpPicker {
             Key::Enter => {
                 let c = self.cursor?;
                 let row_idx = *self.visible_indices.get(c)?;
-                Some(Msg::ChoicePicked(vec![row_idx]))
+                let key = self.keys.get(row_idx)?.clone();
+                Some(Msg::ChoicePicked(vec![ChoicePayload::Session(key)]))
             }
             Key::Backspace => {
                 self.filter.pop();
@@ -276,12 +289,15 @@ mod tests {
     fn key(code: Key) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
-    fn labels() -> Vec<String> {
+    fn labels() -> Vec<(String, lazybox_core::SessionKey)> {
         vec![
-            "owner/repo#10  Fix the parser".to_string(),
-            "owner/repo#22  Add jump picker".to_string(),
-            "other/proj#3  Cleanup".to_string(),
+            ("owner/repo#10  Fix the parser".to_string(), key_at(0)),
+            ("owner/repo#22  Add jump picker".to_string(), key_at(1)),
+            ("other/proj#3  Cleanup".to_string(), key_at(2)),
         ]
+    }
+    fn key_at(i: usize) -> lazybox_core::SessionKey {
+        lazybox_core::SessionKey::new(format!("ws-{i}"))
     }
 
     #[test]
@@ -332,7 +348,10 @@ mod tests {
         let mut p = JumpPicker::new(labels());
         let _ = p.on_key(&key(Key::Down));
         match p.on_key(&key(Key::Enter)) {
-            Some(Msg::ChoicePicked(v)) => assert_eq!(v, vec![1]),
+            // Cursor on row 1 → that row's session key, not its index.
+            Some(Msg::ChoicePicked(v)) => {
+                assert_eq!(v, vec![ChoicePayload::Session(key_at(1))]);
+            }
             other => panic!("expected ChoicePicked, got {other:?}"),
         }
     }
@@ -359,6 +378,26 @@ mod tests {
         let mut p = JumpPicker::new(labels());
         let ev = KeyEvent::new(Key::Char('c'), KeyModifiers::CONTROL);
         assert!(matches!(p.on_key(&ev), Some(Msg::ModalDismissed)));
+    }
+
+    #[test]
+    fn filtered_display_resolves_to_the_right_key_not_the_visible_row() {
+        // Regression for #512: filtering collapses the visible list to
+        // a single row at *visible* position 0, but that row's real
+        // identity is item index 1. The pick must carry row 1's session
+        // key — a positional resolver would have grabbed key_at(0).
+        let mut p = JumpPicker::new(labels());
+        for c in ['j', 'p', 'k'] {
+            let _ = p.on_key(&ke(c));
+        }
+        assert_eq!(p.visible_indices, vec![1], "only the jump-picker row");
+        assert_eq!(p.cursor, Some(0), "cursor sits at visible position 0");
+        match p.on_key(&key(Key::Enter)) {
+            Some(Msg::ChoicePicked(v)) => {
+                assert_eq!(v, vec![ChoicePayload::Session(key_at(1))]);
+            }
+            other => panic!("expected ChoicePicked, got {other:?}"),
+        }
     }
 
     #[test]

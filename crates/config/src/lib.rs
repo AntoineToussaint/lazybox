@@ -243,6 +243,98 @@ where
     })
 }
 
+/// Which button a Confirm modal highlights for `Enter` — resolved from
+/// *how the modal was invoked*, not from its prompt text (issue #525).
+/// `Yes` fires the action on a bare `Enter`; `No` backs out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConfirmDefault {
+    Yes,
+    No,
+}
+
+impl ConfirmDefault {
+    /// Whether `Enter` fires the action (highlights `[Y]es`).
+    pub fn is_yes(self) -> bool {
+        matches!(self, ConfirmDefault::Yes)
+    }
+}
+
+/// Per-invocation-source defaults for destructive Confirm modals (issue
+/// #525). Which button `Enter` highlights depends on *who* raised the
+/// prompt, not on its copy:
+///
+/// - `destructive_shortcut` — the user pressed a destructive chord
+///   (`x x` archive, `g m` merge, …). The chord *is* the intent, so
+///   `Enter` confirms. Defaults to `yes`.
+/// - `event` — a provider event popped the prompt unsolicited (a
+///   merged-PR "remove this workspace?"). The user didn't initiate it,
+///   so a stray `Enter` must not destroy anything. Defaults to `no`.
+///
+/// A cautious user can set `destructive_shortcut: no` to require an
+/// explicit arrow-then-Enter even on chord-initiated prompts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ConfirmDefaults {
+    #[serde(deserialize_with = "de_lenient_confirm_default_shortcut")]
+    pub destructive_shortcut: ConfirmDefault,
+    #[serde(deserialize_with = "de_lenient_confirm_default_event")]
+    pub event: ConfirmDefault,
+}
+
+impl Default for ConfirmDefaults {
+    fn default() -> Self {
+        Self {
+            destructive_shortcut: ConfirmDefault::Yes,
+            event: ConfirmDefault::No,
+        }
+    }
+}
+
+/// Parse a `yes`/`no` confirm-default scalar, case-insensitive. `None`
+/// for anything else so the caller warns and keeps its safe per-source
+/// fallback.
+fn parse_confirm_default(raw: &str) -> Option<ConfirmDefault> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "yes" => Some(ConfirmDefault::Yes),
+        "no" => Some(ConfirmDefault::No),
+        _ => None,
+    }
+}
+
+/// Lenient field deserializer for `ui.confirm_default.destructive_shortcut`:
+/// an unrecognized value warns and falls back to `yes` rather than
+/// failing the whole config load — same policy as
+/// [`de_lenient_activity_pane_mode`].
+fn de_lenient_confirm_default_shortcut<'de, D>(de: D) -> Result<ConfirmDefault, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(de)?;
+    Ok(parse_confirm_default(&raw).unwrap_or_else(|| {
+        tracing::warn!(
+            "unknown ui.confirm_default.destructive_shortcut {raw:?}; expected `yes` or `no`, using `yes`"
+        );
+        ConfirmDefault::Yes
+    }))
+}
+
+/// Lenient field deserializer for `ui.confirm_default.event`: unknown
+/// values warn and fall back to `no` — the safe default for an
+/// unsolicited prompt.
+fn de_lenient_confirm_default_event<'de, D>(de: D) -> Result<ConfirmDefault, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(de)?;
+    Ok(parse_confirm_default(&raw).unwrap_or_else(|| {
+        tracing::warn!(
+            "unknown ui.confirm_default.event {raw:?}; expected `yes` or `no`, using `no`"
+        );
+        ConfirmDefault::No
+    }))
+}
+
 /// `ui:` block — user-facing view state lazybox writes back so UI
 /// preferences survive restart.
 ///
@@ -359,6 +451,12 @@ pub struct UiSection {
     /// workspace with nothing to show still auto-hides regardless.
     #[serde(default, deserialize_with = "de_lenient_activity_pane_mode")]
     pub activity_pane_default: ActivityPaneMode,
+    /// Default Confirm-modal button per invocation source (issue #525):
+    /// a destructive chord (`destructive_shortcut`) defaults `Enter` to
+    /// `yes`; an unsolicited provider prompt (`event`, e.g. merged-PR
+    /// removal) defaults to `no`. See [`ConfirmDefaults`].
+    #[serde(default)]
+    pub confirm_default: ConfirmDefaults,
     /// Keep the machine awake while any agent is actively working.
     /// When `true`, the daemon holds an OS sleep inhibitor
     /// (`caffeinate` on macOS, `systemd-inhibit` on Linux — a
@@ -403,6 +501,7 @@ impl Default for UiSection {
             tips_seen: Vec::new(),
             terminal_new_layout: NewTerminalLayout::default(),
             activity_pane_default: ActivityPaneMode::default(),
+            confirm_default: ConfirmDefaults::default(),
             keep_awake: false,
         }
     }
@@ -438,6 +537,9 @@ pub struct UiDefaults {
     /// Initial Activity-pane mode for an un-toggled workspace. See
     /// [`UiSection::activity_pane_default`].
     pub activity_pane_default: ActivityPaneMode,
+    /// Per-source Confirm-modal defaults. See
+    /// [`UiSection::confirm_default`].
+    pub confirm_default: ConfirmDefaults,
     /// Hold an OS sleep inhibitor while agents work. See
     /// [`UiSection::keep_awake`].
     pub keep_awake: bool,
@@ -459,6 +561,7 @@ impl Default for UiDefaults {
             agent_dead_on_arrival: Duration::from_millis(10_000),
             terminal_new_layout: NewTerminalLayout::default(),
             activity_pane_default: ActivityPaneMode::default(),
+            confirm_default: ConfirmDefaults::default(),
             keep_awake: false,
         }
     }
@@ -493,6 +596,7 @@ impl UiSection {
             agent_dead_on_arrival: d.agent_dead_on_arrival,
             terminal_new_layout: self.terminal_new_layout,
             activity_pane_default: self.activity_pane_default,
+            confirm_default: self.confirm_default,
             keep_awake: self.keep_awake,
         }
     }
@@ -1555,6 +1659,69 @@ repos:
             cfg.ui.resolved().activity_pane_default,
             ActivityPaneMode::Full,
             "unknown value falls back to the default"
+        );
+    }
+
+    /// `ui.confirm_default` defaults per invocation source (issue
+    /// #525): shortcut → `yes`, event → `no`. An absent block resolves
+    /// to those safe defaults.
+    #[test]
+    fn confirm_default_defaults_per_source() {
+        let cfg: Config = serde_yaml::from_str("{}").expect("parse");
+        let cd = cfg.ui.resolved().confirm_default;
+        assert_eq!(cd.destructive_shortcut, ConfirmDefault::Yes);
+        assert_eq!(cd.event, ConfirmDefault::No);
+    }
+
+    /// Each source parses independently, case-insensitively, and
+    /// round-trips through serialization.
+    #[test]
+    fn confirm_default_parses_and_round_trips() {
+        let cfg: Config = serde_yaml::from_str(
+            "ui:\n  confirm_default:\n    destructive_shortcut: no\n    event: yes\n",
+        )
+        .expect("parse");
+        let cd = cfg.ui.resolved().confirm_default;
+        assert_eq!(cd.destructive_shortcut, ConfirmDefault::No);
+        assert_eq!(cd.event, ConfirmDefault::Yes);
+
+        let written = serde_yaml::to_string(&cfg).expect("serialize");
+        let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
+        let cd = reparsed.ui.resolved().confirm_default;
+        assert_eq!(cd.destructive_shortcut, ConfirmDefault::No);
+        assert_eq!(cd.event, ConfirmDefault::Yes, "survives round-trip");
+    }
+
+    /// A partial block overrides only the named source; the other keeps
+    /// its per-source default.
+    #[test]
+    fn confirm_default_partial_block_keeps_other_default() {
+        let cfg: Config =
+            serde_yaml::from_str("ui:\n  confirm_default:\n    destructive_shortcut: no\n")
+                .expect("parse");
+        let cd = cfg.ui.resolved().confirm_default;
+        assert_eq!(cd.destructive_shortcut, ConfirmDefault::No);
+        assert_eq!(cd.event, ConfirmDefault::No, "event keeps its default");
+    }
+
+    /// A typo'd confirm-default value warns and falls back to that
+    /// source's safe default rather than sinking the whole config load.
+    #[test]
+    fn confirm_default_tolerates_a_bad_value() {
+        let cfg: Config = serde_yaml::from_str(
+            "ui:\n  confirm_default:\n    destructive_shortcut: maybe\n    event: perhaps\n",
+        )
+        .expect("a bad confirm-default value must not fail the whole parse");
+        let cd = cfg.ui.resolved().confirm_default;
+        assert_eq!(
+            cd.destructive_shortcut,
+            ConfirmDefault::Yes,
+            "unknown shortcut value falls back to yes"
+        );
+        assert_eq!(
+            cd.event,
+            ConfirmDefault::No,
+            "unknown event value falls back to no"
         );
     }
 

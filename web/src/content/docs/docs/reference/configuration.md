@@ -135,6 +135,9 @@ ui:
   theme: Lazybox Dark        # written back by the `t` theme picker
   terminal_new_layout: split # ordinary new terminals: split | tabs (`]]t` toggles)
   activity_pane_default: full # right pane start mode: full | summary | hidden (`Shift-P` cycles)
+  confirm_default:           # which Confirm button Enter highlights, by source
+    destructive_shortcut: yes # a destructive chord (x x, g m, …): the chord is the intent
+    event: no                # an unsolicited prompt (merged-PR removal): don't destroy on a stray Enter
   # Remap any catalog action. Keys are snake_case action ids; values are
   # key-spec strings. Unset actions keep their default binding.
   action_keys:
@@ -387,6 +390,8 @@ default keymap.
 | `show_tips` | bool | `true` | Show progressive feature-discovery tips (opt-out) |
 | `terminal_new_layout` | `split` \| `tabs` | `split` | How an ordinary second terminal opens. Explicit `]]\|` / `]]-` splits are unaffected; `]]t` toggles and persists this value. |
 | `activity_pane_default` | `full` \| `summary` \| `hidden` | `full` | Where the right (activity) pane starts for a workspace you haven't toggled. `summary` shows a one-line count of new activity / failing CI; `hidden` folds it away. `Shift-P` cycles the three per workspace; a workspace with nothing to show still auto-hides. |
+| `confirm_default.destructive_shortcut` | `yes` \| `no` | `yes` | Which button `Enter` highlights on a Confirm modal raised by a destructive chord (`x x` archive, `g m` merge, …). The chord is the intent, so `Enter` confirms; set `no` to require an explicit arrow-then-Enter. |
+| `confirm_default.event` | `yes` \| `no` | `no` | Which button `Enter` highlights on a Confirm modal raised unsolicited by a provider event (a merged-PR "remove this workspace?"). Defaults to `no` so a stray `Enter` can't destroy a workspace you didn't ask about. |
 
 Duration values take a unit suffix (`30s`, `15m`, `4h`, `365d`).
 

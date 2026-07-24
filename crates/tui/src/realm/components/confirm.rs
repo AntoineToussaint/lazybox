@@ -273,6 +273,48 @@ mod tests {
         })
     }
 
+    /// Render the two buttons and report which carries the BOLD
+    /// highlight — the theme-independent "this is what Enter fires"
+    /// signal (colors come from the mutable active-theme global, so
+    /// they're left out to keep the snapshot deterministic).
+    fn highlight_snapshot(confirm: &mut Confirm) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|f| confirm.view(f, f.area())).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let describe = |label: &str, r: Rect| {
+            let text: String = (r.x..r.x + r.width)
+                .map(|x| buf[(x, r.y)].symbol())
+                .collect();
+            let bold = buf[(r.x, r.y)].modifier.contains(Modifier::BOLD);
+            format!("{label}: {text}  bold={bold}")
+        };
+        let yes = confirm.yes_rect.expect("yes rect recorded on view");
+        let no = confirm.no_rect.expect("no rect recorded on view");
+        format!("{}\n{}", describe("YES", yes), describe("NO ", no))
+    }
+
+    /// Issue #525: a shortcut-initiated (default-yes) confirm highlights
+    /// the Yes button, so Enter completes the action.
+    #[test]
+    fn highlighted_button_snapshot_default_yes() {
+        let mut c = Confirm::new("Archive the focused workspace?").default_yes();
+        insta::assert_snapshot!(highlight_snapshot(&mut c), @r"
+        YES: [Y]es  bold=true
+        NO : [N]o  bold=false
+        ");
+    }
+
+    /// Issue #525: an event-initiated (default-no) confirm highlights the
+    /// No button, so a stray Enter backs out.
+    #[test]
+    fn highlighted_button_snapshot_default_no() {
+        let mut c = Confirm::new("o/r#1 was merged — remove workspace?").default_no();
+        insta::assert_snapshot!(highlight_snapshot(&mut c), @r"
+        YES: [Y]es  bold=false
+        NO : [N]o  bold=true
+        ");
+    }
+
     #[test]
     fn builders_set_the_initial_default() {
         // Issue #312: the three builder forms fix which button Enter

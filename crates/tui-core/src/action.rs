@@ -1531,18 +1531,16 @@ impl ActionDef {
     pub fn guard(&self) -> Guard {
         match self.kind {
             ActionKind::Quit => Guard::DoublePress,
-            // Kills live sessions and drops the row — no undo. Enter backs out.
+            // Kills live sessions and drops the row — no undo.
             ActionKind::Archive => Guard::Confirm {
                 prompt: "Archive the focused workspace? Active sessions \
                  are killed and the row drops from the inbox.",
-                default_yes: false,
             },
-            // Mutates the upstream issue (reopen on GitHub to undo). Enter backs out.
+            // Mutates the upstream issue (reopen on GitHub to undo).
             ActionKind::CloseIssue => Guard::Confirm {
                 prompt: "Close this issue upstream (as not planned)? It drops \
                  out of the inbox once the close lands. Reopen on \
                  GitHub to undo.",
-                default_yes: false,
             },
             // Mutates (or destroys) the upstream item. The static copy
             // covers both resolutions; the dispatcher overrides with a
@@ -1552,30 +1550,25 @@ impl ActionDef {
                  Deleting an issue is permanent; without admin rights it \
                  is closed as not-planned instead. A PR is closed without \
                  merging.",
-                default_yes: false,
             },
-            // Explicitly invoked, but merging mutates the mainline branch
-            // immediately and is hard to undo — a reflexive Enter shouldn't merge.
+            // Explicitly invoked; merging mutates the mainline branch
+            // immediately and is hard to undo.
             ActionKind::MergePr => Guard::Confirm {
                 prompt: "Merge the focused PR? Mainline branch updates \
                  immediately and the PR closes.",
-                default_yes: false,
             },
-            // Hides the workspace for a year. Reversible, but a mis-hit shouldn't
-            // make a row vanish — Enter backs out.
+            // Hides the workspace for a year. Reversible, but a mis-hit
+            // shouldn't make a row vanish.
             ActionKind::LongSnooze => Guard::Confirm {
                 prompt: "Long-snooze this workspace (~1 year)? It drops from \
                  the inbox until then — effectively hidden.",
-                default_yes: false,
             },
-            // The `b`-variant chords are a deliberate, distinct request to work
-            // on main; the confirm is only an awareness gate and opening the
-            // terminal destroys nothing, so Enter affirms the explicit intent.
+            // The `b`-variant chords are a deliberate, distinct request to
+            // work on main; the confirm is only an awareness gate.
             ActionKind::SpawnAgentOnMain | ActionKind::SpawnShellOnMain => Guard::Confirm {
                 prompt: "Start this session on the shared main checkout instead of \
                  an isolated worktree? Edits and commits land on the shared \
                  branch directly, not a throwaway tree.",
-                default_yes: true,
             },
             _ => Guard::None,
         }
@@ -1594,21 +1587,23 @@ impl ActionDef {
     /// confirm path.
     pub fn confirm_prompt(&self) -> Option<&'static str> {
         match self.guard() {
-            Guard::Confirm { prompt, .. } => Some(prompt),
+            Guard::Confirm { prompt } => Some(prompt),
             _ => None,
         }
     }
 
-    /// Which button the Confirm modal defaults Enter to for a
-    /// `Confirm`-guarded action; `None` for non-confirmed actions. The
-    /// value is declared per action next to its prompt in [`Self::guard`]
-    /// so each destructive action owns its default instead of inheriting
-    /// a blanket No at the mount site.
-    pub fn confirm_default_yes(&self) -> Option<bool> {
-        match self.guard() {
-            Guard::Confirm { default_yes, .. } => Some(default_yes),
-            _ => None,
-        }
+    /// Whether a `Confirm`-guarded action is a *benign awareness gate*
+    /// rather than a destructive action. The on-main spawns
+    /// (`b`-variant chords) are explicitly requested and destroy nothing
+    /// at confirm time — the modal only warns that edits land on the
+    /// shared checkout — so `Enter` should affirm the intent no matter
+    /// how `ui.confirm_default.destructive_shortcut` is set. Genuinely
+    /// destructive actions return `false` and follow that knob (#525).
+    pub fn confirm_is_benign_gate(&self) -> bool {
+        matches!(
+            self.kind,
+            ActionKind::SpawnAgentOnMain | ActionKind::SpawnShellOnMain
+        )
     }
 
     /// Resolve the effective chords (alternatives): a user override
@@ -1769,15 +1764,11 @@ pub enum Guard {
     None,
     /// Needs a timed two-press of the chord (e.g. quit's `q q`).
     DoublePress,
-    /// Mounts a Confirm modal before firing. `prompt` is the body copy;
-    /// `default_yes` picks which button Enter selects — `false` for a
-    /// destructive / hard-to-undo action (a reflexive Enter backs out),
-    /// `true` when the confirm is only an awareness gate in front of an
-    /// explicitly-requested, benign-at-confirm-time action.
-    Confirm {
-        prompt: &'static str,
-        default_yes: bool,
-    },
+    /// Mounts a Confirm modal before firing. `prompt` is the body copy.
+    /// Which button `Enter` highlights is *not* declared here — it's
+    /// resolved at the mount site from how the modal was invoked
+    /// (shortcut vs event) and `ui.confirm_default` (issue #525).
+    Confirm { prompt: &'static str },
 }
 
 /// A resolved catalog row: a static action plus any runtime
@@ -2547,32 +2538,27 @@ mod tests {
     }
 
     #[test]
-    fn confirm_defaults_match_intent() {
-        // Issue #312: each destructive catalog action declares its own
-        // Enter default next to its prompt. Destructive / hard-to-undo
-        // actions default No (a reflexive Enter backs out); the on-main
-        // awareness gates default Yes (explicitly-requested, benign at
-        // confirm time). This locks the per-action choice so a future
-        // edit can't silently regress it back to a blanket No.
-        let expect = |kind: ActionKind, yes: bool| {
-            assert_eq!(
-                ActionDef::for_kind(kind).confirm_default_yes(),
-                Some(yes),
-                "{kind:?} default"
+    fn only_on_main_spawns_are_benign_confirm_gates() {
+        // Issue #525: the confirm default is source-driven, but the
+        // benign on-main awareness gates are exempt from the destructive
+        // knob — they always affirm. Every other confirmed action is
+        // destructive and follows `ui.confirm_default`.
+        for def in ActionDef::all() {
+            let expected = matches!(
+                def.kind,
+                ActionKind::SpawnAgentOnMain | ActionKind::SpawnShellOnMain
             );
-        };
-        expect(ActionKind::Archive, false);
-        expect(ActionKind::CloseIssue, false);
-        expect(ActionKind::MergePr, false);
-        expect(ActionKind::LongSnooze, false);
-        expect(ActionKind::SpawnAgentOnMain, true);
-        expect(ActionKind::SpawnShellOnMain, true);
-
-        // Non-confirmed actions carry no default.
-        assert_eq!(
-            ActionDef::for_kind(ActionKind::Work).confirm_default_yes(),
-            None
-        );
+            assert_eq!(
+                def.confirm_is_benign_gate(),
+                expected,
+                "{:?} benign-gate flag",
+                def.kind,
+            );
+        }
+        // Sanity: the on-main gates really are Confirm-guarded.
+        assert!(ActionDef::for_kind(ActionKind::SpawnAgentOnMain).is_destructive());
+        assert!(ActionDef::for_kind(ActionKind::Archive).is_destructive());
+        assert!(!ActionDef::for_kind(ActionKind::Archive).confirm_is_benign_gate());
     }
 
     #[test]
@@ -3066,7 +3052,6 @@ mod tests {
         assert_eq!(def.section, Section::Workspace);
         assert!(def.is_destructive(), "delete must route through Confirm");
         assert!(def.confirm_prompt().is_some());
-        assert_eq!(def.confirm_default_yes(), Some(false));
         assert_eq!(
             leader_group_label(ActionKind::DeleteOrClose),
             Some("github")

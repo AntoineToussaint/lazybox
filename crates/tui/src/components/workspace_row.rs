@@ -181,13 +181,23 @@ impl<'a> WorkspaceRowCtx<'a> {
 /// 7. Badge: agent slot — ` C ` / ` C×2 ` / blank. Same Max semantics.
 /// 8. Badge: shell slot — ` S ` / blank. Cell carries a leading space
 ///    so the two badges visually separate when both present.
-/// 9. Status pill — ` MERGED ` / ` REVIEW  CI FAIL ` / blank.
+/// 9–13. Passive badge slots — one Max-collapsing, center-aligned
+///    column each so every badge type owns a stable x and lines up
+///    row-to-row instead of being appended as ragged inline spans
+///    (issue #524): `⎇ local` (linked checkout), `✎` (has notes),
+///    `]N` (snippet count), `ARM` (auto-merge armed), `FIX` (auto-fix
+///    armed). Each column is `Max(0)`, so a badge type with zero
+///    occupants across the visible list collapses to 0 width — the
+///    same trick the status column uses — and centered so a lone glyph
+///    sits mid-slot. Passive info, so they shed before the actionable
+///    status/time under width pressure.
+/// 14. Status pill — ` MERGED ` / ` REVIEW  CI FAIL ` / blank.
 ///    Right-aligned, sized to the pills actually present (each pill is
 ///    trimmed to its own ` LABEL ` block — no blank-slot filler), so a
 ///    lone CI pill sits one clean gap off the time. Cell is empty
 ///    (width 0) when both review + CI pills are None, so the column
 ///    collapses for an all-empty table.
-/// 10. Time — ` Xm` / ` Xh` / ` Xd`, right-aligned. Leading space is
+/// 15. Time — ` Xm` / ` Xh` / ` Xd`, right-aligned. Leading space is
 ///    baked into the cell so a 1-cell gap separates time from
 ///    whatever sits to its left (status pill or, when status is
 ///    empty, the title flex padding).
@@ -201,6 +211,21 @@ pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
     // pill (CI / CONFLICT — the actionable signal), which is kept
     // nearly as long as the title (issue #328).
     const P_TIME: u8 = 10;
+    // Passive badge slots (#524) are decoration, so they shed early —
+    // right after the timestamp (which #328 keeps as the first trailer to
+    // go, `P_TIME` below `P_UNREAD`), and before the unread count and the
+    // CI/CONFLICT status pill. This is a deliberate change from when these
+    // badges rode inside the status cell and dropped as one unit at the
+    // near-last `P_STATUS`: each now yields its width independently, well
+    // ahead of the actionable signals. Ordered notes → snippet → linked →
+    // fix → arm so the least-consequential info drops first and the
+    // auto-merge arm — the one that changes what lazybox does on its own —
+    // survives longest.
+    const P_NOTES: u8 = 20;
+    const P_SNIPPET: u8 = 21;
+    const P_LINKED: u8 = 22;
+    const P_FIX: u8 = 23;
+    const P_ARM: u8 = 24;
     const P_UNREAD: u8 = 30;
     const P_BADGE_SHELL: u8 = 40;
     const P_BADGE_AGENT: u8 = 50;
@@ -212,8 +237,8 @@ pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
     // title is just a word fragment + `…` and tells you nothing.
     const TITLE_MIN: usize = 20;
     vec![
-        Column::fixed(1),                          // 0: prefix (shared 1-col caret gutter)
-        Column::fixed(2),                          // 1: type glyph + trailing space separator
+        Column::fixed(1),                            // 0: prefix (shared 1-col caret gutter)
+        Column::fixed(2),                            // 1: type glyph + trailing space separator
         Column::fixed(max_pr_num_width), // 2: pr_num (left-aligned, one space off the glyph)
         Column::fixed(2).priority(P_ROLE), // 3: role (" R" or blank)
         Column::fixed(3).priority(P_STATE), // 4: state slot (" ? "/" ⠋ "/blank, reserved)
@@ -221,8 +246,13 @@ pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
         Column::max(0).right().priority(P_UNREAD), // 6: unread
         Column::max(0).priority(P_BADGE_AGENT), // 7: badge_agent
         Column::max(0).priority(P_BADGE_SHELL), // 8: badge_shell (carries its own leading space)
-        Column::max(0).right().priority(P_STATUS), // 9: status
-        Column::max(0).right().priority(P_TIME), // 10: time (carries its own leading space)
+        Column::max(0).center().priority(P_LINKED), // 9: ⎇ local (linked checkout)
+        Column::max(0).center().priority(P_NOTES), // 10: ✎ (has notes)
+        Column::max(0).center().priority(P_SNIPPET), // 11: ]N (snippet count)
+        Column::max(0).center().priority(P_ARM), // 12: ARM (auto-merge armed)
+        Column::max(0).center().priority(P_FIX), // 13: FIX (auto-fix armed)
+        Column::max(0).right().priority(P_STATUS), // 14: status (CI / review pills)
+        Column::max(0).right().priority(P_TIME), // 15: time (carries its own leading space)
     ]
 }
 
@@ -241,6 +271,11 @@ pub fn build_row(ctx: &WorkspaceRowCtx<'_>) -> Row {
         cell_unread(ctx),
         cell_badge_agent(ctx),
         cell_badge_shell(ctx),
+        cell_linked(ctx),
+        cell_notes(ctx),
+        cell_snippet(ctx),
+        cell_arm(ctx),
+        cell_fix(ctx),
         cell_status(ctx),
         cell_time(ctx),
     ];
@@ -606,35 +641,109 @@ fn badge_slot_cell(ctx: &WorkspaceRowCtx<'_>, badge: Option<(char, usize)>) -> C
     }
 }
 
+/// The `⎇ local` badge for a linked (no-worktree) checkout — the
+/// sidebar counterpart of the `⎇ main` tab badge, so the user is always
+/// reminded this workspace's sessions run in their real checkout, not an
+/// isolated worktree. Renders even on a task-less linked row. Owns its
+/// own center-aligned, Max-collapsing column (#524) so it lines up
+/// row-to-row and steals no title width when absent.
+fn cell_linked(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+    if !ctx.workspace.is_some_and(|w| w.is_linked()) {
+        return Cell::empty();
+    }
+    let style = if ctx.is_cursor {
+        ctx.row_style()
+    } else {
+        Style::default()
+            .fg(ctx.theme.warn)
+            .add_modifier(Modifier::BOLD)
+    };
+    Cell::from_span(Span::styled(" ⎇ local ", style))
+}
+
+/// The `✎` has-notes badge (issue #458). Passive info, not an urgent
+/// arm — a dim fg-only glyph rather than the filled ARM/FIX blocks. Its
+/// own center-aligned, Max-collapsing column (#524).
+fn cell_notes(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+    if !ctx.has_notes {
+        return Cell::empty();
+    }
+    let style = if ctx.is_cursor {
+        ctx.row_style()
+    } else {
+        Style::default().fg(ctx.theme.text_dim)
+    };
+    Cell::from_span(Span::styled(" ✎ ", style))
+}
+
+/// The `]N` sent-snippet badge (issue #463) — a dim count of how many
+/// snippets this agent's been sent. Its own center-aligned,
+/// Max-collapsing column (#524), so a lone `]2` centers under a wider
+/// `]12` from another row instead of clinging to an edge.
+fn cell_snippet(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+    if ctx.sent_snippet_count == 0 {
+        return Cell::empty();
+    }
+    let style = if ctx.is_cursor {
+        ctx.row_style()
+    } else {
+        Style::default().fg(ctx.theme.text_dim)
+    };
+    Cell::from_span(Span::styled(
+        format!(" ]{} ", ctx.sent_snippet_count),
+        style,
+    ))
+}
+
+/// The ` ARM ` auto-merge-on-green badge — a filled block so the "this
+/// row will merge itself once CI goes green" signal reads at a glance.
+/// Its own center-aligned, Max-collapsing column (#524).
+fn cell_arm(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+    if !ctx.auto_merge_armed {
+        return Cell::empty();
+    }
+    let style = if ctx.is_cursor {
+        ctx.row_style()
+    } else {
+        Style::default()
+            .bg(ctx.theme.accent)
+            .fg(ratatui::style::Color::Black)
+            .add_modifier(Modifier::BOLD)
+    };
+    Cell::from_span(Span::styled(" ARM ", style))
+}
+
+/// The ` FIX ` auto-fix badge (issue #363) — a filled block so an
+/// explicit per-session auto-fix arm is never invisible. Its own
+/// center-aligned, Max-collapsing column (#524).
+fn cell_fix(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+    if !ctx.auto_fix_armed {
+        return Cell::empty();
+    }
+    let style = if ctx.is_cursor {
+        ctx.row_style()
+    } else {
+        Style::default()
+            .bg(ctx.theme.warn)
+            .fg(ratatui::style::Color::Black)
+            .add_modifier(Modifier::BOLD)
+    };
+    Cell::from_span(Span::styled(" FIX ", style))
+}
+
 fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    // A linked (no-worktree) checkout carries a `⎇ local` badge — the
-    // sidebar counterpart of the `⎇ main` tab badge — so the user is
-    // always reminded this workspace's sessions run in their real
-    // checkout, not an isolated worktree. It renders even on a task-less
-    // linked row, so it must be computed before the `task`-required
-    // status pills below.
-    let linked = ctx.workspace.is_some_and(|w| w.is_linked());
-    // CI/review pills only exist for a workspace with an upstream task;
-    // the notes pill (issue #458) can also ride a task-less local
-    // workspace, so status is derived conditionally rather than
-    // early-returning on a missing task.
+    // CI/review pills only exist for a workspace with an upstream task.
+    // The passive badges (`⎇ local` / `✎` / `]N` / `ARM` / `FIX`) that
+    // used to share this cell now own their own columns (#524), so this
+    // is back to just the actionable status pills.
     let (primary, secondary) = match ctx.task {
         Some(task) => status_pills(task),
         None => (None, None),
     };
     // Empty cell when there's nothing to show — `Column::max(0)`
     // collapses the column across the whole table when NO row has a
-    // pill, handing the slack back to the title flex. An armed row
-    // always shows its ` ARM ` marker even when no CI/review pill
-    // applies yet (e.g. armed before CI runs).
-    if primary.is_none()
-        && secondary.is_none()
-        && !ctx.auto_merge_armed
-        && !ctx.auto_fix_armed
-        && !linked
-        && !ctx.has_notes
-        && ctx.sent_snippet_count == 0
-    {
+    // pill, handing the slack back to the title flex.
+    if primary.is_none() && secondary.is_none() {
         return Cell::empty();
     }
     // Emit only the pills that are actually present, each trimmed to
@@ -644,62 +753,7 @@ fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // Right-aligned by the column, so the rightmost pill sits one clean
     // gap off the duration — its block's trailing space plus the time
     // cell's leading space, nothing more.
-    let mut spans = Vec::with_capacity(4);
-    if linked {
-        let linked_style = if ctx.is_cursor {
-            ctx.row_style()
-        } else {
-            Style::default()
-                .fg(ctx.theme.warn)
-                .add_modifier(Modifier::BOLD)
-        };
-        spans.push(Span::styled(" ⎇ local", linked_style));
-    }
-    if ctx.has_notes {
-        // Passive info, not an urgent arm — a dim fg-only glyph rather
-        // than the filled ARM/FIX blocks.
-        let notes_style = if ctx.is_cursor {
-            ctx.row_style()
-        } else {
-            Style::default().fg(ctx.theme.text_dim)
-        };
-        spans.push(Span::styled(" ✎ ", notes_style));
-    }
-    if ctx.sent_snippet_count > 0 {
-        // Passive info like the notes glyph: a dim ` ]N ` recording how
-        // many snippets this agent's been sent (#463).
-        let snip_style = if ctx.is_cursor {
-            ctx.row_style()
-        } else {
-            Style::default().fg(ctx.theme.text_dim)
-        };
-        spans.push(Span::styled(
-            format!(" ]{} ", ctx.sent_snippet_count),
-            snip_style,
-        ));
-    }
-    if ctx.auto_merge_armed {
-        let arm_style = if ctx.is_cursor {
-            ctx.row_style()
-        } else {
-            Style::default()
-                .bg(ctx.theme.accent)
-                .fg(ratatui::style::Color::Black)
-                .add_modifier(Modifier::BOLD)
-        };
-        spans.push(Span::styled(" ARM ", arm_style));
-    }
-    if ctx.auto_fix_armed {
-        let fix_style = if ctx.is_cursor {
-            ctx.row_style()
-        } else {
-            Style::default()
-                .bg(ctx.theme.warn)
-                .fg(ratatui::style::Color::Black)
-                .add_modifier(Modifier::BOLD)
-        };
-        spans.push(Span::styled(" FIX ", fix_style));
-    }
+    let mut spans = Vec::with_capacity(2);
     if let Some(p) = primary {
         spans.push(Span::styled(p.label, p.style));
     }
@@ -831,10 +885,11 @@ mod tests {
     #[test]
     fn build_columns_have_expected_count_and_order() {
         let cols = build_columns(5);
-        // 11 columns: the labels column retired into the title cell
-        // (#329) — a tag-less row no longer reserves the sidebar-wide
-        // widest label width.
-        assert_eq!(cols.len(), 11);
+        // 16 columns: the labels column retired into the title cell
+        // (#329), and the five passive badges (`⎇`/`✎`/`]N`/`ARM`/`FIX`)
+        // each split out of the shared status cell into their own
+        // collapsing slot (#524).
+        assert_eq!(cols.len(), 16);
         // Title column (idx 5) is the only Flex one.
         let flex_indices: Vec<_> = cols
             .iter()
@@ -1195,11 +1250,12 @@ mod tests {
         assert_eq!(row.fill_style, Some(theme.row_unfocused()));
     }
 
-    /// A linked (no-worktree) workspace shows the `⎇ local` badge in
-    /// the status cell even when it has no task, so the user always
-    /// sees it points at their real checkout.
+    /// A linked (no-worktree) workspace shows the `⎇ local` badge in its
+    /// own slot even when it has no task, so the user always sees it
+    /// points at their real checkout (#524 moved it out of the status
+    /// cell into `cell_linked`).
     #[test]
-    fn cell_status_shows_local_badge_for_linked_workspace() {
+    fn cell_linked_shows_local_badge_for_linked_workspace() {
         let theme = theme();
         let mut ws = Workspace::empty(
             lazybox_core::WorkspaceKey::new("acme-widget"),
@@ -1210,15 +1266,17 @@ mod tests {
         let task = make_task("owner/repo#1", "x");
         let mut ctx = ctx_for(&ws, &task, &theme);
         ctx.task = None; // linked tracking row, no attached task
-        let cell = cell_status(&ctx);
+        let cell = cell_linked(&ctx);
         assert!(
             cell.width() > 0,
-            "linked workspace must render a non-empty status cell"
+            "linked workspace must render a non-empty linked cell"
         );
         let text: String = cell.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("⎇ local"), "got {text:?}");
+        // The status cell no longer carries the linked badge.
+        assert_eq!(cell_status(&ctx).width(), 0);
 
-        // A plain workspace with no task renders nothing there.
+        // A plain workspace with no task renders nothing in either slot.
         let plain = Workspace::empty(
             lazybox_core::WorkspaceKey::new("plain"),
             "main",
@@ -1226,7 +1284,7 @@ mod tests {
         );
         let mut plain_ctx = ctx_for(&plain, &task, &theme);
         plain_ctx.task = None;
-        assert_eq!(cell_status(&plain_ctx).width(), 0);
+        assert_eq!(cell_linked(&plain_ctx).width(), 0);
     }
 
     /// No badges, no agent cell content.
@@ -1359,11 +1417,11 @@ mod tests {
         assert_eq!(cell.spans[0].content.as_ref(), " CI FAIL ");
     }
 
-    /// An armed workspace surfaces its ` ARM ` marker even when the PR
-    /// has no CI / review pill yet — so a freshly-armed row is visibly
-    /// distinct before CI even starts.
+    /// An armed workspace surfaces its ` ARM ` marker in its own slot
+    /// even when the PR has no CI / review pill yet — so a freshly-armed
+    /// row is visibly distinct before CI even starts (#524).
     #[test]
-    fn cell_status_shows_arm_pill_when_armed_without_ci() {
+    fn cell_arm_shows_pill_when_armed_without_ci() {
         let mut task = make_task("owner/repo#1", "x");
         task.review = ReviewStatus::None;
         task.ci = CiStatus::None;
@@ -1371,17 +1429,19 @@ mod tests {
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let mut ctx = ctx_for(&ws, &task, &theme);
+        assert_eq!(cell_arm(&ctx).width(), 0, "unarmed row has no ARM slot");
         ctx.auto_merge_armed = true;
-        let cell = cell_status(&ctx);
-        assert!(cell.width() > 0, "armed row renders a status cell");
+        let cell = cell_arm(&ctx);
         assert_eq!(cell.spans[0].content.as_ref(), " ARM ");
+        // The status cell stays empty — no CI/review pill here.
+        assert_eq!(cell_status(&ctx).width(), 0);
     }
 
     /// A workspace with an auto-fix policy explicitly armed surfaces a
-    /// ` FIX ` pill (issue #363) so the per-session arm is never
-    /// invisible — even before any CI pill applies.
+    /// ` FIX ` pill (issue #363) in its own slot so the per-session arm
+    /// is never invisible — even before any CI pill applies (#524).
     #[test]
-    fn cell_status_shows_fix_pill_when_auto_fix_armed() {
+    fn cell_fix_shows_pill_when_auto_fix_armed() {
         let mut task = make_task("owner/repo#1", "x");
         task.review = ReviewStatus::None;
         task.ci = CiStatus::None;
@@ -1389,20 +1449,18 @@ mod tests {
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let mut ctx = ctx_for(&ws, &task, &theme);
+        assert_eq!(cell_fix(&ctx).width(), 0, "unarmed row has no FIX slot");
         ctx.auto_fix_armed = true;
-        let cell = cell_status(&ctx);
-        assert!(cell.width() > 0, "auto-fix-armed row renders a status cell");
-        assert!(
-            cell.spans.iter().any(|s| s.content.as_ref() == " FIX "),
-            "FIX marker present"
-        );
+        let cell = cell_fix(&ctx);
+        assert_eq!(cell.spans[0].content.as_ref(), " FIX ");
     }
 
-    /// A workspace carrying a local note surfaces a ` ✎ ` pill (issue
-    /// #458) even when it has no CI/review pill and no task at all — a
-    /// session-less scratchpad still reads as noted.
+    /// A workspace carrying a local note surfaces a ` ✎ ` badge (issue
+    /// #458) in its own slot even when it has no CI/review pill and no
+    /// task at all — a session-less scratchpad still reads as noted
+    /// (#524).
     #[test]
-    fn cell_status_shows_notes_pill_without_task() {
+    fn cell_notes_shows_badge_without_task() {
         let ws = Workspace::empty(
             lazybox_core::WorkspaceKey("scratch".into()),
             "main",
@@ -1413,20 +1471,17 @@ mod tests {
         let mut ctx = ctx_for(&ws, &placeholder, &theme);
         // Task-less workspace: no CI/review pills possible.
         ctx.task = None;
-        assert_eq!(cell_status(&ctx).width(), 0, "no note, no pill");
+        assert_eq!(cell_notes(&ctx).width(), 0, "no note, no badge");
         ctx.has_notes = true;
-        let cell = cell_status(&ctx);
-        assert!(cell.width() > 0, "noted row renders a status cell");
-        assert!(
-            cell.spans.iter().any(|s| s.content.as_ref() == " ✎ "),
-            "notes marker present"
-        );
+        let cell = cell_notes(&ctx);
+        assert_eq!(cell.spans[0].content.as_ref(), " ✎ ");
     }
 
-    /// A workspace that's been sent snippets surfaces a ` ]N ` pill
-    /// (issue #463); a row with none shows no such pill.
+    /// A workspace that's been sent snippets surfaces a ` ]N ` badge
+    /// (issue #463) in its own slot; a row with none shows nothing
+    /// (#524).
     #[test]
-    fn cell_status_shows_sent_snippet_pill() {
+    fn cell_snippet_shows_badge() {
         let ws = Workspace::empty(
             lazybox_core::WorkspaceKey("scratch".into()),
             "main",
@@ -1436,32 +1491,29 @@ mod tests {
         let placeholder = make_task("owner/repo#1", "x");
         let mut ctx = ctx_for(&ws, &placeholder, &theme);
         ctx.task = None;
-        assert_eq!(cell_status(&ctx).width(), 0, "no snippets, no pill");
+        assert_eq!(cell_snippet(&ctx).width(), 0, "no snippets, no badge");
         ctx.sent_snippet_count = 3;
-        let cell = cell_status(&ctx);
-        assert!(
-            cell.spans.iter().any(|s| s.content.as_ref() == " ]3 "),
-            "sent-snippet marker present"
-        );
+        let cell = cell_snippet(&ctx);
+        assert_eq!(cell.spans[0].content.as_ref(), " ]3 ");
     }
 
-    /// The ARM marker rides ahead of the live CI pill rather than
-    /// replacing it — an armed PR with running/red CI shows both.
+    /// The ARM badge rides in its own column ahead of the live CI pill
+    /// rather than replacing it — an armed PR with running/red CI shows
+    /// both, in separate cells now (#524).
     #[test]
-    fn cell_status_arm_pill_coexists_with_ci_pill() {
+    fn arm_badge_coexists_with_ci_pill() {
         let mut task = make_task("owner/repo#1", "x");
         task.ci = CiStatus::Failure;
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let mut ctx = ctx_for(&ws, &task, &theme);
         ctx.auto_merge_armed = true;
-        let cell = cell_status(&ctx);
+        assert_eq!(cell_arm(&ctx).spans[0].content.as_ref(), " ARM ");
         assert!(
-            cell.spans.iter().any(|s| s.content.as_ref() == " ARM "),
-            "armed marker present"
-        );
-        assert!(
-            cell.spans.iter().any(|s| s.content.as_ref().contains("CI")),
+            cell_status(&ctx)
+                .spans
+                .iter()
+                .any(|s| s.content.as_ref().contains("CI")),
             "live CI pill still present alongside the arm"
         );
     }
@@ -2181,6 +2233,157 @@ mod tests {
             crate::util::visual_width(&task_line),
             crate::util::visual_width(&scratch_line),
             "taskless row must render to the same width as a task row: {task_line:?} vs {scratch_line:?}",
+        );
+    }
+
+    /// Build a linked (no-worktree) workspace so `cell_linked` renders
+    /// its `⎇ local` badge.
+    fn linked_ws(name: &str) -> Workspace {
+        let mut ws = Workspace::empty(lazybox_core::WorkspaceKey::new(name), "main", fixed_time());
+        ws.linked_checkout = Some(std::path::PathBuf::from("/home/dev/code/local"));
+        ws
+    }
+
+    /// Concatenate a rendered line into its visible string.
+    fn line_text(line: &ratatui::text::Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// The char offset (== cell offset, every glyph here is single-width)
+    /// of `needle` in `haystack`, or `None`.
+    fn char_offset(haystack: &str, needle: char) -> Option<usize> {
+        haystack.chars().position(|c| c == needle)
+    }
+
+    /// Issue #524, core acceptance: each passive badge owns a
+    /// fixed-width slot, so identical badges line up vertically across
+    /// rows and every row renders to the same total width — a row with
+    /// no badges, one badge, and all badges included. The old inline
+    /// spans in a single right-aligned status cell left them ragged.
+    #[test]
+    fn passive_badges_align_across_rows() {
+        let theme = theme();
+        // Row 0: all five passive badges (linked / notes / snippet / arm
+        // / fix). Row 1: just notes. Row 2: no passive badges.
+        let task0 = make_task("owner/repo#1", "all badges");
+        let task1 = make_task("owner/repo#2", "one badge");
+        let task2 = make_task("owner/repo#3", "no badges");
+        let ws0 = linked_ws("all");
+        let ws1 = Workspace::from_task(task1.clone(), fixed_time());
+        let ws2 = Workspace::from_task(task2.clone(), fixed_time());
+
+        let mut ctx0 = ctx_for(&ws0, &task0, &theme);
+        ctx0.has_notes = true;
+        ctx0.sent_snippet_count = 2;
+        ctx0.auto_merge_armed = true;
+        ctx0.auto_fix_armed = true;
+        let mut ctx1 = ctx_for(&ws1, &task1, &theme);
+        ctx1.has_notes = true;
+        let ctx2 = ctx_for(&ws2, &task2, &theme);
+
+        let columns = build_columns(4);
+        let rows = vec![build_row(&ctx0), build_row(&ctx1), build_row(&ctx2)];
+        let lines = crate::components::table::render_table(&rows, &columns, 100);
+        let l0 = line_text(&lines[0]);
+        let l1 = line_text(&lines[1]);
+        let l2 = line_text(&lines[2]);
+
+        // Every row renders to the same total width — that's what keeps
+        // every fixed-position column aligned across rows.
+        let w0 = crate::util::visual_width(&l0);
+        assert_eq!(w0, crate::util::visual_width(&l1), "{l0:?} vs {l1:?}");
+        assert_eq!(w0, crate::util::visual_width(&l2), "{l0:?} vs {l2:?}");
+
+        // The `✎` notes glyph sits at the SAME offset in both noted rows,
+        // and the badge-less row has a space there (its slot is reserved,
+        // not collapsed, because another row occupies it).
+        let notes0 = char_offset(&l0, '✎').expect("row 0 has ✎");
+        let notes1 = char_offset(&l1, '✎').expect("row 1 has ✎");
+        assert_eq!(notes0, notes1, "notes badge misaligned: {l0:?} vs {l1:?}");
+        assert_eq!(
+            l2.chars().nth(notes0),
+            Some(' '),
+            "badge-less row must reserve the notes slot: {l2:?}",
+        );
+
+        // The all-badges row shows every badge, in order.
+        assert!(l0.contains("⎇ local"), "{l0:?}");
+        assert!(l0.contains('✎'), "{l0:?}");
+        assert!(l0.contains("]2"), "{l0:?}");
+        assert!(l0.contains("ARM"), "{l0:?}");
+        assert!(l0.contains("FIX"), "{l0:?}");
+    }
+
+    /// Issue #524: a snippet count narrower than another row's centers
+    /// in the shared slot rather than clinging to an edge. Row 0 has
+    /// `]12` (drives the slot to 4 cells), row 1 has `]2` (3 cells) —
+    /// the `]` of the narrow one lands one cell in, not flush-left.
+    #[test]
+    fn snippet_badge_centers_in_shared_slot() {
+        let theme = theme();
+        let task0 = make_task("owner/repo#1", "a");
+        let task1 = make_task("owner/repo#2", "b");
+        let ws0 = Workspace::from_task(task0.clone(), fixed_time());
+        let ws1 = Workspace::from_task(task1.clone(), fixed_time());
+        let mut ctx0 = ctx_for(&ws0, &task0, &theme);
+        ctx0.sent_snippet_count = 12;
+        let mut ctx1 = ctx_for(&ws1, &task1, &theme);
+        ctx1.sent_snippet_count = 2;
+
+        let columns = build_columns(4);
+        let rows = vec![build_row(&ctx0), build_row(&ctx1)];
+        let lines = crate::components::table::render_table(&rows, &columns, 100);
+        let l0 = line_text(&lines[0]);
+        let l1 = line_text(&lines[1]);
+
+        // Slot width is driven by ` ]12 ` (5). ` ]2 ` (4) centers: 1 pad
+        // to the right → the `]` sits at the same offset as the wider
+        // row's `]`, both one cell in from the slot's left edge.
+        let b0 = char_offset(&l0, ']').expect("row 0 has ]");
+        let b1 = char_offset(&l1, ']').expect("row 1 has ]");
+        assert_eq!(b0, b1, "snippet brackets misaligned: {l0:?} vs {l1:?}");
+    }
+
+    /// Issue #524: a badge type with zero occupants collapses to 0 width
+    /// (matching `cell_status`), handing the slack back to the title —
+    /// unused badge slots steal no room. Adding a snippet badge to one
+    /// row is what makes another row's long title lose that slot's width.
+    #[test]
+    fn unused_badge_column_collapses_and_frees_title_width() {
+        let theme = theme();
+        let long = "Round-robin per-repo sync to reduce query overhead"; // 50 cells
+        let short = make_task("owner/repo#1", "x");
+        let titled = make_task("owner/repo#2", long);
+        let ws_short = Workspace::from_task(short.clone(), fixed_time());
+        let ws_titled = Workspace::from_task(titled.clone(), fixed_time());
+
+        // Width tuned so the long title fits exactly while every passive
+        // badge column is collapsed, but a single 4-cell snippet slot
+        // tips it into truncation.
+        const BUDGET: usize = 68;
+
+        // No passive badges anywhere → snippet column collapses, title fits.
+        let ctx_short = ctx_for(&ws_short, &short, &theme);
+        let ctx_titled = ctx_for(&ws_titled, &titled, &theme);
+        let columns = build_columns(4);
+        let rows = vec![build_row(&ctx_short), build_row(&ctx_titled)];
+        let lines = crate::components::table::render_table(&rows, &columns, BUDGET);
+        assert!(
+            line_text(&lines[1]).contains(long),
+            "long title should fit when badge columns collapse: {:?}",
+            line_text(&lines[1]),
+        );
+
+        // Give the OTHER row a snippet badge: its column now reserves 4
+        // cells for every row, so the long title loses that width.
+        let mut ctx_short_snip = ctx_for(&ws_short, &short, &theme);
+        ctx_short_snip.sent_snippet_count = 2;
+        let rows = vec![build_row(&ctx_short_snip), build_row(&ctx_titled)];
+        let lines = crate::components::table::render_table(&rows, &columns, BUDGET);
+        assert!(
+            !line_text(&lines[1]).contains(long),
+            "occupied snippet column must steal width from the title: {:?}",
+            line_text(&lines[1]),
         );
     }
 }

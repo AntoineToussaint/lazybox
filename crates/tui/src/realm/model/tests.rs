@@ -856,10 +856,12 @@ mod effects_tests {
         );
     }
 
-    /// Issue #312: workspace-removal deletes the worktree (no undo), so
-    /// its confirm keeps Enter on No.
+    /// Issue #525: the workspace-removal prompt is the *event* path — it
+    /// pops unsolicited (a merged/closed task), so its default comes from
+    /// `ui.confirm_default.event` (default No); a stray Enter must not
+    /// force-delete a worktree.
     #[test]
-    fn removal_prompt_defaults_to_no() {
+    fn removal_prompt_defaults_to_no_from_event_source() {
         let mut m = build_model();
         m.pending_removal_prompts
             .push_back(super::super::RemovalPrompt {
@@ -874,7 +876,31 @@ mod effects_tests {
         assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
         assert!(
             !mounted_confirm_default_yes(&m, Id::RemoveOutOfScope),
-            "removal prompt should default to No",
+            "event-driven removal prompt should default to No",
+        );
+    }
+
+    /// Issue #525: a user who sets `event: yes` opts the unsolicited
+    /// removal prompt into a Yes default.
+    #[test]
+    fn removal_prompt_respects_yes_event_override() {
+        use lazybox_config::ConfirmDefault;
+
+        let mut m = build_model();
+        m.ui_defaults.confirm_default.event = ConfirmDefault::Yes;
+        m.pending_removal_prompts
+            .push_back(super::super::RemovalPrompt {
+                workspace_key: WorkspaceKey::new("github:o/r#1"),
+                label: "o/r#1".into(),
+                title: None,
+                terminal_count: 0,
+                reason: super::super::RemovalReason::Merged,
+                has_local_work: false,
+            });
+        m.maybe_mount_next_removal_prompt();
+        assert!(
+            mounted_confirm_default_yes(&m, Id::RemoveOutOfScope),
+            "event: yes flips the removal prompt to Yes",
         );
     }
 
@@ -911,12 +937,12 @@ mod effects_tests {
         );
     }
 
-    /// Issue #312: `mount_action_confirm` carries each destructive
-    /// action's declared default from the catalog — Archive defaults No
-    /// (destructive), the on-main spawn defaults Yes (explicit intent,
-    /// benign awareness gate).
+    /// Issue #525: `mount_action_confirm` is the *shortcut* path — the
+    /// user pressed a destructive chord, so the default comes from
+    /// `ui.confirm_default.destructive_shortcut` (default Yes), not from
+    /// the prompt. `x x` archive + Enter completes the archive.
     #[test]
-    fn action_confirm_reads_catalog_default() {
+    fn action_confirm_defaults_yes_from_shortcut_source() {
         use lazybox_tui_core::action::Action;
 
         let mut m = build_model();
@@ -926,19 +952,28 @@ mod effects_tests {
             None,
         );
         assert!(
-            !mounted_confirm_default_yes(&m, Id::ActionConfirm),
-            "Archive confirm should default to No",
+            mounted_confirm_default_yes(&m, Id::ActionConfirm),
+            "shortcut-initiated Archive confirm should default to Yes",
         );
+    }
+
+    /// Issue #525: a cautious user forcing `destructive_shortcut: no`
+    /// flips even a chord-initiated confirm back to No.
+    #[test]
+    fn action_confirm_respects_no_shortcut_override() {
+        use lazybox_config::ConfirmDefault;
+        use lazybox_tui_core::action::Action;
 
         let mut m = build_model();
+        m.ui_defaults.confirm_default.destructive_shortcut = ConfirmDefault::No;
         m.mount_action_confirm(
-            Action::SpawnAgentOnMain("claude".into()),
+            Action::Archive,
             super::super::ActionConfirmTarget::Workspace(SessionKey::from("github:o/r#1")),
             None,
         );
         assert!(
-            mounted_confirm_default_yes(&m, Id::ActionConfirm),
-            "agent-on-main confirm should default to Yes",
+            !mounted_confirm_default_yes(&m, Id::ActionConfirm),
+            "destructive_shortcut: no forces the confirm back to No",
         );
     }
 

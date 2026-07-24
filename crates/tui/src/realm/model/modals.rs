@@ -978,9 +978,16 @@ impl<T: TerminalAdapter> Model<T> {
             RemovalReason::Merged => terminal_removal_copy(&prompt, "merged"),
             RemovalReason::Closed => terminal_removal_copy(&prompt, "closed"),
         };
-        // Deletes the worktree (force, when it has live terminals or
-        // local work) — no undo, so Enter backs out.
-        let modal = Confirm::new(copy).default_no();
+        // Event path: this prompt popped unsolicited (a merged/closed
+        // task, or a scope change), so a stray Enter must not delete a
+        // worktree by reflex (issue #525). The
+        // `ui.confirm_default.event` knob (default No) drives it.
+        let modal = Confirm::new(copy);
+        let modal = if self.ui_defaults.confirm_default.event.is_yes() {
+            modal.default_yes()
+        } else {
+            modal.default_no()
+        };
         self.active_removal_prompt = Some((prompt.workspace_key, prompt.reason));
         self.mount_modal(Id::RemoveOutOfScope, modal);
     }
@@ -1018,11 +1025,15 @@ impl<T: TerminalAdapter> Model<T> {
                 .unwrap_or("Confirm action?")
                 .to_string()
         });
-        // Each destructive action declares its own Enter default in the
-        // catalog (next to its prompt) instead of inheriting a blanket
-        // No — `confirm_default_yes` carries it here. Fall back to No for
-        // the "Confirm action?" safety net (a def with no declared guard).
-        let default_yes = def.confirm_default_yes().unwrap_or(false);
+        // This is the shortcut path: the user pressed a destructive
+        // chord, so the chord itself is the intent and Enter confirms
+        // (issue #525). The `ui.confirm_default.destructive_shortcut`
+        // knob (default Yes) drives it — a cautious user can force No.
+        let default_yes = self
+            .ui_defaults
+            .confirm_default
+            .destructive_shortcut
+            .is_yes();
         self.pending_action_confirm = Some((action, target));
         let modal = Confirm::new(&prompt);
         let modal = if default_yes {

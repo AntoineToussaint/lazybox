@@ -305,13 +305,20 @@ impl Workspace {
         !self.notes.trim().is_empty()
     }
 
-    /// Whether "track main" (issue #535) can apply to this workspace. It
-    /// needs a GitHub upstream to resolve a default branch and fetch
-    /// against, and it must own a lazybox-provisioned worktree — a
-    /// linked checkout already sits on the user's own branch in their
-    /// own clone, which lazybox never fast-forwards for them.
+    /// Whether "track main" (issue #535) can apply to this workspace.
+    /// Requirements:
+    /// - a GitHub upstream, to resolve a default branch and fetch against;
+    /// - a lazybox-provisioned worktree — a linked checkout already sits
+    ///   on the user's own branch in their own clone, which lazybox never
+    ///   fast-forwards for them;
+    /// - **no PR**. Track-main is for persistent scratch / branchless
+    ///   workspaces cut off `main`. A PR branch carries its own commits,
+    ///   so it's simultaneously ahead of and behind `main` — a
+    ///   fast-forward can never apply, and offering the toggle there would
+    ///   only paint a permanent, misleading "behind" badge on the PR row.
     pub fn supports_track_main(&self) -> bool {
-        !self.is_linked()
+        self.pr.is_none()
+            && !self.is_linked()
             && workspace_project_key(self).is_some_and(|k| k.source_prefix() == "github")
     }
 
@@ -2055,6 +2062,13 @@ mod tests {
         let mut local = Workspace::empty(WorkspaceKey::new("notes"), "scratch", now());
         local.project_key = Some(crate::ProjectKey::local("scratchpad"));
         assert!(!local.supports_track_main());
+
+        // A PR workspace is excluded — its branch carries commits, so a
+        // fast-forward onto main can never apply.
+        let mut with_pr = ws.clone();
+        with_pr.attach_task(pr("acme/widget#1"));
+        assert!(with_pr.pr.is_some());
+        assert!(!with_pr.supports_track_main());
     }
 
     #[test]

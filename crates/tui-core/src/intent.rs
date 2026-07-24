@@ -1237,9 +1237,18 @@ mod tests {
 
     // ── Track-main toggle ────────────────────────────────────────
 
+    /// A persistent scratch workspace under a GitHub project — no PR, no
+    /// linked checkout — the shape track-main is built for.
+    fn scratch() -> Workspace {
+        let mut ws = Workspace::empty(WorkspaceKey::new("scratch"), "scratch", Utc::now());
+        ws.project_key = Some(lazybox_core::ProjectKey::github("acme", "widgets"));
+        ws
+    }
+
     #[test]
     fn toggle_track_main_flips_the_arm() {
-        let mut ws = pr("o/r#1", CiStatus::None, ReviewStatus::None);
+        let mut ws = scratch();
+        assert!(ws.supports_track_main());
         assert!(!ws.track_main);
         match resolve_toggle_track_main(Some(&ws)) {
             Intent::SetTrackMain {
@@ -1267,6 +1276,19 @@ mod tests {
         assert!(!ws.supports_track_main());
         match resolve_toggle_track_main(Some(&ws)) {
             Intent::Notice(msg) => assert!(msg.contains("GitHub"), "{msg}"),
+            other => panic!("expected Notice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn toggle_track_main_on_pr_workspace_surfaces_notice() {
+        // A PR branch is ahead of AND behind main — a fast-forward can
+        // never apply, so track-main is not offered there.
+        let ws = pr("o/r#1", CiStatus::Success, ReviewStatus::None);
+        assert!(ws.pr.is_some());
+        assert!(!ws.supports_track_main());
+        match resolve_toggle_track_main(Some(&ws)) {
+            Intent::Notice(_) => {}
             other => panic!("expected Notice, got {other:?}"),
         }
     }

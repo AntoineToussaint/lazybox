@@ -865,10 +865,21 @@ impl WorktreeManager {
             )));
         }
 
-        // Dirty tree → never touch it: a fast-forward `git merge` would
-        // still refuse, but checking first lets us report *why* rather
-        // than surfacing a merge error.
-        let status = run_git_in(wt_path, &["status", "--porcelain"]).await?;
+        // Tracked-file changes → never touch it: a fast-forward `git
+        // merge` would still refuse, but checking first lets us report
+        // *why* rather than surfacing a merge error.
+        //
+        // `--untracked-files=no` is deliberate: a scratch worktree is
+        // where untracked debris (build output, logs, notes) piles up,
+        // and counting it as dirty would leave the worktree permanently
+        // "behind" and never synced — defeating the feature for its main
+        // use case. A fast-forward can't clobber untracked files unless
+        // it needs to *write over* one, and git's own `merge --ff-only`
+        // refuses exactly that case (surfaced below as an `Err` that
+        // leaves the tree untouched), so ignoring untracked files here is
+        // safe.
+        let status =
+            run_git_in(wt_path, &["status", "--porcelain", "--untracked-files=no"]).await?;
         if !status.trim().is_empty() {
             return Ok(TrackSyncOutcome::SkippedDirty);
         }
@@ -3523,6 +3534,37 @@ mod track_main_tests {
         assert!(
             wt.join("local.txt").exists(),
             "the local commit's file survives"
+        );
+    }
+
+    /// Untracked debris (build output, scratch notes) is exactly what a
+    /// scratch worktree accumulates — it must NOT count as dirty and
+    /// block the fast-forward, or the feature never syncs in practice.
+    #[tokio::test]
+    async fn untracked_file_does_not_block_fast_forward() {
+        let (_tmp, mgr, src, wt) = tracked_worktree().await;
+        advance_main(&src, "c2\n");
+        // A stray untracked file the FF doesn't need to touch.
+        std::fs::write(wt.join("build.log"), "noise\n").expect("write");
+
+        let outcome = mgr
+            .fast_forward_to_base(&wt, "acme", "widgets", "main")
+            .await
+            .expect("sync runs");
+        assert_eq!(
+            outcome,
+            TrackSyncOutcome::FastForwarded,
+            "untracked files must not be treated as dirty"
+        );
+        let origin_main = git(&wt, &["rev-parse", "refs/remotes/origin/main"]);
+        assert_eq!(
+            head(&wt),
+            origin_main,
+            "worktree advanced despite untracked file"
+        );
+        assert!(
+            wt.join("build.log").exists(),
+            "the untracked file is preserved through the fast-forward"
         );
     }
 }

@@ -3911,41 +3911,64 @@ pub(crate) async fn sync_tracked_workspaces_with(
 /// Fast-forward one track-main workspace's worktrees and persist its
 /// resolved base branch + "behind" verdict. Isolated per workspace so a
 /// single repo's fetch failure never aborts the rest of the sweep.
+///
+/// The workspace lock is held only for the brief snapshot and the final
+/// commit — never across the network git (fetch + merge). A background
+/// sweep holding the per-workspace lock through a stalled fetch would
+/// block whatever command the user issues on that workspace next
+/// (reply, inject, snooze, spawn — all take the same lock), so the git
+/// work runs lock-free between two short critical sections.
 async fn sync_one_tracked_workspace(
     config: &ServerConfig,
     mgr: &lazybox_git_ops::WorktreeManager,
     github_scopes: &std::collections::BTreeSet<String>,
     key: &WorkspaceKey,
 ) {
-    let _ws_guard = config.lock_workspace(key.as_str()).await;
-    let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
-        return;
+    // ── Snapshot under the lock, then release before any network git. ──
+    let (repo, base_branch, worktrees) = {
+        let _ws_guard = config.lock_workspace(key.as_str()).await;
+        let Some(workspace) = load_workspace_offloaded(config, key).await else {
+            return;
+        };
+        // Re-check under the lock: the user may have disarmed since the
+        // scan, or the row may be a linked / repo-less / PR workspace
+        // tracking can't act on.
+        if !workspace.track_main || !workspace.supports_track_main() {
+            return;
+        }
+        let Ok(repo) = crate::spawn_handler::clonable_repo_from_project(
+            config,
+            &workspace,
+            Some(github_scopes),
+        ) else {
+            return;
+        };
+        let worktrees: Vec<std::path::PathBuf> = workspace
+            .sessions
+            .iter()
+            .map(|s| s.worktree_path.clone())
+            .filter(|p| p.exists())
+            .collect();
+        (repo, workspace.base_branch.clone(), worktrees)
     };
-    // Re-check under the lock: the user may have disarmed since the scan,
-    // or the row may be a linked / repo-less workspace tracking can't act
-    // on.
-    if !workspace.track_main || !workspace.supports_track_main() {
+
+    // Nothing on disk to sync → don't resolve a base branch. Resolving it
+    // runs `ensure_bare_clone`, which would clone the whole repo for a
+    // workspace that has no worktree to fast-forward.
+    if worktrees.is_empty() {
         return;
     }
-    let Ok(repo) =
-        crate::spawn_handler::clonable_repo_from_project(config, &workspace, Some(github_scopes))
-    else {
-        return;
-    };
     let Some((owner, name)) = repo.split_once('/') else {
         return;
     };
 
-    // Resolve + persist the base branch once (handles main vs master).
-    let mut dirty = false;
-    let base = match workspace.base_branch.clone() {
-        Some(b) => b,
+    // ── Network git, lock-free. ──────────────────────────────────────
+    // Resolve the base branch once (handles main vs master); remember
+    // whether we resolved it fresh so the commit phase persists it.
+    let (base, base_resolved) = match base_branch {
+        Some(b) => (b, false),
         None => match mgr.default_branch(owner, name).await {
-            Ok(b) => {
-                workspace.base_branch = Some(b.clone());
-                dirty = true;
-                b
-            }
+            Ok(b) => (b, true),
             Err(e) => {
                 tracing::debug!(workspace = %key, error = %e, "track-main: default branch unresolved");
                 return;
@@ -3953,22 +3976,12 @@ async fn sync_one_tracked_workspace(
         },
     };
 
-    // Fast-forward every on-disk worktree the workspace owns. Its
-    // sessions share a branch, so the verdict is the same, but a
-    // workspace can hold several worktrees; sync each. "Behind" if ANY
-    // is behind-and-blocked.
+    // Fast-forward every on-disk worktree. A workspace can hold several
+    // (review + experiment); "behind" if ANY is behind-and-blocked.
     let mut behind = false;
-    let mut inspected_any = false;
-    for session in &workspace.sessions {
-        if !session.worktree_path.exists() {
-            continue;
-        }
-        match mgr
-            .fast_forward_to_base(&session.worktree_path, owner, name, &base)
-            .await
-        {
+    for wt in &worktrees {
+        match mgr.fast_forward_to_base(wt, owner, name, &base).await {
             Ok(outcome) => {
-                inspected_any = true;
                 if outcome.is_behind() {
                     behind = true;
                 }
@@ -3980,9 +3993,22 @@ async fn sync_one_tracked_workspace(
         }
     }
 
-    // Only revise the badge when a worktree was actually inspected — a
-    // session-less tracking row has nothing to be behind.
-    if inspected_any && workspace.track_main_behind != behind {
+    // ── Persist the sweep-owned verdict under the lock. ──────────────
+    // Re-load so a concurrent user edit (reply, notes, disarm) between
+    // the snapshot and now isn't clobbered by a blind overwrite.
+    let _ws_guard = config.lock_workspace(key.as_str()).await;
+    let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
+        return;
+    };
+    if !workspace.track_main {
+        return;
+    }
+    let mut dirty = false;
+    if base_resolved && workspace.base_branch.is_none() {
+        workspace.base_branch = Some(base);
+        dirty = true;
+    }
+    if workspace.track_main_behind != behind {
         workspace.track_main_behind = behind;
         dirty = true;
     }
@@ -7069,6 +7095,38 @@ mod track_main_sweep_tests {
             std::fs::read_to_string(wt.join("f.txt")).expect("read"),
             "wip\n",
             "the uncommitted work is never touched"
+        );
+    }
+
+    /// A tracked workspace with no on-disk worktree is left alone — no
+    /// base branch resolved (which would clone the whole repo for nothing
+    /// to sync).
+    #[tokio::test]
+    async fn sweep_skips_workspace_without_a_worktree() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mgr = WorktreeManager::new(tmp.path().join("base"));
+        let store = Arc::new(lazybox_store::MemoryStore::new());
+        let config = ServerConfig::with_store(store);
+        let key = WorkspaceKey::new("scratch");
+        let mut ws = Workspace::empty(key.clone(), "scratch", Utc::now());
+        ws.project_key = Some(lazybox_core::ProjectKey::github("acme", "widgets"));
+        ws.local = true;
+        ws.track_main = true;
+        // No sessions → no worktree on disk.
+        commit_upsert_reported(&config, &key, ws, "seed session-less workspace");
+
+        sync_tracked_workspaces_with(&config, &mgr).await;
+
+        let ws = load_workspace(&config, &key).expect("workspace persists");
+        assert_eq!(
+            ws.base_branch, None,
+            "no base branch resolved when there's no worktree to sync"
+        );
+        assert!(!ws.track_main_behind);
+        // No bare clone was provisioned for a workspace with nothing to sync.
+        assert!(
+            !tmp.path().join("base").join("repos").exists(),
+            "no repo should be cloned for a session-less tracked workspace"
         );
     }
 }

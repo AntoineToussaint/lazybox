@@ -144,6 +144,12 @@ pub struct GqlMutationResponse {
 #[derive(Deserialize, Debug)]
 pub struct GqlError {
     pub message: String,
+    /// GraphQL error classification. GitHub sets this at the top level
+    /// of each error object (`NOT_FOUND`, `FORBIDDEN`, `UNPROCESSABLE`,
+    /// …). Optional — GHES and some paths omit it, so callers that need
+    /// certainty fall back to the message text.
+    #[serde(default, rename = "type")]
+    pub error_type: Option<String>,
     /// GraphQL path to the node that failed (if any).
     #[serde(default)]
     pub path: Option<Vec<serde_json::Value>>,
@@ -157,6 +163,28 @@ pub struct GqlError {
 }
 
 impl GqlError {
+    /// True when this error means the queried node is *definitively* not
+    /// visible to us — deleted, transferred out, made private, or the
+    /// token's scope no longer covers the repo. GitHub signals these as
+    /// a top-level `NOT_FOUND` / `FORBIDDEN` error `type`; the
+    /// message-text fallback (`"could not resolve to"`) catches
+    /// responses that omit the `type` field.
+    ///
+    /// Distinguishing this from a transient error matters for the
+    /// notifications cursor (#512): a definitively-gone entry must be
+    /// treated as *handled* (`Ok(None)`) so the cursor can advance,
+    /// while a transient failure holds the cursor for a retry.
+    pub fn is_not_visible(&self) -> bool {
+        if let Some(t) = &self.error_type
+            && (t.eq_ignore_ascii_case("NOT_FOUND") || t.eq_ignore_ascii_case("FORBIDDEN"))
+        {
+            return true;
+        }
+        self.message
+            .to_ascii_lowercase()
+            .contains("could not resolve to")
+    }
+
     /// Human-readable debug line including path + extensions, not just the message.
     pub fn full(&self) -> String {
         let mut s = self.message.clone();

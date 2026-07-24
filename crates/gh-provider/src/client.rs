@@ -1249,8 +1249,11 @@ impl GhClient {
     /// the single-node GraphQL query. ~85 cost units total (vs. the
     /// 1000s the inbox-scan query burns when re-walking every PR).
     /// Returns `Ok(None)` when GitHub can't find / no longer exposes
-    /// the PR (deleted, scope changed, transferred); the caller treats
-    /// that as "skip this entry."
+    /// the PR (deleted, scope changed, transferred) — whether that
+    /// surfaces as a null `pullRequest` node in an accessible repo or as
+    /// a top-level `NOT_FOUND`/`FORBIDDEN` GraphQL error on the repo
+    /// itself. The caller treats `Ok(None)` as "skip this entry"; only a
+    /// genuinely transient `Err` holds the notifications cursor (#512).
     pub async fn fetch_single_pr(
         &self,
         owner: &str,
@@ -1261,6 +1264,20 @@ impl GhClient {
         let body = graphql::single_pr_body(owner, repo, number);
         let response: graphql::GqlSinglePrResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(errors) = response.errors {
+            // A definitive "not visible" answer (NOT_FOUND / FORBIDDEN:
+            // deleted, transferred, private, scope revoked) is NOT a
+            // transient failure. GitHub returns it as a top-level GraphQL
+            // error alongside `data.repository = null`, so it lands here
+            // rather than the `Ok(None)` null-node path below. Map it to
+            // `Ok(None)` so the notifications-cursor caller treats the
+            // entry as handled and can advance — otherwise a
+            // permanently-gone entry would pin the heartbeat off its
+            // cheap 304 forever (#512). Any other error is transient →
+            // `Err` holds the cursor so the entry re-lists next tick.
+            if gql_errors_all_not_visible(&errors) {
+                tracing::debug!("fetch_single_pr {owner}/{repo}#{number}: not visible — skipping");
+                return Ok(None);
+            }
             let joined = errors
                 .iter()
                 .map(|e| e.full())
@@ -1291,6 +1308,15 @@ impl GhClient {
         let body = graphql::single_issue_body(owner, repo, number);
         let response: graphql::GqlSingleIssueResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(errors) = response.errors {
+            // See `fetch_single_pr`: a definitive NOT_FOUND / FORBIDDEN
+            // is "not visible" (`Ok(None)`), never a cursor-holding
+            // transient failure (#512).
+            if gql_errors_all_not_visible(&errors) {
+                tracing::debug!(
+                    "fetch_single_issue {owner}/{repo}#{number}: not visible — skipping"
+                );
+                return Ok(None);
+            }
             let joined = errors
                 .iter()
                 .map(|e| e.full())
@@ -3210,6 +3236,17 @@ fn gql_errors_all_match(errors: &[graphql::GqlError], markers: &[&str]) -> bool 
         })
 }
 
+/// True when the error list is non-empty and EVERY entry means the
+/// queried node is definitively not visible (NOT_FOUND / FORBIDDEN).
+/// All-of, not any-of: a response mixing a not-found with a genuinely
+/// transient error must still surface as `Err` so the deep-fetch caller
+/// holds the notifications cursor and re-lists the entry next tick
+/// (#512). A permanently-gone entry, by contrast, resolves to `Ok(None)`
+/// so it can't pin the cursor off the cheap 304 steady state forever.
+fn gql_errors_all_not_visible(errors: &[graphql::GqlError]) -> bool {
+    !errors.is_empty() && errors.iter().all(graphql::GqlError::is_not_visible)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3276,6 +3313,61 @@ mod tests {
         );
         assert!(!gql_errors_all_match(&errors, ALREADY_MERGED_MARKERS));
         assert!(!gql_errors_all_match(&[], ALREADY_MERGED_MARKERS));
+    }
+
+    /// #512: a repo-level `NOT_FOUND` / `FORBIDDEN` GraphQL error
+    /// (deleted, transferred, private, scope revoked) is a *definitive*
+    /// "not visible" answer — the deep-fetch must map it to `Ok(None)`
+    /// so the notifications cursor can advance. Only a genuinely
+    /// transient error (or a not-found mixed with one) holds the cursor.
+    /// Without this, a lingering notification for a now-inaccessible repo
+    /// returns `Err` every tick and pins the heartbeat off its cheap 304
+    /// forever.
+    #[test]
+    fn gql_not_found_and_forbidden_classify_as_not_visible() {
+        fn single_pr_errors(payload: &str) -> Vec<graphql::GqlError> {
+            serde_json::from_str::<graphql::GqlSinglePrResponse>(payload)
+                .expect("payload parses")
+                .errors
+                .unwrap_or_default()
+        }
+
+        // Top-level NOT_FOUND on the repository node (repo gone / private),
+        // carried alongside `data.repository = null`.
+        let errs = single_pr_errors(
+            r#"{"data":{"repository":null},
+                "errors":[{"type":"NOT_FOUND","path":["repository"],
+                           "message":"Could not resolve to a Repository with the name 'o/r'."}]}"#,
+        );
+        assert!(gql_errors_all_not_visible(&errs));
+
+        // FORBIDDEN (token scope revoked) is also definitively not visible.
+        let errs = single_pr_errors(
+            r#"{"errors":[{"type":"FORBIDDEN","message":"Resource not accessible by integration"}]}"#,
+        );
+        assert!(gql_errors_all_not_visible(&errs));
+
+        // Message fallback when GitHub omits the `type` field (GHES).
+        let errs = single_pr_errors(
+            r#"{"errors":[{"message":"Could not resolve to a PullRequest with the number of 123."}]}"#,
+        );
+        assert!(gql_errors_all_not_visible(&errs));
+
+        // A transient/unknown error must NOT be swallowed — it holds the cursor.
+        let errs = single_pr_errors(
+            r#"{"errors":[{"type":"INTERNAL","message":"Something went wrong while executing your query."}]}"#,
+        );
+        assert!(!gql_errors_all_not_visible(&errs));
+
+        // All-of: not-found mixed with a transient error still fails.
+        let errs = single_pr_errors(
+            r#"{"errors":[{"type":"NOT_FOUND","message":"Could not resolve to a Repository"},
+                          {"type":"INTERNAL","message":"timeout"}]}"#,
+        );
+        assert!(!gql_errors_all_not_visible(&errs));
+
+        // Empty error list is the plain success path, not "not visible".
+        assert!(!gql_errors_all_not_visible(&[]));
     }
 
     /// `updatePullRequestBranch` retried after its first attempt
@@ -3861,9 +3953,23 @@ mod tests {
                     Err(_) => continue,
                 };
                 tokio::spawn(async move {
+                    // Read until the blank line that ends the request
+                    // headers (these are bodyless GETs). A single `read`
+                    // could return before the `If-Modified-Since` header
+                    // arrives if the request spans TCP segments — rare on
+                    // localhost, but that would flake the 304 assertion.
+                    let mut data = Vec::new();
                     let mut buf = [0u8; 8192];
-                    let n = sock.read(&mut buf).await.unwrap_or(0);
-                    let req = String::from_utf8_lossy(&buf[..n]);
+                    loop {
+                        match sock.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => data.extend_from_slice(&buf[..n]),
+                        }
+                        if data.windows(4).any(|w| w == b"\r\n\r\n") || data.len() > 65536 {
+                            break;
+                        }
+                    }
+                    let req = String::from_utf8_lossy(&data);
                     // First colon splits header name from value; the time
                     // colons in the date stay in the value half.
                     let ims_matches =

@@ -211,12 +211,16 @@ pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
     // pill (CI / CONFLICT — the actionable signal), which is kept
     // nearly as long as the title (issue #328).
     const P_TIME: u8 = 10;
-    // Passive badge slots (#524) shed before the actionable trailers
-    // (unread count, CI status, time): pure-info glyphs are the first to
-    // go when the pane narrows. Ordered notes → snippet → linked → fix →
-    // arm so the least-consequential info drops first and the auto-merge
-    // arm — the one that changes what lazybox does on its own — survives
-    // longest.
+    // Passive badge slots (#524) are decoration, so they shed early —
+    // right after the timestamp (which #328 keeps as the first trailer to
+    // go, `P_TIME` below `P_UNREAD`), and before the unread count and the
+    // CI/CONFLICT status pill. This is a deliberate change from when these
+    // badges rode inside the status cell and dropped as one unit at the
+    // near-last `P_STATUS`: each now yields its width independently, well
+    // ahead of the actionable signals. Ordered notes → snippet → linked →
+    // fix → arm so the least-consequential info drops first and the
+    // auto-merge arm — the one that changes what lazybox does on its own —
+    // survives longest.
     const P_NOTES: u8 = 20;
     const P_SNIPPET: u8 = 21;
     const P_LINKED: u8 = 22;

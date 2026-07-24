@@ -590,9 +590,12 @@ impl TmuxBackend {
             .ok()?;
         let text = String::from_utf8_lossy(&out.stdout);
         let mut parts = text.trim().split('\t');
-        let cols = parts.next()?.parse().ok()?;
-        let rows = parts.next()?.parse().ok()?;
-        Some((cols, rows))
+        let cols: u16 = parts.next()?.parse().ok()?;
+        let rows: u16 = parts.next()?.parse().ok()?;
+        // A zero dimension would attach a 0-cell PTY. tmux never reports
+        // one for a live pane, but treat it as "unknown" so the caller
+        // falls back to the default grid rather than a degenerate size.
+        (cols > 0 && rows > 0).then_some((cols, rows))
     }
 
     /// Whether the pane is alternate and how many history lines tmux

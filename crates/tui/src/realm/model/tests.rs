@@ -6569,6 +6569,20 @@ mod leader_tile_tests {
             )),
             "the picked prompt is re-injected: {cmds:?}",
         );
+
+        // If the target agent exited while the picker was open, picking
+        // sends nothing and doesn't falsely claim a resend.
+        m.prompt_history_choices = vec!["rebase onto main".to_string()];
+        m.prompt_history_target = Some(TerminalId(404));
+        m.push_modal(Id::PromptHistoryPicker);
+        let cmds = m.handle_choice_picked(vec![0]);
+        assert!(
+            !cmds.iter().any(|c| matches!(
+                c,
+                IpcCommand::InjectPrompt { .. } | IpcCommand::Write { .. }
+            )),
+            "no send to a vanished terminal: {cmds:?}",
+        );
     }
 
     /// `]]h` with no prompts sent yet is a no-op with a hint, not a

@@ -100,20 +100,6 @@ impl<T: TerminalAdapter> Model<T> {
     /// shell has no paste debounce, so the encoded direct write submits
     /// cleanly. Shared by the snippet, broadcast, and handoff paths so
     /// the #246 invariant lives in one place.
-    /// Resolve a snippet key to a `Snippet` prompt source, looking up its
-    /// category so the history can name which snippet an entry came from
-    /// (issue #523). The category is empty when the snippet declares none.
-    fn snippet_source(&self, key: &str) -> lazybox_ipc::PromptSource {
-        lazybox_ipc::PromptSource::Snippet {
-            key: key.to_string(),
-            category: self
-                .snippets
-                .get(key)
-                .map(|s| s.category.clone())
-                .unwrap_or_default(),
-        }
-    }
-
     fn deliver_prompt(
         &mut self,
         terminal_id: TerminalId,
@@ -145,6 +131,20 @@ impl<T: TerminalAdapter> Model<T> {
                 terminal_id,
                 bytes: encode_snippet_for_pty(body),
             });
+        }
+    }
+
+    /// Resolve a snippet key to a `Snippet` prompt source, looking up its
+    /// category so the history can name which snippet an entry came from
+    /// (issue #523). The category is empty when the snippet declares none.
+    fn snippet_source(&self, key: &str) -> lazybox_ipc::PromptSource {
+        lazybox_ipc::PromptSource::Snippet {
+            key: key.to_string(),
+            category: self
+                .snippets
+                .get(key)
+                .map(|s| s.category.clone())
+                .unwrap_or_default(),
         }
     }
 
@@ -569,16 +569,22 @@ showing keybinding search only",
             let target = self.prompt_history_target.take();
             self.prompt_history_choices.clear();
             self.pop_modal();
+            // The target is always an agent at mount (history is
+            // agent-only); if it exited while the picker was open, don't
+            // claim a resend that would land on nothing.
             if let (Some(text), Some(terminal_id)) = (text, target) {
-                let is_agent = self.terminals.terminal_is_agent(terminal_id);
-                self.deliver_prompt(
-                    terminal_id,
-                    is_agent,
-                    &text,
-                    lazybox_ipc::PromptSource::Typed,
-                    &mut cmds,
-                );
-                self.flash_info("re-sent prompt");
+                if self.terminals.terminal_is_agent(terminal_id) {
+                    self.deliver_prompt(
+                        terminal_id,
+                        true,
+                        &text,
+                        lazybox_ipc::PromptSource::Typed,
+                        &mut cmds,
+                    );
+                    self.flash_info("re-sent prompt");
+                } else {
+                    self.flash_info("session ended — nothing re-sent");
+                }
             }
             return cmds;
         }

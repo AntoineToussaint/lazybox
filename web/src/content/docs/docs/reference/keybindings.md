@@ -179,6 +179,7 @@ Press the leader key, then the second key. Every menu shows a which-key popup wh
 | `g m` | merge PR *(confirmed first)* |
 | `g u` | update branch |
 | `g g` | auto-merge on green |
+| `g t` | track main |
 | `g p` | policies |
 | `g r` | reviewers |
 | `g a` | assignees |

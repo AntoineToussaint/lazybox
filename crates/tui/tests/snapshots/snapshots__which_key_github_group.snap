@@ -1,5 +1,6 @@
 ---
 source: crates/tui/tests/snapshots.rs
+assertion_line: 352
 expression: rendered
 ---
 
@@ -7,11 +8,11 @@ expression: rendered
   m  merge PR
   u  update branch
   g  auto-merge on green
+  t  track main
   p  policies
   r  reviewers
   a  assignees
   l  labels
   s  sync
   o  open in browser
-  d  delete / close
  ↑↓ select · ↵ · Esc

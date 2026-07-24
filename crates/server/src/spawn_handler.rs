@@ -2180,7 +2180,7 @@ fn sanitize_branch_component(raw: &str) -> String {
 /// or a task-seeded record (polling materialized it) behind. If a future
 /// entry point surfaces a GitHub project header with neither, a
 /// hyphenated owner silently falls back to the lossy name again.
-fn clonable_repo_from_project(
+pub(crate) fn clonable_repo_from_project(
     config: &ServerConfig,
     workspace: &Workspace,
     github_scopes: Option<&std::collections::BTreeSet<String>>,

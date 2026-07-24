@@ -273,6 +273,10 @@ fn all_commands() -> Vec<Command> {
             session_key: key.clone(),
             enabled: true,
         },
+        Command::SetTrackMain {
+            session_key: key.clone(),
+            enabled: true,
+        },
         Command::SetAutoFixPolicy {
             session_key: key.clone(),
             kind: lazybox_core::AutoFixKind::CiFailure,
@@ -797,6 +801,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::Snooze { .. } => "Snooze",
         Command::Unsnooze { .. } => "Unsnooze",
         Command::SetAutoMergeOnGreen { .. } => "SetAutoMergeOnGreen",
+        Command::SetTrackMain { .. } => "SetTrackMain",
         Command::SetAutoFixPolicy { .. } => "SetAutoFixPolicy",
         Command::PostReply { .. } => "PostReply",
         Command::Refresh => "Refresh",
@@ -914,7 +919,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        62,
+        63,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(

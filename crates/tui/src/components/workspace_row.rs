@@ -87,6 +87,15 @@ pub struct WorkspaceRowCtx<'a> {
     /// (`Workspace::policies` — issue #363). Renders a ` FIX ` pill so an
     /// explicit per-session auto-fix arm is visible, never invisible.
     pub auto_fix_armed: bool,
+    /// This workspace has "track main" armed (`Workspace::track_main` —
+    /// issue #535). Renders a ` ⤓main ` pill so the user can see which
+    /// rows the daemon keeps fast-forwarded to the default branch.
+    pub track_main: bool,
+    /// The tracked workspace is behind `origin/<default>` and couldn't be
+    /// auto-synced (`Workspace::track_main_behind`). Flips the track-main
+    /// pill to a warn-colored ` behind ` so a stuck (dirty/diverged)
+    /// worktree reads at a glance. Only meaningful when `track_main`.
+    pub track_main_behind: bool,
     /// This workspace carries a non-empty local note
     /// (`Workspace::has_notes` — issue #458). Renders a small ` ✎ ` pill
     /// so the user can see, at a glance, which rows have a scratchpad.
@@ -181,23 +190,24 @@ impl<'a> WorkspaceRowCtx<'a> {
 /// 7. Badge: agent slot — ` C ` / ` C×2 ` / blank. Same Max semantics.
 /// 8. Badge: shell slot — ` S ` / blank. Cell carries a leading space
 ///    so the two badges visually separate when both present.
-/// 9–13. Passive badge slots — one Max-collapsing, center-aligned
+/// 9–14. Passive badge slots — one Max-collapsing, center-aligned
 ///    column each so every badge type owns a stable x and lines up
 ///    row-to-row instead of being appended as ragged inline spans
 ///    (issue #524): `⎇ local` (linked checkout), `✎` (has notes),
 ///    `]N` (snippet count), `ARM` (auto-merge armed), `FIX` (auto-fix
-///    armed). Each column is `Max(0)`, so a badge type with zero
+///    armed), `⤓main`/`behind` (track-main arm + behind state, #535).
+///    Each column is `Max(0)`, so a badge type with zero
 ///    occupants across the visible list collapses to 0 width — the
 ///    same trick the status column uses — and centered so a lone glyph
 ///    sits mid-slot. Passive info, so they shed before the actionable
 ///    status/time under width pressure.
-/// 14. Status pill — ` MERGED ` / ` REVIEW  CI FAIL ` / blank.
+/// 15. Status pill — ` MERGED ` / ` REVIEW  CI FAIL ` / blank.
 ///    Right-aligned, sized to the pills actually present (each pill is
 ///    trimmed to its own ` LABEL ` block — no blank-slot filler), so a
 ///    lone CI pill sits one clean gap off the time. Cell is empty
 ///    (width 0) when both review + CI pills are None, so the column
 ///    collapses for an all-empty table.
-/// 15. Time — ` Xm` / ` Xh` / ` Xd`, right-aligned. Leading space is
+/// 16. Time — ` Xm` / ` Xh` / ` Xd`, right-aligned. Leading space is
 ///    baked into the cell so a 1-cell gap separates time from
 ///    whatever sits to its left (status pill or, when status is
 ///    empty, the title flex padding).
@@ -226,6 +236,10 @@ pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
     const P_LINKED: u8 = 22;
     const P_FIX: u8 = 23;
     const P_ARM: u8 = 24;
+    // Track-main (#535) is a standing automation arm like the merge arm,
+    // so it survives width pressure alongside `ARM` rather than shedding
+    // with the passive-info badges.
+    const P_TRACK: u8 = 25;
     const P_UNREAD: u8 = 30;
     const P_BADGE_SHELL: u8 = 40;
     const P_BADGE_AGENT: u8 = 50;
@@ -251,8 +265,9 @@ pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
         Column::max(0).center().priority(P_SNIPPET), // 11: ]N (snippet count)
         Column::max(0).center().priority(P_ARM), // 12: ARM (auto-merge armed)
         Column::max(0).center().priority(P_FIX), // 13: FIX (auto-fix armed)
-        Column::max(0).right().priority(P_STATUS), // 14: status (CI / review pills)
-        Column::max(0).right().priority(P_TIME), // 15: time (carries its own leading space)
+        Column::max(0).center().priority(P_TRACK), // 14: track main (⤓main / behind)
+        Column::max(0).right().priority(P_STATUS), // 15: status (CI / review pills)
+        Column::max(0).right().priority(P_TIME), // 16: time (carries its own leading space)
     ]
 }
 
@@ -276,6 +291,7 @@ pub fn build_row(ctx: &WorkspaceRowCtx<'_>) -> Row {
         cell_snippet(ctx),
         cell_arm(ctx),
         cell_fix(ctx),
+        cell_track_main(ctx),
         cell_status(ctx),
         cell_time(ctx),
     ];
@@ -731,9 +747,37 @@ fn cell_fix(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     Cell::from_span(Span::styled(" FIX ", style))
 }
 
+/// The track-main badge (issue #535). A synced tracked workspace shows a
+/// calm accent ` ⤓main `; one that's behind `origin/<default>` and can't
+/// auto-sync (dirty / diverged) flips to a filled warn ` behind ` block
+/// so a stuck worktree reads at a glance. Its own center-aligned,
+/// Max-collapsing column (#524).
+fn cell_track_main(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+    if !ctx.track_main {
+        return Cell::empty();
+    }
+    if ctx.track_main_behind {
+        let style = if ctx.is_cursor {
+            ctx.row_style()
+        } else {
+            Style::default()
+                .bg(ctx.theme.warn)
+                .fg(ratatui::style::Color::Black)
+                .add_modifier(Modifier::BOLD)
+        };
+        return Cell::from_span(Span::styled(" behind ", style));
+    }
+    let style = if ctx.is_cursor {
+        ctx.row_style()
+    } else {
+        Style::default().fg(ctx.theme.accent)
+    };
+    Cell::from_span(Span::styled(" ⤓main ", style))
+}
+
 fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // CI/review pills only exist for a workspace with an upstream task.
-    // The passive badges (`⎇ local` / `✎` / `]N` / `ARM` / `FIX`) that
+    // The passive badges (`⎇ local` / `✎` / `]N` / `ARM` / `FIX` / `⤓main`) that
     // used to share this cell now own their own columns (#524), so this
     // is back to just the actionable status pills.
     let (primary, secondary) = match ctx.task {
@@ -873,6 +917,8 @@ mod tests {
             ascii_glyphs: false,
             auto_merge_armed: false,
             auto_fix_armed: false,
+            track_main: false,
+            track_main_behind: false,
             has_notes: false,
             sent_snippet_count: 0,
         }
@@ -885,11 +931,11 @@ mod tests {
     #[test]
     fn build_columns_have_expected_count_and_order() {
         let cols = build_columns(5);
-        // 16 columns: the labels column retired into the title cell
-        // (#329), and the five passive badges (`⎇`/`✎`/`]N`/`ARM`/`FIX`)
-        // each split out of the shared status cell into their own
-        // collapsing slot (#524).
-        assert_eq!(cols.len(), 16);
+        // 17 columns: the labels column retired into the title cell
+        // (#329), and the six passive badges (`⎇`/`✎`/`]N`/`ARM`/`FIX`/
+        // `⤓main`) each split out of the shared status cell into their own
+        // collapsing slot (#524, #535).
+        assert_eq!(cols.len(), 17);
         // Title column (idx 5) is the only Flex one.
         let flex_indices: Vec<_> = cols
             .iter()
@@ -1193,6 +1239,8 @@ mod tests {
             ascii_glyphs: false,
             auto_merge_armed: false,
             auto_fix_armed: false,
+            track_main: false,
+            track_main_behind: false,
             has_notes: false,
             sent_snippet_count: 0,
         };
@@ -1379,6 +1427,8 @@ mod tests {
             ascii_glyphs: false,
             auto_merge_armed: false,
             auto_fix_armed: false,
+            track_main: false,
+            track_main_behind: false,
             has_notes: false,
             sent_snippet_count: 0,
         };
@@ -1453,6 +1503,29 @@ mod tests {
         ctx.auto_fix_armed = true;
         let cell = cell_fix(&ctx);
         assert_eq!(cell.spans[0].content.as_ref(), " FIX ");
+    }
+
+    /// The track-main badge (issue #535): empty when untracked, a calm
+    /// ` ⤓main ` when tracked-and-synced, and a warn ` behind ` when the
+    /// worktree fell behind and couldn't auto-sync.
+    #[test]
+    fn cell_track_main_reflects_tracked_and_behind_state() {
+        let mut task = make_task("owner/repo#1", "x");
+        task.review = ReviewStatus::None;
+        task.ci = CiStatus::None;
+        task.state = TaskState::Open;
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        assert_eq!(
+            cell_track_main(&ctx).width(),
+            0,
+            "untracked row has no track slot"
+        );
+        ctx.track_main = true;
+        assert_eq!(cell_track_main(&ctx).spans[0].content.as_ref(), " ⤓main ");
+        ctx.track_main_behind = true;
+        assert_eq!(cell_track_main(&ctx).spans[0].content.as_ref(), " behind ");
     }
 
     /// A workspace carrying a local note surfaces a ` ✎ ` badge (issue
@@ -2221,6 +2294,8 @@ mod tests {
             ascii_glyphs: false,
             auto_merge_armed: false,
             auto_fix_armed: false,
+            track_main: false,
+            track_main_behind: false,
             has_notes: false,
             sent_snippet_count: 0,
         };

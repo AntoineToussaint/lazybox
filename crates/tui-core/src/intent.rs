@@ -78,6 +78,13 @@ pub enum Intent {
         workspace_key: WorkspaceKey,
         enabled: bool,
     },
+    /// Flip the workspace's "track main" arm and persist it (issue #535).
+    /// `enabled` is the new state (the resolver reads the current flag
+    /// and inverts it). The model ships `Command::SetTrackMain`.
+    SetTrackMain {
+        workspace_key: WorkspaceKey,
+        enabled: bool,
+    },
     /// Kill every running terminal under the workspace + remove
     /// the row. Two-press confirm at the model layer.
     KillWorkspace { session_key: SessionKey },
@@ -487,6 +494,24 @@ pub fn resolve_toggle_auto_merge(workspace: Option<&Workspace>) -> Intent {
     Intent::SetAutoMergeOnGreen {
         workspace_key: ws.key.clone(),
         enabled: !ws.auto_merge_on_green,
+    }
+}
+
+/// Resolve the "track main" toggle (issue #535). Only applies to a
+/// workspace with a GitHub upstream and a lazybox-provisioned worktree
+/// ([`Workspace::supports_track_main`]) — a linked checkout or repo-less
+/// row has no `origin/<default>` to fast-forward against, so we surface a
+/// `Notice` rather than arming a flag the sweep could never act on.
+pub fn resolve_toggle_track_main(workspace: Option<&Workspace>) -> Intent {
+    let Some(ws) = workspace else {
+        return Intent::NoOp;
+    };
+    if !ws.supports_track_main() {
+        return Intent::Notice("track main applies to a GitHub worktree".into());
+    }
+    Intent::SetTrackMain {
+        workspace_key: ws.key.clone(),
+        enabled: !ws.track_main,
     }
 }
 
@@ -1208,6 +1233,69 @@ mod tests {
     #[test]
     fn toggle_auto_merge_no_workspace_is_noop() {
         assert_eq!(resolve_toggle_auto_merge(None), Intent::NoOp);
+    }
+
+    // ── Track-main toggle ────────────────────────────────────────
+
+    /// A persistent scratch workspace under a GitHub project — no PR, no
+    /// linked checkout — the shape track-main is built for.
+    fn scratch() -> Workspace {
+        let mut ws = Workspace::empty(WorkspaceKey::new("scratch"), "scratch", Utc::now());
+        ws.project_key = Some(lazybox_core::ProjectKey::github("acme", "widgets"));
+        ws
+    }
+
+    #[test]
+    fn toggle_track_main_flips_the_arm() {
+        let mut ws = scratch();
+        assert!(ws.supports_track_main());
+        assert!(!ws.track_main);
+        match resolve_toggle_track_main(Some(&ws)) {
+            Intent::SetTrackMain {
+                workspace_key,
+                enabled,
+            } => {
+                assert_eq!(workspace_key, ws.key);
+                assert!(enabled, "arming a disarmed workspace enables it");
+            }
+            other => panic!("expected SetTrackMain, got {other:?}"),
+        }
+        ws.track_main = true;
+        match resolve_toggle_track_main(Some(&ws)) {
+            Intent::SetTrackMain { enabled, .. } => {
+                assert!(!enabled, "toggling an armed workspace disarms it");
+            }
+            other => panic!("expected SetTrackMain, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn toggle_track_main_on_unsupported_workspace_surfaces_notice() {
+        // A repo-less scratch workspace has no origin to track.
+        let ws = empty();
+        assert!(!ws.supports_track_main());
+        match resolve_toggle_track_main(Some(&ws)) {
+            Intent::Notice(msg) => assert!(msg.contains("GitHub"), "{msg}"),
+            other => panic!("expected Notice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn toggle_track_main_on_pr_workspace_surfaces_notice() {
+        // A PR branch is ahead of AND behind main — a fast-forward can
+        // never apply, so track-main is not offered there.
+        let ws = pr("o/r#1", CiStatus::Success, ReviewStatus::None);
+        assert!(ws.pr.is_some());
+        assert!(!ws.supports_track_main());
+        match resolve_toggle_track_main(Some(&ws)) {
+            Intent::Notice(_) => {}
+            other => panic!("expected Notice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn toggle_track_main_no_workspace_is_noop() {
+        assert_eq!(resolve_toggle_track_main(None), Intent::NoOp);
     }
 
     #[test]

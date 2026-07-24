@@ -791,6 +791,16 @@ pub enum Command {
         session_key: SessionKey,
         enabled: bool,
     },
+    /// Set the workspace's "track main" arm (issue #535). When enabled,
+    /// the daemon's background sweep keeps this workspace's worktree
+    /// fast-forwarded to `origin/<default>` while the tree is clean. The
+    /// daemon persists the flag on the `Workspace` (like
+    /// `SetAutoMergeOnGreen`), resolves and stores the base branch, and
+    /// re-broadcasts.
+    SetTrackMain {
+        session_key: SessionKey,
+        enabled: bool,
+    },
     /// Set the per-session auto-fix arm for one [`lazybox_core::AutoFixKind`]
     /// on the workspace (issue #363). `Arm` overrides a label opt-out, `Disarm`
     /// forces auto-fix off for this workspace, `Default` follows the

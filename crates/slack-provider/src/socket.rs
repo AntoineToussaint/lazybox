@@ -33,6 +33,7 @@
 use crate::SlackError;
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
+use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -74,6 +75,21 @@ pub enum InboundEvent {
     /// rebuilds the WSS URL; consumers see one `Hello` per new
     /// connection.
     Disconnect { reason: String },
+}
+
+impl InboundEvent {
+    /// Stable identity of the underlying Slack message, used to drop
+    /// redeliveries. A Slack message coordinate `(channel, ts)` is unique
+    /// and never changes across resends, whereas the envelope id does — so
+    /// this, not `envelope_id`, is the correct idempotency key. Control
+    /// frames (`Hello`, `Disconnect`) carry no message and aren't deduped.
+    fn dedup_key(&self) -> Option<(&str, &str)> {
+        match self {
+            InboundEvent::Mention { channel, ts, .. }
+            | InboundEvent::Message { channel, ts, .. } => Some((channel, ts)),
+            InboundEvent::Hello | InboundEvent::Disconnect { .. } => None,
+        }
+    }
 }
 
 /// Connection driver. `run_forever` loops over (open WSS → consume
@@ -162,9 +178,13 @@ impl SocketModeClient {
         // upstream maintenance, network blip); we just rebuild.
         let mut backoff = Duration::from_secs(1);
         let mut clean_close = CleanCloseBackoff::new();
+        // Lives across reconnects: a missed ACK drops the socket, then
+        // Slack redelivers the same event on the *next* connection, so
+        // per-connection dedup wouldn't catch it.
+        let mut seen = SeenEvents::new();
         loop {
             let started = Instant::now();
-            match self.run_once(&tx).await {
+            match self.run_once(&tx, &mut seen).await {
                 Ok(RunOutcome::ConsumerGone) => {
                     tracing::info!("slack: event consumer dropped, stopping socket loop");
                     return;
@@ -185,7 +205,11 @@ impl SocketModeClient {
         }
     }
 
-    async fn run_once(&self, tx: &mpsc::Sender<InboundEvent>) -> Result<RunOutcome, SlackError> {
+    async fn run_once(
+        &self,
+        tx: &mpsc::Sender<InboundEvent>,
+        seen: &mut SeenEvents,
+    ) -> Result<RunOutcome, SlackError> {
         // Slack pings every few seconds; a healthy socket never goes
         // quiet for anywhere near this long. Going 90s without ANY
         // frame means the connection is half-open (peer gone, TCP
@@ -238,6 +262,15 @@ impl SocketModeClient {
                 }
             }
             for event in envelope.into_inbound() {
+                // The envelope was ACKed above regardless; here we only
+                // suppress re-dispatch so a redelivered message can't
+                // inject the same prompt into the agent twice.
+                if let Some((channel, ts)) = event.dedup_key()
+                    && seen.mark((channel.to_string(), ts.to_string()))
+                {
+                    tracing::debug!("slack: dropping redelivered event {channel}/{ts}");
+                    continue;
+                }
                 if tx.send(event).await.is_err() {
                     // Consumer dropped — stop the whole loop rather than
                     // reconnecting (a clean `Closed` would just reopen
@@ -247,6 +280,45 @@ impl SocketModeClient {
             }
         }
         Ok(RunOutcome::Closed)
+    }
+}
+
+/// Bounded LRU of already-dispatched message coordinates, keyed by
+/// `(channel, ts)`. Slack redelivers an unacknowledged event (up to 3×
+/// after a missed ACK, a slow reconnect, or a half-open socket); without
+/// this, each redelivery would re-inject the same prompt into the agent.
+/// The bound caps memory on a long-lived connection — an evicted key can
+/// only be re-dispatched if Slack redelivers after `CAP` distinct newer
+/// messages, which Slack's short retry window never reaches.
+struct SeenEvents {
+    order: VecDeque<(String, String)>,
+    set: HashSet<(String, String)>,
+}
+
+impl SeenEvents {
+    const CAP: usize = 512;
+
+    fn new() -> Self {
+        Self {
+            order: VecDeque::new(),
+            set: HashSet::new(),
+        }
+    }
+
+    /// Record `key`, evicting the oldest when full. Returns `true` when the
+    /// key was already present — i.e. this is a redelivery to drop.
+    fn mark(&mut self, key: (String, String)) -> bool {
+        if self.set.contains(&key) {
+            return true;
+        }
+        if self.order.len() >= Self::CAP
+            && let Some(old) = self.order.pop_front()
+        {
+            self.set.remove(&old);
+        }
+        self.order.push_back(key.clone());
+        self.set.insert(key);
+        false
     }
 }
 
@@ -557,6 +629,57 @@ mod tests {
         }))
         .unwrap();
         assert!(env.into_inbound().is_empty());
+    }
+
+    #[test]
+    fn seen_events_drops_repeat_of_same_coordinate() {
+        let mut seen = SeenEvents::new();
+        let key = || ("C123".to_string(), "12345.6789".to_string());
+        assert!(!seen.mark(key()), "first sighting is fresh");
+        assert!(
+            seen.mark(key()),
+            "redelivery of same (channel, ts) is dropped"
+        );
+        // A distinct message in the same channel is not a duplicate.
+        assert!(!seen.mark(("C123".to_string(), "99999.0000".to_string())));
+    }
+
+    #[test]
+    fn seen_events_evicts_oldest_past_capacity() {
+        let mut seen = SeenEvents::new();
+        let first = ("C".to_string(), "0".to_string());
+        assert!(!seen.mark(first.clone()));
+        // Fill past capacity with distinct keys, evicting `first`.
+        for i in 1..=SeenEvents::CAP {
+            assert!(!seen.mark(("C".to_string(), i.to_string())));
+        }
+        // The oldest key was evicted, so it reads as fresh again.
+        assert!(!seen.mark(first));
+        // A key still within the window is retained.
+        let recent = ("C".to_string(), SeenEvents::CAP.to_string());
+        assert!(seen.mark(recent));
+    }
+
+    #[test]
+    fn dedup_key_is_none_for_control_frames() {
+        assert!(InboundEvent::Hello.dedup_key().is_none());
+        assert!(
+            InboundEvent::Disconnect { reason: "x".into() }
+                .dedup_key()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn dedup_key_uses_channel_and_ts_for_messages() {
+        let mention = InboundEvent::Mention {
+            channel: "C1".into(),
+            user: "U1".into(),
+            text: "hi".into(),
+            ts: "1.2".into(),
+            thread_ts: None,
+        };
+        assert_eq!(mention.dedup_key(), Some(("C1", "1.2")));
     }
 
     #[test]

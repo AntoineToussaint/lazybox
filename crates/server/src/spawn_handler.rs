@@ -462,6 +462,12 @@ async fn fold_and_broadcast_agent_state<R>(
     id: TerminalId,
     captured: &SessionKey,
     source: StateSource,
+    // A short, greppable cause for this transition — the "why" the issue
+    // #538 observability ask wants alongside `source`: which PTY liveness
+    // tier settled it (`pty-quiet-settle`, `pty-watchdog-force`), or which
+    // direct path drove it (`lifecycle-hook`, `user-answered-flip`,
+    // `process-exit`). `source` says who; `reason` says why.
+    reason: &'static str,
     fold: impl FnOnce(Option<lazybox_ipc::AgentState>, bool) -> (R, Option<lazybox_ipc::AgentState>),
 ) -> R {
     let meta = terminal_meta.lock().await;
@@ -477,6 +483,7 @@ async fn fold_and_broadcast_agent_state<R>(
             terminal_id = ?id,
             %session_key,
             ?source,
+            reason,
             previous = ?previous,
             state = ?state,
             "agent state transition → cache + Event::AgentState",
@@ -510,6 +517,15 @@ async fn transition_and_broadcast_agent_state(
     source: StateSource,
     candidate_for: impl FnOnce(Option<lazybox_ipc::AgentState>) -> Option<lazybox_ipc::AgentState>,
 ) -> DirectStateTransition {
+    // The direct paths' "why" follows straight from which one drove the
+    // move; the PTY path derives its own finer-grained reason in
+    // `commit_pty_reading`.
+    let reason = match source {
+        StateSource::Flip => "user-answered-flip",
+        StateSource::Hook => "lifecycle-hook",
+        StateSource::Exit => "process-exit",
+        StateSource::Pty => "pty",
+    };
     fold_and_broadcast_agent_state(
         terminal_meta,
         states,
@@ -517,6 +533,7 @@ async fn transition_and_broadcast_agent_state(
         id,
         captured,
         source,
+        reason,
         |previous, terminal_live| {
             let candidate = candidate_for(previous);
             // `Exit` is allowed to use the captured key during teardown;
@@ -1197,6 +1214,14 @@ pub async fn handle_spawn(
             // fires `watchdog_escape_working`.
             let mut watchdog_anchor = tokio::time::Instant::now();
             let mut watchdog_fp: Option<u64> = None;
+            // The last time any byte arrived — moves with `quiet_deadline`,
+            // not with the content fingerprint. Feeds the #538 status
+            // telemetry: "time in Working after the last real output" is the
+            // distribution the 5s quiet / 15s watchdog defaults should be
+            // tuned against, and a `pty-watchdog-force` settle whose
+            // `elapsed_since_output_ms` is tiny is the signature of a
+            // keepalive-painting agent (gap 1).
+            let mut last_output_at = tokio::time::Instant::now();
             // Length of the most recent chunk appended to `state_buf` —
             // the chunk-boundary hint the quiet classifier's same-chunk
             // rule needs.
@@ -1221,9 +1246,10 @@ pub async fn handle_spawn(
                 .await;
                 last_chunk_len = sub.replay.len();
                 if agent_for_pump.is_some() {
-                    quiet_deadline = Some(tokio::time::Instant::now() + quiet_after);
+                    last_output_at = tokio::time::Instant::now();
+                    quiet_deadline = Some(last_output_at + quiet_after);
                     if progress {
-                        watchdog_anchor = tokio::time::Instant::now();
+                        watchdog_anchor = last_output_at;
                     }
                 }
                 if sub.replay_complete {
@@ -1335,9 +1361,10 @@ pub async fn handle_spawn(
                     .await;
                     last_chunk_len = snapshot.replay.len();
                     if agent_for_pump.is_some() {
-                        quiet_deadline = Some(tokio::time::Instant::now() + quiet_after);
+                        last_output_at = tokio::time::Instant::now();
+                        quiet_deadline = Some(last_output_at + quiet_after);
                         if progress {
-                            watchdog_anchor = tokio::time::Instant::now();
+                            watchdog_anchor = last_output_at;
                         }
                     }
                     check_ready(
@@ -1401,9 +1428,10 @@ pub async fn handle_spawn(
                 .await;
                 last_chunk_len = chunk.bytes.len();
                 if agent_for_pump.is_some() {
-                    quiet_deadline = Some(tokio::time::Instant::now() + quiet_after);
+                    last_output_at = tokio::time::Instant::now();
+                    quiet_deadline = Some(last_output_at + quiet_after);
                     if progress {
-                        watchdog_anchor = tokio::time::Instant::now();
+                        watchdog_anchor = last_output_at;
                     }
                 }
                 if !signaled_first_output {
@@ -1438,6 +1466,19 @@ pub async fn handle_spawn(
                         quiet_deadline.unwrap_or_else(tokio::time::Instant::now)
                     ), if quiet_deadline.is_some() => {
                         quiet_deadline = None;
+                        // #538 status telemetry: the stream went byte-silent.
+                        // `elapsed_since_output_ms` is ~the quiet window by
+                        // construction; `content_stable_ms` says how long the
+                        // meaningful content had already been at rest when
+                        // output stopped — the quiet-window tuning signal.
+                        tracing::info!(
+                            target: "lazybox::agent_status_telemetry",
+                            terminal_id = ?id_for_pump,
+                            trigger = "quiet-timer",
+                            elapsed_since_output_ms = last_output_at.elapsed().as_millis(),
+                            content_stable_ms = watchdog_anchor.elapsed().as_millis(),
+                            "quiet classify firing",
+                        );
                         classify_quiet_screen(
                             agent_for_pump.as_ref(),
                             &state_buf,
@@ -1466,6 +1507,23 @@ pub async fn handle_spawn(
                         watchdog_anchor + watchdog_after.unwrap_or_default()
                     ), if agent_for_pump.is_some() && watchdog_after.is_some() => {
                         watchdog_anchor = tokio::time::Instant::now();
+                        // #538 status telemetry: the meaningful content held
+                        // still for the watchdog window. A small
+                        // `elapsed_since_output_ms` here means bytes were
+                        // still flowing (a spinner/keepalive/ticker) while the
+                        // content stayed put — the gap-1 "keepalive pins
+                        // Working" signature. A large one means a genuine
+                        // silent stall the quiet timer would also have caught.
+                        tracing::info!(
+                            target: "lazybox::agent_status_telemetry",
+                            terminal_id = ?id_for_pump,
+                            trigger = "working-watchdog",
+                            elapsed_since_output_ms = last_output_at.elapsed().as_millis(),
+                            content_stable_ms = watchdog_after
+                                .unwrap_or_default()
+                                .as_millis(),
+                            "working watchdog firing",
+                        );
                         watchdog_escape_working(
                             agent_for_pump.as_ref(),
                             &state_buf,
@@ -4054,6 +4112,17 @@ async fn commit_pty_reading(
     // table re-validates whatever folds, and the very next chunk re-reads
     // a fresh age — the same read-then-decide shape the pre-gate pump had.
     let since_last_hook = hook_driven.lock().await.get(&id).map(|at| at.elapsed());
+    // The liveness tier that produced this reading is the PTY path's "why"
+    // (#538): a byte-silent quiet-timer settle, a content-stable watchdog
+    // force, or ordinary streaming (a live dialog surfacing, or a byte-flow
+    // Working). The most common stuck-status question — "why did this
+    // settle to Done / why is it still Working" — is answered by this tier.
+    let reason = match (pty.liveness, pty.state) {
+        (lazybox_agents::Liveness::Silent, _) => "pty-quiet-settle",
+        (lazybox_agents::Liveness::Stalled, _) => "pty-watchdog-force",
+        (lazybox_agents::Liveness::Streaming, lazybox_ipc::AgentState::InputNeeded) => "pty-dialog",
+        (lazybox_agents::Liveness::Streaming, _) => "pty-stream",
+    };
     // Decide, insert, and broadcast under the same canonical lock boundary.
     // A separate cache insert followed by an unlocked broadcast allowed a
     // concurrent hook/exit to commit second but publish first, presenting the
@@ -4065,6 +4134,7 @@ async fn commit_pty_reading(
         id,
         session_key,
         StateSource::Pty,
+        reason,
         |current, terminal_live| {
             if !terminal_live {
                 return (lazybox_agents::Outcome::Rejected, None);
@@ -9057,6 +9127,16 @@ mod tests {
         async fn state(&self) -> Option<lazybox_ipc::AgentState> {
             self.states.lock().await.get(&self.id).copied()
         }
+
+        /// Reset the state machine to a freshly-spawned, **un-booted**
+        /// terminal — the boot gate holds an ambiguous byte-flow `Working`
+        /// until the composer is first classified. The default driver
+        /// pre-boots for steady-state tests; a full-lifecycle timeline that
+        /// starts at the boot→Idle edge needs the gate live.
+        fn unbooted(mut self) -> Self {
+            self.state_machine = lazybox_agents::AgentStateMachine::new();
+            self
+        }
     }
 
     /// The pump's two-path model (#289) under the one-way-door rule (#357)
@@ -9095,6 +9175,114 @@ mod tests {
             "a settled worker is Done (never Idle); Done and a parked `?` both \
              resist byte flow and clear only on a live classification",
         );
+    }
+
+    /// One agent's full lifecycle expressed as its real captured PTY
+    /// transcripts, one per phase.
+    struct GoldenLifecycle {
+        agent_id: &'static str,
+        /// The resting composer at spawn, and again when a turn ends.
+        idle: &'static [u8],
+        /// A live status line mid-turn.
+        working: &'static [u8],
+        /// A structural approval/permission prompt.
+        ask: &'static [u8],
+    }
+
+    /// **Per-agent golden lifecycle timeline (#538).** Drives the *real*
+    /// pump — `note_pty_activity` per chunk, `classify_quiet_screen` at each
+    /// quiet boundary — over each agent's *real* captured transcripts
+    /// through a full session (boot→idle → work → ask → answer → done), and
+    /// asserts the settled `AgentState` after every phase.
+    ///
+    /// The single-frame fixture suites (`detect_fixtures.rs`,
+    /// `codex_fixtures.rs`) prove each capture classifies correctly in
+    /// isolation; this proves they compose into the right *timeline* once
+    /// folded through the state machine — the boot gate holding the opening
+    /// Working, the settle promotion turning a hookless turn-end into `Done`
+    /// (Codex screen-scrape tops out at `Idle`; only the settle reaches
+    /// `Done`), and `InputNeeded` surviving the answer flip. A detector
+    /// regression on any phase, or a fold regression on any edge, fails here
+    /// for whichever agent it breaks.
+    #[tokio::test]
+    async fn per_agent_golden_lifecycle_walks_the_expected_timeline() {
+        use lazybox_ipc::AgentState::{Done, InputNeeded, Working};
+
+        let lifecycles = [
+            GoldenLifecycle {
+                agent_id: "claude",
+                idle: include_bytes!("../../agents/tests/fixtures/idle_composer.bin"),
+                working: include_bytes!("../../agents/tests/fixtures/working_status_line.bin"),
+                ask: include_bytes!("../../agents/tests/fixtures/permission_prompt_fragmented.bin"),
+            },
+            GoldenLifecycle {
+                agent_id: "codex",
+                idle: include_bytes!("../../agents/tests/fixtures/codex_real_idle.bin"),
+                working: include_bytes!("../../agents/tests/fixtures/codex_real_working.bin"),
+                ask: include_bytes!("../../agents/tests/fixtures/codex_real_command_approval.bin"),
+            },
+        ];
+
+        for lc in lifecycles {
+            let agent = lazybox_agents::registry()
+                .get(lc.agent_id)
+                .expect("built-in agent");
+            let mut p = PumpDriver::with_agent(agent, Duration::ZERO, Duration::ZERO).unbooted();
+
+            // Boot: the composer draws. The ambiguous byte-flow Working is
+            // held by the boot gate; the first quiet classification of the
+            // resting composer settles the opening Idle.
+            p.feed(lc.idle).await;
+            p.quiet().await;
+            assert_eq!(
+                p.state().await,
+                Some(lazybox_ipc::AgentState::Idle),
+                "{}: a freshly-booted composer is Idle, never Done",
+                lc.agent_id,
+            );
+
+            // A turn begins: bytes flow.
+            p.feed(lc.working).await;
+            assert_eq!(
+                p.state().await,
+                Some(Working),
+                "{}: byte flow after boot is Working",
+                lc.agent_id,
+            );
+
+            // A structural prompt paints and comes to rest → `?`.
+            p.feed(lc.ask).await;
+            p.quiet().await;
+            assert_eq!(
+                p.state().await,
+                Some(InputNeeded),
+                "{}: a settled approval prompt is InputNeeded",
+                lc.agent_id,
+            );
+
+            // The user answers through lazybox: the optimistic flip commits
+            // Working, and the resumed stream keeps it there.
+            p.answer().await;
+            p.feed(lc.working).await;
+            assert_eq!(
+                p.state().await,
+                Some(Working),
+                "{}: answering resumes Working",
+                lc.agent_id,
+            );
+
+            // The turn ends at a resting composer. A working agent that
+            // comes to rest has finished a turn → Done (never back to Idle),
+            // even for Codex whose screen-scrape only ever reads Idle here.
+            p.feed(lc.idle).await;
+            p.quiet().await;
+            assert_eq!(
+                p.state().await,
+                Some(Done),
+                "{}: a settled turn-end is Done, not the never-worked Idle",
+                lc.agent_id,
+            );
+        }
     }
 
     /// #374: clicking a parked `?` and then clicking away must not clear it.

@@ -75,11 +75,15 @@ fn str_field<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 /// `Notification` case consults it (see `notification_state`).
 ///
 /// The mapping over the events Claude Code actually fires:
-///   - a submitted prompt, tool use, compaction, and subagent
-///     completion all mean the main agent is **busy** →
-///     [`AgentState::Working`] (`UserPromptSubmit` matters: a turn
-///     that streams text with no tool calls fires no other
-///     working-shaped hook at all);
+///   - a submitted prompt, tool use, and compaction mean the main
+///     agent is **busy** → [`AgentState::Working`] (`UserPromptSubmit`
+///     matters: a turn that streams text with no tool calls fires no
+///     other working-shaped hook at all);
+///   - `SubagentStop` (a Task-tool subagent finished) only KEEPS an
+///     already-working agent working — it never resurrects a settled
+///     `Done`/`Idle`/`InputNeeded` agent, because it can arrive after
+///     the main turn's `Stop` and would otherwise strand it on
+///     "running" forever;
 ///   - a `Notification` means Claude is **waiting on the user** →
 ///     [`AgentState::InputNeeded`]: either a permission / elicitation
 ///     dialog, or — the only variant that fires under lazybox's
@@ -104,8 +108,22 @@ pub fn hook_to_state(event: &HookEvent, current: Option<AgentState>) -> Option<A
         HookEventKind::UserPromptSubmit
         | HookEventKind::PreToolUse
         | HookEventKind::PostToolUse
-        | HookEventKind::PreCompact
-        | HookEventKind::SubagentStop => AgentState::Working,
+        | HookEventKind::PreCompact => AgentState::Working,
+        // A subagent (Task tool) finishing does NOT mean the top-level
+        // turn resumed. Claude fires `SubagentStop` when a spawned
+        // subagent completes, and it can land AFTER the main agent's
+        // `Stop` (observed 2–5s later in the wild). Mapping it to
+        // `Working` unconditionally then resurrects a just-settled
+        // `Done` agent and strands it on "running" forever — the main
+        // `Stop` already fired and won't fire again. So only keep an
+        // ALREADY-working agent working; never pull a settled
+        // (`Done`/`Idle`/`InputNeeded`) or `Exited` agent back into
+        // `Working`. (PreToolUse/PostToolUse carry the real mid-turn
+        // Working signal, so this loses nothing during a live turn.)
+        HookEventKind::SubagentStop => match current {
+            Some(AgentState::Working) => AgentState::Working,
+            _ => return None,
+        },
         HookEventKind::Notification => {
             return notification_state(event.notification.as_deref(), current);
         }
@@ -250,8 +268,8 @@ mod tests {
     }
 
     #[test]
-    fn tool_and_compaction_and_subagent_are_working() {
-        for name in ["PreToolUse", "PostToolUse", "PreCompact", "SubagentStop"] {
+    fn tool_and_compaction_are_working() {
+        for name in ["PreToolUse", "PostToolUse", "PreCompact"] {
             let ev = parse(&format!(r#"{{"hook_event_name":"{name}"}}"#));
             assert_eq!(
                 hook_to_state(&ev, None),
@@ -259,6 +277,35 @@ mod tests {
                 "{name} should be Working",
             );
         }
+    }
+
+    #[test]
+    fn subagent_stop_never_resurrects_a_settled_agent() {
+        // Regression: a `SubagentStop` can land AFTER the main agent's
+        // `Stop` (observed 2–5s later in real logs). It must NOT pull a
+        // settled agent back into Working — doing so stranded agents on
+        // "running" forever because the main `Stop` won't fire again.
+        let ev = parse(r#"{"hook_event_name":"SubagentStop"}"#);
+        // Already Working → stays Working (mid-turn subagent completion).
+        assert_eq!(
+            hook_to_state(&ev, Some(AgentState::Working)),
+            Some(AgentState::Working),
+        );
+        // Settled / finished states are untouched (no transition).
+        for settled in [
+            AgentState::Done,
+            AgentState::Idle,
+            AgentState::InputNeeded,
+            AgentState::Exited { code: None },
+        ] {
+            assert_eq!(
+                hook_to_state(&ev, Some(settled)),
+                None,
+                "SubagentStop must be a no-op from {settled:?}, not a resurrection to Working",
+            );
+        }
+        // Unknown/no cached state → no-op (a later real signal sets it).
+        assert_eq!(hook_to_state(&ev, None), None);
     }
 
     #[test]

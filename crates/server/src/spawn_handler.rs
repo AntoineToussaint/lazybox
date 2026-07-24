@@ -3895,8 +3895,11 @@ pub(crate) async fn classify_quiet_screen(
 /// hooks-primary gate still applies: while hooks are fresh they own
 /// `Working` (a long silent tool call is normal there) and the forced
 /// `Done` is dropped — the pump re-arms and retries a window later.
-/// A pending answer reset vetoes the whole tick, same as the quiet
-/// path: the buffer predates the user's answer by decree.
+/// A pending answer reset no longer vetoes the whole tick: still latched
+/// a full watchdog window after the answer, it means zero PTY output
+/// followed, so the stale-buffer classify (which would re-raise the
+/// just-answered `?`) is skipped and the turn is settled `Done` directly.
+/// See the inline comment for why that can't pin `Working`.
 pub(crate) async fn watchdog_escape_working(
     agent: Option<&std::sync::Arc<dyn lazybox_agents::Agent>>,
     buf: &[u8],
@@ -4033,6 +4036,13 @@ async fn commit_pty_reading(
     // and hysteresis. The only fact the machine can't derive itself is how
     // long ago this terminal last spoke a lifecycle hook — a hook-driven
     // terminal is in the map, a pure screen-scraped one never is.
+    //
+    // Read outside the `states` lock the fold takes below, so a hook
+    // ingesting in that window can leave this age one frame stale. Safe:
+    // hook freshness is a soft signal (it only shifts a reading between
+    // "gated" and "folded", never fabricates a state), the transition
+    // table re-validates whatever folds, and the very next chunk re-reads
+    // a fresh age — the same read-then-decide shape the pre-gate pump had.
     let since_last_hook = hook_driven.lock().await.get(&id).map(|at| at.elapsed());
     // Decide, insert, and broadcast under the same canonical lock boundary.
     // A separate cache insert followed by an unlocked broadcast allowed a

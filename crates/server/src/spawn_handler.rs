@@ -1471,7 +1471,10 @@ pub async fn handle_spawn(
                         // construction; `content_stable_ms` says how long the
                         // meaningful content had already been at rest when
                         // output stopped — the quiet-window tuning signal.
-                        tracing::info!(
+                        // `debug` (behind a dedicated target) so it stays out
+                        // of the default log until an operator opts in to
+                        // collect the distribution.
+                        tracing::debug!(
                             target: "lazybox::agent_status_telemetry",
                             terminal_id = ?id_for_pump,
                             trigger = "quiet-timer",
@@ -1507,23 +1510,30 @@ pub async fn handle_spawn(
                         watchdog_anchor + watchdog_after.unwrap_or_default()
                     ), if agent_for_pump.is_some() && watchdog_after.is_some() => {
                         watchdog_anchor = tokio::time::Instant::now();
-                        // #538 status telemetry: the meaningful content held
-                        // still for the watchdog window. A small
-                        // `elapsed_since_output_ms` here means bytes were
-                        // still flowing (a spinner/keepalive/ticker) while the
+                        // #538 status telemetry. Only meaningful while the
+                        // turn is actually `Working`: the watchdog arm re-arms
+                        // every window regardless of state, so an idle/done
+                        // terminal would otherwise emit a line every 15s
+                        // forever. Gate on the cached state (the same one the
+                        // watchdog itself acts on) and keep it at `debug`
+                        // behind the dedicated target. A small
+                        // `elapsed_since_output_ms` here means bytes were still
+                        // flowing (a spinner/keepalive/ticker) while the
                         // content stayed put — the gap-1 "keepalive pins
-                        // Working" signature. A large one means a genuine
-                        // silent stall the quiet timer would also have caught.
-                        tracing::info!(
-                            target: "lazybox::agent_status_telemetry",
-                            terminal_id = ?id_for_pump,
-                            trigger = "working-watchdog",
-                            elapsed_since_output_ms = last_output_at.elapsed().as_millis(),
-                            content_stable_ms = watchdog_after
-                                .unwrap_or_default()
-                                .as_millis(),
-                            "working watchdog firing",
-                        );
+                        // Working" signature; a large one is a genuine silent
+                        // stall the quiet timer would also have caught.
+                        if agent_states_map.lock().await.get(&id_for_pump).copied()
+                            == Some(lazybox_ipc::AgentState::Working)
+                        {
+                            tracing::debug!(
+                                target: "lazybox::agent_status_telemetry",
+                                terminal_id = ?id_for_pump,
+                                trigger = "working-watchdog",
+                                elapsed_since_output_ms = last_output_at.elapsed().as_millis(),
+                                content_stable_ms = watchdog_after.unwrap_or_default().as_millis(),
+                                "working watchdog firing",
+                            );
+                        }
                         watchdog_escape_working(
                             agent_for_pump.as_ref(),
                             &state_buf,
@@ -9208,6 +9218,13 @@ mod tests {
     async fn per_agent_golden_lifecycle_walks_the_expected_timeline() {
         use lazybox_ipc::AgentState::{Done, InputNeeded, Working};
 
+        // Deliberate cross-crate reach into the shared real-capture corpus in
+        // `lazybox-agents` (the same one the single-frame detector suites
+        // assert against, and the same reach the Claude-only sequence test
+        // below already makes). The captures live with the detectors they
+        // exercise; duplicating the binaries here would just risk the two
+        // copies drifting. A rename over there breaks this test at compile
+        // time, which is the intended tripwire.
         let lifecycles = [
             GoldenLifecycle {
                 agent_id: "claude",

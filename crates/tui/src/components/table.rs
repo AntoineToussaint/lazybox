@@ -46,15 +46,19 @@ pub enum ColumnWidth {
     Flex { min: usize },
 }
 
-/// Horizontal alignment within a column. Drives whether the
-/// padding-spaces sit to the *right* of the content (Left — default)
-/// or to the *left* (Right). Sidebar's trailer columns (unread,
-/// status pill, relative time) are Right; the title column is Left.
+/// Horizontal alignment within a column. Drives where the
+/// padding-spaces sit: to the *right* of the content (Left — default),
+/// to the *left* (Right), or split evenly on both sides (Center, with
+/// any odd cell going to the right). Sidebar's trailer columns (unread,
+/// status pill, relative time) are Right; the title column is Left; the
+/// passive badge slots (`✎` / `]N` / `⎇` / `ARM`) are Center so a
+/// glyph sits mid-slot and short counts don't cling to one edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Align {
     #[default]
     Left,
     Right,
+    Center,
 }
 
 /// Default column priority — high, so a column is kept until every
@@ -104,6 +108,14 @@ impl Column {
     /// padding spaces fill the left side. Chainable: `Column::fixed(4).right()`.
     pub fn right(mut self) -> Self {
         self.align = Align::Right;
+        self
+    }
+
+    /// Center the column. Padding splits evenly on both sides (odd cell
+    /// to the right), so a single-glyph badge sits mid-slot. Chainable:
+    /// `Column::max(0).center()`.
+    pub fn center(mut self) -> Self {
+        self.align = Align::Center;
         self
     }
 
@@ -446,6 +458,31 @@ pub fn render_table(
         .collect()
 }
 
+/// Emit `content` into `out` padded to fill a column, placing the
+/// `pad` filler spaces per `align` (Left → all right, Right → all left,
+/// Center → split with the odd cell on the right). The filler carries
+/// `fill_style` so cursor-row padding inherits the highlight bg.
+fn push_padded(
+    out: &mut Vec<ratatui::text::Span<'static>>,
+    content: impl Iterator<Item = ratatui::text::Span<'static>>,
+    pad: usize,
+    align: Align,
+    fill_style: ratatui::style::Style,
+) {
+    let (left, right) = match align {
+        Align::Left => (0, pad),
+        Align::Right => (pad, 0),
+        Align::Center => (pad / 2, pad - pad / 2),
+    };
+    if left > 0 {
+        out.push(ratatui::text::Span::styled(" ".repeat(left), fill_style));
+    }
+    out.extend(content);
+    if right > 0 {
+        out.push(ratatui::text::Span::styled(" ".repeat(right), fill_style));
+    }
+}
+
 fn render_row(row: &Row, columns: &[Column], widths: &[usize]) -> ratatui::text::Line<'static> {
     let mut spans: Vec<ratatui::text::Span<'static>> = Vec::new();
     for (i, target_w) in widths.iter().enumerate() {
@@ -466,21 +503,13 @@ fn render_row(row: &Row, columns: &[Column], widths: &[usize]) -> ratatui::text:
         let cell_w = cell.width();
         if cell_w <= *target_w {
             let pad = *target_w - cell_w;
-            let pad_span = ratatui::text::Span::styled(" ".repeat(pad), fill_style);
-            match align {
-                Align::Left => {
-                    spans.extend(cell.spans.iter().cloned());
-                    if pad > 0 {
-                        spans.push(pad_span);
-                    }
-                }
-                Align::Right => {
-                    if pad > 0 {
-                        spans.push(pad_span);
-                    }
-                    spans.extend(cell.spans.iter().cloned());
-                }
-            }
+            push_padded(
+                &mut spans,
+                cell.spans.iter().cloned(),
+                pad,
+                align,
+                fill_style,
+            );
         } else {
             // Over-wide. A droppable atomic tail (e.g. the title's label
             // chips) is shed WHOLE before any slicing — cutting into it
@@ -492,21 +521,13 @@ fn render_row(row: &Row, columns: &[Column], widths: &[usize]) -> ratatui::text:
             let head_w = cell.floor_width();
             if cell.atomic_tail > 0 && head_w <= *target_w {
                 let pad = *target_w - head_w;
-                let pad_span = ratatui::text::Span::styled(" ".repeat(pad), fill_style);
-                match align {
-                    Align::Left => {
-                        spans.extend(cell.spans.iter().take(head_end).cloned());
-                        if pad > 0 {
-                            spans.push(pad_span);
-                        }
-                    }
-                    Align::Right => {
-                        if pad > 0 {
-                            spans.push(pad_span);
-                        }
-                        spans.extend(cell.spans.iter().take(head_end).cloned());
-                    }
-                }
+                push_padded(
+                    &mut spans,
+                    cell.spans.iter().take(head_end).cloned(),
+                    pad,
+                    align,
+                    fill_style,
+                );
                 continue;
             }
             // Truncate: walk head spans until we've consumed `target_w - 1`
@@ -796,6 +817,36 @@ mod tests {
         let joined: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         // 3 spaces of padding, then "hi" flush right.
         assert_eq!(joined, "   hi");
+    }
+
+    /// Center-aligned column splits padding on both sides, with the
+    /// odd cell landing on the right. A ` ]2 ` badge (4 cells) in a
+    /// 5-cell slot picks up one leading space, not a trailing one.
+    #[test]
+    fn center_align_splits_padding_with_odd_cell_right() {
+        let cols = [Column::max(0).center()];
+        let rows = vec![
+            Row::new(vec![Cell::from_span(Span::raw(" ]12 "))]),
+            Row::new(vec![Cell::from_span(Span::raw(" ]2 "))]),
+        ];
+        let lines = render_table(&rows, &cols, 20);
+        let wide: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        let narrow: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        // Column width = 5 (the ` ]12 ` row). The narrow ` ]2 ` (4)
+        // centers: 1 pad → left 0, right 1.
+        assert_eq!(wide, " ]12 ");
+        assert_eq!(narrow, " ]2  ");
+    }
+
+    /// A single-glyph centered cell sits mid-slot: ` A ` (3) in a
+    /// 5-cell column picks up one space each side.
+    #[test]
+    fn center_align_single_glyph_sits_mid_slot() {
+        let cols = [Column::max(5).center()];
+        let rows = vec![Row::new(vec![Cell::from_span(Span::raw(" A "))])];
+        let lines = render_table(&rows, &cols, 20);
+        let s: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(s, "  A  ");
     }
 
     /// Cell fill_style styles the padding spans (not the content).

@@ -20,6 +20,7 @@
 //! layer only has to test the stateful parts (cooldown / max-attempts)
 //! once.
 
+use crate::policy::{PolicyArm, auto_fix_permitted};
 use crate::{CiStatus, ReviewStatus, Task, TaskRole, TaskState};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -97,9 +98,16 @@ impl Default for AutoFixSettings {
 }
 
 /// Decide whether `task` warrants an auto-fix right now, and of which
-/// kind. Pure — no store, no clock. Returns `None` when any guard
-/// blocks; the server layer adds the stateful guards (cooldown,
-/// max-attempts) on top of a `Some` result.
+/// kind, for a workspace with **no explicit per-session policy** (the
+/// [`PolicyArm::Default`] case). Pure — no store, no clock. Returns
+/// `None` when any guard blocks; the server layer adds the stateful
+/// guards (cooldown, max-attempts) on top of a `Some` result.
+///
+/// This is the source-path shorthand for
+/// [`resolve_auto_fix`]`(task, settings, PolicyArm::Default)` — it
+/// exists so callers that have no per-session arm to apply keep a
+/// two-argument entry point, while the actual enable/label/candidate
+/// composition lives in exactly one place ([`resolve_auto_fix`]).
 ///
 /// Guards, in order (all must pass):
 ///
@@ -126,13 +134,65 @@ impl Default for AutoFixSettings {
 /// we resolve the conflict first; the next sweep picks up any
 /// remaining CI failure.
 pub fn evaluate_auto_fix(task: &Task, settings: &AutoFixSettings) -> Option<AutoFixKind> {
-    if !settings.enabled {
-        return None;
-    }
-    if is_auto_fix_opted_out(task, settings) {
-        return None;
-    }
-    auto_fix_candidate(task)
+    resolve_auto_fix(task, settings, PolicyArm::Default)
+}
+
+/// **The** single auto-fix decision. Composes every layer in one place —
+/// the global enable switch, the task-shape candidacy
+/// ([`auto_fix_candidate`]), the label opt-out
+/// ([`is_auto_fix_opted_out`]), and the per-session [`PolicyArm`] — and
+/// returns the failure kind to fix, or `None` when any layer blocks.
+///
+/// `evaluate_auto_fix` is the `PolicyArm::Default` shorthand of this
+/// function, and the server's dispatcher gates its (already queued)
+/// candidates through [`auto_fix_enabled_and_permitted`], the same
+/// enable/label/arm composition this function uses. Keeping the
+/// composition here means a future change to how those layers combine
+/// (e.g. whether an `Arm` can override the global switch) lands in one
+/// spot the tests cover, instead of drifting between core and the daemon.
+///
+/// Precedence of the per-session arm (see [`auto_fix_permitted`]): an
+/// explicit `Disarm` blocks even a clean candidate; an explicit `Arm`
+/// overrides a label opt-out; `Default` follows the label. The global
+/// enable switch is applied on top of all three — arming a
+/// globally-disabled feature never fires.
+pub fn resolve_auto_fix(
+    task: &Task,
+    settings: &AutoFixSettings,
+    arm: PolicyArm,
+) -> Option<AutoFixKind> {
+    let kind = auto_fix_candidate(task)?;
+    auto_fix_enabled_and_permitted(settings.enabled, is_auto_fix_opted_out(task, settings), arm)
+        .then_some(kind)
+}
+
+/// The **policy-layer gate** for an already-shape-eligible candidate:
+/// whether it may be auto-fixed given the global enable switch
+/// (`enabled`), whether a label currently opts the PR out, and the
+/// resolved per-session [`PolicyArm`]. This is the one place the
+/// enable + label + arm layers are composed — the daemon dispatcher, the
+/// pure `resolve_auto_fix` path, and the TUI policies menu all gate
+/// through it, so the "should we touch this PR?" answer can never drift
+/// between where it's decided and where it's shown.
+///
+/// Takes the bare `enabled` flag rather than the whole [`AutoFixSettings`]
+/// so a caller that only knows the global switch (the TUI client, which
+/// never sees the daemon's full settings) composes the identical rule.
+///
+/// Split out from [`resolve_auto_fix`] because the daemon resolves the
+/// three inputs in two phases separated by the action queue: the source
+/// poller computes the candidate + label opt-out from the [`Task`] it has
+/// (there is no store there), and the dispatcher resolves the workspace's
+/// arm from the store (there is no `Task` there). Both phases feed this
+/// single function so the daemon composes enable/label/arm through the
+/// exact same code the pure `resolve_auto_fix` path uses, rather than
+/// re-deriving the rule (issue #363).
+pub fn auto_fix_enabled_and_permitted(
+    enabled: bool,
+    label_opted_out: bool,
+    arm: PolicyArm,
+) -> bool {
+    enabled && auto_fix_permitted(arm, label_opted_out)
 }
 
 /// The **task-shape** half of the auto-fix decision: everything that
@@ -441,5 +501,158 @@ mod tests {
             None,
             "label opt-out drops it in the composed fn"
         );
+    }
+
+    // ── resolve_auto_fix: the single composition ────────────────────
+
+    /// `evaluate_auto_fix` is exactly the `Default`-arm shorthand of
+    /// `resolve_auto_fix`. This is the invariant that lets the two-arg
+    /// source path and the arm-aware path share one composition — if it
+    /// ever breaks, the source path and the daemon have drifted.
+    #[test]
+    fn evaluate_is_resolve_with_default_arm() {
+        for label in [None, Some("no-auto-fix"), Some("do-not-lazybox")] {
+            for settings in [enabled(), AutoFixSettings::default()] {
+                let mut t = pr();
+                if let Some(l) = label {
+                    t.labels = vec![crate::Label::new(l)];
+                }
+                assert_eq!(
+                    evaluate_auto_fix(&t, &settings),
+                    resolve_auto_fix(&t, &settings, PolicyArm::Default),
+                    "evaluate must equal resolve(Default) for label={label:?} enabled={}",
+                    settings.enabled,
+                );
+            }
+        }
+    }
+
+    /// An explicit `Arm` overrides a label opt-out — the core promise of
+    /// the per-session policy (issue #363). Same fixable PR that
+    /// `evaluate_auto_fix` drops for its label is fixed once armed.
+    #[test]
+    fn arm_overrides_label_opt_out_at_resolve() {
+        let mut t = pr();
+        t.labels = vec![crate::Label::new("No-Auto-Fix")];
+        // Default arm honors the label…
+        assert_eq!(resolve_auto_fix(&t, &enabled(), PolicyArm::Default), None);
+        // …an explicit Arm overrides it and fixes the CI failure.
+        assert_eq!(
+            resolve_auto_fix(&t, &enabled(), PolicyArm::Arm),
+            Some(AutoFixKind::CiFailure)
+        );
+    }
+
+    /// An explicit `Disarm` blocks even a clean, unlabeled candidate.
+    #[test]
+    fn disarm_blocks_clean_candidate_at_resolve() {
+        let t = pr();
+        assert!(!is_auto_fix_opted_out(&t, &enabled()));
+        assert_eq!(
+            resolve_auto_fix(&t, &enabled(), PolicyArm::Default),
+            Some(AutoFixKind::CiFailure),
+            "clean candidate fixes under Default"
+        );
+        assert_eq!(
+            resolve_auto_fix(&t, &enabled(), PolicyArm::Disarm),
+            None,
+            "Disarm wins over a clean candidate"
+        );
+    }
+
+    /// The global enable switch gates every arm — even an explicit `Arm`
+    /// never fires while the feature is globally off.
+    #[test]
+    fn disabled_feature_beats_every_arm_at_resolve() {
+        let t = pr();
+        for arm in [PolicyArm::Default, PolicyArm::Arm, PolicyArm::Disarm] {
+            assert_eq!(
+                resolve_auto_fix(&t, &AutoFixSettings::default(), arm),
+                None,
+                "globally-disabled feature must not fire for arm={arm:?}",
+            );
+        }
+    }
+
+    /// `resolve_auto_fix` still requires a fixable task shape: a
+    /// third-party or green PR is `None` under every arm, so an `Arm`
+    /// can't conjure a fix out of a non-candidate.
+    #[test]
+    fn resolve_requires_candidate_shape_under_every_arm() {
+        let mut green = pr();
+        green.ci = CiStatus::Success;
+        let mut third_party = pr();
+        third_party.role = TaskRole::Reviewer;
+        for arm in [PolicyArm::Default, PolicyArm::Arm, PolicyArm::Disarm] {
+            assert_eq!(resolve_auto_fix(&green, &enabled(), arm), None);
+            assert_eq!(resolve_auto_fix(&third_party, &enabled(), arm), None);
+        }
+    }
+
+    // ── auto_fix_enabled_and_permitted: the daemon's gate ───────────
+
+    /// The daemon dispatcher gate composes enable + label + arm exactly
+    /// as `resolve_auto_fix` does. This table is the drift guard: if the
+    /// server's gate and the pure path ever disagree, one of these fails.
+    #[test]
+    fn enabled_and_permitted_matches_resolve_gate() {
+        // (enabled, label_opted_out, arm) → expected permit
+        let cases = [
+            // Disabled: never, regardless of label/arm.
+            (false, false, PolicyArm::Default, false),
+            (false, false, PolicyArm::Arm, false),
+            (false, true, PolicyArm::Arm, false),
+            (false, true, PolicyArm::Disarm, false),
+            // Enabled + Default follows the label.
+            (true, false, PolicyArm::Default, true),
+            (true, true, PolicyArm::Default, false),
+            // Enabled + Arm overrides a label opt-out.
+            (true, true, PolicyArm::Arm, true),
+            (true, false, PolicyArm::Arm, true),
+            // Enabled + Disarm always off.
+            (true, false, PolicyArm::Disarm, false),
+            (true, true, PolicyArm::Disarm, false),
+        ];
+        for (enabled, opted_out, arm, expected) in cases {
+            assert_eq!(
+                auto_fix_enabled_and_permitted(enabled, opted_out, arm),
+                expected,
+                "enabled={enabled} opted_out={opted_out} arm={arm:?}",
+            );
+        }
+    }
+
+    /// The gate is precisely the `is_some()` of `resolve_auto_fix` for a
+    /// shape-eligible candidate — proving the daemon's two-phase split
+    /// (candidate at the source, gate at the dispatcher) reconstructs the
+    /// same decision as the one-shot pure path.
+    #[test]
+    fn gate_reconstructs_resolve_for_a_candidate() {
+        for enabled in [true, false] {
+            for opted_out_label in [false, true] {
+                for arm in [PolicyArm::Default, PolicyArm::Arm, PolicyArm::Disarm] {
+                    let settings = AutoFixSettings {
+                        enabled,
+                        ..Default::default()
+                    };
+                    let mut t = pr(); // a CI-failing, own, open PR (a candidate)
+                    if opted_out_label {
+                        t.labels = vec![crate::Label::new("no-auto-fix")];
+                    }
+                    // The source phase confirms candidacy + computes the
+                    // label; the dispatcher phase applies the gate.
+                    let candidate = auto_fix_candidate(&t);
+                    let label = is_auto_fix_opted_out(&t, &settings);
+                    let two_phase = candidate
+                        .filter(|_| auto_fix_enabled_and_permitted(settings.enabled, label, arm));
+                    assert_eq!(
+                        two_phase,
+                        resolve_auto_fix(&t, &settings, arm),
+                        "two-phase daemon path must equal one-shot resolve \
+                         (enabled={enabled} label={opted_out_label} arm={arm:?})",
+                    );
+                }
+            }
+        }
     }
 }

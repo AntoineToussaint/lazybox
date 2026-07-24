@@ -253,6 +253,9 @@ async fn wait_for_started(client: &mut lazybox_ipc::Client, expected_agent: &str
                 return run_id;
             }
             Event::AgentRawJson { .. } => {}
+            // Post-subscribe scaffolding (tracker #512): the auto-fix
+            // policy config lands after the snapshot, before the run.
+            Event::AutoFixPolicyConfig { .. } => {}
             other => panic!("expected AgentRunStarted, got {other:?}"),
         }
     }

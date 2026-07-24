@@ -10,6 +10,17 @@
 //! state, never an independent per-poll guess that can jump between
 //! contradictory readings.
 //!
+//! Screen-scraped readings don't fold in raw: they pass through
+//! [`AgentStateMachine::on_pty_reading`], which owns the **hooks-primary
+//! gate** (`hooks_gate_allows`) — the whole "while a lifecycle hook is
+//! fresh, hooks win the Working↔Idle call and the PTY only supplies the
+//! corrections hooks structurally miss" policy — plus the **inactivity
+//! authority** ([`Liveness::Silent`]): a screen classified after true PTY
+//! byte-silence settles a `Working` turn to `Done` even under a fresh
+//! hook, the fail-safe for an agent whose `Stop` hook never fires. Keeping
+//! that policy here (rather than in the daemon's output pump) means one
+//! unit-tested place decides every state, hooks and scraping alike.
+//!
 //! Mapping the lifecycle onto the wire vocabulary:
 //! - `Idle` — freshly launched, no work run yet ("starting").
 //! - `Working` — actively producing output or running a tool ("running").
@@ -73,6 +84,80 @@
 //! sees such a streak and keeps its stricter contract.
 
 use lazybox_ipc::AgentState;
+use std::time::Duration;
+
+/// How old a terminal's most recent lifecycle hook may be before the PTY
+/// detector regains full authority over it. While hooks flow they are the
+/// deterministic Working↔Idle signal (no screen-scraping flicker), so the
+/// PTY detector's `Working`/`Done` readings defer to them; once the last
+/// hook is older than this the pipeline has evidently stopped (socket
+/// hiccup, helper failure) and screen-scraping is the better signal again.
+/// Owned here, alongside the gate that consults it (`hooks_gate_allows`),
+/// so the whole "when does a PTY reading win over a hook" policy is one
+/// unit-testable place rather than scattered across the daemon's pump.
+pub const HOOK_STALENESS: Duration = Duration::from_secs(30);
+
+/// How a PTY reading was obtained — the evidence tier the hooks-primary
+/// gate (`hooks_gate_allows`) reasons about. A busy agent repaints its
+/// status ticker roughly once a second, so *how quiet* the stream was when
+/// a reading was taken is exactly what separates "the turn ended" from "a
+/// tool is still running."
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Liveness {
+    /// Inferred from a PTY chunk while bytes are actively arriving — the
+    /// weakest tier. Byte flow alone is only ever `Working`, and it can
+    /// never overrule a fresh hook.
+    Streaming,
+    /// A classification taken after the PTY produced **no bytes at all**
+    /// for the quiet window. This is authoritative that output stopped: a
+    /// working agent repaints its ticker within that window, so a
+    /// byte-silent screen has come to rest. It settles a `Working` agent to
+    /// `Done` **even while a hook is still fresh** — the fail-safe for a
+    /// hook-driven agent whose `Stop` hook never fires (a manual
+    /// interrupt, a lost hook, or an agent that emits working-shaped hooks
+    /// but no terminal one).
+    Silent,
+    /// A classification taken after no meaningful **content change** for
+    /// the watchdog window, while bytes may still be flowing (a ticking
+    /// elapsed-time / token counter). A long silent tool call looks exactly
+    /// like this, so this tier stays subordinate to a fresh hook — gated
+    /// identically to [`Liveness::Streaming`].
+    Stalled,
+}
+
+/// A PTY-detector reading plus the two facts the hooks-primary gate needs
+/// that a bare [`Reading`] doesn't carry: how quiet the stream was
+/// ([`Liveness`]) and whether the classified screen is an idle composer
+/// ready for a prompt. Fed to [`AgentStateMachine::on_pty_reading`], which
+/// applies the gate and then folds the underlying [`Reading`] through the
+/// same hysteresis as any other reading.
+#[derive(Debug, Clone, Copy)]
+pub struct PtyReading {
+    /// The state this reading implies (see [`Reading::state`]).
+    pub state: AgentState,
+    /// Affirmative-classification flag (see [`Reading::clear`]).
+    pub clear: bool,
+    /// Meaningful-content-change flag (see [`Reading::progress`]).
+    pub progress: bool,
+    /// How the reading was obtained.
+    pub liveness: Liveness,
+    /// Whether the (Idle) screen is a composer drawn and ready for a
+    /// pasted prompt. Only consulted for an `Idle` reading under a fresh
+    /// hook, where it decides whether the idle nudge may demote a
+    /// hook-set `Working` (the composer being ready is corroborating, not
+    /// contradicting — see `hooks_gate_allows`).
+    pub ready_for_prompt: bool,
+}
+
+impl PtyReading {
+    fn reading(&self, clear: bool) -> Reading {
+        Reading {
+            state: self.state,
+            clear,
+            progress: self.progress,
+        }
+    }
+}
 
 /// One detection reading offered to the machine, tagged with the evidence
 /// quality the machine needs.
@@ -166,6 +251,14 @@ pub enum Outcome {
     /// byte-flow `Working` that may not clear a parked `InputNeeded`. The
     /// prior state stands.
     Damped,
+    /// The hooks-primary gate suppressed the reading before hysteresis: a
+    /// fresh lifecycle hook owns the Working↔Idle distinction and this PTY
+    /// reading isn't one of the corrections a hook structurally misses (an
+    /// on-screen dialog, an idle composer, or the byte-silent inactivity
+    /// settle). The prior state stands. Distinct from [`Outcome::Damped`]
+    /// so a hook-gated hold and a hysteresis flap can be told apart in the
+    /// log. See `hooks_gate_allows`.
+    Gated,
 }
 
 /// One terminal's lifecycle state machine.
@@ -235,6 +328,57 @@ impl AgentStateMachine {
             Some(current) if !transition_allowed(current, to) => None,
             _ => Some(to),
         }
+    }
+
+    /// Fold a PTY-detector reading in through the **hooks-primary gate**
+    /// and then the hysteresis. This is the single arbiter for every
+    /// screen-scraped reading — the daemon's output pump does no gating of
+    /// its own; it gathers the facts ([`PtyReading`] + the age of the
+    /// terminal's last hook + a lazily-computed dialog-supersession probe)
+    /// and hands them here.
+    ///
+    /// `since_last_hook` is `None` for a terminal that has never reported a
+    /// lifecycle hook (pure screen-scraping — the gate is a no-op) and
+    /// `Some(age)` once it has. `supersedes_dialog` is evaluated at most
+    /// once, only on the one reading shape that needs it (a stale-hook
+    /// `Working` demoting a cached `?`), so its cost — re-scanning the
+    /// detect window — stays off the per-chunk hot path.
+    ///
+    /// The gate lets three PTY corrections through even while a hook is
+    /// fresh — an on-screen dialog (`InputNeeded`), a ready idle composer,
+    /// and the byte-silent inactivity settle ([`Liveness::Silent`]) — and
+    /// otherwise defers to hooks until they go stale ([`HOOK_STALENESS`]).
+    /// See `hooks_gate_allows` for the full policy. A suppressed reading
+    /// returns [`Outcome::Gated`]; a reading that passes is folded exactly
+    /// as [`Self::on_reading`] would fold it.
+    pub fn on_pty_reading(
+        &mut self,
+        current: Option<AgentState>,
+        pty: PtyReading,
+        since_last_hook: Option<Duration>,
+        supersedes_dialog: impl FnOnce() -> bool,
+    ) -> Outcome {
+        let mut clear = pty.clear;
+        if let Some(since) = since_last_hook {
+            if !hooks_gate_allows(current, &pty, since, supersedes_dialog) {
+                return Outcome::Gated;
+            }
+            // A stale-hook terminal demoting a cached `?` to `Working`
+            // passed the gate ONLY on `supersedes_dialog` evidence — a
+            // working status line painted after the dialog markers, i.e.
+            // proof the prompt was answered. Mark the reading `clear` so
+            // the hysteresis honors the demotion (#374) instead of damping
+            // it as an ambiguous byte-flow flap. Hookless / PTY-sourced
+            // `?`s never reach here, so an incidental repaint still can't
+            // clear them.
+            if since >= HOOK_STALENESS
+                && current == Some(AgentState::InputNeeded)
+                && pty.state == AgentState::Working
+            {
+                clear = true;
+            }
+        }
+        self.on_reading(current, pty.reading(clear))
     }
 
     /// Fold a PTY detection `reading` in, given the terminal's `current`
@@ -369,6 +513,64 @@ impl AgentStateMachine {
             && reading.state != AgentState::InputNeeded
             && !reading.clear
     }
+}
+
+/// Whether a PTY-detector reading may be folded for a hook-driven
+/// terminal, given the age of its most recent hook. This is the whole
+/// "hooks own the state while they flow, PTY corrects what they miss"
+/// policy in one place (moved off the daemon's output pump so it can be
+/// exercised without a running terminal).
+///
+/// Three PTY corrections pass even while a hook is fresh:
+///   - **an on-screen dialog** (`InputNeeded`). An inline mid-turn
+///     approval fires no hook (`PreToolUse` lands only AFTER approval,
+///     `Notification` only after Claude goes idle), so the rendered
+///     `Esc to cancel` dialog is the sole source of truth — without it the
+///     `?` never shows on a hook-driven terminal.
+///   - **a ready idle composer** demoting a stale `Working`. Ctrl-C / Esc
+///     end a turn without firing `Stop`, so a hook-driven terminal could
+///     otherwise stick at `Working` forever. It must NOT clear a
+///     hook-set `InputNeeded`, though: the idle nudge (`Claude is waiting
+///     for your input`, #62) raises `?` precisely WHEN the composer is
+///     ready, so a ready composer is corroborating, not contradicting.
+///   - **the byte-silent inactivity settle** ([`Liveness::Silent`] while
+///     `Working`). A busy agent repaints its status ticker within the
+///     quiet window, so a screen that produced no bytes for that long has
+///     genuinely stopped — authoritative enough to settle `Working` →
+///     `Done` without waiting for the hook pipeline to go stale. This is
+///     the fail-safe that keeps a hook-driven agent whose `Stop` hook
+///     never fires from pinning `Working`. Only the settle is granted; a
+///     byte-silent reading never *clears* a parked `?` this way (a live
+///     dialog is itself what silences the stream).
+///
+/// Once the last hook is older than [`HOOK_STALENESS`] the terminal
+/// degrades to plain PTY detection — every reading passes, with one
+/// exception: a `Working` reading demoting a hook-set `InputNeeded` needs
+/// affirmative `supersedes_dialog` evidence (a working anchor painted
+/// AFTER the dialog markers). A live dialog BLOCKS the hook stream, so
+/// "stale hooks + cached `?`" is the normal shape of a real unanswered
+/// dialog, not a broken pipeline; without the evidence a full-repaint
+/// status bar would clear a real `?`.
+fn hooks_gate_allows(
+    current: Option<AgentState>,
+    reading: &PtyReading,
+    since_last_hook: Duration,
+    supersedes_dialog: impl FnOnce() -> bool,
+) -> bool {
+    // Inactivity authority — overrides even a fresh hook. See the doc
+    // above and [`Liveness::Silent`].
+    if reading.liveness == Liveness::Silent && current == Some(AgentState::Working) {
+        return true;
+    }
+    if since_last_hook >= HOOK_STALENESS {
+        let demotes_input_needed =
+            current == Some(AgentState::InputNeeded) && reading.state == AgentState::Working;
+        return !demotes_input_needed || supersedes_dialog();
+    }
+    reading.state == AgentState::InputNeeded
+        || (reading.state == AgentState::Idle
+            && reading.ready_for_prompt
+            && current != Some(AgentState::InputNeeded))
 }
 
 #[cfg(test)]
@@ -877,6 +1079,190 @@ mod tests {
         assert_eq!(
             AgentStateMachine::transition(Some(Working), EXITED),
             Some(EXITED)
+        );
+    }
+
+    // ── the hooks-primary gate + inactivity authority ─────────────
+    //
+    // `on_pty_reading` is the single arbiter for every screen-scraped
+    // reading; the daemon's pump does no gating of its own. These tests
+    // exercise the gate (`hooks_gate_allows`) and the byte-silent
+    // inactivity settle directly, without a running terminal.
+
+    const FRESH: Duration = Duration::from_secs(1);
+    const STALE: Duration = Duration::from_secs(31);
+
+    fn pty(state: AgentState, clear: bool, liveness: Liveness, ready: bool) -> PtyReading {
+        PtyReading {
+            state,
+            clear,
+            progress: false,
+            liveness,
+            ready_for_prompt: ready,
+        }
+    }
+    /// A classification taken after true byte-silence (the quiet timer).
+    fn silent(state: AgentState) -> PtyReading {
+        pty(state, true, Liveness::Silent, state == Idle)
+    }
+    /// A classification taken after content-stability (the watchdog); bytes
+    /// may still be ticking, so it stays hook-subordinate.
+    fn stalled(state: AgentState) -> PtyReading {
+        pty(state, true, Liveness::Stalled, state == Idle)
+    }
+    /// The per-chunk byte-flow inference while output streams.
+    fn streaming(state: AgentState, clear: bool) -> PtyReading {
+        pty(state, clear, Liveness::Streaming, false)
+    }
+
+    #[test]
+    fn hooks_gate_lets_only_the_pty_corrections_through_while_fresh() {
+        let supersedes = || true;
+        let no_evidence = || false;
+        // Fresh hooks own Working↔Idle: only an on-screen dialog and a
+        // ready idle composer pass, whatever the cache. (Streaming
+        // liveness — the Silent carve-out is a separate test.)
+        assert!(hooks_gate_allows(
+            None,
+            &streaming(InputNeeded, true),
+            FRESH,
+            supersedes
+        ));
+        assert!(hooks_gate_allows(
+            None,
+            &pty(Idle, true, Liveness::Streaming, true),
+            FRESH,
+            supersedes
+        ));
+        assert!(!hooks_gate_allows(
+            None,
+            &pty(Idle, true, Liveness::Streaming, false),
+            FRESH,
+            supersedes
+        ));
+        assert!(!hooks_gate_allows(
+            None,
+            &streaming(Working, false),
+            FRESH,
+            supersedes
+        ));
+        // A fresh hook-set `?` (the idle nudge fires WHEN the composer is
+        // ready) must NOT be cleared by a ready-idle reading — that would
+        // flicker `?` off on the first cursor-blink repaint (#62).
+        assert!(!hooks_gate_allows(
+            Some(InputNeeded),
+            &pty(Idle, true, Liveness::Streaming, true),
+            FRESH,
+            supersedes
+        ));
+        // Stale hooks: full PTY fallback for everything…
+        assert!(hooks_gate_allows(
+            None,
+            &streaming(Working, false),
+            STALE,
+            no_evidence
+        ));
+        assert!(hooks_gate_allows(
+            Some(Working),
+            &pty(Idle, false, Liveness::Streaming, false),
+            STALE,
+            no_evidence
+        ));
+        // …except Working demoting a hook-set `?`, which needs the
+        // detector's "activity painted after the dialog markers" evidence.
+        assert!(!hooks_gate_allows(
+            Some(InputNeeded),
+            &streaming(Working, false),
+            STALE,
+            no_evidence
+        ));
+        assert!(hooks_gate_allows(
+            Some(InputNeeded),
+            &streaming(Working, false),
+            STALE,
+            supersedes
+        ));
+    }
+
+    #[test]
+    fn byte_silence_settles_working_to_done_under_a_fresh_hook() {
+        // The fix (#504): a hook-driven agent whose `Stop` hook never fires
+        // (manual interrupt, lost hook, or an agent that emits
+        // working-shaped hooks but no terminal one) used to sit at
+        // `Working` until hooks went stale. True byte-silence — no PTY
+        // output for the quiet window — is authoritative that the turn
+        // ended (a busy agent repaints its ticker within that window), so a
+        // Silent classification settles `Working` → `Done` immediately,
+        // regardless of how fresh the last hook is. Every resting shape the
+        // quiet timer can surface settles the same way.
+        for resting in [Idle, Working, Done] {
+            let mut m = machine();
+            assert_eq!(
+                m.on_pty_reading(Some(Working), silent(resting), Some(FRESH), || false),
+                Outcome::Committed(Done),
+                "a byte-silent {resting:?} screen must settle Working → Done",
+            );
+        }
+    }
+
+    #[test]
+    fn a_stalled_screen_stays_gated_by_a_fresh_hook() {
+        // The watchdog fires on content-stability, not byte-silence: a
+        // ticking counter keeps the stream alive, which is exactly the
+        // shape of a long silent tool call. So a Stalled classification is
+        // NOT authoritative — it defers to a fresh hook, unchanged.
+        let mut m = machine();
+        assert_eq!(
+            m.on_pty_reading(Some(Working), stalled(Done), Some(FRESH), || false),
+            Outcome::Gated,
+        );
+        // Once the hook pipeline goes stale it forces through.
+        assert_eq!(
+            m.on_pty_reading(Some(Working), stalled(Done), Some(STALE), || false),
+            Outcome::Committed(Done),
+        );
+    }
+
+    #[test]
+    fn a_byte_silent_dialog_still_surfaces_under_a_fresh_hook() {
+        // The stream goes silent because a live dialog froze it. The Silent
+        // carve-out lets it through, and the settle promotion (which
+        // excludes InputNeeded) leaves it as the `?`, not a false Done.
+        let mut m = machine();
+        assert_eq!(
+            m.on_pty_reading(Some(Working), silent(InputNeeded), Some(FRESH), || false),
+            Outcome::Committed(InputNeeded),
+        );
+    }
+
+    #[test]
+    fn byte_silence_never_unasks_a_parked_prompt() {
+        // #62/#374: a byte-silent ready-composer reading must not clear a
+        // hook-set `?` — the carve-out only grants the Working→Done settle,
+        // and from InputNeeded the fresh gate still blocks a ready-idle
+        // clear. The `?` yields to a newer hook or stale hooks, never to
+        // silence at a ready composer.
+        let mut m = machine();
+        assert_eq!(
+            m.on_pty_reading(Some(InputNeeded), silent(Idle), Some(FRESH), || false),
+            Outcome::Gated,
+        );
+    }
+
+    #[test]
+    fn a_pure_pty_terminal_bypasses_the_gate_entirely() {
+        // `None` since-last-hook = a terminal that never spoke a hook
+        // (Cursor, GenericCli, or Claude before its first hook). The gate
+        // is a no-op; the byte-silent settle and the byte-flow Working both
+        // fold straight through the hysteresis.
+        let mut m = machine();
+        assert_eq!(
+            m.on_pty_reading(Some(Idle), streaming(Working, false), None, || false),
+            Outcome::Committed(Working),
+        );
+        assert_eq!(
+            m.on_pty_reading(Some(Working), silent(Idle), None, || false),
+            Outcome::Committed(Done),
         );
     }
 }

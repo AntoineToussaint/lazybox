@@ -256,6 +256,12 @@ pub enum Id {
     /// resolves the picked index and lands the cursor via
     /// `focus_workspace_key`. See `realm::components::jump_picker`.
     JumpPicker,
+    /// Per-session prompt-history picker (`]]h`, issue #523). Lists the
+    /// prompts sent to the focused agent, newest-first, snippet entries
+    /// tagged; the parallel prompt texts live in `prompt_history_choices`
+    /// and `Msg::ChoicePicked` re-sends the chosen one. See
+    /// `realm::components::prompt_history_picker`.
+    PromptHistoryPicker,
     /// Theme picker (`t`, or the `,` Settings palette). Single-pick
     /// `Choice` over `theme::list()` with live preview on highlight:
     /// arrowing applies a palette at once, Enter keeps it and writes
@@ -892,6 +898,13 @@ pub struct Model<T: TerminalAdapter> {
     /// authoritative set. Defaults to the standard set until config is
     /// applied.
     auto_fix_opt_out_labels: Vec<String>,
+    /// Global auto-fix enable switch (`auto_fix.enabled`). Display-only,
+    /// mirrored here so the policies menu can gate its "armed" glyph
+    /// through the same `auto_fix_enabled_and_permitted` composition the
+    /// daemon uses — an armed workspace reads as off while the feature is
+    /// globally disabled, matching what would actually fire. Defaults to
+    /// off (auto-fix is opt-in) until config is applied.
+    auto_fix_enabled: bool,
     /// Workspace keys for which we've already fired
     /// `Command::FetchPrDetails` this session — the lazy-fetch path
     /// that back-fills review-thread activity. Used to dedupe the
@@ -1093,6 +1106,13 @@ pub struct Model<T: TerminalAdapter> {
     /// as its rows — `Msg::ChoicePicked(idx)` resolves to a key here.
     /// Cleared on mount/unmount.
     pub(crate) jump_choices: Vec<lazybox_core::SessionKey>,
+    /// Prompt texts backing the active `PromptHistoryPicker`, in the same
+    /// order as its rows — `Msg::ChoicePicked(idx)` resolves to the text
+    /// to re-send (issue #523). Cleared on mount/unmount.
+    pub(crate) prompt_history_choices: Vec<String>,
+    /// Terminal the active `PromptHistoryPicker` re-sends into (the agent
+    /// focused when it was opened), so a resend targets the right session.
+    pub(crate) prompt_history_target: Option<lazybox_ipc::TerminalId>,
     /// Theme names backing the active `ThemePicker`, in the same order
     /// as `theme::list()` — `Msg::ChoicePicked(idx)` resolves the name
     /// here to persist. Cleared on mount/unmount.
@@ -1245,6 +1265,34 @@ const RECENT_SNIPPETS_MAX: usize = 5;
 /// snooze — not user-authored `snippets.yaml` content.
 const RECENT_SNIPPETS_KV_KEY: &str = "recent_snippets";
 
+/// A compact relative age ("just now", "2m ago", "3h ago", "5d ago")
+/// for a prompt-history row (issue #523). A zero timestamp marks an entry
+/// migrated from the pre-history single-value recap, whose real submit
+/// time is gone — shown as "earlier". Times in the future (clock skew)
+/// collapse to "just now".
+fn relative_age(timestamp_ms: u64, now_ms: u64) -> String {
+    if timestamp_ms == 0 {
+        return "earlier".to_string();
+    }
+    let secs = now_ms.saturating_sub(timestamp_ms) / 1000;
+    if secs < 60 {
+        "just now".to_string()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
+    }
+}
+
+/// Collapse a possibly multi-line prompt to a single line of plain text
+/// for a history row: runs of whitespace (including embedded newlines)
+/// become single spaces so a multi-line prompt reads as one line.
+fn summarize_prompt(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 const DISMISSED_UPDATE_KV_PREFIX: &str = "dismissed_update_target:";
 
 fn dismissed_update_key(target: &str) -> String {
@@ -1356,6 +1404,7 @@ impl<T: TerminalAdapter> Model<T> {
             status: StatusCtx::new(),
             ui_defaults: lazybox_config::UiDefaults::default(),
             auto_fix_opt_out_labels: lazybox_core::AutoFixSettings::default().opt_out_labels,
+            auto_fix_enabled: lazybox_core::AutoFixSettings::default().enabled,
             pr_details_fetched: std::collections::HashSet::new(),
             auto_merge_fired: std::collections::HashSet::new(),
             merge_confirmed: std::collections::HashSet::new(),
@@ -1404,6 +1453,8 @@ impl<T: TerminalAdapter> Model<T> {
             pending_handoff: None,
             handoff_choices: Vec::new(),
             jump_choices: Vec::new(),
+            prompt_history_choices: Vec::new(),
+            prompt_history_target: None,
             theme_choices: Vec::new(),
             theme_picker_prev: None,
             help_convo: Default::default(),
@@ -1598,11 +1649,13 @@ impl<T: TerminalAdapter> Model<T> {
         self.snippets = snippets;
     }
 
-    /// Install the configured auto-fix opt-out label set so the policies
-    /// menu (`g p`, issue #363) reflects which labels opt a PR out.
-    /// Display-only — the daemon enforces the authoritative set.
-    pub fn apply_auto_fix_opt_out_labels(&mut self, labels: Vec<String>) {
-        self.auto_fix_opt_out_labels = labels;
+    /// Install the configured auto-fix settings the policies menu (`g p`,
+    /// issue #363) needs to reflect state: the global enable switch and
+    /// the opt-out label set. Display-only — the daemon enforces the
+    /// authoritative decision; this only keeps the menu's glyphs honest.
+    pub fn apply_auto_fix_config(&mut self, enabled: bool, opt_out_labels: Vec<String>) {
+        self.auto_fix_enabled = enabled;
+        self.auto_fix_opt_out_labels = opt_out_labels;
     }
 
     /// Arm the auto-launch of the feature tour. `main.rs` passes
@@ -1947,6 +2000,42 @@ impl<T: TerminalAdapter> Model<T> {
         let (keys, labels): (Vec<_>, Vec<_>) = targets.into_iter().unzip();
         self.jump_choices = keys;
         self.mount_modal(Id::JumpPicker, JumpPicker::new(labels));
+    }
+
+    /// Mount the per-session prompt-history picker (`]]h`, issue #523).
+    /// Rows are every prompt sent to the focused agent, newest-first and
+    /// timestamped, with snippet-sourced entries tagged; the parallel
+    /// prompt texts are stashed in `prompt_history_choices` so
+    /// `handle_choice_picked` can re-send the chosen one. No-op (with a
+    /// footer hint) when the focused terminal isn't an agent or has no
+    /// history yet.
+    pub(crate) fn mount_prompt_history_picker(&mut self) {
+        use crate::realm::components::prompt_history_picker::{PromptHistoryPicker, PromptRow};
+        if matches!(self.modal_stack.last(), Some(Id::PromptHistoryPicker)) {
+            return;
+        }
+        let Some((terminal_id, history)) = self.terminals.focused_prompt_history() else {
+            self.flash_info("no prompts sent in this session yet");
+            return;
+        };
+        let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        let mut rows = Vec::with_capacity(history.len());
+        let mut texts = Vec::with_capacity(history.len());
+        for prompt in history {
+            let tag = match &prompt.source {
+                lazybox_ipc::PromptSource::Snippet { key, .. } => Some(format!("]{key}")),
+                lazybox_ipc::PromptSource::Typed => None,
+            };
+            rows.push(PromptRow {
+                when: relative_age(prompt.timestamp_ms, now),
+                tag,
+                text: summarize_prompt(&prompt.text),
+            });
+            texts.push(prompt.text);
+        }
+        self.prompt_history_choices = texts;
+        self.prompt_history_target = Some(terminal_id);
+        self.mount_modal(Id::PromptHistoryPicker, PromptHistoryPicker::new(rows));
     }
 
     /// Mount the theme picker — a single-pick `Choice` over every

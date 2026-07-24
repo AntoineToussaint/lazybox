@@ -67,6 +67,13 @@ async fn subscribe_is_admitted_only_once_per_connection() {
 
     client.send(Command::Subscribe).expect("first subscribe");
     assert!(matches!(client.recv().await, Some(Event::Snapshot { .. })));
+    // The first subscribe also pushes the auto-fix policy config right
+    // after the snapshot (tracker #512); drain it so the next event is
+    // the duplicate-subscribe rejection.
+    assert!(matches!(
+        client.recv().await,
+        Some(Event::AutoFixPolicyConfig { .. })
+    ));
     client
         .send(Command::Subscribe)
         .expect("duplicate reaches daemon");
@@ -326,7 +333,11 @@ fn all_non_shutdown_commands() -> Vec<Command> {
         },
         Command::RecordUserMessage {
             terminal_id: tid,
-            message: "hi".into(),
+            prompt: lazybox_ipc::UserPrompt {
+                text: "hi".into(),
+                timestamp_ms: 1,
+                source: lazybox_ipc::PromptSource::Typed,
+            },
         },
         Command::InjectPrompt {
             terminal_id: tid,

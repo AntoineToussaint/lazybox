@@ -31,10 +31,21 @@ pub enum NotificationsPoll {
     /// The polling driver can return immediately; the tick is a no-op.
     NotModified,
     /// `200 OK` with a (possibly empty) list of notification entries.
-    /// The response's `Last-Modified` header is captured into
-    /// `NotificationsState` (crate-private) for the next call's `If-Modified-Since`;
-    /// callers don't need it directly.
-    Modified { entries: Vec<NotificationEntry> },
+    ///
+    /// `last_modified` carries the response's `Last-Modified` header
+    /// (when GitHub sent one) as the *pending* cursor for the next
+    /// call's `If-Modified-Since`. It is deliberately NOT committed to
+    /// `NotificationsState` at parse time: the cursor advance is coupled
+    /// to work completion (#512). The polling layer fans out the
+    /// per-entry deep-fetches and only calls
+    /// [`super::client::GhClient::commit_notifications_cursor`] once every
+    /// entry resolved — a transient deep-fetch `Err` holds the cursor so
+    /// the un-fetched entry re-lists on the next heartbeat instead of
+    /// being skipped forever by a premature 304.
+    Modified {
+        entries: Vec<NotificationEntry>,
+        last_modified: Option<String>,
+    },
 }
 
 /// Subset of the notification fields we actually use.

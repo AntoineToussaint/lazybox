@@ -744,12 +744,15 @@ impl GhSource {
                 return Ok(None);
             }
         };
-        let entries = match poll {
+        let (entries, pending_cursor) = match poll {
             lazybox_gh::NotificationsPoll::NotModified => {
                 self.emit_progress("No new GitHub notifications (304)");
                 return Ok(Some(Vec::new()));
             }
-            lazybox_gh::NotificationsPoll::Modified { entries } => entries,
+            lazybox_gh::NotificationsPoll::Modified {
+                entries,
+                last_modified,
+            } => (entries, last_modified),
         };
         self.emit_progress(format!(
             "{} GitHub notification(s) — fetching changed PRs/issues",
@@ -775,7 +778,7 @@ impl GhSource {
         // poisons the rest of the batch.
         use futures::stream::{self, StreamExt};
         const TARGETED_FETCH_CONCURRENCY: usize = 5;
-        let tasks: Vec<Task> = stream::iter(targets)
+        let results: Vec<_> = stream::iter(targets)
             .map(|target| async move {
                 let result = match target.kind {
                     lazybox_gh::NotificationTargetKind::PullRequest => {
@@ -792,35 +795,61 @@ impl GhSource {
                 (target, result)
             })
             .buffer_unordered(TARGETED_FETCH_CONCURRENCY)
-            .filter_map(|(target, result)| async move {
-                match result {
-                    Ok(Some(t)) => Some(t),
-                    Ok(None) => {
-                        tracing::debug!(
-                            "incremental: {}/{}#{} not visible — skipping",
-                            target.owner,
-                            target.repo,
-                            target.number,
-                        );
-                        None
-                    }
-                    Err(e) => {
-                        // Per-target failure is non-fatal: log and move on.
-                        // The next tick's heartbeat will re-deliver the
-                        // notification if it's still relevant; the full
-                        // sweep timer eventually catches anything stuck.
-                        tracing::warn!(
-                            "incremental: fetch failed for {}/{}#{}: {e}",
-                            target.owner,
-                            target.repo,
-                            target.number,
-                        );
-                        None
-                    }
-                }
-            })
             .collect()
             .await;
+
+        // Fold the fan-out into (kept tasks, failure count). A transient
+        // `Err` counts against the cursor commit below; `Ok(None)` is a
+        // definitive "not visible" answer (deleted / transferred / scope
+        // changed) — treated as handled so a permanently-gone entry can't
+        // pin the cursor forever.
+        let mut tasks: Vec<Task> = Vec::new();
+        let mut deep_fetch_failures = 0usize;
+        for (target, result) in results {
+            match result {
+                Ok(Some(t)) => tasks.push(t),
+                Ok(None) => {
+                    tracing::debug!(
+                        "incremental: {}/{}#{} not visible — skipping",
+                        target.owner,
+                        target.repo,
+                        target.number,
+                    );
+                }
+                Err(e) => {
+                    // Per-target failure is non-fatal for THIS tick's
+                    // task list, but it MUST hold the notifications
+                    // cursor (#512): if we advanced past an un-fetched
+                    // entry, the next heartbeat would answer 304 and
+                    // never re-list it until its `updated_at` bumped
+                    // again — a CI failure / new comment invisible until
+                    // the ≤10-min full sweep.
+                    deep_fetch_failures += 1;
+                    tracing::warn!(
+                        "incremental: fetch failed for {}/{}#{}: {e}",
+                        target.owner,
+                        target.repo,
+                        target.number,
+                    );
+                }
+            }
+        }
+
+        // At-most-once cursor advance coupled to work completion (#512).
+        // Only commit the pending `Last-Modified` when every entry this
+        // tick resolved (success or definitive not-visible). On any
+        // transient failure we leave the old cursor in place so the next
+        // heartbeat re-lists the un-fetched entry (GitHub returns the
+        // full unread set on 200 — the successful entries re-fan-out too,
+        // but the single-node deep-fetch is idempotent and deduped).
+        if deep_fetch_failures == 0 {
+            self.client.commit_notifications_cursor(pending_cursor);
+        } else {
+            tracing::warn!(
+                "incremental: {deep_fetch_failures} deep-fetch failure(s) — \
+                 holding notifications cursor so failed entries re-list next tick",
+            );
+        }
 
         let kept = apply_needs_reply_toggle(
             filter_github_tasks_with_watches(tasks, &self.filter, &self.scopes, &self.watch_repos),
@@ -964,7 +993,12 @@ async fn dispatch_action(
                 return;
             };
             let arm = workspace.policies.arm(kind);
-            if !lazybox_core::auto_fix_permitted(arm, opted_out) {
+            // The source already applied the task-shape gate
+            // (`auto_fix_candidate`) and the global enable check before
+            // queuing; here we compose the same enable + label + arm
+            // policy layer the pure `resolve_auto_fix` path uses, so the
+            // decision lives in one place (issue #363, tracker #512).
+            if !lazybox_core::auto_fix_enabled_and_permitted(settings.enabled, opted_out, arm) {
                 tracing::info!(
                     source = source_name,
                     %session_key,

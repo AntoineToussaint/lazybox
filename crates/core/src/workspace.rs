@@ -209,6 +209,33 @@ pub struct Workspace {
     /// acts while lazybox is running.
     #[serde(default)]
     pub auto_merge_on_green: bool,
+    /// Per-workspace "track main" arm (issue #535). When `true`, the
+    /// daemon's background sweep keeps this workspace's worktree
+    /// fast-forwarded to `origin/<base_branch>` whenever the tree is
+    /// clean, so a persistent scratch workspace ("Issue" / "Work") stays
+    /// based on the default branch without the user prompting a rebase
+    /// every session. User-toggled, persisted in the workspace JSON blob
+    /// alongside [`Workspace::auto_merge_on_green`]. The sync is always
+    /// fast-forward-only: a dirty or diverged tree is skipped, never
+    /// reset, so in-progress work is never destroyed.
+    #[serde(default)]
+    pub track_main: bool,
+    /// The resolved default branch this workspace is based on
+    /// (`main` / `master` / …), persisted so "track main" doesn't
+    /// re-derive it every sweep and so the exact branch survives a
+    /// restart. Populated lazily by the sweep (or the toggle handler)
+    /// the first time it resolves the repo's default branch. `None`
+    /// until then, and on workspaces that never opt into tracking.
+    #[serde(default)]
+    pub base_branch: Option<String>,
+    /// Last sweep verdict for a [`Workspace::track_main`] workspace:
+    /// `true` when the worktree is behind `origin/<base_branch>` but
+    /// couldn't be fast-forwarded automatically (uncommitted changes or
+    /// a diverged history). Drives the sidebar's "behind" badge and is
+    /// persisted so the state survives a restart instead of flashing
+    /// wrong until the next sweep. Always `false` when not tracking.
+    #[serde(default)]
+    pub track_main_behind: bool,
     /// Unified per-session automation policies (issue #363) — today the
     /// per-workspace auto-fix arm/disarm overrides. merge-on-green stays
     /// in [`Workspace::auto_merge_on_green`] above for back-compat but is
@@ -260,6 +287,9 @@ impl Workspace {
             read_indices: HashSet::new(),
             snoozed_until: None,
             auto_merge_on_green: false,
+            track_main: false,
+            base_branch: None,
+            track_main_behind: false,
             policies: crate::AutomationPolicies::default(),
             notes: String::new(),
             sent_snippets: Vec::new(),
@@ -273,6 +303,16 @@ impl Workspace {
     /// sidebar's notes indicator; whitespace-only notes don't count.
     pub fn has_notes(&self) -> bool {
         !self.notes.trim().is_empty()
+    }
+
+    /// Whether "track main" (issue #535) can apply to this workspace. It
+    /// needs a GitHub upstream to resolve a default branch and fetch
+    /// against, and it must own a lazybox-provisioned worktree — a
+    /// linked checkout already sits on the user's own branch in their
+    /// own clone, which lazybox never fast-forwards for them.
+    pub fn supports_track_main(&self) -> bool {
+        !self.is_linked()
+            && workspace_project_key(self).is_some_and(|k| k.source_prefix() == "github")
     }
 
     /// Record `key` as just-sent to this workspace's agent: move it to
@@ -1966,6 +2006,55 @@ mod tests {
             "created_at":"2024-01-01T00:00:00Z","last_viewed_at":null}"#;
         let old: Workspace = serde_json::from_str(legacy).unwrap();
         assert!(!old.is_linked());
+    }
+
+    #[test]
+    fn track_main_state_survives_serde_round_trip() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("acme-widget"), "scratch", now());
+        assert!(!ws.track_main, "a fresh workspace does not track main");
+        assert_eq!(ws.base_branch, None);
+        assert!(!ws.track_main_behind);
+
+        ws.track_main = true;
+        ws.base_branch = Some("main".to_string());
+        ws.track_main_behind = true;
+
+        let json = serde_json::to_string(&ws).unwrap();
+        let back: Workspace = serde_json::from_str(&json).unwrap();
+        assert!(back.track_main);
+        assert_eq!(back.base_branch.as_deref(), Some("main"));
+        assert!(back.track_main_behind);
+    }
+
+    #[test]
+    fn track_main_fields_default_on_legacy_records() {
+        // A pre-#535 record with none of the tracking fields deserializes
+        // to the disarmed defaults, not an error.
+        let legacy = r#"{"key":"old","name":"old","branch":"main","pr":null,
+            "gh_issues":[],"linear_issues":[],"activity":[],"seen_count":0,
+            "created_at":"2024-01-01T00:00:00Z","last_viewed_at":null}"#;
+        let old: Workspace = serde_json::from_str(legacy).unwrap();
+        assert!(!old.track_main);
+        assert_eq!(old.base_branch, None);
+        assert!(!old.track_main_behind);
+    }
+
+    #[test]
+    fn supports_track_main_requires_a_github_worktree() {
+        // GitHub project, lazybox worktree → eligible.
+        let mut ws = Workspace::empty(WorkspaceKey::new("scratch"), "scratch", now());
+        ws.project_key = Some(crate::ProjectKey::github("acme", "widget"));
+        assert!(ws.supports_track_main());
+
+        // A linked checkout sits on the user's own branch — not eligible.
+        let mut linked = ws.clone();
+        linked.linked_checkout = Some(std::path::PathBuf::from("/home/dev/acme/widget"));
+        assert!(!linked.supports_track_main());
+
+        // A local (non-GitHub) project has no origin to track.
+        let mut local = Workspace::empty(WorkspaceKey::new("notes"), "scratch", now());
+        local.project_key = Some(crate::ProjectKey::local("scratchpad"));
+        assert!(!local.supports_track_main());
     }
 
     #[test]

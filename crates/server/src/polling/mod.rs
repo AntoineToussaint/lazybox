@@ -2888,6 +2888,12 @@ pub async fn run_one_tick(config: &ServerConfig) -> TickSummary {
     // the store, not poll state, and must run even when providers
     // errored (the merged state is already persisted locally).
     reprompt_unresolved_removals(config).await;
+    // Keep every "track main" workspace (issue #535) fast-forwarded to
+    // its base branch. Its own pass over the store, gated on the
+    // per-workspace arm — decoupled from the provider round-robin so a
+    // tracked workspace is synced every tick regardless of which repos
+    // this cycle happened to poll.
+    sync_tracked_workspaces(config).await;
     summary
 }
 
@@ -3855,6 +3861,133 @@ pub(crate) async fn reprompt_unresolved_removals_with(
             continue;
         };
         handlers::prompt_merged_pr_removal_with(config, mgr, &ws.key, state).await;
+    }
+}
+
+/// Background "track main" sweep (issue #535). For every workspace the
+/// user armed with track-main, keep its worktree fast-forwarded onto
+/// `origin/<default>` while clean, and record whether it's behind so the
+/// sidebar badge reflects reality. Runs every tick, independent of the
+/// provider round-robin — a track-main workspace is swept even when its
+/// repo wasn't polled this cycle and even when providers are offline
+/// (this is local git work). Cheap when nothing is armed: one
+/// `list_workspaces` read and an early return.
+pub async fn sync_tracked_workspaces(config: &ServerConfig) {
+    sync_tracked_workspaces_with(config, &config.worktree_manager()).await;
+}
+
+/// Test seam for [`sync_tracked_workspaces`] — explicit manager so tests
+/// can root it at a tempdir without mutating `LAZYBOX_HOME`.
+pub(crate) async fn sync_tracked_workspaces_with(
+    config: &ServerConfig,
+    mgr: &lazybox_git_ops::WorktreeManager,
+) {
+    let records = match config.store.list_workspaces() {
+        Ok(records) => records,
+        Err(e) => {
+            tracing::warn!("sync_tracked_workspaces: list_workspaces failed: {e}");
+            return;
+        }
+    };
+    // Pre-filter to the armed keys so we don't lock + reload every row.
+    let keys: Vec<WorkspaceKey> = records
+        .into_iter()
+        .filter_map(|r| r.workspace_json)
+        .filter_map(|j| serde_json::from_str::<Workspace>(&j).ok())
+        .filter(|ws| ws.track_main)
+        .map(|ws| ws.key)
+        .collect();
+    if keys.is_empty() {
+        return;
+    }
+
+    let cfg = lazybox_config::Config::load().unwrap_or_default();
+    let github_scopes = github_scopes_from_config(&cfg);
+    for key in keys {
+        sync_one_tracked_workspace(config, mgr, &github_scopes, &key).await;
+    }
+}
+
+/// Fast-forward one track-main workspace's worktrees and persist its
+/// resolved base branch + "behind" verdict. Isolated per workspace so a
+/// single repo's fetch failure never aborts the rest of the sweep.
+async fn sync_one_tracked_workspace(
+    config: &ServerConfig,
+    mgr: &lazybox_git_ops::WorktreeManager,
+    github_scopes: &std::collections::BTreeSet<String>,
+    key: &WorkspaceKey,
+) {
+    let _ws_guard = config.lock_workspace(key.as_str()).await;
+    let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
+        return;
+    };
+    // Re-check under the lock: the user may have disarmed since the scan,
+    // or the row may be a linked / repo-less workspace tracking can't act
+    // on.
+    if !workspace.track_main || !workspace.supports_track_main() {
+        return;
+    }
+    let Ok(repo) =
+        crate::spawn_handler::clonable_repo_from_project(config, &workspace, Some(github_scopes))
+    else {
+        return;
+    };
+    let Some((owner, name)) = repo.split_once('/') else {
+        return;
+    };
+
+    // Resolve + persist the base branch once (handles main vs master).
+    let mut dirty = false;
+    let base = match workspace.base_branch.clone() {
+        Some(b) => b,
+        None => match mgr.default_branch(owner, name).await {
+            Ok(b) => {
+                workspace.base_branch = Some(b.clone());
+                dirty = true;
+                b
+            }
+            Err(e) => {
+                tracing::debug!(workspace = %key, error = %e, "track-main: default branch unresolved");
+                return;
+            }
+        },
+    };
+
+    // Fast-forward every on-disk worktree the workspace owns. Its
+    // sessions share a branch, so the verdict is the same, but a
+    // workspace can hold several worktrees; sync each. "Behind" if ANY
+    // is behind-and-blocked.
+    let mut behind = false;
+    let mut inspected_any = false;
+    for session in &workspace.sessions {
+        if !session.worktree_path.exists() {
+            continue;
+        }
+        match mgr
+            .fast_forward_to_base(&session.worktree_path, owner, name, &base)
+            .await
+        {
+            Ok(outcome) => {
+                inspected_any = true;
+                if outcome.is_behind() {
+                    behind = true;
+                }
+                tracing::debug!(workspace = %key, ?outcome, "track-main sync");
+            }
+            Err(e) => {
+                tracing::debug!(workspace = %key, error = %e, "track-main sync failed");
+            }
+        }
+    }
+
+    // Only revise the badge when a worktree was actually inspected — a
+    // session-less tracking row has nothing to be behind.
+    if inspected_any && workspace.track_main_behind != behind {
+        workspace.track_main_behind = behind;
+        dirty = true;
+    }
+    if dirty {
+        commit_upsert_offloaded_reported(config, key, workspace, "track-main sync").await;
     }
 }
 
@@ -5003,6 +5136,24 @@ pub async fn set_auto_merge_on_green(config: &ServerConfig, key: &WorkspaceKey, 
     };
     workspace.auto_merge_on_green = enabled;
     commit_upsert_offloaded_reported(config, key, workspace, "set auto-merge preference").await;
+}
+
+/// Persist the workspace's "track main" arm (issue #535). Mirrors
+/// [`set_auto_merge_on_green`]: load, flip the field, commit (persists +
+/// broadcasts `WorkspaceUpserted`). The actual fast-forwarding happens
+/// in the background sweep ([`sync_tracked_workspaces`]); this only
+/// records the intent. Disabling clears the stale "behind" badge so it
+/// doesn't linger after the user stops tracking.
+pub async fn set_track_main(config: &ServerConfig, key: &WorkspaceKey, enabled: bool) {
+    let _ws_guard = config.lock_workspace(key.as_str()).await;
+    let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
+        return;
+    };
+    workspace.track_main = enabled;
+    if !enabled {
+        workspace.track_main_behind = false;
+    }
+    commit_upsert_offloaded_reported(config, key, workspace, "set track-main preference").await;
 }
 
 /// Persist the workspace's per-session auto-fix arm for one
@@ -6769,5 +6920,155 @@ mod tick_noop_skip_tests {
         > {
             self.0.fetch()
         }
+    }
+}
+
+#[cfg(test)]
+mod track_main_sweep_tests {
+    use super::*;
+    use lazybox_core::{SessionKind, WorkspaceKey, WorkspaceSession as Session};
+    use lazybox_git_ops::WorktreeManager;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    fn git(cwd: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.email=test@example.com"])
+            .args(["-c", "user.name=test"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(["-c", "init.defaultBranch=main"])
+            .current_dir(cwd)
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A persisted track-main workspace whose one session sits in a
+    /// scratch worktree cut off `main`, plus the manager rooted at the
+    /// same base. Returns (tmp, config, manager, src path, worktree path).
+    async fn seeded_tracked_workspace() -> (
+        tempfile::TempDir,
+        ServerConfig,
+        WorktreeManager,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src = tmp.path().join("src");
+        std::fs::create_dir(&src).expect("mkdir src");
+        git(&src, &["init", "-q"]);
+        git(&src, &["branch", "-M", "main"]);
+        std::fs::write(src.join("f.txt"), "c1\n").expect("write");
+        git(&src, &["add", "f.txt"]);
+        git(&src, &["commit", "-q", "-m", "c1"]);
+
+        let mgr = WorktreeManager::new(tmp.path().join("base"));
+        // The manager's canonical bare-clone path (`<base>/repos/<owner>/
+        // <repo>.git`); pre-seeded from the local `src` so the offline
+        // `checkout_new_branch_at` finds a healthy clone instead of trying
+        // to fetch from github.
+        let bare = tmp
+            .path()
+            .join("base")
+            .join("repos")
+            .join("acme")
+            .join("widgets.git");
+        std::fs::create_dir_all(bare.parent().expect("bare parent")).expect("mkdir repos");
+        git(
+            tmp.path(),
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                src.to_str().expect("utf8"),
+                bare.to_str().expect("utf8"),
+            ],
+        );
+        let wt = tmp.path().join("wt");
+        mgr.checkout_new_branch_at(&wt, "acme", "widgets", "scratch", "main")
+            .await
+            .expect("provision scratch worktree");
+
+        let store = Arc::new(lazybox_store::MemoryStore::new());
+        let config = ServerConfig::with_store(store);
+        let key = WorkspaceKey::new("scratch");
+        let mut ws = Workspace::empty(key.clone(), "scratch", Utc::now());
+        ws.project_key = Some(lazybox_core::ProjectKey::github("acme", "widgets"));
+        ws.local = true;
+        ws.track_main = true;
+        ws.add_session(Session::new(
+            key.clone(),
+            SessionKind::Shell,
+            wt.clone(),
+            Utc::now(),
+        ));
+        commit_upsert_reported(&config, &key, ws, "seed track-main workspace");
+
+        (tmp, config, mgr, src, wt)
+    }
+
+    /// End-to-end: the sweep resolves + persists the base branch and
+    /// fast-forwards a clean, behind worktree onto `origin/main`.
+    #[tokio::test]
+    async fn sweep_fast_forwards_clean_workspace_and_persists_base() {
+        let (_tmp, config, mgr, src, wt) = seeded_tracked_workspace().await;
+        // Upstream advances after the worktree was cut.
+        std::fs::write(src.join("f.txt"), "c2\n").expect("write");
+        git(&src, &["add", "f.txt"]);
+        git(&src, &["commit", "-q", "-m", "c2"]);
+
+        sync_tracked_workspaces_with(&config, &mgr).await;
+
+        let ws =
+            load_workspace(&config, &WorkspaceKey::new("scratch")).expect("workspace persists");
+        assert_eq!(
+            ws.base_branch.as_deref(),
+            Some("main"),
+            "resolved base branch is persisted"
+        );
+        assert!(
+            !ws.track_main_behind,
+            "a clean worktree is fast-forwarded, not left behind"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.join("f.txt")).expect("read"),
+            "c2\n",
+            "the worktree tree advanced to main"
+        );
+    }
+
+    /// A dirty worktree behind main is left untouched and flagged behind
+    /// so the sidebar badge can surface it.
+    #[tokio::test]
+    async fn sweep_flags_dirty_workspace_behind_without_touching_it() {
+        let (_tmp, config, mgr, src, wt) = seeded_tracked_workspace().await;
+        std::fs::write(src.join("f.txt"), "c2\n").expect("write");
+        git(&src, &["add", "f.txt"]);
+        git(&src, &["commit", "-q", "-m", "c2"]);
+        // Uncommitted local work.
+        std::fs::write(wt.join("f.txt"), "wip\n").expect("write");
+
+        sync_tracked_workspaces_with(&config, &mgr).await;
+
+        let ws =
+            load_workspace(&config, &WorkspaceKey::new("scratch")).expect("workspace persists");
+        assert!(
+            ws.track_main_behind,
+            "a dirty behind worktree is flagged behind"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.join("f.txt")).expect("read"),
+            "wip\n",
+            "the uncommitted work is never touched"
+        );
     }
 }

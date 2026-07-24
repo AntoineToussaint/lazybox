@@ -1809,6 +1809,7 @@ pub(super) fn action_from_kind(
         ActionKind::MergePr => Action::MergePr,
         ActionKind::UpdateBranch => Action::UpdateBranch,
         ActionKind::ToggleAutoMerge => Action::ToggleAutoMerge,
+        ActionKind::ToggleTrackMain => Action::ToggleTrackMain,
         ActionKind::ManagePolicies => Action::ManagePolicies,
         ActionKind::Archive => Action::Archive,
         ActionKind::CloseIssue => Action::CloseIssue,

@@ -121,6 +121,11 @@ pub enum Action {
     /// PR becomes merge-ready. Distinct from GitHub's native
     /// auto-merge; acts only while lazybox is running.
     ToggleAutoMerge,
+    /// Toggle the workspace's "track main" arm (issue #535). When armed,
+    /// the daemon keeps this workspace's worktree fast-forwarded to
+    /// `origin/<default>` while the tree is clean — a persistent scratch
+    /// workspace stays based on main without a manual rebase each session.
+    ToggleTrackMain,
     /// Open the unified automation-policies menu for the focused
     /// PR/issue (issue #363): one surface listing every policy
     /// (merge-on-green, per-session auto-fix arm/disarm, GitHub-native
@@ -387,6 +392,7 @@ pub enum ActionKind {
     MergePr,
     UpdateBranch,
     ToggleAutoMerge,
+    ToggleTrackMain,
     ManagePolicies,
     AdoptSessions,
     SendToSession,
@@ -507,6 +513,7 @@ impl ActionKind {
         Self::MergePr,
         Self::UpdateBranch,
         Self::ToggleAutoMerge,
+        Self::ToggleTrackMain,
         Self::ManagePolicies,
         Self::RequestReviewers,
         Self::AddAssignees,
@@ -608,6 +615,7 @@ impl Action {
             Action::MergePr => ActionKind::MergePr,
             Action::UpdateBranch => ActionKind::UpdateBranch,
             Action::ToggleAutoMerge => ActionKind::ToggleAutoMerge,
+            Action::ToggleTrackMain => ActionKind::ToggleTrackMain,
             Action::ManagePolicies => ActionKind::ManagePolicies,
             Action::AdoptSessions => ActionKind::AdoptSessions,
             Action::SendToSession => ActionKind::SendToSession,
@@ -990,6 +998,13 @@ impl ActionDef {
                 default_keys: "g g",
                 label: "auto-merge on green",
                 describe: "Toggle \"auto-merge on green\": arm the workspace so lazybox merges your PR automatically once CI goes green (own PR, no conflicts, no changes requested). Fires only while lazybox is running.",
+                section: Section::Workspace,
+            },
+            ActionKind::ToggleTrackMain => &Self {
+                kind: ActionKind::ToggleTrackMain,
+                default_keys: "g t",
+                label: "track main",
+                describe: "Toggle \"track main\": keep this workspace's worktree fast-forwarded to the repo's default branch while it's clean, so a persistent scratch workspace stays based on main. Fast-forward only — a dirty or diverged tree is skipped, never reset.",
                 section: Section::Workspace,
             },
             ActionKind::ManagePolicies => &Self {
@@ -1689,6 +1704,7 @@ impl ActionKind {
             ActionKind::MergePr => "merge_pr",
             ActionKind::UpdateBranch => "update_branch",
             ActionKind::ToggleAutoMerge => "toggle_auto_merge",
+            ActionKind::ToggleTrackMain => "toggle_track_main",
             ActionKind::ManagePolicies => "manage_policies",
             ActionKind::AdoptSessions => "adopt_sessions",
             ActionKind::SendToSession => "send_to_session",
@@ -1924,6 +1940,7 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         ActionKind::MergePr
         | ActionKind::UpdateBranch
         | ActionKind::ToggleAutoMerge
+        | ActionKind::ToggleTrackMain
         | ActionKind::ManagePolicies
         | ActionKind::RequestReviewers
         | ActionKind::AddAssignees
@@ -2301,6 +2318,11 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         // can do something; the resolver Notices on non-PR workspaces
         // if the user presses it anyway.
         ActionKind::ToggleAutoMerge => workspace.map(|w| w.pr.is_some()).unwrap_or(false),
+        // Track-main applies to a GitHub-backed lazybox worktree — a
+        // scratch/branch workspace under a github project. Gate on the
+        // same predicate the resolver Notices on, so `g t` only surfaces
+        // where the sweep could actually fast-forward something.
+        ActionKind::ToggleTrackMain => workspace.map(|w| w.supports_track_main()).unwrap_or(false),
         // The policies menu surfaces on any workspace carrying a PR or a
         // GitHub issue — the "tag this PR/issue" surface (issue #363).
         // The menu itself marks which policies apply to PRs vs issues.
@@ -3316,6 +3338,7 @@ mod tests {
             ActionKind::MergePr,
             ActionKind::UpdateBranch,
             ActionKind::ToggleAutoMerge,
+            ActionKind::ToggleTrackMain,
             ActionKind::RequestReviewers,
             ActionKind::AddAssignees,
             ActionKind::ManageLabels,

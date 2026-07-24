@@ -529,6 +529,7 @@ impl<T: TerminalAdapter> Model<T> {
                     | Intent::MergePr { .. }
                     | Intent::UpdateBranch { .. }
                     | Intent::SetAutoMergeOnGreen { .. }
+                    | Intent::SetTrackMain { .. }
                     | Intent::KillWorkspace { .. }
                     | Intent::Snooze { .. }
                     | Intent::Unsnooze { .. }
@@ -617,6 +618,7 @@ impl<T: TerminalAdapter> Model<T> {
                     | Intent::MergePr { .. }
                     | Intent::UpdateBranch { .. }
                     | Intent::SetAutoMergeOnGreen { .. }
+                    | Intent::SetTrackMain { .. }
                     | Intent::KillWorkspace { .. }
                     | Intent::Snooze { .. }
                     | Intent::Unsnooze { .. }
@@ -798,6 +800,48 @@ impl<T: TerminalAdapter> Model<T> {
                     | Intent::OpenEditor
                     | Intent::MergePr { .. }
                     | Intent::UpdateBranch { .. }
+                    | Intent::SetTrackMain { .. }
+                    | Intent::KillWorkspace { .. }
+                    | Intent::Snooze { .. }
+                    | Intent::Unsnooze { .. }
+                    | Intent::MarkAllRead { .. } => {}
+                }
+            }
+            Action::ToggleTrackMain => {
+                let workspace = self.sidebar.selected_workspace().cloned();
+                // Explicit variant list (no `_`): a new Intent variant is
+                // triaged here at compile time, not silently dropped.
+                use crate::intent::Intent;
+                match crate::intent::resolve_toggle_track_main(workspace.as_ref()) {
+                    Intent::SetTrackMain {
+                        workspace_key,
+                        enabled,
+                    } => {
+                        let name = workspace
+                            .as_ref()
+                            .map(|w| crate::util::notice_slug(&w.name).into_owned())
+                            .unwrap_or_default();
+                        if enabled {
+                            self.flash_info(format!("track main: on for {name}"));
+                        } else {
+                            self.flash_info(format!("track main: off for {name}"));
+                        }
+                        cmds.push(IpcCommand::SetTrackMain {
+                            session_key: lazybox_core::SessionKey::from(&workspace_key),
+                            enabled,
+                        });
+                    }
+                    Intent::Notice(msg) => self.flash_info(msg),
+                    Intent::NoOp
+                    | Intent::SpawnAgent { .. }
+                    | Intent::SpawnShell { .. }
+                    | Intent::MountReply { .. }
+                    | Intent::MountNewWorkspaceInput { .. }
+                    | Intent::MountAdoptPicker { .. }
+                    | Intent::OpenEditor
+                    | Intent::MergePr { .. }
+                    | Intent::UpdateBranch { .. }
+                    | Intent::SetAutoMergeOnGreen { .. }
                     | Intent::KillWorkspace { .. }
                     | Intent::Snooze { .. }
                     | Intent::Unsnooze { .. }

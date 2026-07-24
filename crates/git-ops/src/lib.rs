@@ -53,6 +53,33 @@ pub struct Worktree {
     pub branch: String,
 }
 
+/// Result of a "track main" fast-forward sync ([`WorktreeManager::fast_forward_to_base`],
+/// issue #535). Every variant is non-destructive: the two `Skipped`
+/// cases leave the tree exactly as it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackSyncOutcome {
+    /// Worktree tip already contains `origin/<base>` — nothing to do.
+    UpToDate,
+    /// Worktree branch was fast-forwarded onto `origin/<base>`.
+    FastForwarded,
+    /// Behind `origin/<base>` but the tree has uncommitted changes;
+    /// skipped so a `git merge` can't clobber in-progress work.
+    SkippedDirty,
+    /// Behind `origin/<base>` but the branch also carries local commits
+    /// not on the base (diverged); a fast-forward is impossible, so
+    /// skipped rather than rebasing/resetting the user's commits away.
+    SkippedDiverged,
+}
+
+impl TrackSyncOutcome {
+    /// Whether the worktree is behind `origin/<base>` and could not be
+    /// brought up to date automatically — drives the sidebar's "behind"
+    /// badge and the surfaced hint.
+    pub fn is_behind(self) -> bool {
+        matches!(self, Self::SkippedDirty | Self::SkippedDiverged)
+    }
+}
+
 /// Where `link_at` is relative to the worktree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Placement {
@@ -793,6 +820,75 @@ impl WorktreeManager {
         Err(GitError::Command(format!(
             "could not resolve default branch for {owner}/{repo}"
         )))
+    }
+
+    /// Keep a "track main" worktree (issue #535) fast-forwarded onto
+    /// `origin/<base_branch>`. Fetches the base ref, then — only when the
+    /// worktree is clean and its branch is a strict ancestor of the base
+    /// — advances the checked-out branch to the base tip.
+    ///
+    /// **Fast-forward only, never destructive.** The two skip cases exist
+    /// precisely because a scratch worktree is where in-progress work
+    /// accumulates:
+    /// - uncommitted changes → [`TrackSyncOutcome::SkippedDirty`];
+    /// - local commits not on the base (diverged) →
+    ///   [`TrackSyncOutcome::SkippedDiverged`].
+    ///
+    /// Neither runs `reset --hard` or `rebase`; the tree is left
+    /// untouched and the caller surfaces a "behind main" hint instead.
+    ///
+    /// A failed fetch (offline / auth) is tolerated: the sync proceeds
+    /// against whatever `origin/<base>` ref is already local, mirroring
+    /// the offline tolerance the rest of provisioning has.
+    pub async fn fast_forward_to_base(
+        &self,
+        wt_path: &Path,
+        owner: &str,
+        repo: &str,
+        base_branch: &str,
+    ) -> Result<TrackSyncOutcome, GitError> {
+        let bare_path = self.bare_clone_path(owner, repo);
+        let lock = repo_lock(&bare_path);
+        let _guard = lock.lock().await;
+        let bare_path = self.ensure_bare_clone(owner, repo).await?;
+
+        // Refresh origin/<base>. Tolerate failure — fall back to the
+        // last-known local remote-tracking ref, same as every other
+        // network-optional path here.
+        let auth = self.network_env().await;
+        let _ = fetch_origin_ref(&bare_path, owner, repo, base_branch, &auth).await;
+
+        let base_ref = format!("refs/remotes/origin/{base_branch}");
+        if !ref_exists(&bare_path, &base_ref).await {
+            return Err(GitError::Command(format!(
+                "base ref '{base_ref}' not found for {owner}/{repo}"
+            )));
+        }
+
+        // Dirty tree → never touch it: a fast-forward `git merge` would
+        // still refuse, but checking first lets us report *why* rather
+        // than surfacing a merge error.
+        let status = run_git_in(wt_path, &["status", "--porcelain"]).await?;
+        if !status.trim().is_empty() {
+            return Ok(TrackSyncOutcome::SkippedDirty);
+        }
+
+        // Behind count: commits in the base not yet in HEAD. Zero means
+        // the base is already an ancestor of HEAD (up to date, or HEAD is
+        // ahead with local work — either way, not behind).
+        let behind = count_commits(wt_path, &format!("HEAD..{base_ref}")).await;
+        if behind == 0 {
+            return Ok(TrackSyncOutcome::UpToDate);
+        }
+        // Ahead count: local commits not on the base. Behind AND ahead =
+        // diverged, so a fast-forward is impossible.
+        let ahead = count_commits(wt_path, &format!("{base_ref}..HEAD")).await;
+        if ahead > 0 {
+            return Ok(TrackSyncOutcome::SkippedDiverged);
+        }
+
+        run_git_in(wt_path, &["merge", "--ff-only", &base_ref]).await?;
+        Ok(TrackSyncOutcome::FastForwarded)
     }
 
     /// Apply configured mount points to a worktree. Each mount creates
@@ -2319,6 +2415,18 @@ async fn run_git_in(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
     run_git_in_env(cwd, args, &[]).await
 }
 
+/// `git rev-list --count <range>` in `cwd`, as a `u64`. Any failure
+/// (unresolvable range, unborn HEAD, not a repo) counts as `0` — the
+/// callers all treat "no commits in the range" and "couldn't tell" the
+/// same conservative way.
+async fn count_commits(cwd: &Path, range: &str) -> u64 {
+    run_git_in(cwd, &["rev-list", "--count", range])
+        .await
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
 async fn run_git_in_env(
     cwd: &Path,
     args: &[&str],
@@ -3254,6 +3362,167 @@ mod resilient_add_tests {
         assert!(
             !target.exists(),
             "no half-provisioned target is left behind"
+        );
+    }
+}
+
+#[cfg(test)]
+mod track_main_tests {
+    use super::*;
+
+    fn git(cwd: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-c")
+            .arg("user.email=test@example.com")
+            .arg("-c")
+            .arg("user.name=test")
+            .arg("-c")
+            .arg("commit.gpgsign=false")
+            .arg("-c")
+            .arg("init.defaultBranch=main")
+            .current_dir(cwd)
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .output()
+            .expect("git must be runnable in tests");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn head(cwd: &Path) -> String {
+        git(cwd, &["rev-parse", "HEAD"])
+    }
+
+    /// A `src` repo on `main` (one commit), bare-cloned into the
+    /// manager's canonical path with `src` as its `origin`, and a
+    /// lazybox worktree cut on branch `scratch` off `main`. Returns
+    /// (tmp guard, manager, src path, worktree path).
+    async fn tracked_worktree() -> (tempfile::TempDir, WorktreeManager, PathBuf, PathBuf) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src = tmp.path().join("src");
+        std::fs::create_dir(&src).expect("mkdir src");
+        git(&src, &["init", "-q"]);
+        git(&src, &["branch", "-M", "main"]);
+        std::fs::write(src.join("f.txt"), "c1\n").expect("write");
+        git(&src, &["add", "f.txt"]);
+        git(&src, &["commit", "-q", "-m", "c1"]);
+
+        let mgr = WorktreeManager::new(tmp.path().join("base"));
+        let bare = mgr.bare_clone_path("acme", "widgets");
+        std::fs::create_dir_all(bare.parent().expect("bare parent")).expect("mkdir repos");
+        git(
+            tmp.path(),
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                src.to_str().expect("utf8"),
+                bare.to_str().expect("utf8"),
+            ],
+        );
+
+        let wt = tmp.path().join("wt");
+        mgr.checkout_new_branch_at(&wt, "acme", "widgets", "scratch", "main")
+            .await
+            .expect("provision scratch worktree");
+        (tmp, mgr, src, wt)
+    }
+
+    /// Advance `src`'s `main` by one commit — the upstream moving ahead
+    /// of the scratch worktree.
+    fn advance_main(src: &Path, body: &str) {
+        std::fs::write(src.join("f.txt"), body).expect("write");
+        git(src, &["add", "f.txt"]);
+        git(src, &["commit", "-q", "-m", "advance"]);
+    }
+
+    /// Clean worktree behind main → fast-forwarded onto `origin/main`.
+    #[tokio::test]
+    async fn clean_behind_worktree_fast_forwards() {
+        let (_tmp, mgr, src, wt) = tracked_worktree().await;
+        advance_main(&src, "c2\n");
+
+        let outcome = mgr
+            .fast_forward_to_base(&wt, "acme", "widgets", "main")
+            .await
+            .expect("sync runs");
+        assert_eq!(outcome, TrackSyncOutcome::FastForwarded);
+        // The worktree branch now points at the advanced main tip.
+        let origin_main = git(&wt, &["rev-parse", "refs/remotes/origin/main"]);
+        assert_eq!(head(&wt), origin_main, "worktree HEAD advanced to main");
+        // And the working file reflects the fast-forwarded content.
+        assert_eq!(
+            std::fs::read_to_string(wt.join("f.txt")).expect("read"),
+            "c2\n"
+        );
+    }
+
+    /// Already up to date → no-op, no error.
+    #[tokio::test]
+    async fn up_to_date_worktree_is_noop() {
+        let (_tmp, mgr, _src, wt) = tracked_worktree().await;
+        let before = head(&wt);
+        let outcome = mgr
+            .fast_forward_to_base(&wt, "acme", "widgets", "main")
+            .await
+            .expect("sync runs");
+        assert_eq!(outcome, TrackSyncOutcome::UpToDate);
+        assert_eq!(head(&wt), before, "HEAD unchanged when already synced");
+    }
+
+    /// Behind main but the tree has uncommitted changes → skipped, never
+    /// touched.
+    #[tokio::test]
+    async fn dirty_worktree_is_skipped() {
+        let (_tmp, mgr, src, wt) = tracked_worktree().await;
+        advance_main(&src, "c2\n");
+        let before = head(&wt);
+        // Uncommitted edit in the worktree.
+        std::fs::write(wt.join("f.txt"), "work in progress\n").expect("write");
+
+        let outcome = mgr
+            .fast_forward_to_base(&wt, "acme", "widgets", "main")
+            .await
+            .expect("sync runs");
+        assert_eq!(outcome, TrackSyncOutcome::SkippedDirty);
+        assert!(outcome.is_behind());
+        assert_eq!(head(&wt), before, "HEAD untouched on a dirty tree");
+        assert_eq!(
+            std::fs::read_to_string(wt.join("f.txt")).expect("read"),
+            "work in progress\n",
+            "the uncommitted edit is preserved"
+        );
+    }
+
+    /// Behind main AND carrying a local commit (diverged) → skipped;
+    /// a fast-forward is impossible and the local commit must survive.
+    #[tokio::test]
+    async fn diverged_worktree_is_skipped() {
+        let (_tmp, mgr, src, wt) = tracked_worktree().await;
+        // Local commit on scratch...
+        std::fs::write(wt.join("local.txt"), "mine\n").expect("write");
+        git(&wt, &["add", "local.txt"]);
+        git(&wt, &["commit", "-q", "-m", "local work"]);
+        let before = head(&wt);
+        // ...while main also advances upstream.
+        advance_main(&src, "c2\n");
+
+        let outcome = mgr
+            .fast_forward_to_base(&wt, "acme", "widgets", "main")
+            .await
+            .expect("sync runs");
+        assert_eq!(outcome, TrackSyncOutcome::SkippedDiverged);
+        assert!(outcome.is_behind());
+        assert_eq!(head(&wt), before, "diverged HEAD is left intact");
+        assert!(
+            wt.join("local.txt").exists(),
+            "the local commit's file survives"
         );
     }
 }

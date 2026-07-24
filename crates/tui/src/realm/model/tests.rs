@@ -8562,6 +8562,23 @@ mod jump_to_workspace_tests {
     }
 
     /// The whole point of #171: the switcher is reachable from inside an
+    /// `set_focus` is the single owned focus mutator: it assigns `focus`
+    /// AND fans the change out (via `set_focus_attr`, which also resets the
+    /// typed-since-focus flag). Routing every focus change through it makes
+    /// the "assigned focus but forgot to fan out" desync unrepresentable —
+    /// here the flag reset proves the fan-out ran as part of the assignment.
+    #[test]
+    fn set_focus_assigns_and_fans_out_in_one_step() {
+        let mut m = build_model();
+        m.terminal_user_typed_since_focus = true;
+        m.set_focus(PaneFocus::Terminals);
+        assert_eq!(m.focus, PaneFocus::Terminals);
+        assert!(
+            !m.terminal_user_typed_since_focus,
+            "set_focus must fan out (the flag reset lives in set_focus_attr)",
+        );
+    }
+
     /// agent terminal via the `]]` leader (`]]` then `` ` ``), without
     /// first leaving the terminal.
     #[test]

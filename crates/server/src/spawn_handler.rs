@@ -3807,12 +3807,44 @@ pub(crate) async fn classify_quiet_screen(
     };
     // A pending answer reset means the buffer's contents predate the
     // user's answer by decree: `handle_write` flipped the `?` to Working
-    // and marked the buffer for clearing, but the clear only happens on
-    // the NEXT chunk. If the quiet timer fires in between, classifying
-    // the stale dialog would re-raise the just-answered `?` (and its
-    // notification). Peek — don't consume — so the chunk path still
-    // clears the buffer when output resumes.
+    // and marked the buffer for clearing, but the clear only lands on the
+    // NEXT chunk. Classifying the stale dialog now would re-raise the
+    // just-answered `?` (and its notification) — so the classify below is
+    // skipped either way. But this timer firing while the reset is STILL
+    // latched is itself the signal that the answer produced zero output for
+    // a whole quiet window: nothing arrived to clear the reset or settle the
+    // turn. Settle it `Done` directly rather than peeking and returning — a
+    // bare return leaves `Working` pinned, because the quiet timer disarms on
+    // fire and only a chunk re-arms it, and zero output means no chunk is
+    // coming (the watchdog was the sole escape, and none exists when
+    // `working_watchdog_secs = 0`). This mirrors the watchdog's answered
+    // branch exactly, including its liveness: force `Stalled`, not this
+    // timer's `Silent`, so the `Done` yields to a fresh hook through
+    // `commit_pty_reading`'s hooks-primary gate (`Silent` would override it —
+    // see `hooks_gate_allows`). A genuinely live silent turn keeps a fresh
+    // hook and stays `Working`; only a hook-stale or hookless terminal
+    // settles here. Leave the reset latched: a late chunk still clears the
+    // stale buffer via the pump's chunk arm, and by then the state is `Done`.
     if detect_resets.lock().await.contains(&id) {
+        commit_pty_reading(
+            agent,
+            detect_window(buf),
+            lazybox_agents::PtyReading {
+                state: lazybox_ipc::AgentState::Done,
+                clear: true,
+                progress: false,
+                liveness: lazybox_agents::Liveness::Stalled,
+                ready_for_prompt: false,
+            },
+            states,
+            bus,
+            id,
+            session_key,
+            terminal_meta,
+            state_machine,
+            hook_driven,
+        )
+        .await;
         return;
     }
     let detect_window = detect_window(buf);
@@ -9486,12 +9518,17 @@ mod tests {
 
     /// The quiet timer racing the optimistic answer flip: `handle_write`
     /// flipped the `?` to Working and marked the detect buffer for reset,
-    /// but the clear only happens on the next chunk. A quiet firing in
-    /// between must NOT classify the stale dialog still in the buffer —
-    /// that re-raised the just-answered `?` (and its notification).
+    /// but the clear only lands on the next chunk. A quiet firing while the
+    /// reset is still latched must NOT classify the stale dialog (that
+    /// re-raised the just-answered `?`) — yet firing at all means the answer
+    /// produced zero output for a full quiet window, so it settles the turn
+    /// `Done` instead of peeking and returning. A bare return left `Working`
+    /// pinned: the quiet timer disarms on fire and only a chunk re-arms it,
+    /// and zero output means no chunk comes (the watchdog was the sole
+    /// escape, and none exists when `working_watchdog_secs = 0`).
     #[tokio::test]
-    async fn pending_answer_reset_blocks_quiet_reclassification() {
-        use lazybox_ipc::AgentState::{InputNeeded, Working};
+    async fn quiet_at_a_latched_answer_reset_settles_done() {
+        use lazybox_ipc::AgentState::{Done, InputNeeded, Working};
         let input = include_bytes!("../../agents/tests/fixtures/permission_prompt_fragmented.bin");
 
         let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
@@ -9502,13 +9539,44 @@ mod tests {
         p.detect_resets.lock().await.insert(p.id);
         assert_eq!(
             p.quiet().await,
+            vec![Done],
+            "a latched reset at the quiet timer settles Done, not the stale `?`",
+        );
+        assert_eq!(p.states.lock().await.get(&p.id), Some(&Done));
+        assert!(
+            p.detect_resets.lock().await.contains(&p.id),
+            "the reset stays latched — a late chunk still clears the buffer via the chunk arm",
+        );
+    }
+
+    /// The quiet-path settle is the fail-safe for a *dead* zero-output
+    /// answer, not a live one. An answered agent genuinely still at work
+    /// (a silent tool call fires no bytes) keeps a *fresh* lifecycle hook,
+    /// and the settle folds through the hooks-primary gate — so it is
+    /// suppressed and the terminal stays `Working`, exactly as the watchdog
+    /// path yields to a fresh hook.
+    #[tokio::test]
+    async fn quiet_zero_output_settle_still_yields_to_a_fresh_hook() {
+        use lazybox_ipc::AgentState::{InputNeeded, Working};
+        let input = include_bytes!("../../agents/tests/fixtures/permission_prompt_fragmented.bin");
+
+        let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
+        assert_eq!(p.feed(input).await, vec![Working]);
+        assert_eq!(p.quiet().await, vec![InputNeeded]);
+        // Answered, no chunk cleared the reset — but a hook landed just now,
+        // so the agent is provably still at work.
+        p.states.lock().await.insert(p.id, Working);
+        p.detect_resets.lock().await.insert(p.id);
+        p.hook_now().await;
+        assert_eq!(
+            p.quiet().await,
             Vec::<lazybox_ipc::AgentState>::new(),
-            "a pending answer reset must veto classifying the stale buffer",
+            "a fresh hook must gate the settle — the turn is still live",
         );
         assert_eq!(p.states.lock().await.get(&p.id), Some(&Working));
         assert!(
             p.detect_resets.lock().await.contains(&p.id),
-            "the quiet path must peek, not consume — the next chunk still clears the buffer",
+            "the reset stays latched: the next chunk, not this gated tick, clears it",
         );
     }
 

@@ -210,6 +210,14 @@ state machine (`src/state_machine.rs`) instead of overwriting the badge directly
 `Done` is reachable for *every* agent (not just Claude's `Stop` hook) via a
 generic quiet timer — after `agent.quiet_classify_secs` of no PTY output a
 `Working` turn settles to `Done`, even when the resting screen matches no marker.
+This settle is authoritative even on a **hook-driven** terminal whose last hook
+is still fresh (#504): a busy agent repaints its status ticker within the quiet
+window, so true byte-silence proves the turn ended regardless of whether a `Stop`
+hook ever fired (a manual Ctrl-C/Esc, a lost hook). The whole hooks-vs-PTY gate —
+which readings a fresh hook may override and which it may not — lives in
+`AgentStateMachine::on_pty_reading` (`hooks_gate_allows`), not in the daemon's
+output pump; the watchdog's *content-stability* force stays hook-subordinate,
+since a ticking counter can mask a genuinely long silent tool call.
 
 ### Test checklist
 - [ ] A Claude permission prompt flips the row to InputNeeded.

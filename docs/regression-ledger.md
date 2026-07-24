@@ -63,7 +63,7 @@ Depth and soft-wrap parity are guarded above; hyperlink parity is not.
 | `crates/server/src/spawn_handler.rs::a_repaint_scrape_never_clears_a_parked_prompt` | #374 at the pump level, over real fixture bytes |
 | `crates/server/src/spawn_handler.rs::agent_state_transitions_emit_an_ordered_sequence` | #357 — the ordered daemon transition stream end-to-end (mock backend) |
 | `crates/server/src/spawn_handler.rs::a_quiet_unclassifiable_screen_settles_working_to_done` | #225 — weak-detector agents still finish |
-| `crates/server/src/spawn_handler.rs::pty_reading_allowed_gates_on_hook_freshness` | hooks-vs-scrape precedence (#374 family) |
+| `crates/agents/src/state_machine.rs::hooks_gate_lets_only_the_pty_corrections_through_while_fresh` | hooks-vs-scrape precedence (#374 family) |
 | `crates/server/tests/pump_teardown.rs::exiting_agent_broadcasts_exited_not_stuck_working` | #357 — failed/exited agents can't hang on Working |
 | `crates/agents/tests/agents.rs::guarded_composer_protocol_is_shared_by_claude_and_codex` | #397 — one PTY prompt protocol, not per-agent drift |
 | `crates/agents/tests/codex_fixtures.rs::codex_real_approval_round_trip_drives_the_chunk_detector` | #399 — the live-repaint approval round trip over **captured real Codex bytes** |

@@ -6562,14 +6562,12 @@ mod leader_tile_tests {
         arm_leader(&mut m);
         m.dispatch_key(RealmKey::new(Key::Char('h'), RealmMods::NONE));
         assert!(matches!(m.top_modal(), Some(Id::PromptHistoryPicker)));
-        // Newest-first: row 0 is the most recent prompt.
-        assert_eq!(
-            m.prompt_history_choices,
-            vec!["run the tests".to_string(), "rebase onto main".to_string()],
-        );
 
-        // Pick the older prompt (row 1) → re-sent into the session.
-        let cmds = m.handle_choice_picked(vec![1]);
+        // Pick the older prompt → re-sent into the session. The picked
+        // row now carries its full prompt text as the payload (no shadow
+        // Vec), so the handler re-injects exactly that text.
+        let cmds =
+            m.handle_choice_picked(vec![ChoicePayload::Text("rebase onto main".to_string())]);
         assert!(m.top_modal().is_none(), "picker closes on pick");
         assert!(
             cmds.iter().any(|c| matches!(
@@ -6582,10 +6580,10 @@ mod leader_tile_tests {
 
         // If the target agent exited while the picker was open, picking
         // sends nothing and doesn't falsely claim a resend.
-        m.prompt_history_choices = vec!["rebase onto main".to_string()];
         m.prompt_history_target = Some(TerminalId(404));
         m.push_modal(Id::PromptHistoryPicker);
-        let cmds = m.handle_choice_picked(vec![0]);
+        let cmds =
+            m.handle_choice_picked(vec![ChoicePayload::Text("rebase onto main".to_string())]);
         assert!(
             !cmds.iter().any(|c| matches!(
                 c,

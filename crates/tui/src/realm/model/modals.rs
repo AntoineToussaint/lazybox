@@ -1025,15 +1025,17 @@ impl<T: TerminalAdapter> Model<T> {
                 .unwrap_or("Confirm action?")
                 .to_string()
         });
-        // This is the shortcut path: the user pressed a destructive
-        // chord, so the chord itself is the intent and Enter confirms
-        // (issue #525). The `ui.confirm_default.destructive_shortcut`
-        // knob (default Yes) drives it — a cautious user can force No.
-        let default_yes = self
-            .ui_defaults
-            .confirm_default
-            .destructive_shortcut
-            .is_yes();
+        // Shortcut path: the user pressed a destructive chord, so the
+        // chord itself is the intent and Enter confirms (issue #525),
+        // governed by `ui.confirm_default.destructive_shortcut` (default
+        // Yes). A benign awareness gate (the on-main spawn) destroys
+        // nothing, so it always affirms regardless of that knob.
+        let default_yes = def.confirm_is_benign_gate()
+            || self
+                .ui_defaults
+                .confirm_default
+                .destructive_shortcut
+                .is_yes();
         self.pending_action_confirm = Some((action, target));
         let modal = Confirm::new(&prompt);
         let modal = if default_yes {
@@ -1259,7 +1261,11 @@ impl<T: TerminalAdapter> Model<T> {
             format!("Delete worktree {} ?", target.path.display())
         };
         // Deletes a worktree off disk (overriding safety when dirty) —
-        // no undo, so Enter backs out.
+        // irreversible, uncommitted/unpushed work is lost. This keeps a
+        // hard No floor rather than following
+        // `confirm_default.destructive_shortcut` (#525): the disk-loss
+        // risk warrants caution beyond the general shortcut policy, and
+        // No is never less safe than that knob would ask for.
         let modal = Confirm::new(&prompt).default_no();
         self.pending_inspect_target = Some(target);
         self.mount_modal(Id::InspectConfirm, modal);
@@ -1345,7 +1351,10 @@ impl<T: TerminalAdapter> Model<T> {
     /// `(false)` / dismiss drops the prompt silently.
     pub(super) fn mount_clean_worktrees_confirm(&mut self) {
         use crate::realm::components::confirm::Confirm;
-        // Bulk-wipes worktrees off disk — no undo, so Enter backs out.
+        // Bulk-wipes worktrees off disk — irreversible. Like the
+        // per-worktree inspector delete, this keeps a hard No floor
+        // instead of following `confirm_default.destructive_shortcut`
+        // (#525): a mis-hit here could wipe many trees at once.
         let modal = Confirm::new(
             "Wipe every worktree whose session has no live terminal? \
              PR / issue rows stay; active sessions are skipped.",
@@ -1593,6 +1602,12 @@ impl<T: TerminalAdapter> Model<T> {
         else {
             return;
         };
+        // Event-driven (a closing PR was detected), but benign: joining
+        // the issue's sessions into the PR workspace destroys nothing,
+        // and accepting is the expected path. So it defaults Yes and is
+        // exempt from `confirm_default.event` — that knob guards the
+        // *destructive* unsolicited prompts (worktree removal), not this
+        // one (#525).
         let modal =
             Confirm::new(merge_prompt_question(&pr_label, &issue_label, count)).default_yes();
         self.active_merge_prompt = Some((issue_key, pr_key));

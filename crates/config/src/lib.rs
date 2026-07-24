@@ -291,13 +291,13 @@ impl Default for ConfirmDefaults {
     }
 }
 
-/// Parse a `yes`/`no` confirm-default scalar, case-insensitive (also
-/// accepting `true`/`false`). `None` for anything else so the caller
-/// warns and keeps its safe per-source fallback.
+/// Parse a `yes`/`no` confirm-default scalar, case-insensitive. `None`
+/// for anything else so the caller warns and keeps its safe per-source
+/// fallback.
 fn parse_confirm_default(raw: &str) -> Option<ConfirmDefault> {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "yes" | "true" | "y" => Some(ConfirmDefault::Yes),
-        "no" | "false" | "n" => Some(ConfirmDefault::No),
+        "yes" => Some(ConfirmDefault::Yes),
+        "no" => Some(ConfirmDefault::No),
         _ => None,
     }
 }

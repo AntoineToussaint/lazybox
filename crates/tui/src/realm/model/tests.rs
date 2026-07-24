@@ -977,6 +977,28 @@ mod effects_tests {
         );
     }
 
+    /// Issue #525: the on-main spawn confirm is a benign awareness gate,
+    /// not a destructive action — it always defaults Yes, even when a
+    /// cautious user has forced `destructive_shortcut: no` for the
+    /// genuinely destructive prompts.
+    #[test]
+    fn on_main_spawn_confirm_stays_yes_despite_no_shortcut_override() {
+        use lazybox_config::ConfirmDefault;
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        m.ui_defaults.confirm_default.destructive_shortcut = ConfirmDefault::No;
+        m.mount_action_confirm(
+            Action::SpawnAgentOnMain("claude".into()),
+            super::super::ActionConfirmTarget::Workspace(SessionKey::from("github:o/r#1")),
+            None,
+        );
+        assert!(
+            mounted_confirm_default_yes(&m, Id::ActionConfirm),
+            "benign on-main gate affirms regardless of the destructive knob",
+        );
+    }
+
     /// Esc on a RemoveOutOfScope modal clears the slot but
     /// produces no command — there's nothing to tell the daemon;
     /// the workspace stays out of scope on its end too.

@@ -1592,6 +1592,20 @@ impl ActionDef {
         }
     }
 
+    /// Whether a `Confirm`-guarded action is a *benign awareness gate*
+    /// rather than a destructive action. The on-main spawns
+    /// (`b`-variant chords) are explicitly requested and destroy nothing
+    /// at confirm time — the modal only warns that edits land on the
+    /// shared checkout — so `Enter` should affirm the intent no matter
+    /// how `ui.confirm_default.destructive_shortcut` is set. Genuinely
+    /// destructive actions return `false` and follow that knob (#525).
+    pub fn confirm_is_benign_gate(&self) -> bool {
+        matches!(
+            self.kind,
+            ActionKind::SpawnAgentOnMain | ActionKind::SpawnShellOnMain
+        )
+    }
+
     /// Resolve the effective chords (alternatives): a user override
     /// from the config map if present and parseable, otherwise the
     /// catalog defaults.
@@ -2521,6 +2535,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn only_on_main_spawns_are_benign_confirm_gates() {
+        // Issue #525: the confirm default is source-driven, but the
+        // benign on-main awareness gates are exempt from the destructive
+        // knob — they always affirm. Every other confirmed action is
+        // destructive and follows `ui.confirm_default`.
+        for def in ActionDef::all() {
+            let expected = matches!(
+                def.kind,
+                ActionKind::SpawnAgentOnMain | ActionKind::SpawnShellOnMain
+            );
+            assert_eq!(
+                def.confirm_is_benign_gate(),
+                expected,
+                "{:?} benign-gate flag",
+                def.kind,
+            );
+        }
+        // Sanity: the on-main gates really are Confirm-guarded.
+        assert!(ActionDef::for_kind(ActionKind::SpawnAgentOnMain).is_destructive());
+        assert!(ActionDef::for_kind(ActionKind::Archive).is_destructive());
+        assert!(!ActionDef::for_kind(ActionKind::Archive).confirm_is_benign_gate());
     }
 
     #[test]

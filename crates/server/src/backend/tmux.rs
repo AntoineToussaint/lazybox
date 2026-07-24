@@ -569,6 +569,32 @@ impl TmuxBackend {
         })
     }
 
+    /// The pane's current cell grid, `(cols, rows)`. A session that
+    /// survived a daemon restart keeps the size its last client set it to
+    /// (`window-size latest`), so reattaching at exactly this size means
+    /// tmux reports no resize to the pane and the inner program never runs
+    /// its reattach redraw — the DEFAULT-size→viewport reflow that left a
+    /// blank gap under the recovered prompt box (#533). `None` when tmux
+    /// cannot report the size, and the caller falls back to the default
+    /// grid.
+    async fn pane_size(&self, key: &str) -> Option<(u16, u16)> {
+        let out = self
+            .tmux(&[
+                "display-message",
+                "-p",
+                "-t",
+                key,
+                "#{pane_width}\t#{pane_height}",
+            ])
+            .await
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut parts = text.trim().split('\t');
+        let cols = parts.next()?.parse().ok()?;
+        let rows = parts.next()?.parse().ok()?;
+        Some((cols, rows))
+    }
+
     /// Whether the pane is alternate and how many history lines tmux
     /// currently retains. `None` when tmux cannot report the state.
     async fn pane_history_state(&self, key: &str) -> Option<(bool, u64)> {
@@ -940,6 +966,18 @@ impl SessionBackend for TmuxBackend {
                 // round trip, and the hot reuse path above must never wait
                 // on it.
                 let seed = self.capture_history(key).await;
+                // Attach at the pane's CURRENT size, not a hardcoded
+                // default. The surviving pane still carries the viewport
+                // size its last client set, so matching it means tmux sees
+                // no resize on attach — the inner program (Claude Code)
+                // never runs its bottom-anchored incremental redraw and
+                // can't leave a blank gap above the input box (#533).
+                // A stale/absent size falls back to the default grid; the
+                // widget's first-render resize still corrects it.
+                let size = self
+                    .pane_size(key)
+                    .await
+                    .unwrap_or((DEFAULT_COLS, DEFAULT_ROWS));
                 let mut map = self.sessions.lock().await;
                 // Re-check under the lock: a concurrent subscribe may have
                 // opened a client while we were capturing. If so, reuse it
@@ -947,9 +985,10 @@ impl SessionBackend for TmuxBackend {
                 if let Some(slot) = map.get(key).filter(|slot| !slot.client.is_finished()) {
                     slot.client.clone()
                 } else {
+                    let (cols, rows) = size;
                     let size = PtySize {
-                        cols: DEFAULT_COLS,
-                        rows: DEFAULT_ROWS,
+                        cols,
+                        rows,
                         pixel_width: 0,
                         pixel_height: 0,
                     };

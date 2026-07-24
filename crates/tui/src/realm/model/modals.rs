@@ -443,9 +443,9 @@ impl<T: TerminalAdapter> Model<T> {
     /// Mount the "request reviewers" multi-select picker for the
     /// given workspace's PR. Candidates are gathered from the
     /// workspace's known people; Space toggles, Enter submits →
-    /// `Msg::ChoicePicked(indices)` → `handle_choice_picked` looks
-    /// up the chosen logins in `review_choices` and dispatches
-    /// `Command::RequestReviewers`.
+    /// `Msg::ChoicePicked` — each row carrying its login as a
+    /// [`ChoicePayload::Text`] — → `handle_choice_picked` collects the
+    /// chosen logins and dispatches `Command::RequestReviewers`.
     pub(crate) fn mount_request_reviewers(&mut self, workspace_key: lazybox_core::WorkspaceKey) {
         use crate::realm::components::choice::Choice;
 
@@ -480,9 +480,9 @@ impl<T: TerminalAdapter> Model<T> {
     /// Mount the unified automation-policies menu (`g p`, issue #363)
     /// for `workspace_key`. Single-pick `Choice` whose rows are every
     /// policy on the focused PR/issue with its on/off state; picking a
-    /// row dispatches its toggle (see `choice_picked_inner`). Rows +
-    /// their toggles are stashed in `policy_choices` so the picked index
-    /// resolves back.
+    /// row dispatches its toggle (see `choice_picked_inner`). Each row
+    /// carries its toggle as a [`ChoicePayload::Policy`], which the
+    /// handler resolves back.
     pub(crate) fn mount_policy_picker(&mut self, workspace_key: lazybox_core::WorkspaceKey) {
         use crate::realm::components::choice::Choice;
 

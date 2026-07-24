@@ -105,7 +105,8 @@ pub enum Id {
     NewProject,
     /// Repo picker for the `x p` new-workspace flow. Lists the
     /// already-tracked repos plus a "create a new local project"
-    /// escape hatch. Choices live in `new_workspace_repo_choices`;
+    /// escape hatch. Each row carries a [`ChoicePayload::Project`] (or
+    /// [`ChoicePayload::NewLocalProject`] for the escape-hatch row);
     /// `Msg::ChoicePicked` either funnels into the new-workspace name
     /// input under the chosen repo, or mounts `NewProject`.
     NewWorkspaceRepo,
@@ -130,12 +131,12 @@ pub enum Id {
     MergeConfirm,
     /// Picker for the `x a` ("adopt") flow — pick the target
     /// workspace the source's sessions should move into. Source is
-    /// stashed in `pending_adopt_source`; `Msg::ChoicePicked` reads
-    /// the picked index out of `adopt_choices` and dispatches
-    /// `Command::AdoptSessions`.
+    /// stashed in `pending_adopt_source`; each row carries a
+    /// [`ChoicePayload::Workspace`] that `Msg::ChoicePicked` resolves
+    /// to the target and dispatches `Command::AdoptSessions`.
     AdoptTarget,
     /// Project picker for the global "start agent" (`Shift-W`) flow.
-    /// Choices live in `start_agent_project_choices`; `Msg::ChoicePicked`
+    /// Each row carries a [`ChoicePayload::Project`]; `Msg::ChoicePicked`
     /// resolves the project, then funnels into the new-workspace name
     /// input (which auto-spawns the default agent on submit). Skipped
     /// when only one project exists.
@@ -160,15 +161,17 @@ pub enum Id {
     /// Multi-select `Choice` over every [`Filter`](crate::components::sidebar::Filter)
     /// (state / role / kind), each row showing its match count, with the
     /// currently-active filters pre-checked. Submit replaces the
-    /// sidebar's active set; the picked→filter index map lives in
-    /// `filter_choices`. `Msg::ChoicePicked` resolves it.
+    /// sidebar's active set; each row carries its own
+    /// [`ChoicePayload::Filter`], so `Msg::ChoicePicked` applies exactly
+    /// the filters shown even though the menu groups its rows.
     FilterMenu,
     /// Automation-policies menu mounted on `g p` (`ManagePolicies`,
     /// issue #363). Single-pick `Choice` listing every policy on the
     /// focused PR/issue with its on/off state; picking a row toggles
-    /// that policy and re-opens the menu. Rows + the workspace key live
-    /// in `policy_choices` / `pending_policy_workspace`;
-    /// `Msg::ChoicePicked` resolves the index to a toggle command.
+    /// that policy and re-opens the menu. Each row carries a
+    /// [`ChoicePayload::Policy`]; the target workspace lives in
+    /// `pending_policy_workspace`, and `Msg::ChoicePicked` resolves the
+    /// pick to a toggle command.
     PolicyPicker,
     /// Duration picker mounted on `z` (ToggleSnooze) when the
     /// workspace is NOT currently snoozed. Single-pick choice
@@ -251,10 +254,10 @@ pub enum Id {
     /// shown (or Esc / a failed step the user acknowledges).
     WorktreeProgress,
     /// Fuzzy switcher over every workspace (`JumpToWorkspace`, default
-    /// `` ` ``; from a terminal, `]]` then `` ` ``). The parallel
-    /// session keys live in `jump_choices`; `Msg::ChoicePicked`
-    /// resolves the picked index and lands the cursor via
-    /// `focus_workspace_key`. See `realm::components::jump_picker`.
+    /// `` ` ``; from a terminal, `]]` then `` ` ``). Each row carries a
+    /// [`ChoicePayload::Session`]; `Msg::ChoicePicked` resolves the pick
+    /// and lands the cursor via `jump_to_workspace_key`. See
+    /// `realm::components::jump_picker`.
     JumpPicker,
     /// Per-session prompt-history picker (`]]h`, issue #523). Lists the
     /// prompts sent to the focused agent, newest-first, snippet entries
@@ -266,7 +269,8 @@ pub enum Id {
     /// `Choice` over `theme::list()` with live preview on highlight:
     /// arrowing applies a palette at once, Enter keeps it and writes
     /// `ui.theme`, Esc restores the theme stashed in
-    /// `theme_picker_prev`. Names live in `theme_choices`.
+    /// `theme_picker_prev`. Each row carries its theme name as a
+    /// [`ChoicePayload::Text`].
     ThemePicker,
     /// Read-only snippets browser (`]`, or the `,` Settings palette).
     /// Scrollable list of the merged snippet library — key, origin,
@@ -287,8 +291,8 @@ pub enum Id {
     BroadcastText,
     /// Target picker for the agent-to-agent handoff flow (`x s`,
     /// issue #431) — pick the session the source agent's output should
-    /// be injected into. Candidate keys live in `handoff_choices`; the
-    /// source name + captured seed live in `pending_handoff`.
+    /// be injected into. Each row carries a [`ChoicePayload::Session`];
+    /// the source name + captured seed live in `pending_handoff`.
     /// `Msg::ChoicePicked` resolves the target and mounts `HandoffText`.
     HandoffTarget,
     /// Compose step of the handoff flow: a Textarea pre-filled with the
@@ -296,18 +300,19 @@ pub enum Id {
     /// Submit → inject + submit into the target in `pending_handoff`.
     HandoffText,
     /// Single-pick `Choice` over the enabled agents (`,` Settings →
-    /// "Change default agent"), opened on the current default. Pick →
-    /// persist `setup.default_agent` and update the panes live. Ids
-    /// live in `default_agent_choices`.
+    /// "Change default agent"), opened on the current default. Each row
+    /// carries its agent id as a [`ChoicePayload::Text`]. Pick → persist
+    /// `setup.default_agent` and update the panes live.
     DefaultAgentPicker,
     /// Single-pick `Choice` over the just-picked default agent's model
     /// tiers (chained after `DefaultAgentPicker` when the agent
     /// declares any), opened on its current default tier. Pick →
     /// persist `agents.<id>.models.default` so bare `w` / `Shift-W` /
     /// auto-work spawns use it; per-spawn tier chords (`w S`) still
-    /// override. Esc keeps the current tier. Aliases live in
-    /// `default_model_choices`, the target agent in
-    /// `default_model_agent`.
+    /// override. Each row carries its tier alias as a
+    /// [`ChoicePayload::OptText`] (`None` = the agent-default row); the
+    /// target agent lives in `default_model_agent`. Esc keeps the
+    /// current tier.
     DefaultModelPicker,
     /// Confirm-with-preview for an action the Ask Lazybox help agent
     /// proposed (#353) — `add_snippet` or `edit_config`. The pending
@@ -925,8 +930,8 @@ pub struct Model<T: TerminalAdapter> {
     /// `optimistic.rs`.
     pending_mutations: Vec<optimistic::OptimisticMutation>,
     /// Workspace currently waiting on the `SnoozeDuration` picker's
-    /// result. `Msg::ChoicePicked` reads this + `snooze_choices` to
-    /// turn the picked index into a `Command::Snooze`.
+    /// result. `Msg::ChoicePicked` reads this + the picked row's
+    /// [`ChoicePayload::Duration`] to build a `Command::Snooze`.
     pending_snooze_workspace: Option<lazybox_core::SessionKey>,
     /// Stash for the `w` multi-agent chooser (`Id::WorkAgentPicker`,
     /// #418): the running agent ids listed (row order) plus the spawn
@@ -934,8 +939,9 @@ pub struct Model<T: TerminalAdapter> {
     /// submit / dismiss.
     pending_work_picker: Option<crate::realm::model::modals::PendingWorkPicker>,
     /// Workspace the `PolicyPicker` (`g p`, issue #363) is targeting.
-    /// `Msg::ChoicePicked` reads it + `policy_choices` to turn the
-    /// picked index into a toggle command. Cleared on dismiss.
+    /// `Msg::ChoicePicked` reads it + the picked row's
+    /// [`ChoicePayload::Policy`] to build a toggle command. Cleared on
+    /// dismiss.
     pending_policy_workspace: Option<lazybox_core::WorkspaceKey>,
     /// Queued workspace-removal prompts — either out-of-scope
     /// workspaces with running terminals (`WorkspaceOutOfScope`) or
@@ -1823,10 +1829,10 @@ impl<T: TerminalAdapter> Model<T> {
 
     /// Mount the snippet picker with an initial filter (typically
     /// the snippet key prefix typed after `]]s`). Picker rows are
-    /// derived from the model's snippet collection; their keys are
-    /// stashed in `self.snippet_choices` so `handle_choice_picked`
-    /// can resolve a picked index back to a snippet via
-    /// `self.snippets.get(...)` without re-running the filter.
+    /// derived from the model's snippet collection; each row carries its
+    /// snippet key as a [`ChoicePayload::Text`] so `handle_choice_picked`
+    /// resolves the pick back to a snippet via `self.snippets.get(...)`
+    /// regardless of the picker's row order.
     pub(crate) fn mount_snippet_picker(&mut self, initial_filter: String) {
         use crate::realm::components::snippet_picker::{PickerRow, SnippetPicker};
         if matches!(self.modal_stack.last(), Some(Id::SnippetPicker)) {
@@ -2128,8 +2134,8 @@ impl<T: TerminalAdapter> Model<T> {
     /// Mount the default-agent picker — a single-pick `Choice` over the
     /// enabled agents (`self.agents`), opened on the current default.
     /// Pick → `handle_choice_picked` persists `setup.default_agent` and
-    /// updates the panes live. Agent ids are stashed in
-    /// `default_agent_choices` so the picked index resolves back.
+    /// updates the panes live. Each row carries its agent id as a
+    /// [`ChoicePayload::Text`], which the handler resolves back.
     pub(crate) fn mount_default_agent_picker(&mut self) {
         use crate::realm::components::choice::Choice;
         if matches!(self.modal_stack.last(), Some(Id::DefaultAgentPicker)) {

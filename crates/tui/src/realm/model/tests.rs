@@ -1236,8 +1236,8 @@ mod effects_tests {
     }
 
     /// Adopt picker: source + target workspace keys flow into an
-    /// `AdoptSessions` command. The picks index resolves into the
-    /// `adopt_choices` slot we set up.
+    /// `AdoptSessions` command. The pick carries the target as a
+    /// `ChoicePayload::Workspace`, which the handler resolves directly.
     #[test]
     fn choice_picked_for_adopt_target_returns_adopt_sessions() {
         let mut m = build_model();
@@ -1261,9 +1261,9 @@ mod effects_tests {
         assert!(m.pending_adopt_source.is_none());
     }
 
-    /// `Id::RequestReviewers` picker: selecting two indices into
-    /// `review_choices` produces `Command::RequestReviewers` with
-    /// those logins resolved + the workspace key from
+    /// `Id::RequestReviewers` picker: selecting two rows (each carrying
+    /// its login as a `ChoicePayload::Text`) produces
+    /// `Command::RequestReviewers` with those logins + the workspace key from
     /// `pending_review_request`. (Migrated from the older Input
     /// modal — see `mount_request_reviewers`.)
     #[test]

@@ -792,8 +792,9 @@ showing keybinding search only",
             }
             return cmds;
         }
-        // Reviewer picker (Id::RequestReviewers) — picks index
-        // into `review_choices`. Empty pick drops the slot.
+        // Reviewer picker (Id::RequestReviewers) — each pick carries its
+        // chosen login as a `ChoicePayload::Text`. Empty pick drops the
+        // slot.
         if matches!(self.modal_stack.last(), Some(Id::RequestReviewers)) {
             let logins: Vec<String> = picks
                 .iter()
@@ -908,9 +909,8 @@ showing keybinding search only",
             return cmds;
         }
         // Snooze duration picker (Id::SnoozeDuration) — single-pick.
-        // Translate the chosen index into a snooze deadline via the
-        // stashed `snooze_choices`. Empty / Esc dismisses without
-        // snoozing.
+        // Translate the chosen row's `ChoicePayload::Duration` into a
+        // snooze deadline. Empty / Esc dismisses without snoozing.
         if matches!(self.modal_stack.last(), Some(Id::SnoozeDuration)) {
             let duration = picks.first().and_then(|p| p.as_duration());
             let workspace_key = self.pending_snooze_workspace.take();

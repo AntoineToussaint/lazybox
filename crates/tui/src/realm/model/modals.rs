@@ -1817,6 +1817,7 @@ mod tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            kind: Some(lazybox_core::TaskKind::Pr),
             closes_issues: vec![],
         };
         let mut ws = lazybox_core::Workspace::from_task(

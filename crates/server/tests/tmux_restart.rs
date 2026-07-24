@@ -257,6 +257,112 @@ async fn restarted_backend_seeds_scrollback_from_tmux_history() {
     result.expect("test timed out");
 }
 
+/// Reattach after a daemon restart must land the fresh client at the
+/// pane's REAL viewport size, not the hardcoded default grid. The
+/// surviving pane still carries the size its last client set; attaching
+/// at a smaller default reflows the pane down and then the widget's
+/// first-render resize reflows it back up — a resize storm that makes
+/// Claude Code re-anchor its input box via an incremental primary-screen
+/// redraw and leaves a blank gap above it (#533). Matching the pane size
+/// on attach means tmux reports no resize, so no reflow and no gap.
+#[tokio::test]
+async fn reattach_matches_pane_viewport_no_default_reflow() {
+    if modern_tmux_version().is_none() {
+        eprintln!("tmux missing or too old — skipping reattach-size test");
+        return;
+    }
+    let socket = format!("lazybox-test-reattach-size-{}", std::process::id());
+    // A viewport distinct from the DEFAULT 120x32 the backend attaches a
+    // fresh spawn at, so a reflow back to the default is observable.
+    const VIEW_COLS: u16 = 100;
+    const VIEW_ROWS: u16 = 45;
+    let pane_rows = |socket: &str, key: &str| -> u16 {
+        let out = std::process::Command::new("tmux")
+            .args([
+                "-L",
+                socket,
+                "display-message",
+                "-p",
+                "-t",
+                key,
+                "#{pane_height}",
+            ])
+            .output()
+            .expect("display-message");
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .expect("pane height")
+    };
+    let result = timeout(TEST_DEADLINE, async {
+        let backend = TmuxBackend::with_socket(&socket).expect("conf written");
+        let key = backend
+            .spawn(
+                &[
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "for i in $(seq 1 200); do echo line-$i; done; exec sleep 300".to_string(),
+                ],
+                None,
+                &[],
+                "reattach-size-test",
+            )
+            .await
+            .expect("tmux spawn");
+
+        // The widget learns its true size on first render and resizes the
+        // pane to the real viewport — simulate that here so the surviving
+        // pane carries a non-default size into the restart.
+        backend
+            .resize(&key, VIEW_COLS, VIEW_ROWS)
+            .await
+            .expect("resize to viewport");
+        let mut ticker = tokio::time::interval(Duration::from_millis(100));
+        for attempt in 0.. {
+            ticker.tick().await;
+            if pane_rows(&socket, &key) == VIEW_ROWS {
+                break;
+            }
+            assert!(
+                attempt < 100,
+                "pane never reflowed to the viewport size; got {} rows",
+                pane_rows(&socket, &key)
+            );
+        }
+
+        // "Daemon restart": drop the backend (and its attach client). The
+        // tmux session and its pane size live on.
+        drop(backend);
+        let restarted = TmuxBackend::with_socket(&socket).expect("conf written");
+        assert_eq!(
+            pane_rows(&socket, &key),
+            VIEW_ROWS,
+            "detached pane must retain its viewport size across the restart"
+        );
+
+        // Reattach. The fresh client must attach at the pane's real size,
+        // so the pane never reflows through the default 32-row grid. The
+        // attach-driven resize (if any) lands a beat after `subscribe`
+        // returns, so watch the pane for a settling window: it must stay
+        // at the viewport the whole time, never dropping to the default.
+        restarted.subscribe(&key).await.expect("re-subscribe");
+        for _ in 0..10 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert_eq!(
+                pane_rows(&socket, &key),
+                VIEW_ROWS,
+                "reattach must match the pane viewport, not reflow to the \
+                 default 32-row grid"
+            );
+        }
+
+        let _ = restarted.kill(&key).await;
+    })
+    .await;
+    kill_test_server(&socket);
+    result.expect("test timed out");
+}
+
 /// The root cause of the "scrollbar disappears / scrollback dead on
 /// Claude" report: Claude Code ≥2.1 switches its pane to the alternate
 /// screen, which retains ZERO tmux history — the source every lazybox

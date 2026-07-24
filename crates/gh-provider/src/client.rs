@@ -1275,9 +1275,10 @@ impl GhClient {
 
     /// `since` narrows the main `involves:` paginated search to PRs
     /// updated at or after that instant (issue #14) — `None` fetches
-    /// every open involved PR (a reconcile sweep). The window applies
-    /// ONLY to the `involves-main` branch: the merged-sweep already has
-    /// its own `merged:>=` bound, and the reviewer/watched branches are
+    /// every open involved PR (a reconcile sweep). The window also
+    /// applies to the merged-sweep on top of its `merged:>=` bound
+    /// (issue #530), so a steady sweep stops re-downloading the whole
+    /// 7-day merged set. The reviewer/watched branches stay unwindowed —
     /// cheap single-page queries where a window would buy nothing.
     pub async fn fetch_all_prs(
         &self,
@@ -1352,22 +1353,14 @@ impl GhClient {
             }
         };
 
-        // Branch 2: recently-merged sweep.
+        // Branch 2: recently-merged sweep. Windowed on the same
+        // `since` floor as the main branch — a steady-state sweep
+        // shouldn't re-download the whole 7-day merged set every tick.
         let week_ago = (chrono::Utc::now() - chrono::Duration::days(7))
             .format("%Y-%m-%d")
             .to_string();
-        let mut merged_quals = vec![
-            "is:pr".to_string(),
-            "is:merged".to_string(),
-            "archived:false".to_string(),
-            format!("merged:>={week_ago}"),
-        ];
-        if self.pr_filters.is_empty() {
-            merged_quals.push(format!("involves:{}", self.user));
-        } else {
-            merged_quals.extend(self.pr_filters.iter().cloned());
-        }
-        let merged_query = graphql::build_query(&merged_quals);
+        let merged_query =
+            graphql::merged_sweep_query(&self.user, &self.pr_filters, &week_ago, since);
         tracing::debug!("Recently-merged sweep: {merged_query}");
         let merged_fut = self.fetch_pr_single_query("merged-sweep", merged_query);
 
@@ -1568,22 +1561,14 @@ impl GhClient {
 
         // Merged sweep — global, cheap, identical to `fetch_all_prs`.
         // Skipping this would mean PRs that merged between our last
-        // sync of their repo and now stay stuck on `OPEN`.
+        // sync of their repo and now stay stuck on `OPEN`. The
+        // round-robin path never advances a sweep window, so it stays
+        // unwindowed (`None`) — same as its per-repo branch.
         let week_ago = (chrono::Utc::now() - chrono::Duration::days(7))
             .format("%Y-%m-%d")
             .to_string();
-        let mut merged_quals = vec![
-            "is:pr".to_string(),
-            "is:merged".to_string(),
-            "archived:false".to_string(),
-            format!("merged:>={week_ago}"),
-        ];
-        if self.pr_filters.is_empty() {
-            merged_quals.push(format!("involves:{}", self.user));
-        } else {
-            merged_quals.extend(self.pr_filters.iter().cloned());
-        }
-        let merged_query = graphql::build_query(&merged_quals);
+        let merged_query =
+            graphql::merged_sweep_query(&self.user, &self.pr_filters, &week_ago, None);
         let merged_fut = self.fetch_pr_single_query("merged-sweep", merged_query);
 
         let (per_repo_results, reviewer_res, merged_res) =

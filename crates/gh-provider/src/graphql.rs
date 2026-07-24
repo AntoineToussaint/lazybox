@@ -544,6 +544,41 @@ pub fn updated_since_qualifier(since: DateTime<Utc>) -> String {
     format!("updated:>={}", since.format("%Y-%m-%dT%H:%M:%S+00:00"))
 }
 
+/// Search string for the recently-merged back-fill sweep: PRs merged
+/// on or after `merged_floor` (a `YYYY-MM-DD` date, the trailing 7-day
+/// window) scoped to the user's roles, so a PR that lands right after a
+/// sync still picks up its final MERGED state on the next tick.
+///
+/// `since` adds an `updated:>=` window on top of the merge floor (issue
+/// #530). On a windowed global sweep the merged set is dominated by PRs
+/// merged days ago and unchanged since the last poll; without the
+/// window every 10-min sweep re-downloads all of them for nothing. The
+/// window is safe because a merge bumps `updatedAt`, so a newly-merged
+/// PR is always ≥ the previous sweep floor. `None` (reconcile sweep, or
+/// the windowless round-robin path) keeps the full 7-day set.
+pub fn merged_sweep_query(
+    user: &str,
+    pr_filters: &[String],
+    merged_floor: &str,
+    since: Option<DateTime<Utc>>,
+) -> String {
+    let mut quals = vec![
+        "is:pr".to_string(),
+        "is:merged".to_string(),
+        "archived:false".to_string(),
+        format!("merged:>={merged_floor}"),
+    ];
+    if pr_filters.is_empty() {
+        quals.push(format!("involves:{user}"));
+    } else {
+        quals.extend(pr_filters.iter().cloned());
+    }
+    if let Some(since) = since {
+        quals.push(updated_since_qualifier(since));
+    }
+    build_query(&quals)
+}
+
 /// Per-page size for the PR search. Was 100 (GraphQL's maximum)
 /// but with the heavy SEARCH_QUERY payload, GitHub's GraphQL
 /// gateway timed out (HTTP 502 / 504 "We couldn't respond to your
@@ -2672,6 +2707,43 @@ mod tests {
         assert!(q.contains("involves:carol"));
         assert!(q.contains("is:open"));
         assert!(q.contains("updated:>=2026-06-05T13:30:00+00:00"));
+    }
+
+    #[test]
+    fn merged_sweep_query_has_merge_floor_and_involves() {
+        let q = merged_sweep_query("dave", &[], "2026-06-01", None);
+        assert!(q.contains("is:pr"));
+        assert!(q.contains("is:merged"));
+        assert!(q.contains("archived:false"));
+        assert!(q.contains("merged:>=2026-06-01"));
+        assert!(q.contains("involves:dave"));
+    }
+
+    #[test]
+    fn merged_sweep_query_windows_on_since() {
+        let since = DateTime::parse_from_rfc3339("2026-06-05T13:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let q = merged_sweep_query("dave", &[], "2026-06-01", Some(since));
+        // Both bounds present: the 7-day merge floor AND the incremental
+        // update window, so a steady sweep only pulls changed merges.
+        assert!(q.contains("merged:>=2026-06-01"));
+        assert!(q.contains("updated:>=2026-06-05T13:30:00+00:00"));
+    }
+
+    #[test]
+    fn merged_sweep_query_reconcile_omits_update_window() {
+        let q = merged_sweep_query("dave", &[], "2026-06-01", None);
+        assert!(!q.contains("updated:>="));
+    }
+
+    #[test]
+    fn merged_sweep_query_uses_pr_filters_over_involves() {
+        let filters = vec!["author:erin".to_string(), "org:acme".to_string()];
+        let q = merged_sweep_query("dave", &filters, "2026-06-01", None);
+        assert!(q.contains("author:erin"));
+        assert!(q.contains("org:acme"));
+        assert!(!q.contains("involves:dave"));
     }
 
     // ── Issues ────────────────────────────────────────────────────────

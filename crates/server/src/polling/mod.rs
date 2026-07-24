@@ -2945,13 +2945,19 @@ async fn run_tick_inner(
         all_full: outcome.all_full,
     };
     rescope_with_state(config, &outcome, state).await;
-    // (Prefetch of top-N PR details — implemented but disabled until
-    // the underlying sync stability work lands. The spawn re-locked
-    // `poll_state`; with the tick no longer holding it across the
-    // upsert loop (#133) that is no longer a deadlock risk, but
-    // layering "background fetch fan-out" on top of "single sync is
-    // fragile" was the wrong order. Re-enable once the next-tick
-    // cadence is visibly healthy in `/tmp/lazybox.log`.)
+    // Warm the right pane before the user gets there (issue #530):
+    // after a successful poll, prefetch review-thread details for the
+    // top-N highest-attention PRs so opening a row doesn't pay a cold
+    // `fetch_pr_details` round-trip. Runs inline on the tick's tail —
+    // the tick no longer holds `poll_state` across its body (#133), so
+    // the old detached spawn that re-locked it is unnecessary. The
+    // batch is ~1s / ~5 GraphQL units (see `prefetch_top_pr_details`),
+    // trivial against a multi-second sweep and the 5000/hr budget. Skip
+    // it on a failed tick — `polled` is empty and the client may be
+    // rate-limited.
+    if outcome.any_source_succeeded {
+        prefetch_top_pr_details(config, &outcome.polled, state).await;
+    }
     summary
 }
 

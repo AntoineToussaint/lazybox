@@ -1275,6 +1275,23 @@ impl<T: TerminalAdapter> Model<T> {
         self.flash_info("scanning dev folders…");
     }
 
+    /// Mount the "add scan root" directory-path prompt (`x r`). Submit →
+    /// [`Self::handle_input_submitted`] under `Id::AddScanRoot` appends
+    /// the path to `scan.roots` in config and scans just that root.
+    pub(super) fn mount_add_scan_root_input(&mut self) {
+        use crate::realm::components::input::Input;
+
+        if matches!(self.modal_stack.last(), Some(Id::AddScanRoot)) {
+            return;
+        }
+
+        let modal = Input::new("Directory to scan for git checkouts")
+            .title("Add scan root")
+            .placeholder("e.g. ~/development, ~/code, /Users/you/src, …")
+            .with_validator(|s: &str| !s.trim().is_empty());
+        self.mount_modal(Id::AddScanRoot, modal);
+    }
+
     /// Mount the import picker. Called from the
     /// `Event::CheckoutsDiscovered` handler. Stashes the discovered
     /// rows in `pending_import_rows` so the choice handler can index

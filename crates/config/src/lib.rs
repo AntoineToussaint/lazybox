@@ -1590,6 +1590,29 @@ repos:
         assert_eq!(reparsed.scan, cfg.scan, "survives round-trip");
     }
 
+    /// The in-app "add scan root" flow appends a root and writes the
+    /// config to disk (`save_to`); on the next launch `load_from` must
+    /// return it. Exercises the actual file path, not just serde.
+    #[test]
+    fn appended_scan_root_persists_to_disk_and_reloads() {
+        let dir =
+            std::env::temp_dir().join(format!("lazybox-scan-root-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir temp");
+        let path = dir.join("config.yaml");
+        let _ = std::fs::remove_file(&path);
+
+        // Start from a fresh config, append a root, persist.
+        let mut cfg = Config::default();
+        cfg.scan.roots.push(PathBuf::from("~/development"));
+        cfg.save_to(&path).expect("save config");
+
+        // Reload as a subsequent launch would.
+        let reloaded = Config::load_from(&path).expect("reload config");
+        assert_eq!(reloaded.scan.roots, vec![PathBuf::from("~/development")]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Autonomous sessions launch in no-permission mode by default,
     /// and the toggle round-trips so a paranoid user can flip it off.
     #[test]

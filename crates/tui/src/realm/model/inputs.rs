@@ -364,6 +364,41 @@ impl<T: TerminalAdapter> Model<T> {
                     Err(e) => self.flash_info(format!("couldn't save config: {e}")),
                 }
             }
+            Some(Id::AddScanRoot) => {
+                // Store the path as typed (a leading `~/` is preserved —
+                // the daemon expands it at scan time), but validate and
+                // dedup against the expanded form so a typo isn't
+                // silently persisted and `~/code` doesn't double up with
+                // its absolute equivalent.
+                let path = std::path::PathBuf::from(text.trim());
+                let expanded = expand_scan_root(&path);
+                if !expanded.is_dir() {
+                    self.flash_info(format!(
+                        "{} is not a directory — not added",
+                        expanded.display()
+                    ));
+                } else {
+                    let already = lazybox_config::Config::load()
+                        .map(|c| c.scan.roots.iter().any(|r| expand_scan_root(r) == expanded))
+                        .unwrap_or(false);
+                    if already {
+                        self.flash_info(format!("{} is already a scan root", path.display()));
+                    } else {
+                        let to_add = path.clone();
+                        match lazybox_config::Config::save_with(move |c| c.scan.roots.push(to_add))
+                        {
+                            Ok(()) => {
+                                self.flash_info(format!(
+                                    "added scan root {} — scanning…",
+                                    path.display()
+                                ));
+                                cmds.push(IpcCommand::ScanCheckouts { roots: vec![path] });
+                            }
+                            Err(e) => self.flash_info(format!("couldn't save config: {e}")),
+                        }
+                    }
+                }
+            }
             // RequestReviewers / AddAssignees used to go through an
             // Input modal but were migrated to a `Choice::multi`
             // picker — see `mount_request_reviewers` /
@@ -1804,4 +1839,18 @@ pub(super) fn encode_snippet_for_pty(body: &str) -> Vec<u8> {
     out.extend_from_slice(b"\x1b[201~");
     out.push(b'\r');
     out
+}
+
+/// Expand a leading `~/` in a scan-root path to the user's home
+/// directory. Used to validate existence and dedup a newly-typed root
+/// against the config's existing entries; the stored value keeps the
+/// original `~/` form, which the daemon expands the same way at scan
+/// time. Non-`~/` paths pass through unchanged.
+fn expand_scan_root(p: &std::path::Path) -> std::path::PathBuf {
+    if let Some(rest) = p.to_str().and_then(|s| s.strip_prefix("~/"))
+        && let Some(home) = super::home_dir()
+    {
+        return home.join(rest);
+    }
+    p.to_path_buf()
 }

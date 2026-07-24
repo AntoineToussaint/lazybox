@@ -182,6 +182,11 @@ pub enum Id {
     /// action. Submit → write the global `agent.llm_gateway_url` to YAML
     /// (empty input clears it).
     LlmGatewayUrl,
+    /// Single-line directory-path input for the `x r` "add scan root"
+    /// action. Submit → append to `scan.roots` in YAML and kick a
+    /// `ScanCheckouts` of just the new root, which drives the import
+    /// picker via `Event::CheckoutsDiscovered`.
+    AddScanRoot,
     /// Right-click context menu over a sidebar workspace row.
     /// Single-pick `Choice` modal whose items are the workspace's
     /// available actions (spawn claude / shell / mark read /

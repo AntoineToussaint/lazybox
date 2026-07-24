@@ -1784,7 +1784,7 @@ pub(crate) fn prefetch_score(pr: &Task) -> i32 {
 /// quiet after warm-up and won't dominate the tick even once
 /// incremental sync (#14) makes the main poll cheap.
 ///
-/// Ranks candidates with [`prefetch_score`]; 0-above-base workspaces
+/// Ranks candidates with `prefetch_score`; 0-above-base workspaces
 /// are skipped — they don't need the prefetch.
 pub async fn prefetch_top_pr_details(
     config: &ServerConfig,

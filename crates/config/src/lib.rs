@@ -1595,9 +1595,18 @@ repos:
     /// return it. Exercises the actual file path, not just serde.
     #[test]
     fn appended_scan_root_persists_to_disk_and_reloads() {
+        /// Remove the temp dir even if an assertion below panics.
+        struct TempDir(PathBuf);
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
         let dir =
             std::env::temp_dir().join(format!("lazybox-scan-root-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("mkdir temp");
+        let _guard = TempDir(dir.clone());
         let path = dir.join("config.yaml");
         let _ = std::fs::remove_file(&path);
 
@@ -1609,8 +1618,6 @@ repos:
         // Reload as a subsequent launch would.
         let reloaded = Config::load_from(&path).expect("reload config");
         assert_eq!(reloaded.scan.roots, vec![PathBuf::from("~/development")]);
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Autonomous sessions launch in no-permission mode by default,

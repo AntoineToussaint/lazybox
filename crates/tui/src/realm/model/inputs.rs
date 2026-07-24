@@ -365,38 +365,57 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Some(Id::AddScanRoot) => {
-                // Store the path as typed (a leading `~/` is preserved —
-                // the daemon expands it at scan time), but validate and
-                // dedup against the expanded form so a typo isn't
-                // silently persisted and `~/code` doesn't double up with
-                // its absolute equivalent.
-                let path = std::path::PathBuf::from(text.trim());
-                let expanded = expand_scan_root(&path);
-                if !expanded.is_dir() {
-                    self.flash_info(format!(
-                        "{} is not a directory — not added",
-                        expanded.display()
-                    ));
+                let typed = std::path::PathBuf::from(text.trim());
+                let expanded = expand_scan_root(&typed);
+                // Keep the readable `~/`/absolute form the user typed when
+                // it already resolves absolutely; pin a relative path to
+                // the client's CWD *now* so the daemon — which may run
+                // with a different CWD in out-of-process mode — scans the
+                // same directory instead of one relative to its own.
+                let to_store = if expanded.is_absolute() {
+                    typed
                 } else {
-                    let already = lazybox_config::Config::load()
-                        .map(|c| c.scan.roots.iter().any(|r| expand_scan_root(r) == expanded))
-                        .unwrap_or(false);
-                    if already {
-                        self.flash_info(format!("{} is already a scan root", path.display()));
-                    } else {
-                        let to_add = path.clone();
-                        match lazybox_config::Config::save_with(move |c| c.scan.roots.push(to_add))
-                        {
-                            Ok(()) => {
-                                self.flash_info(format!(
-                                    "added scan root {} — scanning…",
-                                    path.display()
-                                ));
-                                cmds.push(IpcCommand::ScanCheckouts { roots: vec![path] });
-                            }
-                            Err(e) => self.flash_info(format!("couldn't save config: {e}")),
-                        }
+                    std::path::absolute(&expanded).unwrap_or(expanded)
+                };
+                // Absolute, tilde-expanded key for existence + dedup, so
+                // `~/code` and its absolute equivalent count as one root.
+                let resolved = resolve_scan_root(&to_store);
+                let exists = resolved.is_dir();
+
+                // Dedup + append inside the single write, under the config
+                // crate's save lock, so two quick adds can't both pass a
+                // separate pre-check and duplicate the root.
+                let push = to_store.clone();
+                let mut added = false;
+                let saved = lazybox_config::Config::save_with(|c| {
+                    if c.scan
+                        .roots
+                        .iter()
+                        .all(|r| resolve_scan_root(r) != resolved)
+                    {
+                        c.scan.roots.push(push);
+                        added = true;
                     }
+                });
+                match saved {
+                    Ok(()) if added => {
+                        // Don't block a not-yet-present root (a network
+                        // mount, a dir made later) — persist it, but flag
+                        // the likely typo. YAML/CLI roots aren't validated
+                        // either.
+                        let note = if exists { "" } else { " (not present yet)" };
+                        self.flash_info(format!(
+                            "added scan root {}{note} — scanning…",
+                            to_store.display()
+                        ));
+                        cmds.push(IpcCommand::ScanCheckouts {
+                            roots: vec![to_store],
+                        });
+                    }
+                    Ok(()) => {
+                        self.flash_info(format!("{} is already a scan root", to_store.display()))
+                    }
+                    Err(e) => self.flash_info(format!("couldn't save config: {e}")),
                 }
             }
             // RequestReviewers / AddAssignees used to go through an
@@ -1842,10 +1861,9 @@ pub(super) fn encode_snippet_for_pty(body: &str) -> Vec<u8> {
 }
 
 /// Expand a leading `~/` in a scan-root path to the user's home
-/// directory. Used to validate existence and dedup a newly-typed root
-/// against the config's existing entries; the stored value keeps the
-/// original `~/` form, which the daemon expands the same way at scan
-/// time. Non-`~/` paths pass through unchanged.
+/// directory. The daemon expands the same way at scan time, so a stored
+/// `~/` root stays readable in YAML. Non-`~/` paths pass through
+/// unchanged (a relative path stays relative here).
 fn expand_scan_root(p: &std::path::Path) -> std::path::PathBuf {
     if let Some(rest) = p.to_str().and_then(|s| s.strip_prefix("~/"))
         && let Some(home) = super::home_dir()
@@ -1853,4 +1871,17 @@ fn expand_scan_root(p: &std::path::Path) -> std::path::PathBuf {
         return home.join(rest);
     }
     p.to_path_buf()
+}
+
+/// The absolute, tilde-expanded form of a scan root — the comparison key
+/// for existence checks and dedup, so `~/code`, `/home/me/code`, and a
+/// CWD-relative `code` collapse to one identity. Lexical only (no
+/// filesystem access); a relative path is pinned to the current dir.
+fn resolve_scan_root(p: &std::path::Path) -> std::path::PathBuf {
+    let expanded = expand_scan_root(p);
+    if expanded.is_absolute() {
+        expanded
+    } else {
+        std::path::absolute(&expanded).unwrap_or(expanded)
+    }
 }

@@ -1040,6 +1040,18 @@ pub struct Model<T: TerminalAdapter> {
     /// (Merged/Closed) or on `Event::WorkspaceRemoved`. The merge already
     /// succeeded, so holding MERGED is authoritative, never optimistic.
     merge_confirmed: std::collections::HashSet<lazybox_core::WorkspaceKey>,
+    /// Recovered agent terminals whose tmux pane predates the native-
+    /// scrollback config because an older lazybox build spawned it, so
+    /// scrollback stays broken until the process is reopened (#544). The
+    /// daemon re-flags these on every reconnect snapshot; tracking them
+    /// here lets the notice fire once instead of nagging permanently,
+    /// self-clear as the terminals exit, and drive the per-terminal
+    /// focus hint. Entries are removed on `Event::TerminalExited`.
+    outdated_scroll_terminals: std::collections::HashSet<lazybox_ipc::TerminalId>,
+    /// The active terminal a #544 focus hint was last shown for, so
+    /// re-syncing or bouncing pane focus on the same terminal doesn't
+    /// re-flash the hint. Reset when the active terminal changes.
+    outdated_scroll_hinted: Option<lazybox_ipc::TerminalId>,
     /// Last `SessionKey` we sent a `Command::FocusWorkspace` for.
     /// Single source of truth for "did the cursor leave the previous
     /// workspace?". `sync_panes` reads it after every key/mouse
@@ -1482,6 +1494,8 @@ impl<T: TerminalAdapter> Model<T> {
             pr_details_fetched: std::collections::HashSet::new(),
             auto_merge_fired: std::collections::HashSet::new(),
             merge_confirmed: std::collections::HashSet::new(),
+            outdated_scroll_terminals: std::collections::HashSet::new(),
+            outdated_scroll_hinted: None,
             last_focused_session_key: None,
             needs_pane_sync: false,
             workspace_focus: std::collections::HashMap::new(),

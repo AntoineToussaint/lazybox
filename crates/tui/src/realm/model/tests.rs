@@ -8954,13 +8954,124 @@ mod spawn_spinner_projection_tests {
             m.pending_refresh_ack,
             "terminal compatibility must not consume a manual refresh acknowledgement"
         );
-        let notice = m.status.notice.as_ref().expect("restart notice");
-        assert!(notice.message.contains("restart required"));
+        let notice = m.status.notice.as_ref().expect("scrollback notice");
+        assert!(notice.message.contains("scrollback limited"));
         assert!(!notice.message.contains("spawn failed"));
         assert!(!notice.message.contains("sync failed"));
+        // The old permanent global nag is gone (#544): the notice
+        // auto-fades and yields to `Esc` like any transient hiccup.
         assert_eq!(
             notice.severity,
-            crate::realm::components::footer::NoticeSeverity::Permanent
+            crate::realm::components::footer::NoticeSeverity::Retryable
+        );
+        assert!(!notice.severity.is_sticky());
+    }
+
+    /// #544: the daemon re-emits `RecoveredTerminalsRequireRestart` on
+    /// every reconnect snapshot. Re-flashing the same flagged set was the
+    /// permanent-nag behavior; a re-fire for an already-known set must
+    /// stay silent so a dismissed notice stays dismissed.
+    #[test]
+    fn recovered_scroll_warning_does_not_renag_on_reconnect() {
+        use crate::realm::components::footer::NoticeSeverity;
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::RecoveredTerminalsRequireRestart {
+            terminal_ids: vec![TerminalId(7), TerminalId(8)],
+        });
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|n| n.message.contains("scrollback limited")),
+            "first flag surfaces a notice"
+        );
+        // User dismisses it (Esc), then a reconnect re-emits the same set.
+        m.status.notice = None;
+        m.handle_daemon_event(IpcEvent::RecoveredTerminalsRequireRestart {
+            terminal_ids: vec![TerminalId(7), TerminalId(8)],
+        });
+        assert!(
+            m.status.notice.is_none(),
+            "a known set must not re-nag after dismissal"
+        );
+        // A genuinely NEW flagged terminal still earns one fresh notice.
+        m.handle_daemon_event(IpcEvent::RecoveredTerminalsRequireRestart {
+            terminal_ids: vec![TerminalId(7), TerminalId(8), TerminalId(9)],
+        });
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .expect("new flag surfaces a notice");
+        assert!(notice.message.contains("scrollback limited"));
+        assert_eq!(notice.severity, NoticeSeverity::Retryable);
+    }
+
+    /// #544: reopening a flagged session is what heals its scrollback, so
+    /// when one exits it must drop out of the tracked set — no manual
+    /// dismissal, and no lingering per-terminal hint.
+    #[test]
+    fn recovered_scroll_warning_auto_clears_when_terminal_exits() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::RecoveredTerminalsRequireRestart {
+            terminal_ids: vec![TerminalId(7)],
+        });
+        assert!(m.outdated_scroll_terminals.contains(&TerminalId(7)));
+        m.handle_daemon_event(IpcEvent::TerminalExited {
+            terminal_id: TerminalId(7),
+            exit_code: Some(0),
+            last_output: None,
+        });
+        assert!(
+            m.outdated_scroll_terminals.is_empty(),
+            "an exited terminal clears the flag without a manual dismiss"
+        );
+    }
+
+    /// #544: focusing a flagged old-build terminal explains the broken
+    /// scrollback in context — as a one-shot `Hint`, and only while that
+    /// terminal is the focused one.
+    #[test]
+    fn focusing_outdated_terminal_hints_in_context() {
+        use crate::realm::components::footer::NoticeSeverity;
+        let mut m = build_model();
+        let ws_key = lazybox_core::WorkspaceKey::new("github:o/r#1");
+        let session_key: SessionKey = (&ws_key).into();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![lazybox_core::Workspace::empty(
+                ws_key,
+                "main",
+                chrono::Utc::now(),
+            )],
+            terminals: vec![],
+            projects: vec![],
+        });
+        assert!(m.sidebar.focus_workspace_key(&session_key));
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(1),
+            session_key,
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        assert_eq!(m.terminals.active_terminal_id(), Some(TerminalId(1)));
+        // The single live terminal (id 1) is the recovered old-build one.
+        m.handle_daemon_event(IpcEvent::RecoveredTerminalsRequireRestart {
+            terminal_ids: vec![TerminalId(1)],
+        });
+        m.status.notice = None;
+        m.set_focus(PaneFocus::Terminals);
+        let notice = m.status.notice.as_ref().expect("focus hint");
+        assert!(notice.message.contains("scrollback unavailable"));
+        assert_eq!(notice.severity, NoticeSeverity::Hint);
+        // Re-focusing the same terminal must not re-nag.
+        m.status.notice = None;
+        m.set_focus(PaneFocus::Sidebar);
+        m.set_focus(PaneFocus::Terminals);
+        assert!(
+            m.status.notice.is_none(),
+            "staying on the same flagged terminal must not re-flash the hint"
         );
     }
 }

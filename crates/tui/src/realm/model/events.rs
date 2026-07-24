@@ -69,6 +69,73 @@ impl<T: TerminalAdapter> Model<T> {
         // target). After the first non-Tab key the flag flips and
         // Tab routes to the PTY normally.
         self.terminal_user_typed_since_focus = false;
+        // Entering the terminal pane on an outdated old-build terminal
+        // explains its broken scrollback in context (#544).
+        self.hint_outdated_scroll_focus();
+    }
+
+    /// Record the recovered old-build terminals the daemon flagged and,
+    /// only when the tracked set actually grows, surface a single
+    /// auto-fading notice (#544). The daemon re-emits
+    /// `RecoveredTerminalsRequireRestart` on every reconnect snapshot;
+    /// re-flashing an already-known set is exactly the permanent global
+    /// nag this replaces — clearing that flagged terminal requires
+    /// killing a live agent, which no one does to dismiss a banner. So
+    /// the notice is `Retryable` (auto-fades, `Esc`-dismissable) rather
+    /// than `Permanent`, and fires at most once per newly-flagged
+    /// terminal.
+    fn note_outdated_scroll_terminals(&mut self, terminal_ids: &[lazybox_ipc::TerminalId]) {
+        let mut grew = false;
+        for id in terminal_ids {
+            if self.outdated_scroll_terminals.insert(*id) {
+                grew = true;
+            }
+        }
+        if !grew {
+            return;
+        }
+        let count = self.outdated_scroll_terminals.len();
+        let noun = if count == 1 { "session" } else { "sessions" };
+        self.flash(
+            format!(
+                "⚠ scrollback limited in {count} recovered agent {noun} started by an \
+                 older lazybox build — reopen a session to enable it"
+            ),
+            crate::realm::components::footer::NoticeSeverity::Retryable,
+        );
+    }
+
+    /// Drop a terminal from the outdated-scroll set once it exits (#544):
+    /// reopening the session is what heals it, so an exit means the
+    /// warning no longer applies and must stop nagging.
+    fn forget_outdated_scroll_terminal(&mut self, terminal_id: lazybox_ipc::TerminalId) {
+        self.outdated_scroll_terminals.remove(&terminal_id);
+        if self.outdated_scroll_hinted == Some(terminal_id) {
+            self.outdated_scroll_hinted = None;
+        }
+    }
+
+    /// When focus rests on a recovered old-build terminal whose
+    /// scrollback is broken, explain it in context (#544) — once per
+    /// terminal, so re-syncing or bouncing pane focus on the same
+    /// terminal never re-nags. Resetting the throttle when the active
+    /// terminal changes lets re-entering an affected terminal re-explain.
+    fn hint_outdated_scroll_focus(&mut self) {
+        let active = self.terminals.active_terminal_id();
+        if self.outdated_scroll_hinted != active {
+            self.outdated_scroll_hinted = None;
+        }
+        if self.focus == PaneFocus::Terminals
+            && let Some(id) = active
+            && self.outdated_scroll_terminals.contains(&id)
+            && self.outdated_scroll_hinted != Some(id)
+        {
+            self.outdated_scroll_hinted = Some(id);
+            self.flash_hint(
+                "scrollback unavailable here — reopen this session (older lazybox build) \
+                 to enable it",
+            );
+        }
     }
 
     /// True when `workspace_key` is already the active removal prompt
@@ -1155,19 +1222,7 @@ impl<T: TerminalAdapter> Model<T> {
         if let IpcEvent::RecoveredTerminalsRequireRestart { terminal_ids } = &event
             && !terminal_ids.is_empty()
         {
-            let count = terminal_ids.len();
-            let noun = if count == 1 {
-                "agent session was"
-            } else {
-                "agent sessions were"
-            };
-            self.flash(
-                format!(
-                    "⚠ restart required — {count} recovered {noun} started by an older \
-                     lazybox build; close and reopen the terminal to enable scrolling"
-                ),
-                crate::realm::components::footer::NoticeSeverity::Permanent,
-            );
+            self.note_outdated_scroll_terminals(terminal_ids);
         }
         // Out-of-band agent-CLI version check. A scheduled sweep stays
         // quiet unless something is actionable; a manual check always
@@ -1333,6 +1388,13 @@ impl<T: TerminalAdapter> Model<T> {
             }
         } else {
             self.needs_pane_sync = true;
+        }
+        // A flagged old-build terminal that exits no longer needs its
+        // "reopen to enable scrolling" warning (#544) — reopening it is
+        // exactly what clears the flag, so drop it from the tracked set
+        // and let the notice/focus hint fall silent on its own.
+        if let IpcEvent::TerminalExited { terminal_id, .. } = &event {
+            self.forget_outdated_scroll_terminal(*terminal_id);
         }
         // Focus mode needs a live terminal to fill the screen. If the
         // focused workspace's last terminal just exited, drop back to
@@ -1678,6 +1740,9 @@ impl<T: TerminalAdapter> Model<T> {
         // hidden while that pane held focus, hand focus to the terminal
         // so keystrokes don't vanish into an unrendered pane.
         self.enforce_pane_focus();
+        // Navigating onto an outdated old-build terminal explains its
+        // broken scrollback in context (#544).
+        self.hint_outdated_scroll_focus();
     }
 
     /// Snapshot the pane the user currently rests in for the selected

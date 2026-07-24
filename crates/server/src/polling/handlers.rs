@@ -11,7 +11,7 @@
 
 use super::{TickState, apply_and_commit, commit_upsert_reported, load_workspace};
 use crate::ServerConfig;
-use lazybox_core::{CiStatus, ReviewStatus, Workspace, WorkspaceKey};
+use lazybox_core::{CiStatus, ReviewStatus, Task, Workspace, WorkspaceKey};
 use lazybox_gh::GhClient;
 use lazybox_ipc::Event;
 use lazybox_linear::LinearClient;
@@ -1737,6 +1737,31 @@ pub(crate) async fn reap_safe_workspace_worktrees_with(
     }
 }
 
+/// Attention score for prefetch selection (higher = warm sooner). The
+/// base of 1 marks a PR as *fetchable*; anything above it clears the
+/// `score > 1` threshold `prefetch_top_pr_details` applies and earns a
+/// prefetch.
+///
+/// Scoring (descending):
+/// - CI failing → +100 (highest-actionability — user wants to fix)
+/// - Review pending / changes-requested → +50
+/// - Unread activity → +10 per item (capped at +50)
+/// - Base +1 (fetchable — the caller drops PRs without a `node_id`)
+pub(crate) fn prefetch_score(pr: &Task) -> i32 {
+    let mut score: i32 = 1;
+    if matches!(pr.ci, CiStatus::Failure | CiStatus::Mixed) {
+        score += 100;
+    }
+    if matches!(
+        pr.review,
+        ReviewStatus::ChangesRequested | ReviewStatus::Pending
+    ) {
+        score += 50;
+    }
+    score += (pr.unread_count.min(5) as i32) * 10;
+    score
+}
+
 /// Post-tick prefetch: after a successful poll, pick the top-N PRs
 /// most likely to be clicked next and concurrently fetch their
 /// review-thread details so the right pane is hot when the user
@@ -1759,13 +1784,8 @@ pub(crate) async fn reap_safe_workspace_worktrees_with(
 /// quiet after warm-up and won't dominate the tick even once
 /// incremental sync (#14) makes the main poll cheap.
 ///
-/// Scoring (descending):
-/// - CI failing → +100 (highest-actionability — user wants to fix)
-/// - Review pending / changes-requested → +50
-/// - Unread activity → +10 per item (capped at +50)
-/// - PR has `node_id` → +1 (otherwise we couldn't fetch anyway)
-///
-/// 0-score workspaces are skipped — they don't need the prefetch.
+/// Ranks candidates with `prefetch_score`; 0-above-base workspaces
+/// are skipped — they don't need the prefetch.
 pub async fn prefetch_top_pr_details(
     config: &ServerConfig,
     polled: &[WorkspaceKey],
@@ -1800,17 +1820,7 @@ pub async fn prefetch_top_pr_details(
         if state.prefetched_pr_details.contains(&node_id) {
             continue;
         }
-        let mut score: i32 = 1;
-        if matches!(pr.ci, CiStatus::Failure | CiStatus::Mixed) {
-            score += 100;
-        }
-        if matches!(
-            pr.review,
-            ReviewStatus::ChangesRequested | ReviewStatus::Pending
-        ) {
-            score += 50;
-        }
-        score += (pr.unread_count.min(5) as i32) * 10;
+        let score = prefetch_score(pr);
         if score > 1 {
             scored.push((score, node_id, key.clone()));
         }
@@ -1929,6 +1939,92 @@ mod github_target_tests {
     fn none_when_the_key_has_no_parseable_number() {
         let t = task(Some("octo/widgets"), "octo/widgets");
         assert_eq!(github_target(&t), None);
+    }
+}
+
+#[cfg(test)]
+mod prefetch_score_tests {
+    use super::prefetch_score;
+    use lazybox_core::{CiStatus, Mergeable, ReviewStatus, Task, TaskId, TaskRole, TaskState};
+
+    fn pr() -> Task {
+        Task {
+            id: TaskId {
+                source: "github".into(),
+                key: "octo/widgets#42".into(),
+            },
+            title: "t".into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Author,
+            ci: CiStatus::None,
+            review: ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: "https://github.com/o/r/pull/42".into(),
+            repo: Some("octo/widgets".into()),
+            branch: None,
+            base_branch: None,
+            updated_at: chrono::Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: Some("PR_node".into()),
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            kind: None,
+            closes_issues: vec![],
+        }
+    }
+
+    #[test]
+    fn quiet_pr_stays_at_the_fetchable_base() {
+        assert_eq!(prefetch_score(&pr()), 1);
+    }
+
+    #[test]
+    fn failing_ci_dominates() {
+        let mut p = pr();
+        p.ci = CiStatus::Failure;
+        assert_eq!(prefetch_score(&p), 101);
+        p.ci = CiStatus::Mixed;
+        assert_eq!(prefetch_score(&p), 101);
+    }
+
+    #[test]
+    fn pending_review_and_changes_requested_add_fifty() {
+        let mut p = pr();
+        p.review = ReviewStatus::Pending;
+        assert_eq!(prefetch_score(&p), 51);
+        p.review = ReviewStatus::ChangesRequested;
+        assert_eq!(prefetch_score(&p), 51);
+    }
+
+    #[test]
+    fn unread_activity_is_capped_at_five_items() {
+        let mut p = pr();
+        p.unread_count = 3;
+        assert_eq!(prefetch_score(&p), 1 + 30);
+        p.unread_count = 100;
+        assert_eq!(prefetch_score(&p), 1 + 50);
+    }
+
+    #[test]
+    fn weights_stack_across_signals() {
+        let mut p = pr();
+        p.ci = CiStatus::Failure;
+        p.review = ReviewStatus::ChangesRequested;
+        p.unread_count = 2;
+        assert_eq!(prefetch_score(&p), 1 + 100 + 50 + 20);
     }
 }
 

@@ -1004,6 +1004,24 @@ impl GhClient {
         }
     }
 
+    /// The `updated:>=` floor for the next windowed merged sweep (issue
+    /// #530), or `None` to run it unwindowed. Independent of the main
+    /// `involves:` floor — see `last_merged_sweep_at_utc`. Internal to
+    /// `fetch_all_prs`; the round-robin path never windows the merged
+    /// sweep.
+    fn merged_sweep_window(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.notifications_state.lock().last_merged_sweep_at_utc
+    }
+
+    /// Record a merged sweep that actually SUCCEEDED. `sweep_started`
+    /// (captured before the fetch) becomes the floor for the next
+    /// windowed merged sweep. Called only on merged-branch success, so a
+    /// transient merged failure leaves the floor put and the next sweep
+    /// re-covers the gap rather than windowing past it.
+    fn record_merged_sweep_window(&self, sweep_started: chrono::DateTime<chrono::Utc>) {
+        self.notifications_state.lock().last_merged_sweep_at_utc = Some(sweep_started);
+    }
+
     /// Arm the next tick to run a full sweep, bypassing the
     /// `FULL_SWEEP_INTERVAL` gate. Used by the manual `Command::Refresh`
     /// path so a freshly created issue/PR surfaces immediately rather
@@ -1322,10 +1340,12 @@ impl GhClient {
 
     /// `since` narrows the main `involves:` paginated search to PRs
     /// updated at or after that instant (issue #14) — `None` fetches
-    /// every open involved PR (a reconcile sweep). The window applies
-    /// ONLY to the `involves-main` branch: the merged-sweep already has
-    /// its own `merged:>=` bound, and the reviewer/watched branches are
-    /// cheap single-page queries where a window would buy nothing.
+    /// every open involved PR (a reconcile sweep). When `since` is set,
+    /// the merged-sweep is also windowed — on its OWN success floor, not
+    /// `since` (issue #530) — so a steady sweep stops re-downloading the
+    /// whole 7-day merged set. The reviewer/watched branches stay
+    /// unwindowed — cheap single-page queries where a window buys
+    /// nothing.
     pub async fn fetch_all_prs(
         &self,
         since: Option<chrono::DateTime<chrono::Utc>>,
@@ -1399,22 +1419,20 @@ impl GhClient {
             }
         };
 
-        // Branch 2: recently-merged sweep.
+        // Branch 2: recently-merged sweep. Windowed on its OWN success
+        // floor (issue #530) so a steady sweep skips re-downloading the
+        // whole 7-day merged set — but NOT the main branch's floor,
+        // which advances even when this best-effort branch fails.
+        // `since.and(..)` keeps it unwindowed on a reconcile (`since`
+        // None) so an unwindowed pass reconciles any merge a prior
+        // windowed pass missed, and on cold start (no floor yet).
+        let merged_started = chrono::Utc::now();
+        let merged_since = since.and(self.merged_sweep_window());
         let week_ago = (chrono::Utc::now() - chrono::Duration::days(7))
             .format("%Y-%m-%d")
             .to_string();
-        let mut merged_quals = vec![
-            "is:pr".to_string(),
-            "is:merged".to_string(),
-            "archived:false".to_string(),
-            format!("merged:>={week_ago}"),
-        ];
-        if self.pr_filters.is_empty() {
-            merged_quals.push(format!("involves:{}", self.user));
-        } else {
-            merged_quals.extend(self.pr_filters.iter().cloned());
-        }
-        let merged_query = graphql::build_query(&merged_quals);
+        let merged_query =
+            graphql::merged_sweep_query(&self.user, &self.pr_filters, &week_ago, merged_since);
         tracing::debug!("Recently-merged sweep: {merged_query}");
         let merged_fut = self.fetch_pr_single_query("merged-sweep", merged_query);
 
@@ -1475,6 +1493,10 @@ impl GhClient {
 
         match merged_res {
             Ok(merged_tasks) => {
+                // Advance the merged floor only on success, so a later
+                // windowed merged sweep can trust it covers every merge
+                // up to `merged_started` (issue #530).
+                self.record_merged_sweep_window(merged_started);
                 merged_fetched = merged_tasks.len();
                 let mut added = 0usize;
                 for t in merged_tasks {
@@ -1615,22 +1637,14 @@ impl GhClient {
 
         // Merged sweep — global, cheap, identical to `fetch_all_prs`.
         // Skipping this would mean PRs that merged between our last
-        // sync of their repo and now stay stuck on `OPEN`.
+        // sync of their repo and now stay stuck on `OPEN`. The
+        // round-robin path never advances a sweep window, so it stays
+        // unwindowed (`None`) — same as its per-repo branch.
         let week_ago = (chrono::Utc::now() - chrono::Duration::days(7))
             .format("%Y-%m-%d")
             .to_string();
-        let mut merged_quals = vec![
-            "is:pr".to_string(),
-            "is:merged".to_string(),
-            "archived:false".to_string(),
-            format!("merged:>={week_ago}"),
-        ];
-        if self.pr_filters.is_empty() {
-            merged_quals.push(format!("involves:{}", self.user));
-        } else {
-            merged_quals.extend(self.pr_filters.iter().cloned());
-        }
-        let merged_query = graphql::build_query(&merged_quals);
+        let merged_query =
+            graphql::merged_sweep_query(&self.user, &self.pr_filters, &week_ago, None);
         let merged_fut = self.fetch_pr_single_query("merged-sweep", merged_query);
 
         let (per_repo_results, reviewer_res, merged_res) =
@@ -3700,6 +3714,33 @@ mod tests {
         let t2 = chrono::Utc::now();
         client.record_pr_sweep_window(t2, false);
         assert_eq!(client.next_pr_sweep_window(), Some(t2));
+    }
+
+    /// Issue #530: the merged sweep tracks its OWN success floor,
+    /// independent of the main `involves:` floor, so a main-branch
+    /// success can't window the merged sweep past a merge that the
+    /// best-effort merged branch failed to observe.
+    #[tokio::test(flavor = "current_thread")]
+    async fn merged_sweep_window_is_independent_of_the_main_floor() {
+        let client = make_client("http://127.0.0.1:1");
+        // Cold start: no merged sweep on record → unwindowed (full 7-day).
+        assert!(
+            client.merged_sweep_window().is_none(),
+            "first merged sweep must run unwindowed"
+        );
+
+        // Advancing the main `involves:` floor must NOT move the merged
+        // floor — that's the whole point of tracking them separately.
+        client.record_pr_sweep_window(chrono::Utc::now(), false);
+        assert!(
+            client.merged_sweep_window().is_none(),
+            "the main floor advancing must leave the merged floor unwindowed"
+        );
+
+        // Only a successful merged sweep advances its own floor.
+        let merged = chrono::Utc::now();
+        client.record_merged_sweep_window(merged);
+        assert_eq!(client.merged_sweep_window(), Some(merged));
     }
 
     /// Regression test for issue #13: GitHub returns a 502 HTML

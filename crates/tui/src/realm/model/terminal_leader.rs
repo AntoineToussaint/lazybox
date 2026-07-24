@@ -24,6 +24,10 @@ pub(super) enum LeaderCmd {
     /// last submitted message) back into the agent's composer, without
     /// submitting it, so a restart doesn't lose what you'd typed.
     RecallPrompt,
+    /// `]]h` — open the per-session prompt-history picker (issue #523):
+    /// every prompt sent to this agent, newest-first, snippet entries
+    /// tagged; Enter re-sends the picked one.
+    PromptHistory,
     /// `]]f` — toggle focus mode.
     ToggleFocusMode,
     /// `]]q` — exit the terminal back to the sidebar.
@@ -67,6 +71,12 @@ const FIXED_COMMANDS: &[FixedCommandSpec] = &[
         command: LeaderCmd::RecallPrompt,
         menu_label: "recall prompt",
         reference: "Restore the in-flight draft, or the last submitted agent prompt, without sending it",
+    },
+    FixedCommandSpec {
+        key: 'h',
+        command: LeaderCmd::PromptHistory,
+        menu_label: "prompt history",
+        reference: "Browse this session's prompt history (newest-first, snippets tagged); Enter re-sends one",
     },
     FixedCommandSpec {
         key: 'f',

@@ -187,7 +187,14 @@ fn all_commands() -> Vec<Command> {
         },
         Command::RecordUserMessage {
             terminal_id: TerminalId(7),
-            message: "fix the flaky test".into(),
+            prompt: lazybox_ipc::UserPrompt {
+                text: "fix the flaky test".into(),
+                timestamp_ms: 1_700_000_000_000,
+                source: lazybox_ipc::PromptSource::Snippet {
+                    key: "test".into(),
+                    category: "CI".into(),
+                },
+            },
         },
         Command::InjectPrompt {
             terminal_id: TerminalId(7),
@@ -386,7 +393,11 @@ fn all_events() -> Vec<Event> {
                 no_permission: true,
                 on_main: true,
                 model_label: Some("Opus".into()),
-                last_user_message: Some("fix the flaky test".into()),
+                prompt_history: vec![lazybox_ipc::UserPrompt {
+                    text: "fix the flaky test".into(),
+                    timestamp_ms: 1_700_000_000_000,
+                    source: lazybox_ipc::PromptSource::Typed,
+                }],
                 composing_buffer: Some("half typed prompt".into()),
             }],
             projects: vec![],

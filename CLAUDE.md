@@ -306,7 +306,12 @@ escape sequence) is a *non-timed* leader (#252) that opens a small
 command menu (which-key popup): `]]s` opens the snippet picker, `]]r`
 recalls the last prompt (in-flight draft, else last submitted message)
 back into the agent composer without submitting it — both survive a
-restart (persisted per terminal in the store, #373), `]]f`
+restart (persisted per terminal in the store, #373), `]]h` opens the
+per-session prompt-history picker (#523 — every prompt sent to this
+agent, newest-first and timestamped, snippet-sourced entries tagged
+with their key; Enter re-sends the picked prompt; the full history is
+persisted per terminal as `terminal-msgs:*` and survives restart, and
+the pinned `you ▸` recap is just its latest entry), `]]f`
 toggles focus mode, `]]q` exits to the sidebar, `]]<digit>` jumps to
 the Nth agent workspace, and `` ]]` `` opens the fuzzy workspace
 switcher. The snippet picker (see

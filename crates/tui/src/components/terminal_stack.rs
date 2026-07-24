@@ -107,6 +107,32 @@ pub const COMPOSING_CAP: usize = 8 * 1024;
 /// without being visually loud.
 const RECAP_PREFIX: &str = "you ▸ ";
 
+/// Client-side cap on the retained per-terminal prompt history. Keeps
+/// the optimistic (pre-reconnect) history bounded to match the daemon's
+/// own eviction; the authoritative capped list arrives on the next
+/// snapshot. Deliberately loose — the daemon owns the hard budget.
+const PROMPT_HISTORY_CAP: usize = 200;
+
+/// Wall-clock milliseconds since the Unix epoch, for stamping a prompt
+/// at submit time. Generated once client-side and persisted verbatim so
+/// a single timestamp follows the entry through the daemon and back.
+fn now_ms() -> u64 {
+    chrono::Utc::now().timestamp_millis().max(0) as u64
+}
+
+/// Build a one-entry `Typed` prompt history from an optional last
+/// message, for tests that used to pass a single `Option<String>` recap.
+#[cfg(test)]
+fn typed_history(text: Option<&str>) -> Vec<lazybox_ipc::UserPrompt> {
+    text.map(|t| lazybox_ipc::UserPrompt {
+        text: t.to_string(),
+        timestamp_ms: 0,
+        source: lazybox_ipc::PromptSource::Typed,
+    })
+    .into_iter()
+    .collect()
+}
+
 /// Collapse a possibly multi-line user message down to a single
 /// line of plain text for the pinned recap row. Newlines and runs
 /// of whitespace become single spaces so multi-line prompts
@@ -751,12 +777,15 @@ struct TerminalSlot {
     /// or Esc (the same keys that wipe the prompt buffer in Claude
     /// Code / a shell prompt).
     composing: String,
-    /// Most recently submitted user message. Rendered as a one-line
-    /// recap above the agent's terminal grid so it's obvious "what
-    /// you just asked the model" even after pages of tool output
-    /// scroll the prompt off-screen. `None` until the user has
-    /// submitted at least one message in this terminal.
-    last_user_message: Option<String>,
+    /// Bounded, oldest-first history of the prompts submitted to this
+    /// terminal (issue #523). The last entry is rendered as a one-line
+    /// recap above the agent's terminal grid so it's obvious "what you
+    /// just asked the model" even after pages of tool output scroll the
+    /// prompt off-screen; the whole list is browsable via `]]h`. Empty
+    /// until the user has submitted at least one message here. Snippet-
+    /// sourced entries carry a `Snippet` source so the history can tag
+    /// them.
+    prompt_history: Vec<lazybox_ipc::UserPrompt>,
     /// Launched in no-permission / bypass mode (autonomous session
     /// running unattended). Drives the "no-perms" badge in the tab
     /// strip so it's obvious which sessions skip approval prompts.
@@ -816,20 +845,30 @@ impl TerminalSlot {
         }
     }
 
-    /// Commit the trimmed composing buffer as the latest user message
-    /// and reset it for the next prompt. An all-whitespace buffer is
-    /// ignored, so mashing Enter on an empty prompt (e.g. dismissing
-    /// an agent approval) doesn't blank out the recap. Returns the
-    /// committed message when one was recorded, so the caller can ship
-    /// it to the daemon for persistence (`Command::RecordUserMessage`).
+    /// Commit the trimmed composing buffer as the latest submitted
+    /// prompt text and reset it for the next prompt. An all-whitespace
+    /// buffer is ignored, so mashing Enter on an empty prompt (e.g.
+    /// dismissing an agent approval) doesn't blank out the recap. Returns
+    /// the committed text when one was recorded; the caller stamps it
+    /// with a source + timestamp and appends it via [`Self::push_prompt`]
+    /// so both the local recap and the daemon persistence agree on the
+    /// single entry (`Command::RecordUserMessage`).
     fn commit_composing(&mut self) -> Option<String> {
         let trimmed = self.composing.trim();
         let committed = (!trimmed.is_empty()).then(|| trimmed.to_string());
-        if let Some(msg) = &committed {
-            self.last_user_message = Some(msg.clone());
-        }
         self.composing.clear();
         committed
+    }
+
+    /// Append one submitted prompt to this slot's bounded history,
+    /// evicting oldest entries past [`PROMPT_HISTORY_CAP`]. Drives the
+    /// pinned recap (last entry) and the `]]h` history view.
+    fn push_prompt(&mut self, prompt: lazybox_ipc::UserPrompt) {
+        self.prompt_history.push(prompt);
+        let overflow = self.prompt_history.len().saturating_sub(PROMPT_HISTORY_CAP);
+        if overflow > 0 {
+            self.prompt_history.drain(0..overflow);
+        }
     }
 
     /// Replay any bytes buffered while this terminal was hidden into
@@ -2317,7 +2356,7 @@ impl TerminalStack {
         no_permission: bool,
         on_main: bool,
         model_label: Option<String>,
-        last_user_message: Option<String>,
+        prompt_history: Vec<lazybox_ipc::UserPrompt>,
         composing: String,
     ) -> TerminalSlot {
         let vt = TerminalVt::new().expect("libghostty-vt init");
@@ -2333,7 +2372,7 @@ impl TerminalStack {
             agent_state: lazybox_ipc::AgentState::Idle,
             last_rendered_size: None,
             composing,
-            last_user_message,
+            prompt_history,
             no_permission,
             on_main,
             model_label,
@@ -2354,7 +2393,23 @@ impl TerminalStack {
     pub fn last_user_message_of(&self, id: TerminalId) -> Option<&str> {
         self.terminals
             .get(&id)
-            .and_then(|s| s.last_user_message.as_deref())
+            .and_then(|s| s.prompt_history.last())
+            .map(|p| p.text.as_str())
+    }
+
+    /// The focused agent terminal's prompt history (issue #523),
+    /// newest-first with each entry's source, for the `]]h` history
+    /// picker. `None` when the focused terminal isn't an agent or has no
+    /// history yet. Returns the terminal id so a re-send can target it.
+    pub fn focused_prompt_history(&self) -> Option<(TerminalId, Vec<lazybox_ipc::UserPrompt>)> {
+        let id = self.focused_terminal_id()?;
+        let slot = self.terminals.get(&id)?;
+        if !matches!(slot.kind, TerminalKind::Agent(_)) || slot.prompt_history.is_empty() {
+            return None;
+        }
+        let mut history = slot.prompt_history.clone();
+        history.reverse();
+        Some((id, history))
     }
 
     /// The text a `]]r` recall should drop back into the focused agent
@@ -2372,7 +2427,7 @@ impl TerminalStack {
         let text = if !slot.composing.trim().is_empty() {
             slot.composing.clone()
         } else {
-            slot.last_user_message.clone()?
+            slot.prompt_history.last()?.text.clone()
         };
         let text = lazybox_agents::trim_leading_blank_lines(&text).to_string();
         slot.composing = text.clone();
@@ -2409,19 +2464,33 @@ impl TerminalStack {
     }
 
     /// Mirror bytes written straight to a terminal's PTY — bypassing
-    /// the per-keystroke `handle_key` path — into the recap state.
-    /// Used by callers that synthesise a full command and submit it in
-    /// one shot (snippet expansion writes the body + a trailing `\r`),
-    /// which would otherwise leave the "you ▸ …" recap showing the
-    /// previous message. No-op for non-Agent terminals. Returns the
-    /// committed message (if this write ended in a submit) so the
-    /// caller can persist it via `Command::RecordUserMessage`.
-    pub fn record_pty_write(&mut self, id: TerminalId, bytes: &[u8]) -> Option<String> {
+    /// the per-keystroke `handle_key` path — into the recap + history
+    /// state. Used by callers that synthesise a full command and submit
+    /// it in one shot (snippet expansion writes the body + a trailing
+    /// `\r`), which would otherwise leave the "you ▸ …" recap showing the
+    /// previous message. `source` tags the entry (`Snippet{..}` for the
+    /// `]]s` picker, `Typed` for free-text broadcast/handoff/resend).
+    /// No-op for non-Agent terminals. When the write ends in a submit,
+    /// appends the stamped `UserPrompt` to the slot history and returns
+    /// it so the caller can persist it via `Command::RecordUserMessage`.
+    pub fn record_pty_write(
+        &mut self,
+        id: TerminalId,
+        bytes: &[u8],
+        source: lazybox_ipc::PromptSource,
+    ) -> Option<lazybox_ipc::UserPrompt> {
         let slot = self.terminals.get_mut(&id)?;
         if !matches!(slot.kind, TerminalKind::Agent(_)) {
             return None;
         }
-        slot.record_pty_bytes(bytes)
+        let text = slot.record_pty_bytes(bytes)?;
+        let prompt = lazybox_ipc::UserPrompt {
+            text,
+            timestamp_ms: now_ms(),
+            source,
+        };
+        slot.push_prompt(prompt.clone());
+        Some(prompt)
     }
 
     fn tab_label(kind: &TerminalKind) -> String {
@@ -2618,7 +2687,17 @@ impl TerminalStack {
             && matches!(slot.kind, TerminalKind::Agent(_))
         {
             let before = slot.composing.clone();
-            let committed = slot.record_pty_bytes(&bytes);
+            // A typed submit is always `Typed`; snippet-sourced sends go
+            // through `deliver_prompt`, which stamps `Snippet` instead.
+            let committed = slot.record_pty_bytes(&bytes).map(|text| {
+                let prompt = lazybox_ipc::UserPrompt {
+                    text,
+                    timestamp_ms: now_ms(),
+                    source: lazybox_ipc::PromptSource::Typed,
+                };
+                slot.push_prompt(prompt.clone());
+                prompt
+            });
             // Only the keys that actually edit the in-flight line
             // (text, backspace, Ctrl-U, a commit that clears it) yield a
             // draft to persist; arrows / mouse / Ctrl-C leave it be, so
@@ -2632,13 +2711,13 @@ impl TerminalStack {
             terminal_id: id,
             bytes,
         });
-        // Persist the submitted prompt daemon-side so the recap survives
+        // Persist the submitted prompt daemon-side so the history survives
         // a restart — the replay ring only carries PTY output, not the
         // input we composed here.
-        if let Some(message) = committed {
+        if let Some(prompt) = committed {
             cmds.push(Command::RecordUserMessage {
                 terminal_id: id,
-                message,
+                prompt,
             });
         }
         // Persist the in-flight draft too (issue #373) so a restart can
@@ -2671,7 +2750,7 @@ impl TerminalStack {
                         slot.no_permission = snap.no_permission;
                         slot.on_main = snap.on_main;
                         slot.model_label = snap.model_label.clone();
-                        slot.last_user_message = snap.last_user_message.clone();
+                        slot.prompt_history = snap.prompt_history.clone();
                         slot.composing = snap.composing_buffer.clone().unwrap_or_default();
                         slot.desynced = true;
                         slot.resync_request_pending = true;
@@ -2687,7 +2766,7 @@ impl TerminalStack {
                         snap.no_permission,
                         snap.on_main,
                         snap.model_label.clone(),
-                        snap.last_user_message.clone(),
+                        snap.prompt_history.clone(),
                         snap.composing_buffer.clone().unwrap_or_default(),
                     );
                     slot.desynced = !snap.replay_available;
@@ -2774,7 +2853,7 @@ impl TerminalStack {
                     *no_permission,
                     *on_main,
                     model_label.clone(),
-                    None,
+                    Vec::new(),
                     String::new(),
                 );
                 self.terminals.insert(*terminal_id, slot);
@@ -3584,7 +3663,7 @@ impl TerminalStack {
     /// same rows.
     fn recap_rows(slot: &TerminalSlot, body_height: u16) -> u16 {
         let show_recap = matches!(slot.kind, TerminalKind::Agent(_))
-            && slot.last_user_message.is_some()
+            && !slot.prompt_history.is_empty()
             && body_height >= 3;
         if show_recap { 2 } else { 0 }
     }
@@ -3621,7 +3700,7 @@ impl TerminalStack {
                 rect
             };
             if recap > 0
-                && let Some(msg) = slot.last_user_message.as_deref()
+                && let Some(msg) = slot.prompt_history.last().map(|p| p.text.as_str())
             {
                 let header_rect = Rect {
                     x: rect.x,
@@ -4688,7 +4767,7 @@ mod ctrl_w_tests {
             false,
             false,
             None,
-            None,
+            Vec::new(),
             String::new(),
         );
         stack.terminals.insert(TerminalId(1), slot);
@@ -4925,7 +5004,7 @@ mod selection_offset_tests {
             false,
             false,
             None,
-            last_user_message.map(str::to_string),
+            typed_history(last_user_message),
             String::new(),
         );
         let mut payload = String::new();
@@ -5001,7 +5080,7 @@ mod selection_offset_tests {
             false,
             false,
             None,
-            None,
+            Vec::new(),
             String::new(),
         );
         stack.terminals.insert(TerminalId(5), live);
@@ -5202,10 +5281,14 @@ mod selection_offset_tests {
             false,
             false,
             None,
-            None,
+            Vec::new(),
             String::new(),
         );
-        slot.last_user_message = Some("hi".into());
+        slot.push_prompt(lazybox_ipc::UserPrompt {
+            text: "hi".into(),
+            timestamp_ms: 0,
+            source: lazybox_ipc::PromptSource::Typed,
+        });
         assert_eq!(TerminalStack::recap_rows(&slot, 2), 0);
         assert_eq!(TerminalStack::recap_rows(&slot, 3), 2);
     }
@@ -5412,7 +5495,7 @@ mod resync_tests {
                 no_permission: false,
                 on_main: false,
                 model_label: None,
-                last_user_message: None,
+                prompt_history: Vec::new(),
                 composing_buffer: None,
             }],
         });
@@ -5983,7 +6066,7 @@ mod hidden_feed_tests {
             no_permission: false,
             on_main: false,
             model_label: None,
-            last_user_message: None,
+            prompt_history: Vec::new(),
             composing_buffer: None,
         };
         stack.on_event(&Event::Snapshot {
@@ -6048,7 +6131,7 @@ mod hidden_feed_tests {
                 no_permission: false,
                 on_main: false,
                 model_label: None,
-                last_user_message: None,
+                prompt_history: Vec::new(),
                 composing_buffer: None,
             }
         };
@@ -6161,7 +6244,7 @@ mod footer_scroll_independence {
             false,
             false,
             None,
-            None,
+            Vec::new(),
             String::new(),
         );
         slot.vt.ensure_size(W - 3, H - 4);
@@ -6359,7 +6442,7 @@ mod footer_scroll_independence {
             false,
             false,
             Some("Opus".into()),
-            None,
+            Vec::new(),
             String::new(),
         );
         stack.terminals.insert(TerminalId(1), slot);
@@ -6702,7 +6785,7 @@ mod hover_scroll_tests {
             false,
             false,
             None,
-            None,
+            Vec::new(),
             String::new(),
         );
         slot.vt.ensure_size(W / 2, H - 4);
@@ -7373,7 +7456,7 @@ mod terminal_availability_tests {
         assert!(
             cmds.iter().any(|c| matches!(
                 c,
-                Command::RecordUserMessage { message, .. } if message == "ship it"
+                Command::RecordUserMessage { prompt, .. } if prompt.text == "ship it"
             )),
             "the submit records the committed message",
         );
@@ -7406,7 +7489,7 @@ mod terminal_availability_tests {
                 no_permission: false,
                 on_main: false,
                 model_label: None,
-                last_user_message: Some("last submitted".into()),
+                prompt_history: typed_history(Some("last submitted")),
                 composing_buffer: Some("half typed".into()),
             }],
         });
@@ -7429,7 +7512,11 @@ mod terminal_availability_tests {
             .terminals
             .get_mut(&TerminalId(1))
             .unwrap()
-            .last_user_message = Some("previous prompt".into());
+            .push_prompt(lazybox_ipc::UserPrompt {
+                text: "previous prompt".into(),
+                timestamp_ms: 0,
+                source: lazybox_ipc::PromptSource::Typed,
+            });
         assert_eq!(
             stack.recall_prompt(),
             Some((TerminalId(1), "previous prompt".into())),

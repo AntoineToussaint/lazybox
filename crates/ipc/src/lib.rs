@@ -183,6 +183,37 @@ impl TerminalKind {
     }
 }
 
+/// Where a submitted user prompt came from. Distinguishes text the
+/// user typed by hand from a body expanded out of the `]]s` snippet
+/// picker, so the per-session prompt history can tag snippet-sourced
+/// entries (issue #523).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PromptSource {
+    /// The user typed (or pasted) the prompt directly.
+    #[default]
+    Typed,
+    /// The prompt was expanded from a snippet. Carries the snippet's
+    /// key and category so the history can name which snippet it was
+    /// (`category` is empty when the snippet declares none).
+    Snippet { key: String, category: String },
+}
+
+/// One prompt the user submitted to an agent terminal, retained in a
+/// bounded per-session history (issue #523). The pinned "you ▸ …" recap
+/// is just the most recent entry; `]]h` opens the full list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserPrompt {
+    /// The submitted prompt text (already trimmed, newlines preserved).
+    pub text: String,
+    /// Unix-epoch milliseconds when the client submitted it. Generated
+    /// once client-side and stored verbatim so a single timestamp
+    /// follows the entry through persistence and replay.
+    pub timestamp_ms: u64,
+    /// Whether this prompt was typed or expanded from a snippet.
+    #[serde(default)]
+    pub source: PromptSource,
+}
+
 /// What the agent's PTY is doing right now. Drives the side-panel
 /// state slot (working spinner / "needs input" pill / done / idle /
 /// exited) and the TerminalStack tab badge.
@@ -543,16 +574,18 @@ pub enum Command {
         terminal_id: TerminalId,
         bytes: Vec<u8>,
     },
-    /// Persist the latest prompt the user submitted to an agent
-    /// terminal so the pinned "you ▸ …" recap survives a restart. The
-    /// recap is composed client-side from the *outgoing* keystroke
-    /// stream (see `TerminalSlot::record_pty_bytes`), which the daemon
-    /// never reconstructs, so the client reports each committed message
-    /// here for the daemon to store against the terminal's backend key.
-    /// Replayed back to clients via `TerminalSnapshot::last_user_message`.
+    /// Append a prompt the user submitted to an agent terminal to that
+    /// terminal's bounded per-session history (issue #523), so the
+    /// pinned "you ▸ …" recap and the `]]h` history view survive a
+    /// restart. The prompt is composed client-side from the *outgoing*
+    /// keystroke stream (see `TerminalSlot::record_pty_bytes`), which the
+    /// daemon never reconstructs, so the client reports each committed
+    /// prompt here for the daemon to append against the terminal's
+    /// backend key. Replayed back to clients via
+    /// `TerminalSnapshot::prompt_history`.
     RecordUserMessage {
         terminal_id: TerminalId,
-        message: String,
+        prompt: UserPrompt,
     },
     /// Inject a prompt into an EXISTING agent terminal — same flow
     /// the daemon uses for Spawn's `initial_prompt`, but targeting
@@ -1835,14 +1868,16 @@ pub struct TerminalSnapshot {
     /// `TerminalSpawned`. `None` for default-model / shell terminals.
     #[serde(default)]
     pub model_label: Option<String>,
-    /// Last prompt the user submitted to this terminal (Agent-only;
-    /// `None` for shells and for agents that haven't received a prompt
-    /// yet). Persisted daemon-side from `Command::RecordUserMessage` so
-    /// a reconnecting client can restore the pinned "you ▸ …" recap row
-    /// — the ring-buffer `replay` only carries PTY *output*, never the
-    /// input we composed, so the recap can't be reconstructed from it.
+    /// Bounded per-session history of prompts the user submitted to this
+    /// terminal, oldest-first (Agent-only; empty for shells and for
+    /// agents that haven't received a prompt yet). Persisted daemon-side
+    /// from `Command::RecordUserMessage` (issue #523) so a reconnecting
+    /// client can restore both the pinned "you ▸ …" recap (the last
+    /// entry) and the `]]h` history view — the ring-buffer `replay` only
+    /// carries PTY *output*, never the input we composed, so neither can
+    /// be reconstructed from it.
     #[serde(default)]
-    pub last_user_message: Option<String>,
+    pub prompt_history: Vec<UserPrompt>,
     /// In-flight composer buffer (typed but not yet submitted) for this
     /// agent terminal, persisted daemon-side from
     /// `Command::RecordComposingBuffer`. Restored into the client's

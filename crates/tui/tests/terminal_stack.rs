@@ -3,7 +3,21 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lazybox_core::SessionKey;
-use lazybox_ipc::{Command, Event, TerminalId, TerminalKind, TerminalSnapshot};
+use lazybox_ipc::{
+    Command, Event, PromptSource, TerminalId, TerminalKind, TerminalSnapshot, UserPrompt,
+};
+
+/// One-entry `Typed` prompt history from an optional last message, for
+/// snapshot literals that used to carry a single `last_user_message`.
+fn hist(text: Option<&str>) -> Vec<UserPrompt> {
+    text.map(|t| UserPrompt {
+        text: t.to_string(),
+        timestamp_ms: 0,
+        source: PromptSource::Typed,
+    })
+    .into_iter()
+    .collect()
+}
 use lazybox_tui::components::TerminalStack;
 use lazybox_tui::components::terminal_stack::{COMPOSING_CAP, RECENT_OUTPUT_CAP, strip_ansi};
 use lazybox_tui::{PaneId, PaneOutcome};
@@ -182,7 +196,7 @@ fn snapshot_replaces_all_terminals() {
             replay_available: true,
             no_permission: false,
             on_main: false,
-            last_user_message: None,
+            prompt_history: Vec::new(),
             composing_buffer: None,
         }],
         projects: vec![],
@@ -1129,11 +1143,14 @@ fn enter_emits_record_user_message_command() {
     let recorded = cmds.iter().find_map(|c| match c {
         Command::RecordUserMessage {
             terminal_id,
-            message,
-        } => Some((*terminal_id, message.clone())),
+            prompt,
+        } => Some((*terminal_id, prompt.text.clone(), prompt.source.clone())),
         _ => None,
     });
-    assert_eq!(recorded, Some((TerminalId(1), "ship it".to_string())));
+    assert_eq!(
+        recorded,
+        Some((TerminalId(1), "ship it".to_string(), PromptSource::Typed)),
+    );
 }
 
 #[test]
@@ -1176,7 +1193,7 @@ fn snapshot_restores_recap_for_agent_terminal() {
             replay_available: true,
             no_permission: false,
             on_main: false,
-            last_user_message: Some("rebase onto main".into()),
+            prompt_history: hist(Some("rebase onto main")),
             composing_buffer: None,
         }],
         projects: vec![],
@@ -1414,9 +1431,55 @@ fn record_pty_write_updates_recap_for_one_shot_commands() {
     assert_eq!(t.last_user_message_of(TerminalId(1)), Some("typed message"));
 
     // A snippet fires straight at the PTY: body + `\r`.
-    t.record_pty_write(TerminalId(1), b"run the tests\r");
+    t.record_pty_write(TerminalId(1), b"run the tests\r", PromptSource::Typed);
     assert_eq!(t.last_user_message_of(TerminalId(1)), Some("run the tests"));
     assert_eq!(t.composing_of(TerminalId(1)), Some(""));
+}
+
+#[test]
+fn prompt_history_accumulates_all_submits_newest_first_with_source() {
+    // Issue #523: every submit is retained (not just the latest), and a
+    // snippet-sourced send is tagged with the snippet key so the `]]h`
+    // history can mark it.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    let mut cmds = Vec::new();
+    type_str(&mut t, "first");
+    t.handle_key(code(KeyCode::Enter), &mut cmds);
+    // A snippet-sourced one-shot send carries a Snippet source.
+    let returned = t.record_pty_write(
+        TerminalId(1),
+        b"review the diff\r",
+        PromptSource::Snippet {
+            key: "rev".into(),
+            category: "Review".into(),
+        },
+    );
+    assert_eq!(
+        returned.as_ref().map(|p| p.text.as_str()),
+        Some("review the diff")
+    );
+
+    // Recap still shows the latest.
+    assert_eq!(
+        t.last_user_message_of(TerminalId(1)),
+        Some("review the diff")
+    );
+
+    // The full history is browsable, newest-first, with the snippet tag.
+    let (_, history) = t.focused_prompt_history().expect("agent has history");
+    let rows: Vec<(&str, &PromptSource)> = history
+        .iter()
+        .map(|p| (p.text.as_str(), &p.source))
+        .collect();
+    assert_eq!(rows[0].0, "review the diff");
+    assert!(matches!(
+        rows[0].1,
+        PromptSource::Snippet { key, category } if key == "rev" && category == "Review"
+    ));
+    assert_eq!(rows[1], ("first", &PromptSource::Typed));
 }
 
 #[test]
@@ -1428,7 +1491,7 @@ fn record_pty_write_treats_embedded_newlines_as_soft() {
     t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
     t.set_active_session(Some(sk("o/r#1")));
 
-    t.record_pty_write(TerminalId(1), b"line1\nline2\r");
+    t.record_pty_write(TerminalId(1), b"line1\nline2\r", PromptSource::Typed);
     assert_eq!(t.last_user_message_of(TerminalId(1)), Some("line1\nline2"));
 }
 
@@ -1442,7 +1505,7 @@ fn record_pty_write_skips_escape_sequences() {
     t.set_active_session(Some(sk("o/r#1")));
 
     // "ab", left-arrow (ESC [ D), "c", then submit.
-    t.record_pty_write(TerminalId(1), b"ab\x1b[Dc\r");
+    t.record_pty_write(TerminalId(1), b"ab\x1b[Dc\r", PromptSource::Typed);
     assert_eq!(t.last_user_message_of(TerminalId(1)), Some("abc"));
 }
 
@@ -1458,7 +1521,7 @@ fn record_pty_write_unknown_meta_escape_does_not_wipe_buffer() {
 
     // "a", ESC+x (meta), "b", submit → the ESC is dropped, the rest
     // composes normally.
-    t.record_pty_write(TerminalId(1), b"a\x1bxb\r");
+    t.record_pty_write(TerminalId(1), b"a\x1bxb\r", PromptSource::Typed);
     assert_eq!(t.last_user_message_of(TerminalId(1)), Some("axb"));
 }
 
@@ -1481,7 +1544,7 @@ fn record_pty_write_is_noop_on_shell() {
     t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
     t.set_active_session(Some(sk("o/r#1")));
 
-    t.record_pty_write(TerminalId(1), b"ls -la\r");
+    t.record_pty_write(TerminalId(1), b"ls -la\r", PromptSource::Typed);
     assert_eq!(t.last_user_message_of(TerminalId(1)), None);
 }
 

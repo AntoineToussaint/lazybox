@@ -135,7 +135,7 @@ fn reattached_agent() -> TerminalStack {
             no_permission: false,
             on_main: false,
             model_label: None,
-            last_user_message: None,
+            prompt_history: Vec::new(),
             composing_buffer: None,
         }],
     });

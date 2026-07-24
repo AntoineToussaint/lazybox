@@ -18,6 +18,7 @@ pub mod loading;
 pub mod markdown_modal;
 pub mod messages;
 pub mod polling;
+pub mod prompt_history_picker;
 pub mod right;
 pub mod settings;
 pub mod sidebar;

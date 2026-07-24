@@ -409,8 +409,18 @@ impl Terminals {
         &mut self,
         id: lazybox_ipc::TerminalId,
         bytes: &[u8],
-    ) -> Option<String> {
-        self.inner.record_pty_write(id, bytes)
+        source: lazybox_ipc::PromptSource,
+    ) -> Option<lazybox_ipc::UserPrompt> {
+        self.inner.record_pty_write(id, bytes, source)
+    }
+
+    /// The focused agent terminal's prompt history, newest-first, for the
+    /// `]]h` history picker (issue #523). See
+    /// [`crate::components::terminal_stack::TerminalStack::focused_prompt_history`].
+    pub fn focused_prompt_history(
+        &self,
+    ) -> Option<(lazybox_ipc::TerminalId, Vec<lazybox_ipc::UserPrompt>)> {
+        self.inner.focused_prompt_history()
     }
 
     /// Encode a mouse event for the focused terminal. Returns the

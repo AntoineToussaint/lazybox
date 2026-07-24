@@ -1953,7 +1953,7 @@ fn snapshot_terminal_backstops_worktree_progress_dismissal() {
             replay_available: true,
             no_permission: false,
             on_main: false,
-            last_user_message: None,
+            prompt_history: Vec::new(),
             composing_buffer: None,
         }],
         projects: vec![],

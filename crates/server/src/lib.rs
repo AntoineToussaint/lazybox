@@ -1370,9 +1370,9 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::RecordUserMessage {
             terminal_id,
-            message,
+            prompt,
         } => {
-            spawn_handler::handle_record_user_message(config, terminal_id, &message).await;
+            spawn_handler::handle_record_user_message(config, terminal_id, &prompt).await;
         }
         lazybox_ipc::Command::InjectPrompt {
             terminal_id,
@@ -1954,7 +1954,7 @@ mod snapshot_budget_tests {
             no_permission: false,
             on_main: false,
             model_label: None,
-            last_user_message: None,
+            prompt_history: Vec::new(),
             composing_buffer: None,
         }
     }

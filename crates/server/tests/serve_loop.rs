@@ -326,7 +326,11 @@ fn all_non_shutdown_commands() -> Vec<Command> {
         },
         Command::RecordUserMessage {
             terminal_id: tid,
-            message: "hi".into(),
+            prompt: lazybox_ipc::UserPrompt {
+                text: "hi".into(),
+                timestamp_ms: 1,
+                source: lazybox_ipc::PromptSource::Typed,
+            },
         },
         Command::InjectPrompt {
             terminal_id: tid,

@@ -660,6 +660,7 @@ impl<T: TerminalAdapter> Model<T> {
             LeaderCmd::JumpAgent(n) => self.jump_to_agent_workspace(n),
             LeaderCmd::Snippets => self.mount_snippet_picker(String::new()),
             LeaderCmd::RecallPrompt => self.recall_prompt(cmds),
+            LeaderCmd::PromptHistory => self.mount_prompt_history_picker(),
             LeaderCmd::ToggleFocusMode => self.toggle_focus_mode(),
             LeaderCmd::ExitToSidebar => self.leave_terminal_to_sidebar(),
             LeaderCmd::JumpPicker => self.mount_jump_picker(),

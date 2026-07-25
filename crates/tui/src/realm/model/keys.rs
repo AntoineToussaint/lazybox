@@ -1737,7 +1737,7 @@ fn advance_highlight(current: Option<usize>, delta: i32, len: usize) -> usize {
 ///
 /// INVARIANT: this is how `Enter` on a highlighted `]]` row re-derives
 /// its command — it feeds the returned char straight back through
-/// [`terminal_leader::LeaderCmd::from_key`]. That only resolves because
+/// [`super::terminal_leader::LeaderCmd::from_key`]. That only resolves because
 /// every `menu_rows` display key is *literally* its dispatch character
 /// (`s`, `|`, `1`, …), never a prettified glyph. The lone exception is
 /// the arrow aggregate, which is multi-char and so lands here as `None`.

@@ -159,7 +159,7 @@ pub(crate) fn key_event_to_stroke(
 /// Globals always match; pane-scoped sections only match when their
 /// pane is focused; lower `section_rank` wins a tie.
 ///
-/// `catalog` is the model's runtime catalog ([`ActionDef::catalog`]):
+/// `catalog` is the model's runtime catalog ([`lazybox_tui_core::action::ActionDef::catalog`]):
 /// its chords already reflect `ui.action_keys` overrides AND carry the
 /// generated per-agent `SpawnAgent` rows. Multi-keystroke (`Seq`)
 /// bindings are ignored here — they resolve through

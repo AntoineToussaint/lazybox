@@ -1234,8 +1234,8 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     /// Resolve a "work on this" spawn for `agent_id` and queue it.
-    /// Shared by `w w` ([`Action::Work`]), the scoped `w c` / `w x`
-    /// chords ([`Action::WorkWith`]), and the which-agent picker's pick
+    /// Shared by `w w` ([`lazybox_tui_core::action::Action::Work`]), the scoped `w c` / `w x`
+    /// chords ([`lazybox_tui_core::action::Action::WorkWith`]), and the which-agent picker's pick
     /// (`choice_picked_inner`, issue #418): all build the same
     /// contextual prompt via [`crate::intent::resolve_work`] and differ
     /// only in how the target agent is chosen. The queued `Spawn`

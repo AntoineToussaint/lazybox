@@ -3662,10 +3662,10 @@ impl TerminalStack {
     }
 
     /// Rows carved off the top of a terminal's body for the pinned
-    /// "you ▸ <recap>" line plus a blank spacer below it: 2 for an
+    /// `you ▸ <recap>` line plus a blank spacer below it: 2 for an
     /// agent terminal with a remembered last user message, 0 for
     /// everything else. `body_height` is the height of the grid area
-    /// (the rect handed to [`render_one_terminal`], already inside the
+    /// (the rect handed to [`Self::render_one_terminal`], already inside the
     /// tab strip + divider) — the recap is refused below 3 rows so a
     /// tiny split keeps every cell for the agent grid. This is the one
     /// source of truth for the offset: the render path and the

@@ -156,7 +156,7 @@ fn alloc_terminal_id(store: &dyn lazybox_store::Store) -> TerminalId {
 ///
 /// `hook_command` is the correlated `hook-ingest` command for an agent
 /// that wires hooks through spawn-argv config overrides instead (Codex).
-/// The agent's [`Agent::hook_command_args`] turns it into the argv
+/// The agent's [`lazybox_agents::agent::Agent::hook_command_args`] turns it into the argv
 /// fragments — appended here — that route its lifecycle events through the
 /// same `IngestHook` path. `None` when no hook command could be built
 /// (binary missing); agents that use neither transport keep PTY detection.
@@ -2678,7 +2678,7 @@ pub(crate) fn gateway_env_for_agent(
         .unwrap_or_default()
 }
 
-/// Layer the spawning agent's own env defaults ([`Agent::spawn_env`],
+/// Layer the spawning agent's own env defaults ([`lazybox_agents::agent::Agent::spawn_env`],
 /// e.g. Codex's Homebrew auto-update suppression) onto `env`, shared by
 /// the PTY and structured (`exec`) spawn paths. A key a higher-priority
 /// source (per-repo `env`) already set wins, so these stay defaults.

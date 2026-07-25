@@ -15,9 +15,9 @@ use lazybox_core::{PersistedSetup, ScopeSource, SessionKey};
 use std::sync::Arc;
 
 /// Cached setup detection results — the `SetupReport` + the source
-/// list `SetupRunner::new` needs. Returned by `crate::setup::detect`
-/// and stashed so the wizard can be re-opened from `,` without
-/// re-running detection from scratch.
+/// list `SetupRunner::new` needs. Produced boot-side by
+/// `setup_detect::detect_all` and stashed so the wizard can be re-opened
+/// from `,` without re-running detection from scratch.
 pub(crate) type SetupInputs = (setup::SetupReport, Arc<Vec<Box<dyn ScopeSource>>>);
 
 /// Result of persisting a finished setup. `Ok(Some(path))` means a

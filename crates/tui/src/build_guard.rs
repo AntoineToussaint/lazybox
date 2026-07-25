@@ -1,8 +1,8 @@
 //! Result types for the startup update check.
 //!
 //! These are UI-facing: the Model stashes an [`AvailableUpdate`] and the
-//! update modal renders [`AvailableUpdate::modal_body`], while the sidebar
-//! consults [`is_release_build`]. The *fetching* half — git, Homebrew, the
+//! update modal renders its `modal_body`, while the sidebar consults
+//! [`is_release_build`]. The *fetching* half — git, Homebrew, the
 //! GitHub releases API, and the state-DB cache — lives boot-side in
 //! `lazybox-tui-boot`'s `build_guard`, so the UI library carries neither
 //! `octocrab` nor a client credential path (#548).

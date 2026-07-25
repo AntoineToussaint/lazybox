@@ -157,9 +157,9 @@ pub fn load_from_yaml(path: &std::path::Path) -> Option<PersistedSetup> {
 /// legacy `KV_KEY_SETUP` blob — lives boot-side, since the UI library
 /// carries no store handle (#548).
 
-/// File-level core of [`save_persisted`], path-injected for tests.
-/// Returns the backup path when a malformed pre-existing config was
-/// moved aside.
+/// File-level core of the boot-side `save_persisted` wrapper,
+/// path-injected for tests. Returns the backup path when a malformed
+/// pre-existing config was moved aside.
 pub fn save_persisted_yaml(
     p: &PersistedSetup,
     path: &std::path::Path,

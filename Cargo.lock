@@ -1811,6 +1811,29 @@ dependencies = [
  "criterion",
  "crossterm",
  "insta",
+ "lazybox-config",
+ "lazybox-core",
+ "lazybox-ipc",
+ "lazybox-tui-core",
+ "lazybox-tui-term",
+ "libghostty-vt",
+ "pulldown-cmark",
+ "ratatui",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tuirealm",
+ "uuid",
+]
+
+[[package]]
+name = "lazybox-tui-boot"
+version = "0.1.7"
+dependencies = [
+ "anyhow",
+ "chrono",
  "lazybox-agents",
  "lazybox-config",
  "lazybox-core",
@@ -1821,22 +1844,16 @@ dependencies = [
  "lazybox-server",
  "lazybox-slack",
  "lazybox-store",
+ "lazybox-tui",
  "lazybox-tui-core",
- "lazybox-tui-term",
- "libghostty-vt",
  "octocrab",
- "pulldown-cmark",
- "ratatui",
  "rpassword",
  "semver",
  "serde_json",
- "serde_yaml",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
- "tuirealm",
- "uuid",
  "which",
 ]
 
@@ -1845,6 +1862,7 @@ name = "lazybox-tui-core"
 version = "0.1.7"
 dependencies = [
  "chrono",
+ "lazybox-agents",
  "lazybox-core",
  "lazybox-ipc",
  "libc",

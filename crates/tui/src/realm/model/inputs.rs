@@ -1659,7 +1659,12 @@ showing keybinding search only",
                 // `Msg::LoadingResolved` when the Loading modal ticks.
                 if let (Some(effect), Some(result)) = (effect, result) {
                     if let Some((_, sources)) = self.setup.inputs.as_ref() {
-                        crate::realm::setup_screen::run_effect(effect, sources.clone(), result);
+                        crate::realm::setup_screen::run_effect(
+                            effect,
+                            sources.clone(),
+                            self.setup.detector.clone(),
+                            result,
+                        );
                     } else {
                         tracing::warn!("handle_runner_step: effect requested but no scope sources");
                     }
@@ -1779,7 +1784,7 @@ showing keybinding search only",
 /// settling, the only way to make the submit reliable across agents
 /// whose input areas debounce pasted bursts (#246).
 pub(super) fn encode_snippet_for_pty(body: &str) -> Vec<u8> {
-    let body = lazybox_agents::trim_leading_blank_lines(body);
+    let body = lazybox_tui_core::agents::trim_leading_blank_lines(body);
     if !body.contains('\n') {
         let mut bytes = Vec::with_capacity(body.len() + 1);
         bytes.extend_from_slice(body.as_bytes());

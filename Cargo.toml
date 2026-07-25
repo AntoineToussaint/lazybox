@@ -16,6 +16,7 @@ members = [
     "crates/linear-provider",
     "crates/tui-core",
     "crates/tui",
+    "crates/tui-boot",
     # Vendored from https://github.com/Uzaaft/libghostty-rs (commit
     # f27655a). Includes lazybox's local Zig-version + xcframework
     # patches that haven't shipped upstream yet. Vendored so a fresh

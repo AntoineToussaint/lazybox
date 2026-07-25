@@ -336,7 +336,7 @@ pub struct Sidebar {
     /// (`C` / `X` / `U`) comes from the agent itself rather than a
     /// hardcoded match here — a new agent declares its own letter and
     /// can't silently collide (#440).
-    agent_registry: lazybox_agents::Registry,
+    agent_registry: lazybox_tui_core::agents::Registry,
     /// Threshold config for the per-repo "needs attention" counter.
     /// Loaded from `~/.lazybox/config.yaml::attention` at startup;
     /// toggle individual signals there to customize.
@@ -458,7 +458,7 @@ impl Sidebar {
             filters: FilterSet::default(),
             sort_mode: SortMode::default(),
             running_terminals: HashMap::new(),
-            agent_registry: lazybox_agents::registry(),
+            agent_registry: lazybox_tui_core::agents::registry(),
             attention: lazybox_config::AttentionConfig::default(),
             projects: BTreeMap::new(),
             default_agent: "claude".to_string(),
@@ -1639,7 +1639,7 @@ impl Sidebar {
 
     /// Stable single-letter key for a runner kind. Drives the workspace
     /// row badge. Agent letters are declared by the agent itself
-    /// ([`lazybox_agents::Agent::badge`]) — `claude` → `C`, `codex` →
+    /// ([`lazybox_agents::Agent::badge`] (via `lazybox_tui_core::agents`)) — `claude` → `C`, `codex` →
     /// `X`, `cursor` → `U` — so identity lives in one place and a new
     /// agent can't silently collide (#440). Resolution (registered badge
     /// or first-char fallback) belongs to the registry, not here.

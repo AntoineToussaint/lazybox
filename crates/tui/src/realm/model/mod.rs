@@ -1637,6 +1637,15 @@ impl<T: TerminalAdapter> Model<T> {
         self
     }
 
+    /// Install the setup re-detection hook before the main loop starts.
+    /// The boot crate supplies it (#548) because detection reaches the
+    /// provider clients the UI library must not depend on; the wizard's
+    /// `r` refresh runs it via `Effect::Detect`.
+    pub fn with_setup_detector(mut self, detector: crate::realm::SetupDetector) -> Self {
+        self.setup.detector = Some(detector);
+        self
+    }
+
     /// Trigger the setup wizard. Called from `run_embedded_realm`
     /// when no persisted setup exists, AND from `reopen_setup` when
     /// the user wants to add a repo / agent / scope mid-session.
@@ -2093,7 +2102,7 @@ impl<T: TerminalAdapter> Model<T> {
         if matches!(self.modal_stack.last(), Some(Id::DefaultAgentPicker)) {
             return;
         }
-        let registry = lazybox_agents::registry();
+        let registry = lazybox_tui_core::agents::registry();
         let ids: Vec<String> = self.agents.clone();
         let current = self.sidebar.default_agent();
         let start = ids.iter().position(|id| id == current).unwrap_or(0);

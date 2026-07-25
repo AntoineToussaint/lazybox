@@ -460,10 +460,10 @@ fn print_usage() {
 }
 
 fn resolve_token(yaml: Option<&str>, env_key: &str) -> Option<String> {
-    if let Ok(v) = std::env::var(env_key) {
-        if !v.trim().is_empty() {
-            return Some(v);
-        }
+    if let Ok(v) = std::env::var(env_key)
+        && !v.trim().is_empty()
+    {
+        return Some(v);
     }
     yaml.filter(|s| !s.trim().is_empty()).map(str::to_string)
 }

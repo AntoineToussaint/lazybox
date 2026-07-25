@@ -22,6 +22,16 @@
 //!
 //! All arg parsing is intentionally stupid — see `take_flag`.
 
+// Boot-side modules quarantined off the thin UI library (#548): the
+// build-guard fetch (octocrab), provider detection, setup persistence,
+// the Slack CLI flows, and the test harness.
+mod build_guard;
+mod setup_detect;
+mod setup_persist;
+mod slack_init;
+mod slack_prune;
+mod test_mode;
+
 use lazybox_ipc::{channel, socket};
 use lazybox_server::lifecycle::{self, ServerStatus};
 use lazybox_server::polling;
@@ -388,7 +398,7 @@ fn take_value(args: &mut Vec<String>, flag: &str) -> Option<String> {
 /// disk writes. The fixture (which owns the TempDir) is held in
 /// scope for the whole TUI session — drop = `rm -rf` the tempdir.
 async fn run_test(preselect: Option<lazybox_tui::realm::model::Preselect>) -> anyhow::Result<()> {
-    let fixture = lazybox_tui::test_mode::TestFixture::new_with_seeded_session()?;
+    let fixture = test_mode::TestFixture::new_with_seeded_session()?;
     eprintln!("--test repo at {}", fixture.repo.path().display());
 
     // Spawn under the test tempdir so any agent we launch defaults
@@ -549,7 +559,7 @@ async fn run_remote(
                 None
             }
         };
-        lazybox_tui::build_guard::available_update(store).await
+        build_guard::available_update(store).await
     });
     let (client, daemon) = match socket::connect(socket_path).await {
         Ok(pair) => pair,
@@ -599,7 +609,7 @@ async fn run_embedded_realm(
 ) -> anyhow::Result<()> {
     let (client, server) = channel::pair();
     let config = server_config_from_user()?;
-    let update_check = tokio::spawn(lazybox_tui::build_guard::available_update(Some(
+    let update_check = tokio::spawn(build_guard::available_update(Some(
         config.store.clone(),
     )));
 
@@ -737,7 +747,7 @@ async fn run_embedded_realm(
     // that path doesn't need to re-run async detection from inside
     // a `spawn_blocking` task. Both calls are read-only + cheap-ish
     // (sub-second on a warm cache).
-    let setup_report = lazybox_tui::setup::detect_all().await;
+    let setup_report = setup_detect::detect_all().await;
     // Scope-source discovery does network IO (GitHub credential +
     // client build). Bounded so a stalled network can't hold the UI
     // hostage pre-paint; the wizard degrades to no scope suggestions.
@@ -786,9 +796,15 @@ async fn run_embedded_realm(
         let store_for_save = std::sync::Arc::new(store_for_save);
         let hook: lazybox_tui::realm::SetupCompleteHook = std::sync::Arc::new(move |outcome| {
             let persisted = lazybox_tui::setup_flow::outcome_to_persisted(&outcome);
-            lazybox_tui::setup_flow::save_persisted(&**store_for_save, &persisted)
+            setup_persist::save_persisted(&**store_for_save, &persisted)
         });
         model = model.with_setup_complete_hook(hook);
+        // Re-detection for the wizard's `r` refresh reaches the provider
+        // clients, which live boot-side; inject it so the UI library
+        // stays provider-free (#548).
+        let detector: lazybox_tui::realm::SetupDetector =
+            std::sync::Arc::new(|| Box::pin(setup_detect::detect_all()));
+        model = model.with_setup_detector(detector);
         if let Some(p) = preselect {
             model = model.with_preselect(p);
         }
@@ -979,7 +995,7 @@ async fn build_scope_sources() -> Vec<Box<dyn lazybox_core::ScopeSource>> {
 }
 
 fn persisted_setup(store: &dyn lazybox_store::Store) -> Option<lazybox_core::PersistedSetup> {
-    lazybox_tui::setup_flow::load_persisted(store)
+    setup_persist::load_persisted(store)
 }
 
 /// Read the optional `editors:` list from `~/.lazybox/config.yaml`.
@@ -1004,7 +1020,7 @@ fn load_user_editors() -> Vec<lazybox_tui::editors::UserEditorEntry> {
 }
 
 /// `lazybox slack <init|doctor>` — Slack-side setup helpers. See
-/// `lazybox_tui::slack_init` for the actual flow; this is just the
+/// `crate::slack_init` for the actual flow; this is just the
 /// `lazybox scan [ROOTS...] [--depth N]` — read-only discovery of git
 /// checkouts (normal clones and linked `git worktree`s) the user
 /// created outside lazybox. Roots come from the command line, or from
@@ -1230,7 +1246,7 @@ fn truncate(s: &str, max: usize) -> String {
 /// to stderr from here would vanish into `/tmp/lazybox.log` instead of
 /// reaching the user's terminal.
 async fn slack_subcommand(args: &[String]) -> anyhow::Result<()> {
-    use lazybox_tui::slack_init;
+    use crate::slack_init;
     match args.first().map(String::as_str) {
         Some("init") => {
             let outcome = slack_init::run_init().await?;
@@ -1258,7 +1274,7 @@ async fn slack_subcommand(args: &[String]) -> anyhow::Result<()> {
             }
         }
         Some("prune") => {
-            use lazybox_tui::slack_prune;
+            use crate::slack_prune;
             let outcome = slack_prune::run(&args[1..]).await?;
             match outcome {
                 slack_prune::PruneOutcome::Done { .. } => Ok(()),

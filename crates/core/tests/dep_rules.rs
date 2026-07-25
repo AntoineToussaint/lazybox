@@ -67,8 +67,25 @@ fn allowed_graph() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
         ),
         ("lazybox-slack", set(&["lazybox-auth"])),
         ("lazybox-store", set(&["lazybox-core"])),
+        // The thin UI library (#548): wire crate + pure TUI logic +
+        // embedded terminal + config + core, nothing wider. A
+        // `use lazybox_store::…` / `lazybox_server::…` here is now a
+        // compile error, not a blessed edge.
         (
             "lazybox-tui",
+            set(&[
+                "lazybox-config",
+                "lazybox-core",
+                "lazybox-ipc",
+                "lazybox-tui-core",
+                "lazybox-tui-term",
+            ]),
+        ),
+        // The boot crate carries the wide daemon/provider/store wiring the
+        // UI library must not: it hosts the `lazybox` binary and depends on
+        // the UI library plus everything the UI library gave up.
+        (
+            "lazybox-tui-boot",
             set(&[
                 "lazybox-agents",
                 "lazybox-config",
@@ -80,11 +97,17 @@ fn allowed_graph() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
                 "lazybox-server",
                 "lazybox-slack",
                 "lazybox-store",
+                "lazybox-tui",
                 "lazybox-tui-core",
-                "lazybox-tui-term",
             ]),
         ),
-        ("lazybox-tui-core", set(&["lazybox-core", "lazybox-ipc"])),
+        // tui-core is the UI library's gateway to agent metadata (badges,
+        // display names) and the prompt-trim helper (#548), so it depends
+        // on agents — keeping that edge off the UI library itself.
+        (
+            "lazybox-tui-core",
+            set(&["lazybox-agents", "lazybox-core", "lazybox-ipc"]),
+        ),
         ("lazybox-tui-term", set(&[])),
         // Vendored libghostty crates: no lazybox-* references allowed.
         ("libghostty-vt", set(&[])),

@@ -67,10 +67,10 @@ setup: ## Prepare pinned Zig, Ghostty, and Cargo caches for offline builds (netw
 	@command -v gh >/dev/null || echo "warning: gh not found — --test works, but GitHub-backed runs need the GitHub CLI or GH_TOKEN"
 
 build: ## Build lazybox (debug). Uses pinned zig.
-	@PATH="$(PINNED_PATH)" cargo build -p lazybox-tui
+	@PATH="$(PINNED_PATH)" cargo build -p lazybox-tui-boot
 
 release: ## Build lazybox optimized, strictly offline (run `make setup` once first).
-	@PATH="$(PINNED_PATH)" LAZYBOX_GHOSTTY_CACHE="$(GHOSTTY_CACHE)" LAZYBOX_OFFLINE=1 CARGO_NET_OFFLINE=true cargo build --offline --locked -p lazybox-tui --release
+	@PATH="$(PINNED_PATH)" LAZYBOX_GHOSTTY_CACHE="$(GHOSTTY_CACHE)" LAZYBOX_OFFLINE=1 CARGO_NET_OFFLINE=true cargo build --offline --locked -p lazybox-tui-boot --release
 
 # `make run` accepts args via ARGS=... (`make run ARGS="--fresh"`).
 # Convenience targets below shorten the common cases.
@@ -84,13 +84,13 @@ PERF ?=
 PERF_ENV := $(if $(filter 1,$(PERF)),LAZYBOX_PERF=1,)
 
 run: ## Build and run lazybox. Pass extra args via ARGS=, perf via PERF=1.
-	@PATH="$(PINNED_PATH)" $(PERF_ENV) cargo run -p lazybox-tui -- $(ARGS)
+	@PATH="$(PINNED_PATH)" $(PERF_ENV) cargo run -p lazybox-tui-boot -- $(ARGS)
 
 run-perf: ## Run with LAZYBOX_PERF=1 (writes /tmp/lazybox-perf.log; surfaces UI stalls + dropped keystrokes).
 	@$(MAKE) run PERF=1 ARGS="$(ARGS)"
 
 run-release: ## Same as `run` but optimized build. Use when debug feels sluggish (terminal scroll, large workspace lists). Build is ~10x slower but the binary is fast.
-	@PATH="$(PINNED_PATH)" $(PERF_ENV) cargo run -p lazybox-tui --release -- $(ARGS)
+	@PATH="$(PINNED_PATH)" $(PERF_ENV) cargo run -p lazybox-tui-boot --release -- $(ARGS)
 
 run-fresh: ## Run lazybox with --fresh (wipe state.db + force the setup wizard).
 	@$(MAKE) run ARGS="--fresh"
@@ -103,7 +103,7 @@ run-connect: ## Connect to a running daemon socket. Usage: make run-connect SOCK
 
 dev: ## Run the dev build against $(LAZYBOX_DEV_HOME) — independent state from `make run`.
 	@echo "▶ dev profile: LAZYBOX_HOME=$(LAZYBOX_DEV_HOME)"
-	@PATH="$(PINNED_PATH)" $(PERF_ENV) LAZYBOX_HOME="$(LAZYBOX_DEV_HOME)" cargo run -p lazybox-tui -- $(ARGS)
+	@PATH="$(PINNED_PATH)" $(PERF_ENV) LAZYBOX_HOME="$(LAZYBOX_DEV_HOME)" cargo run -p lazybox-tui-boot -- $(ARGS)
 
 dev-fresh: ## Same as `dev` but wipes the dev state.db first.
 	@$(MAKE) dev ARGS="--fresh"

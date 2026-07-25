@@ -2429,7 +2429,7 @@ impl TerminalStack {
         } else {
             slot.prompt_history.last()?.text.clone()
         };
-        let text = lazybox_agents::trim_leading_blank_lines(&text).to_string();
+        let text = lazybox_tui_core::agents::trim_leading_blank_lines(&text).to_string();
         slot.composing = text.clone();
         Some((id, text))
     }

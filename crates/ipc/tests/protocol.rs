@@ -478,6 +478,9 @@ fn all_events() -> Vec<Event> {
             active_terminal_count: 1,
             has_local_work: true,
         },
+        Event::RemovalCancelled {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+        },
         Event::RepoLabels {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
             labels: vec![lazybox_core::Label::with_color("bug", "d73a4a")],
@@ -868,6 +871,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::IssueDeleted { .. } => "IssueDeleted",
         Event::DeleteOrCloseFailed { .. } => "DeleteOrCloseFailed",
         Event::MergedPrRemovable { .. } => "MergedPrRemovable",
+        Event::RemovalCancelled { .. } => "RemovalCancelled",
         Event::RepoLabels { .. } => "RepoLabels",
         Event::SessionCreated(_) => "SessionCreated",
         Event::WorktreeProgress { .. } => "WorktreeProgress",
@@ -927,7 +931,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
     );
     assert_eq!(
         event_tags.len(),
-        61,
+        62,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

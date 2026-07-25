@@ -1405,6 +1405,15 @@ pub enum Event {
         /// modal warns when set; removal force-deletes regardless.
         has_local_work: bool,
     },
+    /// A pending workspace-removal prompt for `workspace_key` no longer
+    /// applies and any outstanding `MergedPrRemovable` modal should be
+    /// dismissed. Emitted when a closed issue reopens before its removal
+    /// was acted on (issue #552): the workspace is alive again, so a
+    /// stale "remove closed issue?" prompt must not linger. No-op for
+    /// clients that never mounted a matching prompt.
+    RemovalCancelled {
+        workspace_key: lazybox_core::WorkspaceKey,
+    },
     /// Response to `Command::FetchRepoLabels`. Carries the
     /// repository's full label set (name + color) so the TUI's
     /// label picker can populate without round-tripping a

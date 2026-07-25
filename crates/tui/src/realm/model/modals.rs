@@ -1004,6 +1004,31 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::RemoveOutOfScope, modal);
     }
 
+    /// Drop any queued or mounted workspace-removal prompt for `key`
+    /// (issue #552 reopen-cancel). Prunes the pending queue; if the
+    /// active removal confirm is this workspace's, clears the binding so
+    /// a later confirm can't remove the now-reopened workspace, and — if
+    /// that confirm is on top of the stack — unmounts it and surfaces the
+    /// next queued prompt. Clearing the binding even when the confirm is
+    /// buried under another modal keeps `Msg::Confirmed` a no-op for it
+    /// (it reads `active_removal_prompt`), so a stale buried prompt can't
+    /// silently destroy the reopened workspace.
+    pub(super) fn cancel_removal_prompt(&mut self, key: &lazybox_core::WorkspaceKey) {
+        self.pending_removal_prompts
+            .retain(|p| &p.workspace_key != key);
+        if self
+            .active_removal_prompt
+            .as_ref()
+            .is_some_and(|(k, _)| k == key)
+        {
+            self.active_removal_prompt = None;
+            if self.modal_stack.last() == Some(&Id::RemoveOutOfScope) {
+                self.pop_modal();
+                self.maybe_mount_next_removal_prompt();
+            }
+        }
+    }
+
     /// Mount the `x a` adopt-target picker. Lists every other
     /// workspace the user could move sessions into. No-op when there
     /// are no other workspaces — show a hint instead since there's

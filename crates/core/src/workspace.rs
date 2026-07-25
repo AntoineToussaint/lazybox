@@ -1064,12 +1064,15 @@ fn upsert_by_id(list: &mut Vec<Task>, mut task: Task) {
     }
 }
 
-/// Preserve fields that the gh-provider's inbox-scan query no longer
-/// fetches — `closes_issues` (from `closingIssuesReferences`) and
-/// `checks` (from `statusCheckRollup.contexts`). Both are populated
-/// by the lazy `PR_DETAILS_QUERY`; without this preservation, every
-/// subsequent inbox poll would clobber them back to empty and the
-/// issue↔PR collapse / per-check sidebar would flicker off.
+/// Preserve fields whose canonical value can be absent from a given
+/// inbox-scan response — `checks` (from `statusCheckRollup.contexts`,
+/// which the inbox query drops entirely) and `closes_issues` (from
+/// `closingIssuesReferences`, fetched on the poll path but empty for a
+/// PR that links no issue or in a transiently-empty response). Both
+/// are also populated by the lazy `PR_DETAILS_QUERY`; without this
+/// preservation, a poll carrying the empty value would clobber the
+/// stored one and the issue↔PR collapse / per-check sidebar would
+/// flicker off.
 ///
 /// Rule: incoming wins for any field it has populated; existing
 /// wins only for the listed lazy fields when incoming is empty.
@@ -1896,12 +1899,12 @@ mod tests {
         );
     }
 
-    /// Regression for the GraphQL trim: the inbox-scan query no
-    /// longer fetches `closingIssuesReferences` or
-    /// `statusCheckRollup.contexts`, so the incoming PR's
-    /// `closes_issues` / `checks` are empty. Without preservation,
-    /// every poll cycle would wipe out the lazy-fetched values and
-    /// the issue↔PR collapse would flicker off on every tick.
+    /// Regression for the GraphQL trim: the inbox-scan query does not
+    /// fetch `statusCheckRollup.contexts` (and any response can carry
+    /// an empty `closingIssuesReferences`), so the incoming PR's
+    /// `checks` / `closes_issues` can arrive empty. Without
+    /// preservation, such a poll cycle would wipe out the stored
+    /// values and the issue↔PR collapse would flicker off.
     #[test]
     fn attach_pr_preserves_lazy_fields_when_incoming_is_empty() {
         let mut first = pr("o/r#1");

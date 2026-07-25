@@ -3313,9 +3313,9 @@ async fn branch_name_fallback_collapses_issue_workspace() {
 
 #[tokio::test]
 async fn details_backfill_collapses_issue_workspace() {
-    // Regression: the inbox SEARCH_QUERY omits closingIssuesReferences,
-    // so a PR's `closes_issues` only arrives via the lazy details
-    // fetch. That commit path never re-ran the collapse — the issue
+    // Regression: when a PR's `closes_issues` arrives only via the lazy
+    // details fetch (the poll carried empty refs), that commit path
+    // must still re-run the collapse. It once didn't — the issue
     // workspace sat standalone forever (the next polls saw the refs
     // already attached and the empty-refs early return... never fired
     // because the POLLED task still carried no refs).

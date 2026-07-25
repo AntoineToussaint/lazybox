@@ -84,7 +84,7 @@ async fn checkout_survives_refetch_under_global_fetch_prune() {
     // fetch.prune=true the old refspec deleted the ref here and the
     // start-point resolution failed.
     let wt = mgr
-        .checkout_at(&base.join("wt/pr"), "o", "r", "feat")
+        .checkout_at(&base.join("wt/pr"), "o", "r", "feat", None)
         .await
         .expect("checkout of a pre-fetched branch must survive fetch.prune=true");
     assert!(wt.path.join(".git").exists());

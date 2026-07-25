@@ -122,7 +122,7 @@ async fn poisoned_bare_clone_is_detected_and_recloned() {
     let wm = WorktreeManager::new(base.path().to_path_buf());
     let wt_path = base.path().join("worktrees").join("wt-main");
     let wt = wm
-        .checkout_at(&wt_path, "acme", "broken", "main")
+        .checkout_at(&wt_path, "acme", "broken", "main", None)
         .await
         .expect("provision must recover from a poisoned bare clone");
 
@@ -150,7 +150,7 @@ async fn stale_partial_clone_dir_is_cleaned_up() {
 
     let wm = WorktreeManager::new(base.path().to_path_buf());
     let wt_path = base.path().join("worktrees").join("wt-stale");
-    wm.checkout_at(&wt_path, "acme", "stale", "main")
+    wm.checkout_at(&wt_path, "acme", "stale", "main", None)
         .await
         .expect("stale .partial must not block provisioning");
 
@@ -168,7 +168,7 @@ async fn empty_leftover_worktree_dir_is_reprovisioned() {
 
     let wm = WorktreeManager::new(base.path().to_path_buf());
     let wt = wm
-        .checkout_at(&wt_path, "acme", "leftover", "main")
+        .checkout_at(&wt_path, "acme", "leftover", "main", None)
         .await
         .expect("empty leftover dir must be re-provisioned, not trusted");
 
@@ -192,7 +192,7 @@ async fn nonempty_invalid_worktree_dir_errors_loudly() {
 
     let wm = WorktreeManager::new(base.path().to_path_buf());
     let err = wm
-        .checkout_at(&wt_path, "acme", "occupied", "main")
+        .checkout_at(&wt_path, "acme", "occupied", "main", None)
         .await
         .expect_err("a dir with foreign content must not be silently reused or deleted");
     assert!(err.to_string().contains("not a worktree"), "got: {err}");
@@ -210,13 +210,13 @@ async fn existing_valid_worktree_is_reused_idempotently() {
     let wt_path = base.path().join("worktrees").join("wt-reuse");
 
     let first = wm
-        .checkout_at(&wt_path, "acme", "reuse", "main")
+        .checkout_at(&wt_path, "acme", "reuse", "main", None)
         .await
         .expect("first provision");
     // Leave a marker; a re-provision would wipe it.
     std::fs::write(wt_path.join("marker.txt"), "still here").unwrap();
     let second = wm
-        .checkout_at(&wt_path, "acme", "reuse", "main")
+        .checkout_at(&wt_path, "acme", "reuse", "main", None)
         .await
         .expect("second call is idempotent");
     assert_eq!(first.path, second.path);
@@ -241,8 +241,8 @@ async fn concurrent_checkouts_of_same_repo_both_succeed() {
     let wt_b = base.path().join("worktrees").join("race-b");
 
     let (a, b) = tokio::join!(
-        wm.checkout_at(&wt_a, "acme", "race", "main"),
-        wm.checkout_at(&wt_b, "acme", "race", "dev"),
+        wm.checkout_at(&wt_a, "acme", "race", "main", None),
+        wm.checkout_at(&wt_b, "acme", "race", "dev", None),
     );
     let a = a.expect("first concurrent checkout succeeds");
     let b = b.expect("second concurrent checkout succeeds");

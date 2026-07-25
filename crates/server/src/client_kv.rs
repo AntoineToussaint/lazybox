@@ -7,9 +7,9 @@
 //! so the MRU and dismissals silently diverged from the in-process TUI.
 //!
 //! Routing both through the daemon — the owner of state — heals the fork:
-//! the client sends [`Command::RecordRecentSnippet`] /
-//! [`Command::SetUpdateDismissal`] and reads the current values back from
-//! every [`Event::Snapshot`]. This mirrors the per-terminal draft/history
+//! the client sends [`lazybox_ipc::Command::RecordRecentSnippet`] /
+//! [`lazybox_ipc::Command::SetUpdateDismissal`] and reads the current values back from
+//! every [`lazybox_ipc::Event::Snapshot`]. This mirrors the per-terminal draft/history
 //! precedent (#373 / #523), which already behaves identically over both
 //! transports.
 
@@ -82,7 +82,7 @@ pub fn snapshot(store: &dyn lazybox_store::Store) -> ClientKvSnapshot {
     }
 }
 
-/// The two client-preference lists replayed on every [`Event::Snapshot`].
+/// The two client-preference lists replayed on every [`lazybox_ipc::Event::Snapshot`].
 #[derive(Debug, Default, Clone)]
 pub struct ClientKvSnapshot {
     pub recent_snippets: Vec<String>,

@@ -4493,10 +4493,10 @@ impl TerminalCleanup {
     }
 }
 
-/// Task number parsed off a task id (`owner/repo#123` → `123`). Mirrors
-/// the `#`-split [`Workspace::worktree_slug`] uses. `None` for any id
-/// whose suffix isn't a number.
-fn pr_number_from_task(task: &Task) -> Option<u64> {
+/// Task number parsed off a task id (`owner/repo#123` → `123`), for a PR
+/// or an issue alike. Mirrors the `#`-split [`Workspace::worktree_slug`]
+/// uses. `None` for any id whose suffix isn't a number.
+fn task_number(task: &Task) -> Option<u64> {
     task.id
         .key
         .rsplit_once('#')
@@ -4523,7 +4523,7 @@ fn merged_transition_pr_number(prev: Option<&Workspace>, task: &Task) -> Option<
     if prev_state == lazybox_core::TaskState::Merged {
         return None;
     }
-    pr_number_from_task(task)
+    task_number(task)
 }
 
 /// Decide whether `task` represents an issue that *just* transitioned
@@ -4544,7 +4544,7 @@ fn closed_issue_transition(prev: Option<&Workspace>, task: &Task) -> Option<u64>
     if prev_state == lazybox_core::TaskState::Closed {
         return None;
     }
-    pr_number_from_task(task)
+    task_number(task)
 }
 
 /// Whether `task` is an issue that *just* transitioned closed→open (a
@@ -7449,17 +7449,14 @@ mod merge_detection_tests {
 
     #[test]
     fn pr_number_parses_trailing_id_segment() {
-        assert_eq!(
-            pr_number_from_task(&pr("o/r#7", TaskState::Merged)),
-            Some(7)
-        );
+        assert_eq!(task_number(&pr("o/r#7", TaskState::Merged)), Some(7));
     }
 
     #[test]
     fn pr_number_none_when_no_hash_number() {
         let mut t = pr("o/r#7", TaskState::Merged);
         t.id.key = "ENG-42".into();
-        assert_eq!(pr_number_from_task(&t), None);
+        assert_eq!(task_number(&t), None);
     }
 
     #[test]

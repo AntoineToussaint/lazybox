@@ -376,7 +376,7 @@ pub struct Sidebar {
     /// The single per-session agent status, keyed by workspace — the
     /// source of truth for the `?` asking pill / `? N input` header
     /// counter / `!` jump, the animated `Working` spinner, and the `✓`
-    /// done mark (#80). One [`AgentState`] per session (the four states
+    /// done mark (#80). One [`lazybox_ipc::AgentState`] per session (the four states
     /// share one UI slot, so they're mutually exclusive by
     /// construction; #327). Every reading folds in through
     /// [`crate::agent_attention::apply_agent_state`], which validates the

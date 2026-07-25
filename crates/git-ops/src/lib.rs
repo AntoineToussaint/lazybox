@@ -2276,7 +2276,7 @@ pub async fn worktree_dir_ready(wt_path: &Path) -> bool {
 /// A blobless clone materializes file contents through origin at
 /// checkout time, so `worktree add` can fail on a *network* problem
 /// even though every ref it needs is local. Reword git's opaque
-/// promisor error ("could not fetch <oid> from promisor remote") into
+/// promisor error (`could not fetch <oid> from promisor remote`) into
 /// the actual cause; anything else passes through untouched.
 fn explain_promisor_failure(err: GitError) -> GitError {
     match err {

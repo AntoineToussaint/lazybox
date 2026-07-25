@@ -49,14 +49,14 @@ impl<T: TerminalAdapter> Model<T> {
         // Destructive gate, type-system enforced via the catalog.
         // Every destructive action is routed through the unified
         // Confirm modal first; the pending action lives in
-        // `pending_action_confirm` and fires on `Msg::Confirmed(true)`.
+        // `ModalFlow::ActionConfirm` and fires on `Msg::Confirmed(true)`.
         // This is the *only* path through `dispatch_action` for
         // destructive variants — there's no way to fire one
         // without the user confirming.
         if ActionDef::for_action(action).is_destructive() {
             // Resolve the concrete target NOW, while the selection
             // is the row the user acted on. The confirm fires
-            // against this stash — see `pending_action_confirm`.
+            // against this stash — see `ModalFlow::ActionConfirm`.
             let Some(target) = self.resolve_action_confirm_target() else {
                 // Nothing focused to act on. The catalog's
                 // availability gate keeps surfaces from offering the
@@ -1013,7 +1013,7 @@ impl<T: TerminalAdapter> Model<T> {
                     // `IpcEvent::RepoLabels` arrives. Stash the
                     // workspace key so the event handler knows
                     // whether the response is still relevant.
-                    self.pending_labels_request = Some(ws_key.clone());
+                    self.awaiting_repo_labels = Some(ws_key.clone());
                     cmds.push(IpcCommand::FetchRepoLabels {
                         workspace_key: ws_key,
                     });
@@ -1234,8 +1234,8 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     /// Resolve a "work on this" spawn for `agent_id` and queue it.
-    /// Shared by `w w` ([`Action::Work`]), the scoped `w c` / `w x`
-    /// chords ([`Action::WorkWith`]), and the which-agent picker's pick
+    /// Shared by `w w` ([`lazybox_tui_core::action::Action::Work`]), the scoped `w c` / `w x`
+    /// chords ([`lazybox_tui_core::action::Action::WorkWith`]), and the which-agent picker's pick
     /// (`choice_picked_inner`, issue #418): all build the same
     /// contextual prompt via [`crate::intent::resolve_work`] and differ
     /// only in how the target agent is chosen. The queued `Spawn`

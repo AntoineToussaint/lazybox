@@ -267,13 +267,21 @@ fn generate(frontmatter: &str) -> String {
     );
     out.push_str(
         "\n## Pickers\n\n\
-         Every picker modal (snippets, jump-to-workspace, reviewers, labels, …) shares the \
-         same keys:\n\n\
+         The filter-as-you-type pickers — snippets (`]]s`), jump-to-workspace (`` ` ``), and \
+         prompt history (`]]h`) — share one key protocol. Because typing filters the list, the \
+         letter keys go to the filter and the arrows (not `j` / `k`) move the selection:\n\n\
          | Key | Action |\n| --- | --- |\n\
-         | `j` / `k` or arrows | Move the selection |\n\
-         | `Enter` | Confirm |\n\
-         | (type) | Filter the list |\n\
-         | `Esc` | Dismiss |\n",
+         | `↑` / `↓` | Move the selection |\n\
+         | `Home` / `End` | Jump to the first / last match |\n\
+         | `Enter` | Confirm the highlighted row |\n\
+         | (type) / `Backspace` | Edit the filter |\n\
+         | `Esc` / `Ctrl-c` | Dismiss |\n\n\
+         The snippet picker adds two shortcuts on top of this protocol: typing a key that \
+         uniquely identifies one snippet submits it immediately (so `]]srev` sends `rev` with \
+         no `Enter`), and `Ctrl-F` skips straight to free text in the broadcast flow.\n\n\
+         The reviewers / labels / assignees picker (`Choice`) is a different modal — a \
+         multi-select with no filter, toggled with `Space` — so it does not follow the \
+         protocol above.\n",
     );
     out
 }

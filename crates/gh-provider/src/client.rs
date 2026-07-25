@@ -653,7 +653,7 @@ impl GhClient {
             .map(|(parsed, _bytes)| parsed)
     }
 
-    /// Like [`post_graphql_with_retry`] but also surfaces the byte
+    /// Like [`Self::post_graphql_with_retry`] but also surfaces the byte
     /// length of the successful response body. Used by the PR-fetch
     /// path to record per-branch response size for sync profiling.
     async fn post_graphql_with_retry_measured<T>(

@@ -3776,6 +3776,39 @@ mod inspect_tests {
         );
     }
 
+    /// #575: deleting a workspace must reclaim its session worktree
+    /// directories on disk, not just drop the store row — the leak that
+    /// filled disks with multi-GB orphaned worktrees. A reclaimed-space
+    /// notice reports how much came back.
+    #[tokio::test]
+    async fn delete_workspace_reclaims_worktree_dir() {
+        let store = Arc::new(MemoryStore::new());
+        let wt = std::env::temp_dir().join(format!("lb-reclaim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&wt);
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join("payload.bin"), vec![0u8; 8192]).unwrap();
+        seed_workspace(&store, wt.clone(), /*stopped=*/ true);
+        let config = fresh_config(store);
+        let mut rx = config.bus.subscribe();
+        let key = lazybox_core::WorkspaceKey::new("github:o/r#1".to_string());
+
+        assert!(crate::polling::delete_workspace(&config, &key).await);
+        drain_until(&mut rx, |e| matches!(e, Event::WorkspaceRemoved(_))).await;
+
+        assert!(
+            !wt.exists(),
+            "worktree directory must be reclaimed on delete"
+        );
+        let notice = drain_until(&mut rx, |e| matches!(e, Event::Notification { .. })).await;
+        let Event::Notification { body, .. } = notice else {
+            unreachable!()
+        };
+        assert!(
+            body.contains("reclaimed") && body.contains("worktree"),
+            "notice should report reclaimed space: {body}"
+        );
+    }
+
     /// Confirming removal force-deletes even a worktree with
     /// uncommitted work — the modal already warned. (Contrast with
     /// `cleanup_preserves_dirty_merged_worktree`, the silent path,

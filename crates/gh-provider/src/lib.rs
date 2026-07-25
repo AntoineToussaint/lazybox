@@ -11,7 +11,7 @@ pub mod rate_budget;
 
 pub use client::{GhClient, credential_fingerprint};
 pub use graphql::PrDetails;
-pub use mentions::{LazyboxMention, MentionSource, scan_issue};
+pub use mentions::{LazyboxMention, MentionSource, parse_label_directive, scan_issue};
 pub use notifications::{
     NotificationEntry, NotificationTarget, NotificationTargetKind, NotificationsPoll,
     NotificationsSnapshot,

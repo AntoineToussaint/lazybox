@@ -1480,6 +1480,86 @@ fn linear_filter_drops_disallowed_roles() {
     assert_eq!(kept[0].id.key, "LIN-1");
 }
 
+/// Helper: an issue with the given role carrying one `lazybox:*` label.
+fn labeled_issue(key: &str, role: TaskRole, label: &str) -> Task {
+    let mut t = make_typed_task(key, role, false);
+    t.labels = vec![lazybox_core::Label::new(label)];
+    t
+}
+
+fn spawn_agent_fields(
+    action: &polling::ProviderAction,
+) -> (String, Option<String>, Option<String>) {
+    match action {
+        polling::ProviderAction::AutoSpawnAgent {
+            agent_id,
+            model_alias,
+            dedup_key,
+            ..
+        } => (agent_id.clone(), model_alias.clone(), dedup_key.clone()),
+        _ => panic!("expected AutoSpawnAgent"),
+    }
+}
+
+#[test]
+fn label_spawn_actions_parses_agent_and_model_for_owned_issue() {
+    let issue = labeled_issue("1", TaskRole::Author, "lazybox:codex/xhigh");
+    let acts = polling::label_spawn_actions(&[issue], &std::collections::HashSet::new());
+    assert_eq!(acts.len(), 1);
+    let (agent, model, dedup) = spawn_agent_fields(&acts[0].1);
+    assert_eq!(agent, "codex");
+    assert_eq!(model.as_deref(), Some("xhigh"));
+    assert!(
+        dedup.is_some_and(|k| k.contains("lazybox:codex/xhigh")),
+        "label path must carry an idempotency key"
+    );
+}
+
+#[test]
+fn label_spawn_actions_bare_label_uses_agent_default_model() {
+    let issue = labeled_issue("1", TaskRole::Assignee, "lazybox:claude");
+    let acts = polling::label_spawn_actions(&[issue], &std::collections::HashSet::new());
+    assert_eq!(acts.len(), 1);
+    let (agent, model, _) = spawn_agent_fields(&acts[0].1);
+    assert_eq!(agent, "claude");
+    assert_eq!(model, None);
+}
+
+#[test]
+fn label_spawn_actions_ignores_issues_the_user_does_not_own() {
+    // A third party labelled an issue you're merely mentioned in /
+    // reviewing — must NOT spend your tokens.
+    let mentioned = labeled_issue("1", TaskRole::Mentioned, "lazybox:codex/xhigh");
+    let reviewer = labeled_issue("2", TaskRole::Reviewer, "lazybox:codex/xhigh");
+    let acts =
+        polling::label_spawn_actions(&[mentioned, reviewer], &std::collections::HashSet::new());
+    assert!(acts.is_empty(), "only authored/assigned issues trigger");
+}
+
+#[test]
+fn label_spawn_actions_skips_prs() {
+    let mut pr = make_typed_task("1", TaskRole::Author, true);
+    pr.labels = vec![lazybox_core::Label::new("lazybox:codex/xhigh")];
+    let acts = polling::label_spawn_actions(&[pr], &std::collections::HashSet::new());
+    assert!(
+        acts.is_empty(),
+        "the implement-issue prompt is wrong for a PR"
+    );
+}
+
+#[test]
+fn label_spawn_actions_skips_workspace_a_mention_already_queued() {
+    let issue = labeled_issue("1", TaskRole::Author, "lazybox:codex/xhigh");
+    let key = lazybox_core::workspace_key_for(&issue);
+    let mut queued = std::collections::HashSet::new();
+    queued.insert(key);
+    let acts = polling::label_spawn_actions(&[issue], &queued);
+    assert!(
+        acts.is_empty(),
+        "a mention + a label on one issue must not start two agents"
+    );
+}
+
 #[test]
 fn empty_filter_drops_everything() {
     // Defensive: if the user somehow ends up with an empty filter,
@@ -5952,8 +6032,10 @@ async fn tick_dispatches_auto_spawn_action_after_upsert() {
     let action = polling::ProviderAction::AutoSpawnAgent {
         session_key: session_key.clone(),
         agent_id: "claude".to_string(),
+        model_alias: None,
         prompt: Some("Implement issue".to_string()),
         reason: "@lazybox mention by alice on o/r#101 (issue body)".to_string(),
+        dedup_key: None,
     };
 
     let source: Box<dyn TaskSource> = Box::new(ActionEmittingSource {
@@ -5986,6 +6068,103 @@ async fn tick_dispatches_auto_spawn_action_after_upsert() {
     assert!(
         saw_spawn,
         "AutoSpawnAgent action must trigger TerminalSpawned"
+    );
+}
+
+/// The requested agent + model tier flow through to the spawn: a
+/// `@lazybox codex xhigh`-style trigger must launch that agent at that
+/// tier, not the hardcoded default. Here `claude` + tier `S` (Haiku)
+/// exercises the model passthrough via the tab's `model_label`.
+#[tokio::test]
+async fn tick_auto_spawn_honors_requested_agent_and_model() {
+    let (config, _mock) = ServerConfig::in_memory_with_mock();
+    let mut bus_rx = config.bus.subscribe();
+
+    let mut task = make_task("o/r#202");
+    task.repo = None;
+    let session_key = lazybox_core::SessionKey::new(lazybox_core::workspace_key_for(&task));
+    let action = polling::ProviderAction::AutoSpawnAgent {
+        session_key: session_key.clone(),
+        agent_id: "claude".to_string(),
+        model_alias: Some("S".to_string()),
+        prompt: None,
+        reason: "@lazybox mention by alice on o/r#202 (issue body)".to_string(),
+        dedup_key: None,
+    };
+
+    let source: Box<dyn TaskSource> = Box::new(ActionEmittingSource {
+        name: "github".into(),
+        tasks: vec![task],
+        actions: std::sync::Mutex::new(vec![action]),
+    });
+    polling::tick(&config, &[source]).await;
+
+    let mut spawned_agent = None;
+    let mut spawned_label = None;
+    while let Ok(evt) = bus_rx.try_recv() {
+        if let lazybox_ipc::Event::TerminalSpawned {
+            kind: lazybox_ipc::TerminalKind::Agent(id),
+            model_label,
+            ..
+        } = evt
+        {
+            spawned_agent = Some(id);
+            spawned_label = model_label;
+        }
+    }
+    assert_eq!(
+        spawned_agent.as_deref(),
+        Some("claude"),
+        "spawn must use the requested agent"
+    );
+    assert_eq!(
+        spawned_label.as_deref(),
+        Some("Haiku"),
+        "spawn must carry the requested model tier"
+    );
+}
+
+/// An unknown agent id (typo'd mention, or a label naming an agent this
+/// build doesn't ship) falls back to the default agent so the spawn
+/// still happens instead of silently dropping.
+#[tokio::test]
+async fn tick_auto_spawn_falls_back_to_default_for_unknown_agent() {
+    let (config, _mock) = ServerConfig::in_memory_with_mock();
+    let mut bus_rx = config.bus.subscribe();
+
+    let mut task = make_task("o/r#203");
+    task.repo = None;
+    let session_key = lazybox_core::SessionKey::new(lazybox_core::workspace_key_for(&task));
+    let action = polling::ProviderAction::AutoSpawnAgent {
+        session_key: session_key.clone(),
+        agent_id: "codx".to_string(),
+        model_alias: None,
+        prompt: None,
+        reason: "@lazybox mention by alice on o/r#203 (issue body)".to_string(),
+        dedup_key: None,
+    };
+
+    let source: Box<dyn TaskSource> = Box::new(ActionEmittingSource {
+        name: "github".into(),
+        tasks: vec![task],
+        actions: std::sync::Mutex::new(vec![action]),
+    });
+    polling::tick(&config, &[source]).await;
+
+    let mut spawned_agent = None;
+    while let Ok(evt) = bus_rx.try_recv() {
+        if let lazybox_ipc::Event::TerminalSpawned {
+            kind: lazybox_ipc::TerminalKind::Agent(id),
+            ..
+        } = evt
+        {
+            spawned_agent = Some(id);
+        }
+    }
+    assert_eq!(
+        spawned_agent.as_deref(),
+        Some("claude"),
+        "unknown agent must fall back to the default"
     );
 }
 

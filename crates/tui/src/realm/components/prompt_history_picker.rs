@@ -22,14 +22,18 @@
 use crate::realm::ChoicePayload;
 use crate::realm::Msg;
 use crate::realm::UserEvent;
+use crate::realm::components::filterable::{
+    FilterModalChrome, FilterableList, render_filter_modal, subsequence_icase,
+};
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
-use tuirealm::event::{Event, Key, KeyEvent, KeyModifiers};
+use tuirealm::event::{Event, KeyEvent};
+#[cfg(test)]
+use tuirealm::event::{Key, KeyModifiers};
 use tuirealm::props::{AttrValue, Attribute, QueryResult};
 use tuirealm::ratatui::Frame;
 use tuirealm::ratatui::layout::Rect;
 use tuirealm::ratatui::prelude::*;
-use tuirealm::ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use tuirealm::state::State;
 
 /// One history row for display. Pre-formatted by the model so the
@@ -41,22 +45,6 @@ pub struct PromptRow {
     pub when: String,
     pub tag: Option<String>,
     pub text: String,
-}
-
-/// Case-insensitive subsequence test: do all chars of `needle` appear in
-/// `haystack`, in order (gaps allowed)? Allocation-free — the filter
-/// re-runs on every keystroke.
-fn subsequence_icase(haystack: &str, needle: &str) -> bool {
-    let mut hs = haystack.chars().map(|c| c.to_ascii_lowercase());
-    'outer: for nc in needle.chars().map(|c| c.to_ascii_lowercase()) {
-        for hc in hs.by_ref() {
-            if hc == nc {
-                continue 'outer;
-            }
-        }
-        return false;
-    }
-    true
 }
 
 pub struct PromptHistoryPicker {
@@ -93,9 +81,15 @@ impl PromptHistoryPicker {
         picker
     }
 
-    fn refilter(&mut self) {
+    pub fn on_key(&mut self, key: &KeyEvent) -> Option<Msg> {
+        self.dispatch_key(key)
+    }
+}
+
+impl FilterableList for PromptHistoryPicker {
+    fn compute_visible(&mut self) -> Vec<usize> {
         let q = self.filter.trim();
-        self.visible_indices = if q.is_empty() {
+        if q.is_empty() {
             (0..self.rows.len()).collect()
         } else {
             self.rows
@@ -109,150 +103,65 @@ impl PromptHistoryPicker {
                     subsequence_icase(&hay, q).then_some(i)
                 })
                 .collect()
-        };
-        self.cursor = (!self.visible_indices.is_empty()).then_some(0);
+        }
     }
 
-    pub fn on_key(&mut self, key: &KeyEvent) -> Option<Msg> {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        if matches!(key.code, Key::Esc) || (ctrl && matches!(key.code, Key::Char('c'))) {
-            return Some(Msg::ModalDismissed);
-        }
-        match key.code {
-            Key::Down => {
-                if let Some(c) = self.cursor
-                    && c + 1 < self.visible_indices.len()
-                {
-                    self.cursor = Some(c + 1);
-                }
-                None
-            }
-            Key::Up => {
-                if let Some(c) = self.cursor
-                    && c > 0
-                {
-                    self.cursor = Some(c - 1);
-                }
-                None
-            }
-            Key::Home => {
-                if !self.visible_indices.is_empty() {
-                    self.cursor = Some(0);
-                }
-                None
-            }
-            Key::End => {
-                if !self.visible_indices.is_empty() {
-                    self.cursor = Some(self.visible_indices.len() - 1);
-                }
-                None
-            }
-            Key::Enter => {
-                let c = self.cursor?;
-                let row_idx = *self.visible_indices.get(c)?;
-                let text = self.texts.get(row_idx)?.clone();
-                Some(Msg::ChoicePicked(vec![ChoicePayload::Text(text)]))
-            }
-            Key::Backspace => {
-                self.filter.pop();
-                self.refilter();
-                None
-            }
-            Key::Char(c) if !ctrl => {
-                self.filter.push(c);
-                self.refilter();
-                None
-            }
-            _ => None,
-        }
+    fn pick(&self, item_idx: usize) -> Option<Msg> {
+        let text = self.texts.get(item_idx)?.clone();
+        Some(Msg::ChoicePicked(vec![ChoicePayload::Text(text)]))
+    }
+
+    fn filter(&self) -> &str {
+        &self.filter
+    }
+    fn filter_mut(&mut self) -> &mut String {
+        &mut self.filter
+    }
+    fn cursor(&self) -> Option<usize> {
+        self.cursor
+    }
+    fn set_cursor(&mut self, cursor: Option<usize>) {
+        self.cursor = cursor;
+    }
+    fn visible(&self) -> &[usize] {
+        &self.visible_indices
+    }
+    fn set_visible(&mut self, visible: Vec<usize>) {
+        self.visible_indices = visible;
     }
 }
 
 impl Component for PromptHistoryPicker {
     fn view(&mut self, frame: &mut Frame, area: Rect) {
         let theme = crate::theme::current();
-        let modal_w = 88u16.min(area.width.saturating_sub(4));
-        let modal_h = 24u16.min(area.height.saturating_sub(4));
-        let x = area.x + area.width.saturating_sub(modal_w) / 2;
-        let y = area.y + area.height.saturating_sub(modal_h) / 2;
-        let modal = Rect::new(x, y, modal_w, modal_h);
-
-        frame.render_widget(Clear, modal);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .title(Span::styled(" Prompt history ", theme.modal_title()))
-            .border_style(theme.modal_border());
-        let inner = block.inner(modal);
-        frame.render_widget(block, modal);
-
-        if inner.height < 4 {
-            return;
-        }
-        let filter_rect = Rect {
-            x: inner.x,
-            y: inner.y,
-            width: inner.width,
-            height: 1,
-        };
-        let div_rect = Rect {
-            x: inner.x,
-            y: inner.y + 1,
-            width: inner.width,
-            height: 1,
-        };
-        let help_rect = Rect {
-            x: inner.x,
-            y: inner.y + inner.height - 1,
-            width: inner.width,
-            height: 1,
-        };
-        let body_rect = Rect {
-            x: inner.x,
-            y: inner.y + 2,
-            width: inner.width,
-            height: inner.height - 3,
-        };
-
-        let filter_line = Line::from(vec![
-            Span::styled("› ", Style::default().fg(theme.accent).bold()),
-            Span::styled(self.filter.clone(), Style::default().fg(theme.text_strong)),
-            Span::styled("▌", Style::default().fg(theme.accent)),
-        ]);
-        frame.render_widget(Paragraph::new(filter_line), filter_rect);
-
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "─".repeat(inner.width as usize),
-                theme.divider(),
-            ))),
-            div_rect,
-        );
-
-        // Scroll the visible window so the cursor stays on screen.
-        let rows = body_rect.height as usize;
-        let cursor = self.cursor.unwrap_or(0);
-        let start = cursor.saturating_sub(rows.saturating_sub(1));
-        let mut body: Vec<Line> = Vec::with_capacity(rows.max(1));
-        if self.visible_indices.is_empty() {
-            body.push(Line::from(Span::styled(
-                if self.rows.is_empty() {
-                    "  (no prompts sent yet)"
-                } else {
-                    "  (no matches)"
-                },
-                Style::default().fg(theme.text_dim).italic(),
-            )));
+        let empty = if self.rows.is_empty() {
+            "  (no prompts sent yet)"
         } else {
-            for (i, &row_idx) in self
-                .visible_indices
-                .iter()
-                .enumerate()
-                .skip(start)
-                .take(rows)
-            {
+            "  (no matches)"
+        };
+        let help = vec![
+            Span::styled("↑↓", Style::default().fg(theme.accent).bold()),
+            Span::raw(" navigate  "),
+            Span::styled("Enter", Style::default().fg(theme.success).bold()),
+            Span::raw(" re-send  "),
+            Span::styled("Type", Style::default().fg(theme.accent).bold()),
+            Span::raw(" filter  "),
+            Span::styled("Esc", Style::default().fg(theme.error).bold()),
+            Span::raw(" cancel"),
+        ];
+        render_filter_modal(
+            self,
+            frame,
+            area,
+            theme,
+            FilterModalChrome {
+                title: " Prompt history ",
+                modal_w: 88,
+                empty,
+                help,
+            },
+            |row_idx, is_cursor| {
                 let row = &self.rows[row_idx];
-                let is_cursor = self.cursor == Some(i);
                 let caret = if is_cursor { "▸ " } else { "  " };
                 let base = if is_cursor {
                     Style::default()
@@ -282,22 +191,9 @@ impl Component for PromptHistoryPicker {
                     ));
                 }
                 spans.push(Span::styled(row.text.clone(), base));
-                body.push(Line::from(spans));
-            }
-        }
-        frame.render_widget(Paragraph::new(body), body_rect);
-
-        let help_spans = vec![
-            Span::styled("↑↓", Style::default().fg(theme.accent).bold()),
-            Span::raw(" navigate  "),
-            Span::styled("Enter", Style::default().fg(theme.success).bold()),
-            Span::raw(" re-send  "),
-            Span::styled("Type", Style::default().fg(theme.accent).bold()),
-            Span::raw(" filter  "),
-            Span::styled("Esc", Style::default().fg(theme.error).bold()),
-            Span::raw(" cancel"),
-        ];
-        frame.render_widget(Paragraph::new(Line::from(help_spans)), help_rect);
+                Line::from(spans)
+            },
+        );
     }
 
     fn query(&self, _: Attribute) -> Option<QueryResult<'_>> {

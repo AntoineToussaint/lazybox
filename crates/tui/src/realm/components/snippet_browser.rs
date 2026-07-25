@@ -15,16 +15,21 @@
 //! any other key dismisses.
 
 use crate::components::comment_render::wrap_one;
+use crate::realm::components::scrollable::{
+    centered_rect, draw_frame, handle_scroll_key, max_scroll,
+};
 use crate::realm::{Msg, UserEvent};
 use lazybox_config::{Snippet, SnippetOrigin};
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
-use tuirealm::event::{Event, Key, KeyModifiers};
+#[cfg(test)]
+use tuirealm::event::KeyModifiers;
+use tuirealm::event::{Event, Key};
 use tuirealm::props::{AttrValue, Attribute, QueryResult};
 use tuirealm::ratatui::Frame;
 use tuirealm::ratatui::layout::Rect;
 use tuirealm::ratatui::prelude::*;
-use tuirealm::ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use tuirealm::ratatui::widgets::Paragraph;
 use tuirealm::state::State;
 
 /// One browser row — a snippet rendered in full. Unlike the picker's
@@ -125,10 +130,6 @@ impl SnippetBrowser {
         }
         lines
     }
-
-    fn max_scroll(&self, total_lines: u16) -> u16 {
-        total_lines.saturating_sub(self.body_height.max(1))
-    }
 }
 
 /// Wrap `line` to fit `width` with a hanging two-cell indent: every
@@ -153,19 +154,8 @@ impl Component for SnippetBrowser {
         let theme = crate::theme::current();
         let modal_w = 90u16.min(area.width.saturating_sub(4));
         let modal_h = 24u16.min(area.height.saturating_sub(2));
-        let x = area.x + area.width.saturating_sub(modal_w) / 2;
-        let y = area.y + area.height.saturating_sub(modal_h) / 2;
-        let modal = Rect::new(x, y, modal_w, modal_h);
-
-        frame.render_widget(Clear, modal);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(theme.modal_border())
-            .title(" Snippets ")
-            .title_style(theme.modal_title());
-        let inner = block.inner(modal);
-        frame.render_widget(block, modal);
+        let modal = centered_rect(area, modal_w, modal_h);
+        let inner = draw_frame(frame, modal, " Snippets ", theme);
         if inner.height < 2 {
             return;
         }
@@ -185,7 +175,7 @@ impl Component for SnippetBrowser {
         self.body_height = body_area.height.max(1);
 
         let lines = self.body_lines(theme, body_area.width);
-        let max = self.max_scroll(lines.len() as u16);
+        let max = max_scroll(lines.len(), self.body_height);
         if self.scroll > max {
             self.scroll = max;
         }
@@ -221,37 +211,10 @@ impl AppComponent<Msg, UserEvent> for SnippetBrowser {
         let Event::Keyboard(key) = ev else {
             return None;
         };
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let page = self.body_height.max(1);
+        if handle_scroll_key(&mut self.scroll, self.body_height, key) {
+            return None;
+        }
         match key.code {
-            Key::Down | Key::Char('j') => {
-                self.scroll = self.scroll.saturating_add(1);
-                None
-            }
-            Key::Up | Key::Char('k') => {
-                self.scroll = self.scroll.saturating_sub(1);
-                None
-            }
-            Key::PageDown => {
-                self.scroll = self.scroll.saturating_add(page);
-                None
-            }
-            Key::PageUp => {
-                self.scroll = self.scroll.saturating_sub(page);
-                None
-            }
-            Key::Char('d') if ctrl => {
-                self.scroll = self.scroll.saturating_add((page / 2).max(1));
-                None
-            }
-            Key::Char('u') if ctrl => {
-                self.scroll = self.scroll.saturating_sub((page / 2).max(1));
-                None
-            }
-            Key::Home | Key::Char('g') => {
-                self.scroll = 0;
-                None
-            }
             // `e` hands off to the editor on the YAML file.
             Key::Char('e') => Some(Msg::OpenSnippetsFile),
             // Any other key (Esc, q, Enter, …) closes the browser.

@@ -8,6 +8,7 @@
 pub mod choice;
 pub mod confirm;
 pub mod error;
+pub mod filterable;
 pub mod focus_header;
 pub mod footer;
 pub mod help;
@@ -20,6 +21,7 @@ pub mod messages;
 pub mod polling;
 pub mod prompt_history_picker;
 pub mod right;
+pub mod scrollable;
 pub mod settings;
 pub mod sidebar;
 pub mod snippet_browser;

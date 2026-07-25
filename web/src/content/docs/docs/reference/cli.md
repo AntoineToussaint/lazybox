@@ -7,7 +7,7 @@ All commands assume a `lazybox` binary on your `PATH` — installed via Homebrew
 (`brew install AntoineToussaint/lazybox/lazybox`), the `curl | sh` installer, or
 a source build (see the [Quickstart](/docs/tutorials/quickstart/)). From a
 source checkout without a built binary on `PATH`, substitute
-`cargo run -p lazybox-tui --`.
+`cargo run -p lazybox-tui-boot --`.
 
 An `lb` binary ships alongside `lazybox` — a short alias with the identical
 entrypoint, so every command below works as `lb …` too.
@@ -18,7 +18,7 @@ For day-to-day development, the `Makefile` wraps the common flows.
 
 | Target | What it does |
 | --- | --- |
-| `make setup` | One-shot: download pinned Zig 0.15.2 to `~/.cache/lazybox/zig/` |
+| `make setup` | One-time online prep: fetch the checksum-verified pinned Zig 0.15.2 to `~/.cache/lazybox/zig/`, cache the Ghostty source and the locked Cargo graph, and prebuild the native terminal dependency so later builds run offline |
 | `make run` | Build and run lazybox |
 | `make build` | Build the workspace |
 | `make release` | Build in release mode |
@@ -34,7 +34,7 @@ For day-to-day development, the `Makefile` wraps the common flows.
 | Command | What it does |
 | --- | --- |
 | `cargo build` | Build |
-| `cargo run -p lazybox-tui` | Build and run the TUI binary |
+| `cargo run -p lazybox-tui-boot` | Build and run the TUI binary |
 | `cargo nextest run --workspace` | Run all tests with the repository's per-test timeout policy |
 | `cargo clippy --workspace --all-targets -- -D warnings` | Lint, warnings as errors |
 

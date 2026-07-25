@@ -12,9 +12,20 @@ completion. Pick the one that matches what you need to do.
 - **[Run an agent per workspace](/docs/how-to/run-an-agent-per-workspace/)** —
   spawn Claude Code, Codex, or Cursor scoped to one task, including autonomous
   runs.
+- **[Orchestrate multiple agents](/docs/how-to/orchestrate-multiple-agents/)** —
+  multi-select, broadcast one instruction to many workspaces, bulk-update
+  branches, and hand work from one agent to another.
+- **[Use snippets](/docs/how-to/use-snippets/)** — put repeated multi-sentence
+  agent prompts a few keystrokes away, with auto-submit.
 - **[Manage automation policies](/docs/how-to/manage-automation-policies/)** —
   inspect and toggle merge-on-green and per-workspace auto-fix behavior from
   the unified `g p` menu.
+- **[Trigger agents with @lazybox mentions](/docs/how-to/lazybox-mentions/)** —
+  let a GitHub comment auto-spawn the default agent on that workspace.
+- **[Get desktop notifications](/docs/how-to/desktop-notifications/)** — fire an
+  OS banner when an agent needs input, including over SSH.
+- **[Change the theme](/docs/how-to/themes/)** — live-preview and persist a
+  color palette.
 - **[Per-repo env and mounts](/docs/how-to/per-repo-env-and-mounts/)** — inject
   environment variables, symlink shared directories, and materialize scripts
   into worktrees.

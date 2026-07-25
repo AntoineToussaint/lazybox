@@ -77,7 +77,7 @@ grouped by repo, and the larger pane on the right shows activity for the
 selected row.
 
 :::tip[Want to see the UI with zero setup?]
-Run `lazybox --test` (or `cargo run -p lazybox-tui -- --test`). It boots a
+Run `lazybox --test` (or `cargo run -p lazybox-tui-boot -- --test`). It boots a
 throwaway tempdir repo with one seeded workspace and never touches GitHub —
 the fastest way to poke at the interface before wiring up a real repo.
 :::

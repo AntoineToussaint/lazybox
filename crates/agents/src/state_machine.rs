@@ -506,7 +506,7 @@ impl AgentStateMachine {
     /// requires affirmative evidence: a clear reading (the agent visibly
     /// streaming or idle again), or a positive transition committed through
     /// `transition` directly (the user's answer flip, a hook). Unbounded in
-    /// time, exactly like [`Self::suppress_done_exit`] — navigation can
+    /// time, exactly like `suppress_done_exit` — navigation can
     /// never clear a `?` (#374).
     fn suppress_input_needed_exit(current: Option<AgentState>, reading: Reading) -> bool {
         current == Some(AgentState::InputNeeded)

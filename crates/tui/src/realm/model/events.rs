@@ -1854,7 +1854,7 @@ impl<T: TerminalAdapter> Model<T> {
 }
 
 /// Map a `ProviderError` source string to the user-facing verb of the
-/// GitHub mutation that failed, for the "✗ <action> failed — <reason>"
+/// GitHub mutation that failed, for the `✗ <action> failed — <reason>`
 /// Permanent notice. `None` for sources that are NOT user-initiated
 /// mutations (poll cycles, spawn paths, worktree provisioning, agent
 /// runs …) — those keep their existing handling. The strings mirror

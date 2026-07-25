@@ -77,7 +77,7 @@ enum Row {
     Agent = 3,
 }
 
-/// The rows in display order. Indexed positionally by [`steps`] and the
+/// The rows in display order. Indexed positionally by `steps` and the
 /// renderer; each entry's discriminant equals its index (asserted in
 /// tests) so positional and `Row`-keyed access agree.
 const ROWS: [Row; STEP_COUNT as usize] = [Row::Prepare, Row::WorktreeAdd, Row::Setup, Row::Agent];

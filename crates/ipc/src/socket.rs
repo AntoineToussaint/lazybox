@@ -425,7 +425,7 @@ where
 const MAX_BATCH_MESSAGES: usize = 64;
 const MAX_BATCH_BYTES: usize = 256 * 1024;
 
-/// Bounded-channel writer. Like [`writer_loop`] but drains a bounded
+/// Bounded-channel writer. Like `writer_loop` but drains a bounded
 /// `Receiver` — used for the daemon's event stream so the socket
 /// write rate back-pressures the forwarder.
 ///
@@ -489,7 +489,7 @@ where
     w.flush().await
 }
 
-/// Bounded-channel reader. Like [`reader_loop`] but `.send().await`s on
+/// Bounded-channel reader. Like `reader_loop` but `.send().await`s on
 /// a bounded `Sender`, so a full channel stalls socket reads and
 /// back-pressures the peer instead of buffering frames without bound.
 async fn reader_loop_bounded<R, M>(mut r: R, tx: mpsc::Sender<M>, max_frame_bytes: u32)

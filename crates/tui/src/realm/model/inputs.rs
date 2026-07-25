@@ -1570,7 +1570,7 @@ showing keybinding search only",
     /// state, canonicalizing the value. This is the security boundary:
     /// only these keys can be set, each value is checked against what's
     /// actually available (a registered theme, an enabled agent, a known
-    /// preset), and the returned [`ConfigEdit`] carries a `&'static`
+    /// preset), and the returned [`super::ConfigEdit`] carries a `&'static`
     /// key so the apply step can never be steered off the allowlist.
     pub(super) fn validate_config_edit(
         &self,

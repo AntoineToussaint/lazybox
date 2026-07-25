@@ -321,7 +321,7 @@ pub async fn handle_merge_pr(config: &ServerConfig, workspace_key: WorkspaceKey)
     }
     // Wake the poll loop so MERGED state lands in <5s instead of
     // waiting out the full interval.
-    config.poll_wake.notify_one();
+    config.wake_poll(true);
 }
 
 /// Handle `Command::UpdateBranch`: load the workspace, recover the PR's
@@ -379,7 +379,7 @@ pub async fn handle_update_branch(config: &ServerConfig, workspace_key: Workspac
     });
     // Wake the poll loop so the refreshed state lands in <5s instead of
     // waiting out the full interval.
-    config.poll_wake.notify_one();
+    config.wake_poll(true);
 }
 
 /// Handle `Command::CloseIssue`: load the workspace, recover the
@@ -437,7 +437,7 @@ pub async fn handle_close_issue(config: &ServerConfig, workspace_key: WorkspaceK
     });
     // Wake the poll loop so CLOSED state (and the removal prompt) lands
     // in <5s instead of waiting out the full interval.
-    config.poll_wake.notify_one();
+    config.wake_poll(true);
 }
 
 /// Handle `Command::DeleteOrClose`: remove the workspace's primary
@@ -527,7 +527,7 @@ pub async fn handle_delete_or_close(config: &ServerConfig, workspace_key: Worksp
     }
     // Wake the poll loop so the vanished/closed state (and the rescope
     // removal) lands in <5s instead of waiting out the full interval.
-    config.poll_wake.notify_one();
+    config.wake_poll(true);
 }
 
 /// Handle `Command::RequestReviewers`: add the given GitHub logins
@@ -572,7 +572,7 @@ pub async fn handle_request_reviewers(
         tracing::info!("requested reviewers {logins:?} on workspace {workspace_key}");
         // Wake the poll loop so the reviewer chip on the row
         // updates immediately. Without this the sidebar lags 60s.
-        config.poll_wake.notify_one();
+        config.wake_poll(true);
     }
 }
 
@@ -612,7 +612,7 @@ pub async fn handle_add_assignees(
         emit_err(&format!("add assignees failed: {e}"));
     } else {
         tracing::info!("added assignees {logins:?} on workspace {workspace_key}");
-        config.poll_wake.notify_one();
+        config.wake_poll(true);
     }
 }
 
@@ -654,7 +654,7 @@ pub async fn handle_set_assignees(
     // Wake the poll loop so the task row picks up the new assignee
     // set immediately — without this the row stays stale for up to
     // a full interval (60s default).
-    config.poll_wake.notify_one();
+    config.wake_poll(true);
 }
 
 /// Handle `Command::SetLabels`: replace the workspace's label set
@@ -690,7 +690,7 @@ pub async fn handle_set_labels(
         return;
     }
     tracing::info!("set labels to {names:?} on workspace {workspace_key}");
-    config.poll_wake.notify_one();
+    config.wake_poll(true);
 }
 
 /// Handle `Command::FetchRepoLabels`: pull the workspace repo's full
@@ -1885,7 +1885,7 @@ pub(crate) fn prefetch_score(pr: &Task, engagement: EngagementSignals) -> i32 {
 }
 
 fn detail_prefetch_allowed(tier: EngagementTier, already_prefetched: bool) -> bool {
-    tier == EngagementTier::Hot || !already_prefetched
+    tier == EngagementTier::Warm && !already_prefetched
 }
 
 fn prefetch_rank_score(pr: &Task, engagement: EngagementSignals, tier: EngagementTier) -> i32 {
@@ -1906,10 +1906,9 @@ fn prefetch_rank_score(pr: &Task, engagement: EngagementSignals, tier: Engagemen
 /// the parallel main+merged+watched-repo branches of the same tick.
 ///
 /// Warm rows dedup through `TickState::prefetched_pr_details`: once
-/// their threads are pulled this daemon session they stay quiet.
-/// Hot rows bypass that marker so checks and review threads refresh
-/// with the targeted task itself. Cold rows never enter this deeper
-/// query.
+/// their threads are pulled this daemon session they stay quiet. Hot
+/// rows already carry the same full fields from the batched targeted
+/// query, while cold rows never enter this deeper query.
 ///
 /// Ranks candidates with `prefetch_score`; 0-above-base workspaces
 /// are skipped — they don't need the prefetch.
@@ -1938,7 +1937,7 @@ pub async fn prefetch_top_pr_details(
     let mut seen_node_ids = std::collections::HashSet::new();
     for key in polled {
         let tier = engagement.tier_for(key);
-        if tier == EngagementTier::Cold {
+        if tier != EngagementTier::Warm {
             continue;
         }
         let Some(ws) = load_workspace(config, key) else {
@@ -2180,10 +2179,12 @@ mod prefetch_score_tests {
     }
 
     #[test]
-    fn hot_details_bypass_dedup_while_warm_details_do_not() {
-        assert!(detail_prefetch_allowed(EngagementTier::Hot, true));
+    fn hot_and_cold_rows_skip_detail_prefetch_while_warm_rows_dedup() {
+        assert!(!detail_prefetch_allowed(EngagementTier::Hot, false));
+        assert!(!detail_prefetch_allowed(EngagementTier::Hot, true));
         assert!(!detail_prefetch_allowed(EngagementTier::Warm, true));
         assert!(detail_prefetch_allowed(EngagementTier::Warm, false));
+        assert!(!detail_prefetch_allowed(EngagementTier::Cold, false));
         assert!(!detail_prefetch_allowed(EngagementTier::Cold, true));
     }
 

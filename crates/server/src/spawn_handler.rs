@@ -562,7 +562,7 @@ async fn transition_and_broadcast_agent_state(
 
 fn wake_poll_for_terminal_kind(config: &ServerConfig, kind: &TerminalKind) {
     if matches!(kind, TerminalKind::Agent(_)) {
-        config.poll_wake.notify_one();
+        config.wake_poll(false);
     }
 }
 
@@ -6151,6 +6151,10 @@ mod tests {
         )
         .await
         .expect("agent registration did not wake polling");
+        assert!(
+            !config.take_warm_poll_request(),
+            "agent registration only needs the hot targeted path"
+        );
     }
 
     #[tokio::test]

@@ -119,8 +119,8 @@ notifications paths:
 - **Hot**: a focused workspace, a workspace with a live agent, or an
   open authored PR updated in the last 24 hours. The set is capped at
   three. While non-empty, the poll loop runs every 15 seconds, targets
-  these rows before notification targets, and refreshes full PR
-  details on every pass.
+  these rows before notification targets, and refreshes the whole set
+  with one full-detail `nodes(ids:)` GraphQL request per pass.
 - **Warm**: the remaining active inbox. These rows keep the configured
   base cadence, notifications heartbeat, round-robin searches, and
   one-time attention-ranked detail prefetch.
@@ -133,14 +133,17 @@ Focus changes and successful agent registration notify the sleeping
 poll loop immediately. Provider rate-limit backoff remains
 authoritative and can extend either cadence.
 
-The `/v1/metrics` response reports delivery-age samples for fresher
-updates that replace an existing task:
+The `/v1/metrics` response reports delivery-age samples for observable
+GitHub surface changes that replace an existing task:
 
 - `hot_sync_samples`, `hot_sync_p50_ms`, `hot_sync_p95_ms`
 - `cold_sync_samples`, `cold_sync_p50_ms`, `cold_sync_p95_ms`
 
-Each histogram retains the latest 1,024 samples. First discovery is
-excluded because the upstream item's age is not sync delivery latency.
+Each histogram retains the latest 1,024 samples. When `updatedAt`
+advances, the sample is the upstream event's age. GitHub does not
+advance that timestamp for every CI or mergeability recomputation, so
+same-timestamp surface changes use the interval since the previous
+observation. First discovery is excluded.
 
 ## Detail prefetch cost (#16)
 
@@ -177,16 +180,15 @@ Cost is a non-issue, exactly as for the main poll.
 
 **2. Wall-clock and bytes are modest and bounded.** ~1 s and ~60 KB
 per batch — about 8% of today's ~11 s poll. Warm rows remain
-self-limiting through `prefetched_pr_details`; hot rows deliberately
-bypass that marker so their review threads and check contexts stay as
-fresh as their targeted task refresh. The three-row hot cap fits
-inside the existing top-five detail batch.
+self-limiting through `prefetched_pr_details`. Hot rows skip this
+phase because their bounded set already receives review threads and
+check contexts in the single batched targeted query.
 
 ### Decision: keep N=5
 
 The measured worst case (a full batch) is cheap in every dimension.
-Warm rows still fetch once per daemon session; only the bounded hot
-set pays the repeated detail cost.
+Warm rows still fetch once per daemon session; the hot set uses its
+separate batched refresh.
 
 ## Recommended follow-ups
 

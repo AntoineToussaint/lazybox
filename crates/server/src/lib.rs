@@ -53,7 +53,7 @@ use lazybox_store::{MemoryStore, SqliteStore, Store};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::{Mutex, broadcast};
 
 /// Filesystem root used by daemon-owned git worktrees.
@@ -485,6 +485,9 @@ pub struct ServerConfig {
     /// - the lazy mergeable retry path (`Mergeable::Unknown` PRs
     ///   re-fired ~5s later so GitHub's lazy compute lands)
     pub poll_wake: Arc<tokio::sync::Notify>,
+    /// Set by wake sources that require the notifications heartbeat,
+    /// rather than only the bounded hot-target refresh.
+    poll_warm_requested: Arc<AtomicBool>,
     /// In-flight singleton-spawn claims: `(workspace key, singleton
     /// kind key)` pairs a `handle_spawn` is currently provisioning.
     /// The duplicate-spawn check reads maps that are only populated
@@ -552,6 +555,17 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
+    pub(crate) fn wake_poll(&self, poll_notifications: bool) {
+        if poll_notifications {
+            self.poll_warm_requested.store(true, Ordering::Release);
+        }
+        self.poll_wake.notify_one();
+    }
+
+    pub(crate) fn take_warm_poll_request(&self) -> bool {
+        self.poll_warm_requested.swap(false, Ordering::AcqRel)
+    }
+
     /// Open the store at `~/.lazybox/v2/state.db`.
     ///
     /// Open failures (permissions, disk corruption) abort startup. A
@@ -651,6 +665,7 @@ impl ServerConfig {
             removal_prompts: Arc::new(Mutex::new(polling::RemovalPromptMemory::default())),
             viewer_identities: Arc::new(parking_lot::Mutex::new(Vec::new())),
             poll_wake: Arc::new(tokio::sync::Notify::new()),
+            poll_warm_requested: Arc::new(AtomicBool::new(false)),
             inflight_spawns: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             inflight_spawn_changed: Arc::new(tokio::sync::Notify::new()),
             deleted_workspaces: Arc::new(parking_lot::Mutex::new(HashSet::new())),
@@ -1321,6 +1336,18 @@ fn detached_mutation_capacity(mutations: &tokio::task::JoinSet<()>) -> bool {
 mod mutation_admission_tests {
     use super::*;
 
+    #[test]
+    fn warm_poll_requests_survive_wake_coalescing_until_consumed() {
+        let config = ServerConfig::in_memory();
+        config.wake_poll(false);
+        assert!(!config.take_warm_poll_request());
+
+        config.wake_poll(true);
+        config.wake_poll(false);
+        assert!(config.take_warm_poll_request());
+        assert!(!config.take_warm_poll_request());
+    }
+
     #[tokio::test]
     async fn pending_connection_mutations_have_a_hard_task_cap() {
         let mut tasks = tokio::task::JoinSet::new();
@@ -1429,7 +1456,7 @@ pub async fn dispatch_command(
             polling::mark_removal_prompts_for_replay(config).await;
             // Kick a fresh poll so the freshly-opened TUI refreshes within
             // a few seconds instead of waiting out the current sleep.
-            config.poll_wake.notify_one();
+            config.wake_poll(true);
             // Replay cached viewer identities so a reconnecting TUI can
             // render `@me` without waiting for the next poll cycle.
             let logins = config.viewer_identities.lock().clone();
@@ -1736,7 +1763,7 @@ pub async fn dispatch_command(
             if let Some(client) = config.gh_client_cache.lock().as_ref() {
                 client.force_full_sweep();
             }
-            config.poll_wake.notify_one();
+            config.wake_poll(true);
         }
         lazybox_ipc::Command::PostReply { session_key, body } => {
             polling::post_reply(config, session_key, body).await;

@@ -47,6 +47,33 @@ impl LatencySamples {
     }
 }
 
+#[derive(Debug, Default)]
+struct SyncObservations {
+    observed_at: std::collections::HashMap<String, std::time::Instant>,
+    oldest_first: std::collections::VecDeque<String>,
+}
+
+impl SyncObservations {
+    fn observe(&mut self, workspace_key: &str) -> Option<u64> {
+        let now = std::time::Instant::now();
+        let previous = self.observed_at.insert(workspace_key.to_string(), now);
+        if let Some(position) = self
+            .oldest_first
+            .iter()
+            .position(|key| key == workspace_key)
+        {
+            self.oldest_first.remove(position);
+        }
+        self.oldest_first.push_back(workspace_key.to_string());
+        while self.oldest_first.len() > SYNC_LATENCY_SAMPLE_CAPACITY {
+            if let Some(expired) = self.oldest_first.pop_front() {
+                self.observed_at.remove(&expired);
+            }
+        }
+        previous.map(|previous| now.saturating_duration_since(previous).as_millis() as u64)
+    }
+}
+
 fn percentile(sorted: &[u64], percentile: usize) -> Option<u64> {
     if sorted.is_empty() {
         return None;
@@ -78,6 +105,7 @@ pub struct EventMetrics {
     inline_budget_violations: AtomicU64,
     hot_sync_latency_ms: parking_lot::Mutex<LatencySamples>,
     cold_sync_latency_ms: parking_lot::Mutex<LatencySamples>,
+    sync_observations: parking_lot::Mutex<SyncObservations>,
 }
 
 impl EventMetrics {
@@ -115,6 +143,12 @@ impl EventMetrics {
 
     pub fn record_cold_sync_latency(&self, age_ms: u64) {
         self.cold_sync_latency_ms.lock().record(age_ms);
+    }
+
+    /// Return the elapsed time since this workspace's previous sync
+    /// observation, establishing the baseline on first sight.
+    pub fn observe_sync(&self, workspace_key: &str) -> Option<u64> {
+        self.sync_observations.lock().observe(workspace_key)
     }
 
     /// Point-in-time copy of every counter.
@@ -181,6 +215,8 @@ mod tests {
             m.record_hot_sync_latency(age_ms);
         }
         m.record_cold_sync_latency(600_000);
+        assert_eq!(m.observe_sync("github:o/r#1"), None);
+        assert!(m.observe_sync("github:o/r#1").is_some());
 
         let snap = m.snapshot();
         assert_eq!(snap.terminal_output_dropped, 2);
@@ -194,5 +230,16 @@ mod tests {
         assert_eq!(snap.cold_sync_samples, 1);
         assert_eq!(snap.cold_sync_p50_ms, Some(600_000));
         assert_eq!(snap.cold_sync_p95_ms, Some(600_000));
+    }
+
+    #[test]
+    fn sync_observations_evict_the_oldest_workspace() {
+        let metrics = EventMetrics::default();
+        metrics.observe_sync("oldest");
+        for index in 0..SYNC_LATENCY_SAMPLE_CAPACITY {
+            metrics.observe_sync(&format!("workspace-{index}"));
+        }
+
+        assert_eq!(metrics.observe_sync("oldest"), None);
     }
 }

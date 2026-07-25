@@ -1442,6 +1442,67 @@ impl GhClient {
         }
     }
 
+    /// Fetch the bounded hot set in one GraphQL request. `nodes(ids:)`
+    /// preserves input order, so the returned vector has one slot per
+    /// requested node; `None` means that node is no longer visible.
+    pub async fn fetch_hot_tasks(&self, node_ids: &[String]) -> Result<Vec<Option<Task>>, GhError> {
+        if node_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let started = std::time::Instant::now();
+        let mut metrics = BranchMetrics::new("hot-targets");
+        self.acquire_or_block("hot-target batch query")?;
+        let body = graphql::hot_tasks_body(node_ids);
+        let (response, bytes): (graphql::GqlHotTasksResponse, usize) =
+            self.post_graphql_with_retry_measured(&body).await?;
+        metrics.requests = 1;
+        metrics.resp_bytes = bytes;
+
+        let errors = response.errors.unwrap_or_default();
+        if errors.iter().any(|error| !error.is_not_visible()) {
+            let joined = errors
+                .iter()
+                .map(|error| error.full())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(GhError::Graphql(joined));
+        }
+
+        let Some(data) = response.data else {
+            if errors.is_empty() {
+                return Err(GhError::Graphql("hot-target batch returned no data".into()));
+            }
+            return Ok(vec![None; node_ids.len()]);
+        };
+        if data.nodes.len() != node_ids.len() {
+            return Err(GhError::Graphql(format!(
+                "hot-target batch returned {} node slots for {} ids",
+                data.nodes.len(),
+                node_ids.len()
+            )));
+        }
+        if let Some(rate_limit) = &data.rate_limit {
+            metrics.graphql_cost = rate_limit.cost.unwrap_or(0);
+            self.observe_rate_limit(rate_limit);
+        }
+
+        let tasks = data
+            .nodes
+            .into_iter()
+            .map(|node| {
+                node.map(|node| match node {
+                    graphql::GqlHotTask::PullRequest(pr) => graphql::pr_to_task(&pr, &self.user),
+                    graphql::GqlHotTask::Issue(issue) => graphql::issue_to_task(&issue, &self.user),
+                })
+            })
+            .collect::<Vec<_>>();
+        metrics.prs = tasks.iter().flatten().filter(|task| task.is_pr()).count();
+        metrics.elapsed_ms = started.elapsed().as_millis();
+        metrics.emit();
+        Ok(tasks)
+    }
+
     /// Targeted deep-fetch: pull one PR by `(owner, repo, number)` via
     /// the single-node GraphQL query. ~85 cost units total (vs. the
     /// 1000s the inbox-scan query burns when re-walking every PR).
@@ -4054,6 +4115,84 @@ mod tests {
             )),
             notifications_state: NotificationsState::shared(),
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hot_tasks_are_fetched_in_one_ordered_batch() {
+        const BODY: &str = r#"{
+          "data": {
+            "nodes": [
+              {
+                "id": "I_one",
+                "number": 7,
+                "title": "Fast sync",
+                "body": "body",
+                "url": "https://github.com/acme/widget/issues/7",
+                "updatedAt": "2026-07-25T10:00:00Z",
+                "createdAt": "2026-07-24T10:00:00Z",
+                "closedAt": null,
+                "state": "OPEN",
+                "author": {"login": "test-user"},
+                "labels": {"nodes": []},
+                "assignees": {"nodes": []},
+                "comments": {"nodes": []},
+                "repository": {"nameWithOwner": "acme/widget"}
+              },
+              null
+            ],
+            "rateLimit": {
+              "cost": 2,
+              "limit": 5000,
+              "remaining": 4998,
+              "resetAt": "2026-07-25T11:00:00Z"
+            }
+          }
+        }"#;
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let base_uri =
+            spawn_counting_response_server("200 OK", "application/json", "", BODY, hits.clone())
+                .await;
+        let client = make_client(&base_uri);
+
+        let tasks = client
+            .fetch_hot_tasks(&["I_one".into(), "I_gone".into()])
+            .await
+            .expect("hot batch");
+
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(tasks.len(), 2);
+        let task = tasks[0].as_ref().expect("visible issue");
+        assert_eq!(task.id.key, "acme/widget#7");
+        assert_eq!(task.node_id.as_deref(), Some("I_one"));
+        assert!(!task.is_pr());
+        assert!(tasks[1].is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hot_task_batch_surfaces_transient_graphql_errors() {
+        const BODY: &str = r#"{
+          "data": {
+            "nodes": [null],
+            "rateLimit": {
+              "cost": 1,
+              "limit": 5000,
+              "remaining": 4999,
+              "resetAt": "2026-07-25T11:00:00Z"
+            }
+          },
+          "errors": [{"type": "INTERNAL", "message": "temporary failure"}]
+        }"#;
+        let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
+        let client = make_client(&base_uri);
+
+        let error = client
+            .fetch_hot_tasks(&["PR_one".into()])
+            .await
+            .expect_err("transient GraphQL errors must fail the poll");
+
+        assert!(
+            matches!(error, GhError::Graphql(message) if message.contains("temporary failure"))
+        );
     }
 
     /// Minimal-but-valid SEARCH_QUERY wire page: one PR node, with the

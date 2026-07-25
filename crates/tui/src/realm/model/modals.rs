@@ -1038,19 +1038,18 @@ impl<T: TerminalAdapter> Model<T> {
     /// active removal confirm is this workspace's, clears the binding so
     /// a later confirm can't remove the now-reopened workspace, and — if
     /// that confirm is on top of the stack — unmounts it and surfaces the
-    /// next queued prompt. Clearing the binding even when the confirm is
+    /// next queued prompt. Clearing the flow even when the confirm is
     /// buried under another modal keeps `Msg::Confirmed` a no-op for it
-    /// (it reads `active_removal_prompt`), so a stale buried prompt can't
-    /// silently destroy the reopened workspace.
+    /// (it reads `ModalFlow::RemovalPrompt`), so a stale buried prompt
+    /// can't silently destroy the reopened workspace.
     pub(super) fn cancel_removal_prompt(&mut self, key: &lazybox_core::WorkspaceKey) {
-        self.pending_removal_prompts
+        self.removal_prompt_queue
             .retain(|p| &p.workspace_key != key);
-        if self
-            .active_removal_prompt
-            .as_ref()
-            .is_some_and(|(k, _)| k == key)
-        {
-            self.active_removal_prompt = None;
+        if matches!(
+            &self.modal_flow,
+            Some(ModalFlow::RemovalPrompt { workspace, .. }) if workspace == key
+        ) {
+            self.modal_flow = None;
             if self.modal_stack.last() == Some(&Id::RemoveOutOfScope) {
                 self.pop_modal();
                 self.maybe_mount_next_removal_prompt();

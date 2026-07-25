@@ -507,26 +507,20 @@ impl WorktreeManager {
         // branch). Common reasons fetch can fail and that we tolerate:
         // remote branch was deleted post-merge, offline, auth issue.
         // In all cases the start_point lookup below falls back to the
-        // local ref. Note the fallback covers *refs* only: from a
-        // blobless clone the worktree add below still needs origin
+        // PR head or the local ref. Note the fallback covers *refs* only:
+        // from a blobless clone the worktree add below still needs origin
         // reachable to download file contents, so a fully offline
         // provision only succeeds when the tree's blobs are already
-        // local (a legacy full clone, or a tree checked out before). `fetch_origin_ref` logs a warning so the
-        // degradation isn't silent; a network/auth failure (as opposed
-        // to a deleted remote branch) also surfaces in the provisioning
-        // checklist via a `BaseRefStale` report (issue #320).
+        // local (a legacy full clone, or a tree checked out before).
+        // `fetch_origin_ref` logs a warning so the degradation isn't
+        // silent; a network/auth failure (as opposed to a deleted remote
+        // branch) also surfaces in the provisioning checklist via a
+        // `BaseRefStale` report (issue #320) — but only when we actually
+        // branch from a non-fresh ref (see the gated report below).
         self.report(CheckoutPhase::Fetching);
         let auth = self.network_env().await;
-        if let Err(e) = fetch_origin_ref(&bare_path, owner, repo, branch, &auth).await
-            && let Some(phase) = stale_base_phase(&bare_path, branch, &e, !auth.is_empty()).await
-        {
-            self.report(phase);
-        }
+        let origin_fetch = fetch_origin_ref(&bare_path, owner, repo, branch, &auth).await;
 
-        if let Some(parent) = wt_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        self.report(CheckoutPhase::AddingWorktree);
         // Prefer the fresh remote-tracking ref. When the head branch
         // isn't a plain branch on `origin` — a fork PR (head lives on the
         // contributor's fork), or a PR whose head branch was deleted — fall
@@ -557,7 +551,7 @@ impl WorktreeManager {
         {
             format!("refs/lazybox/pr/{pr}")
         } else if local_exists {
-            local_ref
+            local_ref.clone()
         } else {
             return Err(GitError::Command(pr_number.map_or_else(
                 || format!("branch '{branch}' not found locally or on origin"),
@@ -569,6 +563,23 @@ impl WorktreeManager {
                 },
             )));
         };
+
+        // Surface a stale-base warning only when the origin refresh failed
+        // AND we branched from a non-fresh ref (a stale origin mirror or the
+        // local head). When the fresh `refs/pull/<N>/head` tier resolved the
+        // checkout, there is nothing stale — reporting it would be a false
+        // alarm naming a commit we didn't check out (issue #550 / #320).
+        if let Err(e) = &origin_fetch
+            && !start_point.starts_with("refs/lazybox/pr/")
+            && let Some(phase) = stale_base_phase(&bare_path, branch, e, !auth.is_empty()).await
+        {
+            self.report(phase);
+        }
+
+        if let Some(parent) = wt_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        self.report(CheckoutPhase::AddingWorktree);
         // From a blobless clone, `worktree add` downloads the checked-
         // out tree's blobs on demand — a real network transfer, so it
         // gets the auth env and the transfer-class timeout instead of

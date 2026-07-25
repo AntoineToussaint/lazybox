@@ -534,7 +534,8 @@ async fn checkout_at_prefers_pull_head_over_stale_local_ref() {
     git(upstream.path(), &["checkout", "main", "-q"]);
     git(upstream.path(), &["branch", "-D", "ci/bot"]);
 
-    let wm = WorktreeManager::new(base.path().to_path_buf());
+    let (seen, sink) = recording_sink();
+    let wm = WorktreeManager::new(base.path().to_path_buf()).with_progress(sink);
     let wt = wm
         .checkout_at(
             &base.path().join("bot-wt"),
@@ -552,6 +553,13 @@ async fn checkout_at_prefers_pull_head_over_stale_local_ref() {
         "worktree HEAD is the fresh PR head, not the stale local ref"
     );
     assert_ne!(git_out(&wt.path, &["rev-parse", "HEAD"]), stale);
+    // We branched from the fresh pull head, so there is nothing stale to
+    // warn about — the origin-refresh failure must not surface a
+    // BaseRefStale note naming the (superseded) local ref.
+    assert!(
+        stale_note(&seen).is_none(),
+        "no false stale-base warning when the pull head resolves the checkout"
+    );
     drop(upstream);
 }
 
@@ -643,7 +651,8 @@ async fn checkout_at_keeps_local_ref_with_unpushed_commits_over_pull_head() {
     git(upstream.path(), &["checkout", "main", "-q"]);
     git(upstream.path(), &["branch", "-D", "feature/wip"]);
 
-    let wm = WorktreeManager::new(base.path().to_path_buf());
+    let (seen, sink) = recording_sink();
+    let wm = WorktreeManager::new(base.path().to_path_buf()).with_progress(sink);
     let wt = wm
         .checkout_at(
             &base.path().join("wip-wt"),
@@ -661,5 +670,12 @@ async fn checkout_at_keeps_local_ref_with_unpushed_commits_over_pull_head() {
         "the unpushed local commit is preserved, not reset to the PR head"
     );
     assert_ne!(git_out(&wt.path, &["rev-parse", "HEAD"]), pr_head);
+    // Here we genuinely branched from the local ref (origin gone, pull head
+    // rejected as divergent), so the stale-base warning is accurate and must
+    // still fire — the gate suppresses only the fresh pull-head case.
+    assert!(
+        stale_note(&seen).is_some(),
+        "branching from the local ref must still surface a stale-base note"
+    );
     drop(upstream);
 }

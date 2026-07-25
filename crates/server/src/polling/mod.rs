@@ -5028,6 +5028,14 @@ pub async fn handle_adopt_sessions(
         return;
     }
 
+    // Adopt used to drain only sessions, dropping the source's activity
+    // and every user-owned field (issue #554). Route through the same two
+    // carriers the issue→PR merge uses so the flows can't diverge. The
+    // source row survives here (it may stay as a tracking row), so this is
+    // a non-destructive read — both sides keep their notes/snippets.
+    target_ws.absorb_activity_from(&source_ws);
+    target_ws.absorb_user_state_from(&source_ws);
+
     let source_session_key: lazybox_core::SessionKey = (&source_key).into();
     let target_session_key: lazybox_core::SessionKey = (&target_key).into();
     let moved = source_ws.sessions.len();
@@ -5078,6 +5086,11 @@ fn absorb_issue_workspace(
     // the tasks' `recent_activity` re-merge is then a no-op
     // content-wise and `merge_activity` preserves the marks.
     pr_workspace.absorb_activity_from(&issue_ws);
+    // Carry every user-owned field (snippets, notes, snooze, arms,
+    // policies, cleanup answer, track-main, last-viewed) onto the PR
+    // before the issue row is deleted (issue #554). One merge routine,
+    // shared with adopt, so the two flows can't diverge.
+    pr_workspace.absorb_user_state_from(&issue_ws);
     let mut moved = Vec::with_capacity(issue_ws.sessions.len());
     for mut session in issue_ws.sessions {
         session.workspace_key = pr_workspace.key.clone();

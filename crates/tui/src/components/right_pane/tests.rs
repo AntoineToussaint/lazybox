@@ -1546,4 +1546,24 @@ mod originating_issue_header_tests {
             "an issue workspace shows no originating-issue line",
         );
     }
+
+    #[test]
+    fn squished_header_does_not_register_offscreen_click_targets() {
+        // A pane too short to paint the whole header must not leave a
+        // hit region pointing at a row the header never drew — a click
+        // there would otherwise open the browser over whatever paints
+        // below the clipped header.
+        let ws = Workspace::from_task(task("pull", 172, vec![issue_id(167)]), Utc::now());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+
+        // 3 rows total: the header chunk can't fit the branch/issue rows.
+        let _ = rows(&mut pane, 80, 3);
+        if let Some((row, _)) = &pane.click_hits.header_issue {
+            assert!(*row < 3, "issue hit region must stay within the pane");
+        }
+        if let Some((row, _)) = &pane.click_hits.header_title {
+            assert!(*row < 3, "title hit region must stay within the pane");
+        }
+    }
 }

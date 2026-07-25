@@ -1098,7 +1098,7 @@ impl RightPane {
         ))
     }
 
-    fn render_header(&mut self, area: Rect, frame: &mut Frame) {
+    fn render_header(&mut self, area: Rect, frame: &mut Frame, origin: Option<(String, String)>) {
         self.click_hits.header_title = None;
         self.click_hits.header_issue = None;
         let theme = crate::theme::current();
@@ -1179,8 +1179,14 @@ impl RightPane {
         let (bg, fg) = lazybox_theme::state_pill(theme, bucket);
         // The title line is a live link: clicking it opens the task
         // in the browser (#567). Underline the title so it reads as
-        // clickable, matching the reader-modal link affordance.
-        self.click_hits.header_title = Some((area.y + lines.len() as u16, task.url.clone()));
+        // clickable, matching the reader-modal link affordance. Only
+        // register the click target when the row actually falls inside
+        // the (possibly squished) header area — otherwise a clipped row
+        // would record a hit region over whatever paints below it.
+        let title_row = area.y + lines.len() as u16;
+        if title_row < area.bottom() {
+            self.click_hits.header_title = Some((title_row, task.url.clone()));
+        }
         lines.push(Line::from(vec![
             Span::styled(
                 format!(" {icon} {label} "),
@@ -1209,9 +1215,14 @@ impl RightPane {
         // closes. An explicit, clickable path to it so the user doesn't
         // have to expand the description and hunt for the reference
         // (#567). Its own row so the click handler can tell it apart
-        // from the title link above (row-granular hit-testing).
-        if let Some((label, url)) = self.originating_issue() {
-            self.click_hits.header_issue = Some((area.y + lines.len() as u16, url));
+        // from the title link above (row-granular hit-testing). The
+        // click target is only registered when the row is inside the
+        // header area (see the title line above).
+        if let Some((label, url)) = origin {
+            let issue_row = area.y + lines.len() as u16;
+            if issue_row < area.bottom() {
+                self.click_hits.header_issue = Some((issue_row, url));
+            }
             lines.push(Line::from(vec![
                 Span::styled("Issue: ", Style::default().fg(theme.text_dim)),
                 Span::styled(
@@ -1983,11 +1994,10 @@ impl RightPane {
         let body_constraint = self.task_body_constraint();
         // Baseline header is crumbs + pill/title + branch + reviewers;
         // an originating-issue line (#567) adds one row when present.
-        let header_height = if self.originating_issue().is_some() {
-            5
-        } else {
-            4
-        };
+        // Computed once and threaded into `render_header` so the height
+        // reservation and the emitted line can't disagree.
+        let origin = self.originating_issue();
+        let header_height = if origin.is_some() { 5 } else { 4 };
         let chunks = Layout::vertical([
             Constraint::Length(header_height), // header (crumbs, pill, branch, [issue])
             Constraint::Length(1),             // separator
@@ -1996,7 +2006,7 @@ impl RightPane {
         ])
         .split(area);
 
-        self.render_header(chunks[0], frame);
+        self.render_header(chunks[0], frame, origin);
 
         // Thin separator; accent-tinted while this pane has focus so
         // the active pane reads at a glance (#286) — same cue as the

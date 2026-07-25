@@ -11289,6 +11289,17 @@ mod recent_snippets_tests {
         m.handle_daemon_event(snapshot_with_recent(Vec::new()));
         assert!(m.recent_snippets.is_empty());
     }
+
+    // A `--connect` client (or a snapshot that arrives before the catalog
+    // loads) must NOT have its daemon-owned MRU wiped against an empty
+    // catalog — the prune only runs when a catalog is present (#548).
+    #[test]
+    fn empty_catalog_keeps_the_daemon_mru_unpruned() {
+        let (mut m, _server) = build_model();
+        // No apply_snippets: the catalog is empty.
+        m.handle_daemon_event(snapshot_with_recent(vec!["rev".into(), "pr".into()]));
+        assert_eq!(m.recent_snippets, vec!["rev".to_string(), "pr".to_string()]);
+    }
 }
 
 #[cfg(test)]

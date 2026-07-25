@@ -1970,7 +1970,13 @@ impl<T: TerminalAdapter> Model<T> {
     /// `RECENT_SNIPPETS_MAX` cap is re-applied in case the stored list
     /// predates a smaller cap.
     pub(crate) fn seed_recent_snippets_from_snapshot(&mut self, mut recent: Vec<String>) {
-        recent.retain(|k| self.snippets.get(k).is_some());
+        // Prune only against a *populated* catalog: a snapshot that lands
+        // before `apply_snippets` (or a client that never loads snippets)
+        // would otherwise wipe every key against an empty catalog. A later
+        // snapshot re-prunes once the catalog is in place.
+        if !self.snippets.is_empty() {
+            recent.retain(|k| self.snippets.get(k).is_some());
+        }
         recent.truncate(RECENT_SNIPPETS_MAX);
         self.recent_snippets = recent;
     }

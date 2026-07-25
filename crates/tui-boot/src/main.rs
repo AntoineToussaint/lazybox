@@ -589,6 +589,14 @@ async fn run_remote(
     tokio::task::spawn_blocking(move || {
         let mut model = lazybox_tui::realm::Model::new(client)?;
         model.note_daemon_build(&daemon.build);
+        // Snippets are a client-side concern (the picker + the injected
+        // body live here, not in the daemon), so load the catalog on the
+        // `--connect` path too. Without it the picker is empty and the
+        // daemon-owned "Recent" MRU (#548) has no catalog to render or
+        // prune against.
+        model.apply_snippets(lazybox_config::Snippets::load_merged(
+            std::env::current_dir().ok().as_deref(),
+        ));
         if let Some(update) = available_update {
             model.show_update_if_new(update);
         }
@@ -609,9 +617,7 @@ async fn run_embedded_realm(
 ) -> anyhow::Result<()> {
     let (client, server) = channel::pair();
     let config = server_config_from_user()?;
-    let update_check = tokio::spawn(build_guard::available_update(Some(
-        config.store.clone(),
-    )));
+    let update_check = tokio::spawn(build_guard::available_update(Some(config.store.clone())));
 
     // Recovery probes the backend (`tmux list-sessions`) before the UI
     // paints — bound it so a wedged tmux server degrades to "no

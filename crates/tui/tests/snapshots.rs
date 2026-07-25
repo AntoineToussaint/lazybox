@@ -110,6 +110,8 @@ fn sidebar_golden_render_focused() {
         ],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     let rendered = render_to_string(&mut s, 40, 10, true);
     insta::assert_snapshot!("sidebar_focused_3_sessions", rendered);
@@ -132,6 +134,8 @@ fn sidebar_golden_render_mixed_number_widths() {
         ],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     let rendered = render_to_string(&mut s, 40, 10, true);
     insta::assert_snapshot!("sidebar_mixed_number_widths", rendered);
@@ -158,6 +162,8 @@ fn sidebar_golden_render_split_pr_vs_issue() {
         ],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     // Sidebar starts in the default `ByRoleSplit` (chip label
     // `split`) sort mode; render directly without cycling so the
@@ -191,6 +197,8 @@ fn sidebar_golden_render_recent_pr_and_issue_mixed() {
         ],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     let rendered = render_to_string(&mut s, 40, 12, true);
     insta::assert_snapshot!("sidebar_recent_pr_and_issue_mixed", rendered);
@@ -211,6 +219,8 @@ fn sidebar_tight_gutters_leave_room_for_content_at_small_width() {
         workspaces: vec![Workspace::from_task(t, fixed_time())],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     let w: u16 = 30;
     let rendered = render_to_string(&mut s, w, 10, true);
@@ -244,6 +254,8 @@ fn sidebar_golden_render_unfocused() {
         workspaces: vec![Workspace::from_task(make_task("o/r#1", 10), fixed_time())],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     let rendered = render_to_string(&mut s, 40, 6, false);
     insta::assert_snapshot!("sidebar_unfocused_1_session", rendered);
@@ -278,6 +290,8 @@ fn sidebar_header_fits_narrow_width() {
         workspaces: vec![Workspace::from_task(make_task("o/r#1", 10), fixed_time())],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
 
     let rendered = render_to_string(&mut s, 24, 5, true);

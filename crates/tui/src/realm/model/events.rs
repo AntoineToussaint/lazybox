@@ -555,6 +555,22 @@ impl<T: TerminalAdapter> Model<T> {
             self.sidebar.apply_projects(self.projects.clone());
         }
 
+        // The daemon owns the snippet MRU and the dismissed-update set
+        // (#548). Seed both from every snapshot so in-process and
+        // `--connect` clients share one persisted view, then re-evaluate a
+        // stashed update against the now-known dismissal set.
+        if let IpcEvent::Snapshot {
+            recent_snippets,
+            dismissed_updates,
+            ..
+        } = &event
+        {
+            self.dismissed_updates = dismissed_updates.clone();
+            self.seed_recent_snippets_from_snapshot(recent_snippets.clone());
+            self.snapshot_seen = true;
+            self.maybe_show_pending_update();
+        }
+
         // A broadcast-lag recovery `Snapshot` stands in for the events
         // the client missed — which can include the one-shot
         // `TerminalSpawned` that dismisses an in-flight

@@ -527,25 +527,29 @@ async fn run_remote(
             socket_path.display()
         );
     }
+    // Dismissals now round-trip through the daemon (#548), so this path no
+    // longer opens a client-local `state.db` for them — on a genuinely
+    // remote `--connect` client that was a fresh, unrelated database. The
+    // store here only backs the build guard's release-check cache, which is
+    // a bounded, throwaway optimization; a failed open just skips it.
     let update_check = tokio::spawn(async {
         let open_store = tokio::task::spawn_blocking(lazybox_server::open_store);
         let store = match tokio::time::timeout(Duration::from_millis(500), open_store).await {
             Ok(Ok(Ok(store))) => Some(store),
             Ok(Ok(Err(error))) => {
-                tracing::warn!("update dismissal store unavailable: {error}");
+                tracing::warn!("release-check cache store unavailable: {error}");
                 None
             }
             Ok(Err(error)) => {
-                tracing::warn!("update dismissal store task failed: {error}");
+                tracing::warn!("release-check cache store task failed: {error}");
                 None
             }
             Err(_) => {
-                tracing::warn!("update dismissal store open timed out");
+                tracing::warn!("release-check cache store open timed out");
                 None
             }
         };
-        let update = lazybox_tui::build_guard::available_update(store.clone()).await;
-        (update, store)
+        lazybox_tui::build_guard::available_update(store).await
     });
     let (client, daemon) = match socket::connect(socket_path).await {
         Ok(pair) => pair,
@@ -568,15 +572,15 @@ async fn run_remote(
         .map(|c| c.attention.notifier)
         .unwrap_or_default();
     lazybox_tui::platform::set_notifier_backend(map_notifier_backend(notifier));
-    let (available_update, update_store) = update_check.await.unwrap_or_else(|error| {
+    let available_update = update_check.await.unwrap_or_else(|error| {
         tracing::debug!("startup update check task failed: {error}");
-        (None, None)
+        None
     });
     tokio::task::spawn_blocking(move || {
         let mut model = lazybox_tui::realm::Model::new(client)?;
         model.note_daemon_build(&daemon.build);
         if let Some(update) = available_update {
-            model.show_update_if_new(update, update_store);
+            model.show_update_if_new(update);
         }
         if let Some(p) = preselect {
             model = model.with_preselect(p);
@@ -901,13 +905,12 @@ async fn run_embedded_realm(
         // which is the natural repo root for a single-repo workflow.
         let snippets =
             lazybox_config::Snippets::load_merged(std::env::current_dir().ok().as_deref());
-        // Install the catalog, then restore the snippet-picker "Recent"
-        // MRU from the state DB so frequently-used snippets stay one
-        // keystroke away across restarts (#311). Runtime state, not YAML
-        // — lives in the same store as read/unread and snooze. Bundled
-        // so the restore can never run before the catalog is in place
-        // (it prunes the MRU against it).
-        model.apply_snippets_and_seed_recent(snippets, config.store.clone());
+        // Install the catalog. The snippet-picker "Recent" MRU is owned by
+        // the daemon (#548) and seeded from the first `Event::Snapshot`,
+        // which prunes it against this catalog — so the catalog must be in
+        // place first, and it is (Subscribe's snapshot arrives inside the
+        // loop below).
+        model.apply_snippets(snippets);
         model = model.with_splits(user_config.ui.sidebar_pct, user_config.ui.right_top_pct);
         if let Some((report, sources)) = wizard_seed {
             model.start_setup_wizard(report, sources);
@@ -918,7 +921,7 @@ async fn run_embedded_realm(
             model.maybe_mount_tour();
         }
         if let Some(update) = available_update {
-            model.show_update_if_new(update, Some(config.store.clone()));
+            model.show_update_if_new(update);
         }
         lazybox_tui::realm::model::run_loop_with_model(model)
     })

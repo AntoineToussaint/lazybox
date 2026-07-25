@@ -474,7 +474,6 @@ pub fn run() -> anyhow::Result<()> {
 /// hook + start the wizard before entering the loop.
 pub fn run_loop_with_model<T: TerminalAdapter>(mut model: Model<T>) -> anyhow::Result<()> {
     let result = run_loop(&mut model);
-    model.finish_update_dismissal();
     model.shutdown();
     result
 }
@@ -1249,7 +1248,6 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
         model.tick_working();
         model.tick_terminal_leader();
         model.tick_terminal_drag();
-        model.tick_update_dismissal();
         // Surface a dead daemon channel within a frame of the first
         // failed `send_cmd` — without this a `--connect` client whose
         // daemon died keeps rendering as if everything works while

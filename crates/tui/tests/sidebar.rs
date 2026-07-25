@@ -109,6 +109,8 @@ fn snapshot_populates_workspaces() {
         workspaces: vec![w1.clone(), w2],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     assert_eq!(s.workspace_count(), 2);
     assert_eq!(s.selected_session_key(), Some(&ws_key(&w1)));
@@ -143,6 +145,8 @@ fn workspace_removed_prunes_and_clamps_cursor() {
         workspaces: vec![w1, w2.clone()],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     // Move cursor to second workspace row.
     s.handle_key(key_code(KeyCode::Down), &mut Vec::new());
@@ -168,6 +172,8 @@ fn cursor_follows_workspace_key_across_resort() {
         workspaces: vec![w1, w2.clone(), w3.clone()],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     // Cursor on #2.
     s.handle_key(key_code(KeyCode::Down), &mut Vec::new());
@@ -204,6 +210,8 @@ fn merged_workspace_hidden() {
         workspaces: vec![merged, live.clone()],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     assert_eq!(s.workspace_count(), 1);
     assert_eq!(s.selected_session_key(), Some(&ws_key(&live)));
@@ -231,6 +239,8 @@ fn rows_are_grouped_by_repo_with_headers() {
         ],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     let rows = s.visible_rows();
     // Hierarchy: alpha header → its 2 workspaces → beta header → its 1.
@@ -270,6 +280,8 @@ fn cursor_walks_through_repo_headers() {
         ],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     // Layout: [alpha header, alpha#1, beta header, beta#1]. Cursor
     // starts on alpha#1. j → beta header → beta#1.
@@ -298,6 +310,8 @@ fn snoozed_workspace_hidden_from_inbox() {
         workspaces: vec![snoozed, make_workspace("owner/repo", "o/r#2", now)],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     assert_eq!(s.workspace_count(), 1);
     assert_eq!(s.mailbox(), Mailbox::Inbox);
@@ -313,6 +327,8 @@ fn toggle_mailbox_cycles_inbox_inactive_snoozed() {
         workspaces: vec![snoozed, make_workspace("owner/repo", "o/r#2", now)],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     // Cycle: Inbox → Inactive → Snoozed → Inbox.
     assert_eq!(s.mailbox(), Mailbox::Inbox);
@@ -356,6 +372,8 @@ fn inactive_mailbox_shows_merged_and_closed_workspaces() {
         workspaces: vec![merged, closed, live],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     // Inbox has only the live workspace.
     assert_eq!(s.workspace_count(), 1);
@@ -378,6 +396,8 @@ fn populated_sidebar() -> Sidebar {
         ],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     s
 }
@@ -550,6 +570,8 @@ fn render_windows_list_to_keep_cursor_visible_with_scrollbar() {
         workspaces,
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
 
     // Tall enough for a few rows, far short of all 20 → must scroll.
@@ -593,6 +615,8 @@ fn tall_sidebar() -> Sidebar {
         workspaces,
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     s
 }
@@ -790,6 +814,8 @@ fn workspace_with_one_session_does_not_show_a_subrow() {
         workspaces: vec![w],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     let session_rows = s
         .visible_rows()
@@ -812,6 +838,8 @@ fn workspace_with_two_sessions_expands_into_subrows() {
         workspaces: vec![w],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     let session_rows: Vec<_> = s
         .visible_rows()
@@ -833,6 +861,8 @@ fn cursor_can_land_on_a_session_subrow() {
         workspaces: vec![w],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     // Cursor starts on the workspace row. Down once → session 0.
     s.handle_key(key_code(KeyCode::Down), &mut Vec::new());
@@ -859,6 +889,8 @@ fn session_created_event_expands_into_subrows_at_two() {
         workspaces: vec![w.clone()],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     assert_eq!(
         s.visible_rows()
@@ -900,6 +932,8 @@ fn session_ended_event_collapses_back_below_two() {
         workspaces: vec![w.clone()],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     assert_eq!(
         s.visible_rows()
@@ -936,6 +970,8 @@ fn empty_project_still_renders_a_header() {
         workspaces: vec![],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     let mut projects = std::collections::BTreeMap::new();
     let pk = lazybox_core::ProjectKey::github("fresh-org", "new-repo");
@@ -998,6 +1034,8 @@ fn sidebar_with_pr<F: FnOnce(&mut Task)>(mutate: F) -> Sidebar {
         workspaces: vec![Workspace::from_task(task, now)],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     s
 }
@@ -1093,6 +1131,8 @@ fn action_keys_on_repo_header_are_silent_noops() {
         workspaces: vec![make_workspace("owner/repo", "o/r#1", now)],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     // Move up onto the repo header (row 0).
     s.handle_key(key_code(KeyCode::Up), &mut Vec::new());
@@ -1183,6 +1223,8 @@ fn contextual_bindings_surface_github_group_on_ready_pr() {
         workspaces: vec![Workspace::from_task(pr, Utc::now())],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     let bindings = s.contextual_bindings(&footer_catalog(&std::collections::BTreeMap::new()));
     assert!(
@@ -1206,6 +1248,8 @@ fn contextual_bindings_collapse_agent_spawns_into_one_group_cell() {
         )],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     let bindings = s.contextual_bindings(&footer_catalog(&std::collections::BTreeMap::new()));
     let agent_cells: Vec<_> = bindings.iter().filter(|b| b.label == "agent").collect();
@@ -1226,6 +1270,8 @@ fn contextual_bindings_surface_fix_ci_when_red() {
         workspaces: vec![Workspace::from_task(pr, Utc::now())],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     let bindings = s.contextual_bindings(&footer_catalog(&std::collections::BTreeMap::new()));
     let labels: Vec<String> = bindings.iter().map(|b| b.label.to_string()).collect();
@@ -1255,6 +1301,8 @@ fn contextual_bindings_honor_user_key_overrides() {
         )],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     let mut overrides = std::collections::BTreeMap::new();
     overrides.insert("spawn_shell".to_string(), "Ctrl-t".to_string());
@@ -1280,6 +1328,8 @@ fn merge_target_fires_when_pr_is_ready() {
         workspaces: vec![Workspace::from_task(pr, Utc::now())],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     assert!(s.merge_target_for_cursor().is_some());
 }
@@ -1298,6 +1348,8 @@ fn merge_target_fires_on_green_ci_without_approval() {
             workspaces: vec![Workspace::from_task(pr, Utc::now())],
             terminals: vec![],
             projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
         assert!(
             s.merge_target_for_cursor().is_some(),
@@ -1316,6 +1368,8 @@ fn merge_target_is_hidden_when_changes_requested() {
         workspaces: vec![Workspace::from_task(pr, Utc::now())],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     assert!(s.merge_target_for_cursor().is_none());
 }
@@ -1330,6 +1384,8 @@ fn merge_target_is_hidden_when_ci_failing() {
         workspaces: vec![Workspace::from_task(pr, Utc::now())],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     assert!(s.merge_target_for_cursor().is_none());
 }
@@ -1345,6 +1401,8 @@ fn fix_target_fires_only_when_ci_is_failing() {
         workspaces: vec![Workspace::from_task(pr, Utc::now())],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     assert!(s.fix_target_for_cursor().is_none());
 
@@ -1354,6 +1412,8 @@ fn fix_target_fires_only_when_ci_is_failing() {
         workspaces: vec![Workspace::from_task(pr, Utc::now())],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     let (_, prompt) = s.fix_target_for_cursor().expect("Failure CI must fire");
     assert!(prompt.contains("CI is failing"), "prompt: {prompt}");
@@ -1369,6 +1429,8 @@ fn work_target_fires_for_ci_failure_same_as_fix() {
         workspaces: vec![Workspace::from_task(pr, Utc::now())],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     let fix = s.fix_target_for_cursor();
     let work = s.work_target_for_cursor();
@@ -1388,6 +1450,8 @@ fn work_target_fires_for_issue_with_implement_prompt() {
         workspaces: vec![Workspace::from_task(issue, Utc::now())],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     let (_, prompt) = s
         .work_target_for_cursor()
@@ -1416,6 +1480,8 @@ fn work_target_skips_passing_pr_with_no_action() {
         workspaces: vec![Workspace::from_task(pr, Utc::now())],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     assert!(s.work_target_for_cursor().is_none());
 }
@@ -1443,6 +1509,8 @@ fn merged_closed_hidden_from_inbox_by_default() {
         ],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
 
     let visible_keys: Vec<String> = s
@@ -1493,6 +1561,8 @@ fn show_inactive_in_inbox_surfaces_merged_and_closed() {
         ],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
 
     let visible_count = s
@@ -1516,6 +1586,8 @@ fn work_key_emits_spawn_command_on_issue() {
         workspaces: vec![Workspace::from_task(issue, Utc::now())],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
 
     let mut cmds: Vec<Command> = Vec::new();
@@ -1590,6 +1662,8 @@ fn agent_state_asking_makes_workspace_findable_by_bang() {
         workspaces: vec![w],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
 
     // Before the AgentState event: `!` finds nothing.
@@ -1629,6 +1703,8 @@ fn agent_state_working_shows_spinner_and_is_not_asking() {
         workspaces: vec![w],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     let _ = s.drain_pending_notifications();
 
@@ -1671,6 +1747,8 @@ fn working_then_input_needed_swaps_the_shared_slot() {
         workspaces: vec![w],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
 
     s.on_event(&Event::AgentState {
@@ -1722,6 +1800,8 @@ fn workspace_upserted_does_not_clobber_asking_state() {
         workspaces: vec![w.clone()],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
 
     // 1. Agent goes Asking.
@@ -1764,6 +1844,8 @@ fn agent_state_asking_queues_a_desktop_notification() {
         workspaces: vec![w],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     // Drain any setup-time notifications so the assertion is clean.
     let _ = s.drain_pending_notifications();
@@ -1821,6 +1903,8 @@ fn desktop_notify_off_suppresses_os_banner_but_keeps_footer_notice() {
         workspaces: vec![w],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     let _ = s.drain_pending_notifications();
     let _ = s.drain_pending_asking_notices();
@@ -1939,6 +2023,8 @@ fn bang_jumps_to_next_asking_workspace() {
         workspaces: vec![w1, w2, w3],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
 
     s.on_event(&Event::AgentState {
@@ -1974,6 +2060,8 @@ fn shift_f_jumps_to_next_failing_ci_workspace() {
         workspaces: vec![w1, w2, w3],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
 
     let moved = s.focus_next_failing_ci_workspace();
@@ -1993,6 +2081,8 @@ fn shift_f_treats_mixed_ci_as_failing() {
         workspaces: vec![w],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     assert!(s.focus_next_failing_ci_workspace());
     assert_eq!(s.selected_session_key(), Some(&k));
@@ -2013,6 +2103,8 @@ fn shift_f_is_a_noop_when_no_ci_is_failing() {
         workspaces: vec![w],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     let before = s.selected_session_key().cloned();
     assert_eq!(before.as_ref(), Some(&starting_key));
@@ -2035,6 +2127,8 @@ fn bang_is_a_noop_when_nothing_is_asking() {
         workspaces: vec![w],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     let before = s.selected_session_key().cloned();
     assert_eq!(before.as_ref(), Some(&starting_key));

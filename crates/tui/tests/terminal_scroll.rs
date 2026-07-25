@@ -138,6 +138,8 @@ fn reattached_agent() -> TerminalStack {
             prompt_history: Vec::new(),
             composing_buffer: None,
         }],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     stack.set_active_session(Some(sk("s")));
     render(&mut stack);

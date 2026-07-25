@@ -55,6 +55,69 @@ async fn subscribe_yields_snapshot() {
     }
 }
 
+/// Snippet MRU and update dismissals are daemon-owned (#548), so a value
+/// recorded by one client is replayed to every subsequently-connecting
+/// client through `Event::Snapshot` — the cross-transport parity the old
+/// direct-store code could not provide (a `--connect` client wrote a
+/// separate, unrelated `state.db` or none at all). One `Server` stands in
+/// for "the daemon"; two independent connections stand in for the
+/// in-process TUI and a `--connect` client.
+#[tokio::test]
+async fn client_kv_recorded_by_one_connection_replays_to_another() {
+    let config = ServerConfig::in_memory();
+    let server_config = config.clone();
+    let (server_client, server_conn) = channel::pair();
+    tokio::spawn(async move {
+        Server::new(server_config).serve(server_conn).await.unwrap();
+    });
+
+    // Connection A (stands in for the in-process TUI) records a snippet
+    // use and an update dismissal.
+    server_client
+        .send(Command::RecordRecentSnippet { key: "rev".into() })
+        .unwrap();
+    server_client
+        .send(Command::SetUpdateDismissal {
+            target: "release:v0.2.0".into(),
+        })
+        .unwrap();
+
+    // Connection B (stands in for a `--connect` client) subscribes and must
+    // observe both. The writes are detached, so poll fresh subscriptions
+    // until they land or the deadline passes.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let (mut client_b, conn_b) = channel::pair();
+        let cfg = config.clone();
+        tokio::spawn(async move {
+            Server::new(cfg).serve(conn_b).await.unwrap();
+        });
+        client_b.send(Command::Subscribe).unwrap();
+        let evt = client_b.recv().await.expect("daemon responds");
+        if let Event::Snapshot {
+            recent_snippets,
+            dismissed_updates,
+            ..
+        } = evt
+        {
+            if recent_snippets == vec!["rev".to_string()]
+                && dismissed_updates == vec!["release:v0.2.0".to_string()]
+            {
+                return; // parity achieved
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!(
+                    "client B never saw the recorded state: recent={recent_snippets:?} \
+                     dismissed={dismissed_updates:?}"
+                );
+            }
+        } else {
+            panic!("expected Snapshot, got {evt:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 #[tokio::test]
 async fn subscribe_is_admitted_only_once_per_connection() {
     let (mut client, server) = channel::pair();

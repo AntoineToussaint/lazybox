@@ -89,6 +89,8 @@ fn remapped_reply_binding_mounts_reply_modal() {
         )],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     // Reply moved into the catalog (Section::Workspace) so its
     // remap now lives in `ui.action_keys`, not `Keybindings.reply`.
@@ -119,6 +121,8 @@ fn remapped_new_workspace_binding_mounts_input() {
         workspaces: vec![workspace],
         terminals: vec![],
         projects: vec![project],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     let mut overrides = std::collections::BTreeMap::new();
     overrides.insert("new_workspace".to_string(), "Ctrl-n".to_string());
@@ -185,6 +189,8 @@ fn shift_j_on_issue_with_claiming_pr_emits_collapse_command() {
         workspaces: vec![issue_ws.clone(), pr_ws],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
 
     // Force cursor onto the issue row — default sort can place
@@ -227,6 +233,8 @@ fn shift_j_on_orphan_issue_surfaces_notice_no_ipc() {
         workspaces: vec![issue_ws],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
 
     m.dispatch_key(key(Key::Char('x')));
@@ -396,6 +404,8 @@ fn handle_daemon_event_applies_preselect_on_first_snapshot() {
         workspaces: vec![workspace],
         terminals: Vec::new(),
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     };
     m.handle_daemon_event(snapshot);
     // Sidebar should now have the target workspace selected.
@@ -487,6 +497,8 @@ fn wheel_over_sidebar_scrolls_display_without_changing_selection() {
         workspaces,
         terminals: Vec::new(),
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     let selected = m.sidebar().selected_workspace_key().cloned();
     assert!(selected.is_some(), "snapshot selects a workspace");
@@ -555,6 +567,8 @@ fn r_mounts_reply_modal_from_sidebar() {
         workspaces: vec![workspace],
         terminals: Vec::new(),
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     assert_eq!(m.focus(), PaneFocus::Sidebar);
     m.dispatch_key(key(Key::Char('r')));
@@ -587,6 +601,8 @@ fn r_mounts_reply_modal_from_right_pane() {
         workspaces: vec![workspace],
         terminals: Vec::new(),
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     // Tab to the Right pane (Activity).
     m.dispatch_key(key(Key::Tab));
@@ -609,6 +625,8 @@ fn slash_opens_sidebar_search_through_the_catalog() {
         workspaces: vec![workspace],
         terminals: Vec::new(),
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     assert_eq!(m.focus(), PaneFocus::Sidebar);
     assert!(!m.sidebar().search_editing());
@@ -632,6 +650,8 @@ fn remapped_search_binding_opens_search() {
         workspaces: vec![workspace],
         terminals: Vec::new(),
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     let mut overrides = std::collections::BTreeMap::new();
     overrides.insert("open_search".to_string(), "Ctrl-f".to_string());
@@ -917,6 +937,8 @@ fn w_on_issue_with_running_claude_injects_implement_prompt() {
         workspaces: vec![ws],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     m.handle_daemon_event(IpcEvent::TerminalSpawned {
         model_label: None,
@@ -1004,6 +1026,8 @@ fn w_on_issue_from_right_pane_also_injects() {
         workspaces: vec![ws],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     m.handle_daemon_event(IpcEvent::TerminalSpawned {
         model_label: None,
@@ -1074,6 +1098,8 @@ fn sidebar_w_honors_activity_selection() {
         workspaces: vec![ws],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
 
     // Select the focused activity row from the right pane with Space,
@@ -1161,6 +1187,8 @@ fn shift_a_with_no_sessions_does_not_mount_picker() {
         workspaces: vec![ws],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     // `x a` should be a no-op (no sessions to adopt).
     m.dispatch_key(key(Key::Char('x')));
@@ -1200,6 +1228,8 @@ fn shift_a_with_sessions_mounts_adopt_picker() {
         workspaces: vec![source, target],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     // Sanity: the cursor must be on a workspace with sessions for
     // `x a` to fire. If this fails, the picker test diagnoses the
@@ -1271,6 +1301,8 @@ fn tick_right_drives_auto_mark_and_emits_command() {
         workspaces: vec![ws],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     // Auto-mark-read fires after `ui.auto_mark_delay` (default 1s).
     std::thread::sleep(std::time::Duration::from_millis(1100));
@@ -1326,6 +1358,8 @@ fn leader_g_arms_github_group_when_workspace_selected() {
         workspaces: vec![Workspace::from_task(task_with_pr("o/r#1"), Utc::now())],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
 
     m.dispatch_key(key(Key::Char('g')));
@@ -1349,6 +1383,8 @@ fn leader_g_then_m_mounts_merge_confirm() {
         workspaces: vec![pr_ws],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     assert!(m.__test_sidebar_mut().focus_workspace_key(&pr_key));
 
@@ -1368,6 +1404,8 @@ fn leader_g_then_esc_cancels() {
         workspaces: vec![Workspace::from_task(task_with_pr("o/r#1"), Utc::now())],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
 
     m.dispatch_key(key(Key::Char('g')));
@@ -1392,6 +1430,8 @@ fn leader_g_then_unmapped_key_redispatches() {
         workspaces: vec![pr_ws],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     assert!(m.__test_sidebar_mut().focus_workspace_key(&pr_key));
 
@@ -1449,6 +1489,8 @@ fn spawn_agent_c_spawns_claude() {
         workspaces: vec![pr_ws],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     assert!(m.__test_sidebar_mut().focus_workspace_key(&pr_key));
     while server.rx.try_recv().is_ok() {}
@@ -1473,6 +1515,8 @@ fn spawn_agent_x_spawns_codex() {
         workspaces: vec![pr_ws],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     assert!(m.__test_sidebar_mut().focus_workspace_key(&pr_key));
     while server.rx.try_recv().is_ok() {}
@@ -1498,6 +1542,8 @@ fn spawn_agent_key_is_remappable() {
         workspaces: vec![pr_ws],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     assert!(m.__test_sidebar_mut().focus_workspace_key(&pr_key));
     while server.rx.try_recv().is_ok() {}
@@ -1530,6 +1576,8 @@ fn long_snooze_confirms_then_snoozes_a_year_out() {
         workspaces: vec![pr_ws],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     assert!(m.__test_sidebar_mut().focus_workspace_key(&pr_key));
     while server.rx.try_recv().is_ok() {}
@@ -1596,6 +1644,8 @@ fn gr_with_no_candidate_reviewers_shows_framed_empty_state() {
         workspaces: vec![ws],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
 
     m.dispatch_key(key(Key::Char('g')));
@@ -1675,6 +1725,8 @@ fn model_on_activity_pane() -> (
         workspaces: vec![ws],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     // Enter on the sidebar row moves focus to the activity pane.
     m.dispatch_key(key(Key::Enter));
@@ -1795,6 +1847,8 @@ fn j_and_k_navigate_the_sidebar() {
         workspaces: vec![newer, older],
         terminals: vec![],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     assert_eq!(
         m.__test_sidebar_mut().selected_workspace().map(|w| &w.key),
@@ -1975,6 +2029,8 @@ fn snapshot_terminal_backstops_worktree_progress_dismissal() {
             composing_buffer: None,
         }],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     assert!(
         m.modal_stack.contains(&Id::WorktreeProgress),

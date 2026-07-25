@@ -192,119 +192,106 @@ mod effects_tests {
         assert!(n.message.contains(lazybox_ipc::BUILD_VERSION));
     }
 
+    /// An empty daemon snapshot with no dismissed targets.
+    fn empty_snapshot() -> lazybox_ipc::Event {
+        lazybox_ipc::Event::Snapshot {
+            workspaces: Vec::new(),
+            terminals: Vec::new(),
+            projects: Vec::new(),
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        }
+    }
+
+    fn release_update(available: &str) -> crate::build_guard::AvailableUpdate {
+        crate::build_guard::AvailableUpdate::Release {
+            current: "v0.1.7".into(),
+            available: available.into(),
+            install: crate::build_guard::ReleaseInstall::Homebrew,
+        }
+    }
+
+    // The update modal waits for the first snapshot so its dismissal check
+    // runs against the daemon's authoritative set, not an empty one (#548).
     #[test]
-    fn update_modal_dismissal_is_persisted_per_available_target() {
-        use crate::build_guard::ReleaseInstall;
-        use lazybox_store::{MemoryStore, Store};
-        use std::sync::Arc;
+    fn update_modal_defers_until_the_first_snapshot() {
+        let (client, _server) = lazybox_ipc::channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model");
+
+        m.show_update_if_new(release_update("v0.2.0"));
+        assert!(
+            m.top_modal().is_none(),
+            "no modal before the dismissal set is known"
+        );
+
+        m.handle_daemon_event(empty_snapshot());
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::Update),
+            "the snapshot releases the stashed update"
+        );
+    }
+
+    // Dismissing routes through the daemon (`SetUpdateDismissal`) instead of
+    // a client-local store write, so it sticks across clients/restarts (#548).
+    #[test]
+    fn update_dismissal_routes_through_the_daemon() {
         use tuirealm::event::{Key, KeyEvent, KeyModifiers};
 
-        let store: Arc<dyn Store> = Arc::new(MemoryStore::new());
-        let update = crate::build_guard::AvailableUpdate::Release {
-            current: "v0.1.7".into(),
-            available: "v0.2.0".into(),
-            install: ReleaseInstall::Homebrew,
-        };
+        let (client, mut server) = lazybox_ipc::channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model");
+        m.handle_daemon_event(empty_snapshot());
+        while server.rx.try_recv().is_ok() {} // drain Subscribe + snapshot side effects
 
-        let mut m = build_model();
-        m.show_update_if_new(update.clone(), Some(store.clone()));
+        m.show_update_if_new(release_update("v0.2.0"));
         assert_eq!(m.top_modal(), Some(&Id::Update));
         m.dispatch_modal_key(KeyEvent::new(Key::Enter, KeyModifiers::NONE));
         assert!(m.top_modal().is_none(), "Enter dismisses the modal");
-        let dismissed_v2 = dismissed_update_key("release:v0.2.0");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-        while store.get_kv(&dismissed_v2).unwrap().is_none() && std::time::Instant::now() < deadline
-        {
-            std::thread::yield_now();
-        }
-        while m.update_dismissals_pending > 0 && std::time::Instant::now() < deadline {
-            m.tick_update_dismissal();
-            std::thread::yield_now();
-        }
-        assert_eq!(m.update_dismissals_pending, 0);
-        assert_eq!(store.get_kv(&dismissed_v2).unwrap().as_deref(), Some("1"));
 
-        let mut next_launch = build_model();
-        next_launch.show_update_if_new(update, Some(store.clone()));
-        assert!(
-            next_launch.top_modal().is_none(),
-            "the dismissed target stays quiet"
-        );
-
-        next_launch.show_update_if_new(
-            crate::build_guard::AvailableUpdate::Release {
-                current: "v0.1.7".into(),
-                available: "v0.3.0".into(),
-                install: ReleaseInstall::Shell,
-            },
-            Some(store.clone()),
-        );
-        assert_eq!(next_launch.top_modal(), Some(&Id::Update));
-        next_launch.dispatch_modal_key(KeyEvent::new(Key::Esc, KeyModifiers::NONE));
-        assert!(next_launch.top_modal().is_none(), "Esc dismisses the modal");
-        let dismissed_v3 = dismissed_update_key("release:v0.3.0");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-        while store.get_kv(&dismissed_v3).unwrap().is_none() && std::time::Instant::now() < deadline
-        {
-            std::thread::yield_now();
-        }
-        while next_launch.update_dismissals_pending > 0 && std::time::Instant::now() < deadline {
-            next_launch.tick_update_dismissal();
-            std::thread::yield_now();
-        }
-        assert_eq!(next_launch.update_dismissals_pending, 0);
-        assert_eq!(store.get_kv(&dismissed_v3).unwrap().as_deref(), Some("1"));
-        assert_eq!(store.get_kv(&dismissed_v2).unwrap().as_deref(), Some("1"));
-    }
-
-    #[test]
-    fn update_dismissal_without_a_store_is_not_silently_forgotten() {
-        use crate::build_guard::ReleaseInstall;
-        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
-
-        let mut m = build_model();
-        m.show_update_if_new(
-            crate::build_guard::AvailableUpdate::Release {
-                current: "v0.1.7".into(),
-                available: "v0.2.0".into(),
-                install: ReleaseInstall::Shell,
-            },
-            None,
-        );
-        m.dispatch_modal_key(KeyEvent::new(Key::Esc, KeyModifiers::NONE));
-
-        let notice = m.status.notice.as_ref().expect("persistence warning");
-        assert!(notice.message.contains("local state is unavailable"));
-    }
-
-    #[test]
-    fn update_dismissal_write_failure_is_reported() {
-        use crate::build_guard::ReleaseInstall;
-        use lazybox_store::{Store, StoreError};
-        use std::sync::Arc;
-        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
-
-        struct FailingStore;
-        impl Store for FailingStore {
-            fn set_kv(&self, _key: &str, _value: &str) -> Result<(), StoreError> {
-                Err(StoreError::Backend("disk is read-only".into()))
+        let mut dismissal = None;
+        while let Ok(cmd) = server.rx.try_recv() {
+            if let IpcCommand::SetUpdateDismissal { target } = cmd {
+                dismissal = Some(target);
             }
         }
-
-        let mut m = build_model();
-        m.show_update_if_new(
-            crate::build_guard::AvailableUpdate::Release {
-                current: "v0.1.7".into(),
-                available: "v0.2.0".into(),
-                install: ReleaseInstall::Shell,
-            },
-            Some(Arc::new(FailingStore)),
+        assert_eq!(
+            dismissal.as_deref(),
+            Some("release:v0.2.0"),
+            "dismissal is reported to the daemon"
         );
-        m.dispatch_modal_key(KeyEvent::new(Key::Esc, KeyModifiers::NONE));
-        m.finish_update_dismissal();
 
-        let notice = m.status.notice.as_ref().expect("persistence warning");
-        assert!(notice.message.contains("disk is read-only"));
+        // The local echo keeps the same target quiet this session without
+        // waiting on the next snapshot.
+        m.show_update_if_new(release_update("v0.2.0"));
+        assert!(m.top_modal().is_none(), "the dismissed target stays quiet");
+
+        // A newer target is not covered by the older dismissal.
+        m.show_update_if_new(release_update("v0.3.0"));
+        assert_eq!(m.top_modal(), Some(&Id::Update));
+    }
+
+    // A target the daemon already reports as dismissed never re-mounts.
+    #[test]
+    fn dismissed_target_from_the_snapshot_stays_quiet() {
+        let (client, _server) = lazybox_ipc::channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model");
+        m.handle_daemon_event(lazybox_ipc::Event::Snapshot {
+            workspaces: Vec::new(),
+            terminals: Vec::new(),
+            projects: Vec::new(),
+            recent_snippets: Vec::new(),
+            dismissed_updates: vec!["release:v0.2.0".into()],
+        });
+
+        m.show_update_if_new(release_update("v0.2.0"));
+        assert!(m.top_modal().is_none(), "dismissed target stays quiet");
+
+        m.show_update_if_new(release_update("v0.3.0"));
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::Update),
+            "a fresh target still shows"
+        );
     }
 
     /// Issue #265: a `g m` merge GitHub rejected must surface as a
@@ -1333,6 +1320,8 @@ mod effects_tests {
             )],
             terminals: vec![],
             projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
         assert!(m.sidebar.focus_workspace_key(&session_key));
         m.handle_daemon_event(IpcEvent::TerminalSpawned {
@@ -1627,6 +1616,8 @@ snippets:
             )],
             terminals: vec![],
             projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
         assert!(
             m.sidebar.focus_workspace_key(&session_key),
@@ -1888,6 +1879,8 @@ snippets:
                 .collect(),
             terminals: vec![],
             projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
         for (i, kind) in kinds.iter().enumerate() {
             if let Some(kind) = kind {
@@ -3287,6 +3280,8 @@ mod coalesce_tests {
                 prompt_history: Vec::new(),
                 composing_buffer: None,
             }],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
 
         assert!(matches!(
@@ -3799,6 +3794,8 @@ mod subscribed_projects_tests {
             workspaces: vec![],
             terminals: vec![],
             projects: vec![Project::new(pk.clone(), "acme/widget", chrono::Utc::now())],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
         assert!(m.projects.contains_key(&pk), "snapshot seeds the project");
 
@@ -3806,6 +3803,8 @@ mod subscribed_projects_tests {
             workspaces: vec![],
             terminals: vec![],
             projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
         assert!(
             !m.projects.contains_key(&pk),
@@ -3827,6 +3826,8 @@ mod subscribed_projects_tests {
             workspaces: vec![],
             terminals: vec![],
             projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
         assert!(
             m.projects.contains_key(&pk),
@@ -5833,6 +5834,8 @@ mod daemon_event_fastpath_tests {
             workspaces: vec![ws],
             terminals: vec![],
             projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
         key
     }
@@ -6729,6 +6732,8 @@ mod leader_tile_tests {
                 prompt_history: Vec::new(),
                 composing_buffer: Some("\n  recover me".into()),
             }],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
         m.focus = PaneFocus::Terminals;
         while server.rx.try_recv().is_ok() {}
@@ -6806,6 +6811,8 @@ mod leader_tile_tests {
                 ],
                 composing_buffer: None,
             }],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
         // A single-leaf split so `focused_terminal_id` resolves via the
         // tile tree (the model harness doesn't drive the tab/active-session
@@ -7468,6 +7475,8 @@ mod collapse_into_pr_tests {
             workspaces: vec![issue_ws.clone(), pr_ws.clone(), other_ws],
             terminals: vec![],
             projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
 
         // User is on the issue, with Claude running and on screen.
@@ -7552,6 +7561,8 @@ mod collapse_into_pr_tests {
             workspaces: vec![issue_ws.clone(), pr_ws.clone()],
             terminals: vec![],
             projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
 
         // Claude on the issue is blocked on a prompt.
@@ -7742,6 +7753,8 @@ mod activity_pane_visibility_tests {
             workspaces,
             terminals: vec![],
             projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
     }
 
@@ -8195,6 +8208,8 @@ mod workspace_focus_memory_tests {
             workspaces: vec![empty_ws("github:o/r#1"), empty_ws("github:o/r#2")],
             terminals: vec![],
             projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
         let a = key_of("github:o/r#1");
         let b = key_of("github:o/r#2");
@@ -8251,6 +8266,8 @@ mod workspace_focus_memory_tests {
             workspaces: vec![empty_ws("github:o/r#1"), empty_ws("github:o/r#2")],
             terminals: vec![],
             projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
         let a = key_of("github:o/r#1");
         let b = key_of("github:o/r#2");
@@ -8307,6 +8324,8 @@ mod workspace_focus_memory_tests {
             workspaces: vec![empty_ws("github:o/r#1")],
             terminals: vec![],
             projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
         let a = key_of("github:o/r#1");
         // No terminal spawned; force the (otherwise auto-hidden)
@@ -8352,6 +8371,8 @@ mod workspace_focus_memory_tests {
             workspaces,
             terminals: vec![],
             projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
 
         let area = Rect::new(0, 0, 120, 40);
@@ -8431,6 +8452,8 @@ mod workspace_focus_memory_tests {
             workspaces,
             terminals: vec![],
             projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
 
         let area = Rect::new(0, 0, 120, 40);
@@ -8480,6 +8503,8 @@ mod workspace_focus_memory_tests {
             workspaces: vec![empty_ws("github:o/r#1")],
             terminals: vec![],
             projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
         let a = key_of("github:o/r#1");
         spawn_terminal(&mut m, &a, 1);
@@ -9265,6 +9290,8 @@ mod spawn_spinner_projection_tests {
             )],
             terminals: vec![],
             projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
         assert!(m.sidebar.focus_workspace_key(&session_key));
         m.handle_daemon_event(IpcEvent::TerminalSpawned {
@@ -9351,6 +9378,8 @@ mod worktree_progress_recovery_tests {
             workspaces: vec![Workspace::empty(key.clone(), "main", Utc::now())],
             terminals: vec![],
             projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
 
         // Provisioning starts — the checklist mounts on "Cloning
@@ -9374,6 +9403,8 @@ mod worktree_progress_recovery_tests {
             workspaces: vec![Workspace::empty(key.clone(), "main", Utc::now())],
             terminals: vec![terminal_snapshot(session_key.clone())],
             projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
         assert!(
             m.modal_stack.contains(&Id::WorktreeProgress),
@@ -9407,6 +9438,8 @@ mod worktree_progress_recovery_tests {
             workspaces: vec![Workspace::empty(key, "main", Utc::now())],
             terminals: vec![terminal_snapshot(session_key)],
             projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
         assert!(
             m.modal_stack.contains(&Id::WorktreeProgress),
@@ -9526,6 +9559,8 @@ mod worktree_progress_recovery_tests {
             workspaces: vec![Workspace::empty(key, "main", Utc::now())],
             terminals: vec![terminal_snapshot(other)],
             projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
         assert!(
             m.modal_stack.contains(&Id::WorktreeProgress),
@@ -9556,6 +9591,8 @@ mod worktree_progress_recovery_tests {
             workspaces: vec![Workspace::empty(key, "main", Utc::now())],
             terminals: vec![terminal_snapshot(session_key)],
             projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
         assert!(
             m.modal_stack.contains(&Id::WorktreeProgress),
@@ -9710,6 +9747,8 @@ mod click_outside_modal_dismiss_tests {
             workspaces: vec![empty_ws("github:o/r#1"), empty_ws("github:o/r#2")],
             terminals: vec![],
             projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
         let a = key_of("github:o/r#1");
         let b = key_of("github:o/r#2");
@@ -9762,6 +9801,8 @@ mod click_outside_modal_dismiss_tests {
             workspaces: vec![empty_ws("github:o/r#1"), empty_ws("github:o/r#2")],
             terminals: vec![],
             projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
         let a = key_of("github:o/r#1");
         let b = key_of("github:o/r#2");
@@ -9812,6 +9853,8 @@ mod click_outside_modal_dismiss_tests {
             workspaces: vec![empty_ws("github:o/r#1")],
             terminals: vec![],
             projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
         m.mount_clean_worktrees_confirm();
         assert!(m.modal_stack.contains(&Id::CleanWorktreesConfirm));
@@ -9857,6 +9900,8 @@ mod click_outside_modal_dismiss_tests {
             workspaces: vec![empty_ws("github:o/r#1")],
             terminals: vec![],
             projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
         m.mount_help();
         assert!(m.modal_stack.contains(&Id::Help));
@@ -10051,6 +10096,8 @@ mod merge_latch_tests {
             workspaces: vec![pr_ws(TaskState::Open)],
             terminals: vec![],
             projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
         assert!(
             m.merge_confirmed.contains(&key),
@@ -11126,27 +11173,32 @@ mod dismiss_and_messages_tests {
 
 #[cfg(test)]
 mod recent_snippets_tests {
-    //! Persistence of the snippet-picker "Recent" MRU across restarts
-    //! (#311): `record_recent_snippet` writes through to the state DB,
-    //! `seed_recent_snippets` restores it, and a corrupt / missing
-    //! value degrades to an empty list without panicking.
+    //! The snippet-picker "Recent" MRU is owned by the daemon (#548):
+    //! `record_recent_snippet` reports each use via
+    //! `Command::RecordRecentSnippet` and the persisted order arrives in
+    //! `Event::Snapshot`, which `seed_recent_snippets_from_snapshot` prunes
+    //! against the loaded catalog. This behaves identically over the
+    //! in-process and `--connect` transports because both funnel through
+    //! the same command + snapshot.
     use super::super::*;
+    use lazybox_ipc::Event;
     use lazybox_ipc::channel;
-    use lazybox_store::Store;
-    use lazybox_store::mock::MemoryStore;
-    use std::sync::Arc;
     use tuirealm::ratatui::layout::Size;
 
-    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
-        let (client, _server) = channel::pair();
-        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    fn build_model() -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        lazybox_ipc::Connection,
+    ) {
+        let (client, server) = channel::pair();
+        (
+            Model::new_for_test(client, Size::new(120, 40)).expect("model init"),
+            server,
+        )
     }
 
-    /// Load a snippet library whose keys are exactly `keys` into the
-    /// model, so `seed_recent_snippets` has a catalog to prune stale
-    /// MRU keys against — mirroring the production boot order where
-    /// `apply_snippets` always runs before `seed_recent_snippets`.
-    /// `label` keys the tmp file so parallel tests don't collide.
+    /// Load a snippet library whose keys are exactly `keys` into the model,
+    /// so seeding has a catalog to prune stale MRU keys against — mirroring
+    /// the boot order where `apply_snippets` runs before the first snapshot.
     fn apply_snippet_keys(
         m: &mut Model<tuirealm::terminal::TestTerminalAdapter>,
         label: &str,
@@ -11167,151 +11219,75 @@ mod recent_snippets_tests {
         );
     }
 
-    #[test]
-    fn record_writes_through_to_store() {
-        let store = Arc::new(MemoryStore::new());
-        let mut m = build_model();
-        m.seed_recent_snippets(store.clone());
-        m.record_recent_snippet("rev".into());
-
-        let raw = store
-            .get_kv(RECENT_SNIPPETS_KV_KEY)
-            .unwrap()
-            .expect("recent_snippets persisted");
-        let stored: Vec<String> = serde_json::from_str(&raw).unwrap();
-        assert_eq!(stored, vec!["rev".to_string()]);
+    fn snapshot_with_recent(recent: Vec<String>) -> Event {
+        Event::Snapshot {
+            workspaces: Vec::new(),
+            terminals: Vec::new(),
+            projects: Vec::new(),
+            recent_snippets: recent,
+            dismissed_updates: Vec::new(),
+        }
     }
 
     #[test]
-    fn record_without_store_stays_session_only() {
-        let mut m = build_model();
-        // No seed_recent_snippets → no store handle (the --connect path).
+    fn record_updates_local_mru_and_reports_to_daemon() {
+        let (mut m, mut server) = build_model();
+        while server.rx.try_recv().is_ok() {} // drain Subscribe
+
         m.record_recent_snippet("rev".into());
         assert_eq!(m.recent_snippets, vec!["rev".to_string()]);
+
+        let mut reported = None;
+        while let Ok(cmd) = server.rx.try_recv() {
+            if let IpcCommand::RecordRecentSnippet { key } = cmd {
+                reported = Some(key);
+            }
+        }
+        assert_eq!(reported.as_deref(), Some("rev"), "the use is reported");
     }
 
     #[test]
-    fn seed_missing_value_yields_empty() {
-        let store = Arc::new(MemoryStore::new());
-        let mut m = build_model();
-        m.seed_recent_snippets(store);
-        assert!(m.recent_snippets.is_empty());
+    fn record_dedups_and_caps_local_mru() {
+        let (mut m, _server) = build_model();
+        for k in ["a", "b", "c", "d", "e", "f"] {
+            m.record_recent_snippet(k.to_string());
+        }
+        m.record_recent_snippet("a".into());
+        assert_eq!(m.recent_snippets, vec!["a", "f", "e", "d", "c"]);
     }
 
     #[test]
-    fn seed_corrupt_value_yields_empty_no_panic() {
-        let store = Arc::new(MemoryStore::new());
-        store.set_kv(RECENT_SNIPPETS_KV_KEY, "not json{").unwrap();
-        let mut m = build_model();
-        m.seed_recent_snippets(store);
-        assert!(m.recent_snippets.is_empty());
+    fn seed_from_snapshot_prunes_and_caps() {
+        let (mut m, _server) = build_model();
+        apply_snippet_keys(&mut m, "prune", &["rev", "pr"]);
+        // The daemon list carries two live keys interleaved with two gone.
+        m.handle_daemon_event(snapshot_with_recent(vec![
+            "rev".into(),
+            "gone".into(),
+            "pr".into(),
+            "dead".into(),
+        ]));
+        assert_eq!(m.recent_snippets, vec!["rev".to_string(), "pr".to_string()]);
     }
 
     #[test]
-    fn seed_caps_to_max() {
-        let store = Arc::new(MemoryStore::new());
+    fn seed_from_snapshot_caps_to_max() {
+        let (mut m, _server) = build_model();
         let overflow: Vec<String> = (0..RECENT_SNIPPETS_MAX + 3)
             .map(|i| format!("s{i}"))
             .collect();
-        store
-            .set_kv(
-                RECENT_SNIPPETS_KV_KEY,
-                &serde_json::to_string(&overflow).unwrap(),
-            )
-            .unwrap();
-        let mut m = build_model();
-        // All stored keys are catalog-backed, so only the cap trims.
         let keys: Vec<&str> = overflow.iter().map(String::as_str).collect();
         apply_snippet_keys(&mut m, "caps", &keys);
-        m.seed_recent_snippets(store);
+        m.handle_daemon_event(snapshot_with_recent(overflow));
         assert_eq!(m.recent_snippets.len(), RECENT_SNIPPETS_MAX);
         assert_eq!(m.recent_snippets[0], "s0");
     }
 
     #[test]
-    fn round_trip_across_restart_preserves_mru_order() {
-        let store: Arc<dyn lazybox_store::Store> = Arc::new(MemoryStore::new());
-
-        // Session one: record A, B, C.
-        let mut m1 = build_model();
-        apply_snippet_keys(&mut m1, "round-trip-1", &["A", "B", "C"]);
-        m1.seed_recent_snippets(store.clone());
-        m1.record_recent_snippet("A".into());
-        m1.record_recent_snippet("B".into());
-        m1.record_recent_snippet("C".into());
-
-        // Session two: a fresh Model seeded from the same store, with
-        // the same catalog loaded so no key is pruned.
-        let mut m2 = build_model();
-        apply_snippet_keys(&mut m2, "round-trip-2", &["A", "B", "C"]);
-        m2.seed_recent_snippets(store);
-        assert_eq!(
-            m2.recent_snippets,
-            vec!["C".to_string(), "B".to_string(), "A".to_string()],
-        );
-    }
-
-    /// A stored key whose snippet was since renamed / deleted is pruned
-    /// on seed — otherwise it sits in the MRU consuming a slot it can
-    /// never render into, and a small rotating set of live keys never
-    /// evicts it (finding #1). The pruned list is also flushed back so
-    /// the dead key doesn't linger in the DB.
-    #[test]
-    fn seed_prunes_keys_absent_from_catalog() {
-        let store: Arc<dyn lazybox_store::Store> = Arc::new(MemoryStore::new());
-        // MRU carries two live keys interleaved with two now-gone keys.
-        store
-            .set_kv(
-                RECENT_SNIPPETS_KV_KEY,
-                &serde_json::to_string(&["rev", "gone", "pr", "dead"]).unwrap(),
-            )
-            .unwrap();
-
-        let mut m = build_model();
-        apply_snippet_keys(&mut m, "prune", &["rev", "pr"]);
-        m.seed_recent_snippets(store.clone());
-
-        // Only the catalog-backed keys survive, order preserved.
-        assert_eq!(m.recent_snippets, vec!["rev".to_string(), "pr".to_string()]);
-        // …and the DB is rewritten to the pruned list, so the dead keys
-        // are gone for good.
-        let raw = store.get_kv(RECENT_SNIPPETS_KV_KEY).unwrap().unwrap();
-        let stored: Vec<String> = serde_json::from_str(&raw).unwrap();
-        assert_eq!(stored, vec!["rev".to_string(), "pr".to_string()]);
-    }
-
-    /// The bundled boot entry point applies the catalog *before* seeding,
-    /// so the prune sees a populated catalog. Proven here by passing a
-    /// stored MRU with a stale key: if seeding ran first (empty catalog)
-    /// every key — including the live one — would be wiped.
-    #[test]
-    fn apply_and_seed_bundles_ordering_so_prune_sees_catalog() {
-        let store: Arc<dyn lazybox_store::Store> = Arc::new(MemoryStore::new());
-        store
-            .set_kv(
-                RECENT_SNIPPETS_KV_KEY,
-                &serde_json::to_string(&["rev", "gone"]).unwrap(),
-            )
-            .unwrap();
-
-        let tmp_dir =
-            std::env::temp_dir().join(format!("lazybox-recent-{}-bundle", std::process::id(),));
-        std::fs::create_dir_all(&tmp_dir).unwrap();
-        let tmp = tmp_dir.join("snippets.yaml");
-        std::fs::write(
-            &tmp,
-            "snippets:\n  rev:\n    description: rev\n    body: b\n",
-        )
-        .unwrap();
-        let snippets =
-            lazybox_config::Snippets::load_from(&tmp, lazybox_config::SnippetOrigin::Global)
-                .unwrap();
-
-        let mut m = build_model();
-        m.apply_snippets_and_seed_recent(snippets, store);
-        // The live key survives (catalog was applied first); the stale
-        // one is pruned.
-        assert_eq!(m.recent_snippets, vec!["rev".to_string()]);
+    fn empty_snapshot_yields_empty_mru() {
+        let (mut m, _server) = build_model();
+        m.handle_daemon_event(snapshot_with_recent(Vec::new()));
+        assert!(m.recent_snippets.is_empty());
     }
 }
 

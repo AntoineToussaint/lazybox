@@ -200,6 +200,8 @@ fn snapshot_replaces_all_terminals() {
             composing_buffer: None,
         }],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     assert_eq!(t.terminal_count(), 1);
     t.set_active_session(Some(sk("o/r#3")));
@@ -1197,6 +1199,8 @@ fn snapshot_restores_recap_for_agent_terminal() {
             composing_buffer: None,
         }],
         projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
     });
     t.set_active_session(Some(sk("o/r#1")));
 

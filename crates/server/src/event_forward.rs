@@ -778,6 +778,8 @@ mod tests {
                 composing_buffer: None,
             }],
             projects: Vec::new(),
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         };
         assert!(matches!(state.route(&tx, snap), ControlFlow::Continue(())));
 

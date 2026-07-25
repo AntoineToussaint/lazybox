@@ -1381,3 +1381,189 @@ mod linked_issue_modal_tests {
         );
     }
 }
+
+/// Issue #567: the PR header surfaces the originating issue as its own
+/// clickable line, and the title itself is a clickable link to the PR.
+#[cfg(test)]
+mod originating_issue_header_tests {
+    use super::super::{PaneId, RightPane};
+    use chrono::Utc;
+    use lazybox_core::{Task, TaskId, Workspace};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+
+    fn task(kind: &str, number: u64, closes: Vec<TaskId>) -> Task {
+        Task {
+            id: TaskId {
+                source: "github".into(),
+                key: format!("o/r#{number}"),
+            },
+            title: format!("a {kind}"),
+            body: None,
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: format!("https://github.com/o/r/{kind}/{number}"),
+            repo: Some("o/r".into()),
+            branch: Some("main".into()),
+            base_branch: None,
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            kind: None,
+            closes_issues: closes,
+        }
+    }
+
+    fn rows(pane: &mut RightPane, w: u16, h: u16) -> Vec<String> {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| pane.render(Rect::new(0, 0, w, h), f, true))
+            .unwrap();
+        let buf = term.backend().buffer();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect()
+    }
+
+    fn issue_id(number: u64) -> TaskId {
+        TaskId {
+            source: "github".into(),
+            key: format!("o/r#{number}"),
+        }
+    }
+
+    #[test]
+    fn closes_issues_renders_a_clickable_issue_line() {
+        // A PR whose `closingIssuesReferences` names #167 but hasn't had
+        // that issue folded into the workspace: the line is derived from
+        // the reference and the URL is constructed.
+        let pr = task("pull", 172, vec![issue_id(167)]);
+        let ws = Workspace::from_task(pr, Utc::now());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+
+        assert!(
+            rows(&mut pane, 80, 24)
+                .iter()
+                .any(|r| r.contains("Issue: #167")),
+            "header shows the originating issue",
+        );
+        let (row, url) = pane
+            .click_hits
+            .header_issue
+            .clone()
+            .expect("issue line registers a click target");
+        assert_eq!(url, "https://github.com/o/r/issues/167");
+        assert!(pane.handle_mouse_click(0, row));
+        assert_eq!(pane.take_open_url().as_deref(), Some(url.as_str()));
+    }
+
+    #[test]
+    fn folded_issue_uses_its_real_url() {
+        // Once the issue is folded into the PR workspace (`x j` /
+        // auto-collapse), the header link uses the issue Task's real URL
+        // rather than a derived one.
+        let mut ws = Workspace::from_task(task("pull", 172, vec![]), Utc::now());
+        ws.attach_task(task("issues", 167, vec![]));
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+
+        assert!(
+            rows(&mut pane, 80, 24)
+                .iter()
+                .any(|r| r.contains("Issue: #167")),
+            "header shows the folded originating issue",
+        );
+        let (row, url) = pane
+            .click_hits
+            .header_issue
+            .clone()
+            .expect("issue line registers a click target");
+        assert_eq!(url, "https://github.com/o/r/issues/167");
+        assert!(pane.handle_mouse_click(0, row));
+        assert_eq!(pane.take_open_url().as_deref(), Some(url.as_str()));
+    }
+
+    #[test]
+    fn title_click_opens_the_task_url() {
+        let mut ws = Workspace::from_task(task("pull", 172, vec![issue_id(167)]), Utc::now());
+        ws.attach_task(task("issues", 167, vec![]));
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        let _ = rows(&mut pane, 80, 24);
+
+        let (row, url) = pane
+            .click_hits
+            .header_title
+            .clone()
+            .expect("title line registers a click target");
+        assert_eq!(url, "https://github.com/o/r/pull/172");
+        assert!(pane.handle_mouse_click(0, row));
+        assert_eq!(pane.take_open_url().as_deref(), Some(url.as_str()));
+    }
+
+    #[test]
+    fn plain_pr_has_no_issue_line() {
+        let ws = Workspace::from_task(task("pull", 172, vec![]), Utc::now());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+
+        assert!(pane.click_hits.header_issue.is_none());
+        assert!(
+            !rows(&mut pane, 80, 24).iter().any(|r| r.contains("Issue:")),
+            "a PR with no tracked issue shows no issue line",
+        );
+    }
+
+    #[test]
+    fn issue_workspace_has_no_issue_line() {
+        // An issue-only workspace is its own primary — nothing to point
+        // back to.
+        let ws = Workspace::from_task(task("issues", 167, vec![]), Utc::now());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+
+        assert!(pane.click_hits.header_issue.is_none());
+        assert!(
+            !rows(&mut pane, 80, 24).iter().any(|r| r.contains("Issue:")),
+            "an issue workspace shows no originating-issue line",
+        );
+    }
+
+    #[test]
+    fn squished_header_does_not_register_offscreen_click_targets() {
+        // A pane too short to paint the whole header must not leave a
+        // hit region pointing at a row the header never drew — a click
+        // there would otherwise open the browser over whatever paints
+        // below the clipped header.
+        let ws = Workspace::from_task(task("pull", 172, vec![issue_id(167)]), Utc::now());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+
+        // 3 rows total: the header chunk can't fit the branch/issue rows.
+        let _ = rows(&mut pane, 80, 3);
+        if let Some((row, _)) = &pane.click_hits.header_issue {
+            assert!(*row < 3, "issue hit region must stay within the pane");
+        }
+        if let Some((row, _)) = &pane.click_hits.header_title {
+            assert!(*row < 3, "title hit region must stay within the pane");
+        }
+    }
+}

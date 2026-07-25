@@ -1462,6 +1462,9 @@ impl<T: TerminalAdapter> Model<T> {
                         if self.right.take_open_description() {
                             self.open_focused_description();
                         }
+                        if let Some(url) = self.right.take_open_url() {
+                            self.open_external_url(&url);
+                        }
                         if let Some(msg) = self.right.drain_selection_notice() {
                             self.flash_hint(msg);
                         }

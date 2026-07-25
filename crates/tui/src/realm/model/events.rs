@@ -10,7 +10,7 @@
 //! mouse-capture toggle and pane-focus sync helpers round out
 //! the "things the run loop calls between keystrokes" surface.
 
-use super::{Id, Model, Msg, PaneFocus};
+use super::{Id, ModalFlow, Model, Msg, PaneFocus};
 use lazybox_ipc::{Command as IpcCommand, Event as IpcEvent};
 use tuirealm::terminal::TerminalAdapter;
 
@@ -144,13 +144,12 @@ impl<T: TerminalAdapter> Model<T> {
     /// `MergedPrRemovable`) could otherwise stack duplicate prompts —
     /// belt and braces.
     fn removal_already_pending(&self, workspace_key: &lazybox_core::WorkspaceKey) -> bool {
-        let active = self
-            .active_removal_prompt
-            .as_ref()
-            .map(|(k, _)| k == workspace_key)
-            .unwrap_or(false);
+        let active = matches!(
+            &self.modal_flow,
+            Some(ModalFlow::RemovalPrompt { workspace, .. }) if workspace == workspace_key
+        );
         let queued = self
-            .pending_removal_prompts
+            .removal_prompt_queue
             .iter()
             .any(|p| &p.workspace_key == workspace_key);
         active || queued
@@ -515,8 +514,8 @@ impl<T: TerminalAdapter> Model<T> {
             // this upsert matches the name the user just typed,
             // focus the row + auto-mount the new-workspace input so
             // they can keep typing without re-aiming.
-            if self.pending_focus_project_name.as_deref() == Some(p.name.as_str()) {
-                self.pending_focus_project_name = None;
+            if self.deferred_focus_project.as_deref() == Some(p.name.as_str()) {
+                self.deferred_focus_project = None;
                 let project_key = p.key.clone();
                 if self.sidebar.focus_project_header(&project_key) {
                     self.mount_new_workspace_input(project_key);
@@ -594,15 +593,14 @@ impl<T: TerminalAdapter> Model<T> {
             // its state and could spam the same prompt. Belt and
             // braces.
             if !self.removal_already_pending(workspace_key) {
-                self.pending_removal_prompts
-                    .push_back(super::RemovalPrompt {
-                        workspace_key: workspace_key.clone(),
-                        label: label.clone(),
-                        title: title.clone(),
-                        terminal_count: *active_terminal_count,
-                        reason: super::RemovalReason::OutOfScope,
-                        has_local_work: false,
-                    });
+                self.removal_prompt_queue.push_back(super::RemovalPrompt {
+                    workspace_key: workspace_key.clone(),
+                    label: label.clone(),
+                    title: title.clone(),
+                    terminal_count: *active_terminal_count,
+                    reason: super::RemovalReason::OutOfScope,
+                    has_local_work: false,
+                });
                 self.maybe_mount_next_removal_prompt();
                 self.redraw = true;
             }
@@ -618,17 +616,16 @@ impl<T: TerminalAdapter> Model<T> {
             active_terminal_count,
         } = &event
         {
-            let already_active = self
-                .active_merge_prompt
-                .as_ref()
-                .map(|(i, _)| i == issue_workspace_key)
-                .unwrap_or(false);
+            let already_active = matches!(
+                &self.modal_flow,
+                Some(ModalFlow::MergePrompt { issue, .. }) if issue == issue_workspace_key
+            );
             let already_queued = self
-                .pending_merge_prompts
+                .merge_prompt_queue
                 .iter()
                 .any(|(i, _, _, _, _)| i == issue_workspace_key);
             if !already_active && !already_queued {
-                self.pending_merge_prompts.push_back((
+                self.merge_prompt_queue.push_back((
                     issue_workspace_key.clone(),
                     pr_workspace_key.clone(),
                     issue_label.clone(),
@@ -801,15 +798,14 @@ impl<T: TerminalAdapter> Model<T> {
                     lazybox_ipc::RemovableTerminalState::Merged => super::RemovalReason::Merged,
                     lazybox_ipc::RemovableTerminalState::Closed => super::RemovalReason::Closed,
                 };
-                self.pending_removal_prompts
-                    .push_back(super::RemovalPrompt {
-                        workspace_key: workspace_key.clone(),
-                        label: label.clone(),
-                        title: None,
-                        terminal_count: *active_terminal_count,
-                        reason,
-                        has_local_work: *has_local_work,
-                    });
+                self.removal_prompt_queue.push_back(super::RemovalPrompt {
+                    workspace_key: workspace_key.clone(),
+                    label: label.clone(),
+                    title: None,
+                    terminal_count: *active_terminal_count,
+                    reason,
+                    has_local_work: *has_local_work,
+                });
                 self.maybe_mount_next_removal_prompt();
                 self.redraw = true;
             }
@@ -860,7 +856,7 @@ impl<T: TerminalAdapter> Model<T> {
             labels,
         } = &event
         {
-            if self.pending_labels_request.as_ref() == Some(workspace_key) {
+            if self.awaiting_repo_labels.as_ref() == Some(workspace_key) {
                 self.mount_manage_labels(workspace_key.clone(), labels.clone());
                 self.redraw = true;
             }
@@ -1365,7 +1361,7 @@ impl<T: TerminalAdapter> Model<T> {
             // possibly after the user navigated elsewhere — pull the
             // cursor back to it and mark the new terminal as the tab to
             // activate, so `w` reliably ends on the freshly-spawned agent
-            // rather than wherever the cursor drifted. `pending_focus_terminal`
+            // rather than wherever the cursor drifted. `deferred_focus_terminal`
             // is applied by the upcoming `sync_panes`, after
             // `set_active_session` has rebuilt the followed workspace's
             // visible terminal set.
@@ -1374,7 +1370,7 @@ impl<T: TerminalAdapter> Model<T> {
             {
                 self.spawn_follow_to = None;
                 self.sidebar.focus_workspace_key(&spawned_key);
-                self.pending_focus_terminal = Some(terminal_id);
+                self.deferred_focus_terminal = Some(terminal_id);
             }
             // Editor-deferred-by-spawn: the user pressed `e` on a
             // workspace with no worktree; we asked the daemon to
@@ -1439,7 +1435,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// at all there's nothing to pick from, so surface a clear error
     /// instead.
     fn handle_repo_labels_failed(&mut self, message: &str) {
-        let Some(workspace_key) = self.pending_labels_request.take() else {
+        let Some(workspace_key) = self.awaiting_repo_labels.take() else {
             // Not our request (another client's `g l`, or the user
             // already dismissed) — nothing to do.
             return;
@@ -1712,7 +1708,7 @@ impl<T: TerminalAdapter> Model<T> {
         // user lands on the fresh agent and not whatever tab the
         // workspace last had — a no-op if the terminal isn't in the
         // active session's visible set.
-        if let Some(tid) = self.pending_focus_terminal.take() {
+        if let Some(tid) = self.deferred_focus_terminal.take() {
             self.terminals.focus_terminal(tid);
         }
         // If the selection landed on a workspace whose Activity pane is

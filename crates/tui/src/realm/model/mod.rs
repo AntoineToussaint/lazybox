@@ -95,7 +95,7 @@ pub enum Id {
     /// (issue #458). Pre-filled with the current note; submit →
     /// `Command::SetNotes`. Shares the `Textarea` component with
     /// `Reply`/`BroadcastText`, so `handle_textarea_submitted` routes
-    /// on this id. Target key lives in `Model::pending_notes`.
+    /// on this id. Target key lives in the `ModalFlow::Notes` flow.
     Notes,
     /// Single-line input prompt for naming a brand-new pre-PR
     /// workspace. Submit → `Command::CreateWorkspace { name }`.
@@ -120,18 +120,18 @@ pub enum Id {
     /// Confirm dialog for removing a workspace — either one that fell
     /// out of scope while having running terminals, or one whose PR
     /// just merged (see `RemovalReason`). The pending key + reason
-    /// live in `active_removal_prompt`; `Msg::Confirmed(true)` reads
+    /// live in `ModalFlow::RemovalPrompt`; `Msg::Confirmed(true)` reads
     /// the reason to pick the right command (`Kill` vs.
     /// `RemoveMergedWorkspace`).
     RemoveOutOfScope,
     /// Confirm dialog asking the user to merge an issue workspace
     /// (that has live sessions) into the PR that closes it. The
-    /// (issue, PR) keys live in `active_merge_prompt`; `Msg::Confirmed`
+    /// (issue, PR) keys live in `ModalFlow::MergePrompt`; `Msg::Confirmed`
     /// dispatches `Command::ConfirmMerge` back to the daemon.
     MergeConfirm,
     /// Picker for the `x a` ("adopt") flow — pick the target
     /// workspace the source's sessions should move into. Source is
-    /// stashed in `pending_adopt_source`; each row carries a
+    /// stashed in `ModalFlow::AdoptSource`; each row carries a
     /// [`ChoicePayload::Workspace`] that `Msg::ChoicePicked` resolves
     /// to the target and dispatches `Command::AdoptSessions`.
     AdoptTarget,
@@ -144,7 +144,7 @@ pub enum Id {
     /// Single-line input prompt for the reviewer-login(s) to add to
     /// the focused workspace's PR. Submit →
     /// `Command::RequestReviewers { workspace_key, logins }`. The
-    /// pending workspace key lives in `pending_review_request`;
+    /// pending workspace key lives in `ModalFlow::ReviewRequest`;
     /// `Msg::InputSubmitted` reads it.
     RequestReviewers,
     /// Same shape as `RequestReviewers` but for assignees. Submit
@@ -170,14 +170,14 @@ pub enum Id {
     /// focused PR/issue with its on/off state; picking a row toggles
     /// that policy and re-opens the menu. Each row carries a
     /// [`ChoicePayload::Policy`]; the target workspace lives in
-    /// `pending_policy_workspace`, and `Msg::ChoicePicked` resolves the
+    /// `ModalFlow::PolicyWorkspace`, and `Msg::ChoicePicked` resolves the
     /// pick to a toggle command.
     PolicyPicker,
     /// Duration picker mounted on `z` (ToggleSnooze) when the
     /// workspace is NOT currently snoozed. Single-pick choice
     /// modal with several common snooze durations (1h, today,
     /// tomorrow, next week, 1 month, forever). The pending
-    /// workspace key lives in `pending_snooze_workspace`;
+    /// workspace key lives in `ModalFlow::Snooze`;
     /// `Msg::ChoicePicked` reads it + the picked Duration and
     /// dispatches `Command::Snooze`.
     SnoozeDuration,
@@ -194,7 +194,7 @@ pub enum Id {
     /// Single-pick `Choice` modal whose items are the workspace's
     /// available actions (spawn claude / shell / mark read /
     /// archive / merge / …). Source row + action list live in
-    /// `pending_sidebar_context`; `Msg::ChoicePicked` resolves the
+    /// `ModalFlow::SidebarContext`; `Msg::ChoicePicked` resolves the
     /// index back to an action and dispatches the same IPC the
     /// keyboard shortcut would.
     SidebarContext,
@@ -207,26 +207,26 @@ pub enum Id {
     InspectLoading,
     /// Choice modal listing every worktree the inspector reported,
     /// with a special first row for "Delete all N safe worktrees".
-    /// Picking a row routes through `pending_inspect_rows` →
+    /// Picking a row routes through `ModalFlow::InspectList` →
     /// `InspectConfirm` for a final per-row destructive prompt.
     InspectList,
     /// Confirm for the per-row delete picked from `InspectList`.
-    /// The target row lives in `pending_inspect_target`;
+    /// The target row lives in `ModalFlow::InspectConfirm`;
     /// `Msg::Confirmed(true)` dispatches `DeleteOrphanedWorktree`.
     InspectConfirm,
     /// Choice modal listing every on-disk checkout the dev-folder scan
-    /// discovered. Picking a row routes through `pending_import_rows` →
+    /// discovered. Picking a row routes through `ModalFlow::ImportList` →
     /// `ImportCheckoutConfirm` before the linked workspace is created.
     ImportCheckoutList,
     /// Confirm modal in front of an actual import — warns that sessions
     /// run in the user's real checkout (not an isolated worktree). The
-    /// target row lives in `pending_import_target`; `Msg::Confirmed(true)`
+    /// target row lives in `ModalFlow::ImportConfirm`; `Msg::Confirmed(true)`
     /// dispatches `ImportLocalCheckout`.
     ImportCheckoutConfirm,
     /// Unified confirm modal for any destructive catalog action.
     /// `Model::dispatch_action` routes here when
     /// `ActionDef::is_destructive()` is true; the pending `Action`
-    /// lives in `pending_action_confirm` and fires on
+    /// lives in `ModalFlow::ActionConfirm` and fires on
     /// `Msg::Confirmed(true)`. Replaces the per-action confirm
     /// modals (MergePrConfirm, the kill latch, …) — one modal id,
     /// one Yes-handler, one place to remember.
@@ -288,21 +288,21 @@ pub enum Id {
     /// multi-select). Same `SnippetPicker` component as
     /// `Id::SnippetPicker`, but the pick doesn't send — it funnels into
     /// the `BroadcastText` compose step (`Ctrl-F` skips the snippet).
-    /// Targets live in `pending_broadcast`.
+    /// Targets live in `ModalFlow::Broadcast`.
     BroadcastSnippet,
     /// Compose step of the broadcast flow: a Textarea pre-filled with
     /// the picked snippet's body (custom text appends after it).
-    /// Submit → one delivery per target in `pending_broadcast`.
+    /// Submit → one delivery per target in `ModalFlow::Broadcast`.
     BroadcastText,
     /// Target picker for the agent-to-agent handoff flow (`x s`,
     /// issue #431) — pick the session the source agent's output should
     /// be injected into. Each row carries a [`ChoicePayload::Session`];
-    /// the source name + captured seed live in `pending_handoff`.
+    /// the source name + captured seed live in `ModalFlow::Handoff`.
     /// `Msg::ChoicePicked` resolves the target and mounts `HandoffText`.
     HandoffTarget,
     /// Compose step of the handoff flow: a Textarea pre-filled with the
     /// source agent's captured on-screen output, editable before send.
-    /// Submit → inject + submit into the target in `pending_handoff`.
+    /// Submit → inject + submit into the target in `ModalFlow::Handoff`.
     HandoffText,
     /// Single-pick `Choice` over the enabled agents (`,` Settings →
     /// "Change default agent"), opened on the current default. Each row
@@ -321,7 +321,7 @@ pub enum Id {
     DefaultModelPicker,
     /// Confirm-with-preview for an action the Ask Lazybox help agent
     /// proposed (#353) — `add_snippet` or `edit_config`. The pending
-    /// intent lives in `pending_help_action`; `Msg::Confirmed(true)`
+    /// intent lives in `ModalFlow::HelpAction`; `Msg::Confirmed(true)`
     /// applies it natively (write + hot-reload / persist + live-apply).
     /// Esc / No drops the stash and changes nothing.
     HelpActionConfirm,
@@ -329,7 +329,7 @@ pub enum Id {
     /// a workspace with SEVERAL distinct running agents (#418) —
     /// injecting must not silently guess between them. The listed
     /// agent ids + the spawn params to replay live in
-    /// `pending_work_picker`; `Msg::ChoicePicked` resolves the index
+    /// `ModalFlow::WorkPicker`; `Msg::ChoicePicked` resolves the index
     /// and fires the same work spawn `w` would have, targeted at the
     /// chosen agent.
     WorkAgentPicker,
@@ -380,7 +380,7 @@ impl Id {
 
 /// Why a workspace-removal confirm prompt is being shown. Both
 /// reasons share the `Id::RemoveOutOfScope` modal + the
-/// `pending_removal_prompts` queue but differ in copy and in which
+/// `removal_prompt_queue` queue but differ in copy and in which
 /// command "yes" dispatches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RemovalReason {
@@ -399,7 +399,7 @@ pub(crate) enum RemovalReason {
 
 /// Concrete target a destructive `ActionConfirm` modal was mounted
 /// against — resolved from the sidebar selection when the confirm
-/// mounts and stashed in `pending_action_confirm`. Dispatch on
+/// mounts and stashed in `ModalFlow::ActionConfirm`. Dispatch on
 /// "Yes" fires against this stash, never the live selection, so a
 /// daemon event that moves the cursor under the modal can't redirect
 /// the action onto a different row.
@@ -473,6 +473,110 @@ pub(crate) struct RemovalPrompt {
     /// Merged path: any backing worktree has uncommitted/unpushed
     /// work, so the copy warns before the force-delete.
     pub(crate) has_local_work: bool,
+}
+
+/// The single active modal-flow continuation: what the currently
+/// mounted modal will do when it resolves (pick / submit / confirm),
+/// and the data threaded across a multi-step flow's stages.
+///
+/// This replaces the ~two-dozen `pending_*` side-band `Option`s that
+/// used to encode the modal state machine implicitly. Exactly one flow
+/// is armed at a time, so two continuations can no longer be live at
+/// once — the class of bug where a missed cleanup left a stale stash
+/// that fired on the next unrelated modal is now unrepresentable.
+///
+/// Multi-step flows (broadcast, handoff, the list→confirm inspectors)
+/// keep their *stage* in the modal `Id` on top of `modal_stack`; the
+/// variant only carries the payload that survives across the steps.
+///
+/// State that genuinely is NOT a single mounted-modal continuation
+/// stays in its own field, not here: the event-fed removal / merge
+/// prompt queues (`removal_prompt_queue`, `merge_prompt_queue`), the
+/// async label-fetch arm (`awaiting_repo_labels`, which coexists with
+/// an unrelated modal), and the event-to-event focus handoffs
+/// (`deferred_focus_project`, `deferred_focus_terminal`).
+#[derive(Debug, Clone)]
+pub(crate) enum ModalFlow {
+    /// Reply textarea → `Command::PostReply`. Carries the target
+    /// workspace; consumed by `Msg::TextareaSubmitted`.
+    Reply { target: lazybox_core::SessionKey },
+    /// Notes textarea → `Command::SetNotes` (#458).
+    Notes { target: lazybox_core::SessionKey },
+    /// Reviewer picker → `Command::RequestReviewers`.
+    ReviewRequest {
+        workspace: lazybox_core::WorkspaceKey,
+    },
+    /// Assignee picker → `Command::SetAssignees`.
+    AssigneesRequest {
+        workspace: lazybox_core::WorkspaceKey,
+    },
+    /// Snooze duration picker → `Command::Snooze`.
+    Snooze { workspace: lazybox_core::SessionKey },
+    /// `w` multi-agent chooser (`Id::WorkAgentPicker`, #418).
+    WorkPicker {
+        picker: crate::realm::model::modals::PendingWorkPicker,
+    },
+    /// Automation-policies menu (`g p`, #363).
+    PolicyWorkspace {
+        workspace: lazybox_core::WorkspaceKey,
+    },
+    /// Active workspace-removal confirm (out-of-scope / merged /
+    /// closed). The queue of pending prompts lives in
+    /// `removal_prompt_queue`; this is only the one on screen.
+    RemovalPrompt {
+        workspace: lazybox_core::WorkspaceKey,
+        reason: RemovalReason,
+    },
+    /// Active issue→PR merge confirm. The queue lives in
+    /// `merge_prompt_queue`; this is only the one on screen.
+    MergePrompt {
+        issue: lazybox_core::WorkspaceKey,
+        pr: lazybox_core::WorkspaceKey,
+    },
+    /// `x a` adopt-target picker → `Command::AdoptSessions`.
+    AdoptSource { source: lazybox_core::WorkspaceKey },
+    /// Sidebar right-click context menu → dispatch the picked action.
+    SidebarContext {
+        session_key: lazybox_core::SessionKey,
+        actions: Vec<lazybox_tui_core::action::Action>,
+    },
+    /// Unified destructive-action confirm. Target resolved at mount
+    /// time so a cursor drift under the modal can't redirect it.
+    ActionConfirm {
+        action: lazybox_tui_core::action::Action,
+        target: ActionConfirmTarget,
+    },
+    /// Action proposed by the Ask Lazybox help agent (#353).
+    HelpAction {
+        intent: lazybox_tui_core::help::HelpActionIntent,
+    },
+    /// Worktree inspector list picker → per-row confirm or bulk delete.
+    InspectList {
+        rows: Vec<lazybox_ipc::WorktreeInspectionDto>,
+    },
+    /// Worktree inspector per-row delete confirm.
+    InspectConfirm {
+        target: lazybox_ipc::WorktreeInspectionDto,
+    },
+    /// Discovered-checkout import list picker → import confirm.
+    ImportList {
+        rows: Vec<lazybox_ipc::DiscoveredCheckoutDto>,
+    },
+    /// Discovered-checkout import confirm.
+    ImportConfirm {
+        target: lazybox_ipc::DiscoveredCheckoutDto,
+    },
+    /// New-workspace name input, carrying the project to create under.
+    NewWorkspaceProject { project: lazybox_core::ProjectKey },
+    /// Startup update modal: the available target whose dismissal is
+    /// persisted on Esc.
+    UpdateTarget { target: String },
+    /// Broadcast flow (`Shift-B`): snippet picker → compose textarea.
+    Broadcast { draft: BroadcastDraft },
+    /// Agent-to-agent handoff (`x s`, #431): target picker → compose.
+    Handoff { draft: HandoffDraft },
+    /// Prompt-history picker (#523) → resend into this terminal.
+    PromptHistory { terminal: lazybox_ipc::TerminalId },
 }
 
 /// App-level message vocabulary for modals + globals.
@@ -902,14 +1006,10 @@ pub struct Model<T: TerminalAdapter> {
     /// Splits, last-viewport snapshot, and active drag — see
     /// `LayoutCtx`.
     layout: LayoutCtx,
-    /// Workspace key the reply textarea (if mounted) is targeting.
-    /// Set by `mount_reply`; consumed by `Msg::TextareaSubmitted` to
-    /// build the `Command::PostReply` payload.
-    pending_reply: Option<lazybox_core::SessionKey>,
-    /// Workspace key the notes textarea (if mounted) is targeting. Set
-    /// by `mount_notes`; consumed by `Msg::TextareaSubmitted` to build
-    /// the `Command::SetNotes` payload (issue #458).
-    pending_notes: Option<lazybox_core::SessionKey>,
+    /// The single active modal-flow continuation — what the mounted
+    /// modal does when it resolves. Replaces the old fan of `pending_*`
+    /// Options; see [`ModalFlow`]. `None` when no flow modal is armed.
+    modal_flow: Option<ModalFlow>,
     /// Body of the most recently submitted reply, kept until the next
     /// reply is composed. If the daemon later reports the post failed
     /// (`ProviderError { source: "reply" }`), the composed text would
@@ -917,62 +1017,41 @@ pub struct Model<T: TerminalAdapter> {
     /// the failure handler records it into the messages log (Shift-M)
     /// where the user can recover it.
     last_reply_body: Option<String>,
-    /// Set by `mount_request_reviewers`; consumed by
-    /// `handle_input_submitted` when `Id::RequestReviewers` is the
-    /// top modal. Holds the workspace whose PR we'll request
-    /// reviewers on.
-    pending_review_request: Option<lazybox_core::WorkspaceKey>,
-    /// Same shape but for the add-assignees flow.
-    pending_assignees_request: Option<lazybox_core::WorkspaceKey>,
-    /// Workspace key the `ManageLabels` picker is targeting. Stashed
-    /// at mount time so when `Event::RepoLabels` lands the picker
-    /// can re-mount with the repo's labels. Cleared on submit /
-    /// dismiss.
-    pending_labels_request: Option<lazybox_core::WorkspaceKey>,
+    /// Workspace whose repo-label set we've asked the daemon for
+    /// (`g l` → `Command::FetchRepoLabels`), waiting on the async
+    /// `Event::RepoLabels` reply to mount the picker. NOT a mounted
+    /// modal continuation: it's armed before any modal exists and can
+    /// coexist with an unrelated modal the user opened during the wait
+    /// (the reply then disarms it), so it stays out of [`ModalFlow`].
+    /// Cleared on mount / submit / dismiss / fetch-failure.
+    awaiting_repo_labels: Option<lazybox_core::WorkspaceKey>,
     /// Optimistic mutations applied locally and awaiting the daemon's
     /// echo (#476). Each carries the prior rows so a rejected
     /// round-trip rolls back; the success echo drops the entry. See
     /// `optimistic.rs`.
     pending_mutations: Vec<optimistic::OptimisticMutation>,
-    /// Workspace currently waiting on the `SnoozeDuration` picker's
-    /// result. `Msg::ChoicePicked` reads this + the picked row's
-    /// [`ChoicePayload::Duration`] to build a `Command::Snooze`.
-    pending_snooze_workspace: Option<lazybox_core::SessionKey>,
-    /// Stash for the `w` multi-agent chooser (`Id::WorkAgentPicker`,
-    /// #418): the running agent ids listed (row order) plus the spawn
-    /// params the pick replays through `push_work_spawn`. Cleared on
-    /// submit / dismiss.
-    pending_work_picker: Option<crate::realm::model::modals::PendingWorkPicker>,
-    /// Workspace the `PolicyPicker` (`g p`, issue #363) is targeting.
-    /// `Msg::ChoicePicked` reads it + the picked row's
-    /// [`ChoicePayload::Policy`] to build a toggle command. Cleared on
-    /// dismiss.
-    pending_policy_workspace: Option<lazybox_core::WorkspaceKey>,
-    /// Queued workspace-removal prompts — either out-of-scope
+    /// Event-fed queue of workspace-removal prompts — out-of-scope
     /// workspaces with running terminals (`WorkspaceOutOfScope`) or
-    /// merged PRs (`MergedPrRemovable`). The daemon won't auto-remove
-    /// either; each lands here and one at a time gets surfaced as a
-    /// Confirm modal so the user decides. See [`RemovalReason`].
-    pending_removal_prompts: std::collections::VecDeque<RemovalPrompt>,
-    /// Workspace + reason currently being prompted about. Set when the
-    /// RemoveOutOfScope modal mounts; consumed by `Msg::Confirmed`,
-    /// which uses the reason to pick the command to dispatch.
-    active_removal_prompt: Option<(lazybox_core::WorkspaceKey, RemovalReason)>,
-    /// Pending issue→PR merge prompts. Daemon stalls a merge when
-    /// the issue has live sessions and emits
-    /// `WorkspaceMergePending`; we queue here and surface one at a
-    /// time as a Confirm modal. Tuple: issue key, PR key, issue
-    /// label, PR label, live terminal count.
-    pending_merge_prompts: std::collections::VecDeque<(
+    /// merged/closed PRs (`MergedPrRemovable`). The daemon won't
+    /// auto-remove either; each lands here and one at a time is surfaced
+    /// as a Confirm modal ([`ModalFlow::RemovalPrompt`]) so the user
+    /// decides. NOT a mounted-modal continuation: the queue fills from
+    /// daemon events while any unrelated modal is open. See
+    /// [`RemovalReason`].
+    removal_prompt_queue: std::collections::VecDeque<RemovalPrompt>,
+    /// Event-fed queue of issue→PR merge prompts. Daemon stalls a merge
+    /// when the issue has live sessions and emits `WorkspaceMergePending`;
+    /// we queue here and surface one at a time as a Confirm modal
+    /// ([`ModalFlow::MergePrompt`]). Tuple: issue key, PR key, issue
+    /// label, PR label, live terminal count. Like the removal queue,
+    /// this fills from events independently of the active modal.
+    merge_prompt_queue: std::collections::VecDeque<(
         lazybox_core::WorkspaceKey,
         lazybox_core::WorkspaceKey,
         String,
         String,
         usize,
     )>,
-    /// (issue, PR) pair currently being prompted about. Consumed by
-    /// `Msg::Confirmed` when the top modal is `Id::MergeConfirm`.
-    active_merge_prompt: Option<(lazybox_core::WorkspaceKey, lazybox_core::WorkspaceKey)>,
     /// Accumulated state behind the `Id::WorktreeProgress` modal, keyed
     /// to the spawn whose worktree is being provisioned. `Some` only
     /// while the checklist is up — created on the first
@@ -987,13 +1066,6 @@ pub struct Model<T: TerminalAdapter> {
     /// starts provisioning. A failed step still surfaces as a footer
     /// error so a dismissed checklist can't hide a broken provision.
     worktree_progress_dismissed: Option<lazybox_core::SessionKey>,
-    /// Workspace key whose PR is being confirmed for merge by the
-    /// `g m` Confirm modal. Set when the modal mounts, taken on
-    /// `Msg::Confirmed` / `Msg::ModalDismissed`.
-    /// Source workspace key the `x a` adopt picker is gathering
-    /// a target for. Set when the picker mounts; consumed when the
-    /// user picks (or dismisses).
-    pending_adopt_source: Option<lazybox_core::WorkspaceKey>,
     /// Transient UI status (polling spinner + footer notice). See
     /// `StatusCtx`.
     status: StatusCtx,
@@ -1085,16 +1157,6 @@ pub struct Model<T: TerminalAdapter> {
     /// persisted across launches.
     activity_pane_overrides:
         std::collections::HashMap<lazybox_core::WorkspaceKey, ActivityPaneMode>,
-    /// Active sidebar right-click context menu state: the workspace
-    /// row the menu was raised over plus the ordered list of catalog
-    /// `Action`s the picker is offering. `Msg::ChoicePicked` indexes
-    /// back into the Vec and dispatches the same IpcCommand the
-    /// matching keyboard shortcut would have. None when no menu is
-    /// open.
-    pending_sidebar_context: Option<(
-        lazybox_core::SessionKey,
-        Vec<lazybox_tui_core::action::Action>,
-    )>,
     /// User-supplied key overrides for catalog actions. Keys are
     /// snake_case `ActionKind` names (see `ActionKind::name`), or
     /// `spawn_agent.<id>` for a per-agent row; values are key-spec
@@ -1115,49 +1177,14 @@ pub struct Model<T: TerminalAdapter> {
     /// agents list or overrides change; consulted by keyboard
     /// dispatch, the which-key popup, and the help panel.
     catalog: Vec<lazybox_tui_core::action::CatalogEntry>,
-    /// Action queued behind an `ActionConfirm` modal, paired with the
-    /// concrete target it was aimed at when the modal mounted. Set by
-    /// `mount_action_confirm`, taken (and dispatched if Yes) by
-    /// the `Msg::Confirmed` handler. None when no destructive
-    /// confirm is currently up.
-    ///
-    /// The target is resolved at MOUNT time, not at confirm time —
-    /// daemon events (a workspace removal, a poll-driven re-sort) can
-    /// move the sidebar cursor while the modal is up, and re-reading
-    /// the selection on "Yes" would kill / merge a different row than
-    /// the prompt named.
-    pending_action_confirm: Option<(lazybox_tui_core::action::Action, ActionConfirmTarget)>,
-    /// Action proposed by the Ask Lazybox help agent (#353), queued
-    /// behind a `HelpActionConfirm` modal. Set when the agent's answer
-    /// parses to an allowlisted intent, taken (and applied if Yes) by
-    /// the `Msg::Confirmed` handler. None when no action confirm is up.
-    pending_help_action: Option<lazybox_tui_core::help::HelpActionIntent>,
-    /// Latest inspector report driving the `InspectList` modal. The
-    /// first slot in the Choice modal is the "delete all safe"
-    /// shortcut, hence the wrapper enum on indices.
-    pending_inspect_rows: Vec<lazybox_ipc::WorktreeInspectionDto>,
-    /// Row picked from `InspectList`, waiting on the `InspectConfirm`
-    /// confirm modal. Consumed by `Msg::Confirmed(true)`.
-    pending_inspect_target: Option<lazybox_ipc::WorktreeInspectionDto>,
-    /// Latest dev-folder scan result driving the `ImportCheckoutList`
-    /// picker. `Msg::ChoicePicked` reads the picked index out of this
-    /// to mount the import confirm.
-    pending_import_rows: Vec<lazybox_ipc::DiscoveredCheckoutDto>,
-    /// Checkout picked from `ImportCheckoutList`, waiting on the
-    /// `ImportCheckoutConfirm` modal. Consumed by `Msg::Confirmed(true)`.
-    pending_import_target: Option<lazybox_ipc::DiscoveredCheckoutDto>,
-    /// Project the next `Id::NewWorkspace` submit should land the
-    /// new workspace under. Set by `mount_new_workspace_input(pk)`
-    /// from the focused-project resolver, consumed by
-    /// `handle_input_submitted`'s `Id::NewWorkspace` arm.
-    pending_new_workspace_project: Option<lazybox_core::ProjectKey>,
     /// Name of a project the user just submitted via x p. When
     /// the daemon broadcasts `ProjectUpserted` for a matching name,
     /// we focus its header row + auto-mount the new-workspace input
     /// — without this hand-off, the new project is unreachable via
     /// j/k (RepoHeader rows are skipped by `move_cursor_by`) and the
-    /// user has no clear next step.
-    pending_focus_project_name: Option<String>,
+    /// user has no clear next step. An event-to-event handoff, not a
+    /// mounted-modal continuation, so it stays out of [`ModalFlow`].
+    deferred_focus_project: Option<String>,
     /// Issue workspace the user was viewing when it was removed by a
     /// merge. Set in the `WorkspaceRemoved` handler (before the sidebar
     /// moves the cursor off the gone row) and consumed by the matching
@@ -1175,8 +1202,9 @@ pub struct Model<T: TerminalAdapter> {
     /// Terminal the next `sync_panes` should promote to the active tab.
     /// Set alongside [`Self::spawn_follow_to`] so `w` lands on the
     /// freshly-spawned agent rather than whatever tab the followed
-    /// workspace last had focused.
-    pending_focus_terminal: Option<lazybox_ipc::TerminalId>,
+    /// workspace last had focused. An event-to-event handoff, not a
+    /// mounted-modal continuation, so it stays out of [`ModalFlow`].
+    deferred_focus_terminal: Option<lazybox_ipc::TerminalId>,
     /// Loaded + merged snippet collection (`<lazybox_home>/snippets.yaml`
     /// + `<cwd>/.lazybox/snippets.yaml`). Populated at startup by
     /// `apply_snippets`; the terminal-pane `]` latch reads this to
@@ -1196,24 +1224,9 @@ pub struct Model<T: TerminalAdapter> {
     recent_snippets_store: Option<std::sync::Arc<dyn lazybox_store::Store>>,
     /// Persistence retained only while the startup update modal is open.
     update_store: Option<std::sync::Arc<dyn lazybox_store::Store>>,
-    pending_update_target: Option<String>,
     update_dismissal_tx: mpsc::Sender<Result<(), String>>,
     update_dismissal_rx: mpsc::Receiver<Result<(), String>>,
     update_dismissals_pending: usize,
-    /// Active broadcast flow (`Shift-B`), if any. Set when the flow
-    /// mounts, threaded through the snippet-pick step, consumed by the
-    /// compose submit (or dropped on Esc). See [`BroadcastDraft`].
-    pub(crate) pending_broadcast: Option<BroadcastDraft>,
-    /// Active agent-to-agent handoff flow (`x s`), if any. Set when the
-    /// target picker mounts, threaded through the pick step, consumed by
-    /// the compose submit. See [`HandoffDraft`].
-    pub(crate) pending_handoff: Option<HandoffDraft>,
-    /// Terminal the active `PromptHistoryPicker` re-sends into (the agent
-    /// focused when it was opened), so a resend targets the right session.
-    /// The prompt text itself rides on the picked row as a
-    /// [`ChoicePayload::Text`] (issue #512), so there's no parallel
-    /// text stash. Cleared on mount/unmount.
-    pub(crate) prompt_history_target: Option<lazybox_ipc::TerminalId>,
     /// Theme name active when the picker opened. Live preview mutates
     /// the global theme as the cursor moves; Esc restores this so a
     /// cancelled picker leaves the palette untouched. `None` while no
@@ -1464,23 +1477,14 @@ impl<T: TerminalAdapter> Model<T> {
             terminal_drag: None,
             preselect: None,
             layout: LayoutCtx::new(),
-            pending_reply: None,
-            pending_notes: None,
+            modal_flow: None,
             last_reply_body: None,
-            pending_review_request: None,
-            pending_assignees_request: None,
-            pending_labels_request: None,
+            awaiting_repo_labels: None,
             pending_mutations: Vec::new(),
-            pending_snooze_workspace: None,
-            pending_work_picker: None,
-            pending_policy_workspace: None,
-            pending_removal_prompts: std::collections::VecDeque::new(),
-            active_removal_prompt: None,
-            pending_merge_prompts: std::collections::VecDeque::new(),
-            active_merge_prompt: None,
+            removal_prompt_queue: std::collections::VecDeque::new(),
+            merge_prompt_queue: std::collections::VecDeque::new(),
             worktree_progress: None,
             worktree_progress_dismissed: None,
-            pending_adopt_source: None,
             status: StatusCtx::new(),
             ui_defaults: lazybox_config::UiDefaults::default(),
             auto_fix_opt_out_labels: lazybox_core::AutoFixSettings::default().opt_out_labels,
@@ -1493,7 +1497,6 @@ impl<T: TerminalAdapter> Model<T> {
             needs_pane_sync: false,
             workspace_focus: std::collections::HashMap::new(),
             activity_pane_overrides: std::collections::HashMap::new(),
-            pending_sidebar_context: None,
             action_key_overrides: std::collections::BTreeMap::new(),
             agent_models: std::collections::BTreeMap::new(),
             // Built-in agents + their `a c` / `a x` / `a u` convention.
@@ -1510,28 +1513,17 @@ impl<T: TerminalAdapter> Model<T> {
                 ],
                 &std::collections::BTreeMap::new(),
             ),
-            pending_action_confirm: None,
-            pending_help_action: None,
-            pending_inspect_rows: Vec::new(),
-            pending_import_rows: Vec::new(),
-            pending_import_target: None,
-            pending_inspect_target: None,
-            pending_new_workspace_project: None,
-            pending_focus_project_name: None,
+            deferred_focus_project: None,
             merge_follow_from: None,
             spawn_follow_to: None,
-            pending_focus_terminal: None,
+            deferred_focus_terminal: None,
             snippets: lazybox_config::Snippets::default(),
             recent_snippets: Vec::new(),
             recent_snippets_store: None,
             update_store: None,
-            pending_update_target: None,
             update_dismissal_tx,
             update_dismissal_rx,
             update_dismissals_pending: 0,
-            pending_broadcast: None,
-            pending_handoff: None,
-            prompt_history_target: None,
             theme_picker_prev: None,
             help_convo: Default::default(),
             help_run: None,
@@ -1877,9 +1869,11 @@ impl<T: TerminalAdapter> Model<T> {
             self.flash_info("nothing selected — mark workspaces with v first");
             return;
         }
-        self.pending_broadcast = Some(BroadcastDraft {
-            targets,
-            snippet_key: None,
+        self.set_modal_flow(ModalFlow::Broadcast {
+            draft: BroadcastDraft {
+                targets,
+                snippet_key: None,
+            },
         });
         if self.snippets.is_empty() {
             self.mount_broadcast_textarea(None);
@@ -1903,7 +1897,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// target (`dispatch_broadcast`).
     pub(crate) fn mount_broadcast_textarea(&mut self, snippet_body: Option<String>) {
         use crate::realm::components::textarea::Textarea;
-        let Some(draft) = &self.pending_broadcast else {
+        let Some(ModalFlow::Broadcast { draft }) = &self.modal_flow else {
             return;
         };
         let n = draft.targets.len();
@@ -1923,7 +1917,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// "Broadcast to N: a, b, c" — the target recap shown on both
     /// broadcast modals so what's about to be hit is always visible.
     fn broadcast_header(&self) -> String {
-        let Some(draft) = &self.pending_broadcast else {
+        let Some(ModalFlow::Broadcast { draft }) = &self.modal_flow else {
             return String::new();
         };
         let names: Vec<String> = draft
@@ -2116,7 +2110,9 @@ impl<T: TerminalAdapter> Model<T> {
                 (row, prompt.text)
             })
             .collect();
-        self.prompt_history_target = Some(terminal_id);
+        self.set_modal_flow(ModalFlow::PromptHistory {
+            terminal: terminal_id,
+        });
         self.mount_modal(Id::PromptHistoryPicker, PromptHistoryPicker::new(rows));
     }
 
@@ -2673,7 +2669,7 @@ impl<T: TerminalAdapter> Model<T> {
             update.modal_body(),
         )
         .dismiss_on_confirm();
-        self.pending_update_target = Some(target);
+        self.set_modal_flow(ModalFlow::UpdateTarget { target });
         self.update_store = store;
         self.mount_modal(Id::Update, modal);
     }
@@ -2868,6 +2864,31 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             })
             .collect()
+    }
+
+    /// Arm a fresh [`ModalFlow`] continuation. Debug-asserts that no
+    /// flow was already live: a `Some` here means a previous modal's
+    /// cleanup was missed, the exact illegal state the enum exists to
+    /// make unrepresentable. In release builds the new flow still wins
+    /// (loudly logged) rather than panicking a user's session.
+    ///
+    /// Multi-step flows that legitimately carry a flow across a stage
+    /// transition (broadcast, handoff, the list→confirm inspectors)
+    /// mutate or take `modal_flow` directly instead of calling this.
+    pub(super) fn set_modal_flow(&mut self, flow: ModalFlow) {
+        if self.modal_flow.is_some() {
+            debug_assert!(
+                false,
+                "arming modal flow {flow:?} over live {:?}",
+                self.modal_flow
+            );
+            tracing::warn!(
+                new = ?flow,
+                stale = ?self.modal_flow,
+                "arming modal flow over a live one — missed cleanup",
+            );
+        }
+        self.modal_flow = Some(flow);
     }
 
     /// Mount a modal under `id` with the standard "subscribe to any

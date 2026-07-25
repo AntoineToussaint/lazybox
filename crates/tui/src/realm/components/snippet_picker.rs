@@ -39,6 +39,7 @@ use crate::components::comment_render::wrap_one;
 use crate::realm::ChoicePayload;
 use crate::realm::Msg;
 use crate::realm::UserEvent;
+use crate::realm::components::filterable::FilterableList;
 use crate::theme::Theme;
 use lazybox_config::Snippet;
 use tuirealm::command::{Cmd, CmdResult};
@@ -240,53 +241,6 @@ impl SnippetPicker {
         self
     }
 
-    /// Recompute `visible_indices` from `filter`, grouped by category,
-    /// and reset the cursor to the first visible row. A row matches
-    /// when the filter is a case-insensitive substring of its key,
-    /// description, or category — richer than the pre-#244 key-only
-    /// prefix so snippets are discoverable by what they *do*. The
-    /// exact-key auto-submit fast path is decided separately (see
-    /// [`auto_submit_index`]) and is unaffected by description hits.
-    fn refilter(&mut self) {
-        let q = self.filter.trim();
-        let mut idxs: Vec<usize> = if q.is_empty() {
-            (0..self.rows.len()).collect()
-        } else {
-            self.rows
-                .iter()
-                .enumerate()
-                .filter_map(|(i, r)| {
-                    (contains_icase(&r.key, q)
-                        || contains_icase(&r.description, q)
-                        || contains_icase(&r.category, q))
-                    .then_some(i)
-                })
-                .collect()
-        };
-        // Group by category (headers), keeping rows key-sorted within a
-        // group — `rows` already arrives key-sorted, so a stable sort by
-        // category rank preserves that.
-        idxs.sort_by(|&a, &b| {
-            let (ca, cb) = (&self.rows[a].category, &self.rows[b].category);
-            category_rank(ca)
-                .cmp(&category_rank(cb))
-                .then_with(|| ca.cmp(cb))
-        });
-        // On an empty filter, float the recently-used snippets into a
-        // "Recent" group at the very top (they also remain in their real
-        // category below — the group is a shortcut, not a move). A
-        // non-empty filter is a deliberate search, so recents step aside.
-        if q.is_empty() && !self.recent_rows.is_empty() {
-            self.recent_count = self.recent_rows.len();
-            self.visible_indices = self.recent_rows.iter().copied().chain(idxs).collect();
-        } else {
-            self.recent_count = 0;
-            self.visible_indices = idxs;
-        }
-        self.cursor = (!self.visible_indices.is_empty()).then_some(0);
-        self.list_scroll = 0;
-    }
-
     /// `Some(idx)` when the picker should auto-submit: the typed filter
     /// exactly equals a snippet key AND that key is the *only* snippet
     /// whose key starts with the filter. Decided over key-prefix
@@ -370,66 +324,14 @@ impl SnippetPicker {
         out
     }
 
-    /// Pure key handler. Method (not free function) so the API
-    /// reads naturally; tests drive it directly without spinning
-    /// up a tuirealm `Application`.
+    /// Pure key handler. Tests drive it directly without spinning up a
+    /// tuirealm `Application`; it forwards to the shared picker protocol
+    /// in [`FilterableList::dispatch_key`], which routes Enter through
+    /// [`SnippetPicker::pick`], typed characters through the
+    /// [`FilterableList::auto_submit`] hook, and `Ctrl-F` through the
+    /// [`FilterableList::custom_key`] hook.
     pub fn on_key(&mut self, key: &KeyEvent) -> Option<Msg> {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        if matches!(key.code, Key::Esc) || (ctrl && matches!(key.code, Key::Char('c'))) {
-            return Some(Msg::ModalDismissed);
-        }
-        match key.code {
-            Key::Down => {
-                if let Some(c) = self.cursor
-                    && c + 1 < self.visible_indices.len()
-                {
-                    self.cursor = Some(c + 1);
-                }
-                None
-            }
-            Key::Up => {
-                if let Some(c) = self.cursor
-                    && c > 0
-                {
-                    self.cursor = Some(c - 1);
-                }
-                None
-            }
-            Key::Home => {
-                if !self.visible_indices.is_empty() {
-                    self.cursor = Some(0);
-                }
-                None
-            }
-            Key::End => {
-                if !self.visible_indices.is_empty() {
-                    self.cursor = Some(self.visible_indices.len() - 1);
-                }
-                None
-            }
-            Key::Enter => {
-                let c = self.cursor?;
-                let row_idx = *self.visible_indices.get(c)?;
-                let key = self.rows.get(row_idx)?.key.clone();
-                Some(Msg::ChoicePicked(vec![ChoicePayload::Text(key)]))
-            }
-            // "No snippet — free text only": an empty pick the
-            // broadcast handler reads as "skip straight to compose".
-            Key::Char('f') if ctrl && self.offer_free_text => Some(Msg::ChoicePicked(Vec::new())),
-            Key::Backspace => {
-                self.filter.pop();
-                self.refilter();
-                None
-            }
-            Key::Char(c) if !ctrl => {
-                self.filter.push(c);
-                self.refilter();
-                self.auto_submit_index()
-                    .and_then(|idx| self.rows.get(idx))
-                    .map(|row| Msg::ChoicePicked(vec![ChoicePayload::Text(row.key.clone())]))
-            }
-            _ => None,
-        }
+        self.dispatch_key(key)
     }
 
     /// Render the left, category-grouped list into `area`, scrolling so
@@ -573,6 +475,99 @@ impl SnippetPicker {
             ));
         }
         frame.render_widget(Paragraph::new(lines), area);
+    }
+}
+
+impl FilterableList for SnippetPicker {
+    /// Recompute the visible index list, grouped by category, and record
+    /// whether a "Recent" group leads it (`recent_count`). The shared
+    /// [`FilterableList::refilter`] stores the result and resets the
+    /// cursor; [`SnippetPicker::set_visible`] zeroes `list_scroll`. A row
+    /// matches when the filter is a case-insensitive substring of its
+    /// key, description, or category — richer than the pre-#244 key-only
+    /// prefix so snippets are discoverable by what they *do*. The
+    /// exact-key auto-submit fast path is decided separately (see
+    /// `auto_submit_index`) and is unaffected by description hits.
+    fn compute_visible(&mut self) -> Vec<usize> {
+        let q = self.filter.trim();
+        let mut idxs: Vec<usize> = if q.is_empty() {
+            (0..self.rows.len()).collect()
+        } else {
+            self.rows
+                .iter()
+                .enumerate()
+                .filter_map(|(i, r)| {
+                    (contains_icase(&r.key, q)
+                        || contains_icase(&r.description, q)
+                        || contains_icase(&r.category, q))
+                    .then_some(i)
+                })
+                .collect()
+        };
+        // Group by category (headers), keeping rows key-sorted within a
+        // group — `rows` already arrives key-sorted, so a stable sort by
+        // category rank preserves that.
+        idxs.sort_by(|&a, &b| {
+            let (ca, cb) = (&self.rows[a].category, &self.rows[b].category);
+            category_rank(ca)
+                .cmp(&category_rank(cb))
+                .then_with(|| ca.cmp(cb))
+        });
+        // On an empty filter, float the recently-used snippets into a
+        // "Recent" group at the very top (they also remain in their real
+        // category below — the group is a shortcut, not a move). A
+        // non-empty filter is a deliberate search, so recents step aside.
+        if q.is_empty() && !self.recent_rows.is_empty() {
+            self.recent_count = self.recent_rows.len();
+            self.recent_rows.iter().copied().chain(idxs).collect()
+        } else {
+            self.recent_count = 0;
+            idxs
+        }
+    }
+
+    fn pick(&self, item_idx: usize) -> Option<Msg> {
+        let key = self.rows.get(item_idx)?.key.clone();
+        Some(Msg::ChoicePicked(vec![ChoicePayload::Text(key)]))
+    }
+
+    fn filter(&self) -> &str {
+        &self.filter
+    }
+    fn filter_mut(&mut self) -> &mut String {
+        &mut self.filter
+    }
+    fn cursor(&self) -> Option<usize> {
+        self.cursor
+    }
+    fn set_cursor(&mut self, cursor: Option<usize>) {
+        self.cursor = cursor;
+    }
+    fn visible(&self) -> &[usize] {
+        &self.visible_indices
+    }
+    fn set_visible(&mut self, visible: Vec<usize>) {
+        self.visible_indices = visible;
+        // A refilter re-anchors the viewport to the top; the cursor is
+        // reset by the shared `refilter`.
+        self.list_scroll = 0;
+    }
+
+    /// Typed-character auto-submit: the `]]srev` fast path. Fires only
+    /// when the filter uniquely identifies a snippet key.
+    fn auto_submit(&self) -> Option<Msg> {
+        self.auto_submit_index()
+            .and_then(|idx| self.rows.get(idx))
+            .map(|row| Msg::ChoicePicked(vec![ChoicePayload::Text(row.key.clone())]))
+    }
+
+    /// `Ctrl-F` "no snippet — free text only": an empty pick the
+    /// broadcast handler reads as "skip straight to compose". Inert
+    /// unless the broadcast flow opted in with `with_free_text_option`.
+    fn custom_key(&mut self, key: &KeyEvent) -> Option<Msg> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        (ctrl && matches!(key.code, Key::Char('f')) && self.offer_free_text)
+            .then(|| Msg::ChoicePicked(Vec::new()))
     }
 }
 

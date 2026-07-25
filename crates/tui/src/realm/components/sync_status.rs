@@ -11,18 +11,23 @@
 //! at mount, with `now` captured once so the relative ages don't drift
 //! while the window is open.
 
+use crate::realm::components::scrollable::{
+    centered_rect, draw_frame, handle_scroll_key, max_scroll,
+};
 use crate::realm::status_ctx::{SyncEntry, SyncOutcome};
 use crate::realm::{Msg, UserEvent};
 use chrono::{DateTime, Utc};
 use lazybox_core::time::time_ago_at;
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
-use tuirealm::event::{Event, Key, KeyModifiers};
+use tuirealm::event::Event;
+#[cfg(test)]
+use tuirealm::event::{Key, KeyModifiers};
 use tuirealm::props::{AttrValue, Attribute, QueryResult};
 use tuirealm::ratatui::Frame;
 use tuirealm::ratatui::layout::Rect;
 use tuirealm::ratatui::prelude::*;
-use tuirealm::ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use tuirealm::ratatui::widgets::Paragraph;
 use tuirealm::state::State;
 
 /// Debug / sync-status window.
@@ -134,10 +139,6 @@ impl SyncStatus {
             Span::styled(format!("  ·  {ago}"), Style::default().fg(theme.text_dim)),
         ])
     }
-
-    fn max_scroll(&self, total_lines: u16) -> u16 {
-        total_lines.saturating_sub(self.body_height.max(1))
-    }
 }
 
 /// The human-readable outcome fragment shared by the summary and log
@@ -167,19 +168,8 @@ impl Component for SyncStatus {
         let theme = crate::theme::current();
         let modal_w = 100u16.min(area.width.saturating_sub(4));
         let modal_h = 24u16.min(area.height.saturating_sub(2));
-        let x = area.x + area.width.saturating_sub(modal_w) / 2;
-        let y = area.y + area.height.saturating_sub(modal_h) / 2;
-        let modal = Rect::new(x, y, modal_w, modal_h);
-
-        frame.render_widget(Clear, modal);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(theme.modal_border())
-            .title(" Sync status ")
-            .title_style(theme.modal_title());
-        let inner = block.inner(modal);
-        frame.render_widget(block, modal);
+        let modal = centered_rect(area, modal_w, modal_h);
+        let inner = draw_frame(frame, modal, " Sync status ", theme);
         if inner.height < 2 {
             return;
         }
@@ -202,7 +192,7 @@ impl Component for SyncStatus {
         let lines = self.body_lines(theme);
         // Clamp scroll so a short log can't leave blank rows scrolled
         // off the top.
-        let max = self.max_scroll(lines.len() as u16);
+        let max = max_scroll(lines.len(), self.body_height);
         if self.scroll > max {
             self.scroll = max;
         }
@@ -233,40 +223,11 @@ impl AppComponent<Msg, UserEvent> for SyncStatus {
         let Event::Keyboard(key) = ev else {
             return None;
         };
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let page = self.body_height.max(1);
-        match key.code {
-            Key::Down | Key::Char('j') => {
-                self.scroll = self.scroll.saturating_add(1);
-                None
-            }
-            Key::Up | Key::Char('k') => {
-                self.scroll = self.scroll.saturating_sub(1);
-                None
-            }
-            Key::PageDown => {
-                self.scroll = self.scroll.saturating_add(page);
-                None
-            }
-            Key::PageUp => {
-                self.scroll = self.scroll.saturating_sub(page);
-                None
-            }
-            Key::Char('d') if ctrl => {
-                self.scroll = self.scroll.saturating_add((page / 2).max(1));
-                None
-            }
-            Key::Char('u') if ctrl => {
-                self.scroll = self.scroll.saturating_sub((page / 2).max(1));
-                None
-            }
-            Key::Home | Key::Char('g') => {
-                self.scroll = 0;
-                None
-            }
-            // Any other key (Esc, q, Enter, …) closes the window.
-            _ => Some(Msg::ModalDismissed),
+        if handle_scroll_key(&mut self.scroll, self.body_height, key) {
+            return None;
         }
+        // Any other key (Esc, q, Enter, …) closes the window.
+        Some(Msg::ModalDismissed)
     }
 }
 

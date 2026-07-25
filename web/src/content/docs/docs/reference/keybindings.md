@@ -212,11 +212,16 @@ Press the leader key, then the second key. Every menu shows a which-key popup wh
 
 ## Pickers
 
-Every picker modal (snippets, jump-to-workspace, reviewers, labels, …) shares the same keys:
+The filter-as-you-type pickers — snippets (`]]s`), jump-to-workspace (`` ` ``), and prompt history (`]]h`) — share one key protocol. Because typing filters the list, the letter keys go to the filter and the arrows (not `j` / `k`) move the selection:
 
 | Key | Action |
 | --- | --- |
-| `j` / `k` or arrows | Move the selection |
-| `Enter` | Confirm |
-| (type) | Filter the list |
-| `Esc` | Dismiss |
+| `↑` / `↓` | Move the selection |
+| `Home` / `End` | Jump to the first / last match |
+| `Enter` | Confirm the highlighted row |
+| (type) / `Backspace` | Edit the filter |
+| `Esc` / `Ctrl-c` | Dismiss |
+
+The snippet picker adds two shortcuts on top of this protocol: typing a key that uniquely identifies one snippet submits it immediately (so `]]srev` sends `rev` with no `Enter`), and `Ctrl-F` skips straight to free text in the broadcast flow.
+
+The reviewers / labels / assignees picker (`Choice`) is a different modal — a multi-select with no filter, toggled with `Space` — so it does not follow the protocol above.

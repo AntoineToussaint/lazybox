@@ -16,15 +16,20 @@
 
 use crate::components::markdown_doc::{RenderedDoc, render_markdown};
 use crate::components::scrollbar;
+use crate::realm::components::scrollable::{
+    centered_rect, draw_frame, handle_scroll_key, max_scroll,
+};
 use crate::realm::{Msg, UserEvent};
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
-use tuirealm::event::{Event, Key, KeyModifiers, MouseEventKind};
+#[cfg(test)]
+use tuirealm::event::KeyModifiers;
+use tuirealm::event::{Event, Key, MouseEventKind};
 use tuirealm::props::{AttrValue, Attribute, QueryResult};
 use tuirealm::ratatui::Frame;
 use tuirealm::ratatui::layout::Rect;
 use tuirealm::ratatui::prelude::*;
-use tuirealm::ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use tuirealm::ratatui::widgets::Paragraph;
 use tuirealm::state::State;
 
 /// Wheel notches per scroll event — matches the pane scroll feel.
@@ -60,10 +65,6 @@ impl MarkdownModal {
         }
     }
 
-    fn max_scroll(&self) -> u16 {
-        (self.rendered.lines.len() as u16).saturating_sub(self.body_height.max(1))
-    }
-
     /// Resolve a click to a link URL, mapping the on-screen `(col, row)`
     /// through the current scroll offset into the rendered doc.
     fn link_at_click(&self, col: u16, row: u16) -> Option<&str> {
@@ -97,21 +98,11 @@ impl Component for MarkdownModal {
         } else {
             area.height.saturating_sub(4).max(6)
         };
-        let x = area.x + area.width.saturating_sub(modal_w) / 2;
-        let y = area.y + area.height.saturating_sub(modal_h) / 2;
-        let modal = Rect::new(x, y, modal_w, modal_h);
+        let modal = centered_rect(area, modal_w, modal_h);
         self.modal_rect = modal;
 
-        frame.render_widget(Clear, modal);
         let title = format!(" {} ", trim_title(&self.title, modal_w.saturating_sub(4)));
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(theme.modal_border())
-            .title(title)
-            .title_style(theme.modal_title());
-        let inner = block.inner(modal);
-        frame.render_widget(block, modal);
+        let inner = draw_frame(frame, modal, &title, theme);
         if inner.height < 2 || inner.width < 2 {
             return;
         }
@@ -152,7 +143,7 @@ impl Component for MarkdownModal {
         }
 
         let total = self.rendered.lines.len();
-        let max = self.max_scroll();
+        let max = max_scroll(total, self.body_height);
         if self.scroll > max {
             self.scroll = max;
         }
@@ -190,40 +181,12 @@ impl Component for MarkdownModal {
 
 impl AppComponent<Msg, UserEvent> for MarkdownModal {
     fn on(&mut self, ev: &Event<UserEvent>) -> Option<Msg> {
-        let page = self.body_height.max(1);
         match ev {
             Event::Keyboard(key) => {
-                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                if handle_scroll_key(&mut self.scroll, self.body_height, key) {
+                    return None;
+                }
                 match key.code {
-                    Key::Down | Key::Char('j') => {
-                        self.scroll = self.scroll.saturating_add(1);
-                        None
-                    }
-                    Key::Up | Key::Char('k') => {
-                        self.scroll = self.scroll.saturating_sub(1);
-                        None
-                    }
-                    // PageUp/PageDown and their Shift- variants page.
-                    Key::PageDown => {
-                        self.scroll = self.scroll.saturating_add(page);
-                        None
-                    }
-                    Key::PageUp => {
-                        self.scroll = self.scroll.saturating_sub(page);
-                        None
-                    }
-                    Key::Char('d') if ctrl => {
-                        self.scroll = self.scroll.saturating_add((page / 2).max(1));
-                        None
-                    }
-                    Key::Char('u') if ctrl => {
-                        self.scroll = self.scroll.saturating_sub((page / 2).max(1));
-                        None
-                    }
-                    Key::Home | Key::Char('g') => {
-                        self.scroll = 0;
-                        None
-                    }
                     // Clamp-to-bottom happens in `view` via `max_scroll`.
                     Key::End | Key::Char('G') => {
                         self.scroll = u16::MAX;

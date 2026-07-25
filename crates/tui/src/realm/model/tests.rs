@@ -707,6 +707,54 @@ mod effects_tests {
         );
     }
 
+    /// #552: a `RemovalCancelled` for the workspace whose removal confirm
+    /// is mounted dismisses that modal — a reopened issue must not leave
+    /// a stale "remove closed issue?" prompt up.
+    #[test]
+    fn removal_cancelled_dismisses_mounted_prompt() {
+        use lazybox_ipc::Event as IpcEvent;
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::MergedPrRemovable {
+            workspace_key: WorkspaceKey::new("github:o/r#1"),
+            label: "o/r#1".into(),
+            terminal_state: lazybox_ipc::RemovableTerminalState::Closed,
+            active_terminal_count: 0,
+            has_local_work: true,
+        });
+        assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
+
+        m.handle_daemon_event(IpcEvent::RemovalCancelled {
+            workspace_key: WorkspaceKey::new("github:o/r#1"),
+        });
+        assert_eq!(m.top_modal(), None, "reopen must dismiss the modal");
+        assert!(m.active_removal_prompt.is_none());
+    }
+
+    /// A `RemovalCancelled` for a *different* workspace leaves the
+    /// mounted prompt untouched.
+    #[test]
+    fn removal_cancelled_ignores_other_workspace() {
+        use lazybox_ipc::Event as IpcEvent;
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::MergedPrRemovable {
+            workspace_key: WorkspaceKey::new("github:o/r#1"),
+            label: "o/r#1".into(),
+            terminal_state: lazybox_ipc::RemovableTerminalState::Closed,
+            active_terminal_count: 0,
+            has_local_work: true,
+        });
+        assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
+
+        m.handle_daemon_event(IpcEvent::RemovalCancelled {
+            workspace_key: WorkspaceKey::new("github:o/r#2"),
+        });
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::RemoveOutOfScope),
+            "an unrelated cancel must not dismiss this prompt"
+        );
+    }
+
     /// Regression for #292: two PRs merging in the same poll produce
     /// two `MergedPrRemovable` events → two modals, one after the
     /// other. The second queues behind the first and mounts as soon as

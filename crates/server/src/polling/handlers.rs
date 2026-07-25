@@ -1363,9 +1363,17 @@ pub async fn on_terminal_transition(
 /// A session-less **merged PR** still prompts (issue #499): removal just
 /// drops the tracking row, but a merged PR shouldn't linger unprompted
 /// just because it never had a worktree — `has_local_work` and
-/// `active_terminal_count` come back `false`/`0`. A session-less
-/// **closed issue** is a no-op (no worktree to reap; the bare row is
-/// `x x` territory), matching [`super::removal_candidate_state`].
+/// `active_terminal_count` come back `false`/`0`.
+///
+/// A **closed issue** is the end of that workspace's life, so it doesn't
+/// prompt when removal is safe (issue #552): a session-less issue (no
+/// worktree to reap), or one whose worktrees are all clean (no
+/// uncommitted/unpushed work) and has no live terminal attached, is
+/// removed immediately via [`remove_merged_workspace_with`], with a
+/// footer notice. Genuine local work, an inspect we couldn't complete,
+/// or a live terminal all fall through to the keep/remove prompt so
+/// nothing is destroyed from under the user. Mirrors
+/// [`super::removal_candidate_state`].
 pub(crate) async fn prompt_merged_pr_removal_with(
     config: &ServerConfig,
     mgr: &lazybox_git_ops::WorktreeManager,
@@ -1381,14 +1389,14 @@ pub(crate) async fn prompt_merged_pr_removal_with(
     if workspace.cleanup_prompt == lazybox_core::CleanupPrompt::Declined {
         return;
     }
-    // A merged PR prompts even without a worktree (issue #499); a closed
-    // issue only when it has a session to reap — otherwise the bare row
-    // stays `x x` territory. Mirrors `super::removal_candidate_state`.
-    if terminal_state == lazybox_ipc::RemovableTerminalState::Closed
-        && workspace.sessions.is_empty()
-    {
-        return;
-    }
+
+    let label = workspace
+        .primary_task()
+        .map(|t| t.id.key.clone())
+        .filter(|k| !k.is_empty())
+        .unwrap_or_else(|| key.as_str().to_string());
+    let session_paths = workspace_worktree_paths(&workspace);
+
     {
         let mut prompts = config.removal_prompts.lock().await;
         let now = std::time::Instant::now();
@@ -1403,25 +1411,31 @@ pub(crate) async fn prompt_merged_pr_removal_with(
         prompts.prompted.insert(key.as_str().to_string(), now);
     }
 
-    let label = workspace
-        .primary_task()
-        .map(|t| t.id.key.clone())
-        .filter(|k| !k.is_empty())
-        .unwrap_or_else(|| key.as_str().to_string());
     let active_terminal_count = count_live_terminals(config, key).await;
+    let local_work = workspace_local_work(config, mgr, key, &session_paths).await;
 
-    let session_paths = workspace_worktree_paths(&workspace);
-    let tracked = collect_tracked_sessions(config).await;
-    let has_local_work = match mgr.inspect_worktrees(&tracked).await {
-        Ok(rows) => rows.iter().any(|row| {
-            session_paths.contains(&canon(&row.path))
-                && (row.has_uncommitted_changes || row.has_unpushed_commits)
-        }),
-        Err(e) => {
-            tracing::warn!(workspace = %key, "prompt_merged_pr_removal: inspect failed: {e}");
-            false
+    // A closed issue auto-removes as soon as removal is safe (issue
+    // #552): `local_work == Some(false)` (a session-less row — nothing
+    // to reap — or worktrees that are all clean) AND no live terminal to
+    // yank from under the user. Real local work (`Some(true)`), an
+    // inspect we couldn't complete (`None` — never force-delete the
+    // unverified), or a live terminal all fall through to the
+    // keep/remove prompt. A merged PR always prompts (issue #499).
+    if terminal_state == lazybox_ipc::RemovableTerminalState::Closed
+        && local_work == Some(false)
+        && active_terminal_count == 0
+    {
+        remove_merged_workspace_with(config, mgr, key).await;
+        if load_workspace(config, key).is_none() {
+            let _ = config.bus.send(Event::Notification {
+                title: "lazybox".into(),
+                body: format!("Removed workspace for closed {label}"),
+            });
         }
-    };
+        return;
+    }
+
+    let has_local_work = local_work.unwrap_or(false);
 
     tracing::info!(
         workspace = %key,
@@ -1540,6 +1554,51 @@ fn workspace_worktree_paths(
         .iter()
         .map(|s| canon(&s.worktree_path))
         .collect()
+}
+
+/// Whether any of a workspace's session worktrees hold uncommitted or
+/// unpushed work. `Some(false)` — clean, and also the answer for a
+/// session-less workspace (no worktree to inspect). `Some(true)` — at
+/// least one worktree is dirty or ahead of its remote. `None` — the
+/// inspect itself failed, so cleanliness is unknown: callers that would
+/// destroy a worktree must treat `None` as unsafe, never as clean.
+async fn workspace_local_work(
+    config: &ServerConfig,
+    mgr: &lazybox_git_ops::WorktreeManager,
+    key: &WorkspaceKey,
+    session_paths: &std::collections::HashSet<std::path::PathBuf>,
+) -> Option<bool> {
+    if session_paths.is_empty() {
+        return Some(false);
+    }
+    let tracked = collect_tracked_sessions(config).await;
+    match mgr.inspect_worktrees(&tracked).await {
+        Ok(rows) => Some(rows.iter().any(|row| {
+            session_paths.contains(&canon(&row.path))
+                && (row.has_uncommitted_changes || row.has_unpushed_commits)
+        })),
+        Err(e) => {
+            tracing::warn!(workspace = %key, "prompt_merged_pr_removal: inspect failed: {e}");
+            None
+        }
+    }
+}
+
+/// Cancel a pending workspace-removal prompt (issue #552): drop the
+/// reprompt throttle memory so a re-close prompts cleanly, then
+/// broadcast [`Event::RemovalCancelled`] so any TUI dismisses a still-
+/// mounted "remove closed issue?" modal. Called when a closed issue
+/// reopens before its removal was acted on.
+pub(crate) async fn cancel_pending_removal(config: &ServerConfig, key: &WorkspaceKey) {
+    config
+        .removal_prompts
+        .lock()
+        .await
+        .prompted
+        .remove(key.as_str());
+    let _ = config.bus.send(Event::RemovalCancelled {
+        workspace_key: key.clone(),
+    });
 }
 
 /// Count live terminals (PTY/tmux sessions) bound to a workspace key,
@@ -2605,6 +2664,90 @@ mod inspect_tests {
         key
     }
 
+    /// Build a **closed issue** task (`o/r#{number}`, `TaskKind::Issue`).
+    /// Distinct from the merged-PR seeds so the #552 closed-issue paths
+    /// are exercised with a genuine issue, not a PR mislabelled `Closed`.
+    fn closed_issue_task(number: u64, branch: &str) -> lazybox_core::Task {
+        use lazybox_core::{Task, TaskId, TaskKind, TaskRole, TaskState};
+        Task {
+            id: TaskId {
+                source: "github".into(),
+                key: format!("o/r#{number}"),
+            },
+            title: "closed issue".into(),
+            body: None,
+            state: TaskState::Closed,
+            role: TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: format!("https://github.com/o/r/issues/{number}"),
+            repo: Some("o/r".into()),
+            branch: Some(branch.into()),
+            base_branch: None,
+            updated_at: chrono::Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            kind: Some(TaskKind::Issue),
+            closes_issues: vec![],
+        }
+    }
+
+    /// Seed a closed-issue workspace with one session rooted at `wt`.
+    fn seed_closed_issue_workspace(
+        store: &MemoryStore,
+        wt: PathBuf,
+        branch: &str,
+        number: u64,
+    ) -> (WorkspaceKey, SessionId) {
+        use lazybox_core::Workspace;
+        let mut workspace =
+            Workspace::from_task(closed_issue_task(number, branch), chrono::Utc::now());
+        let key = workspace.key.clone();
+        let session =
+            WorkspaceSession::new(key.clone(), SessionKind::Shell, wt, chrono::Utc::now());
+        let session_id = session.id;
+        workspace.sessions.push(session);
+        store
+            .save_workspace(&WorkspaceRecord {
+                key: key.as_str().into(),
+                created_at: chrono::Utc::now(),
+                workspace_json: Some(serde_json::to_string(&workspace).unwrap()),
+            })
+            .unwrap();
+        (key, session_id)
+    }
+
+    /// Seed a closed-issue workspace with **no session** — the bare
+    /// tracked row that used to linger as `x x` territory (#552).
+    fn seed_closed_issue_no_session(store: &MemoryStore, number: u64) -> WorkspaceKey {
+        use lazybox_core::Workspace;
+        let workspace = Workspace::from_task(closed_issue_task(number, "feat"), chrono::Utc::now());
+        let key = workspace.key.clone();
+        store
+            .save_workspace(&WorkspaceRecord {
+                key: key.as_str().into(),
+                created_at: chrono::Utc::now(),
+                workspace_json: Some(serde_json::to_string(&workspace).unwrap()),
+            })
+            .unwrap();
+        key
+    }
+
     /// Drop the remote-tracking ref so the inspector sees the merged
     /// branch as auto-deleted upstream (the GitHub-on-merge default),
     /// which is what flips the worktree to `is_safe_to_delete`.
@@ -2925,14 +3068,17 @@ mod inspect_tests {
         assert!(has_local_work, "dirty worktree must warn before delete");
     }
 
-    /// A closed **issue** with a session/worktree emits the same
+    /// A closed **issue** whose worktree has local work emits the same
     /// `MergedPrRemovable` prompt as a merged PR, but tags
     /// `terminal_state = Closed` so the modal copy reads "closed" (#250).
+    /// A clean closed issue would auto-remove (#552), so the worktree is
+    /// dirtied here to force the prompt path under test.
     #[tokio::test]
     async fn prompt_emits_closed_terminal_state_for_issue() {
         let fx = setup_fixture().await;
         let wt = add_wt(&fx, "issue", "feat").await;
         delete_remote_ref(&fx, "feat").await;
+        std::fs::write(wt.join("scratch.txt"), "wip").unwrap();
         let store = Arc::new(MemoryStore::new());
         let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
 
@@ -2954,6 +3100,233 @@ mod inspect_tests {
         };
         assert_eq!(terminal_state, lazybox_ipc::RemovableTerminalState::Closed);
         assert!(wt.exists(), "prompt must not delete anything");
+    }
+
+    /// #552: a session-less closed issue auto-removes immediately (no
+    /// worktree to reap, nothing to lose) instead of prompting or
+    /// lingering as an `x x` row. The row is gone and no
+    /// `MergedPrRemovable` is emitted.
+    #[tokio::test]
+    async fn closed_issue_without_session_auto_removes() {
+        let store = Arc::new(MemoryStore::new());
+        let key = seed_closed_issue_no_session(&store, 7);
+
+        let config = fresh_config(store);
+        let mgr = lazybox_git_ops::WorktreeManager::new(
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+        );
+        let mut rx = config.bus.subscribe();
+
+        prompt_merged_pr_removal_with(
+            &config,
+            &mgr,
+            &key,
+            lazybox_ipc::RemovableTerminalState::Closed,
+        )
+        .await;
+
+        assert!(
+            load_workspace(&config, &key).is_none(),
+            "session-less closed issue must be removed immediately"
+        );
+        let removed = drain_until(&mut rx, |e| matches!(e, Event::WorkspaceRemoved(_)));
+        let Event::WorkspaceRemoved(k) = removed.await else {
+            unreachable!()
+        };
+        assert_eq!(k, key);
+    }
+
+    /// #552: a closed issue whose worktree is clean (no uncommitted /
+    /// unpushed work) auto-removes — the worktree is force-deleted and
+    /// the row dropped, no prompt.
+    #[tokio::test]
+    async fn closed_issue_clean_session_auto_removes() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "issue-clean", "feat").await;
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_closed_issue_workspace(&store, wt.clone(), "feat", 8);
+
+        let config = fresh_config(store);
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mut rx = config.bus.subscribe();
+
+        prompt_merged_pr_removal_with(
+            &config,
+            &mgr,
+            &key,
+            lazybox_ipc::RemovableTerminalState::Closed,
+        )
+        .await;
+
+        assert!(
+            load_workspace(&config, &key).is_none(),
+            "clean closed issue must be removed"
+        );
+        assert!(!wt.exists(), "clean worktree must be force-deleted");
+        assert_no_event(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
+    }
+
+    /// #552: a closed issue that is clean but has a live terminal
+    /// attached must NOT be yanked from under the user — it prompts
+    /// (reporting the live terminal) instead of auto-removing.
+    #[tokio::test]
+    async fn closed_issue_clean_session_with_live_terminal_prompts() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "issue-live", "feat").await;
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_closed_issue_workspace(&store, wt.clone(), "feat", 12);
+
+        let config = fresh_config(store);
+        let session_key: lazybox_core::SessionKey = (&key).into();
+        config.terminal_meta.lock().await.insert(
+            lazybox_ipc::TerminalId(1),
+            (session_key, lazybox_ipc::TerminalKind::Shell),
+        );
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mut rx = config.bus.subscribe();
+
+        prompt_merged_pr_removal_with(
+            &config,
+            &mgr,
+            &key,
+            lazybox_ipc::RemovableTerminalState::Closed,
+        )
+        .await;
+
+        let evt = drain_until(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
+        let Event::MergedPrRemovable {
+            active_terminal_count,
+            ..
+        } = evt
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            active_terminal_count, 1,
+            "the live terminal must be reported"
+        );
+        assert!(wt.exists(), "a live-terminal worktree must survive");
+        assert!(load_workspace(&config, &key).is_some());
+    }
+
+    /// #552: a closed issue whose worktree has uncommitted work is NOT
+    /// destroyed — it prompts (`MergedPrRemovable`, `has_local_work`)
+    /// and leaves the worktree + row intact until the user answers.
+    #[tokio::test]
+    async fn closed_issue_dirty_session_prompts() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "issue-dirty", "feat").await;
+        std::fs::write(wt.join("scratch.txt"), "wip").unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_closed_issue_workspace(&store, wt.clone(), "feat", 9);
+
+        let config = fresh_config(store);
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mut rx = config.bus.subscribe();
+
+        prompt_merged_pr_removal_with(
+            &config,
+            &mgr,
+            &key,
+            lazybox_ipc::RemovableTerminalState::Closed,
+        )
+        .await;
+
+        let evt = drain_until(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
+        let Event::MergedPrRemovable {
+            has_local_work,
+            terminal_state,
+            ..
+        } = evt
+        else {
+            unreachable!()
+        };
+        assert!(has_local_work, "dirty worktree must warn, not auto-remove");
+        assert_eq!(terminal_state, lazybox_ipc::RemovableTerminalState::Closed);
+        assert!(wt.exists(), "dirty worktree must survive the prompt");
+        assert!(
+            load_workspace(&config, &key).is_some(),
+            "row must remain until the user answers"
+        );
+    }
+
+    /// #552 + #499: a durable "keep" answer pins even a session-less
+    /// closed issue — the auto-remove is suppressed and the row stays.
+    #[tokio::test]
+    async fn closed_issue_declined_stays_declined() {
+        let store = Arc::new(MemoryStore::new());
+        let key = seed_closed_issue_no_session(&store, 10);
+        {
+            let mut ws = load_workspace(&fresh_config(store.clone()), &key).unwrap();
+            ws.cleanup_prompt = lazybox_core::CleanupPrompt::Declined;
+            store
+                .save_workspace(&WorkspaceRecord {
+                    key: key.as_str().into(),
+                    created_at: chrono::Utc::now(),
+                    workspace_json: Some(serde_json::to_string(&ws).unwrap()),
+                })
+                .unwrap();
+        }
+
+        let config = fresh_config(store);
+        let mgr = lazybox_git_ops::WorktreeManager::new(
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+        );
+        let mut rx = config.bus.subscribe();
+
+        prompt_merged_pr_removal_with(
+            &config,
+            &mgr,
+            &key,
+            lazybox_ipc::RemovableTerminalState::Closed,
+        )
+        .await;
+
+        assert!(
+            load_workspace(&config, &key).is_some(),
+            "a declined closed issue must not be auto-removed"
+        );
+        assert_no_event(&mut rx, |e| {
+            matches!(
+                e,
+                Event::WorkspaceRemoved(_) | Event::MergedPrRemovable { .. }
+            )
+        })
+        .await;
+    }
+
+    /// #552: cancelling a pending removal drops the reprompt throttle
+    /// stamp (so a re-close prompts cleanly) and broadcasts
+    /// `RemovalCancelled` so the TUI dismisses a mounted modal.
+    #[tokio::test]
+    async fn cancel_pending_removal_clears_memory_and_broadcasts() {
+        let store = Arc::new(MemoryStore::new());
+        let key = seed_closed_issue_no_session(&store, 11);
+        let config = fresh_config(store);
+        config
+            .removal_prompts
+            .lock()
+            .await
+            .prompted
+            .insert(key.as_str().to_string(), std::time::Instant::now());
+        let mut rx = config.bus.subscribe();
+
+        cancel_pending_removal(&config, &key).await;
+
+        assert!(
+            !config
+                .removal_prompts
+                .lock()
+                .await
+                .prompted
+                .contains_key(key.as_str()),
+            "reprompt stamp must be dropped"
+        );
+        let evt = drain_until(&mut rx, |e| matches!(e, Event::RemovalCancelled { .. })).await;
+        let Event::RemovalCancelled { workspace_key } = evt else {
+            unreachable!()
+        };
+        assert_eq!(workspace_key, key);
     }
 
     /// Level-trigger sweep (#292): an unresolved merged workspace is
@@ -3134,11 +3507,11 @@ mod inspect_tests {
         assert_eq!(active_terminal_count, 0, "no sessions means no terminals");
     }
 
-    /// Issue #499: a session-less *closed issue* is NOT prompted — with
-    /// no worktree to reap the bare row stays `x x` territory, unlike a
-    /// merged PR. Locks the deliberately asymmetric scope.
+    /// Issue #552: a session-less *closed issue* the transition missed
+    /// is auto-removed by the level-trigger sweep — the row is dropped
+    /// (nothing to reap) rather than prompted or left as `x x` territory.
     #[tokio::test]
-    async fn sweep_skips_session_less_closed_issue() {
+    async fn sweep_auto_removes_session_less_closed_issue() {
         use lazybox_core::{Task, TaskId, TaskRole, TaskState, Workspace};
         let fx = setup_fixture().await;
         let store = Arc::new(MemoryStore::new());
@@ -3179,6 +3552,7 @@ mod inspect_tests {
             closes_issues: vec![],
         };
         let workspace = Workspace::from_task(task, chrono::Utc::now());
+        let key = workspace.key.clone();
         store
             .save_workspace(&WorkspaceRecord {
                 key: workspace.key.as_str().into(),
@@ -3192,7 +3566,12 @@ mod inspect_tests {
         let mut rx = config.bus.subscribe();
 
         crate::polling::reprompt_unresolved_removals_with(&config, &mgr).await;
-        assert_no_event(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
+        assert!(
+            load_workspace(&config, &key).is_none(),
+            "the bare closed-issue row must be auto-removed"
+        );
+        let removed = drain_until(&mut rx, |e| matches!(e, Event::WorkspaceRemoved(_))).await;
+        assert!(matches!(removed, Event::WorkspaceRemoved(k) if k == key));
     }
 
     /// Issue #499: "keep" persists [`lazybox_core::CleanupPrompt::Declined`] on the

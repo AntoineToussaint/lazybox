@@ -3376,6 +3376,21 @@ async fn upsert_into_workspace_key(config: &ServerConfig, key: &WorkspaceKey, ta
         None
     };
 
+    // REOPEN-CANCEL (issue #552): an issue flipping closed→open while a
+    // removal prompt is still outstanding cancels it — the workspace is
+    // alive again, so a stale "remove closed issue?" modal must go. Gate
+    // the store read on the in-memory prompt record so the common
+    // open-issue poll pays only a lock + map lookup, not a load.
+    let reopened_issue = !task.is_pr()
+        && task.state == lazybox_core::TaskState::Open
+        && config
+            .removal_prompts
+            .lock()
+            .await
+            .prompted
+            .contains_key(key.as_str())
+        && issue_reopened(load_workspace(config, key).as_ref(), &task);
+
     // 1. PREPARE: build the workspace's final in-memory state.
     //    Includes the optional issue-collapse merge — if a PR
     //    polls in with `closes_issues`, we fold standalone issue
@@ -3420,6 +3435,8 @@ async fn upsert_into_workspace_key(config: &ServerConfig, key: &WorkspaceKey, ta
     //    commit so it re-reads the freshly persisted session set.
     if let Some(cleanup) = terminal_cleanup {
         handlers::on_terminal_transition(config, key, cleanup).await;
+    } else if reopened_issue {
+        handlers::cancel_pending_removal(config, key).await;
     }
 }
 
@@ -3502,6 +3519,19 @@ fn closed_issue_transition(prev: Option<&Workspace>, task: &Task) -> Option<u64>
         return None;
     }
     pr_number_from_task(task)
+}
+
+/// Whether `task` is an issue that *just* transitioned closed→open (a
+/// reopen). The inverse of [`closed_issue_transition`]: it requires a
+/// known predecessor that *was* closed, so a genuinely-open issue polled
+/// fresh (no prior workspace, or a prior that was already open) is not a
+/// reopen and can't cancel a removal that never existed.
+fn issue_reopened(prev: Option<&Workspace>, task: &Task) -> bool {
+    if task.is_pr() || task.state != lazybox_core::TaskState::Open {
+        return false;
+    }
+    prev.and_then(|w| w.task_by_id(&task.id)).map(|t| t.state)
+        == Some(lazybox_core::TaskState::Closed)
 }
 
 /// What the store holds at a workspace key, with "present but
@@ -4082,9 +4112,12 @@ fn pr_workspace_claiming_issue(
 /// A **merged PR** qualifies even with no sessions (issue #499): its
 /// tracking row should be offered for cleanup even when it never had a
 /// worktree — removal just drops the row, but the user shouldn't have to
-/// discover `x x` to be rid of it. A **closed issue** still requires a
-/// session (a worktree to reap); a bare closed-issue row remains `x x`
-/// territory to avoid nagging on every externally-closed tracked issue.
+/// discover `x x` to be rid of it. A **closed issue** likewise qualifies
+/// with or without sessions (issue #552): `prompt_merged_pr_removal_with`
+/// auto-removes it when that's safe (session-less or clean worktrees) and
+/// only prompts when there's local work, so the level-trigger sweep must
+/// reach even a bare closed-issue row that the open→closed transition
+/// missed (a daemon restart, a lagged broadcast).
 fn removal_candidate_state(
     config: &ServerConfig,
     workspace: &Workspace,
@@ -4097,8 +4130,7 @@ fn removal_candidate_state(
         return (task.state == lazybox_core::TaskState::Merged)
             .then_some(lazybox_ipc::RemovableTerminalState::Merged);
     }
-    if workspace.sessions.is_empty()
-        || task.state != lazybox_core::TaskState::Closed
+    if task.state != lazybox_core::TaskState::Closed
         || pr_workspace_claiming_issue(config, &task.id).is_some()
     {
         return None;
@@ -6435,6 +6467,30 @@ mod merge_detection_tests {
         assert_eq!(closed_issue_transition(Some(&prev), &incoming), None);
     }
 
+    #[test]
+    fn issue_reopen_from_closed_predecessor_fires() {
+        let prev = Workspace::from_task(issue("o/r#7", TaskState::Closed), Utc::now());
+        let incoming = issue("o/r#7", TaskState::Open);
+        assert!(issue_reopened(Some(&prev), &incoming));
+    }
+
+    #[test]
+    fn issue_open_without_closed_predecessor_is_not_a_reopen() {
+        // Freshly-discovered open issue, or one that was already open —
+        // no removal was ever pending, so nothing to cancel.
+        let incoming = issue("o/r#7", TaskState::Open);
+        assert!(!issue_reopened(None, &incoming));
+        let prev = Workspace::from_task(issue("o/r#7", TaskState::Open), Utc::now());
+        assert!(!issue_reopened(Some(&prev), &incoming));
+    }
+
+    #[test]
+    fn reopened_pr_does_not_trip_issue_reopen() {
+        let prev = Workspace::from_task(pr("o/r#7", TaskState::Closed), Utc::now());
+        let incoming = pr("o/r#7", TaskState::Open);
+        assert!(!issue_reopened(Some(&prev), &incoming));
+    }
+
     fn pr_on_branch(branch: &str) -> Task {
         let mut t = pr("o/r#99", TaskState::Open);
         t.branch = Some(branch.into());
@@ -6855,6 +6911,78 @@ mod rescope_collapse_tests {
             removal_candidate_state(&config, &issue_ws),
             None,
             "a PR-claimed closed issue defers to the PR's prompt"
+        );
+    }
+
+    /// #552: a session-less closed issue is now a sweep candidate too
+    /// (`prompt_merged_pr_removal_with` auto-removes it), so the
+    /// level-trigger can catch a transition the daemon missed.
+    #[tokio::test]
+    async fn removal_candidate_state_matches_session_less_closed_issue() {
+        let store = Arc::new(lazybox_store::MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+
+        let closed_issue = gh_task(
+            "o/r#70",
+            "https://github.com/o/r/issues/70",
+            TaskState::Closed,
+            vec![],
+        );
+        let issue_ws = Workspace::from_task(closed_issue, Utc::now());
+        assert_eq!(
+            removal_candidate_state(&config, &issue_ws),
+            Some(lazybox_ipc::RemovableTerminalState::Closed),
+        );
+    }
+
+    /// #552: a closed issue reopening while a removal prompt is
+    /// outstanding cancels it — the upsert broadcasts `RemovalCancelled`
+    /// and drops the reprompt throttle stamp.
+    #[tokio::test]
+    async fn reopened_issue_cancels_pending_removal() {
+        let store = Arc::new(lazybox_store::MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+
+        let closed_issue = gh_task(
+            "o/r#71",
+            "https://github.com/o/r/issues/71",
+            TaskState::Closed,
+            vec![],
+        );
+        let ws = Workspace::from_task(closed_issue, Utc::now());
+        let key = ws.key.clone();
+        seed(&store, &ws);
+        config
+            .removal_prompts
+            .lock()
+            .await
+            .prompted
+            .insert(key.as_str().to_string(), std::time::Instant::now());
+
+        let mut rx = config.bus.subscribe();
+        let reopened = gh_task(
+            "o/r#71",
+            "https://github.com/o/r/issues/71",
+            TaskState::Open,
+            vec![],
+        );
+        upsert_into_workspace_key(&config, &key, reopened).await;
+
+        let mut saw_cancel = false;
+        while let Ok(evt) = rx.try_recv() {
+            if matches!(evt, Event::RemovalCancelled { .. }) {
+                saw_cancel = true;
+            }
+        }
+        assert!(saw_cancel, "reopen must broadcast RemovalCancelled");
+        assert!(
+            !config
+                .removal_prompts
+                .lock()
+                .await
+                .prompted
+                .contains_key(key.as_str()),
+            "reopen must drop the reprompt throttle stamp"
         );
     }
 

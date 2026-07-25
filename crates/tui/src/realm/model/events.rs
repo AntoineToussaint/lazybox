@@ -401,6 +401,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::IssueDeleted { .. }
                 | IpcEvent::DeleteOrCloseFailed { .. }
                 | IpcEvent::MergedPrRemovable { .. }
+                | IpcEvent::RemovalCancelled { .. }
                 | IpcEvent::RepoLabels { .. }
                 | IpcEvent::SessionCreated(_)
                 | IpcEvent::WorktreeProgress { .. }
@@ -814,6 +815,14 @@ impl<T: TerminalAdapter> Model<T> {
             }
             return;
         }
+        // A closed issue reopened before its removal was acted on
+        // (#552): drop any queued or mounted "remove closed issue?"
+        // prompt for it — the workspace is alive again.
+        if let IpcEvent::RemovalCancelled { workspace_key } = &event {
+            self.cancel_removal_prompt(workspace_key);
+            self.redraw = true;
+            return;
+        }
         // Clear the lazy-fetch dedupe entry when a workspace is
         // removed, so a re-added workspace (e.g. user re-checks a
         // filter) gets a fresh details fetch on next focus.
@@ -954,6 +963,7 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::IssueDeleted { .. }
             | IpcEvent::DeleteOrCloseFailed { .. }
             | IpcEvent::MergedPrRemovable { .. }
+            | IpcEvent::RemovalCancelled { .. }
             | IpcEvent::RepoLabels { .. }
             | IpcEvent::SessionCreated(_)
             | IpcEvent::WorktreeProgress { .. }
@@ -1139,6 +1149,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::IssueDeleted { .. }
                 | IpcEvent::DeleteOrCloseFailed { .. }
                 | IpcEvent::MergedPrRemovable { .. }
+                | IpcEvent::RemovalCancelled { .. }
                 | IpcEvent::RepoLabels { .. }
                 | IpcEvent::SessionCreated(_)
                 | IpcEvent::WorktreeProgress { .. }

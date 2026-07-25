@@ -431,6 +431,22 @@ impl Task {
         }
     }
 
+    /// The PR number parsed off this task's id (`owner/repo#123` → `123`),
+    /// but only when the task is actually a pull request. Used to fetch a
+    /// PR's `refs/pull/<N>/head` when provisioning a head branch that isn't
+    /// on `origin` (issue #550). `None` for issues and any id whose suffix
+    /// isn't a number.
+    pub fn pr_number(&self) -> Option<u64> {
+        self.is_pr()
+            .then(|| {
+                self.id
+                    .key
+                    .rsplit_once('#')
+                    .and_then(|(_, n)| n.parse().ok())
+            })
+            .flatten()
+    }
+
     /// When this task was opened, for age/staleness purposes. Uses the
     /// provider-supplied creation time when known, else falls back to
     /// `updated_at` — the best available lower bound on age when a
@@ -987,6 +1003,28 @@ mod status_tag_tests {
             !t.is_pr(),
             "None kind falls back to the URL heuristic (issue)"
         );
+    }
+
+    #[test]
+    fn pr_number_parses_only_for_pull_requests() {
+        // A PR id `owner/repo#123` yields its number; the `refs/pull/<N>/head`
+        // fallback (#550) depends on this.
+        let mut pr = base();
+        pr.id.key = "o/r#123".into();
+        pr.kind = Some(TaskKind::Pr);
+        assert_eq!(pr.pr_number(), Some(123));
+
+        // An issue — even with a numeric id — must not yield a PR number.
+        let mut issue = base();
+        issue.id.key = "o/r#123".into();
+        issue.kind = Some(TaskKind::Issue);
+        assert_eq!(issue.pr_number(), None);
+
+        // A non-numeric suffix (e.g. a Linear key) yields nothing.
+        let mut linear = base();
+        linear.id.key = "ENG-456".into();
+        linear.url = "https://github.com/o/r/pull/1".into();
+        assert_eq!(linear.pr_number(), None);
     }
 
     #[test]

@@ -2346,10 +2346,17 @@ async fn provision_worktree(
                 .as_deref()
                 .or(task.and_then(|t| t.branch.as_deref()))
             {
-                Some(branch) => mgr
-                    .checkout_at(target, owner, name, branch)
-                    .await
-                    .map_err(|e| ServerError::Worktree(format!("checkout_at: {e}")))?,
+                Some(branch) => {
+                    // Thread the PR number so `checkout_at` can fall back
+                    // to `refs/pull/<N>/head` for a head branch that isn't
+                    // on `origin` — a fork PR or a deleted head branch
+                    // (issue #550). `None` on-main (that branch is always a
+                    // plain origin branch) and for non-PR tasks.
+                    let pr_number = (!on_main).then(|| task.and_then(Task::pr_number)).flatten();
+                    mgr.checkout_at(target, owner, name, branch, pr_number)
+                        .await
+                        .map_err(|e| ServerError::Worktree(format!("checkout_at: {e}")))?
+                }
                 None => {
                     // Issue (or other branchless task, or blank workspace):
                     // cut a fresh branch off the repo default. Branch name

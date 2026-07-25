@@ -446,7 +446,7 @@ async fn checkout_existing_branch_surfaces_stale_base_when_fetch_fails() {
     let wm = WorktreeManager::new(base.path().to_path_buf()).with_progress(sink);
     let wt_path = base.path().join("attach-wt");
     let wt = wm
-        .checkout_at(&wt_path, "acme", "attach", "main")
+        .checkout_at(&wt_path, "acme", "attach", "main", None)
         .await
         .expect("checkout_at succeeds offline against the local ref");
     assert_eq!(wt.branch, "main");
@@ -454,4 +454,228 @@ async fn checkout_existing_branch_surfaces_stale_base_when_fetch_fails() {
     let note = stale_note(&seen).expect("BaseRefStale reported for checkout_at");
     assert!(note.contains("could not refresh main"), "note: {note}");
     assert!(note.contains(&short), "note names the fallback sha: {note}");
+}
+
+// The following exercise issue #550: `checkout_at` must provision a PR
+// whose head branch isn't a plain branch on `origin` by falling back to
+// GitHub's `refs/pull/<N>/head`, which the base repo exposes for every PR.
+
+#[tokio::test]
+async fn checkout_at_resolves_fork_pr_via_pull_head() {
+    // A fork PR's head lives on the contributor's fork, so `origin` has no
+    // `refs/heads/<branch>` for it — only `refs/pull/<N>/head`. Simulate
+    // that: build the head commit, publish it as the PR ref, then delete
+    // the branch so nothing but the pull ref reaches it.
+    let (upstream, base, _bare) = setup("acme", "forked");
+    git(
+        upstream.path(),
+        &["checkout", "-b", "contrib/feature", "-q"],
+    );
+    std::fs::write(upstream.path().join("f.txt"), "fork work").unwrap();
+    git(upstream.path(), &["add", "f.txt"]);
+    git(upstream.path(), &["commit", "-m", "fork PR head", "-q"]);
+    let head = git_out(upstream.path(), &["rev-parse", "HEAD"]);
+    git(upstream.path(), &["update-ref", "refs/pull/7/head", &head]);
+    git(upstream.path(), &["checkout", "main", "-q"]);
+    git(upstream.path(), &["branch", "-D", "contrib/feature"]);
+
+    let wm = WorktreeManager::new(base.path().to_path_buf());
+    let wt = wm
+        .checkout_at(
+            &base.path().join("fork-wt"),
+            "acme",
+            "forked",
+            "contrib/feature",
+            Some(7),
+        )
+        .await
+        .expect("fork PR provisions via refs/pull/<N>/head");
+
+    assert_eq!(
+        git_out(&wt.path, &["rev-parse", "HEAD"]),
+        head,
+        "worktree HEAD is the fork PR's head commit"
+    );
+    assert_eq!(wt.branch, "contrib/feature");
+    drop(upstream);
+}
+
+#[tokio::test]
+async fn checkout_at_prefers_pull_head_over_stale_local_ref() {
+    // A bot/CI PR whose head branch was deleted after the head advanced.
+    // The bare clone still holds a stale local `refs/heads/<branch>` that is
+    // an ancestor of the new head (a clean fast-forward, nothing to lose),
+    // so the pull-head fallback must win and land the worktree on the fresh
+    // head rather than the leftover commit.
+    let (upstream, base, bare) = setup("acme", "botpr");
+    git(upstream.path(), &["checkout", "-b", "ci/bot", "-q"]);
+    std::fs::write(upstream.path().join("v1.txt"), "v1").unwrap();
+    git(upstream.path(), &["add", "v1.txt"]);
+    git(upstream.path(), &["commit", "-m", "v1", "-q"]);
+    let stale = git_out(upstream.path(), &["rev-parse", "HEAD"]);
+    // Seed the bare clone's local `refs/heads/ci/bot` at the stale commit.
+    git(
+        &bare,
+        &[
+            "fetch",
+            "-q",
+            "origin",
+            "+refs/heads/ci/bot:refs/heads/ci/bot",
+        ],
+    );
+    assert_eq!(bare_ref(&bare, "refs/heads/ci/bot"), stale);
+
+    // The PR head advances, then the branch is deleted from origin.
+    std::fs::write(upstream.path().join("v2.txt"), "v2").unwrap();
+    git(upstream.path(), &["add", "v2.txt"]);
+    git(upstream.path(), &["commit", "-m", "v2", "-q"]);
+    let head = git_out(upstream.path(), &["rev-parse", "HEAD"]);
+    git(upstream.path(), &["update-ref", "refs/pull/9/head", &head]);
+    git(upstream.path(), &["checkout", "main", "-q"]);
+    git(upstream.path(), &["branch", "-D", "ci/bot"]);
+
+    let (seen, sink) = recording_sink();
+    let wm = WorktreeManager::new(base.path().to_path_buf()).with_progress(sink);
+    let wt = wm
+        .checkout_at(
+            &base.path().join("bot-wt"),
+            "acme",
+            "botpr",
+            "ci/bot",
+            Some(9),
+        )
+        .await
+        .expect("deleted-branch PR provisions via refs/pull/<N>/head");
+
+    assert_eq!(
+        git_out(&wt.path, &["rev-parse", "HEAD"]),
+        head,
+        "worktree HEAD is the fresh PR head, not the stale local ref"
+    );
+    assert_ne!(git_out(&wt.path, &["rev-parse", "HEAD"]), stale);
+    // We branched from the fresh pull head, so there is nothing stale to
+    // warn about — the origin-refresh failure must not surface a
+    // BaseRefStale note naming the (superseded) local ref.
+    assert!(
+        stale_note(&seen).is_none(),
+        "no false stale-base warning when the pull head resolves the checkout"
+    );
+    drop(upstream);
+}
+
+#[tokio::test]
+async fn checkout_at_uses_origin_branch_fast_path_even_for_a_pr() {
+    // When the PR's head branch IS a plain branch on origin (a lazybox-
+    // created PR, or any same-repo PR), the origin fast path stays
+    // unchanged and the pull-head fetch never runs — verified by the
+    // `refs/lazybox/pr/<N>` tracking ref never appearing.
+    let (upstream, base, bare) = setup("acme", "onorigin");
+    git(
+        upstream.path(),
+        &["checkout", "-b", "feature/on-origin", "-q"],
+    );
+    std::fs::write(upstream.path().join("o.txt"), "o").unwrap();
+    git(upstream.path(), &["add", "o.txt"]);
+    git(upstream.path(), &["commit", "-m", "on origin", "-q"]);
+    let head = git_out(upstream.path(), &["rev-parse", "HEAD"]);
+    git(upstream.path(), &["update-ref", "refs/pull/3/head", &head]);
+    git(upstream.path(), &["checkout", "main", "-q"]);
+
+    let wm = WorktreeManager::new(base.path().to_path_buf());
+    let wt = wm
+        .checkout_at(
+            &base.path().join("origin-wt"),
+            "acme",
+            "onorigin",
+            "feature/on-origin",
+            Some(3),
+        )
+        .await
+        .expect("origin-branch PR provisions via the fast path");
+
+    assert_eq!(git_out(&wt.path, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        bare_ref(&bare, "refs/lazybox/pr/3"),
+        "",
+        "the origin fast path must not fetch the pull-head fallback ref"
+    );
+    drop(upstream);
+}
+
+#[tokio::test]
+async fn checkout_at_keeps_local_ref_with_unpushed_commits_over_pull_head() {
+    // A lazybox-created PR: the local `refs/heads/<branch>` carries a commit
+    // that isn't in the PR head yet (unpushed work), and the origin branch
+    // is gone. Resetting to `refs/pull/<N>/head` would silently drop that
+    // commit, so the checkout must keep the local ref when the two diverge.
+    let (upstream, base, bare) = setup("acme", "unpushed");
+
+    // The PR head as GitHub knows it (what `refs/pull/<N>/head` resolves to).
+    git(upstream.path(), &["checkout", "-b", "feature/wip", "-q"]);
+    std::fs::write(upstream.path().join("pushed.txt"), "pushed").unwrap();
+    git(upstream.path(), &["add", "pushed.txt"]);
+    git(upstream.path(), &["commit", "-m", "pushed", "-q"]);
+    let pr_head = git_out(upstream.path(), &["rev-parse", "HEAD"]);
+    git(
+        upstream.path(),
+        &["update-ref", "refs/pull/5/head", &pr_head],
+    );
+
+    // Seed the bare clone's local branch, then advance it with a local-only
+    // commit the PR head never sees, and delete the branch from origin.
+    git(
+        &bare,
+        &[
+            "fetch",
+            "-q",
+            "origin",
+            "+refs/heads/feature/wip:refs/heads/feature/wip",
+        ],
+    );
+    std::fs::write(upstream.path().join("local.txt"), "local").unwrap();
+    git(upstream.path(), &["add", "local.txt"]);
+    git(upstream.path(), &["commit", "-m", "local only", "-q"]);
+    let local_tip = git_out(upstream.path(), &["rev-parse", "HEAD"]);
+    // Move the bare's local ref up to the unpushed tip (the shape a session
+    // that committed locally but never pushed leaves behind).
+    git(
+        &bare,
+        &[
+            "fetch",
+            "-q",
+            "origin",
+            "+refs/heads/feature/wip:refs/heads/feature/wip",
+        ],
+    );
+    assert_eq!(bare_ref(&bare, "refs/heads/feature/wip"), local_tip);
+    git(upstream.path(), &["checkout", "main", "-q"]);
+    git(upstream.path(), &["branch", "-D", "feature/wip"]);
+
+    let (seen, sink) = recording_sink();
+    let wm = WorktreeManager::new(base.path().to_path_buf()).with_progress(sink);
+    let wt = wm
+        .checkout_at(
+            &base.path().join("wip-wt"),
+            "acme",
+            "unpushed",
+            "feature/wip",
+            Some(5),
+        )
+        .await
+        .expect("diverged local ref still provisions");
+
+    assert_eq!(
+        git_out(&wt.path, &["rev-parse", "HEAD"]),
+        local_tip,
+        "the unpushed local commit is preserved, not reset to the PR head"
+    );
+    assert_ne!(git_out(&wt.path, &["rev-parse", "HEAD"]), pr_head);
+    // Here we genuinely branched from the local ref (origin gone, pull head
+    // rejected as divergent), so the stale-base warning is accurate and must
+    // still fire — the gate suppresses only the fresh pull-head case.
+    assert!(
+        stale_note(&seen).is_some(),
+        "branching from the local ref must still surface a stale-base note"
+    );
+    drop(upstream);
 }

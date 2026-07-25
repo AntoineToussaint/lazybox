@@ -453,7 +453,7 @@ impl WorktreeManager {
         branch: &str,
     ) -> Result<Worktree, GitError> {
         let wt_path = self.worktree_path(owner, repo, branch);
-        self.checkout_at(&wt_path, owner, repo, branch).await
+        self.checkout_at(&wt_path, owner, repo, branch, None).await
     }
 
     /// Same as [`Self::checkout`] but with an explicit target path. Used by
@@ -461,12 +461,19 @@ impl WorktreeManager {
     /// stable session UUID — `<state_root>/worktrees/<uuid>` — and
     /// must never depend on owner/repo/branch (so renames + branch
     /// changes don't relocate the on-disk folder).
+    ///
+    /// `pr_number` is the head PR's number when this checkout targets a
+    /// pull request, and enables the `refs/pull/<N>/head` fallback for a
+    /// head branch that isn't a plain branch on `origin` (a fork PR, or a
+    /// PR whose head branch was deleted — issue #550). `None` for non-PR /
+    /// scratch checkouts, which keeps the origin-branch fast path unchanged.
     pub async fn checkout_at(
         &self,
         wt_path: &Path,
         owner: &str,
         repo: &str,
         branch: &str,
+        pr_number: Option<u64>,
     ) -> Result<Worktree, GitError> {
         let bare_path = self.bare_clone_path(owner, repo);
         let lock = repo_lock(&bare_path);
@@ -500,18 +507,71 @@ impl WorktreeManager {
         // branch). Common reasons fetch can fail and that we tolerate:
         // remote branch was deleted post-merge, offline, auth issue.
         // In all cases the start_point lookup below falls back to the
-        // local ref. Note the fallback covers *refs* only: from a
-        // blobless clone the worktree add below still needs origin
+        // PR head or the local ref. Note the fallback covers *refs* only:
+        // from a blobless clone the worktree add below still needs origin
         // reachable to download file contents, so a fully offline
         // provision only succeeds when the tree's blobs are already
-        // local (a legacy full clone, or a tree checked out before). `fetch_origin_ref` logs a warning so the
-        // degradation isn't silent; a network/auth failure (as opposed
-        // to a deleted remote branch) also surfaces in the provisioning
-        // checklist via a `BaseRefStale` report (issue #320).
+        // local (a legacy full clone, or a tree checked out before).
+        // `fetch_origin_ref` logs a warning so the degradation isn't
+        // silent; a network/auth failure (as opposed to a deleted remote
+        // branch) also surfaces in the provisioning checklist via a
+        // `BaseRefStale` report (issue #320) — but only when we actually
+        // branch from a non-fresh ref (see the gated report below).
         self.report(CheckoutPhase::Fetching);
         let auth = self.network_env().await;
-        if let Err(e) = fetch_origin_ref(&bare_path, owner, repo, branch, &auth).await
-            && let Some(phase) = stale_base_phase(&bare_path, branch, &e, !auth.is_empty()).await
+        let origin_fetch = fetch_origin_ref(&bare_path, owner, repo, branch, &auth).await;
+
+        // Prefer the fresh remote-tracking ref. When the head branch
+        // isn't a plain branch on `origin` — a fork PR (head lives on the
+        // contributor's fork), or a PR whose head branch was deleted — fall
+        // back to GitHub's `refs/pull/<N>/head`, which the base repo exposes
+        // for every PR regardless of where the branch lives (issue #550).
+        // Worst case, a clear error naming what couldn't be reached. `-B`
+        // cuts a local branch at whichever commit we resolve.
+        //
+        // A local `refs/heads/<branch>` is only ever created here by a prior
+        // `worktree add -B`, so it can hold committed-but-unpushed work
+        // (lazybox-created PRs). Resetting it to the PR head is safe only
+        // when it loses nothing — i.e. the local branch is already contained
+        // in the fetched head. When they diverge (real unpushed commits, or
+        // a force-recreated head), keep the local ref rather than dropping
+        // commits.
+        let local_ref = format!("refs/heads/{branch}");
+        let local_exists = ref_exists(&bare_path, &local_ref).await;
+        let start_point = if ref_exists(&bare_path, &format!("refs/remotes/origin/{branch}")).await
+        {
+            format!("refs/remotes/origin/{branch}")
+        } else if let Some(pr) = pr_number
+            && fetch_pull_head(&bare_path, owner, repo, pr, &auth)
+                .await
+                .is_ok()
+            && ref_exists(&bare_path, &format!("refs/lazybox/pr/{pr}")).await
+            && (!local_exists
+                || is_ancestor(&bare_path, &local_ref, &format!("refs/lazybox/pr/{pr}")).await)
+        {
+            format!("refs/lazybox/pr/{pr}")
+        } else if local_exists {
+            local_ref.clone()
+        } else {
+            return Err(GitError::Command(pr_number.map_or_else(
+                || format!("branch '{branch}' not found locally or on origin"),
+                |pr| {
+                    format!(
+                        "branch '{branch}' not found locally or on origin, and its \
+                     pull-request head (refs/pull/{pr}/head) could not be fetched"
+                    )
+                },
+            )));
+        };
+
+        // Surface a stale-base warning only when the origin refresh failed
+        // AND we branched from a non-fresh ref (a stale origin mirror or the
+        // local head). When the fresh `refs/pull/<N>/head` tier resolved the
+        // checkout, there is nothing stale — reporting it would be a false
+        // alarm naming a commit we didn't check out (issue #550 / #320).
+        if let Err(e) = &origin_fetch
+            && !start_point.starts_with("refs/lazybox/pr/")
+            && let Some(phase) = stale_base_phase(&bare_path, branch, e, !auth.is_empty()).await
         {
             self.report(phase);
         }
@@ -520,19 +580,6 @@ impl WorktreeManager {
             tokio::fs::create_dir_all(parent).await?;
         }
         self.report(CheckoutPhase::AddingWorktree);
-        // Prefer the fresh remote-tracking ref; fall back to the local
-        // ref when the remote branch was deleted (e.g. auto-delete after
-        // merge). Worst case, `-B` uses whichever commit we have.
-        let start_point = if ref_exists(&bare_path, &format!("refs/remotes/origin/{branch}")).await
-        {
-            format!("refs/remotes/origin/{branch}")
-        } else if ref_exists(&bare_path, &format!("refs/heads/{branch}")).await {
-            format!("refs/heads/{branch}")
-        } else {
-            return Err(GitError::Command(format!(
-                "branch '{branch}' not found locally or on origin"
-            )));
-        };
         // From a blobless clone, `worktree add` downloads the checked-
         // out tree's blobs on demand — a real network transfer, so it
         // gets the auth env and the transfer-class timeout instead of
@@ -1738,6 +1785,47 @@ async fn fetch_origin_ref(
     })
 }
 
+/// Fetch a PR's head commit via GitHub's `refs/pull/<N>/head` pseudo-ref
+/// into a private tracking ref `refs/lazybox/pr/<N>`. The base repo
+/// (`origin`) exposes this ref for *every* PR — fork PRs (whose head lives
+/// on the contributor's fork) and PRs whose head branch was deleted
+/// included — so it's the robust fallback when a PR's head branch isn't a
+/// plain branch on `origin` (issue #550). `--no-prune` for the same reason
+/// as [`fetch_origin_ref`]: a user's global `fetch.prune = true` must not
+/// delete the tracking ref this fetch maintains. On failure, log a warning
+/// and return the error — the caller falls back to a local ref or a clear
+/// error.
+async fn fetch_pull_head(
+    bare_path: &Path,
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+    envs: &[(String, String)],
+) -> Result<(), GitError> {
+    run_git_in_env(
+        bare_path,
+        &[
+            "fetch",
+            "--no-prune",
+            "origin",
+            &format!("+refs/pull/{pr_number}/head:refs/lazybox/pr/{pr_number}"),
+        ],
+        envs,
+    )
+    .await
+    .map(|_| ())
+    .inspect(|()| stamp_refresh_ok(bare_path))
+    .inspect_err(|e| {
+        tracing::warn!(
+            owner,
+            repo,
+            pr_number,
+            error = %e,
+            "could not fetch pull-request head from origin"
+        );
+    })
+}
+
 /// Marker file recording the last SUCCESSFUL origin fetch. git's own
 /// `FETCH_HEAD` can't serve here: a *failed* fetch still truncates and
 /// touches it, so its mtime records attempts, not contact. Best-effort
@@ -1864,6 +1952,22 @@ async fn ref_exists(bare_path: &Path, ref_name: &str) -> bool {
     Command::new("git")
         .current_dir(bare_path)
         .args(["show-ref", "--verify", "--quiet", ref_name])
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Whether every commit reachable from `maybe_ancestor` is also reachable
+/// from `descendant` — i.e. resetting `maybe_ancestor` onto `descendant`
+/// would lose nothing. `git merge-base --is-ancestor` exits 0 for yes, 1
+/// for no; any other failure (bad ref, probe error) is treated as "not an
+/// ancestor" so callers stay on the conservative side (keep the local ref)
+/// rather than discarding commits on an inconclusive answer.
+async fn is_ancestor(bare_path: &Path, maybe_ancestor: &str, descendant: &str) -> bool {
+    Command::new("git")
+        .current_dir(bare_path)
+        .args(["merge-base", "--is-ancestor", maybe_ancestor, descendant])
         .output()
         .await
         .map(|o| o.status.success())

@@ -25,18 +25,18 @@ use serde::Deserialize;
 /// "no PRs in the inbox" loop where octocrab's 25s timeout fired
 /// before any page completed.
 ///
-/// New shape pulls **15 sub-objects per PR** (`labels(3) +
-/// assignees(5) + reviewRequests(5) + comments(last:1) + commits(1)
-/// = 15`), roughly 1/6 the cost. The fields the sidebar doesn't
-/// render directly — review history, per-check details, full
-/// comment threads — live in `PR_DETAILS_QUERY` and only fire when
-/// the user opens a PR (or via the post-tick `prefetch_top_pr_details`
-/// for high-attention rows). The one heavy field kept eager is
-/// `closingIssuesReferences`: it's a shallow connection (just issue
-/// number and repo name) and it's the *authoritative* PR↔issue link,
-/// so fetching it every poll is what makes issue→PR session transfer
-/// fire reliably instead of only when a heuristic or lazy-fetch
-/// happens to run first (#559).
+/// New shape pulls **~25 sub-objects per PR** (`labels(10) +
+/// assignees(5) + reviewRequests(5) + comments(last:1) + commits(1) +
+/// closingIssuesReferences(10)`), still roughly 1/6 the cost of the
+/// old eager query. The fields the sidebar doesn't render directly —
+/// review history, per-check details, full comment threads — live in
+/// `PR_DETAILS_QUERY` and only fire when the user opens a PR (or via
+/// the post-tick `prefetch_top_pr_details` for high-attention rows).
+/// The one heavy field kept eager is `closingIssuesReferences`: it's a
+/// shallow connection (just issue number and repo name) and it's the
+/// *authoritative* PR↔issue link, so fetching it every poll is what
+/// makes issue→PR session transfer fire reliably instead of only when
+/// a heuristic or lazy-fetch happens to run first (#559).
 ///
 /// Trade-offs the lazy split accepts:
 ///   - `closes_issues` reflects `closingIssuesReferences` on every
@@ -111,6 +111,13 @@ query($query: String!, $first: Int!, $after: String) {
             createdAt
           }
         }
+        # Authoritative PR->issue link, kept eager for #559. Adds ~10
+        # node-cost units per PR to a query whose page size is already
+        # capped at PR_PAGE_SIZE (25) to stay under GitHub's gateway
+        # timeout. This connection is shallow (number + repo name) so
+        # the added cost is small; if gateway timeouts ever resurface
+        # for users with very many involved PRs, lower PR_PAGE_SIZE
+        # before dropping this field.
         closingIssuesReferences(first: 10) {
           nodes {
             number
@@ -3844,22 +3851,66 @@ mod tests {
     /// A quiet PR that links a **cross-repo** issue only through its
     /// body (GitHub resolves it into `closingIssuesReferences`; the
     /// title parsers can't, since they're same-repo only) transfers on
-    /// the poll path once the field is fetched eagerly (#559).
+    /// the poll path once the field is fetched eagerly (#559). Driven
+    /// from a `SEARCH_QUERY`-shaped wire response — deserialize plus
+    /// conversion — so it fails if the field is dropped from the query
+    /// OR stops deserializing, not just if `extract_closes_issues`
+    /// regresses.
     #[test]
     fn search_query_transfers_cross_repo_body_link() {
-        let mut pr = make_pr(42, "carol");
-        // No title keyword and a different repo in the link — the
-        // heuristics deliberately would not catch this.
-        pr.title = "Add foo to bar".into();
-        pr.closing_issues_references = Some(GqlClosingIssues {
-            nodes: vec![GqlClosingIssue {
-                number: 7,
-                repository: GqlIssueRepo {
-                    name_with_owner: "other-org/other-repo".into(),
-                },
-            }],
-        });
-        let task = pr_to_task(&pr, "alice");
+        // Title carries no closing keyword and the linked issue is in a
+        // different repo, so neither title parser (same-repo only) could
+        // catch it — only the eager `closingIssuesReferences` does.
+        let wire = r#"{
+          "data": {
+            "search": {
+              "pageInfo": { "hasNextPage": false, "endCursor": null },
+              "nodes": [
+                {
+                  "id": "PR_kwDOxrepo9",
+                  "number": 9,
+                  "title": "Add foo to bar",
+                  "body": "See other-org/other-repo#7 for context.",
+                  "url": "https://github.com/my-org/my-repo/pull/9",
+                  "updatedAt": "2026-05-28T12:00:00Z",
+                  "createdAt": "2026-05-27T09:00:00Z",
+                  "isDraft": false,
+                  "state": "OPEN",
+                  "merged": false,
+                  "additions": 3,
+                  "deletions": 1,
+                  "headRefName": "feature/foo",
+                  "baseRefName": "main",
+                  "mergeable": "MERGEABLE",
+                  "mergeStateStatus": "CLEAN",
+                  "reviewDecision": "REVIEW_REQUIRED",
+                  "autoMergeRequest": null,
+                  "isInMergeQueue": false,
+                  "author": { "login": "carol" },
+                  "commits": {
+                    "nodes": [
+                      { "commit": { "statusCheckRollup": { "state": "SUCCESS" } } }
+                    ]
+                  },
+                  "labels": { "nodes": [] },
+                  "assignees": { "nodes": [] },
+                  "reviewRequests": { "nodes": [] },
+                  "comments": { "totalCount": 0, "nodes": [] },
+                  "closingIssuesReferences": {
+                    "nodes": [
+                      { "number": 7, "repository": { "nameWithOwner": "other-org/other-repo" } }
+                    ]
+                  }
+                }
+              ]
+            },
+            "rateLimit": { "cost": 1, "limit": 5000, "remaining": 4999, "resetAt": "2026-05-28T13:00:00Z" }
+          },
+          "errors": null
+        }"#;
+        let resp: GqlResponse = serde_json::from_str(wire).unwrap();
+        let pr = &resp.data.unwrap().search.nodes[0];
+        let task = pr_to_task(pr, "alice");
         let keys: Vec<&str> = task.closes_issues.iter().map(|t| t.key.as_str()).collect();
         assert_eq!(keys, vec!["other-org/other-repo#7"]);
     }

@@ -5952,8 +5952,10 @@ async fn tick_dispatches_auto_spawn_action_after_upsert() {
     let action = polling::ProviderAction::AutoSpawnAgent {
         session_key: session_key.clone(),
         agent_id: "claude".to_string(),
+        model_alias: None,
         prompt: Some("Implement issue".to_string()),
         reason: "@lazybox mention by alice on o/r#101 (issue body)".to_string(),
+        dedup_key: None,
     };
 
     let source: Box<dyn TaskSource> = Box::new(ActionEmittingSource {
@@ -5986,6 +5988,103 @@ async fn tick_dispatches_auto_spawn_action_after_upsert() {
     assert!(
         saw_spawn,
         "AutoSpawnAgent action must trigger TerminalSpawned"
+    );
+}
+
+/// The requested agent + model tier flow through to the spawn: a
+/// `@lazybox codex xhigh`-style trigger must launch that agent at that
+/// tier, not the hardcoded default. Here `claude` + tier `S` (Haiku)
+/// exercises the model passthrough via the tab's `model_label`.
+#[tokio::test]
+async fn tick_auto_spawn_honors_requested_agent_and_model() {
+    let (config, _mock) = ServerConfig::in_memory_with_mock();
+    let mut bus_rx = config.bus.subscribe();
+
+    let mut task = make_task("o/r#202");
+    task.repo = None;
+    let session_key = lazybox_core::SessionKey::new(lazybox_core::workspace_key_for(&task));
+    let action = polling::ProviderAction::AutoSpawnAgent {
+        session_key: session_key.clone(),
+        agent_id: "claude".to_string(),
+        model_alias: Some("S".to_string()),
+        prompt: None,
+        reason: "@lazybox mention by alice on o/r#202 (issue body)".to_string(),
+        dedup_key: None,
+    };
+
+    let source: Box<dyn TaskSource> = Box::new(ActionEmittingSource {
+        name: "github".into(),
+        tasks: vec![task],
+        actions: std::sync::Mutex::new(vec![action]),
+    });
+    polling::tick(&config, &[source]).await;
+
+    let mut spawned_agent = None;
+    let mut spawned_label = None;
+    while let Ok(evt) = bus_rx.try_recv() {
+        if let lazybox_ipc::Event::TerminalSpawned {
+            kind: lazybox_ipc::TerminalKind::Agent(id),
+            model_label,
+            ..
+        } = evt
+        {
+            spawned_agent = Some(id);
+            spawned_label = model_label;
+        }
+    }
+    assert_eq!(
+        spawned_agent.as_deref(),
+        Some("claude"),
+        "spawn must use the requested agent"
+    );
+    assert_eq!(
+        spawned_label.as_deref(),
+        Some("Haiku"),
+        "spawn must carry the requested model tier"
+    );
+}
+
+/// An unknown agent id (typo'd mention, or a label naming an agent this
+/// build doesn't ship) falls back to the default agent so the spawn
+/// still happens instead of silently dropping.
+#[tokio::test]
+async fn tick_auto_spawn_falls_back_to_default_for_unknown_agent() {
+    let (config, _mock) = ServerConfig::in_memory_with_mock();
+    let mut bus_rx = config.bus.subscribe();
+
+    let mut task = make_task("o/r#203");
+    task.repo = None;
+    let session_key = lazybox_core::SessionKey::new(lazybox_core::workspace_key_for(&task));
+    let action = polling::ProviderAction::AutoSpawnAgent {
+        session_key: session_key.clone(),
+        agent_id: "codx".to_string(),
+        model_alias: None,
+        prompt: None,
+        reason: "@lazybox mention by alice on o/r#203 (issue body)".to_string(),
+        dedup_key: None,
+    };
+
+    let source: Box<dyn TaskSource> = Box::new(ActionEmittingSource {
+        name: "github".into(),
+        tasks: vec![task],
+        actions: std::sync::Mutex::new(vec![action]),
+    });
+    polling::tick(&config, &[source]).await;
+
+    let mut spawned_agent = None;
+    while let Ok(evt) = bus_rx.try_recv() {
+        if let lazybox_ipc::Event::TerminalSpawned {
+            kind: lazybox_ipc::TerminalKind::Agent(id),
+            ..
+        } = evt
+        {
+            spawned_agent = Some(id);
+        }
+    }
+    assert_eq!(
+        spawned_agent.as_deref(),
+        Some("claude"),
+        "unknown agent must fall back to the default"
     );
 }
 

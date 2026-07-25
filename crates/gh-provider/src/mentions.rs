@@ -50,6 +50,17 @@ pub struct LazyboxMention {
     /// Login that wrote the `@lazybox` text. The caller already
     /// allow-listed this — included for logging / audit only.
     pub triggered_by_login: String,
+    /// Agent id parsed from the tokens trailing `@lazybox` (the first
+    /// word after the mention, on the same line). `None` for a bare
+    /// `@lazybox`, which keeps the default agent. Validation against the
+    /// real agent registry happens downstream — an unknown id here falls
+    /// back to the default.
+    pub agent_id: Option<String>,
+    /// Model tier alias parsed from the second trailing token
+    /// (`@lazybox codex xhigh` → `xhigh`). `None` when the mention names
+    /// no tier; an unknown alias resolves to the agent's default model
+    /// downstream.
+    pub model_alias: Option<String>,
 }
 
 /// Which surface the mention lived on. Today only Issue body and
@@ -73,11 +84,19 @@ pub enum MentionSource {
 /// x x"). Detecting quotes line-by-line was deemed not worth the
 /// complexity for an MVP.
 pub fn contains_lazybox_mention(text: &str) -> bool {
+    first_mention_end(text).is_some()
+}
+
+/// Byte offset just past the first boundary-valid `@lazybox` in `text`,
+/// or `None` when there is none. Shared by [`contains_lazybox_mention`]
+/// (which only needs "is there one?") and [`parse_lazybox_directive`]
+/// (which reads the tokens that follow).
+fn first_mention_end(text: &str) -> Option<usize> {
     let bytes = text.as_bytes();
     let needle_lower = b"@lazybox";
     let n = needle_lower.len();
     if bytes.len() < n {
-        return false;
+        return None;
     }
     for i in 0..=bytes.len() - n {
         let window = &bytes[i..i + n];
@@ -105,9 +124,64 @@ pub fn contains_lazybox_mention(text: &str) -> bool {
         {
             continue;
         }
-        return true;
+        return Some(i + n);
     }
-    false
+    None
+}
+
+/// Parse the optional `<agent> <model>` tokens trailing the first
+/// `@lazybox` mention. `@lazybox codex xhigh` → `(Some("codex"),
+/// Some("xhigh"))`; `@lazybox codex` → `(Some("codex"), None)`; a bare
+/// `@lazybox` (or one glued to punctuation like `@lazybox!`, or followed
+/// only by a newline) → `(None, None)`.
+///
+/// Only tokens on the SAME line as the mention count — trailing prose on
+/// the next line is not swallowed as an agent/model. Whether the agent id
+/// names a real agent (or the alias a real tier) is decided downstream at
+/// spawn time; junk here degrades to the default agent / the agent's
+/// default model rather than erroring.
+pub fn parse_lazybox_directive(text: &str) -> (Option<String>, Option<String>) {
+    let Some(end) = first_mention_end(text) else {
+        return (None, None);
+    };
+    let rest = &text[end..];
+    // A glued trailing char (`@lazybox!`, `(@lazybox)`) is not a
+    // directive — only whitespace-separated tokens count.
+    match rest.chars().next() {
+        Some(c) if !c.is_whitespace() => return (None, None),
+        _ => {}
+    }
+    let line = rest.lines().next().unwrap_or("");
+    let mut tokens = line.split_whitespace();
+    let agent = tokens.next().map(str::to_string);
+    let model = tokens.next().map(str::to_string);
+    (agent, model)
+}
+
+/// Parse one GitHub label as a `lazybox:<agent>[/<model>]` auto-spawn
+/// directive. `lazybox:codex/xhigh` → `(Some(("codex", Some("xhigh"))))`;
+/// `lazybox:claude` → `(Some(("claude", None)))`. Returns `None` for any
+/// label that isn't `lazybox:`-prefixed or names no agent. The prefix
+/// match is case-insensitive (users type freely); the agent id and model
+/// alias are returned verbatim so a case-sensitive tier alias (`L`)
+/// survives.
+pub fn parse_label_directive(label: &str) -> Option<(String, Option<String>)> {
+    const PREFIX: &[u8] = b"lazybox:";
+    let bytes = label.as_bytes();
+    if bytes.len() <= PREFIX.len() || !bytes[..PREFIX.len()].eq_ignore_ascii_case(PREFIX) {
+        return None;
+    }
+    // `PREFIX` is ASCII, so byte `PREFIX.len()` is a char boundary.
+    let rest = &label[PREFIX.len()..];
+    let (agent, model) = match rest.split_once('/') {
+        Some((a, m)) => (a.trim(), Some(m.trim())),
+        None => (rest.trim(), None),
+    };
+    if agent.is_empty() {
+        return None;
+    }
+    let model = model.filter(|m| !m.is_empty()).map(str::to_string);
+    Some((agent.to_string(), model))
 }
 
 /// GitHub login alphabet for word-boundary checks: ASCII alnum +
@@ -150,6 +224,7 @@ pub fn scan_issue(issue: &GqlIssue, allowed_logins: &BTreeSet<String>) -> Vec<La
         && !viewer_has_eyes_reacted(issue.reactions.as_ref())
         && let Some(node_id) = issue.id.as_ref()
     {
+        let (agent_id, model_alias) = parse_lazybox_directive(issue.body.as_deref().unwrap_or(""));
         out.push(LazyboxMention {
             repo: repo.clone(),
             issue_number: issue.number,
@@ -157,6 +232,8 @@ pub fn scan_issue(issue: &GqlIssue, allowed_logins: &BTreeSet<String>) -> Vec<La
             target_node_id: node_id.clone(),
             source: MentionSource::Body,
             triggered_by_login: author.login.clone(),
+            agent_id,
+            model_alias,
         });
     }
 
@@ -185,6 +262,7 @@ pub fn scan_issue(issue: &GqlIssue, allowed_logins: &BTreeSet<String>) -> Vec<La
             );
             continue;
         };
+        let (agent_id, model_alias) = parse_lazybox_directive(&comment.body);
         out.push(LazyboxMention {
             repo: repo.clone(),
             issue_number: issue.number,
@@ -192,6 +270,8 @@ pub fn scan_issue(issue: &GqlIssue, allowed_logins: &BTreeSet<String>) -> Vec<La
             target_node_id: comment_id.clone(),
             source: MentionSource::Comment { comment_id },
             triggered_by_login: author.login.clone(),
+            agent_id,
+            model_alias,
         });
     }
 
@@ -315,6 +395,91 @@ mod tests {
         assert!(contains_lazybox_mention("@lazybox!"));
     }
 
+    // ── parse_lazybox_directive ─────────────────────────────────────
+
+    #[test]
+    fn directive_parses_agent_and_model() {
+        assert_eq!(
+            parse_lazybox_directive("@lazybox codex xhigh"),
+            (Some("codex".into()), Some("xhigh".into()))
+        );
+        assert_eq!(
+            parse_lazybox_directive("please @lazybox claude opus and go"),
+            (Some("claude".into()), Some("opus".into()))
+        );
+    }
+
+    #[test]
+    fn directive_parses_agent_only() {
+        assert_eq!(
+            parse_lazybox_directive("@lazybox codex"),
+            (Some("codex".into()), None)
+        );
+        assert_eq!(
+            parse_lazybox_directive("hey @lazybox   codex   "),
+            (Some("codex".into()), None)
+        );
+    }
+
+    #[test]
+    fn directive_bare_mention_has_no_agent_or_model() {
+        assert_eq!(parse_lazybox_directive("@lazybox"), (None, None));
+        assert_eq!(
+            parse_lazybox_directive("@lazybox\ncodex next line"),
+            (None, None)
+        );
+        assert_eq!(parse_lazybox_directive("(@lazybox)"), (None, None));
+        assert_eq!(parse_lazybox_directive("@lazybox!"), (None, None));
+        assert_eq!(parse_lazybox_directive("no mention here"), (None, None));
+    }
+
+    #[test]
+    fn directive_keeps_junk_trailing_tokens_for_downstream_fallback() {
+        // Not a real agent/model — the parser doesn't validate; it just
+        // extracts. Downstream falls back to default agent + default
+        // model, so junk never errors.
+        assert_eq!(
+            parse_lazybox_directive("@lazybox please look at this"),
+            (Some("please".into()), Some("look".into()))
+        );
+    }
+
+    // ── parse_label_directive ───────────────────────────────────────
+
+    #[test]
+    fn label_parses_agent_and_model() {
+        assert_eq!(
+            parse_label_directive("lazybox:codex/xhigh"),
+            Some(("codex".into(), Some("xhigh".into())))
+        );
+        // Case-insensitive prefix; the alias case survives.
+        assert_eq!(
+            parse_label_directive("Lazybox:claude/L"),
+            Some(("claude".into(), Some("L".into())))
+        );
+    }
+
+    #[test]
+    fn label_parses_agent_only() {
+        assert_eq!(
+            parse_label_directive("lazybox:codex"),
+            Some(("codex".into(), None))
+        );
+        assert_eq!(
+            parse_label_directive("lazybox:codex/"),
+            Some(("codex".into(), None))
+        );
+    }
+
+    #[test]
+    fn label_ignores_non_directives() {
+        assert_eq!(parse_label_directive("bug"), None);
+        assert_eq!(parse_label_directive("no-auto-fix"), None);
+        assert_eq!(parse_label_directive("lazybox"), None);
+        assert_eq!(parse_label_directive("lazybox:"), None);
+        assert_eq!(parse_label_directive("lazybox:/xhigh"), None);
+    }
+
     // ── scan_issue ──────────────────────────────────────────────────
 
     #[test]
@@ -333,6 +498,33 @@ mod tests {
         assert_eq!(m[0].issue_number, 42);
         assert_eq!(m[0].repo, "o/r");
         assert_eq!(m[0].triggered_by_login, "alice");
+    }
+
+    #[test]
+    fn scan_body_carries_parsed_agent_and_model() {
+        let i = issue(
+            42,
+            Some("alice"),
+            Some("@lazybox codex xhigh please"),
+            false,
+            vec![],
+        );
+        let m = scan_issue(&i, &allow_only("alice"));
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].agent_id.as_deref(), Some("codex"));
+        assert_eq!(m[0].model_alias.as_deref(), Some("xhigh"));
+    }
+
+    #[test]
+    fn scan_bare_body_mention_has_no_agent_or_model() {
+        let i = issue(42, Some("alice"), Some("@lazybox please"), false, vec![]);
+        let m = scan_issue(&i, &allow_only("alice"));
+        assert_eq!(m.len(), 1);
+        // "please" is the first token — extracted but not a real agent;
+        // downstream falls back to the default. The point here is the
+        // fields are populated from the mention text, not hardcoded.
+        assert_eq!(m[0].agent_id.as_deref(), Some("please"));
+        assert_eq!(m[0].model_alias, None);
     }
 
     #[test]

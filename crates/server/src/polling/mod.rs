@@ -889,12 +889,24 @@ pub enum ProviderAction {
     AutoSpawnAgent {
         session_key: lazybox_core::SessionKey,
         agent_id: String,
+        /// Model tier alias to spawn at (`@lazybox codex xhigh` /
+        /// `lazybox:codex/xhigh`). `None` → the agent's default model.
+        /// An unknown alias also resolves to the default downstream in
+        /// `handle_spawn`.
+        model_alias: Option<String>,
         prompt: Option<String>,
         /// Free-text reason for the trace log: "@lazybox mention by
         /// alice on owner/repo#42 body". Surfaces in /tmp/lazybox.log
         /// so a user wondering "why did lazybox start typing?" can
         /// trace it back to a specific comment.
         reason: String,
+        /// Store-backed idempotency key for label-triggered spawns.
+        /// GitHub labels persist across polls with no 👀-reaction
+        /// equivalent, so `dispatch_action` records this key the first
+        /// time it acts and skips on later polls — otherwise every 60s
+        /// sweep would re-focus the live agent and re-inject the prompt.
+        /// `None` for `@lazybox` mentions, which dedupe via the reaction.
+        dedup_key: Option<String>,
     },
     /// Auto-fix a PR that's failing CI or conflicting with its base.
     /// Surfaced by the auto-fix scan (`evaluate_auto_fix`) during a
@@ -1334,14 +1346,69 @@ impl GhSource {
                         lazybox_gh::MentionSource::Comment { .. } => "comment",
                     },
                 );
-                tracing::info!(%reason, target = %mention.target_node_id, "queued auto-spawn");
+                tracing::info!(
+                    %reason,
+                    target = %mention.target_node_id,
+                    agent = mention.agent_id.as_deref().unwrap_or(DEFAULT_AGENT_ID),
+                    model = mention.model_alias.as_deref().unwrap_or("<default>"),
+                    "queued auto-spawn"
+                );
                 pending.push(ProviderAction::AutoSpawnAgent {
                     session_key,
-                    agent_id: DEFAULT_AGENT_ID.to_string(),
+                    agent_id: mention
+                        .agent_id
+                        .clone()
+                        .unwrap_or_else(|| DEFAULT_AGENT_ID.to_string()),
+                    model_alias: mention.model_alias.clone(),
                     prompt,
                     reason,
+                    // Mentions dedupe via the 👀 reaction, not a store key.
+                    dedup_key: None,
                 });
                 react_targets.push(mention.target_node_id);
+            }
+        }
+
+        // `lazybox:<agent>/<model>` label triggers — the persistent,
+        // more discoverable sibling of the `@lazybox` mention. Gated by
+        // the same master switch (a non-empty allowlist enables the
+        // whole GitHub auto-spawn feature); applying a label already
+        // requires repo write access, so no per-actor allowlist here.
+        // Idempotency is store-backed (`dedup_key`) since labels have no
+        // 👀-reaction to skip on the next sweep. Issues only — the queued
+        // prompt is the implement-issue prompt, which is wrong for a PR.
+        if !self.mention_allowed_logins.is_empty() {
+            let mut pending = self.pending_actions.lock();
+            for task in &raw {
+                if task.is_pr() {
+                    continue;
+                }
+                let Some((label_name, agent_id, model_alias)) = task.labels.iter().find_map(|l| {
+                    lazybox_gh::parse_label_directive(&l.name)
+                        .map(|(agent, model)| (l.name.clone(), agent, model))
+                }) else {
+                    continue;
+                };
+                let session_key =
+                    lazybox_core::SessionKey::new(lazybox_core::workspace_key_for(task));
+                let prompt = Some(lazybox_core::prompts::build_implement_issue_prompt(task));
+                let reason = format!("{label_name} label on {}", task.id.key);
+                let dedup_key = Some(format!("autospawn-label:{session_key}:{label_name}"));
+                tracing::info!(
+                    %reason,
+                    %agent_id,
+                    model = model_alias.as_deref().unwrap_or("<default>"),
+                    "queued auto-spawn from label"
+                );
+                mentioned_tasks.push(task.clone());
+                pending.push(ProviderAction::AutoSpawnAgent {
+                    session_key,
+                    agent_id,
+                    model_alias,
+                    prompt,
+                    reason,
+                    dedup_key,
+                });
             }
         }
 
@@ -1624,6 +1691,34 @@ fn task_number_from_key(key: &str) -> Option<u64> {
     key.rsplit_once('#').and_then(|(_, n)| n.parse().ok())
 }
 
+/// True when a label-triggered auto-spawn under `key` has already been
+/// dispatched on a prior poll — the store-backed idempotency marker for
+/// the `lazybox:<agent>/<model>` label path (labels have no 👀-reaction
+/// dedup like mentions do).
+async fn auto_spawn_already_triggered(config: &ServerConfig, key: &str) -> bool {
+    let store = config.store.clone();
+    let key = key.to_string();
+    tokio::task::spawn_blocking(move || store.get_kv(&key))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten()
+        .is_some()
+}
+
+/// Record that the label-triggered auto-spawn under `key` fired, so later
+/// polls skip it. Best-effort: a failed write just means a harmless
+/// re-dispatch next poll (the `handle_spawn` singleton collapses it).
+async fn mark_auto_spawn_triggered(config: &ServerConfig, key: &str) {
+    let store = config.store.clone();
+    let key = key.to_string();
+    match tokio::task::spawn_blocking(move || store.set_kv(&key, "1")).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(%error, "auto-spawn label marker write failed"),
+        Err(error) => tracing::warn!(%error, "auto-spawn label marker task failed"),
+    }
+}
+
 /// Dispatch one [`ProviderAction`] surfaced by a [`TaskSource`]
 /// during the most recent fetch. Today this is just the
 /// auto-spawn-on-mention path; future provider-driven actions plug
@@ -1650,13 +1745,40 @@ async fn dispatch_action(
         ProviderAction::AutoSpawnAgent {
             session_key,
             agent_id,
+            model_alias,
             prompt,
             reason,
+            dedup_key,
         } => {
+            // Label-triggered spawns carry a store-backed marker (labels
+            // persist with no reaction to skip on). If we've already
+            // acted on this exact label, stop here — re-dispatching would
+            // re-focus the live agent and re-inject the prompt every poll.
+            if let Some(key) = dedup_key.as_deref()
+                && auto_spawn_already_triggered(config, key).await
+            {
+                tracing::debug!(%session_key, key, "auto-spawn label already handled; skipping");
+                return;
+            }
+            // An unknown agent id — a typo'd mention (`@lazybox codx`) or
+            // a label naming an agent this build doesn't ship — falls back
+            // to the default so the spawn still happens. `config.agents`
+            // is the authoritative registry the spawn resolves argv from.
+            let agent_id = if config.agents.get(&agent_id).is_some() {
+                agent_id
+            } else {
+                tracing::warn!(
+                    requested = %agent_id,
+                    fallback = DEFAULT_AGENT_ID,
+                    "auto-spawn requested an unknown agent; using the default"
+                );
+                DEFAULT_AGENT_ID.to_string()
+            };
             tracing::info!(
                 source = source_name,
                 %session_key,
                 %agent_id,
+                model = model_alias.as_deref().unwrap_or("<default>"),
                 %reason,
                 has_prompt = prompt.is_some(),
                 "auto-spawning agent on provider action"
@@ -1674,12 +1796,19 @@ async fn dispatch_action(
                 true,
                 // Autonomous work runs on its own isolated worktree.
                 false,
-                // Autonomous spawns use the agent's default model.
-                None,
+                // The tier the trigger asked for (`@lazybox codex xhigh`
+                // / `lazybox:codex/xhigh`); `None` keeps the agent default.
+                model_alias,
                 // Fresh spawn, not a session restore.
                 false,
             )
             .await;
+            // Record the label marker AFTER the spawn dispatches: a crash
+            // in between re-triggers next poll (the singleton makes that a
+            // no-op) rather than silently dropping the spawn forever.
+            if let Some(key) = dedup_key {
+                mark_auto_spawn_triggered(config, &key).await;
+            }
         }
         ProviderAction::AutoFixPr {
             session_key,
@@ -9033,6 +9162,48 @@ mod track_main_sweep_tests {
         assert!(
             !tmp.path().join("base").join("repos").exists(),
             "no repo should be cloned for a session-less tracked workspace"
+        );
+    }
+}
+
+#[cfg(test)]
+mod auto_spawn_dedup_tests {
+    use super::*;
+
+    /// A `lazybox:<agent>/<model>` label re-appears on every poll (no
+    /// 👀-reaction to skip on), so the store-backed marker must make a
+    /// re-dispatch a full no-op — not even a focus/re-inject event.
+    #[tokio::test]
+    async fn label_dispatch_skips_when_marker_already_present() {
+        let (config, _mock) = crate::ServerConfig::in_memory_with_mock();
+        let session_key = lazybox_core::SessionKey::new("github:o/r#1");
+        let key = format!("autospawn-label:{session_key}:lazybox:codex/xhigh");
+
+        // First poll's effect: the marker is set once the spawn fired.
+        assert!(!auto_spawn_already_triggered(&config, &key).await);
+        mark_auto_spawn_triggered(&config, &key).await;
+        assert!(auto_spawn_already_triggered(&config, &key).await);
+
+        // Next poll re-queues the same label action. Dispatch must bail
+        // before `handle_spawn` — no TerminalSpawned, no focus request.
+        let mut rx = config.bus.subscribe();
+        dispatch_action(
+            &config,
+            "github",
+            None,
+            ProviderAction::AutoSpawnAgent {
+                session_key,
+                agent_id: "claude".into(),
+                model_alias: None,
+                prompt: Some("Implement issue".into()),
+                reason: "lazybox:codex/xhigh label on o/r#1".into(),
+                dedup_key: Some(key),
+            },
+        )
+        .await;
+        assert!(
+            rx.try_recv().is_err(),
+            "an already-handled label must not emit any dispatch event"
         );
     }
 }

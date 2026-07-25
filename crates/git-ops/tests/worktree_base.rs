@@ -503,9 +503,10 @@ async fn checkout_at_resolves_fork_pr_via_pull_head() {
 #[tokio::test]
 async fn checkout_at_prefers_pull_head_over_stale_local_ref() {
     // A bot/CI PR whose head branch was deleted after the head advanced.
-    // The bare clone still holds a stale local `refs/heads/<branch>`; the
-    // pull-head fallback must win so the worktree lands on the fresh head,
-    // not the leftover commit.
+    // The bare clone still holds a stale local `refs/heads/<branch>` that is
+    // an ancestor of the new head (a clean fast-forward, nothing to lose),
+    // so the pull-head fallback must win and land the worktree on the fresh
+    // head rather than the leftover commit.
     let (upstream, base, bare) = setup("acme", "botpr");
     git(upstream.path(), &["checkout", "-b", "ci/bot", "-q"]);
     std::fs::write(upstream.path().join("v1.txt"), "v1").unwrap();
@@ -590,5 +591,75 @@ async fn checkout_at_uses_origin_branch_fast_path_even_for_a_pr() {
         "",
         "the origin fast path must not fetch the pull-head fallback ref"
     );
+    drop(upstream);
+}
+
+#[tokio::test]
+async fn checkout_at_keeps_local_ref_with_unpushed_commits_over_pull_head() {
+    // A lazybox-created PR: the local `refs/heads/<branch>` carries a commit
+    // that isn't in the PR head yet (unpushed work), and the origin branch
+    // is gone. Resetting to `refs/pull/<N>/head` would silently drop that
+    // commit, so the checkout must keep the local ref when the two diverge.
+    let (upstream, base, bare) = setup("acme", "unpushed");
+
+    // The PR head as GitHub knows it (what `refs/pull/<N>/head` resolves to).
+    git(upstream.path(), &["checkout", "-b", "feature/wip", "-q"]);
+    std::fs::write(upstream.path().join("pushed.txt"), "pushed").unwrap();
+    git(upstream.path(), &["add", "pushed.txt"]);
+    git(upstream.path(), &["commit", "-m", "pushed", "-q"]);
+    let pr_head = git_out(upstream.path(), &["rev-parse", "HEAD"]);
+    git(
+        upstream.path(),
+        &["update-ref", "refs/pull/5/head", &pr_head],
+    );
+
+    // Seed the bare clone's local branch, then advance it with a local-only
+    // commit the PR head never sees, and delete the branch from origin.
+    git(
+        &bare,
+        &[
+            "fetch",
+            "-q",
+            "origin",
+            "+refs/heads/feature/wip:refs/heads/feature/wip",
+        ],
+    );
+    std::fs::write(upstream.path().join("local.txt"), "local").unwrap();
+    git(upstream.path(), &["add", "local.txt"]);
+    git(upstream.path(), &["commit", "-m", "local only", "-q"]);
+    let local_tip = git_out(upstream.path(), &["rev-parse", "HEAD"]);
+    // Move the bare's local ref up to the unpushed tip (the shape a session
+    // that committed locally but never pushed leaves behind).
+    git(
+        &bare,
+        &[
+            "fetch",
+            "-q",
+            "origin",
+            "+refs/heads/feature/wip:refs/heads/feature/wip",
+        ],
+    );
+    assert_eq!(bare_ref(&bare, "refs/heads/feature/wip"), local_tip);
+    git(upstream.path(), &["checkout", "main", "-q"]);
+    git(upstream.path(), &["branch", "-D", "feature/wip"]);
+
+    let wm = WorktreeManager::new(base.path().to_path_buf());
+    let wt = wm
+        .checkout_at(
+            &base.path().join("wip-wt"),
+            "acme",
+            "unpushed",
+            "feature/wip",
+            Some(5),
+        )
+        .await
+        .expect("diverged local ref still provisions");
+
+    assert_eq!(
+        git_out(&wt.path, &["rev-parse", "HEAD"]),
+        local_tip,
+        "the unpushed local commit is preserved, not reset to the PR head"
+    );
+    assert_ne!(git_out(&wt.path, &["rev-parse", "HEAD"]), pr_head);
     drop(upstream);
 }

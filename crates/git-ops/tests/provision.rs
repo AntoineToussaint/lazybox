@@ -267,7 +267,7 @@ async fn rm_rfed_worktree_is_reprovisioned_at_the_same_path() {
 
     let wm = WorktreeManager::new(base.path().to_path_buf());
     let wt_path = base.path().join("worktrees").join("wt-vanish");
-    wm.checkout_at(&wt_path, "acme", "vanish", "main")
+    wm.checkout_at(&wt_path, "acme", "vanish", "main", None)
         .await
         .expect("first provision");
 
@@ -275,7 +275,7 @@ async fn rm_rfed_worktree_is_reprovisioned_at_the_same_path() {
     std::fs::remove_dir_all(&wt_path).unwrap();
 
     let restored = wm
-        .checkout_at(&wt_path, "acme", "vanish", "main")
+        .checkout_at(&wt_path, "acme", "vanish", "main", None)
         .await
         .expect("re-provision after a manual rm -rf must prune the stale registration and retry");
     assert_eq!(restored.path, wt_path);

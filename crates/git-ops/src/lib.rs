@@ -532,9 +532,18 @@ impl WorktreeManager {
         // contributor's fork), or a PR whose head branch was deleted — fall
         // back to GitHub's `refs/pull/<N>/head`, which the base repo exposes
         // for every PR regardless of where the branch lives (issue #550).
-        // Only then the local ref (a stale post-merge leftover), and worst
-        // case a clear error naming what couldn't be reached. `-B` cuts a
-        // local branch at whichever commit we resolve.
+        // Worst case, a clear error naming what couldn't be reached. `-B`
+        // cuts a local branch at whichever commit we resolve.
+        //
+        // A local `refs/heads/<branch>` is only ever created here by a prior
+        // `worktree add -B`, so it can hold committed-but-unpushed work
+        // (lazybox-created PRs). Resetting it to the PR head is safe only
+        // when it loses nothing — i.e. the local branch is already contained
+        // in the fetched head. When they diverge (real unpushed commits, or
+        // a force-recreated head), keep the local ref rather than dropping
+        // commits.
+        let local_ref = format!("refs/heads/{branch}");
+        let local_exists = ref_exists(&bare_path, &local_ref).await;
         let start_point = if ref_exists(&bare_path, &format!("refs/remotes/origin/{branch}")).await
         {
             format!("refs/remotes/origin/{branch}")
@@ -543,10 +552,12 @@ impl WorktreeManager {
                 .await
                 .is_ok()
             && ref_exists(&bare_path, &format!("refs/lazybox/pr/{pr}")).await
+            && (!local_exists
+                || is_ancestor(&bare_path, &local_ref, &format!("refs/lazybox/pr/{pr}")).await)
         {
             format!("refs/lazybox/pr/{pr}")
-        } else if ref_exists(&bare_path, &format!("refs/heads/{branch}")).await {
-            format!("refs/heads/{branch}")
+        } else if local_exists {
+            local_ref
         } else {
             return Err(GitError::Command(pr_number.map_or_else(
                 || format!("branch '{branch}' not found locally or on origin"),
@@ -1930,6 +1941,22 @@ async fn ref_exists(bare_path: &Path, ref_name: &str) -> bool {
     Command::new("git")
         .current_dir(bare_path)
         .args(["show-ref", "--verify", "--quiet", ref_name])
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Whether every commit reachable from `maybe_ancestor` is also reachable
+/// from `descendant` — i.e. resetting `maybe_ancestor` onto `descendant`
+/// would lose nothing. `git merge-base --is-ancestor` exits 0 for yes, 1
+/// for no; any other failure (bad ref, probe error) is treated as "not an
+/// ancestor" so callers stay on the conservative side (keep the local ref)
+/// rather than discarding commits on an inconclusive answer.
+async fn is_ancestor(bare_path: &Path, maybe_ancestor: &str, descendant: &str) -> bool {
+    Command::new("git")
+        .current_dir(bare_path)
+        .args(["merge-base", "--is-ancestor", maybe_ancestor, descendant])
         .output()
         .await
         .map(|o| o.status.success())

@@ -38,6 +38,9 @@ impl TestFixture {
     /// Default: temp dir + `git init`, in-memory store with the
     /// setup-skip kv row populated, **no seeded sessions**. The
     /// sidebar boots empty and the user creates a workspace by hand.
+    /// Only the tests below use the unseeded variant; the binary's
+    /// `--test` path takes `new_with_seeded_session`.
+    #[allow(dead_code)]
     pub fn new() -> anyhow::Result<Self> {
         Self::new_with_options(false)
     }

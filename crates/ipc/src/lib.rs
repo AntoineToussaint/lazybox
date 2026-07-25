@@ -1131,6 +1131,31 @@ pub enum Command {
         session_key: SessionKey,
         snippet_key: String,
     },
+    /// Record a snippet key as freshly used, updating the daemon-owned
+    /// most-recently-used list (`recent_snippets`) that floats a
+    /// "Recent" group to the top of every snippet picker (#311). The
+    /// daemon de-duplicates, prepends, and caps the list, then replays
+    /// the new order to every client via `Event::Snapshot`'s
+    /// `recent_snippets`. Fire-and-forget, keyed to no session — the MRU
+    /// is global. Routing it through the daemon (issue #548) is what
+    /// lets a `--connect` client share the same MRU as the in-process
+    /// TUI instead of forking a client-local copy. Appended last
+    /// (bincode is ordinal-sensitive).
+    RecordRecentSnippet {
+        key: String,
+    },
+    /// Mark an update target as dismissed so the startup update modal
+    /// stops re-appearing for it (issue #548). `target` is the opaque
+    /// `source:<sha>` / `release:<version>` key the build guard derives;
+    /// a newer target is never covered by an older dismissal. The daemon
+    /// persists the dismissed set and replays it via `Event::Snapshot`'s
+    /// `dismissed_updates`, so dismissing on one client (in-process or
+    /// `--connect`) sticks for all of them instead of writing a
+    /// client-local `state.db`. Appended last (bincode is
+    /// ordinal-sensitive).
+    SetUpdateDismissal {
+        target: String,
+    },
 }
 
 impl Command {
@@ -1218,6 +1243,19 @@ pub enum Event {
         /// the same way.
         #[serde(default)]
         projects: Vec<lazybox_core::Project>,
+        /// Global most-recently-used snippet keys, newest first, capped
+        /// daemon-side (#548). Every client seeds its picker "Recent"
+        /// group from this so the MRU is shared across in-process and
+        /// `--connect` clients. Trailing `#[serde(default)]` field — same
+        /// wire-fingerprint caveat as `projects` above.
+        #[serde(default)]
+        recent_snippets: Vec<String>,
+        /// Update targets the user has dismissed (`source:<sha>` /
+        /// `release:<version>`), so the startup update modal stays hidden
+        /// for them across clients and restarts (#548). Trailing
+        /// `#[serde(default)]` field — same caveat as `projects`.
+        #[serde(default)]
+        dismissed_updates: Vec<String>,
     },
     /// Authenticated user's login per provider source ("github" →
     /// "AntoineToussaint", etc.). Emitted once after the daemon's

@@ -15,9 +15,9 @@ use lazybox_core::{PersistedSetup, ScopeSource, SessionKey};
 use std::sync::Arc;
 
 /// Cached setup detection results — the `SetupReport` + the source
-/// list `SetupRunner::new` needs. Returned by `crate::setup::detect`
-/// and stashed so the wizard can be re-opened from `,` without
-/// re-running detection from scratch.
+/// list `SetupRunner::new` needs. Produced boot-side by
+/// `setup_detect::detect_all` and stashed so the wizard can be re-opened
+/// from `,` without re-running detection from scratch.
 pub(crate) type SetupInputs = (setup::SetupReport, Arc<Vec<Box<dyn ScopeSource>>>);
 
 /// Result of persisting a finished setup. `Ok(Some(path))` means a
@@ -30,6 +30,18 @@ pub type SetupSaveResult = anyhow::Result<Option<std::path::PathBuf>>;
 /// save outcome so the Finish handler can surface failures and skip
 /// caching state that never hit disk.
 pub type SetupCompleteHook = Arc<dyn Fn(SetupOutcome) -> SetupSaveResult + Send + Sync>;
+
+/// Re-detect tool/provider availability for the wizard's `r` refresh.
+/// Injected by the boot crate (#548) because detection reaches the
+/// GitHub / Linear provider clients, which the UI library must not
+/// depend on. The wizard's `Effect::Detect` calls this instead of a
+/// baked-in `detect_all`. `None` in contexts with no detector (tests
+/// that never refresh) — the executor then yields an empty report.
+pub type SetupDetector = Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = setup::SetupReport> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// Tab a [`SettingsAction`] lives under in the Settings window (`,`).
 /// The old palette was one flat `Choice` list — 11+ rows, growing two
@@ -241,6 +253,9 @@ pub(crate) struct SetupCtx {
     /// dropped their accumulator. The returned [`SetupSaveResult`]
     /// tells the Finish handler whether the save actually landed.
     pub on_complete: Option<SetupCompleteHook>,
+    /// Re-detection hook for the wizard's `r` refresh, installed by the
+    /// boot crate (see [`SetupDetector`]). `None` until installed.
+    pub detector: Option<SetupDetector>,
 }
 
 impl SetupCtx {
@@ -255,6 +270,7 @@ impl SetupCtx {
             pending_editor_launch: None,
             pending_editor_workspace: None,
             on_complete: None,
+            detector: None,
         }
     }
 }

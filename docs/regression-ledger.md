@@ -103,12 +103,12 @@ land with the #403/#405 fixes, against the e2e success contract above.
 
 | guard | shape it covers |
 |---|---|
-| `crates/tui/src/build_guard.rs::source_build_detects_a_newer_checkout_head` | the source guard's git queries against a **real repository** laid out like the #391 incident |
-| `crates/tui/src/build_guard.rs::source_build_uses_ahead_tracking_upstream` | a safely fast-forwardable tracking branch is named as the available source target |
-| `crates/tui/src/build_guard.rs::divergent_main_does_not_mark_a_feature_build_stale` | divergent feature work does not produce a false stale-build warning |
-| `crates/tui/src/build_guard.rs::release_comparison_only_reports_newer_semver` | installed releases only notify for a strictly newer published semantic version |
+| `crates/tui-boot/src/build_guard.rs::source_build_detects_a_newer_checkout_head` | the source guard's git queries against a **real repository** laid out like the #391 incident |
+| `crates/tui-boot/src/build_guard.rs::source_build_uses_ahead_tracking_upstream` | a safely fast-forwardable tracking branch is named as the available source target |
+| `crates/tui-boot/src/build_guard.rs::divergent_main_does_not_mark_a_feature_build_stale` | divergent feature work does not produce a false stale-build warning |
+| `crates/tui-boot/src/build_guard.rs::release_comparison_only_reports_newer_semver` | installed releases only notify for a strictly newer published semantic version |
 | `crates/tui/src/build_guard.rs::modal_copy_scopes_commands_and_names_the_install_channel` | source commands run in the baked checkout and release commands match Homebrew versus the shell installer |
-| `crates/tui/src/realm/model/tests.rs::update_modal_dismissal_is_persisted_per_available_target` | explicit dismissal is remembered for one target while a later target is shown again |
+| `crates/tui/src/realm/model/tests.rs::update_dismissal_routes_through_the_daemon` | dismissal is reported to the daemon (`SetUpdateDismissal`), the same target stays quiet, and a newer target is shown again (#548) |
 
 ## `w` targets the running agent (#224, #418)
 

@@ -22,9 +22,8 @@
 //! including the load/refresh steps — is testable with a plain
 //! `#[test]`: feed an input, assert on the returned `Screen`/`Effect`.
 
-use crate::setup::{self, Category, SetupReport, ToolStatus};
-use lazybox_core::{KV_KEY_SETUP, PersistedSetup, ProviderConfig, ProviderError, Scope};
-use lazybox_store::Store;
+use crate::setup::{Category, SetupReport, ToolStatus};
+use lazybox_core::{PersistedSetup, ProviderConfig, ProviderError, Scope};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Re-export for callers that want the canonical name.
@@ -100,45 +99,11 @@ pub fn persisted_to_outcome(p: PersistedSetup, report: SetupReport) -> SetupOutc
 /// palette, and any hand edits all converge here. Empty / missing
 /// → no persisted setup, wizard runs on first launch. Profile-aware
 /// via the shared `lazybox_core::paths` resolver.
-fn config_yaml_path() -> std::path::PathBuf {
+pub fn config_yaml_path() -> std::path::PathBuf {
     lazybox_core::paths::config_yaml()
 }
 
-/// Load the persisted setup from `~/.lazybox/config.yaml::setup`.
-///
-/// Migration: an older release wrote setup state to the SQLite kv
-/// blob (`KV_KEY_SETUP`). We still check that as a fallback so
-/// existing users don't lose their wizard answers on upgrade — the
-/// next save will rewrite them to YAML and `polling::sources_for`
-/// will find them there going forward.
-pub fn load_persisted(store: &dyn Store) -> Option<PersistedSetup> {
-    if let Some(p) = load_from_yaml(&config_yaml_path()) {
-        return Some(p);
-    }
-    // Legacy kv fallback. Migrates by side-effect on the next save.
-    match store.get_kv(KV_KEY_SETUP) {
-        Ok(Some(raw)) if !raw.is_empty() => match serde_json::from_str::<PersistedSetup>(&raw) {
-            Ok(mut p) => {
-                p.migrate_legacy_keys();
-                tracing::info!(
-                    "setup loaded from legacy kv blob; will migrate to YAML on next save"
-                );
-                Some(p)
-            }
-            Err(e) => {
-                tracing::warn!("legacy setup blob corrupt: {e}");
-                None
-            }
-        },
-        Ok(_) => None,
-        Err(e) => {
-            tracing::warn!("legacy setup read failed: {e}");
-            None
-        }
-    }
-}
-
-fn load_from_yaml(path: &std::path::Path) -> Option<PersistedSetup> {
+pub fn load_from_yaml(path: &std::path::Path) -> Option<PersistedSetup> {
     let raw = std::fs::read_to_string(path).ok()?;
     let cfg: lazybox_config::Config = match serde_yaml::from_str(&raw) {
         Ok(c) => c,
@@ -187,21 +152,15 @@ fn load_from_yaml(path: &std::path::Path) -> Option<PersistedSetup> {
 ///
 /// Errors (serialize / write / rename failures) bubble up so the UI
 /// can tell the user their settings did NOT stick.
-pub fn save_persisted(
-    store: &dyn Store,
-    p: &PersistedSetup,
-) -> anyhow::Result<Option<std::path::PathBuf>> {
-    let backed_up = save_persisted_yaml(p, &config_yaml_path())?;
-    // Clean up the legacy kv blob so the YAML stays the only source
-    // of truth on subsequent loads.
-    let _ = store.set_kv(KV_KEY_SETUP, "");
-    Ok(backed_up)
-}
+///
+/// The store-backed wrapper (`save_persisted`) — which also clears the
+/// legacy `KV_KEY_SETUP` blob — lives boot-side, since the UI library
+/// carries no store handle (#548).
 
-/// File-level core of [`save_persisted`], path-injected for tests.
-/// Returns the backup path when a malformed pre-existing config was
-/// moved aside.
-fn save_persisted_yaml(
+/// File-level core of the boot-side `save_persisted` wrapper,
+/// path-injected for tests. Returns the backup path when a malformed
+/// pre-existing config was moved aside.
+pub fn save_persisted_yaml(
     p: &PersistedSetup,
     path: &std::path::Path,
 ) -> anyhow::Result<Option<std::path::PathBuf>> {
@@ -391,14 +350,6 @@ fn filter_from_keys(keys: &BTreeSet<String>) -> ProviderConfig {
     ProviderConfig {
         enabled_keys: keys.clone(),
     }
-}
-
-// ── Async entry shim ────────────────────────────────────────────────────
-
-/// Run detection — convenience wrapper around `setup::detect_all` that
-/// `run_embedded_realm` calls before constructing `SetupRunner`.
-pub async fn detect() -> SetupReport {
-    setup::detect_all().await
 }
 
 // ── Screens, effects, results (the runner's vocabulary) ─────────────────

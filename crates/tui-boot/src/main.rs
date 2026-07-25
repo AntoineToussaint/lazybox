@@ -22,6 +22,16 @@
 //!
 //! All arg parsing is intentionally stupid — see `take_flag`.
 
+// Boot-side modules quarantined off the thin UI library (#548): the
+// build-guard fetch (octocrab), provider detection, setup persistence,
+// the Slack CLI flows, and the test harness.
+mod build_guard;
+mod setup_detect;
+mod setup_persist;
+mod slack_init;
+mod slack_prune;
+mod test_mode;
+
 use lazybox_ipc::{channel, socket};
 use lazybox_server::lifecycle::{self, ServerStatus};
 use lazybox_server::polling;
@@ -388,7 +398,7 @@ fn take_value(args: &mut Vec<String>, flag: &str) -> Option<String> {
 /// disk writes. The fixture (which owns the TempDir) is held in
 /// scope for the whole TUI session — drop = `rm -rf` the tempdir.
 async fn run_test(preselect: Option<lazybox_tui::realm::model::Preselect>) -> anyhow::Result<()> {
-    let fixture = lazybox_tui::test_mode::TestFixture::new_with_seeded_session()?;
+    let fixture = test_mode::TestFixture::new_with_seeded_session()?;
     eprintln!("--test repo at {}", fixture.repo.path().display());
 
     // Spawn under the test tempdir so any agent we launch defaults
@@ -527,25 +537,29 @@ async fn run_remote(
             socket_path.display()
         );
     }
+    // Dismissals now round-trip through the daemon (#548), so this path no
+    // longer opens a client-local `state.db` for them — on a genuinely
+    // remote `--connect` client that was a fresh, unrelated database. The
+    // store here only backs the build guard's release-check cache, which is
+    // a bounded, throwaway optimization; a failed open just skips it.
     let update_check = tokio::spawn(async {
         let open_store = tokio::task::spawn_blocking(lazybox_server::open_store);
         let store = match tokio::time::timeout(Duration::from_millis(500), open_store).await {
             Ok(Ok(Ok(store))) => Some(store),
             Ok(Ok(Err(error))) => {
-                tracing::warn!("update dismissal store unavailable: {error}");
+                tracing::warn!("release-check cache store unavailable: {error}");
                 None
             }
             Ok(Err(error)) => {
-                tracing::warn!("update dismissal store task failed: {error}");
+                tracing::warn!("release-check cache store task failed: {error}");
                 None
             }
             Err(_) => {
-                tracing::warn!("update dismissal store open timed out");
+                tracing::warn!("release-check cache store open timed out");
                 None
             }
         };
-        let update = lazybox_tui::build_guard::available_update(store.clone()).await;
-        (update, store)
+        build_guard::available_update(store).await
     });
     let (client, daemon) = match socket::connect(socket_path).await {
         Ok(pair) => pair,
@@ -568,15 +582,23 @@ async fn run_remote(
         .map(|c| c.attention.notifier)
         .unwrap_or_default();
     lazybox_tui::platform::set_notifier_backend(map_notifier_backend(notifier));
-    let (available_update, update_store) = update_check.await.unwrap_or_else(|error| {
+    let available_update = update_check.await.unwrap_or_else(|error| {
         tracing::debug!("startup update check task failed: {error}");
-        (None, None)
+        None
     });
     tokio::task::spawn_blocking(move || {
         let mut model = lazybox_tui::realm::Model::new(client)?;
         model.note_daemon_build(&daemon.build);
+        // Snippets are a client-side concern (the picker + the injected
+        // body live here, not in the daemon), so load the catalog on the
+        // `--connect` path too. Without it the picker is empty and the
+        // daemon-owned "Recent" MRU (#548) has no catalog to render or
+        // prune against.
+        model.apply_snippets(lazybox_config::Snippets::load_merged(
+            std::env::current_dir().ok().as_deref(),
+        ));
         if let Some(update) = available_update {
-            model.show_update_if_new(update, update_store);
+            model.show_update_if_new(update);
         }
         if let Some(p) = preselect {
             model = model.with_preselect(p);
@@ -595,9 +617,7 @@ async fn run_embedded_realm(
 ) -> anyhow::Result<()> {
     let (client, server) = channel::pair();
     let config = server_config_from_user()?;
-    let update_check = tokio::spawn(lazybox_tui::build_guard::available_update(Some(
-        config.store.clone(),
-    )));
+    let update_check = tokio::spawn(build_guard::available_update(Some(config.store.clone())));
 
     // Recovery probes the backend (`tmux list-sessions`) before the UI
     // paints — bound it so a wedged tmux server degrades to "no
@@ -733,7 +753,7 @@ async fn run_embedded_realm(
     // that path doesn't need to re-run async detection from inside
     // a `spawn_blocking` task. Both calls are read-only + cheap-ish
     // (sub-second on a warm cache).
-    let setup_report = lazybox_tui::setup::detect_all().await;
+    let setup_report = setup_detect::detect_all().await;
     // Scope-source discovery does network IO (GitHub credential +
     // client build). Bounded so a stalled network can't hold the UI
     // hostage pre-paint; the wizard degrades to no scope suggestions.
@@ -782,9 +802,15 @@ async fn run_embedded_realm(
         let store_for_save = std::sync::Arc::new(store_for_save);
         let hook: lazybox_tui::realm::SetupCompleteHook = std::sync::Arc::new(move |outcome| {
             let persisted = lazybox_tui::setup_flow::outcome_to_persisted(&outcome);
-            lazybox_tui::setup_flow::save_persisted(&**store_for_save, &persisted)
+            setup_persist::save_persisted(&**store_for_save, &persisted)
         });
         model = model.with_setup_complete_hook(hook);
+        // Re-detection for the wizard's `r` refresh reaches the provider
+        // clients, which live boot-side; inject it so the UI library
+        // stays provider-free (#548).
+        let detector: lazybox_tui::realm::SetupDetector =
+            std::sync::Arc::new(|| Box::pin(setup_detect::detect_all()));
+        model = model.with_setup_detector(detector);
         if let Some(p) = preselect {
             model = model.with_preselect(p);
         }
@@ -901,13 +927,12 @@ async fn run_embedded_realm(
         // which is the natural repo root for a single-repo workflow.
         let snippets =
             lazybox_config::Snippets::load_merged(std::env::current_dir().ok().as_deref());
-        // Install the catalog, then restore the snippet-picker "Recent"
-        // MRU from the state DB so frequently-used snippets stay one
-        // keystroke away across restarts (#311). Runtime state, not YAML
-        // — lives in the same store as read/unread and snooze. Bundled
-        // so the restore can never run before the catalog is in place
-        // (it prunes the MRU against it).
-        model.apply_snippets_and_seed_recent(snippets, config.store.clone());
+        // Install the catalog. The snippet-picker "Recent" MRU is owned by
+        // the daemon (#548) and seeded from the first `Event::Snapshot`,
+        // which prunes it against this catalog — so the catalog must be in
+        // place first, and it is (Subscribe's snapshot arrives inside the
+        // loop below).
+        model.apply_snippets(snippets);
         model = model.with_splits(user_config.ui.sidebar_pct, user_config.ui.right_top_pct);
         if let Some((report, sources)) = wizard_seed {
             model.start_setup_wizard(report, sources);
@@ -918,7 +943,7 @@ async fn run_embedded_realm(
             model.maybe_mount_tour();
         }
         if let Some(update) = available_update {
-            model.show_update_if_new(update, Some(config.store.clone()));
+            model.show_update_if_new(update);
         }
         lazybox_tui::realm::model::run_loop_with_model(model)
     })
@@ -976,7 +1001,7 @@ async fn build_scope_sources() -> Vec<Box<dyn lazybox_core::ScopeSource>> {
 }
 
 fn persisted_setup(store: &dyn lazybox_store::Store) -> Option<lazybox_core::PersistedSetup> {
-    lazybox_tui::setup_flow::load_persisted(store)
+    setup_persist::load_persisted(store)
 }
 
 /// Read the optional `editors:` list from `~/.lazybox/config.yaml`.
@@ -1001,7 +1026,7 @@ fn load_user_editors() -> Vec<lazybox_tui::editors::UserEditorEntry> {
 }
 
 /// `lazybox slack <init|doctor>` — Slack-side setup helpers. See
-/// `lazybox_tui::slack_init` for the actual flow; this is just the
+/// `crate::slack_init` for the actual flow; this is just the
 /// `lazybox scan [ROOTS...] [--depth N]` — read-only discovery of git
 /// checkouts (normal clones and linked `git worktree`s) the user
 /// created outside lazybox. Roots come from the command line, or from
@@ -1227,7 +1252,7 @@ fn truncate(s: &str, max: usize) -> String {
 /// to stderr from here would vanish into `/tmp/lazybox.log` instead of
 /// reaching the user's terminal.
 async fn slack_subcommand(args: &[String]) -> anyhow::Result<()> {
-    use lazybox_tui::slack_init;
+    use crate::slack_init;
     match args.first().map(String::as_str) {
         Some("init") => {
             let outcome = slack_init::run_init().await?;
@@ -1255,7 +1280,7 @@ async fn slack_subcommand(args: &[String]) -> anyhow::Result<()> {
             }
         }
         Some("prune") => {
-            use lazybox_tui::slack_prune;
+            use crate::slack_prune;
             let outcome = slack_prune::run(&args[1..]).await?;
             match outcome {
                 slack_prune::PruneOutcome::Done { .. } => Ok(()),

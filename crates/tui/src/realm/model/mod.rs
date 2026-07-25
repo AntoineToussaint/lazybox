@@ -1224,19 +1224,26 @@ pub struct Model<T: TerminalAdapter> {
     /// Snippet keys sent, most-recent first (capped at
     /// `RECENT_SNIPPETS_MAX`). Passed to each picker as its "Recent"
     /// group so a repeated snippet is one `]]s` + `Enter` away (#252).
-    /// Persisted to the state DB via `recent_snippets_store` so the
-    /// group survives a restart (#311).
+    /// The daemon owns the durable MRU (#548): every use is reported via
+    /// `Command::RecordRecentSnippet` and the persisted order is replayed
+    /// in `Event::Snapshot`, so the Recent group survives a restart (#311)
+    /// AND is shared across in-process and `--connect` clients. This local
+    /// copy is the pruned-against-catalog view the pickers render.
     pub(crate) recent_snippets: Vec<String>,
-    /// State-DB handle used to persist `recent_snippets` across
-    /// restarts (#311). Set by `seed_recent_snippets` on the embedded
-    /// boot path; `None` on the `--connect` path (which loads no
-    /// snippets and owns no local store), where MRU stays session-only.
-    recent_snippets_store: Option<std::sync::Arc<dyn lazybox_store::Store>>,
-    /// Persistence retained only while the startup update modal is open.
-    update_store: Option<std::sync::Arc<dyn lazybox_store::Store>>,
-    update_dismissal_tx: mpsc::Sender<Result<(), String>>,
-    update_dismissal_rx: mpsc::Receiver<Result<(), String>>,
-    update_dismissals_pending: usize,
+    /// Update targets the daemon reports as already dismissed, seeded from
+    /// `Event::Snapshot` (#548). `show_update_if_new` checks membership so
+    /// a dismissed target never re-mounts the startup modal.
+    dismissed_updates: Vec<String>,
+    /// The update the build guard found, stashed until the first snapshot
+    /// lands so the dismissal check runs against the daemon's authoritative
+    /// `dismissed_updates` rather than an empty set (#548). Not a
+    /// mounted-modal continuation — the mounted update modal's target rides
+    /// [`ModalFlow::UpdateTarget`] — so it stays a plain field.
+    pending_update: Option<crate::build_guard::AvailableUpdate>,
+    /// Set once the initial `Event::Snapshot` has seeded `dismissed_updates`,
+    /// gating `pending_update` so an update found before the snapshot waits
+    /// for the real dismissal set.
+    snapshot_seen: bool,
     /// Theme name active when the picker opened. Live preview mutates
     /// the global theme as the cursor moves; Esc restores this so a
     /// cancelled picker leaves the palette untouched. `None` while no
@@ -1372,11 +1379,6 @@ const MODAL_REDRAW_WINDOW: Duration = Duration::from_millis(120);
 /// the group is a fast lane for the handful of snippets in active use.
 const RECENT_SNIPPETS_MAX: usize = 5;
 
-/// State-DB key under which the recent-snippets MRU is persisted
-/// (#311). A plain kv entry — runtime state, like read/unread and
-/// snooze — not user-authored `snippets.yaml` content.
-const RECENT_SNIPPETS_KV_KEY: &str = "recent_snippets";
-
 /// A compact relative age ("just now", "2m ago", "3h ago", "5d ago")
 /// for a prompt-history row (issue #523). A zero timestamp marks an entry
 /// migrated from the pre-history single-value recap, whose real submit
@@ -1403,12 +1405,6 @@ fn relative_age(timestamp_ms: u64, now_ms: u64) -> String {
 /// become single spaces so a multi-line prompt reads as one line.
 fn summarize_prompt(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-const DISMISSED_UPDATE_KV_PREFIX: &str = "dismissed_update_target:";
-
-fn dismissed_update_key(target: &str) -> String {
-    format!("{DISMISSED_UPDATE_KV_PREFIX}{target}")
 }
 
 /// How long the footer must sit idle (no modal, no notice) after
@@ -1442,7 +1438,6 @@ impl<T: TerminalAdapter> Model<T> {
         // there's no `crossterm_input_listener` here, so the listener
         // thread doesn't race the main thread for keystrokes.
         let (modal_event_tx, modal_event_rx) = mpsc::channel();
-        let (update_dismissal_tx, update_dismissal_rx) = mpsc::channel();
         let app: Application<Id, Msg, UserEvent> = Application::init(
             EventListenerCfg::default()
                 .add_port(
@@ -1530,11 +1525,9 @@ impl<T: TerminalAdapter> Model<T> {
             deferred_focus_terminal: None,
             snippets: lazybox_config::Snippets::default(),
             recent_snippets: Vec::new(),
-            recent_snippets_store: None,
-            update_store: None,
-            update_dismissal_tx,
-            update_dismissal_rx,
-            update_dismissals_pending: 0,
+            dismissed_updates: Vec::new(),
+            pending_update: None,
+            snapshot_seen: false,
             theme_picker_prev: None,
             help_convo: Default::default(),
             help_run: None,
@@ -1641,6 +1634,15 @@ impl<T: TerminalAdapter> Model<T> {
     /// the polling loop with the user's persisted selections.
     pub fn with_setup_complete_hook(mut self, hook: crate::realm::SetupCompleteHook) -> Self {
         self.setup.on_complete = Some(hook);
+        self
+    }
+
+    /// Install the setup re-detection hook before the main loop starts.
+    /// The boot crate supplies it (#548) because detection reaches the
+    /// provider clients the UI library must not depend on; the wizard's
+    /// `r` refresh runs it via `Effect::Detect`.
+    pub fn with_setup_detector(mut self, detector: crate::realm::SetupDetector) -> Self {
+        self.setup.detector = Some(detector);
         self
     }
 
@@ -1950,95 +1952,33 @@ impl<T: TerminalAdapter> Model<T> {
     /// and keeps it across restarts (#311).
     pub(crate) fn record_recent_snippet(&mut self, key: String) {
         self.recent_snippets.retain(|k| k != &key);
-        self.recent_snippets.insert(0, key);
+        self.recent_snippets.insert(0, key.clone());
         self.recent_snippets.truncate(RECENT_SNIPPETS_MAX);
-        self.persist_recent_snippets();
+        // The daemon owns the durable MRU (#548): report the use and let
+        // the next `Event::Snapshot` reconcile the persisted order. The
+        // local update above keeps the picker's Recent group instant.
+        self.send_cmd(IpcCommand::RecordRecentSnippet { key });
     }
 
-    /// Best-effort write of `recent_snippets` to the state DB. A write
-    /// failure just means the Recent group won't survive this quit —
-    /// non-fatal, like `persist_tip_seen`.
-    fn persist_recent_snippets(&self) {
-        let Some(store) = &self.recent_snippets_store else {
-            return;
-        };
-        let json = match serde_json::to_string(&self.recent_snippets) {
-            Ok(json) => json,
-            Err(e) => {
-                tracing::warn!("serialize recent_snippets failed: {e}");
-                return;
-            }
-        };
-        if let Err(e) = store.set_kv(RECENT_SNIPPETS_KV_KEY, &json) {
-            tracing::warn!("persist recent_snippets failed: {e}");
-        }
-    }
-
-    /// Install the snippet catalog and then restore the persisted
-    /// "Recent" MRU against it, in that order (#311). This is the boot
-    /// entry point `main.rs` uses: bundling the two steps makes the
-    /// ordering un-splittable, so the prune in `seed_recent_snippets`
-    /// can never run before `self.snippets` is populated (which would
-    /// silently wipe a valid MRU). Keep the two methods it calls out of
-    /// the startup path — call this instead.
-    pub fn apply_snippets_and_seed_recent(
-        &mut self,
-        snippets: lazybox_config::Snippets,
-        store: std::sync::Arc<dyn lazybox_store::Store>,
-    ) {
-        self.apply_snippets(snippets);
-        self.seed_recent_snippets(store);
-    }
-
-    /// Seed `recent_snippets` from the state DB and retain the store
-    /// handle for future writes (#311). MUST run *after* `apply_snippets`
+    /// Seed `recent_snippets` from the daemon's persisted MRU, delivered
+    /// in every `Event::Snapshot` (#548). MUST run *after* `apply_snippets`
     /// — it prunes keys no longer in the loaded catalog (a renamed /
-    /// deleted snippet) so they don't sit in the MRU consuming a slot
-    /// they can never render into; with an unpopulated catalog it would
-    /// instead wipe every key. Without the prune a small rotating set of
-    /// live keys never evicts the dead ones, permanently shrinking the
-    /// visible Recent group. The startup path enforces the ordering via
-    /// `apply_snippets_and_seed_recent`; call that, not this, outside of
-    /// tests. A missing / empty / unparseable value yields an empty list
-    /// — non-fatal, MRU just starts fresh. The `RECENT_SNIPPETS_MAX` cap
-    /// is re-applied here in case the stored list predates a smaller cap.
-    pub fn seed_recent_snippets(&mut self, store: std::sync::Arc<dyn lazybox_store::Store>) {
-        // Only true when we loaded a value AND the prune/cap actually
-        // shortened it — gates the flush-back below so a read failure,
-        // an unparseable value, or an already-clean list never triggers
-        // a write (which would clobber recoverable bytes with `[]`).
-        let mut shortened = false;
-        match store.get_kv(RECENT_SNIPPETS_KV_KEY) {
-            Ok(Some(json)) => match serde_json::from_str::<Vec<String>>(&json) {
-                Ok(mut recent) => {
-                    let before = recent.len();
-                    recent.retain(|k| self.snippets.get(k).is_some());
-                    recent.truncate(RECENT_SNIPPETS_MAX);
-                    shortened = recent.len() != before;
-                    self.recent_snippets = recent;
-                }
-                Err(e) => tracing::warn!("parse recent_snippets failed: {e}"),
-            },
-            Ok(None) => {}
-            Err(e) => tracing::warn!("read recent_snippets failed: {e}"),
+    /// deleted snippet) so they don't sit in the MRU consuming a slot they
+    /// can never render into; with an unpopulated catalog it would instead
+    /// wipe every key. Pruning is display-only: the daemon keeps the raw
+    /// list, and dead keys evict naturally as fresh snippets are used. The
+    /// `RECENT_SNIPPETS_MAX` cap is re-applied in case the stored list
+    /// predates a smaller cap.
+    pub(crate) fn seed_recent_snippets_from_snapshot(&mut self, mut recent: Vec<String>) {
+        // Prune only against a *populated* catalog: a snapshot that lands
+        // before `apply_snippets` (or a client that never loads snippets)
+        // would otherwise wipe every key against an empty catalog. A later
+        // snapshot re-prunes once the catalog is in place.
+        if !self.snippets.is_empty() {
+            recent.retain(|k| self.snippets.get(k).is_some());
         }
-        self.recent_snippets_store = Some(store);
-        // Known residual: after a FAILED read the in-memory MRU starts
-        // empty, so the user's next snippet send persists a short list
-        // over whatever the row held. Deliberately not hardened the way
-        // the archived-workspaces set is (`load_archived_set_strict` in
-        // the server): this row is a trivially-rebuildable convenience
-        // cache — the worst case is the Recent group repopulating from
-        // use — not user history whose loss is destructive.
-        //
-        // Flush the pruned list back so dead keys don't linger in the DB
-        // across future seeds — but only when the load succeeded and
-        // dropped something, so we never overwrite a valid or corrupt
-        // stored value with an empty list. Best-effort, like every MRU
-        // write.
-        if shortened {
-            self.persist_recent_snippets();
-        }
+        recent.truncate(RECENT_SNIPPETS_MAX);
+        self.recent_snippets = recent;
     }
 
     /// Mount the read-only snippets browser (`]`, or the Settings
@@ -2168,7 +2108,7 @@ impl<T: TerminalAdapter> Model<T> {
         if matches!(self.modal_stack.last(), Some(Id::DefaultAgentPicker)) {
             return;
         }
-        let registry = lazybox_agents::registry();
+        let registry = lazybox_tui_core::agents::registry();
         let ids: Vec<String> = self.agents.clone();
         let current = self.sidebar.default_agent();
         let start = ids.iter().position(|id| id == current).unwrap_or(0);
@@ -2652,24 +2592,31 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
-    /// Show a startup update notice unless this exact target was dismissed.
-    pub fn show_update_if_new(
-        &mut self,
-        update: crate::build_guard::AvailableUpdate,
-        store: Option<std::sync::Arc<dyn lazybox_store::Store>>,
-    ) {
+    /// Stash the update the build guard found. The modal is not mounted
+    /// here: the dismissal check runs against the daemon's authoritative
+    /// `dismissed_updates`, which only lands with the first
+    /// `Event::Snapshot`. `maybe_show_pending_update` mounts it once that
+    /// set is known — immediately if the snapshot already arrived (#548).
+    pub fn show_update_if_new(&mut self, update: crate::build_guard::AvailableUpdate) {
+        self.pending_update = Some(update);
+        self.maybe_show_pending_update();
+    }
+
+    /// Mount the stashed update modal if the snapshot's dismissal set is
+    /// known and this target isn't in it. Called both from
+    /// `show_update_if_new` (covers "snapshot already arrived") and from
+    /// the snapshot handler (covers "update found before the snapshot").
+    pub(super) fn maybe_show_pending_update(&mut self) {
+        if !self.snapshot_seen {
+            return;
+        }
+        let Some(update) = self.pending_update.take() else {
+            return;
+        };
         let target = update.target();
-        let dismissal_key = dismissed_update_key(&target);
-        let dismissed = store
-            .as_ref()
-            .is_some_and(|store| match store.get_kv(&dismissal_key) {
-                Ok(value) => value.is_some(),
-                Err(error) => {
-                    tracing::warn!("read dismissed update target failed: {error}");
-                    false
-                }
-            });
-        if dismissed || self.modal_stack.iter().any(|id| id == &Id::Update) {
+        if self.dismissed_updates.iter().any(|t| t == &target)
+            || self.modal_stack.iter().any(|id| id == &Id::Update)
+        {
             return;
         }
 
@@ -2681,41 +2628,7 @@ impl<T: TerminalAdapter> Model<T> {
         )
         .dismiss_on_confirm();
         self.set_modal_flow(ModalFlow::UpdateTarget { target });
-        self.update_store = store;
         self.mount_modal(Id::Update, modal);
-    }
-
-    pub(super) fn tick_update_dismissal(&mut self) {
-        while let Ok(result) = self.update_dismissal_rx.try_recv() {
-            self.handle_update_dismissal_result(result);
-        }
-    }
-
-    pub(super) fn finish_update_dismissal(&mut self) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(6);
-        while self.update_dismissals_pending > 0 {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                tracing::warn!("timed out persisting update dismissal during shutdown");
-                break;
-            }
-            match self.update_dismissal_rx.recv_timeout(remaining) {
-                Ok(result) => self.handle_update_dismissal_result(result),
-                Err(error) => {
-                    tracing::warn!("update dismissal worker ended before persistence: {error}");
-                    break;
-                }
-            }
-        }
-    }
-
-    fn handle_update_dismissal_result(&mut self, result: Result<(), String>) {
-        self.update_dismissals_pending = self.update_dismissals_pending.saturating_sub(1);
-        if let Err(error) = result {
-            self.flash_error(format!(
-                "could not remember update dismissal; it may reappear next launch: {error}"
-            ));
-        }
     }
 
     /// Validate the applied keymap config at startup and surface any

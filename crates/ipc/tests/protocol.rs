@@ -372,6 +372,10 @@ fn all_commands() -> Vec<Command> {
             session_key: "github:o/r#1".into(),
             snippet_key: "rev".into(),
         },
+        Command::RecordRecentSnippet { key: "rev".into() },
+        Command::SetUpdateDismissal {
+            target: "release:v0.2.0".into(),
+        },
         Command::Shutdown,
     ]
 }
@@ -408,6 +412,8 @@ fn all_events() -> Vec<Event> {
                 composing_buffer: Some("half typed prompt".into()),
             }],
             projects: vec![],
+            recent_snippets: vec!["rev".into(), "pr".into()],
+            dismissed_updates: vec!["release:v0.2.0".into()],
         },
         Event::ViewerIdentities {
             logins: vec![("github".into(), "octocat".into())],
@@ -844,6 +850,8 @@ fn command_tag(command: &Command) -> &'static str {
         Command::SetNotes { .. } => "SetNotes",
         Command::UpdateBranch { .. } => "UpdateBranch",
         Command::RecordSentSnippet { .. } => "RecordSentSnippet",
+        Command::RecordRecentSnippet { .. } => "RecordRecentSnippet",
+        Command::SetUpdateDismissal { .. } => "SetUpdateDismissal",
     }
 }
 
@@ -926,7 +934,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        63,
+        65,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(

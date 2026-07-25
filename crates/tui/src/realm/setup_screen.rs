@@ -158,10 +158,27 @@ pub fn render(screen: Screen) -> (Box<dyn AppComponent<Msg, UserEvent>>, Option<
 /// into `result`. The boxed `LoadResult` is later recovered by
 /// [`downcast_load_result`] when the Loading modal's tick fires
 /// `Msg::LoadingResolved`.
-pub fn run_effect(effect: Effect, sources: ScopeSources, result: LoadingResult) {
+pub fn run_effect(
+    effect: Effect,
+    sources: ScopeSources,
+    detector: Option<crate::realm::SetupDetector>,
+    result: LoadingResult,
+) {
     tokio::spawn(async move {
         let value: LoadResult = match effect {
-            Effect::Detect => LoadResult::Detected(setup::detect_all().await),
+            Effect::Detect => {
+                let report = match detector {
+                    Some(detect) => detect().await,
+                    // No detector installed (a wizard driven without the
+                    // boot crate's detection hook): yield an empty report
+                    // rather than pretending everything is present.
+                    None => {
+                        tracing::warn!("setup re-detect requested but no detector installed");
+                        setup::SetupReport { tools: Vec::new() }
+                    }
+                };
+                LoadResult::Detected(report)
+            }
             Effect::ListScopes { provider_id } => {
                 LoadResult::Scopes(list_scopes(&sources, &provider_id).await)
             }

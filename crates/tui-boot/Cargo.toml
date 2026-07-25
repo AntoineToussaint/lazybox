@@ -1,0 +1,66 @@
+[package]
+name = "lazybox-tui-boot"
+description = "Boot crate for lazybox: hosts the `lazybox` binary and the wide daemon/provider wiring the thin UI library must not carry."
+default-run = "lazybox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+
+# The workspace sets `publish = false`, which cargo-dist (`dist`) treats as
+# "not distributable" and skips — leaving the release with nothing to ship.
+# This crate produces the `lazybox` binary, so opt it back into releases.
+[package.metadata.dist]
+dist = true
+# Name the Homebrew formula after the binary (`lazybox`), not the crate
+# (`lazybox-tui-boot`), so installs read `brew install …/lazybox`.
+formula = "lazybox"
+
+[[bin]]
+name = "lazybox"
+path = "src/main.rs"
+
+# The short `lb` alias is the auto-discovered bin at `src/bin/lb.rs`, a tiny
+# exec shim for the sibling `lazybox` binary. This keeps release archives from
+# containing two copies of the full TUI. (`lb` can collide with Debian's
+# live-build command on Linux hosts that have it.)
+
+[dependencies]
+# The thin UI library. Everything render-facing lives there; this crate is
+# the boot shell that wires it to the daemon, providers, and store.
+lazybox-tui      = { path = "../tui" }
+lazybox-tui-core = { workspace = true }
+lazybox-core     = { workspace = true }
+lazybox-config   = { workspace = true }
+lazybox-git-ops  = { workspace = true }
+lazybox-store    = { workspace = true }
+lazybox-gh       = { workspace = true }
+lazybox-slack    = { workspace = true }
+lazybox-linear   = { workspace = true }
+lazybox-ipc      = { workspace = true }
+lazybox-agents   = { workspace = true }
+lazybox-server   = { path = "../server" }
+
+tokio              = { workspace = true }
+anyhow             = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono             = { workspace = true }
+serde_json         = { workspace = true }
+semver             = { workspace = true }
+# Release build-guard check + the client-side gh credential chain live here
+# (quarantined off the UI library, #548).
+octocrab           = { workspace = true }
+tempfile           = "3"
+which              = "8"
+rpassword          = "7.5.4"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

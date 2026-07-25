@@ -33,6 +33,7 @@ pub mod api_gateway;
 pub mod auth;
 pub mod backend;
 pub mod chat;
+pub mod client_kv;
 pub mod event_forward;
 pub mod keep_awake;
 pub mod lifecycle;
@@ -1042,6 +1043,8 @@ impl Server {
                         lazybox_ipc::Command::UpdateAgentClis => "UpdateAgentClis",
                         lazybox_ipc::Command::SetNotes { .. } => "SetNotes",
                         lazybox_ipc::Command::RecordSentSnippet { .. } => "RecordSentSnippet",
+                        lazybox_ipc::Command::RecordRecentSnippet { .. } => "RecordRecentSnippet",
+                        lazybox_ipc::Command::SetUpdateDismissal { .. } => "SetUpdateDismissal",
                         lazybox_ipc::Command::Shutdown => "Shutdown",
                     };
                     // `Write` fires on every keystroke — at info it floods
@@ -1175,11 +1178,15 @@ impl Server {
                             );
                             let store = self.config.store.clone();
                             match tokio::task::spawn_blocking(move || {
-                                (load_workspaces(&*store), load_projects(&*store))
+                                (
+                                    load_workspaces(&*store),
+                                    load_projects(&*store),
+                                    client_kv::snapshot(&*store),
+                                )
                             })
                             .await
                             {
-                                Ok((workspaces, projects)) => {
+                                Ok((workspaces, projects, client_kv)) => {
                                     let load_errors =
                                         workspaces.errors.len() + projects.errors.len();
                                     let mut terminals =
@@ -1189,6 +1196,8 @@ impl Server {
                                         workspaces: workspaces.values,
                                         terminals,
                                         projects: projects.values,
+                                        recent_snippets: client_kv.recent_snippets,
+                                        dismissed_updates: client_kv.dismissed_updates,
                                     });
                                     if load_errors > 0 {
                                         let _ = conn.tx.send(storage_recovery_event(load_errors));
@@ -1354,17 +1363,25 @@ pub async fn dispatch_command(
             // empty Snapshot would render a blank sidebar with no
             // breadcrumb.
             let store = config.store.clone();
-            let (workspaces, projects) = match tokio::task::spawn_blocking(move || {
-                (load_workspaces(&*store), load_projects(&*store))
+            let (workspaces, projects, client_kv) = match tokio::task::spawn_blocking(move || {
+                (
+                    load_workspaces(&*store),
+                    load_projects(&*store),
+                    client_kv::snapshot(&*store),
+                )
             })
             .await
             {
-                Ok(pair) => pair,
+                Ok(triple) => triple,
                 Err(e) => {
                     tracing::error!(
                         "Subscribe snapshot load task failed: {e} — sending empty snapshot",
                     );
-                    (LoadOutcome::default(), LoadOutcome::default())
+                    (
+                        LoadOutcome::default(),
+                        LoadOutcome::default(),
+                        client_kv::ClientKvSnapshot::default(),
+                    )
                 }
             };
             let load_errors = workspaces.errors.len() + projects.errors.len();
@@ -1390,6 +1407,8 @@ pub async fn dispatch_command(
                 workspaces: workspaces.values,
                 terminals,
                 projects: projects.values,
+                recent_snippets: client_kv.recent_snippets,
+                dismissed_updates: client_kv.dismissed_updates,
             });
             if load_errors > 0 {
                 let _ = tx.send(storage_recovery_event(load_errors));
@@ -1655,6 +1674,12 @@ pub async fn dispatch_command(
         } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
             polling::record_sent_snippet(config, &key, snippet_key).await;
+        }
+        lazybox_ipc::Command::RecordRecentSnippet { key } => {
+            client_kv::record_recent_snippet(config, key).await;
+        }
+        lazybox_ipc::Command::SetUpdateDismissal { target } => {
+            client_kv::set_update_dismissal(config, target).await;
         }
         lazybox_ipc::Command::SetAutoMergeOnGreen {
             session_key,
@@ -2106,6 +2131,8 @@ mod snapshot_budget_tests {
                 workspaces: Vec::new(),
                 terminals,
                 projects: Vec::new(),
+                recent_snippets: Vec::new(),
+                dismissed_updates: Vec::new(),
             },
             bincode::config::legacy(),
         )

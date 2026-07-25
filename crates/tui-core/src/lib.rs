@@ -10,6 +10,16 @@
 
 pub mod action;
 pub mod agent_attention;
+
+/// Agent metadata the render layer needs — the built-in registry (display
+/// names + badge glyphs) and the prompt-trim helper — re-exported so the
+/// UI library reaches them through `lazybox-tui-core` instead of depending
+/// on `lazybox-agents` directly. That keeps the UI lib's dependency set to
+/// `{ipc, tui-core, tui-term, config, core}` (#548): agent internals live
+/// one crate away, behind this gateway.
+pub mod agents {
+    pub use lazybox_agents::{Registry, registry, trim_leading_blank_lines};
+}
 pub mod confirm_latch;
 pub mod editors;
 pub mod help;

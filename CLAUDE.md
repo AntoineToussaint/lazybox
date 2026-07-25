@@ -12,11 +12,14 @@ Source-agnostic: GitHub is one provider, but Linear/Jira/etc. plug in the same w
 
 ```bash
 cargo build                    # build (first build compiles SQLite, takes ~30s)
-cargo run -p lazybox-tui      # run (uses `gh auth token` automatically)
+cargo run -p lazybox-tui-boot # run (uses `gh auth token` automatically)
 cargo test --workspace         # tests
 cargo clippy --workspace       # lint
-make run                       # same as cargo run -p lazybox-tui
+make run                       # same as cargo run -p lazybox-tui-boot
 ```
+
+The `lazybox` binary lives in `lazybox-tui-boot`, not `lazybox-tui` (which is
+now a library-only crate — see Architecture).
 
 Logs go to `/tmp/lazybox.log`. State persisted in `~/.lazybox/v2/state.db`.
 
@@ -49,10 +52,13 @@ The running build version remains visible in the sidebar header and through
 
 ## Architecture
 
-16 crates organized as a client/daemon split with shared library crates.
+17 crates organized as a client/daemon split with shared library crates.
 Core-library layering: `core` depends on no internal crate; `auth` depends on
-no internal crate; `store` may depend on `core` only. Enforced by the
-workspace dep-rules test (`crates/core/tests/dep_rules.rs`).
+no internal crate; `store` may depend on `core` only. The client/UI split is
+policed too: `tui` (the UI library) may depend only on `{ipc, tui-core,
+tui-term, config, core}` — a `use lazybox_store::…` there is a compile error;
+`tui-boot` (the binary) carries the daemon/provider/store wiring. Enforced by
+the workspace dep-rules test (`crates/core/tests/dep_rules.rs`).
 
 ```
 crates/
@@ -82,11 +88,18 @@ crates/
 
   # ── client / binary ─────────────────────────────────────────────────
   tui-core/        # Ratatui-free TUI logic: action catalog, intent
-                   #   resolvers, latches, editors, platform shims.
-  tui/             # tuirealm-based TUI client. Hosts `lazybox` binary with
-                   #   subcommands: default (in-process daemon + TUI),
-                   #   `server start/stop/status`, `server api`,
-                   #   `--connect <socket>`.
+                   #   resolvers, latches, editors, platform shims. Also the
+                   #   UI library's gateway to agent metadata (badges).
+  tui/             # tuirealm-based TUI *library*: realm model, panes,
+                   #   modals — a thin renderer over IPC. No store/server/
+                   #   provider deps (enforced by dep_rules).
+  tui-boot/        # The binary crate. Hosts `lazybox` with subcommands
+                   #   (default in-process daemon + TUI, `server
+                   #   start/stop/status`, `server api`, `slack …`,
+                   #   `--connect <socket>`), embedded-daemon boot, session
+                   #   recovery, setup persistence, provider detection, and
+                   #   the release build-guard (octocrab). Carries the wide
+                   #   deps the UI library gave up.
 ```
 
 ### Key patterns

@@ -2429,7 +2429,7 @@ impl TerminalStack {
         } else {
             slot.prompt_history.last()?.text.clone()
         };
-        let text = lazybox_agents::trim_leading_blank_lines(&text).to_string();
+        let text = lazybox_tui_core::agents::trim_leading_blank_lines(&text).to_string();
         slot.composing = text.clone();
         Some((id, text))
     }
@@ -5594,6 +5594,8 @@ mod resync_tests {
                 prompt_history: Vec::new(),
                 composing_buffer: None,
             }],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
         let slot = &stack.terminals[&id];
         assert!(slot.desynced);
@@ -6172,6 +6174,8 @@ mod hidden_feed_tests {
                 snap(2, &sk_b, b"hidden\r\n"),
             ],
             projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
 
         // Foreground terminal: parsed eagerly (the mouse/alt-screen
@@ -6243,6 +6247,8 @@ mod hidden_feed_tests {
                 snapshot(2, &shell_key, TerminalKind::Shell, b"shell prompt"),
             ],
             projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
 
         let rows = screen_rows(&mut stack);
@@ -7588,6 +7594,8 @@ mod terminal_availability_tests {
                 prompt_history: typed_history(Some("last submitted")),
                 composing_buffer: Some("half typed".into()),
             }],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
         assert_eq!(stack.composing_of(TerminalId(1)), Some("half typed"));
         assert_eq!(

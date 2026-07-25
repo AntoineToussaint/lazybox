@@ -45,7 +45,7 @@ pub(crate) mod status_ctx;
 pub mod user_event;
 
 pub use model::{ChoicePayload, Id, Model, Msg};
-pub use setup_ctx::{SetupCompleteHook, SetupSaveResult};
+pub use setup_ctx::{SetupCompleteHook, SetupDetector, SetupSaveResult};
 pub use user_event::UserEvent;
 
 /// Two clicks on the same target within this window count as a

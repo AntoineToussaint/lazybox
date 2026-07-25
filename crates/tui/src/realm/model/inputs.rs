@@ -14,7 +14,7 @@
 //! `mount_setup_modal`, `unmount_setup_modal`) co-locates here
 //! since it's the same modal-state-mutation shape.
 
-use super::{ChoicePayload, Id, ModalFlow, Model, Msg, dismissed_update_key};
+use super::{ChoicePayload, Id, ModalFlow, Model, Msg};
 use crate::realm::UserEvent;
 use lazybox_ipc::{Command as IpcCommand, TerminalId};
 use tuirealm::terminal::TerminalAdapter;
@@ -1273,28 +1273,14 @@ showing keybinding search only",
         if self.modal_stack.last() == Some(&Id::Update) {
             self.pop_modal();
             if let Some(ModalFlow::UpdateTarget { target }) = self.modal_flow.take() {
-                if let Some(store) = self.update_store.take() {
-                    let key = dismissed_update_key(&target);
-                    let result_tx = self.update_dismissal_tx.clone();
-                    match std::thread::Builder::new()
-                        .name("update-dismissal".into())
-                        .spawn(move || {
-                            let result = store.set_kv(&key, "1").map_err(|error| error.to_string());
-                            let _ = result_tx.send(result);
-                        }) {
-                        Ok(_worker) => self.update_dismissals_pending += 1,
-                        Err(error) => {
-                            self.flash_error(format!(
-                                "could not remember update dismissal; it may reappear next launch: \
-                                 {error}"
-                            ));
-                        }
-                    }
-                } else {
-                    self.flash_error(
-                        "could not remember update dismissal; local state is unavailable",
-                    );
+                // Let the daemon own the dismissal (#548) so it sticks
+                // across clients and restarts. Record it locally too so a
+                // re-derived same-target update this session stays hidden
+                // without waiting on the next snapshot.
+                if !self.dismissed_updates.iter().any(|t| t == &target) {
+                    self.dismissed_updates.push(target.clone());
                 }
+                self.send_cmd(IpcCommand::SetUpdateDismissal { target });
             }
             self.drain_queued_daemon_prompts();
             return Vec::new();
@@ -1673,7 +1659,12 @@ showing keybinding search only",
                 // `Msg::LoadingResolved` when the Loading modal ticks.
                 if let (Some(effect), Some(result)) = (effect, result) {
                     if let Some((_, sources)) = self.setup.inputs.as_ref() {
-                        crate::realm::setup_screen::run_effect(effect, sources.clone(), result);
+                        crate::realm::setup_screen::run_effect(
+                            effect,
+                            sources.clone(),
+                            self.setup.detector.clone(),
+                            result,
+                        );
                     } else {
                         tracing::warn!("handle_runner_step: effect requested but no scope sources");
                     }
@@ -1793,7 +1784,7 @@ showing keybinding search only",
 /// settling, the only way to make the submit reliable across agents
 /// whose input areas debounce pasted bursts (#246).
 pub(super) fn encode_snippet_for_pty(body: &str) -> Vec<u8> {
-    let body = lazybox_agents::trim_leading_blank_lines(body);
+    let body = lazybox_tui_core::agents::trim_leading_blank_lines(body);
     if !body.contains('\n') {
         let mut bytes = Vec::with_capacity(body.len() + 1);
         bytes.extend_from_slice(body.as_bytes());

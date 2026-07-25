@@ -1,7 +1,6 @@
 [package]
 name = "lazybox-tui"
-description = "A reactive PR inbox in your terminal."
-default-run = "lazybox"
+description = "The lazybox TUI library: realm model, panes, modals — a thin renderer over the IPC contract."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,27 +10,9 @@ repository.workspace = true
 homepage.workspace = true
 readme = "../../README.md"
 
-# The workspace sets `publish = false`, which cargo-dist (`dist`) treats as
-# "not distributable" and skips — leaving the release with nothing to ship.
-# This crate produces the `lazybox` binary, so opt it back into releases.
-[package.metadata.dist]
-dist = true
-# Name the Homebrew formula after the binary (`lazybox`), not the crate
-# (`lazybox-tui`), so installs read `brew install …/lazybox`.
-formula = "lazybox"
-
 [lib]
 name = "lazybox_tui"
 path = "src/lib.rs"
-
-[[bin]]
-name = "lazybox"
-path = "src/main.rs"
-
-# The short `lb` alias is the auto-discovered bin at `src/bin/lb.rs`, a tiny
-# exec shim for the sibling `lazybox` binary. This keeps release archives from
-# containing two copies of the full TUI. (`lb` can collide with Debian's
-# live-build command on Linux hosts that have it.)
 
 [dev-dependencies]
 # Golden-snapshot testing. Use `cargo insta review` to accept
@@ -44,38 +25,30 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 name = "terminal_feed"
 harness = false
 
+# A thin renderer over IPC (#548): the UI library depends only on the wire
+# crate, pure TUI logic, the embedded terminal, config, and core. The
+# daemon, store, providers, and agents are reached through the boot crate
+# (`lazybox-tui-boot`) and the IPC contract — enforced by the dep-rules
+# test, so a `use lazybox_store::…` here is a compile error.
 [dependencies]
 lazybox-core       = { workspace = true }
 lazybox-config     = { workspace = true }
-lazybox-git-ops    = { workspace = true }
-lazybox-store      = { workspace = true }
-lazybox-gh         = { workspace = true }
-lazybox-slack      = { workspace = true }
-lazybox-linear     = { workspace = true }
 lazybox-tui-term   = { workspace = true }
 lazybox-tui-core   = { workspace = true }
+lazybox-ipc        = { workspace = true }
 tuirealm         = { workspace = true }
 libghostty-vt    = { workspace = true }
-lazybox-ipc     = { workspace = true }
-lazybox-agents  = { workspace = true }
-lazybox-server  = { path = "../server" }
 
 tokio            = { workspace = true }
 anyhow           = { workspace = true }
 tracing          = { workspace = true }
-tracing-subscriber = { workspace = true }
 crossterm        = { workspace = true }
 ratatui          = { workspace = true }
 chrono           = { workspace = true }
 serde_json       = { workspace = true }
 serde_yaml       = { workspace = true }
-semver           = { workspace = true }
-octocrab         = { workspace = true }
 pulldown-cmark   = { workspace = true }
-tempfile         = "3"
-which            = "8"
 uuid             = { version = "1", features = ["v4"] }
-rpassword        = "7.5.4"
 
 [lints]
 workspace = true

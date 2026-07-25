@@ -95,6 +95,53 @@ source). Cleanup (`remove_by_path`) removes the worktree and falls back to
 
 ---
 
+## Worktree GC (CLI)
+
+**Status:** stable
+**Crate(s):** `tui-boot` (`src/worktree_gc.rs`), reuses `git-ops::inspect`
+**Config / flags:** — (`--force`, `--dry-run` on `gc`)
+**Key bindings:** — (CLI only; the in-TUI twin is Settings → Inspect/Clean worktrees, `Shift-D`)
+
+### What it does
+Makes the worktree leak visible and reclaimable from the command line, so it can
+be cleaned up before the disk fills — without opening the TUI:
+
+- `lazybox worktree list` — read-only report of every managed worktree with its
+  size, branch, and orphan reasons, plus two totals: **bytes on disk** and
+  **bytes safely reclaimable**.
+- `lazybox worktree gc` — reclaims the *safe* orphaned worktrees (merged/closed
+  upstream, session stopped, or untracked, with no uncommitted/unpushed work and
+  not locked). Confirms first unless `--force`; `--dry-run` reports without
+  deleting.
+
+### How to use it
+```
+lazybox worktree list             # inventory + disk totals
+lazybox worktree gc --dry-run      # preview what would be reclaimed
+lazybox worktree gc                # reclaim (asks y/N first)
+lazybox worktree gc --force        # reclaim without the prompt
+```
+
+### How it works (brief)
+Both paths call `WorktreeManager::inspect_worktrees` with a `TrackedSession` list
+read straight from `state.db` (no daemon), then `gc` reaps the rows where
+`is_orphaned() && is_safe_to_delete` via `delete_inspected(force=false)` — the
+same safety gate the TUI inspector uses. `gc` refuses to run while a daemon (or
+the embedded one behind a live TUI) is running, because a standalone reap can't
+see the daemon's in-memory live-terminal map; quit lazybox first, or reclaim a
+row from the TUI inspector.
+
+### Test checklist
+- [ ] `lazybox worktree list` reports every worktree with sizes and a reclaimable total.
+- [ ] `lazybox worktree gc` only offers orphaned + safe worktrees; dirty/unpushed/locked ones are skipped.
+- [ ] `gc` without `--force` aborts on any answer other than `y`/`yes` (and on EOF from a pipe).
+- [ ] `gc` refuses while lazybox is running.
+
+### Known sharp edges
+- Dirty / unpushed / locked orphans are never reclaimed from the CLI — reclaim those deliberately in the TUI inspector, which carries a per-row force.
+
+---
+
 ## New pre-PR workspace
 
 **Status:** stable

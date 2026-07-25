@@ -11,6 +11,8 @@
 //!   lazybox server stop             stop a running standalone daemon
 //!   lazybox server status           show daemon status
 //!   lazybox server api              foreground JSON HTTP API gateway
+//!   lazybox worktree list           report managed worktrees + disk totals
+//!   lazybox worktree gc             reclaim safe orphaned worktrees
 //!   lazybox slack init              interactive Slack token setup wizard
 //!   lazybox slack doctor            read-only validation of an existing setup
 //!   lazybox slack prune             archive stale per-(session, agent) channels
@@ -31,6 +33,7 @@ mod setup_persist;
 mod slack_init;
 mod slack_prune;
 mod test_mode;
+mod worktree_gc;
 
 use lazybox_ipc::{channel, socket};
 use lazybox_server::lifecycle::{self, ServerStatus};
@@ -230,6 +233,8 @@ Remote & services:
   lazybox slack doctor        validate an existing Slack setup
   lazybox scan [ROOTS...]     list git repos/worktrees under ROOTS (or scan.roots;
                               --depth N to bound the walk, --hidden for dotdirs)
+  lazybox worktree list       report managed worktrees (size, orphan reasons, totals)
+  lazybox worktree gc         reclaim safe orphaned worktrees (--force / --dry-run)
 
 Advanced:
   lazybox --fresh             wipe ~/.lazybox/v2/state.db and re-run setup (destructive)
@@ -289,6 +294,7 @@ async fn main() -> anyhow::Result<()> {
         Some("server") => server_subcommand(&args[1..]).await,
         Some("slack") => slack_subcommand(&args[1..]).await,
         Some("scan") => scan_subcommand(&args[1..]).await,
+        Some("worktree") => worktree_gc::worktree_subcommand(&args[1..]).await,
         Some("hook-ingest") => hook_ingest_subcommand(&args[1..]).await,
         Some("--connect") => {
             let socket_path = args

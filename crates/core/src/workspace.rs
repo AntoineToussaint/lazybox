@@ -144,19 +144,6 @@ pub enum CleanupPrompt {
     Declined,
 }
 
-impl CleanupPrompt {
-    /// The more decisive of two answers when merging across a workspace
-    /// transfer (issue #554): a recorded `Declined` beats `Unresolved`, so
-    /// a "keep" the user made on either side is never re-prompted after a
-    /// move.
-    fn most_decided(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Declined, _) | (_, Self::Declined) => Self::Declined,
-            _ => Self::Unresolved,
-        }
-    }
-}
-
 /// Version stamped into every persisted `Workspace` JSON blob.
 ///
 /// Bump this when a field is renamed, retyped, or otherwise changed in
@@ -752,6 +739,14 @@ impl Workspace {
     /// so `activity`/`seen_count`/`read_indices` are intentionally ignored
     /// below — the caller invokes both. `other` is left untouched; the
     /// caller decides whether to keep or delete its row.
+    ///
+    /// Several arms are **conditional on the destination**, not a blind
+    /// OR: a flag that only means something on a particular kind of
+    /// workspace (track-main on a non-PR worktree, merge-on-green on a
+    /// PR) is carried only where it applies, and a snooze never newly
+    /// *hides* a destination the user could see. Every rule fails toward
+    /// "visible / not silently automated" so a transfer can neither lose
+    /// state nor introduce a surprise the source's arm didn't have.
     pub fn absorb_user_state_from(&mut self, other: &Workspace) {
         let Workspace {
             // ── identity & structure: belong to the destination row ──
@@ -775,6 +770,11 @@ impl Workspace {
             activity: _,
             seen_count: _,
             read_indices: _,
+            // The cleanup-prompt answer is a per-workspace *lifecycle*
+            // decision, not portable content: a "keep" the user made on
+            // the source must not silently suppress the destination's own
+            // merged/closed cleanup prompt. The destination keeps its own.
+            cleanup_prompt: _,
             // ── user-owned state: one explicit merge rule each ──
             snoozed_until,
             auto_merge_on_green,
@@ -784,20 +784,34 @@ impl Workspace {
             policies,
             notes,
             sent_snippets,
-            cleanup_prompt,
             last_viewed_at,
         } = other;
 
-        // Snooze: keep the later deadline — the longer snooze wins.
-        self.snoozed_until = later_opt(self.snoozed_until, *snoozed_until);
-        // Automation arms are OR: if either row armed it, stay armed.
-        self.auto_merge_on_green |= *auto_merge_on_green;
-        self.track_main |= *track_main;
-        self.track_main_behind |= *track_main_behind;
-        // Base branch: keep whichever side already resolved one; the next
-        // sweep re-derives it if neither did.
-        if self.base_branch.is_none() {
-            self.base_branch = base_branch.clone();
+        // Snooze: extend a hide the destination already has (take the
+        // later deadline), but never newly hide a *visible* destination —
+        // an issue→PR collapse must not make a PR the user needs vanish
+        // just because the folded issue was snoozed.
+        if self.snoozed_until.is_some() {
+            self.snoozed_until = later_opt(self.snoozed_until, *snoozed_until);
+        }
+        // merge-on-green is a consequential daemon arm; carry it only
+        // where there's actually a PR to merge. Mirrors the UI, which
+        // refuses to arm it on a PR-less workspace, so a stray arm can't
+        // ride a transfer onto something it could never fire on.
+        if self.pr.is_some() {
+            self.auto_merge_on_green |= *auto_merge_on_green;
+        }
+        // Track-main applies only to a non-PR, non-linked GitHub worktree
+        // (`supports_track_main`). Carried onto anything else — e.g. the
+        // PR after an issue collapse — it paints a permanent, misleading
+        // "behind" badge the sweep (which skips ineligible rows) never
+        // clears. Its `base_branch` rides the same eligibility.
+        if self.supports_track_main() {
+            self.track_main |= *track_main;
+            self.track_main_behind |= *track_main_behind;
+            if self.base_branch.is_none() {
+                self.base_branch = base_branch.clone();
+            }
         }
         // Policies: fold per arm, most-decisive choice wins.
         self.policies.absorb_from(policies);
@@ -805,8 +819,6 @@ impl Workspace {
         self.notes = merge_notes(&self.notes, notes);
         // Snippet MRU: union, destination recency first, capped.
         self.sent_snippets = merge_sent_snippets(&self.sent_snippets, sent_snippets);
-        // Cleanup answer: a recorded "keep" on either side is kept.
-        self.cleanup_prompt = self.cleanup_prompt.most_decided(*cleanup_prompt);
         // Last viewed: the more recent view of either row.
         self.last_viewed_at = later_opt(self.last_viewed_at, *last_viewed_at);
     }
@@ -3038,20 +3050,25 @@ mod tests {
         w
     }
 
-    /// The core #554 guarantee: transferring a session's workspace carries
-    /// **every** user-owned field. A blank destination absorbs a fully-
-    /// populated source and each field lands per its merge rule.
+    /// The core #554 guarantee for the always-portable fields: notes,
+    /// snippet MRU, policies and last-viewed transfer onto any destination
+    /// regardless of its kind. Uses a track-main-eligible (GitHub, no-PR)
+    /// destination so the eligibility-gated arms carry here too.
     #[test]
-    fn absorb_user_state_carries_every_field_onto_blank_target() {
+    fn absorb_user_state_carries_portable_fields_onto_eligible_target() {
         let source = source_with_all_user_state();
-        let mut target = Workspace::empty(WorkspaceKey::new("pr-dst"), "feature", now());
+        // Issue workspace: no PR, GitHub project → track-main eligible.
+        let mut target = Workspace::from_task(issue("github", "o/r#99"), now());
+        // Pre-snooze so the snooze rule (extend-only) applies.
+        target.snoozed_until = Some(now() + chrono::Duration::hours(1));
         target.absorb_user_state_from(&source);
 
-        assert_eq!(target.snoozed_until, source.snoozed_until, "snooze carried");
-        assert!(target.auto_merge_on_green, "merge-on-green arm carried");
-        assert!(target.track_main, "track-main arm carried");
-        assert_eq!(target.base_branch.as_deref(), Some("main"), "base carried");
-        assert!(target.track_main_behind, "behind flag carried");
+        assert_eq!(target.notes, "source note", "notes carried");
+        assert_eq!(
+            target.sent_snippets,
+            vec!["plan", "rev"],
+            "snippet MRU carried in order",
+        );
         assert_eq!(
             target.policies.arm(crate::AutoFixKind::CiFailure),
             crate::PolicyArm::Arm,
@@ -3062,20 +3079,92 @@ mod tests {
             crate::PolicyArm::Disarm,
             "auto-fix-conflict policy carried",
         );
-        assert_eq!(target.notes, "source note", "notes carried");
-        assert_eq!(
-            target.sent_snippets,
-            vec!["plan", "rev"],
-            "snippet MRU carried in order",
-        );
-        assert_eq!(
-            target.cleanup_prompt,
-            CleanupPrompt::Declined,
-            "cleanup answer carried",
-        );
         assert_eq!(
             target.last_viewed_at, source.last_viewed_at,
-            "last-viewed carried",
+            "later last-viewed carried",
+        );
+        // Eligible destination → track-main trio carries.
+        assert!(
+            target.track_main,
+            "track-main arm carried onto eligible dest"
+        );
+        assert_eq!(target.base_branch.as_deref(), Some("main"), "base carried");
+        assert!(target.track_main_behind, "behind flag carried");
+        // Already-snoozed destination → extended to the later deadline.
+        assert_eq!(
+            target.snoozed_until,
+            Some(now() + chrono::Duration::hours(5)),
+            "snooze extended to the later deadline",
+        );
+        // No PR on this destination → merge-on-green arm not carried.
+        assert!(
+            !target.auto_merge_on_green,
+            "merge-on-green must not arm a PR-less destination",
+        );
+        // Cleanup is the destination's own lifecycle decision, not carried.
+        assert_eq!(
+            target.cleanup_prompt,
+            CleanupPrompt::Unresolved,
+            "destination keeps its own cleanup answer",
+        );
+    }
+
+    /// #554 regression: an issue with track-main armed, folded into its
+    /// closing PR, must NOT paint a track-main badge on the PR — a PR is
+    /// ineligible and the sweep never clears the flag, so the badge would
+    /// be permanent and wrong.
+    #[test]
+    fn absorb_user_state_never_arms_track_main_on_a_pr() {
+        let source = source_with_all_user_state();
+        assert!(source.track_main, "precondition: source tracks main");
+        let mut pr_target = Workspace::from_task(pr("o/r#1"), now());
+        assert!(
+            !pr_target.supports_track_main(),
+            "a PR is track-main ineligible"
+        );
+        pr_target.absorb_user_state_from(&source);
+        assert!(!pr_target.track_main, "track-main must not ride onto a PR");
+        assert!(
+            !pr_target.track_main_behind,
+            "behind flag must not ride onto a PR"
+        );
+        assert_eq!(pr_target.base_branch, None, "no track-main base on a PR");
+    }
+
+    /// #554: a snooze on the source must never *hide* a destination the
+    /// user can currently see (a visible PR the folded issue was snoozed).
+    #[test]
+    fn absorb_user_state_snooze_never_hides_a_visible_destination() {
+        let source = source_with_all_user_state();
+        assert!(
+            source.snoozed_until.is_some(),
+            "precondition: source snoozed"
+        );
+        let mut visible = Workspace::from_task(pr("o/r#1"), now());
+        assert_eq!(visible.snoozed_until, None, "destination starts visible");
+        visible.absorb_user_state_from(&source);
+        assert_eq!(
+            visible.snoozed_until, None,
+            "a snoozed source must not hide a visible destination",
+        );
+    }
+
+    /// #554: merge-on-green rides onto a destination that has a PR (there
+    /// is something to merge), matching the UI's own arming gate.
+    #[test]
+    fn absorb_user_state_arms_merge_on_green_only_with_a_pr() {
+        let mut source = Workspace::empty(WorkspaceKey::new("src"), "scratch", now());
+        source.auto_merge_on_green = true;
+
+        let mut pr_target = Workspace::from_task(pr("o/r#1"), now());
+        pr_target.absorb_user_state_from(&source);
+        assert!(pr_target.auto_merge_on_green, "arm carried onto a PR");
+
+        let mut issue_target = Workspace::from_task(issue("github", "o/r#42"), now());
+        issue_target.absorb_user_state_from(&source);
+        assert!(
+            !issue_target.auto_merge_on_green,
+            "arm must not ride onto a PR-less destination",
         );
     }
 

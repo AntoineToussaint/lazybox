@@ -161,6 +161,13 @@ impl Right {
         self.inner.take_open_description()
     }
 
+    /// Drain a URL queued by a click on the header title or the
+    /// originating-issue line (#567). The orchestrator opens it in the
+    /// browser.
+    pub fn take_open_url(&mut self) -> Option<String> {
+        self.inner.take_open_url()
+    }
+
     /// The focused task's raw markdown body, for the reader modal.
     pub fn task_body(&self) -> Option<String> {
         self.inner.task_body()

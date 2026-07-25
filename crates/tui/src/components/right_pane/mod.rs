@@ -129,6 +129,11 @@ pub struct RightPane {
     /// this after dispatching the click and surfaces it as a
     /// footer Hint — pure `✓` visual was too subtle on its own.
     pending_selection_notice: Option<String>,
+    /// URL queued by `handle_mouse_click` when a click lands on the
+    /// header title or the originating-issue line. The orchestrator
+    /// drains it after dispatching the click and hands it to the
+    /// browser launcher (#567).
+    pending_open_url: Option<String>,
     /// Set when the user asks to read the full description (a second
     /// `d`, or a click on the `+N more lines` trailer). The orchestrator
     /// drains it after dispatching the key/click and mounts the reader
@@ -173,6 +178,14 @@ pub struct RightPane {
 /// re-layout / re-measure happens in the click path.
 #[derive(Debug, Default)]
 struct ClickHits {
+    /// Row of the header's title (state-pill) line, paired with the
+    /// primary task's URL. Clicking it opens the PR / issue in the
+    /// browser — the title is a live link, not just a label (#567).
+    header_title: Option<(u16, String)>,
+    /// Row of the header's `Issue: #N` originating-issue line, paired
+    /// with that issue's URL. `None` unless the workspace is a PR with
+    /// a tracked originating issue (#567).
+    header_issue: Option<(u16, String)>,
     /// Row containing the `▶ Description` / `▼ Description` header,
     /// or `None` when the section isn't being rendered (no body).
     body_header_row: Option<u16>,
@@ -355,6 +368,7 @@ impl RightPane {
             auto_mark_delay: lazybox_config::UiDefaults::default().auto_mark_delay,
             click_hits: ClickHits::default(),
             pending_selection_notice: None,
+            pending_open_url: None,
             pending_open_description: false,
             body_overflows: false,
             activity_buffer: None,
@@ -846,6 +860,20 @@ impl RightPane {
             cards = ?self.click_hits.activity_cards,
             "right_pane.handle_mouse_click",
         );
+        if let Some((r, url)) = &self.click_hits.header_title
+            && *r == row
+        {
+            // The title is a live link — open the PR / issue itself.
+            self.pending_open_url = Some(url.clone());
+            return true;
+        }
+        if let Some((r, url)) = &self.click_hits.header_issue
+            && *r == row
+        {
+            // Open the originating issue directly (#567).
+            self.pending_open_url = Some(url.clone());
+            return true;
+        }
         if Some(row) == self.click_hits.body_header_row {
             // Click the description header to toggle the teaser — same
             // effect as pressing `d`.
@@ -902,6 +930,13 @@ impl RightPane {
     /// to its footer Notice.
     pub fn drain_selection_notice(&mut self) -> Option<String> {
         self.pending_selection_notice.take()
+    }
+
+    /// Drain a URL queued by a click on the header title or the
+    /// originating-issue line. The orchestrator opens it in the
+    /// browser (#567).
+    pub fn take_open_url(&mut self) -> Option<String> {
+        self.pending_open_url.take()
     }
 
     /// Double-click on an activity card → toggle its expanded state.
@@ -1041,7 +1076,31 @@ impl RightPane {
         self.feed.clear_selection();
     }
 
-    fn render_header(&self, area: Rect, frame: &mut Frame) {
+    /// The originating issue for a PR workspace — the one the PR was
+    /// created from / closes — as `(label, url)`. `None` for issue
+    /// workspaces and PRs with no tracked issue link.
+    ///
+    /// Prefers a folded-in issue `Task` (`gh_issues` / `linear_issues`,
+    /// carrying a real provider URL); falls back to the PR's
+    /// `closes_issues` reference, whose `owner/repo#N` key yields a
+    /// derived GitHub issue URL (#567).
+    fn originating_issue(&self) -> Option<(String, String)> {
+        let ws = self.workspace.as_ref()?;
+        let pr = ws.pr.as_ref()?;
+        if let Some(issue) = ws.gh_issues.iter().chain(ws.linear_issues.iter()).next() {
+            return Some((task_ref_label(issue), issue.url.clone()));
+        }
+        let issue_id = pr.closes_issues.first()?;
+        let (repo, number) = issue_id.key.rsplit_once('#')?;
+        Some((
+            format!("#{number}"),
+            format!("https://github.com/{repo}/issues/{number}"),
+        ))
+    }
+
+    fn render_header(&mut self, area: Rect, frame: &mut Frame) {
+        self.click_hits.header_title = None;
+        self.click_hits.header_issue = None;
         let theme = crate::theme::current();
         let Some(workspace) = &self.workspace else {
             let line = Line::from(Span::styled(" (no session selected) ", theme.hint()));
@@ -1118,6 +1177,10 @@ impl RightPane {
             lazybox_core::TaskState::InReview => (icons::PR_REVIEW, "REVIEW", StatePill::InReview),
         };
         let (bg, fg) = lazybox_theme::state_pill(theme, bucket);
+        // The title line is a live link: clicking it opens the task
+        // in the browser (#567). Underline the title so it reads as
+        // clickable, matching the reader-modal link affordance.
+        self.click_hits.header_title = Some((area.y + lines.len() as u16, task.url.clone()));
         lines.push(Line::from(vec![
             Span::styled(
                 format!(" {icon} {label} "),
@@ -1129,7 +1192,8 @@ impl RightPane {
                 &task.title,
                 Style::default()
                     .fg(theme.text_strong)
-                    .add_modifier(Modifier::BOLD),
+                    .add_modifier(Modifier::BOLD)
+                    .add_modifier(Modifier::UNDERLINED),
             ),
         ]));
 
@@ -1140,6 +1204,24 @@ impl RightPane {
             Span::styled("Branch: ", Style::default().fg(theme.text_dim)),
             Span::styled(branch, Style::default().fg(theme.accent)),
         ]));
+
+        // Originating issue — the Issue this PR was created from /
+        // closes. An explicit, clickable path to it so the user doesn't
+        // have to expand the description and hunt for the reference
+        // (#567). Its own row so the click handler can tell it apart
+        // from the title link above (row-granular hit-testing).
+        if let Some((label, url)) = self.originating_issue() {
+            self.click_hits.header_issue = Some((area.y + lines.len() as u16, url));
+            lines.push(Line::from(vec![
+                Span::styled("Issue: ", Style::default().fg(theme.text_dim)),
+                Span::styled(
+                    label,
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::UNDERLINED),
+                ),
+            ]));
+        }
 
         // Reviewers + assignees. When populated, render the @logins.
         // When empty AND the task is a PR, surface a discoverable
@@ -1899,11 +1981,18 @@ impl RightPane {
         // guarantees the activity feed always has at least its header
         // + 2 rows visible, no matter how long the PR description is.
         let body_constraint = self.task_body_constraint();
+        // Baseline header is crumbs + pill/title + branch + reviewers;
+        // an originating-issue line (#567) adds one row when present.
+        let header_height = if self.originating_issue().is_some() {
+            5
+        } else {
+            4
+        };
         let chunks = Layout::vertical([
-            Constraint::Length(4), // header (crumbs, pill, branch)
-            Constraint::Length(1), // separator
-            body_constraint,       // 0 / 1 / Max(N) for the body
-            Constraint::Min(3),    // activity — never below 3 rows
+            Constraint::Length(header_height), // header (crumbs, pill, branch, [issue])
+            Constraint::Length(1),             // separator
+            body_constraint,                   // 0 / 1 / Max(N) for the body
+            Constraint::Min(3),                // activity — never below 3 rows
         ])
         .split(area);
 

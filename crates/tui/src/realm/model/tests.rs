@@ -782,7 +782,7 @@ mod effects_tests {
             workspace_key: WorkspaceKey::new("github:o/r#1"),
         });
         assert_eq!(m.top_modal(), None, "reopen must dismiss the modal");
-        assert!(m.active_removal_prompt.is_none());
+        assert!(m.modal_flow.is_none());
     }
 
     /// #552: even if the removal confirm has been buried under another
@@ -808,8 +808,8 @@ mod effects_tests {
             workspace_key: WorkspaceKey::new("github:o/r#1"),
         });
         assert!(
-            m.active_removal_prompt.is_none(),
-            "binding must be cleared so a confirm can't remove the reopened row"
+            m.modal_flow.is_none(),
+            "flow must be cleared so a confirm can't remove the reopened row"
         );
         assert_eq!(
             m.top_modal(),

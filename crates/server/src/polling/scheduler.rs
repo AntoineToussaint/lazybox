@@ -87,6 +87,10 @@ impl RoundRobinState {
     pub fn record_sync(&mut self, repo: &str, at: Instant) {
         self.cursor.insert(repo.to_string(), at);
     }
+
+    pub fn remove_repos(&mut self, repos: &std::collections::HashSet<String>) {
+        self.cursor.retain(|repo, _| !repos.contains(repo));
+    }
 }
 
 /// The scheduler's per-tick verdict: which repos (if any) to query
@@ -254,6 +258,23 @@ mod tests {
         let pick = pick_repos_for_tick(&HashMap::new(), Some("a/b"), 5, 3);
         assert!(pick.repos.is_empty());
         assert!(pick.run_global);
+    }
+
+    #[test]
+    fn removing_cold_repos_keeps_warm_cursor_entries() {
+        let mut state = RoundRobinState {
+            cursor: cursor(&[("cold/a", 1), ("warm/b", 2), ("cold/c", 3)]),
+            ..RoundRobinState::default()
+        };
+        state.remove_repos(
+            &["cold/a".to_string(), "cold/c".to_string()]
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(
+            state.cursor.keys().cloned().collect::<Vec<_>>(),
+            vec!["warm/b".to_string()]
+        );
     }
 
     /// Stalest-first ordering across a uniform cursor.

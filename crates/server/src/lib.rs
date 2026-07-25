@@ -419,6 +419,10 @@ pub struct ServerConfig {
     /// dismiss, and 30s later the long-lived loop would re-prompt
     /// (each has its own `TickState`).
     pub poll_state: Arc<Mutex<polling::TickState>>,
+    /// Current GitHub workspace engagement tiers. Focus updates write
+    /// here on the serve loop; poll ticks fold in live agents and
+    /// persisted workspace state, then publish one bounded hot set.
+    pub poll_engagement: Arc<parking_lot::RwLock<polling::PollEngagement>>,
     /// Long-lived GitHub client, cached across ticks in its OWN lock —
     /// deliberately NOT a field of `poll_state` (issue #92). WITHOUT a
     /// persistent client, every tick (and every user-triggered
@@ -533,9 +537,8 @@ pub struct ServerConfig {
     /// free-text elicitation can't clear a real `?`. Cleaned on
     /// `TerminalExited`.
     pub input_needed_shapes: Arc<Mutex<HashMap<TerminalId, lazybox_agents::PromptShape>>>,
-    /// Cumulative counters for the event pipeline's two lossy paths
-    /// (forwarder output drops + bus lag). Surfaced at `/v1/metrics` and
-    /// stamped into the drop/lag warn lines (issue #91).
+    /// Cumulative event-pipeline counters and bounded GitHub sync
+    /// delivery-latency samples. Surfaced at `/v1/metrics`.
     pub event_metrics: Arc<metrics::EventMetrics>,
     /// Per-workspace-key write serialization for the store's
     /// load-modify-save cycles (see [`ServerConfig::lock_workspace`]).
@@ -641,6 +644,7 @@ impl ServerConfig {
             credential_store: Arc::new(auth::MemoryCredentialStore::new()),
             default_principal_id: lazybox_ipc::PrincipalId::local(),
             poll_state: Arc::new(Mutex::new(polling::TickState::default())),
+            poll_engagement: Arc::new(parking_lot::RwLock::new(polling::PollEngagement::default())),
             gh_client_cache: Arc::new(parking_lot::Mutex::new(None)),
             merge_prompts: Arc::new(Mutex::new(polling::MergePromptMemory::default())),
             auto_merge: Arc::new(parking_lot::Mutex::new(polling::AutoMergeMemory::default())),

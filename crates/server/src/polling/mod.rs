@@ -5576,7 +5576,7 @@ fn load_archived_set_strict(
 /// doesn't exist or fails to read — safe here because this consumer is
 /// READ-ONLY and degrades gracefully (worst case the dismissed row
 /// reappears one more time). Write paths must use
-/// [`load_archived_set_strict`] instead.
+/// `load_archived_set_strict` instead.
 pub fn load_archived_set(config: &ServerConfig) -> std::collections::HashSet<String> {
     load_archived_set_strict(config).unwrap_or_else(|e| {
         tracing::warn!("load_archived_set: {e} — treating as empty for read-only use");

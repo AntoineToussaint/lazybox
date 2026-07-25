@@ -195,7 +195,7 @@ pub enum WorkspaceDecodeError {
 pub struct Workspace {
     /// Persistence schema version this row was LOADED at (0 for
     /// records predating the field). Serialization always stamps
-    /// [`WORKSPACE_SCHEMA_VERSION`] — see [`stamp_current_schema`].
+    /// [`WORKSPACE_SCHEMA_VERSION`] via the `stamp_current_schema` hook.
     /// Compared by [`Workspace::decode_persisted`] to refuse rows
     /// written by a newer build.
     #[serde(default, serialize_with = "stamp_current_schema")]

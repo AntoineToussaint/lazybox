@@ -7,8 +7,9 @@ Goal: spawn a coding agent (Claude Code, Codex, or Cursor) scoped to a single
 workspace's git worktree — including letting lazybox pick the right prompt for
 the row's state, and running autonomously.
 
-Each workspace gets one worktree and one agent session. The agent operates
-directly in that worktree with the same `git` and `gh` tools it would have in
+Each workspace gets one worktree; agent and shell sessions — one or several,
+as splits or tabs — all operate in that worktree. The agent works directly
+with the same `git` and `gh` tools it would have in
 any checkout; lazybox does not wrap those actions behind an approval layer.
 
 ## Prerequisites

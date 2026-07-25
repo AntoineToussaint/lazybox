@@ -364,14 +364,12 @@ impl<T: TerminalAdapter> Model<T> {
         if self.handle_help_agent_event(&event) {
             return;
         }
-        // Enforce the confirmed-merge latch centrally, before any pane or
-        // the auto-merge check sees the workspace. Once GitHub accepted a
-        // merge (`Event::PrMerged` latched the key), an incoming
+        // Enforce the confirmed-merge latch centrally, before any pane
+        // sees the workspace. Once GitHub accepted a merge
+        // (`Event::PrMerged` latched the key), an incoming
         // poll/snapshot that still reports `Open` is stale — patch the
         // owned event to MERGED here so the sidebar row AND the right-pane
-        // header agree, and `maybe_auto_merge` reads the merged state
-        // (which `merge_block_reason` then blocks) instead of re-firing a
-        // redundant merge. No-op unless a key is latched.
+        // header agree. No-op unless a key is latched.
         if !self.merge_confirmed.is_empty() {
             match &mut event {
                 IpcEvent::WorkspaceUpserted(ws) => self.apply_merge_latch(ws),
@@ -824,10 +822,7 @@ impl<T: TerminalAdapter> Model<T> {
             // archive/delete of this row (#476).
             self.reconcile_optimistic(key.as_str());
             self.pr_details_fetched.remove(key);
-            // A merged/removed workspace can't re-fire; drop its arming
-            // latch so the set doesn't leak keys across a session.
-            self.auto_merge_fired.remove(key);
-            // Same for the confirmed-merge latch — the row is gone, so a
+            // Drop the confirmed-merge latch — the row is gone, so a
             // stale entry could only leak or mis-patch a re-added key.
             self.merge_confirmed.remove(key);
             // Drop any Activity-pane visibility override so a re-added
@@ -887,11 +882,11 @@ impl<T: TerminalAdapter> Model<T> {
         if let Some(msg) = self.sidebar.drain_pending_asking_notices().pop() {
             self.flash_hint(msg);
         }
-        // Client-side "auto-merge on green": a poll update to an armed
-        // workspace may have just made its PR merge-ready. The event
-        // carries the full workspace, so check it directly.
+        // NOTE: "auto-merge on green" is fired by the DAEMON's polling
+        // commit path (`polling::auto_merge`) — the client no longer
+        // triggers merges, so a headless daemon fires it and N attached
+        // clients can't double-fire it.
         if let IpcEvent::WorkspaceUpserted(ws) = &event {
-            self.maybe_auto_merge(ws);
             // The daemon's fresh copy is authoritative — reconcile any
             // optimistic chip edit (reviewers/assignees/labels) on this
             // workspace (#476).
@@ -1477,37 +1472,6 @@ impl<T: TerminalAdapter> Model<T> {
         self.redraw = true;
     }
 
-    /// Client-side "auto-merge on green" trigger. Called after every
-    /// `WorkspaceUpserted` with the freshly-upserted workspace. When
-    /// the workspace is armed and its own PR just satisfied every merge
-    /// guard ([`lazybox_tui_core::intent::should_auto_merge`]), fire the
-    /// same `MergePr` the manual `g m` uses — exactly once per arming.
-    ///
-    /// The persisted `auto_merge_on_green` flag is the arm; the
-    /// transient `auto_merge_fired` set is the one-shot latch. Once
-    /// dispatched we leave the key latched until the PR is no longer
-    /// merge-ready (merged, or CI/state slipped) — at which point we
-    /// clear it, so a genuine re-green after a failed race can re-fire,
-    /// but a re-broadcast of the same green state can't double-merge.
-    fn maybe_auto_merge(&mut self, ws: &lazybox_core::Workspace) {
-        if crate::intent::should_auto_merge(ws) {
-            if self.auto_merge_fired.insert(ws.key.clone()) {
-                self.flash_info(format!(
-                    "auto-merging {} — CI green",
-                    crate::util::notice_slug(&ws.name)
-                ));
-                self.send_cmd(IpcCommand::MergePr {
-                    workspace_key: ws.key.clone(),
-                });
-            }
-        } else {
-            // No longer merge-ready — release the latch so a fresh green
-            // (e.g. after a failing-check race made the first attempt a
-            // no-op) re-arms the one-shot.
-            self.auto_merge_fired.remove(&ws.key);
-        }
-    }
-
     /// Patch a workspace about to be stored/fanned-out so a confirmed
     /// merge stays MERGED. Once `Event::PrMerged` latched a key, GitHub
     /// already accepted the merge, so:
@@ -1518,8 +1482,8 @@ impl<T: TerminalAdapter> Model<T> {
     /// - a workspace that lost its PR entirely → release the latch.
     ///
     /// Applied at ingest to every `WorkspaceUpserted` / `Snapshot`
-    /// workspace, so both panes and `maybe_auto_merge` see one
-    /// consistent state. No-op for un-latched keys.
+    /// workspace, so both panes see one consistent state. No-op for
+    /// un-latched keys.
     pub(super) fn apply_merge_latch(&mut self, ws: &mut lazybox_core::Workspace) {
         if !self.merge_confirmed.contains(&ws.key) {
             return;
@@ -1566,13 +1530,17 @@ impl<T: TerminalAdapter> Model<T> {
     /// Without this hook the auto-mark never fires — the timer
     /// counted forever and unread badges never dropped.
     pub fn tick_right(&mut self) {
-        if let Some((session_key, index)) = self.right.tick() {
+        if let Some((session_key, index, fingerprint)) = self.right.tick() {
             tracing::info!(
                 %session_key,
                 index,
                 "auto-mark-read fired → Command::MarkActivityRead",
             );
-            self.send_cmd(IpcCommand::MarkActivityRead { session_key, index });
+            self.send_cmd(IpcCommand::MarkActivityRead {
+                session_key,
+                index,
+                fingerprint: Some(fingerprint),
+            });
             self.redraw = true;
         }
     }

@@ -40,7 +40,7 @@ fn website_covers_v017_public_contracts() {
         "--depth N",
         "--hidden",
         "read-only",
-        "not implemented yet",
+        "x i",
     ] {
         assert!(cli.contains(expected), "CLI reference missing {expected:?}");
     }
@@ -88,7 +88,7 @@ fn website_covers_v017_public_contracts() {
     );
 
     let architecture = read("web/src/content/docs/docs/explanation/architecture.md");
-    for expected in ["Protocol v11", "bounded", "exit code"] {
+    for expected in ["wire fingerprint", "bounded", "exit code"] {
         assert!(
             architecture.contains(expected),
             "architecture page missing {expected:?}"

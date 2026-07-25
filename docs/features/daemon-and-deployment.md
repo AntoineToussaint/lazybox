@@ -48,7 +48,7 @@ doesn't branch on local vs remote — both sit behind the same transport trait.
 
 **Status:** stable
 **Crate(s):** `tui` (`main.rs`), `server`
-**Config / flags:** socket at `~/.lazybox/v2/run/daemon.sock`, PID at `~/.lazybox/v2/run/daemon.pid`
+**Config / flags:** socket at `~/.lazybox/run/daemon.sock`, PID at `~/.lazybox/run/daemon.pid` (`LAZYBOX_RUNTIME_DIR` overrides the directory)
 **Key bindings:** —
 
 ### What it does
@@ -57,14 +57,15 @@ disconnects — for SSH / multi-client setups (same model as a tmux server).
 
 ### How to use it
 ```sh
-lazybox server start     # start a standalone daemon
-lazybox server status    # PID + socket path if running
+lazybox server start     # start a standalone daemon (foreground; keep it running)
+lazybox server status    # PID + socket path if running (from another shell)
 lazybox server stop      # SIGTERM the daemon
 ```
 
 ### How it works (brief)
-`server_start` (`crates/tui/src/main.rs`) forks a daemon listening on the Unix
-socket and writes a PID file. `server stop` sends SIGTERM via the lifecycle
+`server_start` (`crates/tui/src/main.rs`) runs the daemon in the foreground
+(blocking until shutdown — run it under tmux/nohup/a service unit), listening
+on the Unix socket and writing a PID file. `server stop` sends SIGTERM via the lifecycle
 helper; `server status` reports PID + socket. Socket/PID paths derive from
 `LAZYBOX_HOME`.
 

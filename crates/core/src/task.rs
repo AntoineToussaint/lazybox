@@ -229,6 +229,74 @@ pub enum ActivityKind {
     CiUpdate,
 }
 
+/// Number of body characters [`ActivityFingerprint::Content`] keeps.
+/// Short on purpose — comparing whole bodies is wasteful and a prefix
+/// is enough to tell row from row in practice; 64 chars survives
+/// auto-formatting that trims or wraps trailing whitespace.
+pub const ACTIVITY_FINGERPRINT_BODY_PREFIX: usize = 64;
+
+/// Stable-enough identifier for one activity row, shared by client
+/// and daemon so a positional index never travels alone across the
+/// wire: a poll committing a new top-of-feed comment shifts every
+/// older row down by one, and a raw cached index would mark the
+/// wrong comment read. Prefers the upstream `node_id` (GitHub gives
+/// this for comments and reviews); falls back to a content tuple for
+/// kinds that don't carry one (CI events, status changes).
+///
+/// This is the same identity notion `Workspace::merge_activity` uses
+/// to carry read state across a re-sort — node-id first, content
+/// tuple fallback — kept in core precisely so the TUI's fingerprint
+/// and the daemon's resolution can't drift.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ActivityFingerprint {
+    NodeId(String),
+    Content {
+        author: String,
+        created_at: DateTime<Utc>,
+        body_prefix: String,
+    },
+}
+
+impl ActivityFingerprint {
+    pub fn of(activity: &Activity) -> Self {
+        if let Some(id) = &activity.node_id
+            && !id.is_empty()
+        {
+            return Self::NodeId(id.clone());
+        }
+        let body_prefix: String = activity
+            .body
+            .chars()
+            .take(ACTIVITY_FINGERPRINT_BODY_PREFIX)
+            .collect();
+        Self::Content {
+            author: activity.author.clone(),
+            created_at: activity.created_at,
+            body_prefix,
+        }
+    }
+
+    pub fn matches(&self, activity: &Activity) -> bool {
+        *self == Self::of(activity)
+    }
+
+    /// Resolve this fingerprint to its *current* index in `activity`.
+    /// `hint` is the position the sender last saw the row at — checked
+    /// first so identical-content twins resolve to the row the user
+    /// actually acted on when it hasn't moved; otherwise the list is
+    /// scanned. `None` when no row matches (deleted upstream between
+    /// snapshot and command) — callers should no-op rather than touch
+    /// a stranger.
+    pub fn resolve(&self, activity: &[Activity], hint: usize) -> Option<usize> {
+        if let Some(act) = activity.get(hint)
+            && self.matches(act)
+        {
+            return Some(hint);
+        }
+        activity.iter().position(|a| self.matches(a))
+    }
+}
+
 /// A source-agnostic task descriptor. Providers convert their domain objects
 /// into this type. The TUI and session system only work with `Task`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -543,6 +611,82 @@ impl ActionPriority {
             Self::WaitingOnOthers => "Waiting on Others",
             Self::Stale => "Stale",
         }
+    }
+}
+
+#[cfg(test)]
+mod activity_fingerprint_tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+
+    fn act(node_id: Option<&str>, author: &str, body: &str, secs: i64) -> Activity {
+        Activity {
+            author: author.into(),
+            body: body.into(),
+            created_at: Utc.timestamp_opt(1_700_000_000 + secs, 0).unwrap(),
+            kind: ActivityKind::Comment,
+            node_id: node_id.map(Into::into),
+            path: None,
+            line: None,
+            diff_hunk: None,
+            thread_id: None,
+        }
+    }
+
+    #[test]
+    fn prefers_node_id_and_falls_back_to_content() {
+        let with_id = act(Some("IC_1"), "alice", "hello", 0);
+        assert_eq!(
+            ActivityFingerprint::of(&with_id),
+            ActivityFingerprint::NodeId("IC_1".into())
+        );
+        // Empty node id is treated as absent, like the TUI always did.
+        let empty_id = act(Some(""), "alice", "hello", 0);
+        assert!(matches!(
+            ActivityFingerprint::of(&empty_id),
+            ActivityFingerprint::Content { .. }
+        ));
+    }
+
+    /// The wire scenario `MarkActivityRead` exists for: the client
+    /// resolved index 1, a poll committed a new top-of-feed row, and
+    /// the daemon must land the mark on the fingerprinted row at its
+    /// SHIFTED position — not on whatever now sits at index 1.
+    #[test]
+    fn resolve_finds_the_row_after_a_list_shift() {
+        let target = act(Some("IC_target"), "alice", "the one", 10);
+        let fp = ActivityFingerprint::of(&target);
+        let shifted = vec![
+            act(Some("IC_fresh"), "bot", "brand new", 20),
+            act(Some("IC_other"), "bob", "innocent bystander", 15),
+            target,
+        ];
+        assert_eq!(fp.resolve(&shifted, 1), Some(2));
+    }
+
+    /// A vanished row resolves to None — the daemon no-ops instead of
+    /// marking a stranger.
+    #[test]
+    fn resolve_returns_none_when_the_row_is_gone() {
+        let fp = ActivityFingerprint::of(&act(Some("IC_gone"), "alice", "deleted", 0));
+        let list = vec![act(Some("IC_other"), "bob", "still here", 5)];
+        assert_eq!(fp.resolve(&list, 0), None);
+    }
+
+    /// Identical-content twins (no node id): the hint index picks the
+    /// exact row the user acted on when it still matches, instead of
+    /// always collapsing onto the first twin.
+    #[test]
+    fn resolve_hint_disambiguates_content_twins() {
+        let twin = act(None, "bot", "same text same second", 0);
+        let list = vec![twin.clone(), twin.clone()];
+        let fp = ActivityFingerprint::of(&twin);
+        assert_eq!(fp.resolve(&list, 1), Some(1), "matching hint wins");
+        assert_eq!(
+            fp.resolve(&list, 5),
+            Some(0),
+            "stale hint falls back to scan"
+        );
     }
 }
 

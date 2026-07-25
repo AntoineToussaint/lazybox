@@ -11,6 +11,27 @@ contain explicitly documented compatibility changes.
 - A dismissable startup notice detects newer source commits or published
   releases, shows a checkout- and install-channel-specific manual update
   command, and stays quiet for a previously dismissed target.
+- Agent-to-agent handoff (`x s`): capture a running agent's output, edit the
+  brief, and inject it into another workspace's session (#431).
+- Update branch: `g u` merges the base into a behind PR's head, and `Shift-U`
+  fans it out over the sidebar multi-select (#484).
+- A multi-select filter menu on `f` combining state, role, and kind predicates
+  with match counts and removable header chips (#443).
+- Per-workspace notes (`n`) (#458).
+- A scrollable markdown reader modal for long or richly formatted PR/issue
+  bodies, opened by a second `d` on the description preview (#448).
+- In-place import of externally created checkouts (`x i`, backed by
+  `ScanCheckouts`/`CheckoutsDiscovered`), completing the `lazybox scan`
+  discovery flow (#452).
+- A per-session prompt-history picker (`]]h`): every prompt sent to the agent,
+  persisted across restarts, re-sendable with Enter (#523).
+- A track-main arm keeping scratch workspaces tied to the repo's default
+  branch (#535).
+- Per-workspace sync (`g s`): a targeted re-poll of just the focused
+  workspace's PR/issue instead of the global sweep (#456).
+- Activity-pane cycling (`Shift-P`): full → one-line summary → hidden,
+  remembered per workspace with a `ui.activity_pane_default` starting mode
+  (#487).
 
 ## [0.1.7] - 2026-07-19
 
@@ -28,8 +49,8 @@ contain explicitly documented compatibility changes.
 - An accessible custom 404 page and resilient no-JavaScript homepage content.
 - Ask Lazybox as the primary `?` surface, with live effective-keymap search,
   conversational workflow help, and searchable terminal-leader commands.
-- `lazybox scan` for read-only discovery of externally created checkouts (the
-  future in-place import flow is not wired yet).
+- `lazybox scan` for read-only discovery of externally created checkouts
+  (in-place import shipped later — see the Unreleased `x i` entry).
 - A unified policies menu for per-PR and per-issue automation controls, plus a
   configurable tabs-first layout for newly opened terminals.
 - Explicit terminal `Exited` state so clean exits, crashes, and agents that

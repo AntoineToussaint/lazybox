@@ -83,6 +83,7 @@ Depth and soft-wrap parity are guarded above; hyperlink parity is not.
 | `crates/server/tests/e2e_real_paths.rs::e2e_spawn_provisions_a_real_worktree_and_collapse_carries_it_to_the_pr` | #404, **real shape** — spawn runs REAL provisioning (`git worktree add` off a local upstream), collapse migrates that real worktree |
 | `crates/server/tests/issue_pr_transfer.rs::collapse_retires_pristine_pr_stub_and_carries_wip_worktree` | #446, the worktree half — a pre-collapse PR stub session (real worktrees, dead records) is retired so the issue's WIP checkout becomes the PR's default session and a later spawn lands in it |
 | `crates/server/tests/issue_pr_transfer.rs::collapse_keeps_pr_session_with_uncommitted_work` | #446 guard-rail — a PR-side worktree holding local work is NOT a stub; the collapse keeps both sessions and touches neither checkout |
+| `crates/server/tests/polling.rs::collapse_preserves_issue_activity_and_read_state` | resiliency-review gap — the folded issue's comment history AND its read marks survive onto the PR workspace (read-index remapping via `absorb_activity_from`), alongside the PR's own feed |
 
 ## Worktree provisioning (#403, #405)
 
@@ -120,3 +121,20 @@ land with the #403/#405 fixes, against the e2e success contract above.
 | `crates/tui/src/realm/model/tests.rs::bare_w_with_several_agents_mounts_chooser_and_pick_targets_it` | #418 — the chooser modal mounts, and the pick replays the work spawn against the chosen agent |
 | `crates/tui/src/realm/model/tests.rs::work_chooser_pick_injects_into_the_chosen_agent` | #418 — the pick rides the spawn→inject rewrite into the chosen agent's terminal |
 | `crates/tui/src/realm/model/tests.rs::bare_w_with_no_running_agent_spawns_the_default` | #418 — the default agent is the answer only when nothing is running |
+
+## Persisted-state compatibility (unreadable-row clobber, schema drift, archive-set wipe, duplicate reviews)
+
+| guard | shape it covers |
+|---|---|
+| `crates/server/src/polling/mod.rs::upsert_never_overwrites_a_corrupt_stored_row` | a stored row that fails to decode is preserved byte-identical through the next poll's upsert, and the skip is reported (debounced) |
+| `crates/server/src/polling/mod.rs::upsert_never_overwrites_a_newer_schema_row` | a row stamped by a newer build (downgrade) is never lenient-parsed and rewritten minus its newer fields |
+| `crates/server/src/polling/mod.rs::upsert_skips_when_the_stored_row_cannot_be_read` | a transient store READ failure does not masquerade as "row absent" and rebuild the workspace fresh |
+| `crates/server/src/polling/mod.rs::rescope_preserves_a_corrupt_out_of_scope_row` | the rescope reaper preserves (never deletes) a row it cannot decode |
+| `crates/core/tests/persisted_compat.rs::current_serialization_matches_checked_in_fixture` | any persisted `Workspace` field rename/retype/removal fails the build against the golden fixture |
+| `crates/core/tests/persisted_compat.rs::v0_legacy_minimal_blob_deserializes` | pre-schema-field records keep deserializing forever |
+| `crates/core/src/workspace.rs::decode_persisted_refuses_rows_from_a_newer_build` | the strict decoder's newer-schema refusal |
+| `crates/server/src/polling/mod.rs::failing_read_during_archive_must_not_shrink_the_persisted_set` | one SQLITE_BUSY during `x x` cannot replace the whole archived set with a single element |
+| `crates/server/src/polling/mod.rs::corrupt_archived_payload_fails_archive_without_rewriting` | an unparseable archived set is preserved for recovery, never rewritten |
+| `crates/gh-provider/src/graphql.rs::pending_review_activity_identity_is_stable_across_polls` | a pending review (null `submittedAt`) keeps one stable identity across polls instead of duplicating as unread forever |
+| `crates/gh-provider/src/graphql.rs::pending_review_fallback_timestamp_never_uses_wall_clock` | review-activity timestamps are never stamped with `Utc::now()` |
+| `crates/core/src/workspace.rs::merge_activity_same_node_id_review_edit_replaces_in_place` | an edited review (same node id, new body) replaces its stored activity instead of appending |

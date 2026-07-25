@@ -984,6 +984,11 @@ async fn load_workspaces_for_status(store: Arc<dyn Store>) -> Vec<lazybox_core::
         };
         records
             .into_iter()
+            // Lenient decode is fine HERE: this path is read-only
+            // (status display) — an unreadable row is merely omitted
+            // from the reply, never rewritten. Read-modify-write paths
+            // must use the strict decode (`Workspace::decode_persisted`
+            // via `polling::load_workspace`) instead.
             .filter_map(|r| serde_json::from_str(r.workspace_json.as_deref()?).ok())
             .collect()
     })

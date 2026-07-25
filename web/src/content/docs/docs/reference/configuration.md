@@ -22,7 +22,7 @@ which is the canonical source of truth for defaults and field names.
 | [`setup`](#setup) | Wizard output: enabled providers / agents, filters, scopes, default agent |
 | [`editors`](#editors) | Override / extend the detected editors |
 | [`repos`](#repos) | Per-repo env, mounts, scripts, branch prefix |
-| [`agent`](#agent) | Agent command, args, permission prompts, LLM gateway |
+| [`agent`](#agent) | Permission prompts, LLM gateway, agent state-detection timers |
 | [`agents`](#agentsid) | Per-agent overrides — the model-tier menu |
 | [`worktree`](#worktree) | Global mounts, scripts, branch prefix, merged-cleanup |
 | [`scan`](#scan) | Roots and depth for read-only external-checkout discovery |
@@ -189,7 +189,7 @@ applies only to worktrees / spawns in that repo.
 
 | Type | Description |
 | --- | --- |
-| map of string → string | Environment variables injected into every shell and agent PTY in that repo's worktrees. Layered over the daemon env and global `agent.env`; the per-repo value wins. |
+| map of string → string | Environment variables injected into every shell and agent PTY in that repo's worktrees. Layered over the daemon env; a per-repo value wins over the global LLM-gateway injection (`agent.llm_gateway_url`) and the agent's own spawn defaults. |
 
 ### `mounts`
 
@@ -241,28 +241,33 @@ hand.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `name` | string | `Claude Code` | Display name of the default agent |
-| `command` | string | `claude` | Executable to spawn |
-| `args` | list of string | `[]` | Extra args for the first launch |
-| `resume_args` | list of string | `["--continue"]` | Args used to resume a session |
-| `asking_patterns` | list of string | `(y/n)`, `do you want`, … | Output substrings that mark the agent as waiting on input |
 | `autonomous_skip_permissions` | bool | `true` | Autonomous `@lazybox` work runs Claude with `--dangerously-skip-permissions` (blast radius bounded to the worktree) |
 | `skip_permissions` | bool | `false` | Skip permission prompts for interactively spawned agents too |
 | `llm_gateway_url` | string | unset | Global LLM-gateway base URL. When set, every spawned agent gets it injected as the base-URL env var its CLI reads (`ANTHROPIC_BASE_URL` for Claude, `OPENAI_BASE_URL` for Codex / Cursor). A per-repo `env` entry for the same var wins. Auth keys are deliberately not managed here. |
+| `working_watchdog_secs` | int | `15` | Fail-safe window: seconds a `Working` agent terminal may sit with no meaningful screen change before the daemon classifies the screen and forces the turn out of `Working`. `0` disables the watchdog. |
+| `quiet_classify_secs` | int | `5` | Quiet-timer window: seconds of PTY silence before a `Working` turn settles to `Done`. Cannot be disabled (`0` falls back to 5); raise it to be less eager to call a turn finished. |
+
+There is no per-agent argv customization here — the built-in agents (Claude,
+Codex, Cursor) own their spawn/resume command lines, and per-agent knobs (the
+model-tier menu, auto-update) live under [`agents.<id>`](#agentsid). Extra
+per-spawn args come from the model-tier menu's `args`
+([`agents.<id>.models`](#agentsid)); arbitrary CLIs are the `GenericCli`
+agent's territory (`crates/agents/`).
 
 ## `agents.<id>`
 
-Per-agent overrides keyed by agent id (`claude`, `codex`, …). Today this
-carries the **model-tier menu** the `w S` / `w M` / `w L` and `a S` / `a M` /
-`a L` chords pick from. Agents without an entry fall back to the built-in
-preset — Claude ships Haiku (`S`) / Sonnet (`M`) / Opus (`L`); other agents
-have no built-in menu.
+Per-agent overrides keyed by agent id (`claude`, `codex`, …). This carries the
+**model-tier menu** the `w S` / `w M` / `w L` and `a S` / `a M` / `a L` chords
+pick from, plus the per-agent `auto_update` switch. Agents without an entry
+fall back to the built-in preset — Claude ships Haiku (`S`) / Sonnet (`M`) /
+Opus (`L`); other agents have no built-in menu.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `models.default` | string | unset | Alias of the tier a bare spawn uses; unset → the agent's own default model |
 | `models.tiers` | list | `[]` | Ordered tier menu. Each entry: `alias` (the chord key — a single uppercase letter binds as `Shift`, e.g. `S` → `w S`), `label` (shown in the popup and the `◆` tab badge), `args` (appended to the spawn argv) |
 | `models.priority` | map | `{}` | `high` / `medium` / `low` → tier alias, used when a spawn declares no explicit tier but the task carries a priority |
+| `auto_update` | bool | `false` | Let lazybox apply this agent's CLI updates automatically when the scheduled out-of-band check finds a newer version. Off by default: the check still runs and surfaces "update available", but installing waits for the manual "update agent CLIs" action. |
 
 ## `worktree`
 
@@ -384,7 +389,8 @@ default keymap.
 | `short_snooze` | duration | `4h` | `z` snooze duration |
 | `long_snooze` | duration | `365d` | `x z` long-snooze duration |
 | `log_path` | path | `/tmp/lazybox.log` | Where the client writes its log |
-| `browser` | string | OS default | Preferred browser for `o` / terminal links. macOS: the app name for `open -a` (`"Google Chrome"`); Linux: the executable. |
+| `browser` | string | OS default | Preferred browser for `g o` / terminal links. macOS: the app name for `open -a` (`"Google Chrome"`); Linux: the executable. |
+| `keep_awake` | bool | `false` | Hold an OS sleep inhibitor (`caffeinate` on macOS, `systemd-inhibit` on Linux) for exactly as long as at least one agent terminal is actively `Working`; released the moment everything goes idle. Re-read on every agent transition — no restart needed. |
 | `keymap_preset` | `default` \| `vim` | unset | Base keymap layer shipped in-tree; your `action_keys` still layer on top (`vim` moves pane-cycling to `Ctrl-w`) |
 | `theme` | string | unset | Active UI theme by exact name (`"Lazybox Dark"`, `"Lazybox Light"`, `"High Contrast"`, …). Written back by the `t` theme picker (live preview; `Esc` restores); unknown / unset keeps the default theme. Full theme list: [docs/themes.md](https://github.com/AntoineToussaint/lazybox/blob/main/docs/themes.md). |
 | `show_tips` | bool | `true` | Show progressive feature-discovery tips (opt-out) |
@@ -485,7 +491,7 @@ Opt-in — it pushes commits to your PRs with no manual nudge.
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `enabled` | bool | `false` | Master switch |
-| `opt_out_labels` | list of string | `[]` | Labels (case-insensitive) that opt a PR out |
+| `opt_out_labels` | list of string | `["no-auto-fix", "do-not-lazybox"]` | Labels (case-insensitive) that opt a PR out |
 | `max_attempts` | int | `3` | Attempts per PR, per failure-kind, per `window` |
 | `cooldown` | duration | `1h` | Minimum gap between attempts on the same PR (floored at 60s) |
 | `window` | duration | `24h` | Rolling window the `max_attempts` budget is measured over |

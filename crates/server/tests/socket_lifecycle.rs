@@ -333,6 +333,66 @@ async fn hook_ingest_over_socket_reaches_shared_embedded_config() {
     let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
 }
 
+/// SIGTERM path end-to-end: `shutdown_handle().notify_one()` (exactly
+/// what the daemon's signal handler calls) must drain a connection's
+/// in-flight detached mutation before the service aborts connection
+/// tasks and removes the socket/pid files. Pre-fix, shutdown went
+/// straight to `connections.shutdown()`, aborting the serve task and
+/// its mutations JoinSet mid-write.
+#[tokio::test]
+async fn shutdown_drains_in_flight_mutations_before_abort() {
+    let base = TempDir::new().unwrap();
+    let (sock, pid) = runtime_paths(&base);
+
+    let (config, mock) = ServerConfig::in_memory_with_mock();
+    mock.set_spawn_delay(Duration::from_millis(500)).await;
+    let factory_config = config.clone();
+    let service = SocketService::new(sock.clone(), pid.clone(), move || factory_config.clone());
+    let shutdown = service.shutdown_handle();
+    let handle = tokio::spawn(async move {
+        service.run().await.unwrap();
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while !sock.exists() {
+        assert!(tokio::time::Instant::now() < deadline, "socket never bound");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let (client, _) = socket::connect(&sock).await.expect("connect");
+    client
+        .send(Command::Spawn {
+            model_alias: None,
+            session_key: "test:sigterm-drain".into(),
+            session_id: None,
+            kind: lazybox_ipc::TerminalKind::Shell,
+            cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
+            initial_prompt: None,
+            on_main: false,
+        })
+        .expect("spawn command");
+    // Give the frame time to cross the socket and the serve loop time
+    // to park the mutation in the backend's artificial delay.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        mock.list().await.expect("list").is_empty(),
+        "spawn must still be mid-provision when SIGTERM lands"
+    );
+
+    shutdown.notify_one();
+    tokio::time::timeout(Duration::from_secs(8), handle)
+        .await
+        .expect("service exits within the drain bound")
+        .expect("service task");
+
+    assert_eq!(
+        mock.list().await.expect("list").len(),
+        1,
+        "the in-flight mutation must complete before connection abort"
+    );
+    assert!(!sock.exists(), "socket removed on clean shutdown");
+    assert!(!pid.exists(), "pid file removed on clean shutdown");
+}
+
 // ── Pure lifecycle helpers ─────────────────────────────────────────────
 
 #[test]

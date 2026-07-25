@@ -404,7 +404,8 @@ async fn run_test(preselect: Option<lazybox_tui::realm::model::Preselect>) -> an
         }
     });
 
-    spawn_terminal_restore_on_signal();
+    // No drain handle: --test state is a throwaway tempdir.
+    spawn_terminal_restore_on_signal(None);
     tokio::task::spawn_blocking(move || {
         let mut model = lazybox_tui::realm::Model::new(client)?;
         if let Some(p) = preselect {
@@ -417,6 +418,14 @@ async fn run_test(preselect: Option<lazybox_tui::realm::model::Preselect>) -> an
     // `fixture` drops here → TempDir cleanup.
 }
 
+/// Handle to the embedded daemon for signal-time teardown: `trigger`
+/// raises the serve loop's graceful-stop signal, `done` observes the
+/// serve task finishing (after its bounded in-flight-mutation drain).
+struct DaemonDrain {
+    trigger: std::sync::Arc<tokio::sync::watch::Sender<bool>>,
+    done: tokio::sync::watch::Receiver<bool>,
+}
+
 /// Restore the host terminal if the process is killed by a signal
 /// (#211). SIGTERM / SIGHUP — and an externally-delivered SIGINT, since
 /// raw mode swallows interactive Ctrl-C — terminate the process without
@@ -426,10 +435,23 @@ async fn run_test(preselect: Option<lazybox_tui::realm::model::Preselect>) -> an
 /// `kill`ed lazybox strands the shell in Kitty keyboard protocol + raw
 /// mode. Spawned before the blocking run loop on every real-terminal
 /// path.
-fn spawn_terminal_restore_on_signal() {
-    tokio::spawn(async {
+///
+/// With a `drain` handle (embedded mode), the task also gives the
+/// in-process daemon a SHORT best-effort window to finish in-flight
+/// mutations before `exit` tears the runtime down — so a `kill` landing
+/// mid-merge doesn't cancel the local save after the remote merge
+/// already succeeded. Terminal restore still runs FIRST (it must win),
+/// and the window is 2s — deliberately shorter than the daemon's own
+/// 5s drain — because this is a kill, not a quit.
+fn spawn_terminal_restore_on_signal(drain: Option<DaemonDrain>) {
+    tokio::spawn(async move {
         wait_for_exit_signal().await;
         lazybox_tui::realm::model::restore_host_terminal();
+        if let Some(mut drain) = drain {
+            let _ = drain.trigger.send(true);
+            let _ = tokio::time::timeout(Duration::from_secs(2), drain.done.wait_for(|done| *done))
+                .await;
+        }
         // 128 + SIGTERM(15); a conventional signal-exit status.
         std::process::exit(143);
     });
@@ -536,7 +558,9 @@ async fn run_remote(
         }
     };
 
-    spawn_terminal_restore_on_signal();
+    // No drain handle: the standalone daemon outlives this client and
+    // runs its own disconnect-time mutation drain.
+    spawn_terminal_restore_on_signal(None);
     // The remote path skips the full config application (the daemon
     // owns most of it), but notifications fire client-side — arm them
     // here too or `--connect` sessions would stay silent.
@@ -577,7 +601,12 @@ async fn run_embedded_realm(
 
     // Recovery probes the backend (`tmux list-sessions`) before the UI
     // paints — bound it so a wedged tmux server degrades to "no
-    // recovered sessions" instead of a frozen launch.
+    // recovered sessions" instead of a frozen launch. The timeout
+    // cancels `recover_sessions` MID-LOOP, so some live tmux sessions
+    // can end up alive-but-unregistered; `restore_persisted_sessions`
+    // below re-lists the backend itself and skips those, so the
+    // cancellation can never lead to a second agent spawned into a
+    // worktree whose tmux session survived.
     if tokio::time::timeout(
         Duration::from_secs(5),
         lazybox_server::spawn_handler::recover_sessions(&config),
@@ -600,11 +629,21 @@ async fn run_embedded_realm(
     lazybox_server::polling::migrate_legacy_sandbox(&config);
 
     let serve_config = config.clone();
+    // Graceful-teardown plumbing for the in-process daemon (#FIX-shutdown):
+    //   * `graceful_stop` lets the signal handler break the serve loop
+    //     the same way SIGTERM does for the standalone daemon;
+    //   * `serve_done` flips once `serve` has returned — i.e. after its
+    //     bounded in-flight-mutation drain — so quit/signal paths can
+    //     wait for real completion instead of an arbitrary sleep.
+    let (graceful_stop_tx, graceful_stop_rx) = tokio::sync::watch::channel(false);
+    let graceful_stop_tx = std::sync::Arc::new(graceful_stop_tx);
+    let (serve_done_tx, serve_done_rx) = tokio::sync::watch::channel(false);
     tokio::spawn(async move {
-        let daemon = Server::new(serve_config);
+        let daemon = Server::new(serve_config).with_graceful_stop(graceful_stop_rx);
         if let Err(e) = daemon.serve(server).await {
             tracing::error!("daemon exited: {e}");
         }
+        let _ = serve_done_tx.send(true);
     });
 
     // Bind the IPC socket in embedded mode too, sharing the same
@@ -719,7 +758,10 @@ async fn run_embedded_realm(
         None
     });
 
-    spawn_terminal_restore_on_signal();
+    spawn_terminal_restore_on_signal(Some(DaemonDrain {
+        trigger: graceful_stop_tx.clone(),
+        done: serve_done_rx.clone(),
+    }));
     let store_for_save = config.store.clone();
     let realm_result = tokio::task::spawn_blocking(move || {
         let mut model = lazybox_tui::realm::Model::new(client)?;
@@ -885,9 +927,33 @@ async fn run_embedded_realm(
     // Tear the embedded socket service down the same way the server
     // subcommand does on SIGTERM: `SocketService::run` removes the
     // socket + pid file on its way out, so the next start doesn't
-    // mistake this exited instance for still-running.
-    if let Some((shutdown, handle)) = embedded_socket {
+    // mistake this exited instance for still-running. Notify first
+    // (non-blocking) so its own connection drain overlaps the
+    // in-process serve drain below.
+    if let Some((shutdown, _)) = &embedded_socket {
         shutdown.notify_one();
+    }
+    // `q q` teardown: `Model::shutdown` sent `Command::Shutdown` (and
+    // dropping the Model closed the command channel as a backstop), so
+    // the in-process serve loop is breaking and draining any in-flight
+    // mutations — a merge save or worktree teardown mid-write. Wait for
+    // that drain to actually FINISH before returning, because leaving
+    // this function drops the runtime and cancels whatever is left.
+    // Bound: the daemon's own 5s drain plus a second of margin; the
+    // common case (nothing in flight) resolves in milliseconds.
+    let mut serve_done = serve_done_rx;
+    if tokio::time::timeout(
+        lazybox_server::MUTATION_DRAIN_TIMEOUT + Duration::from_secs(1),
+        serve_done.wait_for(|done| *done),
+    )
+    .await
+    .is_err()
+    {
+        tracing::warn!("quit: embedded daemon did not finish draining within the bound");
+    }
+    if let Some((_, handle)) = embedded_socket {
+        // The socket service applies the same bound to its own
+        // connections; most of that window already elapsed in parallel.
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
     }
     realm_result?
@@ -1121,7 +1187,7 @@ fn print_scan_results(
             tag_str,
         );
     }
-    println!("\nImport into lazybox is not wired up yet (issue #348, stage two).");
+    println!("\nTo import one of these in place, press `x i` (import checkout) inside lazybox.");
 }
 
 /// `secs`-ago-style relative age. Coarse buckets are enough for a

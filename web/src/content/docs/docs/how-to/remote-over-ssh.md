@@ -19,16 +19,23 @@ bridges the two machines.
 
 ## 1. Start the daemon on the remote host
 
-SSH into the remote machine and start the server:
+SSH into the remote machine and start the server. `lazybox server start` runs
+in the **foreground** — it blocks until the daemon shuts down — so give it its
+own terminal, tmux pane, or service unit:
 
 ```sh
-lazybox server start
+lazybox server start      # blocks; keep it running in tmux, nohup, or a service
+```
+
+Then, from a second shell on the remote host:
+
+```sh
 lazybox server status     # confirm it is up
 ```
 
 The daemon listens on a Unix socket at `~/.lazybox/run/daemon.sock`
 (`LAZYBOX_HOME` moves the whole `~/.lazybox` tree, socket included;
-`lazybox server status` confirms the daemon is up).
+`LAZYBOX_RUNTIME_DIR` overrides just the socket/pid directory).
 
 ## 2. Forward the socket over SSH
 

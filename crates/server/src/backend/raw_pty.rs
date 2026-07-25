@@ -18,7 +18,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 
 const DEFAULT_COLS: u16 = 120;
 const DEFAULT_ROWS: u16 = 32;
@@ -32,10 +32,14 @@ const KILL_ESCALATION_GRACE: std::time::Duration = std::time::Duration::from_sec
 /// Internal map: backend session key → live PTY + cached exit code.
 struct Slot {
     pty: Arc<DaemonPty>,
-    /// Once the child exits, the pump task that drains its output
-    /// stores the exit code here so subsequent `wait_exit` calls
-    /// return immediately. `None` while the child is alive.
-    exit: Arc<Mutex<Option<Option<i32>>>>,
+    /// Once the child exits, the spawn-side watcher task publishes
+    /// the exit code here. A `watch` channel — same mechanism as
+    /// `DaemonPty::exit_watch` (see `pty.rs` and
+    /// docs/codebase-review-236.md) — so any number of concurrent
+    /// `wait_exit` callers await the change instead of polling, and
+    /// repeated calls read the retained code immediately. `None`
+    /// while the child is alive.
+    exit: watch::Receiver<Option<Option<i32>>>,
 }
 
 pub struct RawPtyBackend {
@@ -93,19 +97,19 @@ impl RawPtyBackend {
             .map_err(|e| BackendError::Spawn(e.to_string()))?;
             let pty = Arc::new(pty);
             let key = self.alloc_key(hint);
+            let (exit_tx, exit_rx) = watch::channel::<Option<Option<i32>>>(None);
             let slot = Slot {
                 pty: pty.clone(),
-                exit: Arc::new(Mutex::new(None)),
+                exit: exit_rx,
             };
-            // Background task that watches for exit and caches the
-            // code. Without this, only ONE call to wait_exit ever
-            // succeeds (DaemonPty's oneshot is consumed). The trait
-            // contract is "call repeatedly, get the cached code".
-            let exit_slot = slot.exit.clone();
+            // Background task that watches for exit and publishes the
+            // code on the watch channel. The watch retains the value,
+            // so every `wait_exit` call — concurrent or repeated —
+            // gets the cached code (the trait contract).
             let pty_for_exit = pty.clone();
             tokio::spawn(async move {
                 let code = pty_for_exit.wait_exit().await;
-                *exit_slot.lock().await = Some(code);
+                let _ = exit_tx.send(Some(code));
             });
             self.sessions.lock().await.insert(key.clone(), slot);
             Ok(key)
@@ -387,18 +391,22 @@ impl SessionBackend for RawPtyBackend {
         key: &'a str,
     ) -> Pin<Box<dyn Future<Output = Option<i32>> + Send + 'a>> {
         Box::pin(async move {
-            let exit = {
+            let mut exit = {
                 let map = self.sessions.lock().await;
                 map.get(key).map(|s| s.exit.clone())?
             };
-            // Poll the cached slot. The spawn task fills it on exit;
-            // until then we yield and re-check. Cheap because the
-            // slot is a small mutex and exits are rare.
+            // Await the published exit code — no polling. The watch
+            // retains the value, so a call made after the exit
+            // returns the cached code immediately.
             loop {
-                if let Some(code) = *exit.lock().await {
+                if let Some(code) = *exit.borrow_and_update() {
                     return code;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                if exit.changed().await.is_err() {
+                    // Publisher task gone without sending — the exit
+                    // was unobservable.
+                    return None;
+                }
             }
         })
     }
@@ -488,6 +496,27 @@ mod tests {
                 sessions_drained(&b, Duration::from_secs(8)).await,
                 "SIGKILL escalation reaps the trap-TERM child and releases the slot"
             );
+        })
+        .await
+        .expect("test deadline exceeded");
+    }
+
+    /// Regression (unbounded 50ms poll loop): `wait_exit` used to spin
+    /// on a mutexed slot every 50ms forever. It now awaits the exit
+    /// code on a `watch` channel (the `DaemonPty` pattern) — the trait
+    /// contract stays: two concurrent callers both observe the code,
+    /// and a call made after the exit gets the cached code immediately.
+    #[tokio::test]
+    async fn wait_exit_serves_concurrent_and_repeated_callers() {
+        timeout(Duration::from_secs(10), async {
+            let b = RawPtyBackend::new();
+            let key = b.spawn(&sh("exit 7"), None, &[], "t").await.expect("spawn");
+            let (a, c) = tokio::join!(b.wait_exit(&key), b.wait_exit(&key));
+            assert_eq!(a, Some(7), "first concurrent caller sees the code");
+            assert_eq!(c, Some(7), "second concurrent caller sees the code");
+            // After the exit the watch retains the value: a fresh call
+            // returns the cached code.
+            assert_eq!(b.wait_exit(&key).await, Some(7), "post-exit call is cached");
         })
         .await
         .expect("test deadline exceeded");

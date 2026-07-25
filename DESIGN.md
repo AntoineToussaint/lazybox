@@ -65,7 +65,7 @@ but not in v2.0.
 └──────────────┬────────────┘
                │  Transport:
                │  - In-process (default): tokio mpsc channel pair
-               │  - Local out-of-process: Unix socket at ~/.lazybox/v2/daemon.sock
+               │  - Local out-of-process: Unix socket at ~/.lazybox/run/daemon.sock
                │  - Remote: SSH tunnel to a remote Unix socket
                │                (no TCP/TLS in v2.0 — SSH handles both)
                │  Framing: length-prefixed bincode
@@ -84,7 +84,7 @@ but not in v2.0.
 | Configurability | **Everything that could reasonably be configured, is.** Dashboard tile set + order, agent registry (name, spawn cmd, resume args, state patterns), keybindings per component, filter defaults, snooze presets. YAML, with sensible built-in defaults so empty config is fine. |
 | Client / daemon communication | **Abstracted behind a `Client` trait so local == in-process.** When client and daemon are in the same process (the common case) the "transport" is a pair of tokio mpsc channels — zero serialization, zero sockets. Only when actually remote does it serialize over a socket. TUI code doesn't branch on local vs remote. |
 | Session wrapper (tmux etc.) | **Abstracted via `SessionWrapper` trait.** `TmuxWrapper` is the default impl. Swappable so we can add `ScreenWrapper`, `ZellijWrapper`, or a no-wrapper "raw PTY" mode later without touching the daemon core. |
-| Remote access | **SSH-tunneled Unix socket.** Server binds `~/.lazybox/v2/daemon.sock`; remote clients connect through `ssh -L`. No TCP, no TLS cert management — SSH is the trust boundary. |
+| Remote access | **SSH-tunneled Unix socket.** Server binds `~/.lazybox/run/daemon.sock` (`LAZYBOX_RUNTIME_DIR` overrides the directory); remote clients connect through `ssh -L`. No TCP, no TLS cert management — SSH is the trust boundary. |
 | Server lifetime | **Long-running service when out-of-process.** First client auto-starts the daemon subprocess; survives client disconnect; `lazybox server stop` terminates. Same model as tmux server. For the common in-process case, daemon lives and dies with the TUI. |
 | Binary | **One binary.** `lazybox` with subcommands: `lazybox` (default: TUI + in-process daemon), `lazybox server start/stop/status` (manage a standalone daemon), `lazybox server api [addr]` (foreground JSON HTTP API gateway), `lazybox --connect <socket>` (remote TUI, don't start a local daemon). |
 
@@ -92,22 +92,28 @@ but not in v2.0.
 
 ```
 crates/
-├── core/             source-agnostic types (Task, Session, SessionKey, …)
-├── auth/             credential chain
-├── store/            SQLite backend
-├── config/           YAML loader
-├── git-ops/          worktrees (bare clones + per-task worktrees)
-├── tui-term/         PTY + ghostty-vt parser + widget
-├── gh-provider/      GitHub PRs + Issues
-├── linear-provider/  Linear issues via GraphQL
-├── ipc/              wire types + framing + transport (channel + socket)
-├── agents/           Agent trait + Claude/Codex/Cursor/GenericCli + SessionWrapper
-├── server/           PTY lifecycle, polling, agent runs, JSON API gateway
-└── tui/              the `lazybox` binary — component tree + key/event dispatch
+├── core/               source-agnostic types (Task, Session, SessionKey, …)
+├── auth/               credential chain
+├── store/              Store trait + SQLite backend
+├── config/             YAML loader
+├── git-ops/            worktrees (bare clones + per-task worktrees)
+├── tui-term/           PTY + ghostty-vt parser + widget
+├── libghostty-vt/      vendored safe Rust bindings for ghostty's VT parser
+├── libghostty-vt-sys/  raw FFI layer under libghostty-vt (builds the C lib)
+├── gh-provider/        GitHub PRs + Issues
+├── linear-provider/    Linear issues via GraphQL
+├── slack-provider/     Slack DMs/channels via Web API + Socket Mode
+├── ipc/                wire types + framing + transport (channel + socket)
+├── agents/             Agent trait + Claude/Codex/Cursor/GenericCli + SessionWrapper
+├── server/             PTY lifecycle, polling, agent runs, JSON API gateway
+├── tui-core/           ratatui-free TUI logic: action catalog, intents, editors
+└── tui/                the `lazybox` binary — component tree + key/event dispatch
 ```
 
-The core libraries (`core`, `auth`, `store`) must not depend
-on each other. Provider crates depend only on `core` + `auth`.
+Core-library layering: `core` and `auth` depend on no internal crate;
+`store` may depend on `core` only (enforced by the workspace dep-rules
+test, `crates/core/tests/dep_rules.rs`). Provider crates depend only on
+`core` + `auth`.
 
 ## IPC protocol
 
@@ -131,8 +137,8 @@ enum Command {
 
 // Event: daemon → client (broadcast to subscribers)
 enum Event {
-    SessionUpserted(Session),
-    SessionRemoved(SessionKey),
+    WorkspaceUpserted(Workspace),
+    WorkspaceRemoved(WorkspaceKey),
     TerminalSpawned { terminal_id, session_key, kind },
     TerminalOutput { terminal_id, bytes, seq },
     TerminalExited { terminal_id, code },
@@ -142,9 +148,10 @@ enum Event {
 }
 ```
 
-Reconnect: daemon keeps a per-terminal ring buffer (64 KB). On
-`Subscribe`, daemon replays the ring before streaming live bytes. Client
-feeds bytes into its local libghostty-vt, reconstructs the screen.
+Reconnect: daemon keeps a per-terminal ring buffer (2 MiB —
+`REPLAY_RING_BYTES`, `crates/server/src/pty.rs`). On `Subscribe`, daemon
+replays the ring before streaming live bytes. Client feeds bytes into its
+local libghostty-vt, reconstructs the screen.
 
 ## Component tree (TUI)
 
@@ -179,7 +186,7 @@ App
 ├── TabBar                   — subscribes: TerminalSpawned/Exited
 ├── Sidebar                  — default focus
 │   ├── FilterRow            — owns search + time filter
-│   └── SessionList          — subscribes: SessionUpserted/Removed
+│   └── SessionList          — subscribes: WorkspaceUpserted/Removed
 │       └── SessionRow × N   — subscribes: AgentState(key)
 ├── RightPane                — Tab reaches here from Sidebar
 │   ├── Header
@@ -313,7 +320,7 @@ captures structured metadata on every request/response.
 
 ### Implementation
 
-New crate `crates/llm-proxy/`:
+The (since-removed) `llm-proxy` crate would have exposed:
 
 ```rust
 pub struct ProxyConfig {
@@ -437,7 +444,7 @@ Built-ins (shipped in `crates/agents/`):
 ## Server responsibilities
 
 1. **Providers.** `TaskProvider` pollers (currently GitHub; Linear etc.
-   plug in). Emit `Event::SessionUpserted` on results.
+   plug in). Emit `Event::WorkspaceUpserted` on results.
 2. **Worktrees.** `WorktreeManager` owns the layout. On startup
    reconciles disk against the session DB per the rules in `REWRITE.md`.
 3. **Agent runtimes.** Look up Agent by id, spawn inside tmux, hold
@@ -452,12 +459,9 @@ Built-ins (shipped in `crates/agents/`):
   command printing the effective merged config is planned, not yet built.
 - **Dashboard tile layout.** Fixed grid (2×2) or stacked (1×N with user
   reorder)? Leaning stacked, user can drag/reorder later.
-- **Streaming responses in `llm-proxy`.** Hyper's streaming body types
-  work; we tee the bytes into a parser that assembles the record as SSE
-  frames arrive. OpenAI vs Anthropic wire formats differ — per-provider
-  adapter modules.
 - **Cost estimation.** Hard-coded price table by model in `prices.rs`,
-  updated manually. Acceptable because models change slowly.
+  updated manually. Acceptable because models change slowly. (Only
+  relevant if the superseded LLM-proxy telemetry design is ever revived.)
 
 ## Testing discipline (non-negotiable)
 
@@ -468,7 +472,6 @@ snapshot; every bug fix lands with a regression test.**
 |-------|------------------|
 | `ipc` | Serde round-trip per Command/Event variant; framing on synthetic streams; property tests for arbitrary frame sizes + malformed bytes. |
 | `agents` | Registry lookup; each Agent's spawn/resume argv snapshotted; SessionWrapper behaviors (tmux mocked by intercepting Command). |
-| `llm-proxy` | Record serde round-trip; pricing rates for known models; Unknown returns None; redaction on headers + nested JSON; streaming SSE assembly from recorded fixtures. |
 | `server` | End-to-end via `channel::pair` — Subscribe → Snapshot; PTY spawn → output stream → exit; ring buffer wraparound; reconnect replay fidelity. |
 | `tui` components | Pure key-routing tests (no render). Golden render snapshots via `insta` + ratatui `TestBackend`. Event-subscription dispatch tests. Focus chain invariants. |
 | providers | GraphQL fixtures checked into `tests/fixtures/`. Never hit live APIs in unit tests. One opt-in integration test per provider gated on env var. |
@@ -477,5 +480,5 @@ snapshot; every bug fix lands with a regression test.**
 CI matrix: Linux + macOS, `cargo test --workspace` + `cargo clippy
 --workspace -- -D warnings` + `cargo fmt --check` on every PR.
 `cargo test --doc` enabled. Coverage tracked via `cargo llvm-cov` —
-target 80% on library crates (server/ipc/agents/llm-proxy/providers).
+target 80% on library crates (server/ipc/agents/providers).
 TUI render tests count as coverage via the ratatui TestBackend.

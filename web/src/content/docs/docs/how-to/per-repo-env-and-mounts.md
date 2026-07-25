@@ -76,7 +76,8 @@ variables and files are present:
 
 ```sh
 echo "$DATABASE_URL"
-ls -l node_modules .secrets _lazybox/scripts
+ls -l node_modules _lazybox/scripts
+ls -l ../.secrets    # placement: above → the link lives in the worktree's parent
 ```
 
 ## Related

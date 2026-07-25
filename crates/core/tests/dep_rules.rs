@@ -109,22 +109,33 @@ fn package_name(manifest: &str, path: &Path) -> String {
 
 /// Every `lazybox-*` package referenced as a dependency key anywhere
 /// in the manifest (dependencies, dev-dependencies,
-/// build-dependencies). A dependency line starts with the package
-/// name followed by `=` or `.` (dotted form).
+/// build-dependencies). Two legal Cargo spellings are recognized:
+/// - inline entries — the package name at line start followed by `=`
+///   or `.` (dotted form, `lazybox-x.workspace = true`);
+/// - table headers — `[dependencies.lazybox-x]`,
+///   `[dev-dependencies.lazybox-x]`, and target-scoped
+///   `[target.'cfg(...)'.dependencies.lazybox-x]`. These used to be
+///   invisible to the guard: a silent evasion vector for the whole
+///   allowlist.
 fn internal_deps(manifest: &str) -> BTreeSet<String> {
+    fn dep_name(s: &str) -> String {
+        s.chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect()
+    }
     let mut out = BTreeSet::new();
     for line in manifest.lines() {
         let line = line.trim_start();
-        if !line.starts_with("lazybox-") {
-            continue;
-        }
-        let name: String = line
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-            .collect();
-        let rest = line[name.len()..].trim_start();
-        if rest.starts_with('=') || rest.starts_with('.') {
-            out.insert(name);
+        if line.starts_with("lazybox-") {
+            let name = dep_name(line);
+            let rest = line[name.len()..].trim_start();
+            if rest.starts_with('=') || rest.starts_with('.') {
+                out.insert(name);
+            }
+        } else if line.starts_with('[')
+            && let Some(idx) = line.find("dependencies.lazybox-")
+        {
+            out.insert(dep_name(&line[idx + "dependencies.".len()..]));
         }
     }
     out
@@ -201,4 +212,91 @@ fn no_crate_references_lazybox_events() {
         offenders.is_empty(),
         "the legacy `lazybox-events` bus is deleted; these manifests must not reference it: {offenders:?}",
     );
+}
+
+// ── internal_deps parser unit tests ─────────────────────────────────
+// The guard is only as strong as its parser: any legal Cargo spelling
+// it misses is a silent evasion vector, so each spelling gets pinned.
+
+fn set_of(names: &[&str]) -> BTreeSet<String> {
+    names.iter().map(|s| s.to_string()).collect()
+}
+
+/// The historical spellings: `name = { ... }` and dotted
+/// `name.workspace = true` under a `[dependencies]` section.
+#[test]
+fn internal_deps_parses_inline_entries() {
+    let manifest = r#"
+[package]
+name = "demo"
+
+[dependencies]
+lazybox-core = { path = "../core" }
+lazybox-ipc.workspace = true
+serde = "1"
+"#;
+    assert_eq!(
+        internal_deps(manifest),
+        set_of(&["lazybox-core", "lazybox-ipc"])
+    );
+}
+
+/// Regression (parser loophole): the equally legal table-header form
+/// `[dependencies.lazybox-x]` was invisible — the old parser only
+/// matched lines STARTING with `lazybox-`.
+#[test]
+fn internal_deps_parses_dependency_table_headers() {
+    let manifest = r#"
+[package]
+name = "demo"
+
+[dependencies.lazybox-auth]
+path = "../auth"
+"#;
+    assert_eq!(internal_deps(manifest), set_of(&["lazybox-auth"]));
+}
+
+/// Same loophole, `[dev-dependencies.lazybox-x]` spelling.
+#[test]
+fn internal_deps_parses_dev_dependency_table_headers() {
+    let manifest = r#"
+[package]
+name = "demo"
+
+[dev-dependencies.lazybox-store]
+path = "../store"
+"#;
+    assert_eq!(internal_deps(manifest), set_of(&["lazybox-store"]));
+}
+
+/// Same loophole, target-scoped spelling:
+/// `[target.'cfg(...)'.dependencies.lazybox-x]`.
+#[test]
+fn internal_deps_parses_target_scoped_table_headers() {
+    let manifest = r#"
+[package]
+name = "demo"
+
+[target.'cfg(unix)'.dependencies.lazybox-config]
+path = "../config"
+"#;
+    assert_eq!(internal_deps(manifest), set_of(&["lazybox-config"]));
+}
+
+/// Non-dependency mentions must NOT match: comments (both a prose
+/// mention of the table form and a commented-out inline entry) and
+/// the package's own `name =` line.
+#[test]
+fn internal_deps_ignores_non_dependency_mentions() {
+    let manifest = r#"
+[package]
+name = "lazybox-demo"
+
+# see [dependencies.lazybox-core] docs for why this is NOT a dep
+# lazybox-slack = { path = "../slack-provider" }
+
+[dependencies]
+serde = "1"
+"#;
+    assert_eq!(internal_deps(manifest), BTreeSet::new());
 }

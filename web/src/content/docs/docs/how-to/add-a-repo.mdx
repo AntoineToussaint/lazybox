@@ -37,13 +37,16 @@ A repo group can be folded or unfolded with `Space` on the group row.
 
 Once rows arrive, you usually don't want all of them at once. From the sidebar:
 
-- Press `f` to cycle the **role filter**:
-  `all → author → reviewer → assignee → mentioned → all`.
+- Press `f` to open the **filter menu** — a multi-select over state, role, and
+  kind predicates (unread, CI-failing, with-agent, author, reviewer, assignee,
+  mentioned, PR/issue, …), each shown with a live match count. Toggle
+  predicates and confirm; active filters appear as removable chips in the
+  sidebar header.
 - Press `o` to cycle the **sort order**: `recent → by-role → split`.
 
-So to see only the PRs where you've been asked to review, press `f` until the
-filter reads `reviewer`. Press `Shift-R` at any time to force a manual refresh
-instead of waiting for the next poll.
+So to see only the PRs where you've been asked to review, press `f`, toggle
+the **reviewer** predicate, and press Enter. Press `Shift-R` at any time to
+force a manual refresh instead of waiting for the next poll.
 
 ## Verify
 
@@ -56,9 +59,10 @@ A blank sidebar just after adding a repo is normal, not a bug:
 
 - The first poll can take up to ~60s (`providers.github.poll_interval`). Press
   `Shift-R` to force a refresh instead of waiting.
-- Rows may be hidden by the role filter — press `f` to widen it back to `all`.
+- Rows may be hidden by active filters — press `f` and clear any toggled
+  predicates (or remove the chips shown in the sidebar header).
 - If the repo simply has little activity tied to you, there may be nothing to
-  show. Press `n` to spin up a fresh scratch workspace and open a session in it.
+  show. Press `x n` to spin up a fresh scratch workspace and open a session in it.
 :::
 
 ## Related

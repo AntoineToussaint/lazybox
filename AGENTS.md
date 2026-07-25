@@ -11,11 +11,11 @@ Source-agnostic: GitHub is one provider, but Linear/Jira/etc. plug in the same w
 ## Build & Run
 
 ```bash
-cargo build                    # build (first build compiles SQLite, takes ~30s)
+cargo build                   # build (first build compiles SQLite, takes ~30s)
 cargo run -p lazybox-tui-boot # run (uses `gh auth token` automatically)
-cargo test --workspace         # tests
-cargo clippy --workspace       # lint
-make run                       # same as cargo run -p lazybox-tui-boot
+cargo test --workspace        # tests
+cargo clippy --workspace      # lint
+make run                      # same as cargo run -p lazybox-tui-boot
 ```
 
 Logs go to `/tmp/lazybox.log`. State persisted in `~/.lazybox/v2/state.db`.

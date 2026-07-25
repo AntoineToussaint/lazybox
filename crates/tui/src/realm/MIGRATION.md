@@ -7,9 +7,9 @@ crates have been removed; lazybox's binary depends on `tuirealm 4.1`
 and lazybox's own `theme.rs` / `pane.rs` modules.
 
 ```sh
-cargo run -p lazybox-tui-boot          # default
-cargo run -p lazybox-tui-boot -- --fresh   # wipe ~/.lazybox/v2/state.db, re-run setup
-cargo run -p lazybox-tui-boot -- --test    # throwaway tempdir, no GitHub
+cargo run -p lazybox-tui-boot            # default
+cargo run -p lazybox-tui-boot -- --fresh # wipe ~/.lazybox/v2/state.db, re-run setup
+cargo run -p lazybox-tui-boot -- --test  # throwaway tempdir, no GitHub
 ```
 
 ## What landed

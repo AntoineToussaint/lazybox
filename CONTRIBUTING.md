@@ -6,8 +6,8 @@ participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
 ## Build + run
 
 ```sh
-cargo build                       # first build compiles Zig/ghostty + SQLite (~30s)
-cargo run -p lazybox-tui-boot       # uses `gh auth token` automatically
+cargo build                   # first build compiles Zig/ghostty + SQLite (~30s)
+cargo run -p lazybox-tui-boot # uses `gh auth token` automatically
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all

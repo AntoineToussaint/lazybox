@@ -1369,7 +1369,8 @@ pub async fn on_terminal_transition(
 /// prompt when removal is safe (issue #552): a session-less issue (no
 /// worktree to reap), or one whose worktrees are all clean (no
 /// uncommitted/unpushed work) and has no live terminal attached, is
-/// removed immediately via [`remove_merged_workspace_with`], with a
+/// removed immediately via [`remove_merged_workspace_with`] (without
+/// archiving, so reopening the issue on GitHub resurfaces it), with a
 /// footer notice. Genuine local work, an inspect we couldn't complete,
 /// or a live terminal all fall through to the keep/remove prompt so
 /// nothing is destroyed from under the user. Mirrors
@@ -1395,7 +1396,36 @@ pub(crate) async fn prompt_merged_pr_removal_with(
         .map(|t| t.id.key.clone())
         .filter(|k| !k.is_empty())
         .unwrap_or_else(|| key.as_str().to_string());
-    let session_paths = workspace_worktree_paths(&workspace);
+
+    // A closed issue's primary outcome is removal, not a prompt, so it's
+    // evaluated up front and is NOT throttled — a session-less row, or
+    // one whose worktrees are all clean with no live terminal, is removed
+    // on sight (issue #552), on the open→closed transition and on the
+    // recovery sweep alike. Evaluating before the throttle also means a
+    // reprompt tick catches a dirty→clean flip immediately instead of
+    // waiting out the reprompt window. The removal does NOT archive, so
+    // reopening the issue on GitHub resurfaces it. Real local work
+    // (`Some(true)`), an inspect we couldn't complete (`None` — never
+    // force-delete the unverified), a live terminal, or a removal that
+    // fails all fall through to the throttled keep/remove prompt below.
+    // A merged PR never auto-removes and defers its worktree inspect past
+    // the throttle, so a throttled reprompt tick pays no filesystem cost.
+    if terminal_state == lazybox_ipc::RemovableTerminalState::Closed {
+        let session_paths = workspace_worktree_paths(&workspace);
+        let local_work = workspace_local_work(config, mgr, key, &session_paths).await;
+        if local_work == Some(false) && count_live_terminals(config, key).await == 0 {
+            remove_merged_workspace_with(config, mgr, key, /*archive=*/ false).await;
+            if load_workspace(config, key).is_none() {
+                let _ = config.bus.send(Event::Notification {
+                    title: "lazybox".into(),
+                    body: format!("Removed workspace for closed {label}"),
+                });
+                return;
+            }
+            // Removal failed (row still present) — fall through to the
+            // throttled prompt rather than retry on every tick.
+        }
+    }
 
     {
         let mut prompts = config.removal_prompts.lock().await;
@@ -1411,31 +1441,11 @@ pub(crate) async fn prompt_merged_pr_removal_with(
         prompts.prompted.insert(key.as_str().to_string(), now);
     }
 
+    let session_paths = workspace_worktree_paths(&workspace);
     let active_terminal_count = count_live_terminals(config, key).await;
-    let local_work = workspace_local_work(config, mgr, key, &session_paths).await;
-
-    // A closed issue auto-removes as soon as removal is safe (issue
-    // #552): `local_work == Some(false)` (a session-less row — nothing
-    // to reap — or worktrees that are all clean) AND no live terminal to
-    // yank from under the user. Real local work (`Some(true)`), an
-    // inspect we couldn't complete (`None` — never force-delete the
-    // unverified), or a live terminal all fall through to the
-    // keep/remove prompt. A merged PR always prompts (issue #499).
-    if terminal_state == lazybox_ipc::RemovableTerminalState::Closed
-        && local_work == Some(false)
-        && active_terminal_count == 0
-    {
-        remove_merged_workspace_with(config, mgr, key).await;
-        if load_workspace(config, key).is_none() {
-            let _ = config.bus.send(Event::Notification {
-                title: "lazybox".into(),
-                body: format!("Removed workspace for closed {label}"),
-            });
-        }
-        return;
-    }
-
-    let has_local_work = local_work.unwrap_or(false);
+    let has_local_work = workspace_local_work(config, mgr, key, &session_paths)
+        .await
+        .unwrap_or(false);
 
     tracing::info!(
         workspace = %key,
@@ -1457,17 +1467,28 @@ pub(crate) async fn prompt_merged_pr_removal_with(
 /// merged-PR removal modal. Snapshot the worktree paths, kill the
 /// sessions + drop the row via [`super::delete_workspace`], then
 /// force-delete the now-idle worktree directories — the deletion
-/// `delete_workspace` (used by `x x`) deliberately skips.
+/// `delete_workspace` (used by `x x`) deliberately skips. A confirmed
+/// removal archives, so the next poll doesn't resurrect the row.
 pub async fn remove_merged_workspace(config: &ServerConfig, key: &WorkspaceKey) {
-    remove_merged_workspace_with(config, &config.worktree_manager(), key).await
+    remove_merged_workspace_with(
+        config,
+        &config.worktree_manager(),
+        key,
+        /*archive=*/ true,
+    )
+    .await
 }
 
 /// Test seam for [`remove_merged_workspace`] — explicit manager so
 /// tests can root it at a tempdir without mutating `LAZYBOX_HOME`.
+/// `archive` controls whether the row is recorded in `KV_KEY_ARCHIVED`:
+/// a user-confirmed removal archives (stay gone), the closed-issue
+/// auto-remove (issue #552) does not (so a reopen resurfaces it).
 pub(crate) async fn remove_merged_workspace_with(
     config: &ServerConfig,
     mgr: &lazybox_git_ops::WorktreeManager,
     key: &WorkspaceKey,
+    archive: bool,
 ) {
     // Capture the worktree paths before the row is gone —
     // `delete_workspace` drops the store record (and with it the
@@ -1476,9 +1497,9 @@ pub(crate) async fn remove_merged_workspace_with(
         .map(|w| workspace_worktree_paths(&w))
         .unwrap_or_default();
 
-    // Kills backing terminals, removes the row, and records the archive
-    // so the next poll doesn't resurrect the merged workspace.
-    if !super::delete_workspace(config, key).await {
+    // Kills backing terminals and removes the row; `archive` decides
+    // whether the next poll may resurrect it.
+    if !super::delete_workspace_with_archive(config, key, archive).await {
         // The lifecycle/store path already emitted a precise error. Keep the
         // worktrees and removal-prompt memory intact so the user can retry.
         return;
@@ -3166,6 +3187,35 @@ mod inspect_tests {
         assert_no_event(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
     }
 
+    /// #552: the auto-remove must NOT archive the key — unlike a
+    /// user-confirmed `x x`, an automatic close-cleanup should let a
+    /// later reopen on GitHub re-create the workspace, so the row is
+    /// dropped without being recorded in the archived set.
+    #[tokio::test]
+    async fn closed_issue_auto_remove_does_not_archive() {
+        let store = Arc::new(MemoryStore::new());
+        let key = seed_closed_issue_no_session(&store, 13);
+
+        let config = fresh_config(store);
+        let mgr = lazybox_git_ops::WorktreeManager::new(
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+        );
+
+        prompt_merged_pr_removal_with(
+            &config,
+            &mgr,
+            &key,
+            lazybox_ipc::RemovableTerminalState::Closed,
+        )
+        .await;
+
+        assert!(load_workspace(&config, &key).is_none(), "row must be gone");
+        assert!(
+            !crate::polling::load_archived_set(&config).contains(key.as_str()),
+            "auto-remove must not archive — a reopen should resurface it"
+        );
+    }
+
     /// #552: a closed issue that is clean but has a live terminal
     /// attached must NOT be yanked from under the user — it prompts
     /// (reporting the live terminal) instead of auto-removing.
@@ -3618,7 +3668,7 @@ mod inspect_tests {
         let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
         let mut rx = config.bus.subscribe();
 
-        remove_merged_workspace_with(&config, &mgr, &key).await;
+        remove_merged_workspace_with(&config, &mgr, &key, /*archive=*/ true).await;
 
         drain_until(&mut rx, |e| matches!(e, Event::WorkspaceRemoved(_))).await;
         assert!(!wt.exists(), "merged worktree should be deleted");
@@ -3667,7 +3717,7 @@ mod inspect_tests {
         let config = fresh_config(store);
         let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
 
-        remove_merged_workspace_with(&config, &mgr, &key).await;
+        remove_merged_workspace_with(&config, &mgr, &key, /*archive=*/ true).await;
 
         assert!(!wt.exists(), "force-delete must remove the dirty worktree");
         assert!(

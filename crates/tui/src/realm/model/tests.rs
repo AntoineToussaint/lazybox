@@ -730,6 +730,39 @@ mod effects_tests {
         assert!(m.active_removal_prompt.is_none());
     }
 
+    /// #552: even if the removal confirm has been buried under another
+    /// modal, a `RemovalCancelled` clears its binding so a later confirm
+    /// can't destroy the reopened workspace — the buried modal is left in
+    /// place (it's not on top) but is now a no-op.
+    #[test]
+    fn removal_cancelled_neutralizes_buried_prompt() {
+        use lazybox_ipc::Event as IpcEvent;
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::MergedPrRemovable {
+            workspace_key: WorkspaceKey::new("github:o/r#1"),
+            label: "o/r#1".into(),
+            terminal_state: lazybox_ipc::RemovableTerminalState::Closed,
+            active_terminal_count: 0,
+            has_local_work: true,
+        });
+        assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
+        // Bury the removal confirm under another modal.
+        m.modal_stack.push(Id::Help);
+
+        m.handle_daemon_event(IpcEvent::RemovalCancelled {
+            workspace_key: WorkspaceKey::new("github:o/r#1"),
+        });
+        assert!(
+            m.active_removal_prompt.is_none(),
+            "binding must be cleared so a confirm can't remove the reopened row"
+        );
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::Help),
+            "a buried removal confirm is not popped (it's not on top)"
+        );
+    }
+
     /// A `RemovalCancelled` for a *different* workspace leaves the
     /// mounted prompt untouched.
     #[test]

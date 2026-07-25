@@ -3376,19 +3376,16 @@ async fn upsert_into_workspace_key(config: &ServerConfig, key: &WorkspaceKey, ta
         None
     };
 
-    // REOPEN-CANCEL (issue #552): an issue flipping closed→open while a
-    // removal prompt is still outstanding cancels it — the workspace is
-    // alive again, so a stale "remove closed issue?" modal must go. Gate
-    // the store read on the in-memory prompt record so the common
-    // open-issue poll pays only a lock + map lookup, not a load.
+    // REOPEN-CANCEL (issue #552): an issue flipping closed→open cancels
+    // any outstanding removal prompt — the workspace is alive again, so a
+    // stale "remove closed issue?" modal must go. Detected off the stored
+    // (pre-`prepare_upsert`) state rather than the in-memory prompt
+    // record so it still fires after a daemon restart, when a client may
+    // hold a modal the restarted daemon has no cadence memory of. The
+    // load is scoped to open issues, whose predecessor state we'd need to
+    // read regardless.
     let reopened_issue = !task.is_pr()
         && task.state == lazybox_core::TaskState::Open
-        && config
-            .removal_prompts
-            .lock()
-            .await
-            .prompted
-            .contains_key(key.as_str())
         && issue_reopened(load_workspace(config, key).as_ref(), &task);
 
     // 1. PREPARE: build the workspace's final in-memory state.
@@ -5692,6 +5689,22 @@ pub fn unarchive_workspace_key(config: &ServerConfig, key: &str) -> bool {
 
 #[must_use]
 pub async fn delete_workspace(config: &ServerConfig, key: &WorkspaceKey) -> bool {
+    delete_workspace_with_archive(config, key, /*archive=*/ true).await
+}
+
+/// Like [`delete_workspace`] but with the archive decision explicit.
+/// `archive=true` records the key in `KV_KEY_ARCHIVED` so the next poll
+/// doesn't resurrect the row — the right choice for a user-intent
+/// removal (`x x`, a confirmed merged/closed removal). `archive=false`
+/// drops the row without archiving so a genuine upstream change can
+/// re-create it: the closed-issue auto-remove (issue #552) uses this so
+/// reopening the issue on GitHub brings its workspace back.
+#[must_use]
+pub async fn delete_workspace_with_archive(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    archive: bool,
+) -> bool {
     // Own the delete-vs-spawn serialization here so every destructive caller
     // (single workspace, merged cleanup, project cascade) gets it. Keeping
     // this only in one command-dispatch arm let other callers race a late
@@ -5702,7 +5715,7 @@ pub async fn delete_workspace(config: &ServerConfig, key: &WorkspaceKey) -> bool
         .insert(key.as_str().to_string());
     crate::spawn_handler::await_inflight_spawns(config, key.as_str()).await;
     let _workspace_guard = config.lock_workspace(key.as_str()).await;
-    let deleted = delete_workspace_internal(config, key, /*archive=*/ true).await;
+    let deleted = delete_workspace_internal(config, key, archive).await;
     // The tombstone must not outlive the delete it guarded: a
     // recreated same-name workspace re-allocates the same key
     // (`allocate_workspace_key` only consults the store), and a stale
@@ -6983,6 +6996,47 @@ mod rescope_collapse_tests {
                 .prompted
                 .contains_key(key.as_str()),
             "reopen must drop the reprompt throttle stamp"
+        );
+    }
+
+    /// #552: reopen-cancel fires off the stored predecessor state, not
+    /// the in-memory prompt stamp — so a daemon restarted with empty
+    /// cadence memory (holding no stamp) still tells clients to dismiss a
+    /// stale removal modal when the issue reopens.
+    #[tokio::test]
+    async fn reopened_issue_cancels_without_prior_stamp() {
+        let store = Arc::new(lazybox_store::MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+
+        let closed_issue = gh_task(
+            "o/r#72",
+            "https://github.com/o/r/issues/72",
+            TaskState::Closed,
+            vec![],
+        );
+        let ws = Workspace::from_task(closed_issue, Utc::now());
+        let key = ws.key.clone();
+        seed(&store, &ws);
+        // No removal_prompts stamp — models a fresh daemon process.
+
+        let mut rx = config.bus.subscribe();
+        let reopened = gh_task(
+            "o/r#72",
+            "https://github.com/o/r/issues/72",
+            TaskState::Open,
+            vec![],
+        );
+        upsert_into_workspace_key(&config, &key, reopened).await;
+
+        let mut saw_cancel = false;
+        while let Ok(evt) = rx.try_recv() {
+            if matches!(evt, Event::RemovalCancelled { .. }) {
+                saw_cancel = true;
+            }
+        }
+        assert!(
+            saw_cancel,
+            "reopen must broadcast RemovalCancelled even with no in-memory stamp"
         );
     }
 

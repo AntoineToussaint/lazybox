@@ -1971,8 +1971,12 @@ async fn resolve_or_create_session(
     // workspaces have no scope and no meaningful "main", so they fall
     // through to normal isolated provisioning.
     if on_main && let Some(path) = main_worktree_path(&workspace) {
-        let provisioned = provision_worktree(config, &workspace, &path, session_key, true).await;
-        if let Err(e) = &provisioned {
+        // A failed main-checkout provision FAILS THE SPAWN. The old
+        // fallback (`mkdir` an empty dir and carry on) fabricated a
+        // directory that masqueraded as the shared main checkout —
+        // the terminal opened in a non-git folder and the agent's
+        // first `git` command was the only thing that noticed.
+        if let Err(e) = provision_worktree(config, &workspace, &path, session_key, true).await {
             tracing::warn!("main-checkout worktree provisioning failed: {e}");
             emit_worktree_progress(
                 config,
@@ -1980,11 +1984,9 @@ async fn resolve_or_create_session(
                 WorktreeStep::Clone,
                 WorktreeStepStatus::Failed(e.to_string()),
             );
-            let _ = config.bus.send(Event::provider_error_retryable(
-                "worktree",
-                format!("main checkout setup failed; using empty dir ({e})"),
-            ));
-            ensure_dir_exists(&path).await;
+            return Err(crate::ServerError::Worktree(format!(
+                "main checkout setup failed — spawn aborted, retry once the cause is fixed: {e}"
+            )));
         }
         return Ok((path, SessionId::new(), true));
     }
@@ -1993,11 +1995,11 @@ async fn resolve_or_create_session(
         let session = workspace.find_session(id).ok_or_else(|| {
             crate::ServerError::Workspace(format!("session {id:?} not in workspace"))
         })?;
-        ensure_worktree_present(config, &workspace, &session.worktree_path, session_key).await;
+        ensure_worktree_present(config, &workspace, &session.worktree_path, session_key).await?;
         return Ok((session.worktree_path.clone(), session.id, false));
     }
     if let Some(session) = workspace.default_session() {
-        ensure_worktree_present(config, &workspace, &session.worktree_path, session_key).await;
+        ensure_worktree_present(config, &workspace, &session.worktree_path, session_key).await?;
         return Ok((session.worktree_path.clone(), session.id, false));
     }
 
@@ -2019,11 +2021,14 @@ async fn resolve_or_create_session(
         worktree = %path.display(),
         "provision_worktree complete",
     );
-    if let Err(e) = &provisioned {
+    if let Err(e) = provisioned {
         // Real-checkout failed (no GH access, branch missing, network
-        // hiccup) — fall back to an empty dir so spawn works. Surface
-        // a non-fatal error so the user knows their `s` press landed
-        // in a bare directory, not the PR's tree.
+        // hiccup) — FAIL THE SPAWN. The old fallback persisted the
+        // session anyway and `mkdir`'d an empty dir "so spawn works",
+        // which pinned the session to a non-git directory forever:
+        // every later spawn saw the path existed and never re-ran the
+        // repair machinery. No session is persisted here, so the next
+        // `w` press retries the full provision from scratch.
         tracing::warn!("worktree provisioning failed: {e}");
         // Surface the failure in the progress modal too, so a cold
         // clone that can't reach GitHub shows the error instead of the
@@ -2031,18 +2036,18 @@ async fn resolve_or_create_session(
         // (clone/fetch/worktree-add) are the only ones that abort
         // provisioning; mounts/scripts are best-effort. The modal freezes
         // on whichever step is on screen, so the exact variant here only
-        // names where in the checklist the ✗ lands.
+        // names where in the checklist the ✗ lands. The returned error
+        // additionally lands as a `spawn:session` provider error via
+        // `handle_spawn`'s resolve arm.
         emit_worktree_progress(
             config,
             session_key,
             WorktreeStep::Clone,
             WorktreeStepStatus::Failed(e.to_string()),
         );
-        let _ = config.bus.send(Event::provider_error_retryable(
-            "worktree",
-            format!("git worktree setup failed; using empty dir ({e})"),
-        ));
-        ensure_dir_exists(&path).await;
+        return Err(crate::ServerError::Worktree(format!(
+            "git worktree setup failed — spawn aborted, retry once the cause is fixed: {e}"
+        )));
     }
 
     // Provisioning above intentionally runs without the workspace lock. Once
@@ -2734,31 +2739,36 @@ fn expand_tilde(p: &std::path::Path) -> PathBuf {
     p.to_path_buf()
 }
 
-/// Idempotently create `path` (and parents). Used as the fallback when
-/// git checkout can't run, and for re-validation when the persisted
-/// session record points at a path that may have been removed by hand.
-async fn ensure_dir_exists(path: &std::path::Path) {
-    if let Some(parent) = path.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
-    }
-    let _ = tokio::fs::create_dir_all(path).await;
-}
-
 /// If a stored Session points at a worktree path the user has since
-/// removed (manual `rm -rf`, disk wipe, etc.), restore it. Tries a
-/// real `git worktree add` first so the recovered tree carries the
-/// PR's branch; falls back to a plain mkdir + ProviderError when git
-/// can't help (no clone, branch missing, no network).
+/// removed (manual `rm -rf`, disk wipe) — or at a directory that is
+/// NOT a completed checkout (the empty dir an old failed-provision
+/// fallback fabricated, a `.git` dangling after the bare clone was
+/// deleted) — restore it through the full provision path, whose
+/// `checkout_at` validation owns the reclaim/repair decisions.
+///
+/// The old guard here was a bare `path.exists()`, which made the
+/// git-ops repair machinery unreachable: once anything existed at the
+/// path — including a plain empty folder — every later spawn
+/// "succeeded" into it forever. The fast path now requires the dir to
+/// actually look like a finished checkout.
+///
+/// Failure fails the spawn (no empty-dir fallback): the caller
+/// surfaces it as a `spawn:session` provider error and the session
+/// record stays pointed at the path, so the next spawn retries the
+/// provision.
 async fn ensure_worktree_present(
     config: &ServerConfig,
     workspace: &Workspace,
     path: &std::path::Path,
     session_key: &SessionKey,
-) {
-    if path.exists() {
-        return;
+) -> Result<(), crate::ServerError> {
+    if lazybox_git_ops::worktree_dir_ready(path).await {
+        return Ok(());
     }
-    tracing::info!("worktree {} missing — re-provisioning", path.display());
+    tracing::info!(
+        "worktree {} missing or not a completed checkout — re-provisioning",
+        path.display()
+    );
     // Re-provisioning a persisted session's worktree — always an
     // isolated per-session tree (main-checkout terminals aren't
     // persisted as sessions).
@@ -2770,12 +2780,12 @@ async fn ensure_worktree_present(
             WorktreeStep::Clone,
             WorktreeStepStatus::Failed(e.to_string()),
         );
-        let _ = config.bus.send(Event::provider_error_retryable(
-            "worktree",
-            format!("re-checkout failed; using empty dir ({e})"),
-        ));
-        ensure_dir_exists(path).await;
+        return Err(crate::ServerError::Worktree(format!(
+            "re-checkout of {} failed — spawn aborted, retry once the cause is fixed: {e}",
+            path.display()
+        )));
     }
+    Ok(())
 }
 
 /// Look for an existing terminal in `session_key`'s set whose
@@ -3088,6 +3098,52 @@ pub(crate) async fn await_inflight_spawns(config: &ServerConfig, workspace_key: 
         )
         .await;
     }
+}
+
+/// Clear `workspace_key`'s delete tombstone in `deleted_workspaces`
+/// once its race window is provably closed.
+///
+/// The tombstone exists to kill spawns that raced the delete: a spawn
+/// that loaded the workspace before its store row vanished can still
+/// be provisioning when the delete finishes (`await_inflight_spawns`
+/// is bounded — a wedged provision outlives it), and the
+/// pre-registration `cancel_spawn_for_deleted_workspace` check is what
+/// stops it from registering a terminal for a dead workspace. Any
+/// spawn STARTING after the delete fails on its own: the workspace
+/// row is gone, so `resolve_or_create_session`'s load errors out.
+///
+/// So the tombstone is only needed while a pre-delete spawn claim is
+/// still in flight. Common case: none is (the delete already drained
+/// them) → clear synchronously. Otherwise clear in the background the
+/// moment the last claim for the key drops. Without this the
+/// tombstone lived forever: recreating a same-name workspace reuses
+/// the same key, and every spawn on the new row was silently killed.
+pub(crate) fn release_delete_tombstone(config: &ServerConfig, workspace_key: &str) {
+    let still_busy =
+        |cfg: &ServerConfig, key: &str| cfg.inflight_spawns.lock().keys().any(|(ws, _)| ws == key);
+    if !still_busy(config, workspace_key) {
+        config.deleted_workspaces.lock().remove(workspace_key);
+        return;
+    }
+    tracing::info!(
+        workspace = workspace_key,
+        "delete finished with a spawn still in flight — deferring tombstone release until it drains",
+    );
+    let config = config.clone();
+    let key = workspace_key.to_string();
+    tokio::spawn(async move {
+        loop {
+            if !still_busy(&config, &key) {
+                config.deleted_workspaces.lock().remove(key.as_str());
+                return;
+            }
+            let _ = tokio::time::timeout(
+                Duration::from_millis(200),
+                config.inflight_spawn_changed.notified(),
+            )
+            .await;
+        }
+    });
 }
 
 /// PR-attach path reconciliation. Walks every session in `workspace`
@@ -4557,6 +4613,15 @@ async fn prepare_submit_confirmation(
 /// instruction. When every attempt goes unconfirmed the give-up is
 /// loud — a user-visible error on the bus, not just a log line — so a
 /// parked prompt can't silently strand the agent.
+///
+/// Before every Enter (resend or give-up) the authoritative
+/// `agent_states` cache is re-checked: a permission chooser can appear
+/// AFTER the inject path's one-time `InputNeeded` gate, exactly as the
+/// paste lands. A bare Enter into that chooser selects its default
+/// answer — silently auto-approving a tool the user never saw — which
+/// is the same hazard the spawn path's readiness gate exists to avoid
+/// (see `await_inject_window`). So a chooser observed here aborts the
+/// resend loop and fails loudly instead of typing into the dialog.
 async fn confirm_prompt_submission(
     mut confirm: SubmitConfirmation,
     config: &ServerConfig,
@@ -4565,17 +4630,30 @@ async fn confirm_prompt_submission(
     deadline: Duration,
 ) {
     let mut resends = 0u32;
+    let mut blocked_on_input = false;
     let confirmed = loop {
         let wait = deadline * (resends + 1);
         if await_submit_evidence(
             &confirm.signal,
             &mut confirm.events,
             confirm.terminal_id,
+            &config.agent_states,
             wait,
         )
         .await
         {
             break true;
+        }
+        // No evidence — but before touching the keyboard again, consult
+        // the authoritative state: if the agent is parked on a
+        // permission gate / chooser, that dialog owns input and a bare
+        // Enter would ANSWER it (typically "Yes"). Abort instead; the
+        // loud failure below tells the user the prompt didn't start.
+        if config.agent_state_for(confirm.terminal_id).await
+            == Some(lazybox_ipc::AgentState::InputNeeded)
+        {
+            blocked_on_input = true;
+            break false;
         }
         if resends >= SUBMIT_RESEND_LIMIT {
             break false;
@@ -4624,6 +4702,22 @@ async fn confirm_prompt_submission(
         }
     }
     if confirmed {
+        return;
+    }
+    if blocked_on_input {
+        tracing::warn!(
+            terminal_id = ?confirm.terminal_id,
+            resends,
+            "prompt submit unconfirmed and the agent is now on a permission \
+             prompt — suppressing Enter resends (Enter would answer the prompt)",
+        );
+        let _ = confirm.bus.send(Event::TerminalInputRejected {
+            terminal_id: confirm.terminal_id,
+            message: "a permission prompt appeared while the injected prompt was being \
+                      submitted, so Enter was not resent (it would answer the prompt) — \
+                      answer the agent's prompt, then re-send the work if it didn't start"
+                .into(),
+        });
         return;
     }
     tracing::warn!(
@@ -4724,10 +4818,20 @@ async fn await_paste_settled(
 /// True when submission evidence arrived before `deadline`: the
 /// per-terminal `UserPromptSubmit` signal, or an `Event::AgentState`
 /// flipping this terminal to `Working`.
+///
+/// On a `Lagged` receiver the very `Working` transition may have been
+/// dropped, so the authoritative `states` map is consulted (mirroring
+/// [`wait_until_input_resolved`]) rather than ignoring the gap — an
+/// unobserved flip must not trigger spurious Enter resends into an
+/// already-working agent. Only a cached `Working` counts as evidence:
+/// any resting state (`Idle`/`Done`) may simply predate the submit.
 async fn await_submit_evidence(
     signal: &tokio::sync::Notify,
     events: &mut tokio::sync::broadcast::Receiver<Event>,
     terminal_id: TerminalId,
+    states: &std::sync::Arc<
+        tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
+    >,
     deadline: Duration,
 ) -> bool {
     let wait = async {
@@ -4742,7 +4846,13 @@ async fn await_submit_evidence(
                             ..
                         }) if tid == terminal_id => break true,
                         Ok(_) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            if states.lock().await.get(&terminal_id)
+                                == Some(&lazybox_ipc::AgentState::Working)
+                            {
+                                break true;
+                            }
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break false,
                     }
                 }
@@ -5853,12 +5963,41 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
     gc_scrollback_files(&workspaces, &lazybox_core::paths::scrollback_dir());
 
     // Snapshot live (session_key, kind) pairs so we can dedupe.
-    let live: std::collections::HashSet<(String, String)> = {
+    let mut live: std::collections::HashSet<(String, String)> = {
         let meta = config.terminal_meta.lock().await;
         meta.values()
             .map(|(sk, k)| (sk.as_str().to_string(), kind_id(k)))
             .collect()
     };
+    // `terminal_meta` alone is not the whole truth: startup recovery is
+    // run under a wall-clock bound (a wedged tmux must not freeze the
+    // launch) and a timeout cancels `recover_sessions` MID-LOOP —
+    // backend sessions it hadn't registered yet are alive but absent
+    // from the maps. Spawning a "restore" for those would put a second
+    // agent into the same worktree beside the surviving tmux session.
+    // Invariant: a live backend session for key K must never coexist
+    // with a fresh spawn for K — so fold the backend's own listing
+    // (resolved through the same persisted meta recovery uses) into
+    // the dedupe set. A listing failure means the backend is wedged
+    // and live sessions are unknowable; skip the restore pass entirely
+    // rather than risk double-spawning (a dead tmux server reports an
+    // empty list as `Ok`, so cold-start restores still run).
+    match config.backend.list().await {
+        Ok(backend_keys) => {
+            for backend_key in backend_keys {
+                if let Some((sk, kind)) = load_terminal_meta(config, &backend_key).await {
+                    live.insert((sk.as_str().to_string(), kind_id(&kind)));
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                "restore: backend.list failed ({e}) — skipping session restore, \
+                 cannot prove which persisted sessions are still live"
+            );
+            return;
+        }
+    }
 
     for record in workspaces {
         let Some(json) = record.workspace_json else {
@@ -6903,6 +7042,91 @@ mod tests {
         assert!(config.terminal_meta.lock().await.is_empty());
     }
 
+    /// The delete tombstone must not outlive the delete it guarded: a
+    /// recreated same-name workspace re-allocates the same key, and a
+    /// stale tombstone silently killed every spawn on the new row.
+    /// With no spawn in flight the release is synchronous with the
+    /// delete.
+    #[tokio::test]
+    async fn successful_delete_clears_the_tombstone() {
+        let (config, _mock) = ServerConfig::in_memory_with_mock();
+        let key = WorkspaceKey::new("test:del-clear");
+        let ws = Workspace::empty(key.clone(), "main", Utc::now());
+        config
+            .store
+            .save_workspace(&WorkspaceRecord {
+                key: key.as_str().to_string(),
+                created_at: ws.created_at,
+                workspace_json: Some(serde_json::to_string(&ws).expect("serialize")),
+            })
+            .expect("save workspace");
+
+        assert!(crate::polling::delete_workspace(&config, &key).await);
+        assert!(
+            !config.deleted_workspaces.lock().contains("test:del-clear"),
+            "the tombstone is released once the delete has fully settled"
+        );
+
+        // The recreated same-key workspace's spawns are not killed by
+        // a stale tombstone.
+        let session_key: SessionKey = "test:del-clear".into();
+        let backend_key = config
+            .backend
+            .spawn(&["claude".into()], None, &[], "recreated")
+            .await
+            .expect("spawn");
+        assert!(
+            !cancel_spawn_for_deleted_workspace(&config, &session_key, &backend_key).await,
+            "a spawn on the recreated workspace must proceed"
+        );
+    }
+
+    /// When a wedged provision outlived the delete's bounded
+    /// `await_inflight_spawns` wait, the tombstone must stay up until
+    /// that claim drains — it is the only thing stopping the late
+    /// spawn from registering a terminal for the dead workspace — and
+    /// be released right after.
+    #[tokio::test(start_paused = true)]
+    async fn delete_defers_tombstone_release_while_a_spawn_is_in_flight() {
+        let (config, _mock) = ServerConfig::in_memory_with_mock();
+        let key = WorkspaceKey::new("test:del-busy");
+        let ws = Workspace::empty(key.clone(), "main", Utc::now());
+        config
+            .store
+            .save_workspace(&WorkspaceRecord {
+                key: key.as_str().to_string(),
+                created_at: ws.created_at,
+                workspace_json: Some(serde_json::to_string(&ws).expect("serialize")),
+            })
+            .expect("save workspace");
+
+        let session_key: SessionKey = "test:del-busy".into();
+        let kind = TerminalKind::Agent("claude".into());
+        let guard = InflightSpawnGuard::try_claim(&config, &session_key, &kind, false)
+            .expect("claim the in-flight slot");
+
+        // The delete waits out `KILL_INFLIGHT_WAIT` (auto-advanced
+        // under paused time) and proceeds anyway — the wedged-spawn
+        // shape.
+        assert!(crate::polling::delete_workspace(&config, &key).await);
+        assert!(
+            config.deleted_workspaces.lock().contains("test:del-busy"),
+            "the tombstone must survive while the wedged spawn can still race registration"
+        );
+
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if !config.deleted_workspaces.lock().contains("test:del-busy") {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the tombstone is released once the in-flight claim drains");
+    }
+
     /// Concurrent injections must not clobber each other's submit
     /// signal: the first confirmation's cleanup may only remove the map
     /// entry if it is still ITS OWN `Notify` (`Arc::ptr_eq`). Pre-fix,
@@ -6954,6 +7178,109 @@ mod tests {
         assert!(
             config.prompt_submit_signals.lock().await.is_empty(),
             "second confirmation cleans up its own signal"
+        );
+    }
+
+    /// Injection-safety regression: when the agent flips to
+    /// `InputNeeded` after the paste (a permission chooser appeared and
+    /// swallowed the submit), the confirm loop must NOT resend Enter —
+    /// Enter into a chooser selects its default answer, silently
+    /// auto-approving a tool the user never saw. It aborts and fails
+    /// loudly instead.
+    #[tokio::test]
+    async fn chooser_mid_confirm_suppresses_enter_resends() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let key = config
+            .backend
+            .spawn(&["claude".into()], None, &[], "t")
+            .await
+            .unwrap();
+        let id = TerminalId(4246);
+        config.terminals.lock().await.insert(id, key.clone());
+        config
+            .agent_states
+            .lock()
+            .await
+            .insert(id, lazybox_ipc::AgentState::InputNeeded);
+        let mut bus = config.bus.subscribe();
+
+        let confirm = prepare_submit_confirmation(&config, id).await;
+        confirm_prompt_submission(confirm, &config, &key, b"\r", Duration::from_millis(10)).await;
+
+        assert!(
+            mock.writes_for(&key).await.is_empty(),
+            "no bare Enter may be written while a chooser owns input"
+        );
+        let mut rejected = false;
+        while let Ok(ev) = bus.try_recv() {
+            if matches!(
+                ev,
+                Event::TerminalInputRejected { terminal_id, .. } if terminal_id == id
+            ) {
+                rejected = true;
+            }
+        }
+        assert!(
+            rejected,
+            "the suppressed submit must fail loudly, not evaporate"
+        );
+    }
+
+    /// L5 regression: a bus receiver that lagged past the `Working`
+    /// transition must fall back to the authoritative `agent_states`
+    /// map instead of ignoring the gap — otherwise the confirm loop
+    /// resends Enter into an already-working agent up to the limit and
+    /// then posts a false "prompt parked" notice.
+    #[tokio::test]
+    async fn lagged_confirm_receiver_falls_back_to_state_map() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let key = config
+            .backend
+            .spawn(&["claude".into()], None, &[], "t")
+            .await
+            .unwrap();
+        let id = TerminalId(4247);
+        config.terminals.lock().await.insert(id, key.clone());
+        // The authoritative map saw the submit take: the agent is Working.
+        config
+            .agent_states
+            .lock()
+            .await
+            .insert(id, lazybox_ipc::AgentState::Working);
+
+        let confirm = prepare_submit_confirmation(&config, id).await;
+        // Overflow the confirmation's subscribed receiver so its next
+        // recv reports `Lagged` — the regime in which the `Working`
+        // transition itself was dropped from the bus.
+        for _ in 0..crate::BUS_CAPACITY + 8 {
+            let _ = config.bus.send(Event::TerminalOutput {
+                terminal_id: TerminalId(9_999),
+                bytes: Vec::new(),
+                first_seq: 0,
+                seq: 0,
+            });
+        }
+        // Subscribed after the flood so this receiver never lags and a
+        // false "prompt parked" notice can't hide behind its own gap.
+        let mut bus = config.bus.subscribe();
+        confirm_prompt_submission(confirm, &config, &key, b"\r", Duration::from_millis(10)).await;
+
+        assert!(
+            mock.writes_for(&key).await.is_empty(),
+            "a lag-hidden Working transition must not trigger Enter resends"
+        );
+        let mut rejected = false;
+        while let Ok(ev) = bus.try_recv() {
+            if matches!(
+                ev,
+                Event::TerminalInputRejected { terminal_id, .. } if terminal_id == id
+            ) {
+                rejected = true;
+            }
+        }
+        assert!(
+            !rejected,
+            "the lag fallback confirmed the submit; no false parked notice"
         );
     }
 
@@ -8799,6 +9126,75 @@ mod tests {
             "scratch",
             "standalone worktree is on the workspace branch",
         );
+    }
+
+    /// A failed worktree provision must FAIL the spawn — not persist a
+    /// session pinned to a fabricated empty dir. The old fallback
+    /// `mkdir`'d the path, persisted the session anyway, and every
+    /// later spawn short-circuited on `path.exists()` into a non-git
+    /// folder with no route back to the repair machinery.
+    #[tokio::test]
+    async fn failed_provision_fails_spawn_without_persisting_a_session() {
+        let config = ServerConfig::in_memory();
+        let mut task = task_for("github", "acme/widget#94242");
+        // A repo that isn't `owner/name` fails provisioning before any
+        // git or network work — a deterministic offline failure.
+        task.repo = Some("not-owner-name-format".into());
+        let session_key = persist_task_workspace(&config, task);
+        let kind = TerminalKind::Agent("claude".into());
+
+        let err = resolve_or_create_session(&config, &session_key, None, &kind, false)
+            .await
+            .expect_err("provision failure must fail the spawn loudly");
+        assert!(
+            err.to_string().contains("spawn aborted"),
+            "the error names the abort: {err}"
+        );
+
+        let ws = load_workspace(&config, &WorkspaceKey::new(session_key.as_str()))
+            .expect("workspace record survives");
+        assert!(
+            ws.sessions.is_empty(),
+            "no session may be persisted for a worktree that was never provisioned"
+        );
+        let path = worktree_path_for_session(&ws, 0);
+        assert!(
+            !path.exists(),
+            "no empty dir fabricated at {}",
+            path.display()
+        );
+    }
+
+    /// `ensure_worktree_present` used to hard-return on `path.exists()`,
+    /// which pinned persisted sessions to whatever debris sat at the
+    /// path (the empty dir an old failed provision fabricated). It now
+    /// routes anything that isn't a completed checkout back through
+    /// provisioning — here the standalone-init path, exercised offline.
+    #[tokio::test]
+    async fn ensure_worktree_present_reprovisions_a_non_checkout_dir() {
+        let config = ServerConfig::in_memory();
+        let mut ws = Workspace::empty(WorkspaceKey::new("scratch-repair"), "main", Utc::now());
+        ws.project_key = Some(lazybox_core::ProjectKey::local("notes"));
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("worktree");
+        // The empty non-git dir the old fallback left behind.
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let session_key = SessionKey::new("scratch-repair");
+
+        ensure_worktree_present(&config, &ws, &dir, &session_key)
+            .await
+            .expect("an empty leftover dir must be repaired, not trusted");
+        assert!(
+            dir.join(".git").exists(),
+            "the empty dir became a real checkout"
+        );
+
+        // A healthy checkout short-circuits without touching anything.
+        std::fs::write(dir.join("work.txt"), "user work").expect("write");
+        ensure_worktree_present(&config, &ws, &dir, &session_key)
+            .await
+            .expect("healthy fast path");
+        assert!(dir.join("work.txt").exists(), "fast path is a no-op");
     }
 
     const HARD: std::time::Duration = std::time::Duration::from_secs(10);

@@ -252,3 +252,37 @@ async fn concurrent_checkouts_of_same_repo_both_succeed() {
     assert_eq!(git_out(&a.path, &["rev-parse", "HEAD"]), tip);
     assert_eq!(git_out(&b.path, &["rev-parse", "HEAD"]), tip);
 }
+
+/// Manual `rm -rf` of a provisioned worktree leaves its registration
+/// behind in `<bare>/worktrees/`; git then refuses a re-add at the
+/// same path with "'<path>' is a missing but already registered
+/// worktree" — a wording the branch-collision matcher never caught, so
+/// the prune-and-retry ladder was skipped and the session stayed
+/// unprovisionable forever. The re-provision must prune the stale
+/// registration and produce a healthy checkout again.
+#[tokio::test]
+async fn rm_rfed_worktree_is_reprovisioned_at_the_same_path() {
+    let (upstream, base) = setup_upstream();
+    poison_bare(&base, "acme", "vanish", upstream.path());
+
+    let wm = WorktreeManager::new(base.path().to_path_buf());
+    let wt_path = base.path().join("worktrees").join("wt-vanish");
+    wm.checkout_at(&wt_path, "acme", "vanish", "main")
+        .await
+        .expect("first provision");
+
+    // The user wipes the worktree by hand; the registration survives.
+    std::fs::remove_dir_all(&wt_path).unwrap();
+
+    let restored = wm
+        .checkout_at(&wt_path, "acme", "vanish", "main")
+        .await
+        .expect("re-provision after a manual rm -rf must prune the stale registration and retry");
+    assert_eq!(restored.path, wt_path);
+    let tip = git_out(upstream.path(), &["rev-parse", "HEAD"]);
+    assert_eq!(
+        git_out(&wt_path, &["rev-parse", "HEAD"]),
+        tip,
+        "the recovered worktree holds the upstream tip again"
+    );
+}

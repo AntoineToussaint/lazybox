@@ -1021,19 +1021,13 @@ pub struct Model<T: TerminalAdapter> {
     /// Cleared when a workspace is removed (`Event::WorkspaceRemoved`)
     /// so a re-added workspace gets a fresh fetch.
     pr_details_fetched: std::collections::HashSet<lazybox_core::WorkspaceKey>,
-    /// Workspace keys we've already auto-fired `Command::MergePr` for
-    /// this arming. The persisted `auto_merge_on_green` flag is the
-    /// arm; this transient set is the one-shot latch that stops us
-    /// re-dispatching every poll while the merge is in flight. Cleared
-    /// when the PR leaves the merge-ready state (so a fresh green
-    /// re-fires after a failed race) and on `Event::WorkspaceRemoved`.
-    auto_merge_fired: std::collections::HashSet<lazybox_core::WorkspaceKey>,
     /// Workspace keys whose PR GitHub confirmed as merged (via
     /// `Command::MergePr` → `Event::PrMerged`) but whose next poll hasn't
     /// caught up yet. Held Model-side — not in a single pane — because the
     /// MERGED state must show identically in the sidebar row AND the
-    /// right-pane header, and `maybe_auto_merge` must not re-fire on a PR
-    /// we already know is merged. Every incoming `WorkspaceUpserted` /
+    /// right-pane header. (The "auto-merge on green" trigger itself lives
+    /// in the daemon — `polling::auto_merge` — not in this client.)
+    /// Every incoming `WorkspaceUpserted` /
     /// `Snapshot` is patched through [`Self::apply_merge_latch`] before
     /// fan-out, so an interim poll still reporting `Open` can't flicker
     /// the row back. Cleared once a poll confirms the terminal state
@@ -1492,7 +1486,6 @@ impl<T: TerminalAdapter> Model<T> {
             auto_fix_opt_out_labels: lazybox_core::AutoFixSettings::default().opt_out_labels,
             auto_fix_enabled: lazybox_core::AutoFixSettings::default().enabled,
             pr_details_fetched: std::collections::HashSet::new(),
-            auto_merge_fired: std::collections::HashSet::new(),
             merge_confirmed: std::collections::HashSet::new(),
             outdated_scroll_terminals: std::collections::HashSet::new(),
             outdated_scroll_hinted: None,
@@ -2025,6 +2018,14 @@ impl<T: TerminalAdapter> Model<T> {
             Err(e) => tracing::warn!("read recent_snippets failed: {e}"),
         }
         self.recent_snippets_store = Some(store);
+        // Known residual: after a FAILED read the in-memory MRU starts
+        // empty, so the user's next snippet send persists a short list
+        // over whatever the row held. Deliberately not hardened the way
+        // the archived-workspaces set is (`load_archived_set_strict` in
+        // the server): this row is a trivially-rebuildable convenience
+        // cache — the worst case is the Recent group repopulating from
+        // use — not user history whose loss is destructive.
+        //
         // Flush the pruned list back so dead keys don't linger in the DB
         // across future seeds — but only when the load succeeded and
         // dropped something, so we never overwrite a valid or corrupt
@@ -3496,7 +3497,21 @@ impl<T: TerminalAdapter> Model<T> {
     /// The run loop calls this on a clean exit; the guard's `Drop` is
     /// the backstop for error / panic / signal paths so the host shell
     /// is never stranded in Kitty keyboard mode (#211).
+    ///
+    /// Also asks the daemon to end this connection's serve loop:
+    /// `Command::Shutdown` rides the command channel BEHIND any queued
+    /// work, and on arrival the serve loop breaks and runs its bounded
+    /// in-flight-mutation drain — so a `q q` right after a merge or
+    /// workspace delete doesn't strand the mutation when the embedded
+    /// runtime drops (dropping the `Client` remains the backstop
+    /// trigger if the send fails). For a `--connect` client this ends
+    /// only its own connection; the standalone daemon keeps running.
     pub fn shutdown(&mut self) {
+        if let Err(error) = self.client.send(IpcCommand::Shutdown) {
+            tracing::debug!(
+                "quit: Shutdown command not delivered ({error}); relying on client drop"
+            );
+        }
         self.term_guard.take();
     }
     /// The Activity (right) pane's mode for the currently-selected

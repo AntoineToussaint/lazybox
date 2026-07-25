@@ -218,11 +218,21 @@ pub trait TaskProvider: Send + Sync {
     /// will check `workspace.pr` (or equivalent) is ready and
     /// dispatch to the backend's merge mutation.
     ///
+    /// `expected_head_oid` — when the caller knows which head commit it
+    /// verified as merge-ready — asks the backend to reject the merge
+    /// if the head has since moved (GitHub's `expectedHeadOid`
+    /// compare-and-swap). `None` skips the guard; providers without an
+    /// equivalent concept may ignore it.
+    ///
     /// Idempotency: if the task is already merged, return `Ok(())`
     /// rather than `Permanent` — the polling cycle will reconcile
     /// the local copy regardless.
-    async fn merge(&self, workspace: &Workspace) -> Result<(), ProviderError> {
-        let _ = workspace;
+    async fn merge(
+        &self,
+        workspace: &Workspace,
+        expected_head_oid: Option<&str>,
+    ) -> Result<(), ProviderError> {
+        let _ = (workspace, expected_head_oid);
         Err(ProviderError::unsupported(self.name(), "merge"))
     }
 

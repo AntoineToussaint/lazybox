@@ -8,9 +8,10 @@
 //! provenance. This module owns the per-session overrides and documents
 //! how the three compose so nothing acts silently:
 //!
-//! 1. **merge-on-green** — lazybox's *client-side* arm
-//!    ([`crate::Workspace::auto_merge_on_green`]). Fires a merge the
-//!    moment your own PR is merge-ready, and only while lazybox runs. It
+//! 1. **merge-on-green** — lazybox's arm
+//!    ([`crate::Workspace::auto_merge_on_green`]). The *daemon* fires a
+//!    merge the moment your own PR is merge-ready (see
+//!    [`should_auto_merge`]), and only while the daemon runs. It
 //!    stays on its own `Workspace` field (already wired end-to-end) but
 //!    is presented in the same policies surface.
 //! 2. **auto-fix** — spawns an agent to fix failing CI / a merge
@@ -23,11 +24,10 @@
 //!
 //! ### Precedence
 //!
-//! - **native auto-merge > client merge-on-green.** When GitHub's native
-//!   auto-merge is already enabled on a PR, lazybox's client-side
-//!   merge-on-green stands down (see `lazybox_tui_core::intent`'s
-//!   `should_auto_merge`) — GitHub will land it, so a second client-side
-//!   merge is redundant and racy.
+//! - **native auto-merge > lazybox merge-on-green.** When GitHub's native
+//!   auto-merge is already enabled on a PR, lazybox's merge-on-green
+//!   stands down (see [`should_auto_merge`]) — GitHub will land it, so a
+//!   second merge fired by lazybox is redundant and racy.
 //! - **auto-fix per-session [`PolicyArm`]** resolves as
 //!   [`auto_fix_permitted`] documents: an explicit `Disarm` beats
 //!   everything, an explicit `Arm` overrides a label opt-out, and
@@ -44,8 +44,96 @@
 //! fix); the UI surfaces them as unavailable there rather than arming a
 //! flag that could never fire.
 
-use crate::AutoFixKind;
+use crate::{AutoFixKind, Task, Workspace};
 use serde::{Deserialize, Serialize};
+
+/// Why this PR can't be merged from lazybox right now, as a
+/// user-facing phrase — or `None` when nothing blocks it. Drives both
+/// the merge-ready gate (`resolve_merge` in `lazybox-tui-core`) and the
+/// message shown when a confirmed merge can't proceed, so the hint and
+/// the explanation never disagree. Lives in core (not the TUI layer)
+/// because the daemon's auto-merge path re-verifies eligibility with
+/// the same predicate before every automatic merge.
+///
+/// We deliberately do NOT require a formal `Approved` review. Repos
+/// without required reviews — a personal repo, your own PR — let you
+/// merge with no approval, so demanding one here produced false
+/// "not merge-ready" blocks. We only veto on `ChangesRequested`, which
+/// is an unambiguous "not yet" regardless of branch protection. For
+/// anything subtler (a required review that isn't satisfied, a
+/// required-but-unfinished check) we let the merge dispatch and surface
+/// GitHub's real rejection rather than guessing at protection rules we
+/// don't fetch.
+pub fn merge_block_reason(pr: &Task) -> Option<&'static str> {
+    if !matches!(
+        pr.state,
+        crate::TaskState::Open | crate::TaskState::InReview
+    ) {
+        return Some("the PR isn't open");
+    }
+    if matches!(pr.review, crate::ReviewStatus::ChangesRequested) {
+        return Some("changes were requested — address the review first");
+    }
+    if !matches!(pr.ci, crate::CiStatus::Success | crate::CiStatus::None) {
+        return Some("CI isn't green yet");
+    }
+    if pr.mergeable.is_conflicting() {
+        return Some("the branch has merge conflicts");
+    }
+    None
+}
+
+/// Why "auto-merge on green" must NOT fire for this workspace *right
+/// now*, as a user-facing phrase — or `None` when an automatic merge is
+/// allowed. [`should_auto_merge`] is the boolean view of this.
+///
+/// The auto gate is deliberately **stricter** than [`merge_block_reason`]
+/// (the manual `g m` gate), because auto-merge acts with no keypress:
+///
+/// 1. The workspace must be armed (`auto_merge_on_green`).
+/// 2. Your **own** PR only (`TaskRole::Author`) — lazybox never
+///    auto-merges someone else's PR, even if it's green.
+/// 3. CI must be positively **green** (`CiStatus::Success`). Unlike the
+///    manual gate, `CiStatus::None` (a PR with no checks configured)
+///    does NOT qualify — we don't silently land a PR that never ran CI.
+/// 4. Everything the manual gate blocks on still blocks
+///    ([`merge_block_reason`]): the PR must be open (drafts, merged and
+///    closed PRs are out), no changes-requested review, no conflict.
+/// 5. GitHub's **native** auto-merge is not already enabled. Precedence
+///    (issue #363): native auto-merge wins — GitHub will land the PR
+///    itself once it's ready, so firing lazybox's own merge on top is
+///    redundant and races the server-side merge.
+///
+/// Nothing here that `g m` wouldn't also merge — this is a subset.
+pub fn auto_merge_block_reason(workspace: &Workspace) -> Option<&'static str> {
+    if !workspace.auto_merge_on_green {
+        return Some("auto-merge on green isn't armed");
+    }
+    let Some(pr) = workspace.pr.as_ref() else {
+        return Some("the workspace has no PR");
+    };
+    // Native auto-merge takes precedence — let GitHub land it.
+    if pr.auto_merge_enabled {
+        return Some("GitHub's native auto-merge is already enabled");
+    }
+    if pr.role != crate::TaskRole::Author {
+        return Some("only your own PRs auto-merge");
+    }
+    if pr.ci != crate::CiStatus::Success {
+        return Some("CI isn't green");
+    }
+    merge_block_reason(pr)
+}
+
+/// Should the daemon auto-fire a merge for this workspace *right now*?
+///
+/// The "auto-merge on green" trigger — evaluated by the daemon's
+/// polling commit path (so it fires with or without an attached TUI,
+/// and exactly once across any number of clients). See
+/// [`auto_merge_block_reason`] for the full guard list.
+pub fn should_auto_merge(workspace: &Workspace) -> bool {
+    auto_merge_block_reason(workspace).is_none()
+}
 
 /// Per-session override for an auto-fix behavior. The unified,
 /// discoverable replacement for "label opt-out only" — a workspace can
@@ -210,5 +298,171 @@ mod tests {
         let p: AutomationPolicies = serde_json::from_str("{}").unwrap();
         assert_eq!(p, AutomationPolicies::default());
         assert_eq!(p.auto_fix_ci, PolicyArm::Default);
+    }
+}
+
+/// Merge-eligibility tests, moved here from `lazybox-tui-core`'s
+/// `intent` module when the predicate moved into core so the daemon's
+/// auto-merge path could share it.
+#[cfg(test)]
+mod merge_gate_tests {
+    use super::*;
+    use crate::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace};
+    use chrono::Utc;
+
+    fn pr(key: &str, ci: CiStatus, review: ReviewStatus) -> Workspace {
+        let (path, num) = key.rsplit_once('#').unwrap_or((key, "1"));
+        let task = Task {
+            id: TaskId {
+                source: "github".into(),
+                key: key.into(),
+            },
+            title: format!("PR {key}"),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Author,
+            ci,
+            review,
+            checks: vec![],
+            unread_count: 0,
+            url: format!("https://github.com/{path}/pull/{num}"),
+            repo: Some("o/r".into()),
+            branch: Some("main".into()),
+            base_branch: None,
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: crate::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            kind: None,
+            closes_issues: vec![],
+        };
+        Workspace::from_task(task, Utc::now())
+    }
+
+    fn issue(key: &str) -> Workspace {
+        let (path, num) = key.rsplit_once('#').unwrap_or((key, "1"));
+        let mut t = pr(key, CiStatus::None, ReviewStatus::None);
+        // Convert to issue: clear pr, attach as gh_issue.
+        let mut task = t.pr.take().unwrap();
+        task.url = format!("https://github.com/{path}/issues/{num}");
+        t.attach_task(task);
+        t
+    }
+
+    #[test]
+    fn should_auto_merge_only_when_armed() {
+        let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::Approved);
+        assert!(!should_auto_merge(&ws), "disarmed workspace never fires");
+        ws.auto_merge_on_green = true;
+        assert!(should_auto_merge(&ws), "armed + green + own PR fires");
+    }
+
+    #[test]
+    fn should_auto_merge_requires_own_pr() {
+        // Never auto-merge someone else's PR, even armed + green.
+        for role in [TaskRole::Reviewer, TaskRole::Assignee, TaskRole::Mentioned] {
+            let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::Approved);
+            ws.pr.as_mut().unwrap().role = role;
+            ws.auto_merge_on_green = true;
+            assert!(!should_auto_merge(&ws), "role {role:?} must not auto-merge");
+        }
+    }
+
+    #[test]
+    fn should_auto_merge_requires_green_not_none() {
+        // Manual `g m` treats CiStatus::None as mergeable, but
+        // auto-merge must NOT land a PR that never ran CI.
+        let mut ws = pr("o/r#1", CiStatus::None, ReviewStatus::Approved);
+        ws.auto_merge_on_green = true;
+        assert!(
+            !should_auto_merge(&ws),
+            "no-CI PR must not auto-merge even though `g m` would allow it"
+        );
+        // Sanity: the manual gate DOES allow this one.
+        assert_eq!(merge_block_reason(ws.pr.as_ref().unwrap()), None);
+    }
+
+    #[test]
+    fn should_auto_merge_honors_every_manual_block() {
+        // Anything the manual gate blocks, auto-merge blocks too.
+        let mut armed_conflict = pr("o/r#1", CiStatus::Success, ReviewStatus::None);
+        armed_conflict.auto_merge_on_green = true;
+        armed_conflict.pr.as_mut().unwrap().mergeable = crate::Mergeable::Conflicting;
+        assert!(!should_auto_merge(&armed_conflict), "conflict blocks");
+
+        let mut armed_changes = pr("o/r#1", CiStatus::Success, ReviewStatus::ChangesRequested);
+        armed_changes.auto_merge_on_green = true;
+        assert!(
+            !should_auto_merge(&armed_changes),
+            "changes-requested blocks"
+        );
+
+        let mut armed_failing = pr("o/r#1", CiStatus::Failure, ReviewStatus::Approved);
+        armed_failing.auto_merge_on_green = true;
+        assert!(!should_auto_merge(&armed_failing), "red CI blocks");
+    }
+
+    #[test]
+    fn should_auto_merge_defers_to_native_auto_merge() {
+        // Precedence (issue #363): when GitHub's native auto-merge is
+        // already enabled, lazybox's merge-on-green stands down —
+        // GitHub will land it, so a second lazybox merge is redundant
+        // and races the server-side one.
+        let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::Approved);
+        ws.auto_merge_on_green = true;
+        assert!(should_auto_merge(&ws), "armed + green fires without native");
+        ws.pr.as_mut().unwrap().auto_merge_enabled = true;
+        assert!(
+            !should_auto_merge(&ws),
+            "native auto-merge takes precedence over lazybox merge-on-green"
+        );
+    }
+
+    #[test]
+    fn should_auto_merge_never_fires_on_draft() {
+        let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::Approved);
+        ws.auto_merge_on_green = true;
+        ws.pr.as_mut().unwrap().state = TaskState::Draft;
+        assert!(!should_auto_merge(&ws), "draft PRs never auto-merge");
+    }
+
+    #[test]
+    fn should_auto_merge_never_fires_on_issue() {
+        let mut ws = issue("o/r#42");
+        ws.auto_merge_on_green = true;
+        assert!(
+            !should_auto_merge(&ws),
+            "issue workspaces have no PR to merge"
+        );
+    }
+
+    /// The reason view and the boolean view can never disagree — the
+    /// daemon's stand-down notice names the same guard the predicate
+    /// tripped on.
+    #[test]
+    fn block_reason_is_none_exactly_when_predicate_fires() {
+        let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::Approved);
+        ws.auto_merge_on_green = true;
+        assert_eq!(auto_merge_block_reason(&ws), None);
+        ws.pr.as_mut().unwrap().ci = CiStatus::Failure;
+        assert_eq!(auto_merge_block_reason(&ws), Some("CI isn't green"));
+        ws.pr.as_mut().unwrap().ci = CiStatus::Success;
+        ws.pr.as_mut().unwrap().review = ReviewStatus::ChangesRequested;
+        assert_eq!(
+            auto_merge_block_reason(&ws),
+            Some("changes were requested — address the review first")
+        );
     }
 }

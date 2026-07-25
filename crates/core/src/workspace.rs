@@ -144,12 +144,62 @@ pub enum CleanupPrompt {
     Declined,
 }
 
+/// Version stamped into every persisted `Workspace` JSON blob.
+///
+/// Bump this when a field is renamed, retyped, or otherwise changed in
+/// a way that a lenient `#[serde(default)]` read cannot round-trip
+/// losslessly. Readers compare a stored row's `schema` against this
+/// constant: a row stamped NEWER than the running build must be
+/// preserved untouched (never lenient-parsed and rewritten), because a
+/// rewrite by an older build silently drops every field it doesn't
+/// know about. See [`Workspace::decode_persisted`].
+///
+/// History:
+/// - 0: every record written before the field existed (reads back via
+///   `#[serde(default)]`).
+/// - 1: the `schema` field itself.
+pub const WORKSPACE_SCHEMA_VERSION: u32 = 1;
+
+/// Serialize hook for [`Workspace::schema`]: always stamp the CURRENT
+/// version on save, regardless of what version the row was loaded at.
+/// A row we were able to decode and are willing to rewrite is, by
+/// definition, now in the running build's shape.
+fn stamp_current_schema<S>(_loaded: &u32, s: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    s.serialize_u32(WORKSPACE_SCHEMA_VERSION)
+}
+
+/// Why a persisted workspace blob was refused by
+/// [`Workspace::decode_persisted`]. Either way the caller must treat
+/// the stored row as present-but-unreadable: preserve it, never
+/// overwrite it with freshly-derived state.
+#[derive(Debug, thiserror::Error)]
+pub enum WorkspaceDecodeError {
+    #[error("invalid workspace JSON: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error(
+        "workspace schema v{found} is newer than this build supports (v{supported}); \
+         refusing lenient decode so a downgraded build cannot rewrite the row and \
+         erase fields it does not know about"
+    )]
+    NewerSchema { found: u32, supported: u32 },
+}
+
 /// One workspace = one unit of work (PR + linked issues), holding
 /// **zero or more sessions**. A session is one folder worktree on
 /// disk; without sessions the workspace is purely a tracking row
 /// with no on-disk presence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workspace {
+    /// Persistence schema version this row was LOADED at (0 for
+    /// records predating the field). Serialization always stamps
+    /// [`WORKSPACE_SCHEMA_VERSION`] via the `stamp_current_schema` hook.
+    /// Compared by [`Workspace::decode_persisted`] to refuse rows
+    /// written by a newer build.
+    #[serde(default, serialize_with = "stamp_current_schema")]
+    pub schema: u32,
     pub key: WorkspaceKey,
     /// The Project this workspace lives under (sidebar grouping
     /// header). `None` only during back-compat reads of pre-Project
@@ -200,13 +250,14 @@ pub struct Workspace {
     #[serde(default)]
     pub snoozed_until: Option<DateTime<Utc>>,
     /// Per-workspace "auto-merge on green" arm. When `true`, the
-    /// client auto-fires a merge the moment this workspace's own PR
-    /// becomes merge-ready (green CI, no conflict, no changes
-    /// requested). User-toggled, persisted in the workspace JSON blob
-    /// alongside [`Workspace::snoozed_until`]. Distinct from the PR's
-    /// `Task::auto_merge_enabled` — that's GitHub's native server-side
-    /// "merge when ready"; this is lazybox's client-side arm that only
-    /// acts while lazybox is running.
+    /// **daemon's** polling commit path auto-fires a merge the moment
+    /// this workspace's own PR becomes merge-ready (green CI, no
+    /// conflict, no changes requested — see
+    /// [`crate::should_auto_merge`]). User-toggled, persisted in the
+    /// workspace JSON blob alongside [`Workspace::snoozed_until`].
+    /// Distinct from the PR's `Task::auto_merge_enabled` — that's
+    /// GitHub's native server-side "merge when ready"; this is
+    /// lazybox's arm that only acts while the lazybox daemon runs.
     #[serde(default)]
     pub auto_merge_on_green: bool,
     /// Per-workspace "track main" arm (issue #535). When `true`, the
@@ -272,6 +323,7 @@ impl Workspace {
     pub fn empty(key: WorkspaceKey, branch: impl Into<String>, now: DateTime<Utc>) -> Self {
         let branch = branch.into();
         Self {
+            schema: WORKSPACE_SCHEMA_VERSION,
             name: key.as_str().to_string(),
             key,
             project_key: None,
@@ -297,6 +349,33 @@ impl Workspace {
             created_at: now,
             last_viewed_at: None,
         }
+    }
+
+    /// Decode a persisted workspace JSON blob, refusing rows this
+    /// build cannot round-trip losslessly.
+    ///
+    /// Two failure modes, both meaning "the row is present but
+    /// unreadable — preserve it, do not overwrite it":
+    /// - the JSON doesn't parse (corruption, or a shape change a
+    ///   lenient serde read chokes on);
+    /// - the row's [`Workspace::schema`] stamp is newer than
+    ///   [`WORKSPACE_SCHEMA_VERSION`]. Lenient serde would *parse* such
+    ///   a row fine (unknown fields are ignored), but any subsequent
+    ///   save would rewrite it minus the newer build's fields — the
+    ///   downgrade-erases-data hole. Refusing here routes the row into
+    ///   the same preserve-and-report machinery as corruption.
+    ///
+    /// Every load that can lead to a save of the same row must go
+    /// through this instead of a bare `serde_json::from_str`.
+    pub fn decode_persisted(json: &str) -> Result<Self, WorkspaceDecodeError> {
+        let ws: Self = serde_json::from_str(json)?;
+        if ws.schema > WORKSPACE_SCHEMA_VERSION {
+            return Err(WorkspaceDecodeError::NewerSchema {
+                found: ws.schema,
+                supported: WORKSPACE_SCHEMA_VERSION,
+            });
+        }
+        Ok(ws)
     }
 
     /// Whether this workspace carries a non-empty local note. Drives the
@@ -588,6 +667,52 @@ impl Workspace {
             .collect();
     }
 
+    /// Absorb another workspace's activity feed *and its read/seen
+    /// state*. Used by the issue→PR collapse: the folded issue's
+    /// comment history must survive on the PR workspace, and the rows
+    /// the user already read there must not resurface as unread
+    /// (docs/resiliency-review.md flagged the collapse as dropping
+    /// both).
+    ///
+    /// Built on [`Self::merge_activity`], which already preserves
+    /// *this* workspace's read/seen marks content-wise across the
+    /// merge; this method additionally snapshots `other`'s read and
+    /// seen identity keys up front and, after the merge, flips every
+    /// merged row carrying one of those identities to read. Rows that
+    /// were unread in `other` stay unread here. `other` is untouched
+    /// — the caller deletes its row separately.
+    pub fn absorb_activity_from(&mut self, other: &Workspace) {
+        if other.activity.is_empty() {
+            return;
+        }
+        // Snapshot the absorbed workspace's read + seen state by the
+        // same occurrence-aware identity `merge_activity` uses, so
+        // remapping follows identical rules on both sides of the
+        // merge (including the twin/occurrence disambiguation).
+        let other_ids = activity_identities(&other.activity);
+        let mut carried: HashSet<ActivityIdentity> = other
+            .read_indices
+            .iter()
+            .filter_map(|i| other_ids.get(*i).cloned())
+            .collect();
+        let seen_start = other.activity.len().saturating_sub(other.seen_count);
+        carried.extend(other_ids.get(seen_start..).unwrap_or(&[]).iter().cloned());
+
+        self.merge_activity(&other.activity);
+
+        // Re-derive identities on the merged list and mark read every
+        // row the absorbed workspace had read-or-seen. Rows already
+        // inside this workspace's seen suffix are implicitly read and
+        // need no explicit mark.
+        let ids = activity_identities(&self.activity);
+        let cut = self.activity.len() - self.seen_count;
+        for (i, id) in ids.iter().take(cut).enumerate() {
+            if carried.contains(id) {
+                self.read_indices.insert(i);
+            }
+        }
+    }
+
     /// The "headline" task for this workspace — the one components
     /// like the sidebar row and the right-pane header render. PRs
     /// always win over issues; among issues we pick the first GitHub
@@ -676,10 +801,27 @@ impl Workspace {
     ///
     /// Resolution order:
     /// - PR attached → `PR-{number}-{slug-of-title}` (capped at 8
-    ///   words so it stays scannable).
-    /// - No PR but a custom workspace name → slug of `name`.
-    /// - Both empty → fall back to a stable `workspace_{key-suffix}`
+    ///   words so it stays scannable). The number disambiguates
+    ///   same-titled PRs.
+    /// - No PR but an upstream task (issue / ticket) →
+    ///   `issue-{number}-{slug-of-name}` (or `{slug-of-task-key}-…`
+    ///   for numberless sources like Linear). Title alone used to be
+    ///   the whole slug, so two issues titled "Bump dependencies"
+    ///   silently shared one checkout — and one branch.
+    /// - No task but a custom workspace name → slug of `name`; when
+    ///   the workspace key was allocated from that same name
+    ///   (`<slug>` / `<slug>-2` / …, see the daemon's
+    ///   `allocate_workspace_key`) the key itself is used, so two
+    ///   same-named scratch workspaces get distinct directories while
+    ///   the first keeps its legacy `<slug>` path.
+    /// - All empty → fall back to a stable `workspace_{key-suffix}`
     ///   placeholder so the path is always non-empty.
+    ///
+    /// Back-compat: a session's `worktree_path` is persisted at
+    /// creation and reused in place when the directory is a live
+    /// worktree (see the server's `migrate_session_paths_if_needed`),
+    /// so a slug-scheme change only affects worktrees provisioned
+    /// after it — existing checkouts keep resolving.
     pub fn worktree_slug(&self) -> String {
         if let Some(pr) = self.pr.as_ref()
             && let Some((_, num_str)) = pr.id.key.rsplit_once('#')
@@ -688,7 +830,53 @@ impl Workspace {
             return crate::slug::pr_slug(num, &pr.title);
         }
         let name_slug = crate::slug::slugify(&self.name);
+        // Non-PR workspace anchored to an upstream task: prefix the
+        // task's stable discriminator, mirroring branch naming
+        // (`issue-42-bump-dependencies`).
+        if self.pr.is_none()
+            && let Some(task) = self.primary_task()
+        {
+            let number = task
+                .id
+                .key
+                .rsplit_once('#')
+                .map(|(_, n)| n)
+                .filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+            let stem = match number {
+                Some(n) => Some(format!("issue-{n}")),
+                // Numberless task keys (Linear `ENG-456`, …) slugify
+                // to a stable discriminator of their own.
+                None => {
+                    let key_slug = crate::slug::slugify(&task.id.key);
+                    (!key_slug.is_empty()).then_some(key_slug)
+                }
+            };
+            if let Some(stem) = stem {
+                return if name_slug.is_empty() {
+                    stem
+                } else {
+                    format!("{stem}-{name_slug}")
+                };
+            }
+        }
         if !name_slug.is_empty() {
+            // A key allocated from this same name is the collision-free
+            // form of the name slug (`bump-deps`, `bump-deps-2`, …):
+            // use it directly. Identical to the name slug for the first
+            // workspace of a name — the legacy path — and suffixed for
+            // later same-named siblings, which used to collide. Keys
+            // not derived from the name (task-keyed records that lost
+            // their task, sandbox keys) keep the plain name slug.
+            let key = self.key.as_str();
+            let name_derived_key = key == name_slug
+                || key
+                    .strip_prefix(&format!("{name_slug}-"))
+                    .is_some_and(|rest| {
+                        !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
+                    });
+            if name_derived_key {
+                return key.to_string();
+            }
             return name_slug;
         }
         // Fall-back: avoid empty paths even on a fully-anonymous
@@ -2046,6 +2234,170 @@ mod tests {
         assert!(!old.track_main_behind);
     }
 
+    /// A submitted review that was EDITED keeps its GraphQL node id but
+    /// changes its body. With a stable node id the merge must replace
+    /// the stored copy in place — never append a duplicate row (the
+    /// pending-review-duplicates bug was the node-id-less flavor of
+    /// this: identity fell back to (author, body, created_at) with a
+    /// fresh timestamp every poll).
+    #[test]
+    fn merge_activity_same_node_id_review_edit_replaces_in_place() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("ws-1"), "main", now());
+        let mut review = activity_at(10, "LGTM");
+        review.kind = ActivityKind::Review;
+        review.node_id = Some("PRR_1".into());
+        ws.merge_activity(std::slice::from_ref(&review));
+        assert_eq!(ws.activity.len(), 1);
+
+        // Same node id, edited body, same timestamp (GitHub keeps
+        // submittedAt on edit).
+        let mut edited = review.clone();
+        edited.body = "LGTM — one nit".into();
+        ws.merge_activity(std::slice::from_ref(&edited));
+        assert_eq!(
+            ws.activity.len(),
+            1,
+            "an edit with the same node id must replace, not duplicate"
+        );
+        assert_eq!(ws.activity[0].body, "LGTM — one nit");
+
+        // Re-polling the identical review stays idempotent.
+        ws.merge_activity(std::slice::from_ref(&edited));
+        assert_eq!(ws.activity.len(), 1);
+    }
+
+    /// Same-node-id replacement also holds when the re-poll carries a
+    /// DIFFERENT created_at (a pending review that gets submitted gains
+    /// a real submittedAt): the node id wins over the tuple.
+    #[test]
+    fn merge_activity_same_node_id_survives_timestamp_change() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("ws-1"), "main", now());
+        let mut review = activity_at(10, "thinking...");
+        review.kind = ActivityKind::Review;
+        review.node_id = Some("PRR_2".into());
+        ws.merge_activity(std::slice::from_ref(&review));
+
+        let mut submitted = review.clone();
+        submitted.created_at = now() + chrono::Duration::seconds(500);
+        ws.merge_activity(std::slice::from_ref(&submitted));
+        assert_eq!(
+            ws.activity.len(),
+            1,
+            "same node id with a new timestamp must still replace in place"
+        );
+        assert_eq!(ws.activity[0].created_at, submitted.created_at);
+    }
+
+    /// Issue→PR collapse (docs/resiliency-review.md): the absorbed
+    /// issue workspace's activity must land on the PR workspace WITH
+    /// its read/seen state — a comment the user already read on the
+    /// issue must not resurface as unread after the fold, and the
+    /// issue's genuinely-unread rows must stay unread.
+    #[test]
+    fn absorb_activity_from_carries_history_and_read_state() {
+        let mut pr = Workspace::empty(WorkspaceKey::new("pr-ws"), "main", now());
+        pr.merge_activity(&[activity_at(100, "pr-comment")]);
+        pr.mark_activity_read(0);
+
+        let mut issue = Workspace::empty(WorkspaceKey::new("issue-ws"), "main", now());
+        issue.merge_activity(&[
+            activity_at(30, "issue-newest"),
+            activity_at(20, "issue-read"),
+            activity_at(10, "issue-seen"),
+        ]);
+        // Oldest row is inside the positional seen tail; the middle
+        // row carries an explicit read mark; the newest stays unread.
+        issue.seen_count = 1;
+        issue.mark_activity_read(1);
+        assert!(issue.is_activity_unread(0));
+        assert!(!issue.is_activity_unread(1));
+
+        pr.absorb_activity_from(&issue);
+
+        // Merged feed: all four rows, newest-first.
+        let bodies: Vec<&str> = pr.activity.iter().map(|a| a.body.as_str()).collect();
+        assert_eq!(
+            bodies,
+            ["pr-comment", "issue-newest", "issue-read", "issue-seen"],
+            "the PR workspace must inherit the issue's full history"
+        );
+        assert!(!pr.is_activity_unread(0), "the PR's own read mark survives");
+        assert!(
+            pr.is_activity_unread(1),
+            "an issue row the user never read stays unread"
+        );
+        assert!(
+            !pr.is_activity_unread(2),
+            "the issue's explicit read mark carries over"
+        );
+        assert!(
+            !pr.is_activity_unread(3),
+            "the issue's seen tail carries over as read"
+        );
+        assert_eq!(pr.unread_count(), 1);
+    }
+
+    /// The absorb must not manufacture read state: an all-unread
+    /// issue folds in as all-unread, and the PR's pre-existing unread
+    /// rows stay unread too.
+    #[test]
+    fn absorb_activity_from_keeps_unread_rows_unread() {
+        let mut pr = Workspace::empty(WorkspaceKey::new("pr-ws"), "main", now());
+        pr.merge_activity(&[activity_at(100, "pr-unread")]);
+        let mut issue = Workspace::empty(WorkspaceKey::new("issue-ws"), "main", now());
+        issue.merge_activity(&[activity_at(10, "issue-unread")]);
+
+        pr.absorb_activity_from(&issue);
+        assert_eq!(pr.activity.len(), 2);
+        assert_eq!(pr.unread_count(), 2, "no row may be invented as read");
+    }
+
+    #[test]
+    fn decode_persisted_accepts_legacy_rows_as_schema_zero() {
+        // The same minimal pre-schema blob the other legacy tests use.
+        let legacy = r#"{"key":"old","name":"old","branch":"main","pr":null,
+            "gh_issues":[],"linear_issues":[],"activity":[],"seen_count":0,
+            "created_at":"2024-01-01T00:00:00Z","last_viewed_at":null}"#;
+        let ws = Workspace::decode_persisted(legacy).unwrap();
+        assert_eq!(ws.schema, 0, "pre-schema rows read back as v0");
+    }
+
+    #[test]
+    fn decode_persisted_refuses_rows_from_a_newer_build() {
+        // Valid JSON, parses fine under lenient serde — but stamped by
+        // a future build. Must be refused so a downgraded build never
+        // rewrites (and thereby truncates) it.
+        let future = r#"{"schema":999,"key":"old","name":"old","branch":"main","pr":null,
+            "gh_issues":[],"linear_issues":[],"activity":[],"seen_count":0,
+            "created_at":"2024-01-01T00:00:00Z","last_viewed_at":null,
+            "field_from_the_future":{"important":"state"}}"#;
+        let err = Workspace::decode_persisted(future).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                WorkspaceDecodeError::NewerSchema {
+                    found: 999,
+                    supported: WORKSPACE_SCHEMA_VERSION
+                }
+            ),
+            "expected NewerSchema, got: {err}"
+        );
+    }
+
+    #[test]
+    fn serialization_stamps_the_current_schema_even_on_legacy_loads() {
+        let legacy = r#"{"key":"old","name":"old","branch":"main","pr":null,
+            "gh_issues":[],"linear_issues":[],"activity":[],"seen_count":0,
+            "created_at":"2024-01-01T00:00:00Z","last_viewed_at":null}"#;
+        let ws = Workspace::decode_persisted(legacy).unwrap();
+        let rewritten = serde_json::to_value(&ws).unwrap();
+        assert_eq!(
+            rewritten["schema"],
+            serde_json::json!(WORKSPACE_SCHEMA_VERSION),
+            "every save stamps the running build's schema version"
+        );
+    }
+
     #[test]
     fn supports_track_main_requires_a_github_worktree() {
         // GitHub project, lazybox worktree → eligible.
@@ -2336,6 +2688,63 @@ mod tests {
                 "{slug} has uppercase outside the PR- anchor",
             );
         }
+    }
+
+    #[test]
+    fn same_titled_issue_workspaces_get_distinct_slugs() {
+        // The collision that shared one checkout (and one branch)
+        // between two agents: two issues in the same repo titled
+        // identically used to slug to the bare title. The issue number
+        // now disambiguates, mirroring branch naming.
+        let mut a = issue("github", "o/r#42");
+        a.title = "Bump dependencies".into();
+        let mut b = issue("github", "o/r#43");
+        b.title = "Bump dependencies".into();
+        let a = Workspace::from_task(a, now());
+        let b = Workspace::from_task(b, now());
+        assert_ne!(a.worktree_slug(), b.worktree_slug());
+        assert_eq!(a.worktree_slug(), "issue-42-bump-dependencies");
+        assert_eq!(b.worktree_slug(), "issue-43-bump-dependencies");
+    }
+
+    #[test]
+    fn same_titled_linear_workspaces_get_distinct_slugs() {
+        // Numberless sources use their task key as the discriminator.
+        let mut a = issue("linear", "ENG-456");
+        a.title = "Ship it".into();
+        let mut b = issue("linear", "ENG-457");
+        b.title = "Ship it".into();
+        let a = Workspace::from_task(a, now());
+        let b = Workspace::from_task(b, now());
+        assert_ne!(a.worktree_slug(), b.worktree_slug());
+        assert_eq!(a.worktree_slug(), "eng-456-ship-it");
+    }
+
+    #[test]
+    fn same_named_local_workspaces_get_distinct_slugs() {
+        // Two scratch workspaces created with the same name get
+        // collision-free keys (`bump-deps`, `bump-deps-2` — see the
+        // daemon's `allocate_workspace_key`) but used to share a slug.
+        // The key now carries the disambiguation; the FIRST workspace
+        // of a name keeps its legacy `<name-slug>` path exactly, so
+        // existing checkouts keep resolving.
+        let mut a = Workspace::empty(crate::WorkspaceKey::new("bump-deps"), "main", now());
+        a.name = "Bump Deps".into();
+        let mut b = Workspace::empty(crate::WorkspaceKey::new("bump-deps-2"), "main", now());
+        b.name = "Bump Deps".into();
+        assert_eq!(a.worktree_slug(), "bump-deps", "legacy path preserved");
+        assert_eq!(b.worktree_slug(), "bump-deps-2");
+    }
+
+    #[test]
+    fn non_name_derived_key_keeps_plain_name_slug() {
+        // A workspace whose key was NOT allocated from its name (a
+        // task-keyed record, a sandbox key) keeps the legacy plain
+        // name slug — the key would be unreadable as a directory name
+        // and the legacy on-disk layout must not shift.
+        let mut w = Workspace::empty(crate::WorkspaceKey::new("github:owner/repo"), "main", now());
+        w.name = "Hotfix Auth".into();
+        assert_eq!(w.worktree_slug(), "hotfix-auth");
     }
 
     // ── Worktree scope (#223) ─────────────────────────────────────

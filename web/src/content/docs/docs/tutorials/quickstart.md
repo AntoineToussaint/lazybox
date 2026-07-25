@@ -106,8 +106,8 @@ An empty sidebar right after setup is normal, not a bug:
 
 - The first poll can take up to ~60s (`providers.github.poll_interval`). Press
   `Shift-R` to force a refresh instead of waiting.
-- Rows can be hidden by the role filter. Press `f` to widen it
-  (`all → author → reviewer → assignee → mentioned → all`).
+- Rows can be hidden by active filters. Press `f` to open the filter menu and
+  clear any toggled predicates.
 - If you simply have little GitHub activity, there may be nothing to show. You
   don't need a PR to get the win above — press `x n` to spin up a fresh scratch
   workspace and open a session in it.

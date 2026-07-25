@@ -58,9 +58,11 @@ keys (the wizard's filter step, or `setup.filters.linear` in YAML):
 | `role.assignee` | Issues assigned to you (the default) |
 | `role.author` | Issues you created |
 | `role.mentioned` | Issues where you're mentioned |
+| `role.subscriber` | Issues you subscribe to |
 
 Linear has no reviewer concept, so there is no `role.reviewer` key. In the
-sidebar, `f` cycles the role filter across whatever is enabled.
+sidebar, press `f` to open the filter menu and narrow rows by role, state, or
+kind.
 
 ## Limitations
 

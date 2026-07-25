@@ -570,6 +570,7 @@ impl<T: TerminalAdapter> Model<T> {
                         cmds.push(IpcCommand::MarkActivityRead {
                             session_key: sk.clone(),
                             index,
+                            fingerprint: self.right.activity_fingerprint_at(index),
                         });
                     }
                     self.flash_info(format!(

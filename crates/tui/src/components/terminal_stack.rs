@@ -2707,10 +2707,7 @@ impl TerminalStack {
         } else {
             (None, None)
         };
-        cmds.push(Command::Write {
-            terminal_id: id,
-            bytes,
-        });
+        Self::push_write(cmds, id, bytes);
         // Persist the submitted prompt daemon-side so the history survives
         // a restart — the replay ring only carries PTY output, not the
         // input we composed here.
@@ -2731,6 +2728,19 @@ impl TerminalStack {
             });
         }
         PaneOutcome::Consumed
+    }
+
+    /// Single emission point for PTY-bound bytes from this pane. Large
+    /// payloads (a bracketed paste, a burst injection) are split via
+    /// [`Command::write_chunked`] so each resulting `Command::Write`
+    /// frames under the daemon's `MAX_COMMAND_FRAME_BYTES` socket
+    /// ingress cap — one unchunked >256 KiB write used to kill a
+    /// `--connect` session. Chunks are pushed in order onto the same
+    /// `cmds` vec (and later the same ordered command channel), so the
+    /// PTY receives the identical byte stream; splitting mid-UTF-8 or
+    /// mid-escape is fine for a byte-oriented PTY.
+    fn push_write(cmds: &mut Vec<Command>, terminal_id: TerminalId, bytes: Vec<u8>) {
+        cmds.extend(Command::write_chunked(terminal_id, bytes));
     }
 
     pub fn on_event(&mut self, event: &Event) {
@@ -4798,6 +4808,92 @@ mod ctrl_w_tests {
             vec![0x17],
             "Ctrl-w is the inner program's key, not a lazybox prefix"
         );
+    }
+}
+
+#[cfg(test)]
+mod write_chunking_tests {
+    //! One unchunked >256 KiB `Command::Write` (a huge bracketed
+    //! paste) used to exceed the daemon's `MAX_COMMAND_FRAME_BYTES`
+    //! socket ingress cap and permanently kill a `--connect` session.
+    //! Every PTY-bound write from this pane now flows through
+    //! `TerminalStack::push_write`, which splits at
+    //! `MAX_WRITE_CHUNK_BYTES` boundaries.
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use lazybox_ipc::{Command, MAX_COMMAND_FRAME_BYTES, MAX_WRITE_CHUNK_BYTES};
+
+    #[test]
+    fn oversized_write_splits_into_ordered_chunks_under_the_command_cap() {
+        // A paste comfortably above the daemon's command-frame cap,
+        // with a non-uniform pattern so a dropped, truncated, or
+        // reordered chunk cannot concatenate back to the original.
+        let original: Vec<u8> = (0..(MAX_COMMAND_FRAME_BYTES as usize + 100 * 1024))
+            .map(|i| (i % 251) as u8)
+            .collect();
+
+        let mut cmds = Vec::new();
+        TerminalStack::push_write(&mut cmds, TerminalId(4), original.clone());
+
+        assert!(
+            cmds.len() > 1,
+            "a paste above the cap must split into multiple writes"
+        );
+        let mut reassembled = Vec::new();
+        for cmd in &cmds {
+            match cmd {
+                Command::Write { terminal_id, bytes } => {
+                    assert_eq!(*terminal_id, TerminalId(4));
+                    assert!(
+                        bytes.len() <= MAX_WRITE_CHUNK_BYTES,
+                        "each chunk must frame under the daemon's command cap \
+                         ({} > {MAX_WRITE_CHUNK_BYTES})",
+                        bytes.len(),
+                    );
+                    reassembled.extend_from_slice(bytes);
+                }
+                other => panic!("push_write must only emit Write commands: {other:?}"),
+            }
+        }
+        assert_eq!(
+            reassembled, original,
+            "chunks must concatenate byte-identically, in order"
+        );
+    }
+
+    /// The everyday path is untouched: a single keystroke through
+    /// `handle_key` still yields exactly one small `Command::Write`.
+    #[test]
+    fn ordinary_keystroke_stays_a_single_write() {
+        let sk = SessionKey::new("session");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        let slot = TerminalStack::make_slot(
+            sk.clone(),
+            TerminalKind::Shell,
+            0,
+            false,
+            false,
+            None,
+            Vec::new(),
+            String::new(),
+        );
+        stack.terminals.insert(TerminalId(1), slot);
+        stack.set_active_session(Some(sk));
+
+        let mut cmds = Vec::new();
+        stack.handle_key(
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+            &mut cmds,
+        );
+        let writes: Vec<_> = cmds
+            .iter()
+            .filter(|c| matches!(c, Command::Write { .. }))
+            .collect();
+        assert_eq!(writes.len(), 1, "one keystroke, one write: {cmds:?}");
+        assert!(matches!(
+            writes[0],
+            Command::Write { bytes, .. } if bytes == &vec![b'a']
+        ));
     }
 }
 

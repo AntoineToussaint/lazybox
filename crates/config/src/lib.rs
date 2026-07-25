@@ -1086,16 +1086,40 @@ impl Config {
     }
 
     pub fn save_to(&self, path: &Path) -> Result<(), ConfigError> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
         let yaml = serde_yaml::to_string(self)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let tmp = path.with_extension("yaml.tmp");
+        // Unique temp name per write, in the same directory (rename
+        // must not cross filesystems). The old FIXED sibling
+        // (`config.yaml.tmp`) tore under two lazybox processes —
+        // explicitly supported — racing a save: both wrote the same
+        // temp file, so one rename could land the other's
+        // half-written bytes. pid + a process-local counter keeps
+        // the name unique across processes and across threads
+        // within one; `SAVE_LOCK` in `save_with` only serialises
+        // one process.
+        static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let mut tmp_name = path
+            .file_name()
+            .map(std::ffi::OsString::from)
+            .unwrap_or_else(|| std::ffi::OsString::from("config.yaml"));
+        tmp_name.push(format!(".{}.{seq}.tmp", std::process::id()));
+        let tmp = path.with_file_name(tmp_name);
+        // Best-effort cleanup: a failure after the temp file exists
+        // must not leave it behind.
+        let cleanup_on_err = |e: ConfigError| -> ConfigError {
+            let _ = std::fs::remove_file(&tmp);
+            e
+        };
         std::fs::write(&tmp, yaml)?;
         // 0600 before the rename so the secret-bearing YAML is never
         // visible to other users, even transiently.
-        restrict_to_owner(&tmp)?;
-        std::fs::rename(&tmp, path)?;
+        restrict_to_owner(&tmp).map_err(|e| cleanup_on_err(e.into()))?;
+        std::fs::rename(&tmp, path).map_err(|e| cleanup_on_err(e.into()))?;
         Ok(())
     }
 
@@ -1113,12 +1137,26 @@ impl Config {
     where
         F: FnOnce(&mut Self),
     {
+        Self::save_with_at(&Self::default_path(), f)
+    }
+
+    /// `save_with` against an explicit path. Split out so tests can
+    /// exercise the locked load-mutate-write cycle against a temp
+    /// directory; production goes through `save_with`.
+    fn save_with_at<F>(path: &Path, f: F) -> Result<(), ConfigError>
+    where
+        F: FnOnce(&mut Self),
+    {
         use std::sync::Mutex;
         static SAVE_LOCK: Mutex<()> = Mutex::new(());
         let _guard = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut cfg = Self::load()?;
+        let mut cfg = if path.exists() {
+            Self::load_from(path)?
+        } else {
+            Self::default()
+        };
         f(&mut cfg);
-        cfg.save()
+        cfg.save_to(path)
     }
 
     pub fn default_path() -> PathBuf {
@@ -1517,6 +1555,70 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("loosen");
         Config::load_from(&path).expect("load");
         assert_eq!(mode_of(&path), 0o600, "load must tighten a loose file");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression (#tmp-name race): `save_to` used a FIXED sibling
+    /// temp path (`config.yaml.tmp`), so two lazybox processes —
+    /// explicitly supported — racing a save could interleave writes
+    /// into the same temp file and rename torn bytes into place.
+    /// Temp names are now unique (pid + counter). The canary file
+    /// planted at the old fixed name proves no writer touches it,
+    /// concurrent `save_with` calls all land their mutation, and the
+    /// final file parses.
+    #[test]
+    fn concurrent_saves_use_unique_tmp_names_and_keep_the_file_valid() {
+        let dir =
+            std::env::temp_dir().join(format!("lazybox-config-tmp-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("config.yaml");
+
+        // Canary at the legacy fixed temp name: the old code would
+        // overwrite it and rename it away; the fixed name must no
+        // longer be used at all.
+        let canary = dir.join("config.yaml.tmp");
+        std::fs::write(&canary, "canary").expect("plant canary");
+
+        const WRITES_PER_THREAD: usize = 20;
+        std::thread::scope(|scope| {
+            for t in 0..2 {
+                let path = &path;
+                scope.spawn(move || {
+                    for i in 0..WRITES_PER_THREAD {
+                        Config::save_with_at(path, |cfg| {
+                            cfg.repos
+                                .insert(format!("race/t{t}-w{i}"), RepoConfig::default());
+                        })
+                        .expect("concurrent save_with must succeed");
+                    }
+                });
+            }
+        });
+
+        // Final file is valid YAML carrying every mutation.
+        let cfg = Config::load_from(&path).expect("final config parses");
+        assert_eq!(
+            cfg.repos.len(),
+            2 * WRITES_PER_THREAD,
+            "every concurrent mutation must land"
+        );
+
+        // The fixed temp name was never touched…
+        assert_eq!(
+            std::fs::read_to_string(&canary).expect("canary survives"),
+            "canary",
+            "the fixed `config.yaml.tmp` name must no longer be used"
+        );
+        // …and no unique temp file was left behind (all renamed away).
+        let strays: Vec<_> = std::fs::read_dir(&dir)
+            .expect("read dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "config.yaml" && n != "config.yaml.tmp")
+            .collect();
+        assert!(strays.is_empty(), "no stray temp files: {strays:?}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

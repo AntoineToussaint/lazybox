@@ -50,8 +50,11 @@ first.
 | `lazybox --version`, `-V` | Print the version and exit |
 | `lazybox --fresh` | Wipe `~/.lazybox/v2/state.db` and re-run the setup wizard |
 | `lazybox --test` | Throwaway tempdir repo with one seeded workspace, no GitHub |
-| `lazybox --connect <socket>` | Connect to a remote daemon over a Unix socket |
+| `lazybox --connect [socket]` | Connect to a remote daemon over a Unix socket; with no path, defaults to `~/.lazybox/run/daemon.sock` |
+| `lazybox --workspace <key>` | Preselect a workspace on startup |
+| `lazybox --session <id>` | Preselect a session on startup |
 | `lazybox scan [ROOTS...] [--depth N] [--hidden]` | Find existing git clones and linked worktrees without modifying them |
+| `lazybox hook-ingest --backend-key <key>` | Internal: forward an agent lifecycle hook payload (stdin JSON) to the daemon — lazybox injects this into spawned agents' hook config; not typically run by hand |
 
 ## `lazybox scan`
 
@@ -72,14 +75,16 @@ lazybox scan --hidden
 
 Results are ordered by recent commit activity and identify the branch, path,
 linked worktrees, dirty checkouts, and any checkout lazybox already tracks.
-Lazybox's own managed worktree directory is excluded. The command only reports
-what it finds; importing an external checkout in place is not implemented yet.
+Lazybox's own managed worktree directory is excluded. The command is read-only —
+it only reports what it finds. To import a discovered checkout in place, use
+the in-app import flow: press `x i` inside lazybox to scan and link a checkout
+as a workspace without moving it.
 
 ## `lazybox server`
 
 | Command | What it does |
 | --- | --- |
-| `lazybox server start` | Start the daemon |
+| `lazybox server start` | Start the daemon in the **foreground** (blocks until shutdown — run it in tmux, `nohup`, or a service unit) |
 | `lazybox server stop` | Stop the daemon |
 | `lazybox server status` | Report whether the daemon is running |
 | `lazybox server api [addr:port] [--insecure-no-auth] [--allow-insecure-http]` | Start the JSON HTTP API gateway |
@@ -110,7 +115,18 @@ an unreadable row was preserved and omitted from the decoded workspace list.
 | --- | --- |
 | `lazybox slack init` | Set up the Slack mirror from your config |
 | `lazybox slack doctor` | Diagnose token, scope, and connectivity issues |
-| `lazybox slack prune` | Remove stale per-workspace channels |
+| `lazybox slack prune` | **Archive** stale per-workspace channels (Slack has no channel delete) |
+
+### `lazybox slack prune` options
+
+The command computes a plan, prints it, and prompts before archiving anything.
+
+| Option | Effect |
+| --- | --- |
+| `--dry-run` | List what would be archived without touching Slack |
+| `--yes`, `-y` | Skip the confirmation prompt |
+| `--older-than DUR` | Only archive channels stale for at least this long (e.g. `7d`) |
+| `--workspace KEY` | Restrict pruning to one workspace's channels |
 
 ## Environment variables
 
@@ -119,7 +135,8 @@ an unreadable row was preserved and omitted from the decoded workspace list.
 | `GH_TOKEN`, `GITHUB_TOKEN` | GitHub credential (otherwise `gh auth token` is used) |
 | `LINEAR_API_KEY` | Credential for the Linear provider |
 | `RUST_LOG` | Log filter, e.g. `RUST_LOG=lazybox=debug` for verbose logs |
-| `LAZYBOX_HOME` | Overrides every path lazybox writes: state, worktrees, tmux socket |
+| `LAZYBOX_HOME` | Overrides every path lazybox writes under `~/.lazybox`: state, config, worktrees, runtime dir, tmux socket. Logs are separate — they default to `/tmp/lazybox.log` (override with `ui.log_path`) |
+| `LAZYBOX_RUNTIME_DIR` | Overrides just the daemon runtime directory (`daemon.sock` / `daemon.pid`); wins over `LAZYBOX_HOME`'s default `<home>/run/` |
 | `LAZYBOX_API_TOKEN` | Bearer token for `lazybox server api` (required unless `--insecure-no-auth`) |
 | `LAZYBOX_API_ADDR` | Listen address for `lazybox server api` when no `[addr:port]` argument is given |
 

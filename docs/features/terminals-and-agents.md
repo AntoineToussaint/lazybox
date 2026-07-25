@@ -31,7 +31,8 @@ appears in the right-hand stack. Multiple terminals coexist per workspace.
 ### How it works (brief)
 `TermSession` (`crates/tui-term/src/lib.rs`) wraps `portable-pty` + a
 libghostty-vt parser behind a `Mutex`, read on a `std::thread`. The daemon keeps
-a per-terminal **64 KB ring buffer**; on `Subscribe` it replays the ring then
+a per-terminal **2 MiB ring buffer** (`REPLAY_RING_BYTES`,
+`crates/server/src/pty.rs`); on `Subscribe` it replays the ring then
 streams live `TerminalOutput` bytes. The default session backend is tmux
 (`TmuxBackend`, `crates/server/src/backend/tmux.rs`), swappable via the
 `SessionBackend` trait (`crates/server/src/backend/mod.rs`).
@@ -41,7 +42,7 @@ streams live `TerminalOutput` bytes. The default session backend is tmux
 - [ ] Detaching/reattaching a client replays the screen from the ring buffer.
 - [ ] A full-screen program (vim/less) renders correctly.
 - [ ] Killing a session terminates its tmux session.
-- [ ] Output beyond 64 KB scrolls without corrupting the live screen.
+- [ ] Output beyond the 2 MiB ring scrolls without corrupting the live screen.
 
 ### Known sharp edges
 - `make setup` fetches the pinned Ghostty source and Zig packages once into a
@@ -143,8 +144,10 @@ with `--dangerously-skip-permissions` and the tab strip flags them with a
 default.
 
 ### How to use it
-Mention `@lazybox` (e.g. via the Slack mirror or a configured trigger) to kick off
-autonomous work. To force prompts even on autonomous runs, or to opt your own
+Mention `@lazybox` in a GitHub issue or PR comment (gated by
+`mention.allowed_logins`) to kick off autonomous work. The Slack mirror cannot
+spawn agents — inbound Slack messages only forward text to an
+already-running agent's terminal or answer status queries. To force prompts even on autonomous runs, or to opt your own
 interactive sessions into bypass:
 
 ```yaml
@@ -361,6 +364,37 @@ leader (`]]`) followed by `s` mounts the snippet picker
 
 ### Known sharp edges
 - The trigger reuses the terminal escape char; if you remap `terminal.escape_char`, the snippet trigger moves with it.
+
+---
+
+## Agent-to-agent handoff (`x s` send to session)
+
+**Status:** stable
+**Crate(s):** `tui-core` (`SendToSession` in `src/action.rs`), `tui`, `server`
+**Config / flags:** —
+**Key bindings:** `x s`
+
+### What it does
+Hands work from one running agent to another (#431): captures the focused
+agent's on-screen output, lets you pick a target workspace, edit the brief,
+and injects + submits it into that workspace's agent session.
+
+### How to use it
+With the source agent's terminal focused (or its workspace selected), press
+`x s`. Pick the target workspace from the picker — the source workspace is
+excluded, so a handoff can't loop back to itself — then edit the pre-filled
+brief and submit. A visible `source → target` footer notice records the trail.
+
+### How it works (brief)
+`SendToSession` (`crates/tui-core/src/action.rs`) drives a
+capture → pick → compose flow; delivery reuses the settle-gated prompt inject
+so the brief lands when the target agent is ready for input.
+
+### Test checklist
+- [ ] `x s` captures the focused agent's output into the compose textarea.
+- [ ] The target picker excludes the source workspace.
+- [ ] Submit injects and sends the brief into the target's agent.
+- [ ] A `source → target` notice appears after delivery.
 
 ---
 

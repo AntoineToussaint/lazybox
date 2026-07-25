@@ -1284,13 +1284,31 @@ fn tick_right_drives_auto_mark_and_emits_command() {
         commands.push(cmd);
     }
     let marked = commands.iter().find_map(|c| match c {
-        Command::MarkActivityRead { session_key, index } => Some((session_key.clone(), *index)),
+        Command::MarkActivityRead {
+            session_key,
+            index,
+            fingerprint,
+        } => Some((session_key.clone(), *index, fingerprint.clone())),
         _ => None,
     });
-    let (session_key, index) =
+    let (session_key, index, fingerprint) =
         marked.expect("tick_right must emit Command::MarkActivityRead after the delay");
     assert_eq!(session_key.as_str(), "github-o-r-1");
     assert_eq!(index, 0);
+    // The command must carry the marked row's stable identity so the
+    // daemon resolves it against its own (possibly shifted) list —
+    // this row has no node_id, so the content-tuple fallback rides.
+    match fingerprint.expect("auto-mark must ship the row's fingerprint") {
+        lazybox_core::ActivityFingerprint::Content {
+            author,
+            body_prefix,
+            ..
+        } => {
+            assert_eq!(author, "alice");
+            assert_eq!(body_prefix, "needs your attention");
+        }
+        other => panic!("expected content fingerprint, got {other:?}"),
+    }
 }
 
 // ── Grouped two-step (leader-key) chords — issue #126 ────────────────

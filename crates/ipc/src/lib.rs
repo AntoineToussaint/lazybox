@@ -35,6 +35,20 @@ pub const MAX_FRAME_BYTES: u32 = 64 * 1024 * 1024;
 /// room for a large composed prompt while bounding every retained command.
 pub const MAX_COMMAND_FRAME_BYTES: u32 = 256 * 1024;
 
+/// Largest `bytes` payload a client should put in a single
+/// [`Command::Write`]. Derived from [`MAX_COMMAND_FRAME_BYTES`] (half
+/// of it) so the two limits can never drift apart: half the ingress
+/// cap leaves generous headroom for the bincode envelope (enum
+/// ordinal, terminal id, vec length) and the 4-byte frame prefix, so
+/// a chunked write always frames comfortably under the daemon's
+/// command-frame ceiling. Larger writes (a multi-hundred-KiB paste)
+/// are split with [`Command::write_chunked`]; the socket client
+/// additionally normalizes every outbound command through
+/// [`Command::into_write_chunks`] right before framing, so no
+/// emission site can produce a frame the daemon's bounded command
+/// reader refuses.
+pub const MAX_WRITE_CHUNK_BYTES: usize = (MAX_COMMAND_FRAME_BYTES / 2) as usize;
+
 /// Magic prefix of the 8-byte connection preamble each side sends
 /// before any frames (`PROTOCOL_MAGIC ++ PROTOCOL_FINGERPRINT as u32
 /// LE`). Lets a peer distinguish "wire-incompatible lazybox" from "not
@@ -722,10 +736,20 @@ pub enum Command {
     /// flow uses this so a brief glance at one comment doesn't flip
     /// the whole workspace's unread badge to zero. `index` is the
     /// activity slot in `Workspace.activity` after the daemon's
-    /// `sort_activity` pass — the same view the TUI sees.
+    /// `sort_activity` pass — the same view the TUI saw *when it
+    /// resolved the row*. Because a poll can commit a new top-of-feed
+    /// comment between that snapshot and this command landing (which
+    /// shifts every older index), `fingerprint` carries the row's
+    /// stable identity: the daemon resolves it against its CURRENT
+    /// list (index serves as a position hint / twin disambiguator)
+    /// and no-ops when the row is gone, instead of marking whatever
+    /// now sits at `index`. `None` keeps the raw-index behavior for
+    /// clients that don't track fingerprints (JSON API scripts).
     MarkActivityRead {
         session_key: SessionKey,
         index: usize,
+        #[serde(default)]
+        fingerprint: Option<lazybox_core::ActivityFingerprint>,
     },
     /// Reverse a previous `MarkActivityRead`. Bound to the `z` undo
     /// affordance.
@@ -1107,6 +1131,47 @@ pub enum Command {
         session_key: SessionKey,
         snippet_key: String,
     },
+}
+
+impl Command {
+    /// Build the [`Command::Write`]s for `bytes`, split into chunks of
+    /// at most [`MAX_WRITE_CHUNK_BYTES`] so each command frames under
+    /// the daemon's [`MAX_COMMAND_FRAME_BYTES`] ingress cap (one
+    /// unchunked >256 KiB paste used to kill a `--connect` session:
+    /// the oversized frame tripped the daemon's bounded command
+    /// reader).
+    ///
+    /// Chunking happens at raw byte boundaries: PTY input is a byte
+    /// stream, so splitting mid-UTF-8 or mid-escape-sequence is fine —
+    /// the PTY reassembles the exact same stream. Ordering is
+    /// preserved because every chunk travels the same ordered command
+    /// channel as the original write would have.
+    pub fn write_chunked(terminal_id: TerminalId, bytes: Vec<u8>) -> Vec<Command> {
+        if bytes.len() <= MAX_WRITE_CHUNK_BYTES {
+            // Common case: no split, no copy.
+            return vec![Command::Write { terminal_id, bytes }];
+        }
+        bytes
+            .chunks(MAX_WRITE_CHUNK_BYTES)
+            .map(|chunk| Command::Write {
+                terminal_id,
+                bytes: chunk.to_vec(),
+            })
+            .collect()
+    }
+
+    /// Normalize this command for the wire: an oversized
+    /// [`Command::Write`] becomes several in-order chunked writes (see
+    /// [`Command::write_chunked`]); every other command passes through
+    /// untouched. The socket client's outbound path runs each command
+    /// through this so no single write can exceed the daemon's
+    /// command-frame cap, regardless of which call site emitted it.
+    pub fn into_write_chunks(self) -> Vec<Command> {
+        match self {
+            Command::Write { terminal_id, bytes } => Command::write_chunked(terminal_id, bytes),
+            other => vec![other],
+        }
+    }
 }
 
 /// The terminal state a removable workspace's primary task reached,
@@ -2279,6 +2344,50 @@ mod transport_admission_tests {
         assert!(matches!(
             sender.send(notice(2)),
             Err(mpsc::error::TrySendError::Closed(_))
+        ));
+    }
+
+    /// A small write must pass through `write_chunked` as a single
+    /// untouched command; an over-cap payload must split into in-order
+    /// chunks, each under [`MAX_WRITE_CHUNK_BYTES`] (and therefore
+    /// framing under [`MAX_COMMAND_FRAME_BYTES`]), concatenating
+    /// byte-identically to the original.
+    #[test]
+    fn write_chunked_splits_at_the_cap_and_preserves_bytes() {
+        // Below the cap: exactly one command, identical bytes.
+        let small = vec![7u8; 64];
+        match Command::write_chunked(TerminalId(1), small.clone()).as_slice() {
+            [Command::Write { terminal_id, bytes }] => {
+                assert_eq!(*terminal_id, TerminalId(1));
+                assert_eq!(*bytes, small);
+            }
+            other => panic!("small write must stay a single command: {other:?}"),
+        }
+
+        // Above the cap: split, ordered, byte-identical. Non-uniform
+        // pattern so a dropped/reordered chunk cannot go unnoticed.
+        let original: Vec<u8> = (0..(MAX_WRITE_CHUNK_BYTES * 2 + 999))
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let chunks = Command::write_chunked(TerminalId(9), original.clone());
+        assert_eq!(chunks.len(), 3, "2·cap + tail = three chunks");
+        let mut reassembled = Vec::new();
+        for chunk in &chunks {
+            match chunk {
+                Command::Write { terminal_id, bytes } => {
+                    assert_eq!(*terminal_id, TerminalId(9));
+                    assert!(bytes.len() <= MAX_WRITE_CHUNK_BYTES);
+                    reassembled.extend_from_slice(bytes);
+                }
+                other => panic!("chunking must only ever emit Write: {other:?}"),
+            }
+        }
+        assert_eq!(reassembled, original);
+
+        // Wire normalization: a non-Write passes through untouched.
+        assert!(matches!(
+            Command::Subscribe.into_write_chunks().as_slice(),
+            [Command::Subscribe]
         ));
     }
 

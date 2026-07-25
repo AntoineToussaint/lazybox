@@ -60,11 +60,14 @@ pub enum GhError {
 ///
 /// Transport variants (Hyper/Service/Http/Json/Io) are always
 /// transient — the request never reached GitHub's app layer.
-/// `HttpStatus` retries on 502/503/504 + 429 + any 2xx with a
-/// non-JSON content-type (proxy/CDN serving a maintenance page),
-/// matching what `From<GhError> for ProviderError` classifies as
-/// `Retryable`. Auth (401/403), other 4xx, and 2xx-JSON parse
-/// failures (real schema mismatches) are not retried.
+/// `HttpStatus` retries on 5xx (capped at one in-call retry, see
+/// `is_server_error`) + any 2xx with a non-JSON content-type
+/// (proxy/CDN serving a maintenance page), matching what
+/// `From<GhError> for ProviderError` classifies as `Retryable`.
+/// Rate limits (429 / secondary-limit 403) surface as
+/// `GhError::RateLimited` and are never retried in-call. Auth
+/// (401/403), other 4xx, and 2xx-JSON parse failures (real schema
+/// mismatches) are not retried.
 fn is_transient(e: &GhError) -> bool {
     match e {
         GhError::Api(octocrab::Error::Hyper { .. })
@@ -81,7 +84,16 @@ fn is_transient(e: &GhError) -> bool {
             content_type,
             ..
         } => {
-            if matches!(*status, 502..=504) || *status == 429 {
+            // 429 is deliberately NOT here: a throttle response is
+            // surfaced as `GhError::RateLimited` (with the server's
+            // `Retry-After` honored by the poll scheduler), never
+            // retried on the in-call millisecond ladder — hot-retrying
+            // a rate limit is exactly what deepens it.
+            //
+            // All 5xx count as transient, but the retry ladder caps
+            // them at ONE in-call retry (see `is_server_error`) so a
+            // sustained outage is spaced by the poll-level backoff.
+            if matches!(*status, 500..=599) {
                 return true;
             }
             // 2xx with a non-JSON body — usually a proxy/CDN
@@ -92,6 +104,73 @@ fn is_transient(e: &GhError) -> bool {
         }
         _ => false,
     }
+}
+
+/// Is this a 5xx from GitHub's app layer? These stay transient but
+/// get at most ONE in-call retry — a sustained outage should be
+/// spaced by the poll-level backoff (the tick scheduler's interval /
+/// retry-after clamp), not hammered on the 200ms/800ms ladder.
+fn is_server_error(e: &GhError) -> bool {
+    matches!(e, GhError::HttpStatus { status, .. } if (500..=599).contains(status))
+}
+
+/// Rate-limit hints parsed off a non-success GitHub response. All
+/// three headers are optional on the wire; `parse` never fails.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct RateLimitHeaders {
+    /// `Retry-After` in seconds (GitHub only uses the delta-seconds
+    /// form, never the HTTP-date form, per its rate-limit docs).
+    retry_after_secs: Option<u64>,
+    /// `x-ratelimit-remaining`.
+    remaining: Option<u32>,
+    /// `x-ratelimit-reset` — epoch seconds when the window reopens.
+    reset_epoch_secs: Option<u64>,
+}
+
+impl RateLimitHeaders {
+    fn parse(retry_after: Option<&str>, remaining: Option<&str>, reset: Option<&str>) -> Self {
+        Self {
+            retry_after_secs: retry_after.and_then(|v| v.trim().parse().ok()),
+            remaining: remaining.and_then(|v| v.trim().parse().ok()),
+            reset_epoch_secs: reset.and_then(|v| v.trim().parse().ok()),
+        }
+    }
+
+    /// Seconds to wait before the next request, preferring the
+    /// explicit `Retry-After`, falling back to the reset timestamp,
+    /// then to a conservative 60s default. Clamped to >= 1 so a
+    /// clock-skewed reset in the past never produces a hot loop.
+    fn wait_secs(&self, now_epoch_secs: u64) -> u64 {
+        if let Some(secs) = self.retry_after_secs {
+            return secs.max(1);
+        }
+        if let Some(reset) = self.reset_epoch_secs {
+            return reset.saturating_sub(now_epoch_secs).max(1);
+        }
+        60
+    }
+}
+
+/// Does this non-success response mean "you are being rate limited"?
+/// GitHub signals throttling two ways: a plain 429, and — for
+/// secondary (abuse) limits — a 403 whose body carries a documented
+/// message ("You have exceeded a secondary rate limit…" /
+/// "…rate limit exceeded…") and usually a `Retry-After` header. A
+/// bare 403 without either marker stays an auth failure.
+fn is_rate_limit_response(status: u16, body: &str, has_retry_after: bool) -> bool {
+    if status == 429 {
+        return true;
+    }
+    if status != 403 {
+        return false;
+    }
+    if has_retry_after {
+        return true;
+    }
+    let lower = body.to_ascii_lowercase();
+    lower.contains("secondary rate limit")
+        || lower.contains("rate limit exceeded")
+        || lower.contains("abuse detection")
 }
 
 /// `true` when the content-type header looks like JSON. GitHub uses
@@ -336,11 +415,31 @@ fn watched_repo_query(repo: &str, user: &str) -> String {
     format!("is:open is:pr repo:{repo} archived:false -involves:{user}")
 }
 
+/// Short, non-reversible fingerprint of a credential token. Lets the
+/// polling layer's client cache detect "the token material changed"
+/// (rotation via `gh auth refresh`, a new `GH_TOKEN`, …) without
+/// storing or comparing the raw secret: the credential *source label*
+/// is constant across rotations ("cmd:gh auth token" forever), so a
+/// label-only comparison kept serving the startup token until daemon
+/// restart. Not cryptographic — only ever compared against another
+/// fingerprint produced by this same function in the same process.
+pub fn credential_fingerprint(token: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    token.hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
 #[derive(Clone)]
 pub struct GhClient {
     inner: Octocrab,
     user: String,
     credential_source: String,
+    /// Fingerprint of the token this client was built with — see
+    /// [`credential_fingerprint`]. Cache-reuse checks compare this so
+    /// a rotated token rebuilds the client even when the source label
+    /// is unchanged.
+    credential_fingerprint: String,
     /// Search qualifiers used by `fetch_all_prs` (PR-only — built
     /// from `pr.*` keys plus scope).
     pr_filters: Vec<String>,
@@ -409,6 +508,7 @@ impl BranchMetrics {
 impl GhClient {
     pub async fn from_credential(cred: Credential) -> Result<Self, GhError> {
         let source = cred.source.clone();
+        let fingerprint = credential_fingerprint(cred.token());
         // Disable octocrab's built-in retry: its `OctoBody` clone only
         // Arc-clones a single-use body stream, so on a 429/5xx retry the
         // second attempt goes out with an empty `{}` body. GitHub answers
@@ -433,6 +533,31 @@ impl GhClient {
             inner,
             user,
             credential_source: source,
+            credential_fingerprint: fingerprint,
+            pr_filters: vec![],
+            issue_filters: vec![],
+            watch_repos: vec![],
+            budget: std::sync::Arc::new(parking_lot::Mutex::new(
+                crate::rate_budget::RateBudget::default_for_lazybox(),
+            )),
+            notifications_state: NotificationsState::shared(),
+        })
+    }
+
+    /// Test-only: a `GhClient` with the given credential identity and
+    /// a default (never-called) transport. Lets server-side tests seed
+    /// the daemon's client cache without a network round-trip.
+    #[doc(hidden)]
+    pub fn stub_for_tests(
+        credential_source: &str,
+        credential_fingerprint: &str,
+    ) -> Result<Self, GhError> {
+        let inner = Octocrab::builder().build().map_err(GhError::Api)?;
+        Ok(Self {
+            inner,
+            user: "test-user".to_string(),
+            credential_source: credential_source.to_string(),
+            credential_fingerprint: credential_fingerprint.to_string(),
             pr_filters: vec![],
             issue_filters: vec![],
             watch_repos: vec![],
@@ -506,8 +631,12 @@ impl GhClient {
     /// Retry policy:
     /// - Transport variants (Hyper, Service, Http, Json, Io) →
     ///   retry. Always transient.
-    /// - 502 / 503 / 504, 429 → retry.
+    /// - 5xx → ONE in-call retry, then surface (the poll-level
+    ///   backoff spaces further repeats).
     /// - 2xx with a non-JSON body → retry (proxy/CDN bait).
+    /// - 429 / secondary-limit 403 → NEVER retried here; surfaced as
+    ///   `RateLimited` with the server's `Retry-After` so the poll
+    ///   scheduler sleeps out the real window.
     /// - Anything else (auth, validation, 2xx-JSON schema mismatch)
     ///   → return immediately. Retrying wouldn't change the answer.
     ///
@@ -599,6 +728,19 @@ impl GhClient {
                     if !transient {
                         return Err(e);
                     }
+                    // 5xx: one in-call retry only. A single blip
+                    // usually resolves within the first 200ms retry;
+                    // a sustained outage should be spaced by the
+                    // poll-level backoff, not burned down the whole
+                    // millisecond ladder.
+                    let allowed_retries = if is_server_error(&e) {
+                        1
+                    } else {
+                        DELAYS_MS.len()
+                    };
+                    if attempt >= allowed_retries {
+                        return Err(e);
+                    }
                     if attempt < DELAYS_MS.len() {
                         let delay_ms = DELAYS_MS[attempt];
                         tracing::warn!(
@@ -637,12 +779,22 @@ impl GhClient {
         let status = response.status().as_u16();
         // `HeaderMap::get` is case-insensitive, so lowercase here is
         // both the canonical form and what octocrab uses internally.
-        let content_type = response
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_string();
+        let header = |name: &str| -> Option<String> {
+            response
+                .headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        };
+        let content_type = header("content-type").unwrap_or_default();
+        // Rate-limit hints ride the headers of the FAILURE response —
+        // read them before the body is consumed. On successful parses
+        // the GraphQL `rateLimit` field feeds the budget instead.
+        let rate_headers = RateLimitHeaders::parse(
+            header("retry-after").as_deref(),
+            header("x-ratelimit-remaining").as_deref(),
+            header("x-ratelimit-reset").as_deref(),
+        );
         let raw_body = self
             .inner
             .body_to_string(response)
@@ -653,6 +805,40 @@ impl GhClient {
         // an HTML page / login redirect / GitHub error JSON we'd
         // rather surface verbatim than mis-deserialise.
         if !(200..=299).contains(&status) || !content_type_is_json(&content_type) {
+            // Throttle responses (429, or 403 carrying the documented
+            // secondary-limit markers) are special-cased BEFORE the
+            // generic status error: they must surface as `RateLimited`
+            // with the server's own wait hint so (a) the in-call retry
+            // ladder never hot-retries them and (b) the poll scheduler
+            // sleeps out the real window instead of its base cadence.
+            if is_rate_limit_response(status, &raw_body, rate_headers.retry_after_secs.is_some()) {
+                let now = chrono::Utc::now();
+                let retry_after_secs = rate_headers.wait_secs(now.timestamp().max(0) as u64);
+                // Feed the observation into the shared budget so
+                // admission control stops admitting until the window
+                // reopens. `remaining` is recorded as 0 regardless of
+                // the header: GitHub is actively refusing requests
+                // (secondary limits fire with primary quota left), so
+                // the *effective* remaining is zero until reset.
+                self.budget
+                    .lock()
+                    .observe(crate::rate_budget::RemoteRateLimit {
+                        remaining: 0,
+                        limit: 0,
+                        reset_at: now
+                            + chrono::Duration::seconds(
+                                retry_after_secs.min(i64::MAX as u64) as i64
+                            ),
+                        observed_at: std::time::Instant::now(),
+                    });
+                return Err(GhError::RateLimited {
+                    retry_after_secs,
+                    reason: format!(
+                        "github answered HTTP {status} ({})",
+                        body_excerpt(&raw_body)
+                    ),
+                });
+            }
             return Err(http_status_error(status, &content_type, &raw_body));
         }
         // 2xx + JSON content-type: this is the success path. A parse
@@ -895,6 +1081,14 @@ impl GhClient {
 
     pub fn credential_source(&self) -> &str {
         &self.credential_source
+    }
+
+    /// Fingerprint of the token this client authenticates with — a
+    /// short hash, never the raw secret. See the module-level
+    /// [`credential_fingerprint`] for why cache layers compare this
+    /// in addition to the (rotation-stable) source label.
+    pub fn credential_fingerprint(&self) -> &str {
+        &self.credential_fingerprint
     }
 
     /// Fetch ALL relevant PRs in a single GraphQL query.
@@ -1263,6 +1457,24 @@ impl GhClient {
         repo: &str,
         number: u64,
     ) -> Result<Option<Task>, GhError> {
+        Ok(self
+            .fetch_single_pr_with_head(owner, repo, number)
+            .await?
+            .map(|(task, _)| task))
+    }
+
+    /// [`fetch_single_pr`](Self::fetch_single_pr) that also surfaces the
+    /// PR's **head commit OID** from the same response. `Task` doesn't
+    /// carry the OID, but the daemon's auto-merge path needs the head it
+    /// verified green so it can pin `mergePullRequest`'s
+    /// `expectedHeadOid` to exactly that commit — coming from one fetch
+    /// keeps "observed green" and "merge this" atomic.
+    pub async fn fetch_single_pr_with_head(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Option<(Task, Option<String>)>, GhError> {
         self.acquire_or_block("single-PR notification deep-fetch")?;
         let body = graphql::single_pr_body(owner, repo, number);
         let response: graphql::GqlSinglePrResponse = self.post_graphql_with_retry(&body).await?;
@@ -1296,7 +1508,10 @@ impl GhClient {
             self.observe_rate_limit(rl);
         }
         let pr = data.repository.and_then(|r| r.pull_request);
-        Ok(pr.map(|pr| graphql::pr_to_task(&pr, &self.user)))
+        Ok(pr.map(|pr| {
+            let head = pr.head_ref_oid.clone();
+            (graphql::pr_to_task(&pr, &self.user), head)
+        }))
     }
 
     /// Sibling of `fetch_single_pr` for Issue-typed notifications.
@@ -2665,10 +2880,20 @@ impl GhClient {
             .ok_or_else(|| GhError::Graphql("PR node has no repository merge method".to_string()))
     }
 
-    pub async fn merge_pr(&self, pull_request_node_id: &str) -> Result<(), GhError> {
+    /// Merge a PR. `expected_head_oid` — when known — pins the merge to
+    /// that head commit: GitHub rejects the mutation ("Head branch was
+    /// modified…") if anything was pushed since, so a force-push between
+    /// "observed green" and "merge" can't land unverified commits. Pass
+    /// `None` only when no verified head is available (the guard is then
+    /// skipped, matching the pre-#expectedHeadOid behavior).
+    pub async fn merge_pr(
+        &self,
+        pull_request_node_id: &str,
+        expected_head_oid: Option<&str>,
+    ) -> Result<(), GhError> {
         let merge_method = self.pr_merge_method(pull_request_node_id).await?;
         self.acquire_or_block("mergePullRequest mutation")?;
-        let body = graphql::merge_pr_body(pull_request_node_id, &merge_method);
+        let body = graphql::merge_pr_body(pull_request_node_id, &merge_method, expected_head_oid);
         let response: graphql::GqlMutationResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(errors) = response.errors {
             // Idempotence guard: `post_graphql_with_retry` re-sends the
@@ -2765,9 +2990,15 @@ impl lazybox_core::TaskProvider for GhClient {
     /// hitting this on a fresh-from-cache workspace surfaces as
     /// `Permanent("PR has no node_id")` which the caller can
     /// translate to "repoll first".
+    ///
+    /// `expected_head_oid` pins the merge to that head commit
+    /// (`mergePullRequest`'s `expectedHeadOid`); a head that moved
+    /// since surfaces as GitHub's own "Head branch was modified"
+    /// rejection, which the caller reports via `Event::PrMergeFailed`.
     async fn merge(
         &self,
         workspace: &lazybox_core::Workspace,
+        expected_head_oid: Option<&str>,
     ) -> Result<(), lazybox_core::ProviderError> {
         let Some(pr) = workspace.pr.as_ref() else {
             return Err(lazybox_core::ProviderError::permanent(
@@ -2781,7 +3012,7 @@ impl lazybox_core::TaskProvider for GhClient {
                 "PR has no node_id (poll first)",
             ));
         };
-        self.merge_pr(node_id)
+        self.merge_pr(node_id, expected_head_oid)
             .await
             .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))
     }
@@ -3514,6 +3745,255 @@ mod tests {
         format!("http://{addr}")
     }
 
+    /// Like `spawn_canned_response_server`, but counts connections
+    /// (so tests can assert "no hot retry happened") and injects
+    /// extra response headers (`Retry-After`, `x-ratelimit-*`).
+    async fn spawn_counting_response_server(
+        status_line: &'static str,
+        content_type: &'static str,
+        extra_headers: &'static str,
+        body: &'static str,
+        counter: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => continue,
+                };
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let _ = sock.read(&mut buf).await;
+                    let response = format!(
+                        "HTTP/1.1 {status_line}\r\n\
+                         Content-Type: {content_type}\r\n\
+                         {extra_headers}\
+                         Content-Length: {}\r\n\
+                         Connection: close\r\n\r\n{body}",
+                        body.len(),
+                    );
+                    let _ = sock.write_all(response.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    // ── rate-limit responses (429 / 403 secondary) ────────────────
+
+    /// A 429 with `Retry-After` must surface as `RateLimited` carrying
+    /// the server's own wait hint, must NOT be retried on the in-call
+    /// millisecond ladder, and must poison the shared budget so
+    /// admission control stops admitting until the window reopens.
+    #[tokio::test(flavor = "current_thread")]
+    async fn rate_limit_429_no_hot_retry_and_budget_updated() {
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let base_uri = spawn_counting_response_server(
+            "429 Too Many Requests",
+            "application/json",
+            "Retry-After: 7\r\n",
+            r#"{"message":"API rate limit exceeded"}"#,
+            hits.clone(),
+        )
+        .await;
+        let client = make_client(&base_uri);
+
+        let body = serde_json::json!({"query": "{}"});
+        let err = client
+            .post_graphql_with_retry::<serde_json::Value>(&body)
+            .await
+            .expect_err("429 must fail");
+        match &err {
+            GhError::RateLimited {
+                retry_after_secs,
+                reason,
+            } => {
+                assert_eq!(*retry_after_secs, 7, "Retry-After header must be honored");
+                assert!(reason.contains("429"), "reason names the status: {reason}");
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a 429 must not be retried hot inside the call"
+        );
+        // The ProviderError mapping preserves the hint for the poll
+        // scheduler's backoff clamp.
+        let pe = lazybox_core::ProviderError::from(err);
+        assert!(pe.is_retryable());
+        assert_eq!(pe.retry_after_secs(), Some(7));
+        // Budget fed: the next acquire is refused until the window.
+        match client.budget.lock().try_acquire() {
+            Err(crate::rate_budget::AcquireError::RemoteLow { remaining, .. }) => {
+                assert_eq!(remaining, 0, "throttle observation records 0 remaining");
+            }
+            other => panic!("budget must refuse admission after a 429, got {other:?}"),
+        }
+    }
+
+    /// GitHub signals secondary (abuse) limits as a 403 with a
+    /// documented message + `Retry-After`. That must classify as
+    /// RateLimited — not as an auth failure — and skip the hot ladder.
+    #[tokio::test(flavor = "current_thread")]
+    async fn secondary_limit_403_classifies_rate_limited() {
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let base_uri = spawn_counting_response_server(
+            "403 Forbidden",
+            "application/json",
+            "Retry-After: 30\r\n",
+            r#"{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}"#,
+            hits.clone(),
+        )
+        .await;
+        let client = make_client(&base_uri);
+
+        let body = serde_json::json!({"query": "{}"});
+        let err = client
+            .post_graphql_with_retry::<serde_json::Value>(&body)
+            .await
+            .expect_err("403 secondary limit must fail");
+        match &err {
+            GhError::RateLimited {
+                retry_after_secs, ..
+            } => assert_eq!(*retry_after_secs, 30),
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let pe = lazybox_core::ProviderError::from(err);
+        assert!(
+            pe.is_retryable() && !pe.is_auth(),
+            "a secondary limit is throttling, not a dead token"
+        );
+    }
+
+    /// A plain 403 (no limit markers, no Retry-After) stays an auth
+    /// failure — the secondary-limit carve-out must not swallow real
+    /// permission errors.
+    #[tokio::test(flavor = "current_thread")]
+    async fn plain_403_still_classifies_auth() {
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let base_uri = spawn_counting_response_server(
+            "403 Forbidden",
+            "application/json",
+            "",
+            r#"{"message":"Resource not accessible by integration"}"#,
+            hits.clone(),
+        )
+        .await;
+        let client = make_client(&base_uri);
+
+        let body = serde_json::json!({"query": "{}"});
+        let err = client
+            .post_graphql_with_retry::<serde_json::Value>(&body)
+            .await
+            .expect_err("plain 403 must fail");
+        assert!(
+            matches!(&err, GhError::HttpStatus { status: 403, .. }),
+            "got {err:?}"
+        );
+        assert!(lazybox_core::ProviderError::from(err).is_auth());
+    }
+
+    /// 5xx keeps its transient classification but gets exactly ONE
+    /// in-call retry — sustained outages are spaced by the poll-level
+    /// backoff, not burned down the 200ms/800ms ladder.
+    #[tokio::test(flavor = "current_thread")]
+    async fn five_hundred_gets_exactly_one_in_call_retry() {
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let base_uri = spawn_counting_response_server(
+            "500 Internal Server Error",
+            "text/html",
+            "",
+            "<html>boom</html>",
+            hits.clone(),
+        )
+        .await;
+        let client = make_client(&base_uri);
+
+        let body = serde_json::json!({"query": "{}"});
+        let err = client
+            .post_graphql_with_retry::<serde_json::Value>(&body)
+            .await
+            .expect_err("500 must fail");
+        assert!(
+            matches!(&err, GhError::HttpStatus { status: 500, .. }),
+            "got {err:?}"
+        );
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "5xx = initial attempt + exactly one in-call retry"
+        );
+        assert!(lazybox_core::ProviderError::from(err).is_retryable());
+    }
+
+    // ── rate-limit header parsing / detection (pure) ──────────────
+
+    #[test]
+    fn rate_limit_headers_prefer_retry_after() {
+        let h = RateLimitHeaders::parse(Some("120"), Some("0"), Some("1750000000"));
+        assert_eq!(h.wait_secs(1749999000), 120);
+    }
+
+    #[test]
+    fn rate_limit_headers_fall_back_to_reset_epoch() {
+        let h = RateLimitHeaders::parse(None, Some("0"), Some("1750000090"));
+        assert_eq!(h.wait_secs(1750000000), 90);
+    }
+
+    #[test]
+    fn rate_limit_headers_default_when_absent_and_clamp_past_reset() {
+        let none = RateLimitHeaders::parse(None, None, None);
+        assert_eq!(none.wait_secs(1750000000), 60, "no hints → 60s default");
+        let past = RateLimitHeaders::parse(None, None, Some("1749999000"));
+        assert_eq!(
+            past.wait_secs(1750000000),
+            1,
+            "reset in the past clamps to 1s"
+        );
+    }
+
+    #[test]
+    fn rate_limit_detection_covers_429_and_documented_403s() {
+        assert!(is_rate_limit_response(429, "", false));
+        assert!(is_rate_limit_response(
+            403,
+            "You have exceeded a secondary rate limit.",
+            false
+        ));
+        assert!(is_rate_limit_response(
+            403,
+            "API rate limit exceeded",
+            false
+        ));
+        assert!(
+            is_rate_limit_response(403, "{}", true),
+            "403 + Retry-After is the documented secondary-limit shape"
+        );
+        assert!(!is_rate_limit_response(403, "forbidden", false));
+        assert!(!is_rate_limit_response(500, "rate limit exceeded", false));
+    }
+
+    // ── credential fingerprint ────────────────────────────────────
+
+    #[test]
+    fn credential_fingerprint_tracks_token_material() {
+        let a = credential_fingerprint("ghp_tokenA");
+        let a2 = credential_fingerprint("ghp_tokenA");
+        let b = credential_fingerprint("ghp_tokenB");
+        assert_eq!(a, a2, "same token → same fingerprint");
+        assert_ne!(a, b, "rotated token → different fingerprint");
+        assert!(
+            !a.contains("ghp_tokenA") && a.len() == 16,
+            "fingerprint is a short hash, never the raw secret: {a}"
+        );
+    }
+
     /// Like `spawn_canned_response_server`, but serves a SEQUENCE of
     /// bodies — the i-th connection gets `bodies[i]` (the last body
     /// repeats once exhausted). Lets pagination tests hand back
@@ -3551,15 +4031,21 @@ mod tests {
     fn make_client(base_uri: &str) -> GhClient {
         // Bypass `from_credential` (which calls `/user`) — we want
         // a `GhClient` that talks to the mock server directly.
+        // Octocrab's built-in retry is disabled exactly like the
+        // production builder in `from_credential`: with it on, the
+        // request-count assertions below would measure octocrab's
+        // middleware, not our retry ladder.
         let inner = octocrab::Octocrab::builder()
             .base_uri(base_uri)
             .unwrap()
+            .add_retry_config(octocrab::service::middleware::retry::RetryConfig::None)
             .build()
             .unwrap();
         GhClient {
             inner,
             user: "test-user".to_string(),
             credential_source: "test".to_string(),
+            credential_fingerprint: credential_fingerprint("test-token"),
             pr_filters: vec![],
             issue_filters: vec![],
             watch_repos: vec![],
@@ -3864,7 +4350,7 @@ mod tests {
         let base_uri = spawn_sequenced_response_server(vec![METHOD, BODY]).await;
         let client = make_client(&base_uri);
         client
-            .merge_pr("PR_kwDO")
+            .merge_pr("PR_kwDO", None)
             .await
             .expect("merge success must not report a false failure");
     }
@@ -3876,7 +4362,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn merge_pins_repo_default_method() {
         assert_eq!(
-            graphql::merge_pr_body("PR_kwDO", "SQUASH")["variables"]["method"],
+            graphql::merge_pr_body("PR_kwDO", "SQUASH", None)["variables"]["method"],
             "SQUASH",
             "the resolved default method must ride the merge mutation"
         );
@@ -3886,7 +4372,7 @@ mod tests {
         let base_uri = spawn_sequenced_response_server(vec![METHOD, BODY]).await;
         let client = make_client(&base_uri);
         client
-            .merge_pr("PR_kwDO")
+            .merge_pr("PR_kwDO", None)
             .await
             .expect("merging a squash-only repo must succeed");
     }
@@ -3975,7 +4461,7 @@ mod tests {
         let base_uri = spawn_sequenced_response_server(vec![METHOD, BODY]).await;
         let client = make_client(&base_uri);
         let err = client
-            .merge_pr("PR_kwDO")
+            .merge_pr("PR_kwDO", None)
             .await
             .expect_err("a real GraphQL error must still surface as an error");
         let msg = err.to_string();

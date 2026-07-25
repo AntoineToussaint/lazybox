@@ -22,11 +22,13 @@
 //! `last_viewed_at` all survive the poll. We do it inline here since
 //! there's only one place sessions enter the system.
 
+pub mod auto_merge;
 mod autofix;
 mod handlers;
 mod mutate;
 mod scheduler;
 
+pub use auto_merge::AutoMergeMemory;
 pub use scheduler::{
     CURSOR_TTL, DEFAULT_ROUND_ROBIN_N, RoundRobinPick, RoundRobinState, pick_repos_for_tick,
     plan_round_robin_tick,
@@ -1567,6 +1569,25 @@ pub fn filter_linear_tasks(tasks: Vec<Task>, filter: &ProviderConfig) -> Vec<Tas
         .collect()
 }
 
+/// Pure reuse decision for the cached GitHub client: reuse only when
+/// BOTH the credential source label and the token fingerprint match
+/// the freshly-resolved credential.
+///
+/// The label alone is not enough — it names where the token came from
+/// ("cmd:gh auth token", "GH_TOKEN env"), which is identical before
+/// and after a rotation. Comparing the fingerprint (a short hash of
+/// the token material, never the raw secret) is what makes a rotated
+/// token rebuild the client instead of riding the startup token until
+/// daemon restart.
+pub fn gh_client_reusable(
+    cached_source: &str,
+    cached_fingerprint: &str,
+    fresh_source: &str,
+    fresh_fingerprint: &str,
+) -> bool {
+    cached_source == fresh_source && cached_fingerprint == fresh_fingerprint
+}
+
 /// Best-effort: build the source set from the user's persisted
 /// setup. Each constructed source carries the per-provider filter
 /// (role + item-type toggles) and applies it post-fetch. Providers
@@ -1591,20 +1612,31 @@ pub async fn sources_for(
         {
             Ok(cred) => {
                 // Reuse the cached client when the credential source
-                // is unchanged. `with_filters` consumes Self and
+                // AND the token material are unchanged. The source
+                // label alone is rotation-stable ("cmd:gh auth token"
+                // forever), so comparing only the label kept serving
+                // the startup token after a rotation — every fresh
+                // token the chain resolved was silently discarded and
+                // the daemon stayed bricked on 401s until restart.
+                // `with_filters` consumes Self and
                 // returns a new client with refreshed qualifiers —
                 // the underlying `Arc<Mutex<RateBudget>>` is cloned,
                 // so observations made by previous ticks (or by the
                 // GhSource we hand out below) remain visible to the
                 // cached copy and vice versa.
                 let cred_source = cred.source.clone();
+                let cred_fingerprint = lazybox_gh::credential_fingerprint(cred.token());
                 // Clone the cached client out under a brief std-lock and
                 // release before any `.await` — the cache lock must never
                 // span the `from_credential` network call (issue #92).
-                let cached = gh_client_cache
-                    .lock()
-                    .clone()
-                    .filter(|c| c.credential_source() == cred_source.as_str());
+                let cached = gh_client_cache.lock().clone().filter(|c| {
+                    gh_client_reusable(
+                        c.credential_source(),
+                        c.credential_fingerprint(),
+                        &cred_source,
+                        &cred_fingerprint,
+                    )
+                });
                 // Cap the cold-cache client build. `from_credential`
                 // makes an untimed `/user` REST call, and this runs
                 // OUTSIDE the 180s tick timeout — without a cap a
@@ -1612,7 +1644,7 @@ pub async fn sources_for(
                 // forever (no tick ever starts, so no tick timeout
                 // ever fires).
                 const CLIENT_INIT_TIMEOUT: Duration = Duration::from_secs(15);
-                let client_result: Result<GhClient, String> = match cached {
+                let client_result: Result<GhClient, lazybox_core::ProviderError> = match cached {
                     Some(existing) => Ok(existing),
                     None => {
                         match tokio::time::timeout(
@@ -1621,10 +1653,17 @@ pub async fn sources_for(
                         )
                         .await
                         {
-                            Ok(result) => result.map_err(|e| e.to_string()),
-                            Err(_) => Err(format!(
-                                "client init timed out after {}s",
-                                CLIENT_INIT_TIMEOUT.as_secs()
+                            // Keep the typed classification (auth vs
+                            // retryable vs permanent) — the failure
+                            // broadcast below tells the TUI how loud
+                            // to be about it.
+                            Ok(result) => result.map_err(lazybox_core::ProviderError::from),
+                            Err(_) => Err(lazybox_core::ProviderError::retryable(
+                                lazybox_gh::SOURCE,
+                                format!(
+                                    "client init timed out after {}s",
+                                    CLIENT_INIT_TIMEOUT.as_secs()
+                                ),
                             )),
                         }
                     }
@@ -1766,7 +1805,37 @@ pub async fn sources_for(
                             last_windowed: parking_lot::Mutex::new(false),
                         }));
                     }
-                    Err(e) => tracing::warn!("github client init failed: {e}"),
+                    Err(e) => {
+                        // A dead token at startup used to be log-only:
+                        // the daemon looked idle in the UI while every
+                        // tick silently failed to even build a client.
+                        // Broadcast a ProviderError the same way fetch
+                        // failures do — with the per-source debounce so
+                        // the identical failure doesn't re-toast every
+                        // tick.
+                        tracing::warn!("github client init failed: {}", e.diagnostic());
+                        let msg = e.user_message();
+                        if state.last_error.get(lazybox_gh::SOURCE).map(String::as_str)
+                            != Some(msg.as_str())
+                        {
+                            state
+                                .last_error
+                                .insert(lazybox_gh::SOURCE.to_string(), msg.clone());
+                            let kind = if e.is_retryable() {
+                                "retryable"
+                            } else if e.is_auth() {
+                                "auth"
+                            } else {
+                                "permanent"
+                            };
+                            let _ = bus.send(Event::ProviderError {
+                                source: lazybox_gh::SOURCE.to_string(),
+                                message: msg,
+                                detail: e.diagnostic(),
+                                kind: kind.to_string(),
+                            });
+                        }
+                    }
                 }
             }
             Err(e) => tracing::info!("github credentials not available: {e}"),
@@ -1862,7 +1931,22 @@ pub struct TickState {
     /// — adding TTL pruning or a dynamic-N knob doesn't touch this
     /// struct.
     pub round_robin: RoundRobinState,
+    /// Consecutive polls in which each task (keyed by task id) has
+    /// reported `Mergeable::Unknown`. Drives the fast-repoll cap:
+    /// only the first [`UNKNOWN_MERGEABLE_MAX_FAST_PROBES`] Unknown
+    /// sightings arm the 5s re-poll; after that the task waits out
+    /// the normal cadence. Entries clear the moment the task reports
+    /// a definitive value (or stops being polled Unknown).
+    unknown_mergeable_probes: std::collections::HashMap<String, u32>,
 }
+
+/// How many consecutive `Mergeable::Unknown` sightings of one task may
+/// arm the 5s fast re-poll before that task falls back to the normal
+/// poll cadence. GitHub computes mergeability within a few seconds in
+/// the happy case; a PR still Unknown after three fast probes isn't
+/// going to resolve on the next 5s probe either, and the fast loop
+/// burns rate budget.
+const UNKNOWN_MERGEABLE_MAX_FAST_PROBES: u32 = 3;
 
 /// Issue→PR merge-prompt dedupe memory, kept in its OWN lock —
 /// deliberately NOT a field of [`TickState`].
@@ -2035,11 +2119,47 @@ pub async fn tick_with_state(
                 // — see `UpsertContext`.
                 let mut upsert_ctx = UpsertContext::build(config);
                 for (i, task) in tasks.into_iter().enumerate() {
-                    if task.mergeable == lazybox_core::Mergeable::Unknown {
-                        saw_unknown_mergeable = true;
-                    }
                     let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
                     let task_id = task.id.to_string();
+                    // Fast-repoll trigger for GitHub's lazily-computed
+                    // mergeability — with two guards that used to be
+                    // missing:
+                    //   1. Only NON-terminal tasks count. Merged/closed
+                    //      PRs never get a computed value upstream, so
+                    //      counting them kept the 5s fast-loop armed on
+                    //      literally every merged-sweep tick (the
+                    //      provider now maps them to a definitive value,
+                    //      but the scheduler must not depend on every
+                    //      provider getting that right).
+                    //   2. Per-task probe cap. GitHub usually computes
+                    //      mergeability within a few seconds; if N fast
+                    //      probes in a row still say Unknown, fall back
+                    //      to the normal cadence for that task instead
+                    //      of 5s-polling indefinitely. The counter
+                    //      resets the moment a definitive value lands.
+                    if task.mergeable == lazybox_core::Mergeable::Unknown
+                        && !matches!(
+                            task.state,
+                            lazybox_core::TaskState::Merged | lazybox_core::TaskState::Closed
+                        )
+                    {
+                        let probes = state
+                            .unknown_mergeable_probes
+                            .entry(task_id.clone())
+                            .or_insert(0);
+                        *probes = probes.saturating_add(1);
+                        if *probes <= UNKNOWN_MERGEABLE_MAX_FAST_PROBES {
+                            saw_unknown_mergeable = true;
+                        } else if *probes == UNKNOWN_MERGEABLE_MAX_FAST_PROBES + 1 {
+                            tracing::info!(
+                                task = %task_id,
+                                "mergeable still UNKNOWN after {UNKNOWN_MERGEABLE_MAX_FAST_PROBES} \
+                                 fast probes — falling back to the normal poll cadence"
+                            );
+                        }
+                    } else {
+                        state.unknown_mergeable_probes.remove(&task_id);
+                    }
                     polled.push(key);
                     let one_started = std::time::Instant::now();
                     match tokio::time::timeout(
@@ -2125,6 +2245,19 @@ pub async fn tick_with_state(
                     tracing::error!(diagnostic = %e.diagnostic(), "poll failed (auth)");
                 } else {
                     tracing::error!(diagnostic = %e.diagnostic(), "poll failed (permanent)");
+                }
+                // An auth-classified failure means the token the cached
+                // client holds is dead (expired / revoked / rotated).
+                // Drop the cache so the NEXT tick re-resolves the
+                // credential chain and rebuilds from scratch — without
+                // this, the cache-reuse filter could keep handing back
+                // the bricked client until daemon restart.
+                if e.is_auth() && source.name() == lazybox_gh::SOURCE {
+                    *config.gh_client_cache.lock() = None;
+                    tracing::info!(
+                        "cleared cached GitHub client after auth failure — \
+                         next tick rebuilds from the credential chain"
+                    );
                 }
                 let kind = if e.is_retryable() {
                     "retryable"
@@ -2357,7 +2490,11 @@ pub async fn rescope_with_state(
         let key = WorkspaceKey::new(r.key.clone());
         // Decode the stored workspace once — used by both the
         // snoozed-skip guard AND the locally-created (no upstream
-        // task) guard below.
+        // task) guard below. Lenient decode is deliberate: this copy
+        // only feeds preserve-guards, never a write. A row that fails
+        // to decode here can still never be reaped — the silent-delete
+        // branch below re-loads through the STRICT `load_workspace`
+        // and preserves anything it cannot read.
         let stored_ws = r
             .workspace_json
             .as_deref()
@@ -2465,6 +2602,17 @@ pub async fn rescope_with_state(
                     );
                     continue;
                 }
+                // User notes are user work exactly like sessions are:
+                // a session-less row carrying a non-empty note must
+                // survive the sweep (it just goes Inactive) rather
+                // than take the note with it.
+                if stored_ws.as_ref().is_some_and(|w| w.has_notes()) {
+                    tracing::info!(
+                        workspace_key = %r.key,
+                        "rescope: preserving out-of-scope workspace with user notes"
+                    );
+                    continue;
+                }
                 // Safe to remove silently: nothing's running.
                 tracing::info!(
                     workspace_key = %r.key,
@@ -2480,11 +2628,12 @@ pub async fn rescope_with_state(
                     continue;
                 };
                 if !fresh_workspace.sessions.is_empty()
+                    || fresh_workspace.has_notes()
                     || handlers::count_live_terminals(config, &key).await > 0
                 {
                     tracing::info!(
                         workspace_key = %r.key,
-                        "rescope: workspace gained a session during sweep — preserving"
+                        "rescope: workspace gained a session or notes during sweep — preserving"
                     );
                     continue;
                 }
@@ -2702,28 +2851,22 @@ pub fn spawn(config: ServerConfig, interval: Duration) -> tokio::task::JoinHandl
                 summary.saw_unknown_mergeable,
             );
 
-            // Base cadence is `interval`. If a provider reported a
-            // rate-limit reset window, use whichever is longer.
-            let mut next_in = match summary.retry_after_secs {
-                Some(secs) => interval.max(Duration::from_secs(secs)),
-                None => interval,
-            };
+            let next_in = next_tick_delay(
+                interval,
+                summary.retry_after_secs,
+                summary.saw_unknown_mergeable,
+                UNKNOWN_RETRY,
+            );
             if summary.retry_after_secs.is_some() {
                 tracing::warn!(
                     "polling: backing off {}s before next tick (rate-limit hint)",
                     next_in.as_secs(),
                 );
-            }
-            // GitHub returns `mergeable: UNKNOWN` while it computes
-            // mergeability in the background. The second query
-            // (issued ~5s later) almost always returns the real
-            // value, so override the cadence in that case.
-            if summary.saw_unknown_mergeable && UNKNOWN_RETRY < next_in {
+            } else if summary.saw_unknown_mergeable && next_in < interval {
                 tracing::info!(
                     "polling: re-firing in {}s to chase UNKNOWN mergeable",
-                    UNKNOWN_RETRY.as_secs(),
+                    next_in.as_secs(),
                 );
-                next_in = UNKNOWN_RETRY;
             }
             next_due = Instant::now() + next_in;
             // Expose the effective cadence every tick so "why is sync
@@ -2784,13 +2927,7 @@ pub fn spawn_with_sources(
             let retry_after = outcome.retry_after_secs;
             let saw_unknown = outcome.saw_unknown_mergeable;
             rescope_with_state(&config, &outcome, &mut state).await;
-            let mut next_in = match retry_after {
-                Some(secs) => interval.max(Duration::from_secs(secs)),
-                None => interval,
-            };
-            if saw_unknown && UNKNOWN_RETRY < next_in {
-                next_in = UNKNOWN_RETRY;
-            }
+            let next_in = next_tick_delay(interval, retry_after, saw_unknown, UNKNOWN_RETRY);
             next_due = Instant::now() + next_in;
         }
     })
@@ -2806,6 +2943,34 @@ pub fn spawn_with_sources(
 /// provider reported a rate-limit reset window; `saw_unknown_mergeable`
 /// triggers a quick re-poll so GitHub's lazy mergeability landing
 /// doesn't have to wait out the full interval.
+/// How long to sleep before the next poll tick. Pure so the ordering
+/// contract is testable:
+///
+/// 1. Start from the configured base cadence.
+/// 2. The unknown-mergeable fast probe may only SHORTEN it (chase
+///    GitHub's lazy mergeability computation ~5s later).
+/// 3. A provider-reported `retry_after` may only LENGTHEN it — and it
+///    is applied LAST, so a rate-limit reset window always beats the
+///    fast probe. (The old code applied the 5s override after the
+///    retry-after clamp, which stomped a provider-mandated multi-
+///    minute backoff down to 5s and kept hammering a limited token.)
+pub fn next_tick_delay(
+    interval: Duration,
+    retry_after_secs: Option<u64>,
+    saw_unknown_mergeable: bool,
+    unknown_retry: Duration,
+) -> Duration {
+    let base = if saw_unknown_mergeable {
+        interval.min(unknown_retry)
+    } else {
+        interval
+    };
+    match retry_after_secs {
+        Some(secs) => base.max(Duration::from_secs(secs)),
+        None => base,
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TickSummary {
     pub retry_after_secs: Option<u64>,
@@ -3216,14 +3381,37 @@ async fn upsert_into_workspace_key(config: &ServerConfig, key: &WorkspaceKey, ta
     //    polls in with `closes_issues`, we fold standalone issue
     //    workspaces into it here. Async (touches the store +
     //    `terminal_meta`) but doesn't yet write the PR's own row.
-    let (workspace, pending_merges) = prepare_upsert(config, key, task).await;
+    //    `None` means the stored row exists but is unreadable —
+    //    committing would overwrite the preserved row with
+    //    freshly-derived state, so this poll's update is dropped.
+    let Some((workspace, pending_merges)) = prepare_upsert(config, key, task).await else {
+        return;
+    };
+
+    // Auto-merge signal, captured off the final in-memory state before
+    // the commit consumes it (commit only mutates sessions/paths, never
+    // the PR fields the signal reads). The hook itself runs AFTER the
+    // commit + broadcast below, so an attempt can never observe — or
+    // race — a workspace state clients haven't seen.
+    let auto_merge_signal = auto_merge::signal_for(&workspace);
 
     // 2. COMMIT: migrate worktree dirs to the (possibly new) PR slug,
     //    atomically persist the PR, terminal rebadges, and absorbed-issue
     //    deletes, then publish the complete I1–I6 event tail. The blocking
     //    owner retains every lock and projection even if the polling task is
     //    cancelled by its per-task timeout.
-    commit_merge(config, workspace, pending_merges, ws_guards).await;
+    let commit_outcome = commit_merge(config, workspace, pending_merges, ws_guards).await;
+
+    // Daemon-side "auto-merge on green" (the trigger moved out of the
+    // TUI): evaluate the freshly-committed state and dispatch a merge
+    // attempt when it flipped merge-ready. One firing authority — a
+    // headless daemon fires it, N attached clients can't double-fire.
+    auto_merge::on_workspace_committed(
+        config,
+        key,
+        auto_merge_signal,
+        commit_outcome == CommitOutcome::Changed,
+    );
 
     // 3. TERMINAL: the PR merged or the issue closed → either reap its
     //    safe-to-delete worktrees silently (when
@@ -3316,10 +3504,90 @@ fn closed_issue_transition(prev: Option<&Workspace>, task: &Task) -> Option<u64>
     pr_number_from_task(task)
 }
 
+/// What the store holds at a workspace key, with "present but
+/// unreadable" kept distinct from "absent". The distinction is what
+/// stops the upsert path from clobbering a row that startup's
+/// `load_workspaces` honestly preserved ("preserved, not deleted"):
+/// treating a decode failure as absent rebuilt the workspace fresh
+/// from the task and overwrote the preserved row on the very next
+/// poll — destroying its sessions, read-state, snooze, and policies.
+enum StoredWorkspace {
+    /// No row / no JSON payload — nothing to lose, safe to create.
+    Absent,
+    Present(Box<Workspace>),
+    /// Row exists but cannot be read: store read error, corrupt JSON,
+    /// or a schema stamped by a newer build (downgrade). Carries the
+    /// reason for the report.
+    Unreadable(String),
+}
+
+/// Strict load of the stored workspace row at `key`. Callers on a
+/// read-modify-WRITE path must branch on [`StoredWorkspace::Unreadable`]
+/// and skip the write; lenient read-only consumers can keep using
+/// [`load_workspace`].
+fn load_stored_workspace(config: &ServerConfig, key: &WorkspaceKey) -> StoredWorkspace {
+    match config.store.get_workspace(key) {
+        // A transient read error (e.g. SQLITE_BUSY) means we cannot
+        // know whether a row exists — writing "fresh" state now could
+        // overwrite one. Same preserve semantics as corruption.
+        Err(e) => StoredWorkspace::Unreadable(format!("store read failed: {e}")),
+        Ok(None) => StoredWorkspace::Absent,
+        Ok(Some(record)) => match record.workspace_json {
+            None => StoredWorkspace::Absent,
+            Some(json) => match Workspace::decode_persisted(&json) {
+                Ok(ws) => StoredWorkspace::Present(Box::new(ws)),
+                Err(e) => StoredWorkspace::Unreadable(e.to_string()),
+            },
+        },
+    }
+}
+
+/// Minimum interval between repeated "unreadable stored row" reports
+/// for the same workspace key. The poll tick re-encounters the same
+/// corrupt row every cycle; one storage event every ten minutes keeps
+/// the condition visible without hint-bar spam every ~60s.
+const UNDECODABLE_REPORT_EVERY: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Log + broadcast that a stored workspace row is unreadable and being
+/// preserved, debounced per key via
+/// [`ServerConfig::undecodable_row_reports`]. Mirrors startup's
+/// `storage_recovery_event` wording so the user sees one consistent
+/// story ("preserved, not deleted") from both paths.
+fn report_unreadable_workspace_row(config: &ServerConfig, key: &str, reason: &str) {
+    tracing::warn!(
+        workspace_key = %key,
+        %reason,
+        "upsert: stored workspace row is unreadable — preserving it, skipping this poll's update"
+    );
+    let now = std::time::Instant::now();
+    {
+        let mut reports = config.undecodable_row_reports.lock();
+        if let Some(last) = reports.get(key)
+            && now.duration_since(*last) < UNDECODABLE_REPORT_EVERY
+        {
+            return;
+        }
+        reports.insert(key.to_string(), now);
+    }
+    let _ = config.bus.send(Event::provider_error_permanent(
+        "storage",
+        format!(
+            "workspace {key} could not be loaded ({reason}). It was preserved, not \
+             overwritten; provider updates for it are paused. Back up the state \
+             directory and follow the recovery guide."
+        ),
+    ));
+}
+
 /// Pure-ish prepare step: load the existing workspace (if any),
 /// attach the incoming task, and run the issue-collapse merge. No
 /// store writes, no `WorkspaceUpserted` broadcast — the returned
 /// `Workspace` is what we'll commit in step 3.
+///
+/// Returns `None` when the stored row exists but cannot be decoded
+/// (corruption, store read error, or newer-schema row from a
+/// downgrade): the caller must skip the upsert entirely so the
+/// preserved row stays intact for startup/manual recovery.
 ///
 /// Split out from `upsert_into_workspace_key` so a future test can
 /// drive the prepare step against a mock store without committing
@@ -3329,14 +3597,15 @@ async fn prepare_upsert(
     config: &ServerConfig,
     key: &WorkspaceKey,
     task: Task,
-) -> (Workspace, Vec<PendingIssueMerge>) {
-    let existing = config
-        .store
-        .get_workspace(key)
-        .ok()
-        .flatten()
-        .and_then(|r| r.workspace_json)
-        .and_then(|j| serde_json::from_str::<Workspace>(&j).ok());
+) -> Option<(Workspace, Vec<PendingIssueMerge>)> {
+    let existing = match load_stored_workspace(config, key) {
+        StoredWorkspace::Present(ws) => Some(*ws),
+        StoredWorkspace::Absent => None,
+        StoredWorkspace::Unreadable(reason) => {
+            report_unreadable_workspace_row(config, key.as_str(), &reason);
+            return None;
+        }
+    };
 
     // Sync-latency probe: when this task already lives in the workspace
     // and the incoming copy is genuinely fresher, log how stale it was
@@ -3369,7 +3638,7 @@ async fn prepare_upsert(
     // Happens here (in prepare) so the migration step sees the
     // final session set and renames worktrees in one pass.
     let pending_merges = merge_closing_issue_workspaces(config, &mut workspace).await;
-    (workspace, pending_merges)
+    Some((workspace, pending_merges))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4012,7 +4281,14 @@ async fn sync_one_tracked_workspace(
                 tracing::debug!(workspace = %key, ?outcome, "track-main sync");
             }
             Err(e) => {
-                tracing::debug!(workspace = %key, error = %e, "track-main sync failed");
+                // A failing FF means "not verifiably synced" — exactly
+                // what the behind flag exists to say ("could not be
+                // brought up to date automatically"). The old arm left
+                // `behind` untouched, so a persistently erroring sync
+                // (base ref gone, merge blocked on an untracked-file
+                // collision) rendered as ✓ synced forever.
+                behind = true;
+                tracing::warn!(workspace = %key, worktree = %wt.display(), error = %e, "track-main sync failed");
             }
         }
     }
@@ -4366,12 +4642,15 @@ fn issue_merge_events(pr_key: &WorkspaceKey, pending: Vec<PendingIssueMerge>) ->
 /// `pending` may be empty: the normal (non-merge) upsert path routes
 /// every commit through here too, in which case this is just the
 /// migrate + commit path with no terminal or removal event tail.
+/// Returns the commit outcome (`Unchanged` also covers a failed
+/// commit — nothing new became durable/visible) so the caller's
+/// auto-merge hook can tell a byte-identical re-poll from real news.
 async fn commit_merge(
     config: &ServerConfig,
     mut pr_ws: Workspace,
     pending: Vec<PendingIssueMerge>,
     workspace_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
-) {
+) -> CommitOutcome {
     let moved: std::collections::HashSet<lazybox_core::SessionId> = pending
         .iter()
         .flat_map(|merge| merge.moved_session_ids.iter().copied())
@@ -4392,7 +4671,7 @@ async fn commit_merge(
         })
         .collect();
     let post_commit_events = issue_merge_events(&pr_key, pending);
-    if let Err(error) = commit_workspace_move(
+    match commit_workspace_move(
         config,
         vec![(pr_key.clone(), pr_ws)],
         deletes,
@@ -4402,7 +4681,11 @@ async fn commit_merge(
     )
     .await
     {
-        report_commit_error(config, "merge issue workspace into PR", &error);
+        Ok(outcome) => outcome,
+        Err(error) => {
+            report_commit_error(config, "merge issue workspace into PR", &error);
+            CommitOutcome::Unchanged
+        }
     }
 }
 
@@ -4759,6 +5042,13 @@ fn absorb_issue_workspace(
     pr_workspace: &mut Workspace,
     issue_ws: Workspace,
 ) -> Vec<lazybox_core::SessionId> {
+    // Carry the issue's comment history AND its read/seen state onto
+    // the PR before its row is deleted — without this the collapse
+    // silently dropped both (docs/resiliency-review.md). Runs before
+    // `attach_task` below so the read marks are established first;
+    // the tasks' `recent_activity` re-merge is then a no-op
+    // content-wise and `merge_activity` preserves the marks.
+    pr_workspace.absorb_activity_from(&issue_ws);
     let mut moved = Vec::with_capacity(issue_ws.sessions.len());
     for mut session in issue_ws.sessions {
         session.workspace_key = pr_workspace.key.clone();
@@ -4816,7 +5106,21 @@ fn issue_id_to_workspace_key(issue_id: &lazybox_core::TaskId) -> WorkspaceKey {
 pub(super) fn load_workspace(config: &ServerConfig, key: &WorkspaceKey) -> Option<Workspace> {
     let record = config.store.get_workspace(key).ok().flatten()?;
     let json = record.workspace_json?;
-    serde_json::from_str::<Workspace>(&json).ok()
+    // Strict decode: a corrupt row OR one stamped by a newer build
+    // reads as `None` here. Every caller treats `None` as "nothing I
+    // can act on" — mutation paths become no-ops (preserving the row)
+    // and rescope's final delete gate preserves rather than reaps.
+    match Workspace::decode_persisted(&json) {
+        Ok(ws) => Some(ws),
+        Err(e) => {
+            tracing::warn!(
+                workspace_key = %key.as_str(),
+                error = %e,
+                "load_workspace: stored row unreadable — treating as absent (row preserved)"
+            );
+            None
+        }
+    }
 }
 
 /// Record the user's "I'm looking at this workspace" hint on the
@@ -5240,29 +5544,67 @@ pub async fn set_auto_fix_policy(
 /// hides the tabs in lazybox but leaves ghost tmux sessions visible
 /// in `tmux ls`, which then re-surface on the next lazybox launch
 /// via `recover_sessions`.
+/// Strict read of the persisted archived set, distinguishing "no set
+/// stored yet" (`Ok(empty)`) from "the set exists but could not be
+/// read" (`Err`). The distinction matters for the read-modify-WRITE
+/// callers ([`archive_workspace_key`] / [`unarchive_workspace_key`]):
+/// treating one SQLITE_BUSY (or a corrupt payload) as an empty set and
+/// then rewriting the row would replace the user's entire archive
+/// history with a single element.
+fn load_archived_set_strict(
+    config: &ServerConfig,
+) -> Result<std::collections::HashSet<String>, String> {
+    let raw = config
+        .store
+        .get_kv(lazybox_core::KV_KEY_ARCHIVED)
+        .map_err(|e| format!("read failed: {e}"))?;
+    let Some(json) = raw else {
+        return Ok(Default::default());
+    };
+    if json.trim().is_empty() {
+        // Legacy empty payload — nothing stored, nothing to lose.
+        return Ok(Default::default());
+    }
+    serde_json::from_str::<Vec<String>>(&json)
+        .map(|v| v.into_iter().collect())
+        .map_err(|e| format!("parse failed: {e}"))
+}
+
 /// Read the persisted set of archived workspace keys. Used by the
 /// upsert path to skip re-creating a workspace the user explicitly
 /// dismissed via `x x`. Returns an empty set when the kv entry
-/// doesn't exist or fails to parse — degrades gracefully (worst
-/// case the dismissed row reappears one more time).
+/// doesn't exist or fails to read — safe here because this consumer is
+/// READ-ONLY and degrades gracefully (worst case the dismissed row
+/// reappears one more time). Write paths must use
+/// `load_archived_set_strict` instead.
 pub fn load_archived_set(config: &ServerConfig) -> std::collections::HashSet<String> {
-    config
-        .store
-        .get_kv(lazybox_core::KV_KEY_ARCHIVED)
-        .ok()
-        .flatten()
-        .and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
-        .map(|v| v.into_iter().collect())
-        .unwrap_or_default()
+    load_archived_set_strict(config).unwrap_or_else(|e| {
+        tracing::warn!("load_archived_set: {e} — treating as empty for read-only use");
+        Default::default()
+    })
 }
 
 /// Add `key` to the persisted archived set. Idempotent. Returns false when
 /// persistence fails so a destructive caller can keep the workspace instead
 /// of deleting it now and letting the next restart resurrect it.
+///
+/// A failed or unparseable READ of the existing set also returns false:
+/// rewriting the row from a degraded read would wipe every previously
+/// archived key. The caller's abort/rollback path already handles a
+/// `false` archive.
 #[must_use]
 pub fn archive_workspace_key(config: &ServerConfig, key: &str) -> bool {
     let _update_guard = config.archive_updates.lock();
-    let mut set = load_archived_set(config);
+    let mut set = match load_archived_set_strict(config) {
+        Ok(set) => set,
+        Err(e) => {
+            tracing::error!(
+                "archive_workspace_key: existing archived set unreadable ({e}) — \
+                 refusing to rewrite it; archive of {key} aborted"
+            );
+            return false;
+        }
+    };
     if !set.insert(key.to_string()) {
         return true;
     }
@@ -5282,10 +5624,23 @@ pub fn archive_workspace_key(config: &ServerConfig, key: &str) -> bool {
 /// re-create the workspace. Clears the matching in-process spawn tombstone
 /// only after persistence succeeds; otherwise an unarchived-but-still-deleted
 /// workspace could race back into existence during this daemon run.
+///
+/// Same degraded-read contract as [`archive_workspace_key`]: an
+/// unreadable existing set fails the operation instead of rewriting
+/// (and thereby truncating) the stored history.
 #[must_use]
 pub fn unarchive_workspace_key(config: &ServerConfig, key: &str) -> bool {
     let _update_guard = config.archive_updates.lock();
-    let mut set = load_archived_set(config);
+    let mut set = match load_archived_set_strict(config) {
+        Ok(set) => set,
+        Err(e) => {
+            tracing::error!(
+                "unarchive_workspace_key: existing archived set unreadable ({e}) — \
+                 refusing to rewrite it; unarchive of {key} aborted"
+            );
+            return false;
+        }
+    };
     if !set.remove(key) {
         config.deleted_workspaces.lock().remove(key);
         return true;
@@ -5315,7 +5670,19 @@ pub async fn delete_workspace(config: &ServerConfig, key: &WorkspaceKey) -> bool
         .insert(key.as_str().to_string());
     crate::spawn_handler::await_inflight_spawns(config, key.as_str()).await;
     let _workspace_guard = config.lock_workspace(key.as_str()).await;
-    delete_workspace_internal(config, key, /*archive=*/ true).await
+    let deleted = delete_workspace_internal(config, key, /*archive=*/ true).await;
+    // The tombstone must not outlive the delete it guarded: a
+    // recreated same-name workspace re-allocates the same key
+    // (`allocate_workspace_key` only consults the store), and a stale
+    // tombstone would silently kill every spawn on the new row. The
+    // failure paths inside `delete_workspace_internal` already remove
+    // it on rollback; the success path releases it here, once no
+    // in-flight spawn that could still race the teardown remains (see
+    // `release_delete_tombstone` for why that's the safe point).
+    if deleted {
+        crate::spawn_handler::release_delete_tombstone(config, key.as_str());
+    }
+    deleted
 }
 
 /// Inner delete with the archive decision explicit. User-intent
@@ -5550,16 +5917,38 @@ pub async fn set_session_layout(
 /// range — both are user-driven inputs and we don't want a TUI race
 /// (poll deletes a workspace while the user hovers) to crash the
 /// daemon.
-pub async fn mark_activity_read(config: &ServerConfig, key: &WorkspaceKey, index: usize) {
-    apply_activity_mark(config, key, index, /*read=*/ true).await;
+///
+/// `fingerprint` is the row's stable identity as the client saw it.
+/// The daemon's list may have shifted since the client's snapshot (a
+/// poll commits a new top-of-feed comment between the TUI resolving
+/// the row and this command landing), so when a fingerprint is
+/// present it is resolved against the CURRENT list — `index` only
+/// serves as a position hint / same-content-twin disambiguator — and
+/// a vanished row is a logged no-op rather than a mark on whatever
+/// now occupies `index`.
+pub async fn mark_activity_read(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    index: usize,
+    fingerprint: Option<&lazybox_core::ActivityFingerprint>,
+) {
+    apply_activity_mark(config, key, index, fingerprint, /*read=*/ true).await;
 }
 
-/// Reverse of `mark_activity_read`. `z` undo binds here.
+/// Reverse of `mark_activity_read`. `z` undo binds here. The TUI
+/// re-resolves the undo target against its latest snapshot before
+/// sending, so this path still travels as a raw index.
 pub async fn unmark_activity_read(config: &ServerConfig, key: &WorkspaceKey, index: usize) {
-    apply_activity_mark(config, key, index, /*read=*/ false).await;
+    apply_activity_mark(config, key, index, None, /*read=*/ false).await;
 }
 
-async fn apply_activity_mark(config: &ServerConfig, key: &WorkspaceKey, index: usize, read: bool) {
+async fn apply_activity_mark(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    index: usize,
+    fingerprint: Option<&lazybox_core::ActivityFingerprint>,
+    read: bool,
+) {
     // Lost-update guard: without it a poll tick's prepare→commit
     // window could overwrite this mark with the pre-mark copy it
     // loaded (see `upsert_into_workspace_key`).
@@ -5567,6 +5956,20 @@ async fn apply_activity_mark(config: &ServerConfig, key: &WorkspaceKey, index: u
     let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
         tracing::debug!("apply_activity_mark: no record for {key}");
         return;
+    };
+    let index = match fingerprint {
+        Some(fp) => match fp.resolve(&workspace.activity, index) {
+            Some(resolved) => resolved,
+            None => {
+                tracing::debug!(
+                    workspace_key = %key.as_str(),
+                    index,
+                    "apply_activity_mark: fingerprinted row not in current list — no-op"
+                );
+                return;
+            }
+        },
+        None => index,
     };
     if read {
         workspace.mark_activity_read(index);
@@ -6787,6 +7190,375 @@ mod rescope_collapse_tests {
 }
 
 #[cfg(test)]
+mod unreadable_row_preservation_tests {
+    //! Fix for "unparseable workspace rows are silently clobbered by
+    //! the next poll": startup preserves an unreadable row with a
+    //! warning, but `prepare_upsert` used to lenient-parse with `.ok()`
+    //! and rebuild `Workspace::from_task` fresh on failure — the next
+    //! poll of the same PR then overwrote the preserved row, destroying
+    //! its sessions / read-state / snooze / policies. These tests pin
+    //! the new contract: present-but-unreadable rows (corrupt JSON,
+    //! newer-schema stamp, failing store reads) are never overwritten,
+    //! and the condition is reported on the bus (debounced).
+    use super::*;
+    use lazybox_core::{TaskId, TaskRole, TaskState};
+    use lazybox_store::{MemoryStore, Store, StoreError, StoreMutation};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn gh_pr_task(key: &str) -> Task {
+        Task {
+            id: TaskId {
+                source: "github".into(),
+                key: key.into(),
+            },
+            title: "t".into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: format!("https://github.com/{}", key.replace('#', "/pull/")),
+            repo: Some("o/r".into()),
+            branch: Some("feat".into()),
+            base_branch: None,
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            kind: None,
+            closes_issues: vec![],
+        }
+    }
+
+    /// Drain the bus and count `ProviderError { source: "storage" }`
+    /// events.
+    fn storage_error_count(rx: &mut tokio::sync::broadcast::Receiver<Event>) -> usize {
+        let mut n = 0;
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::ProviderError { source, .. } = ev
+                && source == "storage"
+            {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// Valid JSON, wrong shape (a "future enum variant" a lenient read
+    /// chokes on), plus live-session markers the old behavior would
+    /// have destroyed.
+    const WRONG_SHAPE_ROW: &str = r#"{"key":"github-o-r-1","name":"n","branch":"feat",
+        "pr":{"totally":"different-shape"},"gh_issues":[],"linear_issues":[],
+        "activity":[],"seen_count":0,"sessions":[{"future_variant":true}],
+        "created_at":"2026-01-01T00:00:00Z","last_viewed_at":null}"#;
+
+    #[tokio::test]
+    async fn upsert_never_overwrites_a_corrupt_stored_row() {
+        let store = Arc::new(MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+        let task = gh_pr_task("o/r#1");
+        let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
+        let kv_key = format!("workspace:{}", key.as_str());
+        store.set_kv(&kv_key, WRONG_SHAPE_ROW).unwrap();
+
+        let mut rx = config.bus.subscribe();
+        upsert_into_workspace_key(&config, &key, task.clone()).await;
+
+        assert_eq!(
+            store.get_kv(&kv_key).unwrap().as_deref(),
+            Some(WRONG_SHAPE_ROW),
+            "the preserved-but-unreadable row must be left byte-identical"
+        );
+        assert_eq!(
+            storage_error_count(&mut rx),
+            1,
+            "the skip must be reported on the bus"
+        );
+
+        // Second poll of the same key within the debounce window:
+        // still no overwrite, and no report spam.
+        upsert_into_workspace_key(&config, &key, task).await;
+        assert_eq!(
+            store.get_kv(&kv_key).unwrap().as_deref(),
+            Some(WRONG_SHAPE_ROW)
+        );
+        assert_eq!(
+            storage_error_count(&mut rx),
+            0,
+            "repeat reports for the same key are debounced"
+        );
+    }
+
+    /// A row stamped with a NEWER schema parses fine under lenient
+    /// serde but must be preserved too: rewriting it from an older
+    /// build would silently drop the newer build's fields.
+    #[tokio::test]
+    async fn upsert_never_overwrites_a_newer_schema_row() {
+        let store = Arc::new(MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+        let task = gh_pr_task("o/r#2");
+        let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
+
+        let mut ws = Workspace::from_task(task.clone(), Utc::now());
+        ws.notes = "state a newer build wrote".into();
+        let mut row: serde_json::Value = serde_json::to_value(&ws).unwrap();
+        row["schema"] = serde_json::json!(u32::MAX);
+        row["field_from_the_future"] = serde_json::json!({"important": true});
+        let row = serde_json::to_string(&row).unwrap();
+        let kv_key = format!("workspace:{}", key.as_str());
+        store.set_kv(&kv_key, &row).unwrap();
+
+        let mut rx = config.bus.subscribe();
+        upsert_into_workspace_key(&config, &key, task).await;
+
+        assert_eq!(
+            store.get_kv(&kv_key).unwrap().as_deref(),
+            Some(row.as_str()),
+            "a downgraded build must not rewrite (and truncate) a newer-schema row"
+        );
+        assert_eq!(storage_error_count(&mut rx), 1);
+    }
+
+    /// Store wrapper whose `workspace:*` reads fail while armed —
+    /// SQLITE_BUSY shaped. A failing READ during the upsert must skip
+    /// the write, not masquerade as "row absent" and create fresh.
+    struct FailingReadStore {
+        inner: MemoryStore,
+        fail_reads: AtomicBool,
+    }
+
+    impl Store for FailingReadStore {
+        fn apply_batch(&self, mutations: &[StoreMutation]) -> Result<(), StoreError> {
+            self.inner.apply_batch(mutations)
+        }
+        fn get_kv(&self, key: &str) -> Result<Option<String>, StoreError> {
+            if key.starts_with("workspace:") && self.fail_reads.load(Ordering::SeqCst) {
+                return Err(StoreError::Backend("database is locked".into()));
+            }
+            self.inner.get_kv(key)
+        }
+        fn set_kv(&self, key: &str, value: &str) -> Result<(), StoreError> {
+            self.inner.set_kv(key, value)
+        }
+        fn delete_kv(&self, key: &str) -> Result<(), StoreError> {
+            self.inner.delete_kv(key)
+        }
+        fn list_workspaces(&self) -> Result<Vec<lazybox_store::WorkspaceRecord>, StoreError> {
+            self.inner.list_workspaces()
+        }
+        fn list_projects(&self) -> Result<Vec<lazybox_store::ProjectRecord>, StoreError> {
+            self.inner.list_projects()
+        }
+    }
+
+    #[tokio::test]
+    async fn upsert_skips_when_the_stored_row_cannot_be_read() {
+        let store = Arc::new(FailingReadStore {
+            inner: MemoryStore::new(),
+            fail_reads: AtomicBool::new(false),
+        });
+        let config = ServerConfig::with_store(store.clone());
+        let task = gh_pr_task("o/r#3");
+        let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
+        let ws = Workspace::from_task(task.clone(), Utc::now());
+        let row = serde_json::to_string(&ws).unwrap();
+        let kv_key = format!("workspace:{}", key.as_str());
+        store.inner.set_kv(&kv_key, &row).unwrap();
+
+        store.fail_reads.store(true, Ordering::SeqCst);
+        upsert_into_workspace_key(&config, &key, task).await;
+        store.fail_reads.store(false, Ordering::SeqCst);
+
+        assert_eq!(
+            store.inner.get_kv(&kv_key).unwrap().as_deref(),
+            Some(row.as_str()),
+            "a transient read failure must not let the upsert rebuild the row fresh"
+        );
+    }
+
+    /// Rescope's silent-delete branch must also preserve an unreadable
+    /// row: the corrupt row decodes to `None` for every guard, but the
+    /// final fresh-load gate refuses to reap what it cannot read.
+    #[tokio::test]
+    async fn rescope_preserves_a_corrupt_out_of_scope_row() {
+        let store = Arc::new(MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+        let kv_key = "workspace:github-o-r-1";
+        store.set_kv(kv_key, WRONG_SHAPE_ROW).unwrap();
+
+        // Non-empty polled set (a different key) with legacy scope
+        // info: every unpolled workspace is a deletion candidate.
+        let outcome = TickOutcome {
+            polled: vec![WorkspaceKey::new("github-o-r-999")],
+            any_source_succeeded: true,
+            retry_after_secs: None,
+            saw_unknown_mergeable: false,
+            source_scopes: std::collections::HashMap::new(),
+            all_full: true,
+        };
+        let mut state = TickState::default();
+        rescope_with_state(&config, &outcome, &mut state).await;
+
+        assert_eq!(
+            store.get_kv(kv_key).unwrap().as_deref(),
+            Some(WRONG_SHAPE_ROW),
+            "rescope must preserve (not reap) a row it cannot decode"
+        );
+    }
+}
+
+#[cfg(test)]
+mod archived_set_degraded_read_tests {
+    //! Fix for the archived-set wipe: `archive_workspace_key` /
+    //! `unarchive_workspace_key` are read-modify-writes of the whole
+    //! `archived_workspaces_v1` row. One failing or unparseable READ
+    //! used to be treated as "empty set", so the follow-up write
+    //! replaced the user's entire archive history with a single
+    //! element. Degraded reads must fail the operation instead.
+    use super::*;
+    use lazybox_store::{MemoryStore, Store, StoreError, StoreMutation};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct FlakyArchiveStore {
+        inner: MemoryStore,
+        fail_archived_reads: AtomicBool,
+    }
+
+    impl Store for FlakyArchiveStore {
+        fn apply_batch(&self, mutations: &[StoreMutation]) -> Result<(), StoreError> {
+            self.inner.apply_batch(mutations)
+        }
+        fn get_kv(&self, key: &str) -> Result<Option<String>, StoreError> {
+            if key == lazybox_core::KV_KEY_ARCHIVED
+                && self.fail_archived_reads.load(Ordering::SeqCst)
+            {
+                return Err(StoreError::Backend("database is locked".into()));
+            }
+            self.inner.get_kv(key)
+        }
+        fn set_kv(&self, key: &str, value: &str) -> Result<(), StoreError> {
+            self.inner.set_kv(key, value)
+        }
+        fn delete_kv(&self, key: &str) -> Result<(), StoreError> {
+            self.inner.delete_kv(key)
+        }
+        fn list_workspaces(&self) -> Result<Vec<lazybox_store::WorkspaceRecord>, StoreError> {
+            self.inner.list_workspaces()
+        }
+        fn list_projects(&self) -> Result<Vec<lazybox_store::ProjectRecord>, StoreError> {
+            self.inner.list_projects()
+        }
+    }
+
+    fn seeded_config() -> (Arc<FlakyArchiveStore>, ServerConfig) {
+        let store = Arc::new(FlakyArchiveStore {
+            inner: MemoryStore::new(),
+            fail_archived_reads: AtomicBool::new(false),
+        });
+        store
+            .inner
+            .set_kv(
+                lazybox_core::KV_KEY_ARCHIVED,
+                r#"["old-1","old-2","old-3"]"#,
+            )
+            .unwrap();
+        let config = ServerConfig::with_store(store.clone());
+        (store, config)
+    }
+
+    fn persisted_set(store: &FlakyArchiveStore) -> std::collections::HashSet<String> {
+        serde_json::from_str::<Vec<String>>(
+            &store
+                .inner
+                .get_kv(lazybox_core::KV_KEY_ARCHIVED)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap()
+        .into_iter()
+        .collect()
+    }
+
+    #[test]
+    fn failing_read_during_archive_must_not_shrink_the_persisted_set() {
+        let (store, config) = seeded_config();
+        store.fail_archived_reads.store(true, Ordering::SeqCst);
+
+        assert!(
+            !archive_workspace_key(&config, "new-key"),
+            "archive must fail loudly on a degraded read"
+        );
+
+        store.fail_archived_reads.store(false, Ordering::SeqCst);
+        let set = persisted_set(&store);
+        assert_eq!(
+            set,
+            ["old-1", "old-2", "old-3"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            "the historical archived set must survive the failed attempt"
+        );
+    }
+
+    #[test]
+    fn corrupt_archived_payload_fails_archive_without_rewriting() {
+        let (store, config) = seeded_config();
+        store
+            .inner
+            .set_kv(lazybox_core::KV_KEY_ARCHIVED, "{definitely not json")
+            .unwrap();
+
+        assert!(!archive_workspace_key(&config, "new-key"));
+        assert_eq!(
+            store
+                .inner
+                .get_kv(lazybox_core::KV_KEY_ARCHIVED)
+                .unwrap()
+                .as_deref(),
+            Some("{definitely not json"),
+            "an unparseable set is preserved for recovery, never replaced"
+        );
+    }
+
+    #[test]
+    fn failing_read_during_unarchive_must_not_wipe_the_set() {
+        let (store, config) = seeded_config();
+        store.fail_archived_reads.store(true, Ordering::SeqCst);
+        assert!(!unarchive_workspace_key(&config, "old-2"));
+        store.fail_archived_reads.store(false, Ordering::SeqCst);
+        assert_eq!(persisted_set(&store).len(), 3);
+    }
+
+    #[test]
+    fn archive_still_works_on_a_healthy_store() {
+        let (store, config) = seeded_config();
+        assert!(archive_workspace_key(&config, "new-key"));
+        let set = persisted_set(&store);
+        assert_eq!(set.len(), 4);
+        assert!(set.contains("new-key"));
+        assert!(unarchive_workspace_key(&config, "new-key"));
+        assert_eq!(persisted_set(&store).len(), 3);
+    }
+}
+
+#[cfg(test)]
 mod tick_noop_skip_tests {
     //! The steady-state poll re-fetches every task each tick; when the
     //! upstream task is byte-identical to the stored workspace,
@@ -7119,6 +7891,65 @@ mod track_main_sweep_tests {
             std::fs::read_to_string(wt.join("f.txt")).expect("read"),
             "wip\n",
             "the uncommitted work is never touched"
+        );
+    }
+
+    /// A fast-forward that ERRORS (here: git's own refusal to overwrite
+    /// an untracked file the incoming tree needs) must flag the
+    /// workspace behind — "could not be brought up to date" — not
+    /// render it as ✓ synced. The old `Err` arm left `behind = false`,
+    /// so a persistently failing sync looked permanently up to date.
+    #[tokio::test]
+    async fn sweep_flags_failing_fast_forward_as_behind_not_synced() {
+        let (_tmp, config, mgr, src, wt) = seeded_tracked_workspace().await;
+        // Upstream adds a NEW tracked file...
+        std::fs::write(src.join("new.txt"), "upstream\n").expect("write");
+        git(&src, &["add", "new.txt"]);
+        git(&src, &["commit", "-q", "-m", "add new.txt"]);
+        // ...which collides with an untracked local file of the same
+        // name: the tree is status-clean (untracked-files=no), behind,
+        // not diverged — and `merge --ff-only` refuses to clobber.
+        std::fs::write(wt.join("new.txt"), "local scratch\n").expect("write");
+
+        sync_tracked_workspaces_with(&config, &mgr).await;
+
+        let ws =
+            load_workspace(&config, &WorkspaceKey::new("scratch")).expect("workspace persists");
+        assert!(
+            ws.track_main_behind,
+            "a failing fast-forward must surface as behind, never as synced"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.join("new.txt")).expect("read"),
+            "local scratch\n",
+            "the local untracked file is never clobbered"
+        );
+    }
+
+    /// A worktree parked on a detached HEAD (bisect step, `git checkout
+    /// <sha>` inspection) is refused and reported behind — and, above
+    /// all, never advanced under the user.
+    #[tokio::test]
+    async fn sweep_never_advances_a_detached_head_worktree() {
+        let (_tmp, config, mgr, src, wt) = seeded_tracked_workspace().await;
+        std::fs::write(src.join("f.txt"), "c2\n").expect("write");
+        git(&src, &["add", "f.txt"]);
+        git(&src, &["commit", "-q", "-m", "c2"]);
+        let before = git(&wt, &["rev-parse", "HEAD"]);
+        git(&wt, &["checkout", "-q", "--detach"]);
+
+        sync_tracked_workspaces_with(&config, &mgr).await;
+
+        assert_eq!(
+            git(&wt, &["rev-parse", "HEAD"]),
+            before,
+            "the detached HEAD is left exactly where the user parked it"
+        );
+        let ws =
+            load_workspace(&config, &WorkspaceKey::new("scratch")).expect("workspace persists");
+        assert!(
+            ws.track_main_behind,
+            "a refused sync reports behind, not silently synced"
         );
     }
 

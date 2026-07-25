@@ -70,12 +70,14 @@ review, are assigned, or are mentioned on appear in the inbox. Act on them with
 the GitHub action group (`g` leader); its which-key popup shows every continuation.
 
 ### How it works (brief)
-`GhPoller` (`crates/gh-provider/src/poller.rs`) runs one GraphQL query per
-cycle via `GhClient`, diffs against the previous snapshot, and emits
-fine-grained events (state change, CI change, review change, new activity). CI
-is a `CiStatus` rolled up from individual `CheckRun`s. `GhClient` also
-implements `ScopeSource` for the setup flow. Credential chain:
-`GH_TOKEN` env → `GITHUB_TOKEN` env → `gh auth token` (`crates/gh-provider/src/lib.rs`).
+`GhClient` (`crates/gh-provider/src/client.rs`) fetches PRs and issues via
+GraphQL; the polling loop itself lives daemon-side in
+`crates/server/src/polling/mod.rs`, which schedules repos round-robin
+(stalest-first), diffs against the previous snapshot, and emits fine-grained
+events (state change, CI change, review change, new activity). CI is a
+`CiStatus` rolled up from individual `CheckRun`s. `GhClient` also implements
+`ScopeSource` for the setup flow. Credential chain: `GH_TOKEN` env →
+`GITHUB_TOKEN` env → `gh auth token` (`crates/gh-provider/src/lib.rs`).
 
 ### Test checklist
 - [ ] PRs and issues both appear, with correct state (open/draft/merged/closed).
@@ -153,9 +155,12 @@ enable per-workspace channels. lazybox creates a channel per workspace; mention
 Outbound: workspace/agent events → `chat.postMessage` via the HTTP client
 (`crates/slack-provider/src/api.rs`). Inbound: a Socket Mode WebSocket
 (`crates/slack-provider/src/socket.rs`) opened via `apps.connections.open`
-streams `app_mention` / `message.*` events; an `@lazybox` mention is routed over
-IPC to spawn or write into the target workspace's session. Channels are named
-from the slugified workspace key with an optional prefix.
+streams `app_mention` / `message.*` events; the chat router
+(`crates/server/src/chat.rs`) either answers a status query (`status` /
+`state` / `ls` / `list`) or forwards the text verbatim into the terminal
+routed to that channel. Inbound Slack can **not** spawn an agent — a channel
+with no routed terminal is ignored. Channels are named from the slugified
+workspace key with an optional prefix.
 
 ### Test checklist
 - [ ] With both tokens set, `auth.test` succeeds and the bot name shows in logs.

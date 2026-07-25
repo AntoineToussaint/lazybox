@@ -25,6 +25,22 @@ pub enum FrameError {
     Io(#[from] std::io::Error),
     #[error("frame too large ({0} bytes); exceeds this channel's limit")]
     TooLarge(u32),
+    /// A frame's declared length exceeded this channel's ingress cap
+    /// but stayed within [`MAX_FRAME_BYTES`], i.e. a well-framed peer
+    /// sent one legitimately-encoded message that is just too big for
+    /// this channel (e.g. an old client shipping a >256 KiB paste as a
+    /// single `Command::Write`). By the time this error is returned
+    /// the reader has already consumed and discarded the payload, so
+    /// the stream is still frame-aligned: callers may drop this one
+    /// message and keep reading. Lengths beyond [`MAX_FRAME_BYTES`]
+    /// are [`FrameError::TooLarge`] instead — no lazybox peer ever
+    /// writes such a frame (`encode_frame` enforces the ceiling), so a
+    /// wilder prefix means the stream itself is corrupt and fatal.
+    #[error(
+        "skipped an oversized frame ({len} bytes; this channel's limit is {max}) — \
+         the message was discarded but the stream remains in sync"
+    )]
+    OversizedSkipped { len: u32, max: u32 },
     #[error("encode: {0}")]
     Encode(#[from] bincode::error::EncodeError),
     #[error("decode: {0}")]
@@ -274,7 +290,23 @@ where
     }
     let len = u32::from_be_bytes(len_buf);
     if len > max_frame_bytes {
-        return Err(FrameError::TooLarge(len));
+        // Two very different failures share this branch — see
+        // `FrameError::OversizedSkipped` for the rule:
+        //   * cap < len <= MAX_FRAME_BYTES: a well-framed peer sent one
+        //     message too big for this channel. Consume and discard
+        //     exactly `len` payload bytes so the stream stays
+        //     frame-aligned, then report a skippable error.
+        //   * len > MAX_FRAME_BYTES: no lazybox peer ever writes such a
+        //     frame, so the length prefix itself is garbage — the
+        //     stream is desynced/corrupt and the error is fatal.
+        if len > MAX_FRAME_BYTES {
+            return Err(FrameError::TooLarge(len));
+        }
+        discard_exact(r, len as usize).await?;
+        return Err(FrameError::OversizedSkipped {
+            len,
+            max: max_frame_bytes,
+        });
     }
     let mut buf = vec![0u8; len as usize];
     r.read_exact(&mut buf).await?;
@@ -284,6 +316,30 @@ where
         return Err(FrameError::TrailingBytes(buf.len() - consumed));
     }
     Ok(Some(message))
+}
+
+/// Read and throw away exactly `len` bytes — the payload of an
+/// oversized-but-sane frame — so the next read starts at the next
+/// frame's length prefix. EOF mid-discard is an I/O error: the peer
+/// hung up mid-frame.
+async fn discard_exact<R>(r: &mut R, len: usize) -> Result<(), FrameError>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut remaining = len;
+    let mut scratch = [0u8; 8192];
+    while remaining > 0 {
+        let want = remaining.min(scratch.len());
+        let got = r.read(&mut scratch[..want]).await?;
+        if got == 0 {
+            return Err(FrameError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "EOF while discarding an oversized frame's payload",
+            )));
+        }
+        remaining -= got;
+    }
+    Ok(())
 }
 
 /// Connect to a daemon listening at `path` (possibly tunneled by SSH
@@ -307,12 +363,36 @@ pub async fn connect(path: &Path) -> std::io::Result<(Client, PeerInfo)> {
     // resync actually happens. The client never drops, it only stalls.
     let (evt_tx, evt_rx) = mpsc::channel::<Event>(EVENT_CHANNEL_CAPACITY);
 
-    // Writer task: drain Commands from TUI, frame them onto the socket.
-    tokio::spawn(writer_loop_bounded(wr, cmd_rx));
+    // Writer path: drain Commands from the TUI, normalize any
+    // oversized `Command::Write` into chunks that frame under the
+    // daemon's `MAX_COMMAND_FRAME_BYTES` ingress cap, then frame them
+    // onto the socket. The chunking sits at this single wire choke
+    // point so EVERY client emission site (typed keys, bracketed
+    // paste, prompt injection) is covered.
+    let (wire_tx, wire_rx) = mpsc::channel::<Command>(COMMAND_CHANNEL_CAPACITY);
+    tokio::spawn(chunk_commands_loop(cmd_rx, wire_tx));
+    tokio::spawn(writer_loop_bounded(wr, wire_rx));
     // Reader task: parse framed Events from the socket, push to TUI.
     tokio::spawn(reader_loop_bounded(rd, evt_tx, MAX_FRAME_BYTES));
 
     Ok((Client::from_bounded_channels(cmd_tx, evt_rx), peer))
+}
+
+/// Outbound command normalizer for the socket client: forwards every
+/// command in order, expanding an oversized `Command::Write` into
+/// multiple in-order chunked writes (see [`Command::write_chunked`]).
+/// One sequential task feeding one ordered channel, so the relative
+/// order of all commands — and of the chunks within a split write —
+/// is exactly the order the TUI sent them; the PTY receives the same
+/// byte stream it would have unchunked.
+async fn chunk_commands_loop(mut rx: mpsc::Receiver<Command>, tx: mpsc::Sender<Command>) {
+    while let Some(cmd) = rx.recv().await {
+        for chunk in cmd.into_write_chunks() {
+            if tx.send(chunk).await.is_err() {
+                return; // writer gone — connection is closing
+            }
+        }
+    }
 }
 
 /// Connection-side: wrap an accepted socket as a `Connection` handle.
@@ -425,6 +505,16 @@ where
                 }
             }
             Ok(None) => break, // clean EOF
+            // An oversized-but-well-framed message was already
+            // discarded by `read_frame_limited` with the stream left
+            // frame-aligned. Drop that ONE message and keep serving —
+            // tearing the connection down here is what used to turn a
+            // single >cap paste into a permanently dead `--connect`
+            // session. Corrupt framing (a length prefix beyond
+            // `MAX_FRAME_BYTES`) still lands in the fatal arm below.
+            Err(e @ FrameError::OversizedSkipped { .. }) => {
+                tracing::warn!("reader: {e} — dropping that message, connection stays up");
+            }
             Err(e) => {
                 tracing::warn!("reader: {e}");
                 break;
@@ -528,21 +618,118 @@ mod batching_tests {
         reader.await.expect("reader task");
     }
 
+    /// Regression for the killed `--connect` session: an
+    /// oversized-but-well-framed command frame (above the command cap,
+    /// within `MAX_FRAME_BYTES`) must be discarded WITHOUT tearing the
+    /// connection down — the valid command behind it still arrives.
     #[tokio::test]
-    async fn command_reader_rejects_frames_above_the_command_specific_cap() {
+    async fn command_reader_skips_oversized_frame_and_keeps_serving() {
+        let (mut peer, daemon) = tokio::io::duplex(64 * 1024);
+        let (tx, mut rx) = mpsc::channel::<Command>(1);
+        let reader = tokio::spawn(reader_loop_bounded(daemon, tx, MAX_COMMAND_FRAME_BYTES));
+
+        // Hand-frame an oversized command: sane length prefix, then
+        // exactly that many payload bytes (contents irrelevant — the
+        // reader must discard them unparsed).
+        let oversized_len = MAX_COMMAND_FRAME_BYTES + 1;
+        peer.write_all(&oversized_len.to_be_bytes())
+            .await
+            .expect("length prefix");
+        // Write in slices so the small duplex buffer never deadlocks
+        // against the concurrently-draining reader.
+        let payload = vec![0u8; oversized_len as usize];
+        peer.write_all(&payload).await.expect("oversized payload");
+        // A valid command right behind it proves the stream stayed
+        // frame-aligned across the discard.
+        write_frame(&mut peer, &cmd(7)).await.expect("valid frame");
+        peer.flush().await.expect("flush");
+
+        let survivor = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("reader must survive the oversized frame");
+        assert!(
+            matches!(
+                survivor,
+                Some(Command::Write { terminal_id, .. }) if terminal_id == TerminalId(7)
+            ),
+            "the command after the skipped frame must arrive: {survivor:?}"
+        );
+
+        drop(peer);
+        drop(rx);
+        reader.await.expect("reader task exits cleanly on EOF");
+    }
+
+    /// A length prefix beyond `MAX_FRAME_BYTES` is not a big message —
+    /// it's a desynced/corrupt stream (no lazybox peer ever writes such
+    /// a frame). That stays fatal: the reader terminates and the
+    /// command channel closes.
+    #[tokio::test]
+    async fn command_reader_dies_on_wild_length_prefix() {
         let (mut peer, daemon) = tokio::io::duplex(64);
         let (tx, mut rx) = mpsc::channel::<Command>(1);
         let reader = tokio::spawn(reader_loop_bounded(daemon, tx, MAX_COMMAND_FRAME_BYTES));
-        peer.write_all(&(MAX_COMMAND_FRAME_BYTES + 1).to_be_bytes())
+        peer.write_all(&(MAX_FRAME_BYTES + 1).to_be_bytes())
             .await
             .expect("length prefix");
         peer.flush().await.expect("flush");
 
         tokio::time::timeout(std::time::Duration::from_secs(1), reader)
             .await
-            .expect("oversized frame rejected promptly")
+            .expect("wild prefix rejected promptly")
             .expect("reader task");
         assert!(rx.recv().await.is_none());
+    }
+
+    /// End-to-end over the client's outbound path (chunking adapter +
+    /// batched writer): one `Command::Write` far above the command cap
+    /// must arrive as multiple frames, EACH decodable under the
+    /// daemon's `MAX_COMMAND_FRAME_BYTES` reader cap, concatenating
+    /// byte-identically and in order to the original payload.
+    #[tokio::test]
+    async fn client_chunking_keeps_every_command_frame_under_the_daemon_cap() {
+        // A recognizable, non-uniform pattern so a reordered or
+        // truncated chunk cannot concatenate back to the original.
+        let original: Vec<u8> = (0..(MAX_COMMAND_FRAME_BYTES as usize * 2 + 12345))
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let (tx, rx) = mpsc::channel::<Command>(4);
+        let (wire_tx, wire_rx) = mpsc::channel::<Command>(4);
+        tx.try_send(Command::Write {
+            terminal_id: TerminalId(3),
+            bytes: original.clone(),
+        })
+        .expect("capacity");
+        drop(tx);
+
+        let (wr, mut rd) = tokio::io::duplex(8 * 1024 * 1024);
+        let chunker = tokio::spawn(chunk_commands_loop(rx, wire_tx));
+        writer_loop_bounded(wr, wire_rx).await;
+        chunker.await.expect("chunker task");
+
+        let mut frames = 0usize;
+        let mut reassembled = Vec::new();
+        // Read with the DAEMON's command cap: any frame the old
+        // unchunked path would have produced fails right here.
+        while let Some(back) = read_frame_limited::<_, Command>(&mut rd, MAX_COMMAND_FRAME_BYTES)
+            .await
+            .expect("every chunked frame fits under the command cap")
+        {
+            match back {
+                Command::Write { terminal_id, bytes } => {
+                    assert_eq!(terminal_id, TerminalId(3));
+                    assert!(bytes.len() <= crate::MAX_WRITE_CHUNK_BYTES);
+                    frames += 1;
+                    reassembled.extend_from_slice(&bytes);
+                }
+                other => panic!("unexpected frame: {other:?}"),
+            }
+        }
+        assert!(frames > 1, "an over-cap write must split ({frames} frames)");
+        assert_eq!(
+            reassembled, original,
+            "chunks must concatenate byte-identically, in order"
+        );
     }
 
     /// Pre-queued messages must arrive intact and in order through the

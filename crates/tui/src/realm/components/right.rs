@@ -61,9 +61,15 @@ impl Right {
     }
 
     /// Drive the auto-mark-on-hover timer; the orchestrator calls
-    /// this each tick. Returns the `(SessionKey, index)` to mark read
-    /// when the timer fires, otherwise None.
-    pub fn tick(&mut self) -> Option<(lazybox_core::SessionKey, usize)> {
+    /// this each tick. Returns the `(SessionKey, index, fingerprint)`
+    /// to mark read when the timer fires, otherwise None.
+    pub fn tick(
+        &mut self,
+    ) -> Option<(
+        lazybox_core::SessionKey,
+        usize,
+        lazybox_core::ActivityFingerprint,
+    )> {
         self.inner.tick(self.focused)
     }
 
@@ -175,6 +181,16 @@ impl Right {
     /// dispatch to mark only those instead of the whole workspace.
     pub fn selected_activity_indices(&self) -> Vec<usize> {
         self.inner.selected_activity_indices()
+    }
+
+    /// Fingerprint of the activity row at `index`, shipped alongside
+    /// the raw index in `Command::MarkActivityRead` so the daemon
+    /// resolves the row against its own list.
+    pub fn activity_fingerprint_at(
+        &self,
+        index: usize,
+    ) -> Option<lazybox_core::ActivityFingerprint> {
+        self.inner.activity_fingerprint_at(index)
     }
 
     /// Per-row mark-read at the activity cursor. Used by the `m`

@@ -30,8 +30,8 @@ Terminal panes, `Space` folds/unfolds a repo group. Rows carry status chips
 (CI, review, unread count, agent state).
 
 ### How it works (brief)
-Providers poll and emit `Event::SessionUpserted`/`TaskUpdated` onto the
-daemon's broadcast bus (`crates/events`). The sidebar subscribes and rebuilds
+Providers poll and emit `Event::WorkspaceUpserted` onto the daemon's broadcast
+bus (event types in `crates/ipc`). The sidebar subscribes and rebuilds
 its row model. A `Workspace` (`crates/core/src/workspace.rs`) bundles at most
 one PR, its linked issues, merged activity, and zero-or-more terminal
 `Session`s. `attention.*` config decides which signals count as
@@ -145,32 +145,40 @@ the latest state per provider. (`OpenSyncStatus` in
 
 ---
 
-## Role filter
+## Filter menu
 
 **Status:** stable
-**Crate(s):** `tui` (`crates/tui/src/components/sidebar/handlers.rs`)
-**Config / flags:** `setup.filters` (per-provider role/type filters)
+**Crate(s):** `tui-core` (`OpenFilterMenu` in `src/action.rs`), `tui` (sidebar)
+**Config / flags:** `setup.filters` (per-provider role/type filters seed which rows are fetched)
 **Key bindings:** `f`
 
 ### What it does
-Cycles the sidebar through role scopes: `all → author → reviewer → assignee →
-mentioned`. A chip on the sidebar header shows the current scope.
+Opens a multi-select **filter menu** over three predicate axes — state
+(with-agent, CI-failing, conflict, unread, asking, review-requested,
+auto-merge), role (author / reviewer / assignee / mentioned), and kind
+(PR / issue) — each shown with a live match count. Filters combine
+AND-across-axes / OR-within-axis and render as removable chips in the sidebar
+header.
 
 ### How to use it
-Press `f` (or click the chip on the header row) to advance the filter.
+Press `f`, toggle the predicates you want, confirm. Active filters show as
+header chips (removable). Filters compose with `/` search.
 
 ### How it works (brief)
-`f` cycles a sidebar-local filter state; the row model is re-filtered by the
-task's `TaskRole`. Defaults come from `setup.filters` in config.
+`OpenFilterMenu` (`crates/tui-core/src/action.rs`) mounts the multi-select;
+the sidebar row model is re-filtered by the combined predicate set. Which rows
+exist at all is still shaped by `setup.filters` (provider-side role/type
+fetch filters).
 
 ### Test checklist
-- [ ] `f` advances all → author → reviewer → assignee → mentioned → all.
-- [ ] The header chip reflects the active filter.
-- [ ] Clicking the chip cycles it the same way.
-- [ ] Filtering to `reviewer` hides PRs you only author.
+- [ ] `f` opens the menu with per-predicate match counts.
+- [ ] Toggling `reviewer` hides PRs you only author.
+- [ ] Predicates across axes combine with AND; within an axis with OR.
+- [ ] Active filters render as removable header chips.
+- [ ] Filters compose with `/` search.
 
 ### Known sharp edges
-- Role is provider-assigned; if a provider can't classify a task's role it lands in `all` only.
+- Role is provider-assigned; if a provider can't classify a task's role, role predicates won't match it.
 
 ---
 
@@ -308,3 +316,39 @@ timestamp passes.
 
 ### Known sharp edges
 - `z` is overloaded: in the sidebar it's snooze; in the Activity pane it's *undo auto-mark-read*. Context matters.
+
+---
+
+## Multi-select & broadcast
+
+**Status:** stable
+**Crate(s):** `tui-core` (`BroadcastToSelected`, `UpdateBranchSelected` in `src/action.rs`), `tui` (sidebar)
+**Config / flags:** —
+**Key bindings:** `v` multi-select rows, `Shift-B` broadcast, `Shift-U` bulk update-branch
+
+### What it does
+`v` marks multiple workspace rows in the sidebar (marks survive `j/k`; `Esc`
+clears). `Shift-B` then sends one instruction to every selected workspace;
+`Shift-U` bulk-updates the branch of every selected PR that's behind its base
+(#484).
+
+### How to use it
+Mark rows with `v`, then press `Shift-B`. A snippet picker opens first
+(`Ctrl-F` skips it for free text) and feeds a compose textarea pre-filled with
+the snippet body. Submit delivers per target: running agents get the
+settle-gated inject, plain shells a direct write, and session-less workspaces
+are skipped and named in the summary notice. `Shift-U` instead issues one
+`UpdateBranch` per selected PR behind `main`; up-to-date and non-PR selections
+are skipped and counted.
+
+### How it works (brief)
+`BroadcastToSelected` / `UpdateBranchSelected`
+(`crates/tui-core/src/action.rs`) fan the sidebar's multi-select set out into
+per-workspace commands; delivery reuses the same prompt-inject path as a
+single-workspace send.
+
+### Test checklist
+- [ ] `v` marks survive cursor movement; `Esc` clears the marks.
+- [ ] `Shift-B` delivers to agents (injected) and shells (written) and names skipped targets.
+- [ ] `Ctrl-F` in the snippet picker jumps straight to free-text compose.
+- [ ] `Shift-U` updates only the selected PRs that are behind; the summary counts skips.

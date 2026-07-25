@@ -186,6 +186,8 @@ async fn metrics_route_returns_event_counters() {
     config.event_metrics.record_output_dropped();
     config.event_metrics.record_resync();
     config.event_metrics.record_bus_lagged(7);
+    config.event_metrics.record_hot_sync_latency(2_000);
+    config.event_metrics.record_cold_sync_latency(120_000);
 
     let request = Request::builder()
         .method(Method::GET)
@@ -201,6 +203,12 @@ async fn metrics_route_returns_event_counters() {
     assert_eq!(payload.terminal_resyncs, 1);
     assert_eq!(payload.bus_lagged_events, 7);
     assert_eq!(payload.bus_lag_recoveries, 0);
+    assert_eq!(payload.hot_sync_samples, 1);
+    assert_eq!(payload.hot_sync_p50_ms, Some(2_000));
+    assert_eq!(payload.hot_sync_p95_ms, Some(2_000));
+    assert_eq!(payload.cold_sync_samples, 1);
+    assert_eq!(payload.cold_sync_p50_ms, Some(120_000));
+    assert_eq!(payload.cold_sync_p95_ms, Some(120_000));
 }
 
 #[tokio::test]

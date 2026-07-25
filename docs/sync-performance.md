@@ -111,6 +111,40 @@ involved in, which `involves-main` returned moments earlier. The busy
 watched repo alone re-downloaded 89.6 KB of mostly-duplicate PRs. At
 10+ watched repos this branch count and its overlap dominate.
 
+## Engagement tiers
+
+The daemon overlays three engagement tiers on the discovery and
+notifications paths:
+
+- **Hot**: a focused workspace, a workspace with a live agent, or an
+  open authored PR updated in the last 24 hours. The set is capped at
+  three. While non-empty, the poll loop runs every 15 seconds, targets
+  these rows before notification targets, and refreshes the whole set
+  with one full-detail `nodes(ids:)` GraphQL request per pass.
+- **Warm**: the remaining active inbox. These rows keep the configured
+  base cadence, notifications heartbeat, round-robin searches, and
+  one-time attention-ranked detail prefetch.
+- **Cold**: snoozed or terminal-state rows. Cold-only repositories are
+  removed from the per-repo round robin, and their notification
+  targets wait for global discovery; their rows use the lean search
+  payload and skip detail prefetch.
+
+Focus changes and successful agent registration notify the sleeping
+poll loop immediately. Provider rate-limit backoff remains
+authoritative and can extend either cadence.
+
+The `/v1/metrics` response reports delivery-age samples for observable
+GitHub surface changes that replace an existing task:
+
+- `hot_sync_samples`, `hot_sync_p50_ms`, `hot_sync_p95_ms`
+- `cold_sync_samples`, `cold_sync_p50_ms`, `cold_sync_p95_ms`
+
+Each histogram retains the latest 1,024 samples. When `updatedAt`
+advances, the sample is the upstream event's age. GitHub does not
+advance that timestamp for every CI or mergeability recomputation, so
+same-timestamp surface changes use the interval since the previous
+observation. First discovery is excluded.
+
 ## Detail prefetch cost (#16)
 
 After every successful poll the server runs `prefetch_top_pr_details`:
@@ -145,24 +179,16 @@ units; at one batch/minute that's 300/hr against the 5000/hr budget.
 Cost is a non-issue, exactly as for the main poll.
 
 **2. Wall-clock and bytes are modest and bounded.** ~1 s and ~60 KB
-per batch — about 8% of today's ~11 s poll. Even once #14 collapses
-the main poll, this does **not** become a fixed per-tick tax: the
-`prefetched_pr_details` dedup set means a PR is prefetched at most
-once per daemon session, so prefetch fires only for PRs that *newly*
-clear the threshold. On a steady inbox it goes quiet after warm-up;
-on a churning inbox it tracks the rate of new actionable PRs, which is
-exactly when warming the cache pays off.
+per batch — about 8% of today's ~11 s poll. Warm rows remain
+self-limiting through `prefetched_pr_details`. Hot rows skip this
+phase because their bounded set already receives review threads and
+check contexts in the single batched targeted query.
 
-### Decision: keep N=5, every tick
+### Decision: keep N=5
 
-No change to cadence or N. The cadence concern in the issue —
-"5 calls every tick" — is already mitigated by the per-session dedup,
-and the measured worst case (a full cold batch) is cheap in every
-dimension. Making it event-driven or reducing N would add complexity
-to shave ~1 s off a path that is already self-limiting and only runs
-when there is genuinely new detail worth pre-warming. The one fix
-warranted by the data was the wrong cost number in the handler
-comment, now corrected.
+The measured worst case (a full batch) is cheap in every dimension.
+Warm rows still fetch once per daemon session; the hot set uses its
+separate batched refresh.
 
 ## Recommended follow-ups
 

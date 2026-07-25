@@ -1477,6 +1477,28 @@ query($owner: String!, $name: String!, $number: Int!) {
           repository { nameWithOwner }
         }
       }
+      reviewThreads(first: 50) {
+        nodes {
+          id
+          isResolved
+          isOutdated
+          path
+          line
+          originalLine
+          comments(first: 10) {
+            nodes {
+              id
+              author { login }
+              body
+              createdAt
+              path
+              line
+              originalLine
+              diffHunk
+            }
+          }
+        }
+      }
     }
   }
   rateLimit {
@@ -1583,6 +1605,176 @@ pub struct GqlSingleIssueData {
 #[derive(Deserialize, Debug)]
 pub struct GqlSingleIssueRepository {
     pub issue: Option<GqlIssue>,
+}
+
+const HOT_TASKS_QUERY: &str = r#"
+query($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    __typename
+    ... on PullRequest {
+      id
+      number
+      title
+      body
+      url
+      updatedAt
+      createdAt
+      closedAt
+      isDraft
+      state
+      merged
+      additions
+      deletions
+      headRefName
+      headRefOid
+      baseRefName
+      mergeable
+      mergeStateStatus
+      reviewDecision
+      autoMergeRequest { enabledAt }
+      isInMergeQueue
+      author { login }
+      commits(last: 1) {
+        nodes {
+          commit {
+            statusCheckRollup {
+              state
+              contexts(first: 20) {
+                nodes {
+                  __typename
+                  ... on CheckRun {
+                    name
+                    conclusion
+                    status
+                    permalink
+                  }
+                  ... on StatusContext {
+                    context
+                    state
+                    targetUrl
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      labels(first: 10) { nodes { name color } }
+      assignees(first: 10) { nodes { login } }
+      reviewRequests(first: 10) {
+        nodes {
+          requestedReviewer {
+            ... on User { login }
+            ... on Team { name }
+          }
+        }
+      }
+      comments(first: 15) {
+        nodes {
+          id
+          author { login }
+          body
+          createdAt
+        }
+      }
+      reviews(first: 10) {
+        nodes {
+          id
+          author { login }
+          body
+          state
+          submittedAt
+          createdAt
+        }
+      }
+      closingIssuesReferences(first: 10) {
+        nodes {
+          number
+          repository { nameWithOwner }
+        }
+      }
+      reviewThreads(first: 50) {
+        nodes {
+          id
+          isResolved
+          isOutdated
+          path
+          line
+          originalLine
+          comments(first: 10) {
+            nodes {
+              id
+              author { login }
+              body
+              createdAt
+              path
+              line
+              originalLine
+              diffHunk
+            }
+          }
+        }
+      }
+    }
+    ... on Issue {
+      id
+      number
+      title
+      body
+      url
+      updatedAt
+      createdAt
+      closedAt
+      state
+      author { login }
+      labels(first: 10) { nodes { name color } }
+      assignees(first: 10) { nodes { login } }
+      comments(first: 15) {
+        nodes {
+          id
+          author { login }
+          body
+          createdAt
+        }
+      }
+      repository { nameWithOwner }
+    }
+  }
+  rateLimit {
+    cost
+    limit
+    remaining
+    resetAt
+  }
+}
+"#;
+
+pub fn hot_tasks_body(node_ids: &[String]) -> serde_json::Value {
+    serde_json::json!({
+        "query": HOT_TASKS_QUERY,
+        "variables": { "ids": node_ids },
+    })
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlHotTasksResponse {
+    pub data: Option<GqlHotTasksData>,
+    #[serde(default)]
+    pub errors: Option<Vec<GqlError>>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlHotTasksData {
+    pub nodes: Vec<Option<GqlHotTask>>,
+    #[serde(rename = "rateLimit")]
+    pub rate_limit: Option<GqlRateLimit>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(untagged)]
+pub enum GqlHotTask {
+    PullRequest(Box<GqlPr>),
+    Issue(Box<GqlIssue>),
 }
 
 /// Convert the lazy-fetched review-thread data into the same
@@ -2804,6 +2996,18 @@ mod tests {
         let body = single_pr_body("o", "r", 7);
         let query = body["query"].as_str().unwrap();
         assert!(query.contains("headRefOid"));
+        assert!(query.contains("reviewThreads(first: 50)"));
+    }
+
+    #[test]
+    fn hot_tasks_body_batches_full_detail_nodes() {
+        let ids = vec!["PR_one".to_string(), "I_two".to_string()];
+        let body = hot_tasks_body(&ids);
+        assert_eq!(body["variables"]["ids"], serde_json::json!(ids));
+        let query = body["query"].as_str().unwrap();
+        assert!(query.contains("nodes(ids: $ids)"));
+        assert!(query.contains("reviewThreads(first: 50)"));
+        assert!(query.contains("contexts(first: 20)"));
     }
 
     #[test]

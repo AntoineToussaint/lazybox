@@ -9,7 +9,10 @@
 //! helpers (`commit_upsert`, `load_workspace`) leak across via
 //! `pub(super)`.
 
-use super::{TickState, apply_and_commit, commit_upsert_reported, load_workspace};
+use super::{
+    EngagementSignals, EngagementTier, TickState, apply_and_commit, commit_upsert_reported,
+    load_workspace,
+};
 use crate::ServerConfig;
 use lazybox_core::{CiStatus, ReviewStatus, Task, Workspace, WorkspaceKey};
 use lazybox_gh::GhClient;
@@ -318,7 +321,7 @@ pub async fn handle_merge_pr(config: &ServerConfig, workspace_key: WorkspaceKey)
     }
     // Wake the poll loop so MERGED state lands in <5s instead of
     // waiting out the full interval.
-    config.poll_wake.notify_one();
+    config.wake_poll(true);
 }
 
 /// Handle `Command::UpdateBranch`: load the workspace, recover the PR's
@@ -376,7 +379,7 @@ pub async fn handle_update_branch(config: &ServerConfig, workspace_key: Workspac
     });
     // Wake the poll loop so the refreshed state lands in <5s instead of
     // waiting out the full interval.
-    config.poll_wake.notify_one();
+    config.wake_poll(true);
 }
 
 /// Handle `Command::CloseIssue`: load the workspace, recover the
@@ -434,7 +437,7 @@ pub async fn handle_close_issue(config: &ServerConfig, workspace_key: WorkspaceK
     });
     // Wake the poll loop so CLOSED state (and the removal prompt) lands
     // in <5s instead of waiting out the full interval.
-    config.poll_wake.notify_one();
+    config.wake_poll(true);
 }
 
 /// Handle `Command::DeleteOrClose`: remove the workspace's primary
@@ -524,7 +527,7 @@ pub async fn handle_delete_or_close(config: &ServerConfig, workspace_key: Worksp
     }
     // Wake the poll loop so the vanished/closed state (and the rescope
     // removal) lands in <5s instead of waiting out the full interval.
-    config.poll_wake.notify_one();
+    config.wake_poll(true);
 }
 
 /// Handle `Command::RequestReviewers`: add the given GitHub logins
@@ -569,7 +572,7 @@ pub async fn handle_request_reviewers(
         tracing::info!("requested reviewers {logins:?} on workspace {workspace_key}");
         // Wake the poll loop so the reviewer chip on the row
         // updates immediately. Without this the sidebar lags 60s.
-        config.poll_wake.notify_one();
+        config.wake_poll(true);
     }
 }
 
@@ -609,7 +612,7 @@ pub async fn handle_add_assignees(
         emit_err(&format!("add assignees failed: {e}"));
     } else {
         tracing::info!("added assignees {logins:?} on workspace {workspace_key}");
-        config.poll_wake.notify_one();
+        config.wake_poll(true);
     }
 }
 
@@ -651,7 +654,7 @@ pub async fn handle_set_assignees(
     // Wake the poll loop so the task row picks up the new assignee
     // set immediately — without this the row stays stale for up to
     // a full interval (60s default).
-    config.poll_wake.notify_one();
+    config.wake_poll(true);
 }
 
 /// Handle `Command::SetLabels`: replace the workspace's label set
@@ -687,7 +690,7 @@ pub async fn handle_set_labels(
         return;
     }
     tracing::info!("set labels to {names:?} on workspace {workspace_key}");
-    config.poll_wake.notify_one();
+    config.wake_poll(true);
 }
 
 /// Handle `Command::FetchRepoLabels`: pull the workspace repo's full
@@ -1847,13 +1850,27 @@ pub(crate) async fn reap_safe_workspace_worktrees_with(
 /// `score > 1` threshold `prefetch_top_pr_details` applies and earns a
 /// prefetch.
 ///
-/// Scoring (descending):
+/// Engagement signals are deliberately stronger than inbox noise:
+/// - live agent → +300
+/// - focused workspace → +250
+/// - own open PR → +25
+///
+/// Task signals:
 /// - CI failing → +100 (highest-actionability — user wants to fix)
 /// - Review pending / changes-requested → +50
 /// - Unread activity → +10 per item (capped at +50)
 /// - Base +1 (fetchable — the caller drops PRs without a `node_id`)
-pub(crate) fn prefetch_score(pr: &Task) -> i32 {
+pub(crate) fn prefetch_score(pr: &Task, engagement: EngagementSignals) -> i32 {
     let mut score: i32 = 1;
+    if engagement.live_agent {
+        score += 300;
+    }
+    if engagement.focused {
+        score += 250;
+    }
+    if engagement.own_open_pr {
+        score += 25;
+    }
     if matches!(pr.ci, CiStatus::Failure | CiStatus::Mixed) {
         score += 100;
     }
@@ -1865,6 +1882,14 @@ pub(crate) fn prefetch_score(pr: &Task) -> i32 {
     }
     score += (pr.unread_count.min(5) as i32) * 10;
     score
+}
+
+fn detail_prefetch_allowed(tier: EngagementTier, already_prefetched: bool) -> bool {
+    tier == EngagementTier::Warm && !already_prefetched
+}
+
+fn prefetch_rank_score(pr: &Task, engagement: EngagementSignals, tier: EngagementTier) -> i32 {
+    prefetch_score(pr, engagement) + i32::from(tier == EngagementTier::Hot) * 1_000
 }
 
 /// Post-tick prefetch: after a successful poll, pick the top-N PRs
@@ -1880,14 +1905,10 @@ pub(crate) fn prefetch_score(pr: &Task) -> i32 {
 /// trivially. Concurrency=3 keeps the local budget healthy alongside
 /// the parallel main+merged+watched-repo branches of the same tick.
 ///
-/// Dedup via `TickState::prefetched_pr_details`: once we've pulled a
-/// PR's threads this daemon session, the row's still subject to the
-/// TUI's lazy-fetch on focus (so re-opens get fresh data), but we
-/// don't re-pull every poll cycle. Cleared on daemon restart. This is
-/// why prefetch is *not* a fixed per-tick tax: it fires only for PRs
-/// that newly clear the score threshold, so on a steady inbox it goes
-/// quiet after warm-up and won't dominate the tick even once
-/// incremental sync (#14) makes the main poll cheap.
+/// Warm rows dedup through `TickState::prefetched_pr_details`: once
+/// their threads are pulled this daemon session they stay quiet. Hot
+/// rows already carry the same full fields from the batched targeted
+/// query, while cold rows never enter this deeper query.
 ///
 /// Ranks candidates with `prefetch_score`; 0-above-base workspaces
 /// are skipped — they don't need the prefetch.
@@ -1911,8 +1932,14 @@ pub async fn prefetch_top_pr_details(
     // PR. `polled` is the key list from the just-completed tick; load
     // each via the store path the rest of the handler module uses so
     // the scoring sees the post-upsert state.
+    let engagement = config.poll_engagement.read().snapshot();
     let mut scored: Vec<(i32, String, WorkspaceKey)> = Vec::new();
+    let mut seen_node_ids = std::collections::HashSet::new();
     for key in polled {
+        let tier = engagement.tier_for(key);
+        if tier != EngagementTier::Warm {
+            continue;
+        }
         let Some(ws) = load_workspace(config, key) else {
             continue;
         };
@@ -1922,10 +1949,13 @@ pub async fn prefetch_top_pr_details(
         let Some(node_id) = pr.node_id.clone() else {
             continue;
         };
-        if state.prefetched_pr_details.contains(&node_id) {
+        if !seen_node_ids.insert(node_id.clone()) {
             continue;
         }
-        let score = prefetch_score(pr);
+        if !detail_prefetch_allowed(tier, state.prefetched_pr_details.contains(&node_id)) {
+            continue;
+        }
+        let score = prefetch_rank_score(pr, engagement.signals_for(key), tier);
         if score > 1 {
             scored.push((score, node_id, key.clone()));
         }
@@ -2049,7 +2079,10 @@ mod github_target_tests {
 
 #[cfg(test)]
 mod prefetch_score_tests {
-    use super::prefetch_score;
+    use super::{
+        EngagementSignals, EngagementTier, detail_prefetch_allowed, prefetch_rank_score,
+        prefetch_score,
+    };
     use lazybox_core::{CiStatus, Mergeable, ReviewStatus, Task, TaskId, TaskRole, TaskState};
 
     fn pr() -> Task {
@@ -2093,34 +2126,34 @@ mod prefetch_score_tests {
 
     #[test]
     fn quiet_pr_stays_at_the_fetchable_base() {
-        assert_eq!(prefetch_score(&pr()), 1);
+        assert_eq!(prefetch_score(&pr(), EngagementSignals::default()), 1);
     }
 
     #[test]
     fn failing_ci_dominates() {
         let mut p = pr();
         p.ci = CiStatus::Failure;
-        assert_eq!(prefetch_score(&p), 101);
+        assert_eq!(prefetch_score(&p, EngagementSignals::default()), 101);
         p.ci = CiStatus::Mixed;
-        assert_eq!(prefetch_score(&p), 101);
+        assert_eq!(prefetch_score(&p, EngagementSignals::default()), 101);
     }
 
     #[test]
     fn pending_review_and_changes_requested_add_fifty() {
         let mut p = pr();
         p.review = ReviewStatus::Pending;
-        assert_eq!(prefetch_score(&p), 51);
+        assert_eq!(prefetch_score(&p, EngagementSignals::default()), 51);
         p.review = ReviewStatus::ChangesRequested;
-        assert_eq!(prefetch_score(&p), 51);
+        assert_eq!(prefetch_score(&p, EngagementSignals::default()), 51);
     }
 
     #[test]
     fn unread_activity_is_capped_at_five_items() {
         let mut p = pr();
         p.unread_count = 3;
-        assert_eq!(prefetch_score(&p), 1 + 30);
+        assert_eq!(prefetch_score(&p, EngagementSignals::default()), 1 + 30);
         p.unread_count = 100;
-        assert_eq!(prefetch_score(&p), 1 + 50);
+        assert_eq!(prefetch_score(&p, EngagementSignals::default()), 1 + 50);
     }
 
     #[test]
@@ -2129,7 +2162,48 @@ mod prefetch_score_tests {
         p.ci = CiStatus::Failure;
         p.review = ReviewStatus::ChangesRequested;
         p.unread_count = 2;
-        assert_eq!(prefetch_score(&p), 1 + 100 + 50 + 20);
+        assert_eq!(
+            prefetch_score(&p, EngagementSignals::default()),
+            1 + 100 + 50 + 20
+        );
+    }
+
+    #[test]
+    fn engagement_outweighs_inbox_noise_and_stacks() {
+        let signals = EngagementSignals {
+            live_agent: true,
+            focused: true,
+            own_open_pr: true,
+        };
+        assert_eq!(prefetch_score(&pr(), signals), 1 + 300 + 250 + 25);
+    }
+
+    #[test]
+    fn hot_and_cold_rows_skip_detail_prefetch_while_warm_rows_dedup() {
+        assert!(!detail_prefetch_allowed(EngagementTier::Hot, false));
+        assert!(!detail_prefetch_allowed(EngagementTier::Hot, true));
+        assert!(!detail_prefetch_allowed(EngagementTier::Warm, true));
+        assert!(detail_prefetch_allowed(EngagementTier::Warm, false));
+        assert!(!detail_prefetch_allowed(EngagementTier::Cold, false));
+        assert!(!detail_prefetch_allowed(EngagementTier::Cold, true));
+    }
+
+    #[test]
+    fn hot_rank_beats_a_noisy_warm_pr() {
+        let hot = prefetch_rank_score(
+            &pr(),
+            EngagementSignals {
+                own_open_pr: true,
+                ..EngagementSignals::default()
+            },
+            EngagementTier::Hot,
+        );
+        let mut noisy = pr();
+        noisy.ci = CiStatus::Failure;
+        noisy.review = ReviewStatus::ChangesRequested;
+        noisy.unread_count = 5;
+        let warm = prefetch_rank_score(&noisy, EngagementSignals::default(), EngagementTier::Warm);
+        assert!(hot > warm);
     }
 }
 

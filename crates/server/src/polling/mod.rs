@@ -56,6 +56,580 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
+pub const HOT_SET_MAX: usize = 3;
+pub const HOT_POLL_INTERVAL: Duration = Duration::from_secs(15);
+const OWN_PR_HOT_WINDOW: chrono::Duration = chrono::Duration::hours(24);
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum EngagementTier {
+    Hot,
+    #[default]
+    Warm,
+    Cold,
+}
+
+impl EngagementTier {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Hot => "hot",
+            Self::Warm => "warm",
+            Self::Cold => "cold",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EngagementSignals {
+    pub live_agent: bool,
+    pub focused: bool,
+    pub own_open_pr: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct GithubEngagementTarget {
+    pub workspace_key: WorkspaceKey,
+    pub target: lazybox_gh::NotificationTarget,
+    pub node_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct EngagementEntry {
+    tier: EngagementTier,
+    signals: EngagementSignals,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EngagementSnapshot {
+    entries: std::collections::HashMap<String, EngagementEntry>,
+    hot_targets: Vec<GithubEngagementTarget>,
+    cold_targets: std::collections::BTreeSet<lazybox_gh::NotificationTarget>,
+    cold_only_repos: std::collections::HashSet<String>,
+    active_repos: std::collections::HashSet<String>,
+}
+
+impl EngagementSnapshot {
+    pub fn tier_for(&self, key: &WorkspaceKey) -> EngagementTier {
+        self.entries
+            .get(key.as_str())
+            .map(|entry| entry.tier)
+            .unwrap_or_default()
+    }
+
+    pub fn signals_for(&self, key: &WorkspaceKey) -> EngagementSignals {
+        self.entries
+            .get(key.as_str())
+            .map(|entry| entry.signals)
+            .unwrap_or_default()
+    }
+
+    pub fn hot_targets(&self) -> &[GithubEngagementTarget] {
+        &self.hot_targets
+    }
+
+    pub fn cold_targets(&self) -> &std::collections::BTreeSet<lazybox_gh::NotificationTarget> {
+        &self.cold_targets
+    }
+
+    pub fn cold_only_repos(&self) -> &std::collections::HashSet<String> {
+        &self.cold_only_repos
+    }
+
+    pub fn active_repos(&self) -> &std::collections::HashSet<String> {
+        &self.active_repos
+    }
+
+    pub fn hot_count(&self) -> usize {
+        self.hot_targets.len()
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct PollEngagement {
+    focused_workspace: Option<String>,
+    snapshot: EngagementSnapshot,
+}
+
+impl PollEngagement {
+    pub fn focused_workspace(&self) -> Option<&str> {
+        self.focused_workspace.as_deref()
+    }
+
+    pub fn snapshot(&self) -> EngagementSnapshot {
+        self.snapshot.clone()
+    }
+
+    pub fn tier_for(&self, key: &WorkspaceKey) -> EngagementTier {
+        self.snapshot.tier_for(key)
+    }
+
+    fn replace_snapshot(&mut self, snapshot: EngagementSnapshot) {
+        self.snapshot = snapshot;
+    }
+
+    fn set_focused_workspace(&mut self, workspace_key: Option<String>) -> bool {
+        if self.focused_workspace == workspace_key {
+            return false;
+        }
+        self.focused_workspace = workspace_key;
+        true
+    }
+}
+
+#[derive(Debug, Clone)]
+struct EngagementCandidate {
+    workspace_key: WorkspaceKey,
+    target: lazybox_gh::NotificationTarget,
+    node_id: Option<String>,
+    repo: String,
+    updated_at: chrono::DateTime<Utc>,
+    cold: bool,
+    live_agent: bool,
+    own_open_pr: bool,
+}
+
+fn select_engagement_snapshot(
+    candidates: Vec<EngagementCandidate>,
+    focused_workspace: Option<&str>,
+    now: chrono::DateTime<Utc>,
+) -> EngagementSnapshot {
+    let mut eligible: Vec<&EngagementCandidate> = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.live_agent
+                || focused_workspace == Some(candidate.workspace_key.as_str())
+                || (!candidate.cold
+                    && candidate.own_open_pr
+                    && now.signed_duration_since(candidate.updated_at) <= OWN_PR_HOT_WINDOW)
+        })
+        .collect();
+    eligible.sort_by(|left, right| {
+        let left_focused = focused_workspace == Some(left.workspace_key.as_str());
+        let right_focused = focused_workspace == Some(right.workspace_key.as_str());
+        right_focused
+            .cmp(&left_focused)
+            .then_with(|| right.live_agent.cmp(&left.live_agent))
+            .then_with(|| right.own_open_pr.cmp(&left.own_open_pr))
+            .then_with(|| right.updated_at.cmp(&left.updated_at))
+            .then_with(|| {
+                left.workspace_key
+                    .as_str()
+                    .cmp(right.workspace_key.as_str())
+            })
+    });
+
+    let hot_keys: std::collections::HashSet<String> = eligible
+        .into_iter()
+        .take(HOT_SET_MAX)
+        .map(|candidate| candidate.workspace_key.as_str().to_string())
+        .collect();
+
+    let mut entries = std::collections::HashMap::new();
+    let mut hot_targets = Vec::new();
+    let mut cold_targets = std::collections::BTreeSet::new();
+    let mut repos = std::collections::HashSet::new();
+    let mut non_cold_repos = std::collections::HashSet::new();
+    for candidate in candidates {
+        let focused = focused_workspace == Some(candidate.workspace_key.as_str());
+        let tier = if hot_keys.contains(candidate.workspace_key.as_str()) {
+            EngagementTier::Hot
+        } else if candidate.cold {
+            EngagementTier::Cold
+        } else {
+            EngagementTier::Warm
+        };
+        repos.insert(candidate.repo.clone());
+        if tier != EngagementTier::Cold {
+            non_cold_repos.insert(candidate.repo.clone());
+        }
+        if tier == EngagementTier::Hot {
+            hot_targets.push(GithubEngagementTarget {
+                workspace_key: candidate.workspace_key.clone(),
+                target: candidate.target.clone(),
+                node_id: candidate.node_id.clone(),
+            });
+        } else if tier == EngagementTier::Cold {
+            cold_targets.insert(candidate.target.clone());
+        }
+        entries.insert(
+            candidate.workspace_key.as_str().to_string(),
+            EngagementEntry {
+                tier,
+                signals: EngagementSignals {
+                    live_agent: candidate.live_agent,
+                    focused,
+                    own_open_pr: candidate.own_open_pr,
+                },
+            },
+        );
+    }
+    hot_targets.sort_by(|left, right| {
+        let left_entry = entries
+            .get(left.workspace_key.as_str())
+            .map(|entry| entry.signals)
+            .unwrap_or_default();
+        let right_entry = entries
+            .get(right.workspace_key.as_str())
+            .map(|entry| entry.signals)
+            .unwrap_or_default();
+        right_entry
+            .focused
+            .cmp(&left_entry.focused)
+            .then_with(|| right_entry.live_agent.cmp(&left_entry.live_agent))
+            .then_with(|| {
+                left.workspace_key
+                    .as_str()
+                    .cmp(right.workspace_key.as_str())
+            })
+    });
+    let cold_only_repos = repos
+        .difference(&non_cold_repos)
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+
+    EngagementSnapshot {
+        entries,
+        hot_targets,
+        cold_targets,
+        cold_only_repos,
+        active_repos: non_cold_repos,
+    }
+}
+
+pub async fn refresh_github_engagement(config: &ServerConfig) -> EngagementSnapshot {
+    let live_agent_workspaces: std::collections::HashSet<String> = {
+        let terminal_meta = config.terminal_meta.lock().await;
+        terminal_meta
+            .values()
+            .filter(|(_, kind)| matches!(kind, lazybox_ipc::TerminalKind::Agent(_)))
+            .map(|(session_key, _)| session_key.as_str().to_string())
+            .collect()
+    };
+
+    let store = config.store.clone();
+    let records = match tokio::task::spawn_blocking(move || store.list_workspaces()).await {
+        Ok(Ok(records)) => records,
+        Ok(Err(error)) => {
+            tracing::warn!("engagement: list_workspaces failed: {error}");
+            return config.poll_engagement.read().snapshot();
+        }
+        Err(error) => {
+            tracing::warn!("engagement: workspace scan task failed: {error}");
+            return config.poll_engagement.read().snapshot();
+        }
+    };
+
+    let now = Utc::now();
+    let mut candidates = Vec::new();
+    for record in records {
+        let Some(json) = record.workspace_json else {
+            continue;
+        };
+        let Ok(workspace) = Workspace::decode_persisted(&json) else {
+            continue;
+        };
+        let Some(task) = workspace.primary_task() else {
+            continue;
+        };
+        if task.id.source != lazybox_gh::SOURCE {
+            continue;
+        }
+        let Some((owner, repo_name, number)) = handlers::github_target(task) else {
+            continue;
+        };
+        let repo = format!("{owner}/{repo_name}");
+        let active = !matches!(
+            task.state,
+            lazybox_core::TaskState::Closed | lazybox_core::TaskState::Merged
+        );
+        let own_open_pr = task.is_pr() && active && task.role == lazybox_core::TaskRole::Author;
+        let cold = workspace.is_snoozed(now) || !active;
+        candidates.push(EngagementCandidate {
+            workspace_key: workspace.key.clone(),
+            target: lazybox_gh::NotificationTarget {
+                owner,
+                repo: repo_name,
+                number,
+                kind: if task.is_pr() {
+                    lazybox_gh::NotificationTargetKind::PullRequest
+                } else {
+                    lazybox_gh::NotificationTargetKind::Issue
+                },
+            },
+            node_id: task.node_id.clone(),
+            repo,
+            updated_at: task.updated_at,
+            cold,
+            live_agent: live_agent_workspaces.contains(workspace.key.as_str()),
+            own_open_pr,
+        });
+    }
+
+    let mut engagement = config.poll_engagement.write();
+    let snapshot =
+        select_engagement_snapshot(candidates, engagement.focused_workspace.as_deref(), now);
+    tracing::info!(
+        hot = snapshot.hot_count(),
+        cold_repos = snapshot.cold_only_repos.len(),
+        focused = engagement.focused_workspace.as_deref().unwrap_or(""),
+        "engagement tiers refreshed"
+    );
+    engagement.replace_snapshot(snapshot.clone());
+    snapshot
+}
+
+#[cfg(test)]
+mod engagement_tier_tests {
+    use super::*;
+    use lazybox_core::{
+        CheckRun, CiStatus, Mergeable, ReviewStatus, TaskId, TaskKind, TaskRole, TaskState,
+    };
+
+    fn target(number: u64) -> lazybox_gh::NotificationTarget {
+        lazybox_gh::NotificationTarget {
+            owner: "o".into(),
+            repo: "r".into(),
+            number,
+            kind: lazybox_gh::NotificationTargetKind::PullRequest,
+        }
+    }
+
+    fn candidate(number: u64) -> EngagementCandidate {
+        EngagementCandidate {
+            workspace_key: WorkspaceKey::new(format!("github:o/r#{number}")),
+            target: target(number),
+            node_id: Some(format!("PR_{number}")),
+            repo: "o/r".into(),
+            updated_at: Utc::now(),
+            cold: false,
+            live_agent: false,
+            own_open_pr: true,
+        }
+    }
+
+    fn task(number: u64, role: TaskRole) -> Task {
+        Task {
+            id: TaskId {
+                source: "github".into(),
+                key: format!("o/r#{number}"),
+            },
+            title: format!("PR {number}"),
+            body: None,
+            state: TaskState::Open,
+            role,
+            ci: CiStatus::Success,
+            review: ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: format!("https://github.com/o/r/pull/{number}"),
+            repo: Some("o/r".into()),
+            branch: Some("feature".into()),
+            base_branch: Some("main".into()),
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: Some(format!("PR_{number}")),
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+            kind: Some(TaskKind::Pr),
+        }
+    }
+
+    #[test]
+    fn hot_selection_is_bounded_and_keeps_focus_first() {
+        let candidates: Vec<_> = (1..=8).map(candidate).collect();
+        let focused = WorkspaceKey::new("github:o/r#8");
+        let snapshot = select_engagement_snapshot(candidates, Some(focused.as_str()), Utc::now());
+        assert_eq!(snapshot.hot_count(), HOT_SET_MAX);
+        assert_eq!(snapshot.tier_for(&focused), EngagementTier::Hot);
+        assert!(
+            snapshot
+                .hot_targets()
+                .first()
+                .is_some_and(|target| target.workspace_key == focused)
+        );
+    }
+
+    #[test]
+    fn cold_only_repos_leave_the_round_robin_tier() {
+        let mut cold = candidate(1);
+        cold.cold = true;
+        cold.own_open_pr = false;
+        cold.repo = "o/cold".into();
+        cold.target.repo = "cold".into();
+        let mut warm = candidate(2);
+        warm.own_open_pr = false;
+        warm.repo = "o/warm".into();
+        warm.target.repo = "warm".into();
+
+        let snapshot = select_engagement_snapshot(vec![cold, warm], None, Utc::now());
+        assert_eq!(
+            snapshot.tier_for(&WorkspaceKey::new("github:o/r#1")),
+            EngagementTier::Cold
+        );
+        assert!(snapshot.cold_only_repos().contains("o/cold"));
+        assert!(!snapshot.cold_only_repos().contains("o/warm"));
+    }
+
+    #[test]
+    fn live_agent_overrides_inactive_classification() {
+        let mut live = candidate(1);
+        live.cold = true;
+        live.own_open_pr = false;
+        live.live_agent = true;
+        let key = live.workspace_key.clone();
+
+        let snapshot = select_engagement_snapshot(vec![live], None, Utc::now());
+        assert_eq!(snapshot.tier_for(&key), EngagementTier::Hot);
+        assert!(snapshot.signals_for(&key).live_agent);
+        assert!(snapshot.cold_only_repos().is_empty());
+    }
+
+    #[test]
+    fn old_own_pr_stays_warm() {
+        let mut own = candidate(1);
+        own.updated_at = Utc::now() - OWN_PR_HOT_WINDOW - chrono::Duration::seconds(1);
+        let key = own.workspace_key.clone();
+        let snapshot = select_engagement_snapshot(vec![own], None, Utc::now());
+        assert_eq!(snapshot.tier_for(&key), EngagementTier::Warm);
+    }
+
+    #[test]
+    fn snoozed_own_pr_stays_cold_without_focus_or_live_agent() {
+        let mut own = candidate(1);
+        own.cold = true;
+        let key = own.workspace_key.clone();
+        let snapshot = select_engagement_snapshot(vec![own], None, Utc::now());
+        assert_eq!(snapshot.tier_for(&key), EngagementTier::Cold);
+    }
+
+    #[test]
+    fn targeted_requests_dedup_and_rank_hot_first() {
+        let hot = target(2);
+        let notification: lazybox_gh::NotificationEntry =
+            serde_json::from_value(serde_json::json!({
+                "reason": "review_requested",
+                "subject": {
+                    "title": "PR",
+                    "url": "https://api.github.com/repos/o/r/pulls/1",
+                    "type": "PullRequest"
+                },
+                "repository": {"full_name": "o/r"}
+            }))
+            .expect("notification fixture");
+        let hot_notification: lazybox_gh::NotificationEntry =
+            serde_json::from_value(serde_json::json!({
+                "subject": {
+                    "url": "https://api.github.com/repos/o/r/pulls/2",
+                    "type": "PullRequest"
+                }
+            }))
+            .expect("hot notification fixture");
+        let ranked = rank_targeted_requests(
+            &[hot],
+            &[notification.clone(), hot_notification.clone()],
+            &std::collections::BTreeSet::new(),
+        );
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked[0].target.number, 2);
+        assert!(ranked[0].flags.hot);
+        assert!(ranked[0].flags.notification);
+        assert_eq!(ranked[1].target.number, 1);
+        assert!(!ranked[1].flags.hot);
+
+        let cold_targets = [target(1)].into_iter().collect();
+        let ranked = rank_targeted_requests(
+            &[target(2)],
+            &[notification, hot_notification],
+            &cold_targets,
+        );
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].target.number, 2);
+        assert!(ranked[0].flags.hot);
+        assert!(ranked[0].flags.notification);
+    }
+
+    #[test]
+    fn hot_only_ticks_skip_the_notifications_heartbeat() {
+        assert_eq!(gh_fetch_plan(false, false), GhFetchPlan::Hot);
+        assert_eq!(gh_fetch_plan(false, true), GhFetchPlan::Warm);
+        assert_eq!(gh_fetch_plan(true, false), GhFetchPlan::Full);
+    }
+
+    #[tokio::test]
+    async fn live_agent_membership_flows_into_the_engagement_snapshot() {
+        let config = ServerConfig::in_memory();
+        let task = task(42, TaskRole::Reviewer);
+        let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
+        upsert(&config, task).await;
+        config.terminal_meta.lock().await.insert(
+            lazybox_ipc::TerminalId(1),
+            (
+                lazybox_core::SessionKey::from(key.as_str()),
+                lazybox_ipc::TerminalKind::Agent("claude".into()),
+            ),
+        );
+
+        let snapshot = refresh_github_engagement(&config).await;
+        assert_eq!(snapshot.tier_for(&key), EngagementTier::Hot);
+        assert!(snapshot.signals_for(&key).live_agent);
+    }
+
+    #[tokio::test]
+    async fn fresher_upserts_feed_hot_and_cold_latency_histograms() {
+        let config = ServerConfig::in_memory();
+        let mut hot = task(1, TaskRole::Reviewer);
+        hot.updated_at = Utc::now() - chrono::Duration::seconds(10);
+        let hot_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&hot));
+        upsert(&config, hot.clone()).await;
+        set_focused_workspace(&config, &hot_key).await;
+        refresh_github_engagement(&config).await;
+        hot.updated_at = Utc::now() - chrono::Duration::seconds(2);
+        upsert(&config, hot.clone()).await;
+        hot.ci = CiStatus::Failure;
+        hot.checks = vec![CheckRun {
+            name: "build".into(),
+            status: CiStatus::Failure,
+            url: None,
+        }];
+        upsert(&config, hot.clone()).await;
+        let mut lean_hot = hot;
+        lean_hot.checks.clear();
+        upsert(&config, lean_hot).await;
+
+        let mut cold = task(2, TaskRole::Reviewer);
+        cold.updated_at = Utc::now() - chrono::Duration::minutes(10);
+        let cold_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&cold));
+        upsert(&config, cold.clone()).await;
+        set_snooze(
+            &config,
+            &cold_key,
+            Some(Utc::now() + chrono::Duration::hours(1)),
+        )
+        .await;
+        set_focused_workspace(&config, &WorkspaceKey::new("local:other")).await;
+        refresh_github_engagement(&config).await;
+        cold.updated_at = Utc::now() - chrono::Duration::minutes(3);
+        upsert(&config, cold).await;
+
+        let metrics = config.event_metrics.snapshot();
+        assert_eq!(metrics.hot_sync_samples, 2);
+        assert_eq!(metrics.cold_sync_samples, 1);
+        assert!(metrics.hot_sync_p95_ms.is_some_and(|age| age < 10_000));
+        assert!(metrics.cold_sync_p95_ms.is_some_and(|age| age >= 170_000));
+    }
+}
+
 /// Did the last `fetch` return ALL in-scope tasks, or a subset?
 ///
 /// `Full` is the historical behavior — the source ran an exhaustive
@@ -69,6 +643,7 @@ use std::time::Duration;
 pub enum FetchMode {
     Full,
     Incremental,
+    Hot,
 }
 
 impl FetchMode {
@@ -83,6 +658,7 @@ impl FetchMode {
         match self {
             FetchMode::Full => "full-sweep",
             FetchMode::Incremental => "notifications",
+            FetchMode::Hot => "hot-targets",
         }
     }
 }
@@ -288,6 +864,15 @@ pub struct GhSource {
     /// row. Read by [`TaskSource::polled_scope`] after `fetch` resolves.
     /// Initialized `false` (a never-fetched source isn't windowed).
     last_windowed: parking_lot::Mutex<bool>,
+    /// Bounded focus/live/own-PR targets that are refreshed on every
+    /// tick independently of notifications and search windows.
+    hot_targets: Vec<GithubEngagementTarget>,
+    /// Snoozed or terminal-state rows whose notifications wait for
+    /// the slower discovery sweep.
+    cold_targets: std::collections::BTreeSet<lazybox_gh::NotificationTarget>,
+    /// Whether this tick also carries the base-cadence notifications
+    /// heartbeat. False on the intervening hot-only ticks.
+    poll_notifications: bool,
 }
 
 /// Out-of-band action a `TaskSource` may surface alongside the
@@ -343,7 +928,95 @@ pub enum ProviderAction {
     },
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct TargetedFlags {
+    hot: bool,
+    notification: bool,
+}
+
+#[derive(Debug, Clone)]
+struct TargetedRequest {
+    target: lazybox_gh::NotificationTarget,
+    flags: TargetedFlags,
+}
+
+struct TargetedOutcome {
+    tasks: Vec<Task>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GhFetchPlan {
+    Full,
+    Warm,
+    Hot,
+}
+
+fn gh_fetch_plan(full_sweep_due: bool, poll_notifications: bool) -> GhFetchPlan {
+    if full_sweep_due {
+        GhFetchPlan::Full
+    } else if poll_notifications {
+        GhFetchPlan::Warm
+    } else {
+        GhFetchPlan::Hot
+    }
+}
+
+fn rank_targeted_requests(
+    hot_targets: &[lazybox_gh::NotificationTarget],
+    notification_entries: &[lazybox_gh::NotificationEntry],
+    cold_targets: &std::collections::BTreeSet<lazybox_gh::NotificationTarget>,
+) -> Vec<TargetedRequest> {
+    let mut targets: std::collections::BTreeMap<lazybox_gh::NotificationTarget, TargetedFlags> =
+        std::collections::BTreeMap::new();
+    for target in hot_targets {
+        targets.entry(target.clone()).or_default().hot = true;
+    }
+    for target in notification_entries
+        .iter()
+        .filter_map(lazybox_gh::NotificationEntry::target)
+    {
+        if cold_targets.contains(&target) && !targets.get(&target).is_some_and(|flags| flags.hot) {
+            continue;
+        }
+        targets.entry(target).or_default().notification = true;
+    }
+    let mut ranked: Vec<TargetedRequest> = targets
+        .into_iter()
+        .map(|(target, flags)| TargetedRequest { target, flags })
+        .collect();
+    ranked.sort_by(|left, right| {
+        right
+            .flags
+            .hot
+            .cmp(&left.flags.hot)
+            .then_with(|| left.target.cmp(&right.target))
+    });
+    ranked
+}
+
+fn merge_targeted_tasks(base: &mut Vec<Task>, targeted: Vec<Task>) {
+    let positions: std::collections::HashMap<lazybox_core::TaskId, usize> = base
+        .iter()
+        .enumerate()
+        .map(|(index, task)| (task.id.clone(), index))
+        .collect();
+    for task in targeted {
+        if let Some(index) = positions.get(&task.id).copied() {
+            base[index] = task;
+        } else {
+            base.push(task);
+        }
+    }
+}
+
 impl GhSource {
+    fn hot_notification_targets(&self) -> Vec<lazybox_gh::NotificationTarget> {
+        self.hot_targets
+            .iter()
+            .map(|hot| hot.target.clone())
+            .collect()
+    }
+
     pub fn new(
         client: GhClient,
         filter: ProviderConfig,
@@ -369,6 +1042,9 @@ impl GhSource {
             last_kind: parking_lot::Mutex::new(FetchMode::Full),
             last_coverage_partial: parking_lot::Mutex::new(false),
             last_windowed: parking_lot::Mutex::new(false),
+            hot_targets: Vec::new(),
+            cold_targets: std::collections::BTreeSet::new(),
+            poll_notifications: true,
         }
     }
 
@@ -706,10 +1382,6 @@ impl GhSource {
         );
         self.emit_progress(format!("{} tasks kept after filter", kept.len()));
 
-        // Auto-fix scan: queue fix-CI / resolve-conflict spawns for
-        // eligible PRs. Drained + dispatched alongside mention spawns.
-        self.queue_auto_fix_actions(&kept);
-
         // Advance the `updated:>=` floor (issue #14) only when this
         // tick actually ran the global `involves:` search — a
         // round-robin per-repo sweep didn't look at the whole involved
@@ -723,15 +1395,143 @@ impl GhSource {
         // Mark sweep complete BEFORE returning so the next tick's
         // `should_full_sweep` check sees fresh data.
         self.client.mark_full_sweep_done();
-        log_rate_budget(&self.client);
         Ok(kept)
     }
 
-    /// Notifications-driven incremental fetch. Returns `Ok(None)` when
-    /// no targeted fetch should follow this tick (304 from GitHub or
-    /// heartbeat failure that we want to swallow) — caller treats that
-    /// as a no-op tick. Returns `Ok(Some(tasks))` with the targeted
-    /// deep-fetched PRs/issues otherwise.
+    async fn fetch_targeted(
+        &self,
+        requests: Vec<TargetedRequest>,
+    ) -> Result<TargetedOutcome, lazybox_core::ProviderError> {
+        use futures::stream::{self, StreamExt};
+
+        const TARGETED_FETCH_CONCURRENCY: usize = 5;
+        let hot_node_ids: std::collections::BTreeMap<lazybox_gh::NotificationTarget, String> = self
+            .hot_targets
+            .iter()
+            .filter_map(|hot| {
+                hot.node_id
+                    .as_ref()
+                    .map(|node_id| (hot.target.clone(), node_id.clone()))
+            })
+            .collect();
+        let mut batched = Vec::new();
+        let mut individual = Vec::new();
+        for request in requests {
+            if request.flags.hot
+                && let Some(node_id) = hot_node_ids.get(&request.target)
+            {
+                batched.push((request, node_id.clone()));
+            } else {
+                individual.push(request);
+            }
+        }
+
+        let mut tasks = Vec::new();
+        if !batched.is_empty() {
+            let node_ids = batched
+                .iter()
+                .map(|(_, node_id)| node_id.clone())
+                .collect::<Vec<_>>();
+            let results = self
+                .client
+                .fetch_hot_tasks(&node_ids)
+                .await
+                .map_err(lazybox_core::ProviderError::from)?;
+            for ((request, _), task) in batched.into_iter().zip(results) {
+                if let Some(task) = task {
+                    tasks.push(task);
+                } else {
+                    tracing::debug!(
+                        hot = true,
+                        "targeted: {}/{}#{} not visible — skipping",
+                        request.target.owner,
+                        request.target.repo,
+                        request.target.number,
+                    );
+                }
+            }
+        }
+
+        let results: Vec<_> = stream::iter(individual)
+            .map(|request| async move {
+                let result = match request.target.kind {
+                    lazybox_gh::NotificationTargetKind::PullRequest => {
+                        self.client
+                            .fetch_single_pr(
+                                &request.target.owner,
+                                &request.target.repo,
+                                request.target.number,
+                            )
+                            .await
+                    }
+                    lazybox_gh::NotificationTargetKind::Issue => {
+                        self.client
+                            .fetch_single_issue(
+                                &request.target.owner,
+                                &request.target.repo,
+                                request.target.number,
+                            )
+                            .await
+                    }
+                };
+                (request, result)
+            })
+            .buffer_unordered(TARGETED_FETCH_CONCURRENCY)
+            .collect()
+            .await;
+
+        let mut first_error = None;
+        for (request, result) in results {
+            match result {
+                Ok(Some(task)) => tasks.push(task),
+                Ok(None) => {
+                    tracing::debug!(
+                        hot = request.flags.hot,
+                        "targeted: {}/{}#{} not visible — skipping",
+                        request.target.owner,
+                        request.target.repo,
+                        request.target.number,
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        hot = request.flags.hot,
+                        notification = request.flags.notification,
+                        "targeted: fetch failed for {}/{}#{}: {error}",
+                        request.target.owner,
+                        request.target.repo,
+                        request.target.number,
+                    );
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(lazybox_core::ProviderError::from(error));
+        }
+        Ok(TargetedOutcome { tasks })
+    }
+
+    async fn fetch_hot_only(&self) -> Result<Vec<Task>, lazybox_core::ProviderError> {
+        let hot_targets = self.hot_notification_targets();
+        let requests = rank_targeted_requests(&hot_targets, &[], &self.cold_targets);
+        let targeted = self.fetch_targeted(requests).await?;
+        Ok(apply_needs_reply_toggle(
+            filter_github_tasks_with_watches(
+                targeted.tasks,
+                &self.filter,
+                &self.scopes,
+                &self.watch_repos,
+            ),
+            self.detect_needs_reply,
+        ))
+    }
+
+    /// Notifications-driven incremental fetch. Hot targets are added
+    /// before notification targets, including when the REST heartbeat
+    /// answers 304.
     async fn fetch_incremental(&self) -> Result<Option<Vec<Task>>, lazybox_core::ProviderError> {
         self.emit_progress("Checking GitHub notifications…");
         let poll = match self.client.fetch_notifications().await {
@@ -746,96 +1546,25 @@ impl GhSource {
                 return Ok(None);
             }
         };
-        let (entries, pending_cursor) = match poll {
+        let (entries, pending_cursor, commit_cursor) = match poll {
             lazybox_gh::NotificationsPoll::NotModified => {
                 self.emit_progress("No new GitHub notifications (304)");
-                return Ok(Some(Vec::new()));
+                (Vec::new(), None, false)
             }
             lazybox_gh::NotificationsPoll::Modified {
                 entries,
                 last_modified,
-            } => (entries, last_modified),
+            } => (entries, last_modified, true),
         };
         self.emit_progress(format!(
-            "{} GitHub notification(s) — fetching changed PRs/issues",
-            entries.len()
+            "{} hot target(s) + {} GitHub notification(s) — fetching changed PRs/issues",
+            self.hot_targets.len(),
+            entries.len(),
         ));
 
-        // Dedup at the source: GitHub fires several notifications per
-        // PR within a window (one per comment + one per CI status flip),
-        // and we want exactly one targeted fetch per distinct PR/issue.
-        // `BTreeSet<NotificationTarget>` collapses duplicates and gives
-        // deterministic iteration order — useful for stable logs.
-        let targets: std::collections::BTreeSet<lazybox_gh::NotificationTarget> = entries
-            .iter()
-            .filter_map(lazybox_gh::NotificationEntry::target)
-            .collect();
-
-        // Bounded-concurrent fan-out, mirroring the watched-repo
-        // pattern in `GhClient::fetch_all_prs`. 5 in flight is the
-        // same compromise: large enough to compress the latency of 10+
-        // targets into two batches, small enough that the local rate
-        // budget (capacity 30) doesn't get fully drained by a single
-        // tick. Failures are logged per-target — one bad fetch never
-        // poisons the rest of the batch.
-        use futures::stream::{self, StreamExt};
-        const TARGETED_FETCH_CONCURRENCY: usize = 5;
-        let results: Vec<_> = stream::iter(targets)
-            .map(|target| async move {
-                let result = match target.kind {
-                    lazybox_gh::NotificationTargetKind::PullRequest => {
-                        self.client
-                            .fetch_single_pr(&target.owner, &target.repo, target.number)
-                            .await
-                    }
-                    lazybox_gh::NotificationTargetKind::Issue => {
-                        self.client
-                            .fetch_single_issue(&target.owner, &target.repo, target.number)
-                            .await
-                    }
-                };
-                (target, result)
-            })
-            .buffer_unordered(TARGETED_FETCH_CONCURRENCY)
-            .collect()
-            .await;
-
-        // Fold the fan-out into (kept tasks, failure count). A transient
-        // `Err` counts against the cursor commit below; `Ok(None)` is a
-        // definitive "not visible" answer (deleted / transferred / scope
-        // changed) — treated as handled so a permanently-gone entry can't
-        // pin the cursor forever.
-        let mut tasks: Vec<Task> = Vec::new();
-        let mut deep_fetch_failures = 0usize;
-        for (target, result) in results {
-            match result {
-                Ok(Some(t)) => tasks.push(t),
-                Ok(None) => {
-                    tracing::debug!(
-                        "incremental: {}/{}#{} not visible — skipping",
-                        target.owner,
-                        target.repo,
-                        target.number,
-                    );
-                }
-                Err(e) => {
-                    // Per-target failure is non-fatal for THIS tick's
-                    // task list, but it MUST hold the notifications
-                    // cursor (#512): if we advanced past an un-fetched
-                    // entry, the next heartbeat would answer 304 and
-                    // never re-list it until its `updated_at` bumped
-                    // again — a CI failure / new comment invisible until
-                    // the ≤10-min full sweep.
-                    deep_fetch_failures += 1;
-                    tracing::warn!(
-                        "incremental: fetch failed for {}/{}#{}: {e}",
-                        target.owner,
-                        target.repo,
-                        target.number,
-                    );
-                }
-            }
-        }
+        let hot_targets = self.hot_notification_targets();
+        let requests = rank_targeted_requests(&hot_targets, &entries, &self.cold_targets);
+        let targeted = self.fetch_targeted(requests).await?;
 
         // At-most-once cursor advance coupled to work completion (#512).
         // Only commit the pending `Last-Modified` when every entry this
@@ -844,29 +1573,23 @@ impl GhSource {
         // heartbeat re-lists the un-fetched entry (GitHub returns the
         // full unread set on 200 — the successful entries re-fan-out too,
         // but the single-node deep-fetch is idempotent and deduped).
-        if deep_fetch_failures == 0 {
+        if commit_cursor {
             self.client.commit_notifications_cursor(pending_cursor);
-        } else {
-            tracing::warn!(
-                "incremental: {deep_fetch_failures} deep-fetch failure(s) — \
-                 holding notifications cursor so failed entries re-list next tick",
-            );
         }
 
         let kept = apply_needs_reply_toggle(
-            filter_github_tasks_with_watches(tasks, &self.filter, &self.scopes, &self.watch_repos),
+            filter_github_tasks_with_watches(
+                targeted.tasks,
+                &self.filter,
+                &self.scopes,
+                &self.watch_repos,
+            ),
             self.detect_needs_reply,
         );
         self.emit_progress(format!(
-            "{} task(s) refreshed via notifications",
+            "{} task(s) refreshed via hot/notification targets",
             kept.len()
         ));
-        // Auto-fix fires on the fast path too: the CI / mergeable
-        // signals it reads are on every Task, so a notification-driven
-        // CI-failure flip kicks off a fix without waiting for the next
-        // full sweep.
-        self.queue_auto_fix_actions(&kept);
-        log_rate_budget(&self.client);
         Ok(Some(kept))
     }
 }
@@ -1167,16 +1890,18 @@ impl TaskSource for GhSource {
         let mut guard = self.pending_actions.lock();
         std::mem::take(&mut *guard)
     }
-    /// Tiered fetch (issue #19):
+    /// Tiered fetch:
     ///
-    /// 1. **Slow full sweep** — heavy `involves:USER` GraphQL search,
+    /// 1. **Hot targets** — bounded focus/live/recent-own workspaces,
+    ///    refreshed every tick and ranked ahead of notification rows.
+    /// 2. **Slow full sweep** — heavy `involves:USER` GraphQL search,
     ///    fires every [`GhClient::FULL_SWEEP_INTERVAL`] (default 10 min)
     ///    and on the first tick after daemon start. Rescope runs.
     ///    `@lazybox` mention scanning ONLY happens on this path (the
     ///    full search response is what mention scanning walks).
-    /// 2. **Fast notifications heartbeat** — `GET /notifications` with
+    /// 3. **Fast notifications heartbeat** — `GET /notifications` with
     ///    `If-Modified-Since`; 304 → return empty `Vec`, no rescope.
-    /// 3. **Targeted deep-fetch** — for each modified notification,
+    /// 4. **Targeted deep-fetch** — for each modified notification,
     ///    fetch only that one PR/issue via the single-node GraphQL
     ///    query (~85 cost units total, vs. 1000s for the full search).
     ///
@@ -1187,31 +1912,39 @@ impl TaskSource for GhSource {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, lazybox_core::ProviderError>> + Send + 'a>>
     {
         Box::pin(async move {
-            // `last_kind` is only consulted by the tick driver in the
-            // `Ok` arm (errored sources never reach the all_full
-            // check), so we set it inside `Ok` branches only — the
-            // value held during an Err is unobservable.
-            if self.client.should_full_sweep() {
-                let tasks = self.fetch_full().await?;
-                self.set_last_kind(FetchMode::Full);
-                return Ok(tasks);
+            let (mut tasks, kind) =
+                match gh_fetch_plan(self.client.should_full_sweep(), self.poll_notifications) {
+                    GhFetchPlan::Full => (self.fetch_full().await?, FetchMode::Full),
+                    GhFetchPlan::Hot => (self.fetch_hot_only().await?, FetchMode::Hot),
+                    GhFetchPlan::Warm => match self.fetch_incremental().await? {
+                        Some(tasks) => (tasks, FetchMode::Incremental),
+                        None => {
+                            tracing::info!("incremental returned None; promoting to full sweep");
+                            (self.fetch_full().await?, FetchMode::Full)
+                        }
+                    },
+                };
+
+            if kind == FetchMode::Full && !self.hot_targets.is_empty() {
+                let hot_targets = self.hot_notification_targets();
+                let requests = rank_targeted_requests(&hot_targets, &[], &self.cold_targets);
+                let targeted = self.fetch_targeted(requests).await?;
+                let hot_tasks = apply_needs_reply_toggle(
+                    filter_github_tasks_with_watches(
+                        targeted.tasks,
+                        &self.filter,
+                        &self.scopes,
+                        &self.watch_repos,
+                    ),
+                    self.detect_needs_reply,
+                );
+                merge_targeted_tasks(&mut tasks, hot_tasks);
             }
-            match self.fetch_incremental().await? {
-                Some(tasks) => {
-                    self.set_last_kind(FetchMode::Incremental);
-                    Ok(tasks)
-                }
-                None => {
-                    // Heartbeat failed quietly — fall back to full sweep
-                    // rather than silently freezing the inbox. The full
-                    // sweep also re-arms the slow-sweep clock so we
-                    // don't loop on the same broken heartbeat.
-                    tracing::info!("incremental returned None; promoting to full sweep");
-                    let tasks = self.fetch_full().await?;
-                    self.set_last_kind(FetchMode::Full);
-                    Ok(tasks)
-                }
-            }
+
+            self.queue_auto_fix_actions(&tasks);
+            log_rate_budget(&self.client);
+            self.set_last_kind(kind);
+            Ok(tasks)
         })
     }
     fn last_fetch_kind(&self) -> FetchMode {
@@ -1603,6 +2336,27 @@ pub async fn sources_for(
     viewer_identities: std::sync::Arc<parking_lot::Mutex<Vec<(String, String)>>>,
     gh_client_cache: std::sync::Arc<parking_lot::Mutex<Option<GhClient>>>,
 ) -> Vec<Box<dyn TaskSource>> {
+    sources_for_with_engagement(
+        setup,
+        bus,
+        state,
+        viewer_identities,
+        gh_client_cache,
+        &EngagementSnapshot::default(),
+        true,
+    )
+    .await
+}
+
+async fn sources_for_with_engagement(
+    setup: &lazybox_core::PersistedSetup,
+    bus: tokio::sync::broadcast::Sender<Event>,
+    state: &mut TickState,
+    viewer_identities: std::sync::Arc<parking_lot::Mutex<Vec<(String, String)>>>,
+    gh_client_cache: std::sync::Arc<parking_lot::Mutex<Option<GhClient>>>,
+    engagement: &EngagementSnapshot,
+    poll_notifications: bool,
+) -> Vec<Box<dyn TaskSource>> {
     let mut sources: Vec<Box<dyn TaskSource>> = Vec::new();
 
     if setup.enabled_providers.contains(lazybox_gh::SOURCE) {
@@ -1803,6 +2557,9 @@ pub async fn sources_for(
                             last_kind: parking_lot::Mutex::new(FetchMode::Full),
                             last_coverage_partial: parking_lot::Mutex::new(false),
                             last_windowed: parking_lot::Mutex::new(false),
+                            hot_targets: engagement.hot_targets().to_vec(),
+                            cold_targets: engagement.cold_targets().clone(),
+                            poll_notifications,
                         }));
                     }
                     Err(e) => {
@@ -2042,7 +2799,7 @@ pub async fn tick_with_state(
                 any_source_succeeded = true;
                 source_scopes.insert(source.name().to_string(), source.polled_scope());
                 let mode = source.last_fetch_kind();
-                if mode == FetchMode::Incremental {
+                if mode != FetchMode::Full {
                     all_full = false;
                 }
                 let count = tasks.len();
@@ -2101,9 +2858,15 @@ pub async fn tick_with_state(
                 // automatically as the user's involvement set grows.
                 let now = std::time::Instant::now();
                 if source.name() == lazybox_gh::SOURCE {
+                    let engagement = config.poll_engagement.read().snapshot();
                     let mut seen_repos: std::collections::HashSet<&str> =
                         std::collections::HashSet::new();
                     for task in &tasks {
+                        let workspace_key =
+                            WorkspaceKey::new(lazybox_core::workspace_key_for(task));
+                        if engagement.tier_for(&workspace_key) == EngagementTier::Cold {
+                            continue;
+                        }
                         if let Some(repo) = task.repo.as_deref()
                             && !repo.is_empty()
                         {
@@ -2782,6 +3545,7 @@ pub fn spawn(config: ServerConfig, interval: Duration) -> tokio::task::JoinHandl
         // immediately (matches the previous loop's "first run is
         // eager" behaviour).
         let mut next_due: Instant = Instant::now();
+        let mut next_warm_due: Instant = Instant::now();
         let mut tick_n: u64 = 0;
         loop {
             // Wait until `next_due`, with the chunked-sleep + wake
@@ -2806,6 +3570,8 @@ pub fn spawn(config: ServerConfig, interval: Duration) -> tokio::task::JoinHandl
 
             tick_n += 1;
             tracing::info!("polling: tick #{tick_n} starting");
+            let warm_requested = config.take_warm_poll_request();
+            let poll_warm = Instant::now() >= next_warm_due || warm_requested;
 
             // Tolerate panics inside `run_one_tick`. tokio swallows
             // panics from spawned tasks by default; without this
@@ -2815,9 +3581,11 @@ pub fn spawn(config: ServerConfig, interval: Duration) -> tokio::task::JoinHandl
             // at error level + the loop continues with a normal
             // interval — degraded behaviour is far better than
             // silent death.
-            let summary = match std::panic::AssertUnwindSafe(run_one_tick(&config))
-                .catch_unwind()
-                .await
+            let summary = match std::panic::AssertUnwindSafe(run_one_tick_with_notifications(
+                &config, poll_warm,
+            ))
+            .catch_unwind()
+            .await
             {
                 Ok(s) => s,
                 Err(payload) => {
@@ -2841,7 +3609,7 @@ pub fn spawn(config: ServerConfig, interval: Duration) -> tokio::task::JoinHandl
                 }
             };
             tracing::info!(
-                "polling: tick #{tick_n} done (path={}, retry_after={:?}, unknown_mergeable={})",
+                "polling: tick #{tick_n} done (path={}, retry_after={:?}, unknown_mergeable={}, hot={})",
                 if summary.all_full {
                     "full-sweep"
                 } else {
@@ -2849,13 +3617,19 @@ pub fn spawn(config: ServerConfig, interval: Duration) -> tokio::task::JoinHandl
                 },
                 summary.retry_after_secs,
                 summary.saw_unknown_mergeable,
+                summary.hot_count,
             );
 
-            let next_in = next_tick_delay(
-                interval,
+            if poll_warm {
+                next_warm_due = Instant::now() + interval;
+            }
+            let warm_in = next_warm_due.saturating_duration_since(Instant::now());
+            let next_in = next_tick_delay_with_hot(
+                warm_in,
                 summary.retry_after_secs,
                 summary.saw_unknown_mergeable,
                 UNKNOWN_RETRY,
+                summary.hot_count,
             );
             if summary.retry_after_secs.is_some() {
                 tracing::warn!(
@@ -2960,10 +3734,31 @@ pub fn next_tick_delay(
     saw_unknown_mergeable: bool,
     unknown_retry: Duration,
 ) -> Duration {
-    let base = if saw_unknown_mergeable {
-        interval.min(unknown_retry)
+    next_tick_delay_with_hot(
+        interval,
+        retry_after_secs,
+        saw_unknown_mergeable,
+        unknown_retry,
+        0,
+    )
+}
+
+pub fn next_tick_delay_with_hot(
+    interval: Duration,
+    retry_after_secs: Option<u64>,
+    saw_unknown_mergeable: bool,
+    unknown_retry: Duration,
+    hot_count: usize,
+) -> Duration {
+    let engagement_interval = if hot_count > 0 {
+        interval.min(HOT_POLL_INTERVAL)
     } else {
         interval
+    };
+    let base = if saw_unknown_mergeable {
+        engagement_interval.min(unknown_retry)
+    } else {
+        engagement_interval
     };
     match retry_after_secs {
         Some(secs) => base.max(Duration::from_secs(secs)),
@@ -2980,6 +3775,9 @@ pub struct TickSummary {
     /// driver's per-tick log so the delivery path of a slow update is
     /// visible without cross-referencing per-source lines.
     pub all_full: bool,
+    /// Number of bounded GitHub targets that keep the loop on its
+    /// tighter cadence.
+    pub hot_count: usize,
 }
 
 /// Check the cross-tick [`TickState`] OUT of `config.poll_state`,
@@ -3030,6 +3828,13 @@ pub async fn restore_poll_state(config: &ServerConfig, mut state: TickState) {
 }
 
 pub async fn run_one_tick(config: &ServerConfig) -> TickSummary {
+    run_one_tick_with_notifications(config, true).await
+}
+
+async fn run_one_tick_with_notifications(
+    config: &ServerConfig,
+    poll_notifications: bool,
+) -> TickSummary {
     let setup = match lazybox_config::Config::load() {
         Ok(c) => crate::persisted_from_config(&c),
         Err(e) => {
@@ -3045,7 +3850,7 @@ pub async fn run_one_tick(config: &ServerConfig) -> TickSummary {
     // the serve loop's own `poll_state` users stay responsive while a
     // slow sync runs. See `checkout_poll_state`.
     let mut state = checkout_poll_state(config).await;
-    let summary = run_tick_inner(config, &setup, &mut state).await;
+    let summary = run_tick_inner(config, &setup, &mut state, poll_notifications).await;
     restore_poll_state(config, state).await;
     // Level-triggered removal prompts (issue #292): after every tick,
     // re-offer cleanup for any workspace still merged/closed with
@@ -3070,13 +3875,27 @@ async fn run_tick_inner(
     config: &ServerConfig,
     setup: &lazybox_core::PersistedSetup,
     state: &mut TickState,
+    poll_notifications: bool,
 ) -> TickSummary {
-    let sources = sources_for(
+    let engagement = refresh_github_engagement(config).await;
+    let hot_count = if setup.enabled_providers.contains(lazybox_gh::SOURCE) {
+        engagement.hot_count()
+    } else {
+        0
+    };
+    state.round_robin.update_engagement_repos(
+        engagement.cold_only_repos(),
+        engagement.active_repos(),
+        std::time::Instant::now(),
+    );
+    let sources = sources_for_with_engagement(
         setup,
         config.bus.clone(),
         state,
         config.viewer_identities.clone(),
         config.gh_client_cache.clone(),
+        &engagement,
+        poll_notifications,
     )
     .await;
     if sources.is_empty() {
@@ -3098,7 +3917,10 @@ async fn run_tick_inner(
             all_full: true,
         };
         rescope_with_state(config, &outcome, state).await;
-        return TickSummary::default();
+        return TickSummary {
+            hot_count,
+            ..TickSummary::default()
+        };
     }
     // Overall tick cap — defense in depth. Each sub-step already has
     // its own timeout (25s per graphql call × 3 retries, 30s per git
@@ -3148,6 +3970,7 @@ async fn run_tick_inner(
         retry_after_secs: outcome.retry_after_secs,
         saw_unknown_mergeable: outcome.saw_unknown_mergeable,
         all_full: outcome.all_full,
+        hot_count,
     };
     rescope_with_state(config, &outcome, state).await;
     // Warm the right pane before the user gets there (issue #530):
@@ -3634,24 +4457,11 @@ async fn prepare_upsert(
         }
     };
 
-    // Sync-latency probe: when this task already lives in the workspace
-    // and the incoming copy is genuinely fresher, log how stale it was
-    // by the time we processed it (`now - task.updated_at`). This is the
-    // end-to-end "an update took a long time to appear" signal — large
-    // values point at a slow delivery path (full-sweep cadence) rather
-    // than a slow upsert. First-discovery (no existing task) is skipped:
-    // its age reflects the PR's history, not delivery latency.
-    if let Some(prev) = existing.as_ref().and_then(|w| w.task_by_id(&task.id))
-        && task.updated_at > prev.updated_at
-    {
-        let age_ms = (Utc::now() - task.updated_at).num_milliseconds().max(0);
-        tracing::info!(
-            task = %task.id,
-            workspace_key = %key.as_str(),
-            update_age_ms = age_ms,
-            "sync: delivered fresher task"
-        );
-    }
+    let task_id = task.id.clone();
+    let previous_task = existing
+        .as_ref()
+        .and_then(|workspace| workspace.task_by_id(&task_id))
+        .cloned();
 
     let mut workspace = match existing {
         Some(mut w) => {
@@ -3661,11 +4471,65 @@ async fn prepare_upsert(
         None => Workspace::from_task(task, Utc::now()),
     };
 
+    let observation_window_ms = if task_id.source == lazybox_gh::SOURCE {
+        config.event_metrics.observe_sync(key.as_str())
+    } else {
+        None
+    };
+    if let (Some(previous), Some(surfaced)) = (previous_task, workspace.task_by_id(&task_id))
+        && sync_surface_changed(&previous, surfaced)
+    {
+        let age_ms = if surfaced.updated_at > previous.updated_at {
+            Some((Utc::now() - surfaced.updated_at).num_milliseconds().max(0) as u64)
+        } else {
+            observation_window_ms
+        };
+        let tier = config.poll_engagement.read().tier_for(key);
+        if let Some(age_ms) = age_ms {
+            match tier {
+                EngagementTier::Hot => config.event_metrics.record_hot_sync_latency(age_ms),
+                EngagementTier::Cold => config.event_metrics.record_cold_sync_latency(age_ms),
+                EngagementTier::Warm => {}
+            }
+        }
+        tracing::info!(
+            task = %task_id,
+            workspace_key = %key.as_str(),
+            update_age_ms = ?age_ms,
+            engagement_tier = tier.label(),
+            "sync: surfaced changed task state"
+        );
+    }
+
     // Issue-collapse pass — see `merge_closing_issue_workspaces`.
     // Happens here (in prepare) so the migration step sees the
     // final session set and renames worktrees in one pass.
     let pending_merges = merge_closing_issue_workspaces(config, &mut workspace).await;
     Some((workspace, pending_merges))
+}
+
+fn sync_surface_changed(previous: &Task, incoming: &Task) -> bool {
+    previous.updated_at < incoming.updated_at
+        || previous.state != incoming.state
+        || previous.ci != incoming.ci
+        || previous.review != incoming.review
+        || previous.mergeable != incoming.mergeable
+        || previous.is_behind_base != incoming.is_behind_base
+        || previous.auto_merge_enabled != incoming.auto_merge_enabled
+        || previous.is_in_merge_queue != incoming.is_in_merge_queue
+        || previous.additions != incoming.additions
+        || previous.deletions != incoming.deletions
+        || check_runs_changed(&previous.checks, &incoming.checks)
+}
+
+fn check_runs_changed(
+    previous: &[lazybox_core::CheckRun],
+    incoming: &[lazybox_core::CheckRun],
+) -> bool {
+    previous.len() != incoming.len()
+        || previous.iter().zip(incoming).any(|(left, right)| {
+            left.name != right.name || left.status != right.status || left.url != right.url
+        })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5165,40 +6029,24 @@ pub(super) fn load_workspace(config: &ServerConfig, key: &WorkspaceKey) -> Optio
     }
 }
 
-/// Record the user's "I'm looking at this workspace" hint on the
-/// round-robin scheduler. The next `pick_repos_for_tick` call reads
-/// it and bumps the repo to the front of the rotation so a comment
-/// landing on the visible PR shows up next cycle instead of waiting
-/// its turn.
-///
-/// No-op when:
-/// - the workspace is missing from the store (race with a delete);
-/// - the workspace has no primary task (locally-created pre-PR
-///   sandbox);
-/// - the primary task isn't a GitHub item (Linear doesn't share the
-///   per-repo fan-out model);
-/// - the primary task has no usable repo string.
-///
-/// The hint is *replaced*, not accumulated — only the most-recent
-/// focus matters; older selections age out via stalest-first ordering.
+/// Replace the current GitHub focus hint and wake the poll loop when
+/// the focused workspace changes.
 pub async fn set_focused_workspace(config: &ServerConfig, key: &WorkspaceKey) {
-    let Some(workspace) = load_workspace(config, key) else {
-        return;
-    };
-    let Some(task) = workspace.primary_task() else {
-        return;
-    };
-    if task.id.source != lazybox_gh::SOURCE {
-        return;
-    }
-    let Some(repo) = task
-        .repo
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    else {
-        return;
-    };
+    let repo = load_workspace(config, key)
+        .and_then(|workspace| {
+            workspace
+                .primary_task()
+                .filter(|task| task.id.source == lazybox_gh::SOURCE)
+                .and_then(|task| task.repo.clone())
+        })
+        .map(|repo| repo.trim().to_string())
+        .filter(|repo| !repo.is_empty());
+    let focused_workspace = repo.as_ref().map(|_| key.as_str().to_string());
+    let changed = config
+        .poll_engagement
+        .write()
+        .set_focused_workspace(focused_workspace);
+
     // Best-effort round-robin focus hint — NEVER block here.
     //
     // This runs INLINE on the daemon serve loop for every
@@ -5217,11 +6065,11 @@ pub async fn set_focused_workspace(config: &ServerConfig, key: &WorkspaceKey) {
     // poll prioritizes, so skipping it under contention costs nothing.
     match config.poll_state.try_lock() {
         Ok(mut state) => {
-            let prev = state.round_robin.focused_repo.replace(repo.to_string());
-            if prev.as_deref() != Some(repo) {
+            let prev = std::mem::replace(&mut state.round_robin.focused_repo, repo.clone());
+            if prev != repo {
                 tracing::debug!(
                     workspace_key = %key.as_str(),
-                    repo,
+                    repo = repo.as_deref().unwrap_or(""),
                     "round-robin focus updated"
                 );
             }
@@ -5234,6 +6082,14 @@ pub async fn set_focused_workspace(config: &ServerConfig, key: &WorkspaceKey) {
                  the serve loop responsive (keystrokes/spawns must not wait on the sync)"
             );
         }
+    }
+    if changed {
+        tracing::info!(
+            workspace_key = %key.as_str(),
+            github = repo.is_some(),
+            "polling focus changed — waking targeted refresh"
+        );
+        config.wake_poll(false);
     }
 }
 

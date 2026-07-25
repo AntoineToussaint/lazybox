@@ -55,6 +55,10 @@ pub struct RoundRobinState {
     /// stale repo (no longer touched by polls) falls out of the
     /// rotation instead of being burned on every tick.
     pub cursor: HashMap<String, Instant>,
+    /// Repositories removed solely because every stored row was cold.
+    /// Their prior cursor position is retained so a snooze expiry or
+    /// upstream reopen can restore the repo to the active rotation.
+    suspended_cold: HashMap<String, Instant>,
     /// Repo of the workspace the user is currently looking at,
     /// surfaced via `Command::FocusWorkspace`. Bumped to the front
     /// of the rotation by [`pick_repos_for_tick`].
@@ -78,6 +82,10 @@ impl RoundRobinState {
             now.checked_duration_since(*last)
                 .is_none_or(|d| d < CURSOR_TTL)
         });
+        self.suspended_cold.retain(|_, last| {
+            now.checked_duration_since(*last)
+                .is_none_or(|d| d < CURSOR_TTL)
+        });
     }
 
     /// Stamp `repo` as just-synced. Used both pre-fetch (for repos
@@ -85,7 +93,27 @@ impl RoundRobinState {
     /// rotation) and post-fetch (for repos newly discovered in the
     /// global sweep's result set).
     pub fn record_sync(&mut self, repo: &str, at: Instant) {
+        self.suspended_cold.remove(repo);
         self.cursor.insert(repo.to_string(), at);
+    }
+
+    pub fn update_engagement_repos(
+        &mut self,
+        cold_repos: &std::collections::HashSet<String>,
+        active_repos: &std::collections::HashSet<String>,
+        now: Instant,
+    ) {
+        for repo in active_repos {
+            if let Some(last_sync) = self.suspended_cold.remove(repo) {
+                self.cursor.insert(repo.clone(), last_sync);
+            }
+        }
+
+        let fallback = now.checked_sub(Duration::from_secs(60 * 60)).unwrap_or(now);
+        for repo in cold_repos {
+            let last_sync = self.cursor.remove(repo).unwrap_or(fallback);
+            self.suspended_cold.entry(repo.clone()).or_insert(last_sync);
+        }
     }
 }
 
@@ -254,6 +282,56 @@ mod tests {
         let pick = pick_repos_for_tick(&HashMap::new(), Some("a/b"), 5, 3);
         assert!(pick.repos.is_empty());
         assert!(pick.run_global);
+    }
+
+    #[test]
+    fn cold_repos_leave_and_reenter_the_active_rotation() {
+        let mut state = RoundRobinState {
+            cursor: cursor(&[("cold/a", 1), ("warm/b", 2), ("cold/c", 3)]),
+            ..RoundRobinState::default()
+        };
+        let cold = ["cold/a".to_string(), "cold/c".to_string()]
+            .into_iter()
+            .collect();
+        let active = ["warm/b".to_string()].into_iter().collect();
+        state.update_engagement_repos(&cold, &active, Instant::now());
+        assert_eq!(
+            state.cursor.keys().cloned().collect::<Vec<_>>(),
+            vec!["warm/b".to_string()]
+        );
+
+        state.update_engagement_repos(
+            &["cold/c".to_string()].into_iter().collect(),
+            &["cold/a".to_string(), "warm/b".to_string()]
+                .into_iter()
+                .collect(),
+            Instant::now(),
+        );
+        assert!(state.cursor.contains_key("cold/a"));
+        assert!(state.cursor.contains_key("warm/b"));
+        assert!(!state.cursor.contains_key("cold/c"));
+    }
+
+    #[test]
+    fn cold_repo_without_a_cursor_is_restored_when_it_reopens() {
+        let mut state = RoundRobinState::default();
+        let now = Instant::now();
+        state.update_engagement_repos(
+            &["cold/a".to_string()].into_iter().collect(),
+            &std::collections::HashSet::new(),
+            now,
+        );
+        assert!(state.cursor.is_empty());
+
+        state.update_engagement_repos(
+            &std::collections::HashSet::new(),
+            &["cold/a".to_string()].into_iter().collect(),
+            now + Duration::from_secs(60),
+        );
+        assert_eq!(
+            state.cursor.keys().cloned().collect::<Vec<_>>(),
+            vec!["cold/a".to_string()]
+        );
     }
 
     /// Stalest-first ordering across a uniform cursor.

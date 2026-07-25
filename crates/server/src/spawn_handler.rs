@@ -560,6 +560,12 @@ async fn transition_and_broadcast_agent_state(
     .await
 }
 
+fn wake_poll_for_terminal_kind(config: &ServerConfig, kind: &TerminalKind) {
+    if matches!(kind, TerminalKind::Agent(_)) {
+        config.wake_poll(false);
+    }
+}
+
 /// Spawn a terminal inside a session and broadcast
 /// `Event::TerminalSpawned`. Failures emit `Event::ProviderError` so
 /// the user gets feedback in the TUI rather than a silent miss.
@@ -1038,6 +1044,7 @@ pub async fn handle_spawn(
                 .await;
         }
     }
+    wake_poll_for_terminal_kind(config, &kind);
     drop(workspace_registration_guard);
     // The persisted backend_key → session ownership pairing lets the next
     // lazybox start reattach surviving tmux sessions to their workspace.
@@ -6123,6 +6130,32 @@ fn kind_id(kind: &TerminalKind) -> String {
 mod tests {
     use super::*;
     use crate::backend::SessionBackend;
+
+    #[tokio::test]
+    async fn agent_registration_wakes_polling_but_shell_registration_does_not() {
+        let config = ServerConfig::in_memory();
+        wake_poll_for_terminal_kind(&config, &TerminalKind::Shell);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                config.poll_wake.notified(),
+            )
+            .await
+            .is_err()
+        );
+
+        wake_poll_for_terminal_kind(&config, &TerminalKind::Agent("codex".into()));
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            config.poll_wake.notified(),
+        )
+        .await
+        .expect("agent registration did not wake polling");
+        assert!(
+            !config.take_warm_poll_request(),
+            "agent registration only needs the hot targeted path"
+        );
+    }
 
     #[tokio::test]
     async fn coalesced_writes_preserve_bare_chooser_answer_boundaries() {

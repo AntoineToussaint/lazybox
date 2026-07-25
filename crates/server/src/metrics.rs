@@ -21,6 +21,67 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+const SYNC_LATENCY_SAMPLE_CAPACITY: usize = 1024;
+
+#[derive(Debug, Default)]
+struct LatencySamples {
+    values: std::collections::VecDeque<u64>,
+}
+
+impl LatencySamples {
+    fn record(&mut self, value_ms: u64) {
+        if self.values.len() == SYNC_LATENCY_SAMPLE_CAPACITY {
+            self.values.pop_front();
+        }
+        self.values.push_back(value_ms);
+    }
+
+    fn summary(&self) -> (u64, Option<u64>, Option<u64>) {
+        let mut sorted: Vec<u64> = self.values.iter().copied().collect();
+        sorted.sort_unstable();
+        (
+            sorted.len() as u64,
+            percentile(&sorted, 50),
+            percentile(&sorted, 95),
+        )
+    }
+}
+
+#[derive(Debug, Default)]
+struct SyncObservations {
+    observed_at: std::collections::HashMap<String, std::time::Instant>,
+    oldest_first: std::collections::VecDeque<String>,
+}
+
+impl SyncObservations {
+    fn observe(&mut self, workspace_key: &str) -> Option<u64> {
+        let now = std::time::Instant::now();
+        let previous = self.observed_at.insert(workspace_key.to_string(), now);
+        if let Some(position) = self
+            .oldest_first
+            .iter()
+            .position(|key| key == workspace_key)
+        {
+            self.oldest_first.remove(position);
+        }
+        self.oldest_first.push_back(workspace_key.to_string());
+        while self.oldest_first.len() > SYNC_LATENCY_SAMPLE_CAPACITY {
+            if let Some(expired) = self.oldest_first.pop_front() {
+                self.observed_at.remove(&expired);
+            }
+        }
+        previous.map(|previous| now.saturating_duration_since(previous).as_millis() as u64)
+    }
+}
+
+fn percentile(sorted: &[u64], percentile: usize) -> Option<u64> {
+    if sorted.is_empty() {
+        return None;
+    }
+    let rank = (sorted.len() * percentile).div_ceil(100);
+    sorted.get(rank.saturating_sub(1)).copied()
+}
+
 /// Process-wide counters for the daemon's two lossy event paths. Cloned
 /// (cheaply, via the surrounding `Arc`) into every `ServerConfig`.
 #[derive(Debug, Default)]
@@ -42,6 +103,9 @@ pub struct EventMetrics {
     /// stalls while a handler runs" class of bug (#34, #206). Detached
     /// handlers can't contribute: they return to `select!` in µs.
     inline_budget_violations: AtomicU64,
+    hot_sync_latency_ms: parking_lot::Mutex<LatencySamples>,
+    cold_sync_latency_ms: parking_lot::Mutex<LatencySamples>,
+    sync_observations: parking_lot::Mutex<SyncObservations>,
 }
 
 impl EventMetrics {
@@ -73,14 +137,38 @@ impl EventMetrics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn record_hot_sync_latency(&self, age_ms: u64) {
+        self.hot_sync_latency_ms.lock().record(age_ms);
+    }
+
+    pub fn record_cold_sync_latency(&self, age_ms: u64) {
+        self.cold_sync_latency_ms.lock().record(age_ms);
+    }
+
+    /// Return the elapsed time since this workspace's previous sync
+    /// observation, establishing the baseline on first sight.
+    pub fn observe_sync(&self, workspace_key: &str) -> Option<u64> {
+        self.sync_observations.lock().observe(workspace_key)
+    }
+
     /// Point-in-time copy of every counter.
     pub fn snapshot(&self) -> EventMetricsSnapshot {
+        let (hot_sync_samples, hot_sync_p50_ms, hot_sync_p95_ms) =
+            self.hot_sync_latency_ms.lock().summary();
+        let (cold_sync_samples, cold_sync_p50_ms, cold_sync_p95_ms) =
+            self.cold_sync_latency_ms.lock().summary();
         EventMetricsSnapshot {
             terminal_output_dropped: self.terminal_output_dropped.load(Ordering::Relaxed),
             terminal_resyncs: self.terminal_resyncs.load(Ordering::Relaxed),
             bus_lagged_events: self.bus_lagged_events.load(Ordering::Relaxed),
             bus_lag_recoveries: self.bus_lag_recoveries.load(Ordering::Relaxed),
             inline_budget_violations: self.inline_budget_violations.load(Ordering::Relaxed),
+            hot_sync_samples,
+            hot_sync_p50_ms,
+            hot_sync_p95_ms,
+            cold_sync_samples,
+            cold_sync_p50_ms,
+            cold_sync_p95_ms,
         }
     }
 }
@@ -94,6 +182,18 @@ pub struct EventMetricsSnapshot {
     pub bus_lag_recoveries: u64,
     #[serde(default)]
     pub inline_budget_violations: u64,
+    #[serde(default)]
+    pub hot_sync_samples: u64,
+    #[serde(default)]
+    pub hot_sync_p50_ms: Option<u64>,
+    #[serde(default)]
+    pub hot_sync_p95_ms: Option<u64>,
+    #[serde(default)]
+    pub cold_sync_samples: u64,
+    #[serde(default)]
+    pub cold_sync_p50_ms: Option<u64>,
+    #[serde(default)]
+    pub cold_sync_p95_ms: Option<u64>,
 }
 
 #[cfg(test)]
@@ -111,6 +211,12 @@ mod tests {
         m.record_bus_lag_recovery();
         m.record_inline_budget_violation();
         m.record_inline_budget_violation();
+        for age_ms in [10, 20, 30, 100] {
+            m.record_hot_sync_latency(age_ms);
+        }
+        m.record_cold_sync_latency(600_000);
+        assert_eq!(m.observe_sync("github:o/r#1"), None);
+        assert!(m.observe_sync("github:o/r#1").is_some());
 
         let snap = m.snapshot();
         assert_eq!(snap.terminal_output_dropped, 2);
@@ -118,5 +224,22 @@ mod tests {
         assert_eq!(snap.bus_lagged_events, 8);
         assert_eq!(snap.bus_lag_recoveries, 1);
         assert_eq!(snap.inline_budget_violations, 2);
+        assert_eq!(snap.hot_sync_samples, 4);
+        assert_eq!(snap.hot_sync_p50_ms, Some(20));
+        assert_eq!(snap.hot_sync_p95_ms, Some(100));
+        assert_eq!(snap.cold_sync_samples, 1);
+        assert_eq!(snap.cold_sync_p50_ms, Some(600_000));
+        assert_eq!(snap.cold_sync_p95_ms, Some(600_000));
+    }
+
+    #[test]
+    fn sync_observations_evict_the_oldest_workspace() {
+        let metrics = EventMetrics::default();
+        metrics.observe_sync("oldest");
+        for index in 0..SYNC_LATENCY_SAMPLE_CAPACITY {
+            metrics.observe_sync(&format!("workspace-{index}"));
+        }
+
+        assert_eq!(metrics.observe_sync("oldest"), None);
     }
 }

@@ -366,7 +366,7 @@ pub async fn run_attempt<B: MergeBackend>(config: &ServerConfig, ticket: Attempt
                 workspace_key: key.clone(),
                 pr_label,
             });
-            config.poll_wake.notify_one();
+            config.wake_poll(true);
         }
         Err(e) => {
             tracing::warn!(workspace = %key, "auto-merge failed: {e}");

@@ -397,6 +397,21 @@ async fn set_focused_workspace_never_blocks_on_an_in_flight_poll() {
         held.round_robin.focused_repo.is_none(),
         "focus hint must be skipped, not applied, while a poll holds the lock"
     );
+    assert_eq!(
+        config.poll_engagement.read().focused_workspace(),
+        Some(workspace.key.as_str()),
+        "the exact workspace focus must remain available to engagement scheduling",
+    );
+    tokio::time::timeout(Duration::from_millis(50), config.poll_wake.notified())
+        .await
+        .expect("focus change did not wake the poll loop");
+    polling::set_focused_workspace(&config, &workspace.key).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), config.poll_wake.notified())
+            .await
+            .is_err(),
+        "repeating the same focus should not schedule redundant polls",
+    );
 }
 
 // ── tick() / upsert() ───────────────────────────────────────────────
@@ -2146,6 +2161,7 @@ fn gh_polled_scope_downgrades_to_preserve_all_on_partial_sweep() {
 fn fetch_mode_label_distinguishes_delivery_paths() {
     assert_eq!(FetchMode::Full.label(), "full-sweep");
     assert_eq!(FetchMode::Incremental.label(), "notifications");
+    assert_eq!(FetchMode::Hot.label(), "hot-targets");
 }
 
 #[tokio::test]
@@ -4410,6 +4426,30 @@ fn unknown_mergeable_shortens_to_fast_probe_without_backoff() {
 fn next_tick_delay_defaults_to_interval() {
     let d = polling::next_tick_delay(Duration::from_secs(60), None, false, Duration::from_secs(5));
     assert_eq!(d, Duration::from_secs(60));
+}
+
+#[test]
+fn hot_targets_shorten_the_regular_cadence() {
+    let d = polling::next_tick_delay_with_hot(
+        Duration::from_secs(60),
+        None,
+        false,
+        Duration::from_secs(5),
+        1,
+    );
+    assert_eq!(d, polling::HOT_POLL_INTERVAL);
+}
+
+#[test]
+fn rate_limit_backoff_beats_the_hot_cadence() {
+    let d = polling::next_tick_delay_with_hot(
+        Duration::from_secs(60),
+        Some(300),
+        false,
+        Duration::from_secs(5),
+        polling::HOT_SET_MAX,
+    );
+    assert_eq!(d, Duration::from_secs(300));
 }
 
 #[test]

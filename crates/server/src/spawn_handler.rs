@@ -1978,11 +1978,14 @@ async fn resolve_or_create_session(
         // first `git` command was the only thing that noticed.
         if let Err(e) = provision_worktree(config, &workspace, &path, session_key, true).await {
             tracing::warn!("main-checkout worktree provisioning failed: {e}");
+            // Land the ✗ on the checklist row that actually aborted
+            // (issue #557 B, acceptance #2) rather than always "Cloning".
+            let message = e.to_string();
             emit_worktree_progress(
                 config,
                 session_key,
-                WorktreeStep::Clone,
-                WorktreeStepStatus::Failed(e.to_string()),
+                lazybox_ipc::WorktreeRecovery::classify(&message).failed_step(),
+                WorktreeStepStatus::Failed(message),
             );
             return Err(crate::ServerError::Worktree(format!(
                 "main checkout setup failed — spawn aborted, retry once the cause is fixed: {e}"
@@ -2039,11 +2042,16 @@ async fn resolve_or_create_session(
         // names where in the checklist the ✗ lands. The returned error
         // additionally lands as a `spawn:session` provider error via
         // `handle_spawn`'s resolve arm.
+        // Classify the failure so the ✗ lands on the phase that actually
+        // aborted (clone/fetch/worktree-add) instead of always "Cloning"
+        // (issue #557 B, acceptance #2). The modal re-derives the same
+        // class from this message to render its recovery affordance.
+        let message = e.to_string();
         emit_worktree_progress(
             config,
             session_key,
-            WorktreeStep::Clone,
-            WorktreeStepStatus::Failed(e.to_string()),
+            lazybox_ipc::WorktreeRecovery::classify(&message).failed_step(),
+            WorktreeStepStatus::Failed(message),
         );
         return Err(crate::ServerError::Worktree(format!(
             "git worktree setup failed — spawn aborted, retry once the cause is fixed: {e}"
@@ -9142,6 +9150,7 @@ mod tests {
         task.repo = Some("not-owner-name-format".into());
         let session_key = persist_task_workspace(&config, task);
         let kind = TerminalKind::Agent("claude".into());
+        let mut bus_rx = config.bus.subscribe();
 
         let err = resolve_or_create_session(&config, &session_key, None, &kind, false)
             .await
@@ -9149,6 +9158,31 @@ mod tests {
         assert!(
             err.to_string().contains("spawn aborted"),
             "the error names the abort: {err}"
+        );
+
+        // Issue #557 acceptance #2: the ✗ must land on the phase that
+        // actually aborted, not always "Cloning". A malformed repo fails
+        // pre-git, so the failure is reported on the Fetch (Preparing)
+        // row and its message classifies to the BadRepo recovery class —
+        // which the modal reads to render its affordance.
+        let mut failed = None;
+        while let Ok(ev) = bus_rx.try_recv() {
+            if let Event::WorktreeProgress {
+                step,
+                status: WorktreeStepStatus::Failed(msg),
+                ..
+            } = ev
+            {
+                failed = Some((step, msg));
+            }
+        }
+        let (step, msg) = failed.expect("a Failed progress event is emitted");
+        assert_ne!(step, WorktreeStep::Clone, "no always-Clone mislabel: {msg}");
+        assert_eq!(step, lazybox_ipc::WorktreeRecovery::BadRepo.failed_step());
+        assert_eq!(
+            lazybox_ipc::WorktreeRecovery::classify(&msg),
+            lazybox_ipc::WorktreeRecovery::BadRepo,
+            "message classifies to the BadRepo recovery class: {msg}"
         );
 
         let ws = load_workspace(&config, &WorkspaceKey::new(session_key.as_str()))

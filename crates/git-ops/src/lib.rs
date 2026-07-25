@@ -865,8 +865,12 @@ impl WorktreeManager {
             }
         }
 
-        // Last resort: probe common defaults before giving up.
-        for guess in ["main", "master"] {
+        // Last resort: probe common defaults before giving up. `develop`
+        // and `trunk` cover the repos whose default is neither `main` nor
+        // `master` yet still conventional — enough that a repo we *have*
+        // a ref for locally resolves even when `origin/HEAD` never got
+        // set (issue #557 B10).
+        for guess in ["main", "master", "develop", "trunk"] {
             if ref_exists(&bare_path, &format!("refs/remotes/origin/{guess}")).await
                 || ref_exists(&bare_path, &format!("refs/heads/{guess}")).await
             {
@@ -874,8 +878,12 @@ impl WorktreeManager {
             }
         }
 
+        // Nothing resolved. Name the likely cause — a fresh bare clone
+        // with no fetched refs is almost always offline or an auth/repo
+        // problem — so the failure modal's guidance points somewhere.
         Err(GitError::Command(format!(
-            "could not resolve default branch for {owner}/{repo}"
+            "could not resolve default branch for {owner}/{repo} — the repo may be \
+             unreachable (offline / auth) or use a non-standard default branch"
         )))
     }
 
@@ -3053,6 +3061,91 @@ mod health_probe_tests {
     async fn healthy_bare_clone_probes_ok_true() {
         let (_tmp, bare) = local_bare_clone();
         assert!(bare_repo_health(&bare).await.unwrap());
+    }
+
+    /// B10 (issue #557): when `origin/HEAD` can't be resolved (offline,
+    /// or a bare clone that never had it set), `default_branch` still
+    /// resolves a repo whose default is the conventional-but-not-
+    /// main/master `develop` via the last-resort probe. Origin is
+    /// removed so the `set-head --auto` / `symbolic-ref` tiers both fail
+    /// and only the probe can answer.
+    #[tokio::test]
+    async fn default_branch_probes_develop_when_head_unresolved() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src = tmp.path().join("src");
+        std::fs::create_dir(&src).expect("mkdir src");
+        git(&src, &["init", "-q"]);
+        std::fs::write(src.join("f.txt"), "x\n").expect("write");
+        git(&src, &["add", "f.txt"]);
+        git(&src, &["commit", "-q", "-m", "init"]);
+        // Rename the sole branch to `develop` — whatever git's default
+        // init name is, this leaves exactly one head named `develop`.
+        git(&src, &["branch", "-m", "develop"]);
+
+        let mgr = WorktreeManager::new(tmp.path().join("base"));
+        let bare = mgr.bare_clone_path("acme", "widget");
+        std::fs::create_dir_all(bare.parent().expect("bare parent")).expect("mkdir repos");
+        git(
+            tmp.path(),
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                src.to_str().expect("utf8"),
+                bare.to_str().expect("utf8"),
+            ],
+        );
+        // Drop origin so `origin/HEAD` can never be (re)established; the
+        // `refs/heads/develop` probe is the only path left.
+        git(&bare, &["remote", "remove", "origin"]);
+
+        let got = mgr
+            .default_branch("acme", "widget")
+            .await
+            .expect("develop must resolve via the fallback probe");
+        assert_eq!(got, "develop");
+    }
+
+    /// The same path with no resolvable branch at all reports the
+    /// offline/auth-flavored guidance the failure modal keys off (B10).
+    #[tokio::test]
+    async fn default_branch_names_the_likely_cause_when_unresolvable() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src = tmp.path().join("src");
+        std::fs::create_dir(&src).expect("mkdir src");
+        git(&src, &["init", "-q"]);
+        std::fs::write(src.join("f.txt"), "x\n").expect("write");
+        git(&src, &["add", "f.txt"]);
+        git(&src, &["commit", "-q", "-m", "init"]);
+        // An unconventional sole branch: the repo is healthy (so no
+        // reclone is attempted) but matches none of the probe guesses.
+        git(&src, &["branch", "-m", "wip-unconventional"]);
+
+        let mgr = WorktreeManager::new(tmp.path().join("base"));
+        let bare = mgr.bare_clone_path("acme", "widget");
+        std::fs::create_dir_all(bare.parent().expect("bare parent")).expect("mkdir repos");
+        git(
+            tmp.path(),
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                src.to_str().expect("utf8"),
+                bare.to_str().expect("utf8"),
+            ],
+        );
+        git(&bare, &["remote", "remove", "origin"]);
+
+        let err = mgr
+            .default_branch("acme", "widget")
+            .await
+            .expect_err("no branch can resolve");
+        let msg = err.to_string();
+        assert!(msg.contains("could not resolve default branch"), "{msg}");
+        assert!(
+            msg.contains("unreachable"),
+            "guidance names the cause: {msg}"
+        );
     }
 
     /// git ran and CONFIRMED the directory is not a usable repo

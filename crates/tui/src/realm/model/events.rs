@@ -1054,16 +1054,23 @@ impl<T: TerminalAdapter> Model<T> {
                         // armed would let a later unrelated spawn inherit
                         // this `w`'s follow.
                         self.spawn_follow_to = None;
-                        // No `TerminalSpawned` is coming, so a progress
-                        // checklist that reached "Starting agent" would
-                        // hang — surface the error in the footer and
-                        // tear it down. `ProviderError` carries no
-                        // session, so this clears whichever checklist
-                        // is up (only ever one). Also release any Esc-
-                        // dismissal marker — the op is dead.
-                        self.worktree_progress_dismissed = None;
-                        self.force_dismiss_worktree_progress();
-                        self.flash_error(format!("✗ spawn failed — {message}"));
+                        // A worktree-provisioning failure already mounted
+                        // the actionable checklist modal (classified
+                        // error + hint + `r` retry, issue #557). That is
+                        // the recovery surface — do NOT tear it down into
+                        // a single truncated footer line (the exact
+                        // regression this issue reported). The redundant
+                        // provider-error footer is suppressed; the modal
+                        // owns the failure. Any OTHER spawn error (backend
+                        // spawn, target-moved) has no failed checklist, so
+                        // it still surfaces + clears as before.
+                        let modal_owns_failure =
+                            self.worktree_progress.as_ref().is_some_and(|s| s.failed());
+                        if !modal_owns_failure {
+                            self.worktree_progress_dismissed = None;
+                            self.force_dismiss_worktree_progress();
+                            self.flash_error(format!("✗ spawn failed — {message}"));
+                        }
                     } else if source == "repo-labels" {
                         self.handle_repo_labels_failed(message);
                     } else if let Some(action) = mutation_failure_label(source) {

@@ -36,7 +36,7 @@
 use crate::realm::Msg;
 use crate::realm::UserEvent;
 use lazybox_core::SessionKey;
-use lazybox_ipc::{WorktreeStep, WorktreeStepStatus};
+use lazybox_ipc::{WorktreeRecovery, WorktreeStep, WorktreeStepStatus};
 use std::time::{Duration, Instant};
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
@@ -81,6 +81,21 @@ enum Row {
 /// renderer; each entry's discriminant equals its index (asserted in
 /// tests) so positional and `Row`-keyed access agree.
 const ROWS: [Row; STEP_COUNT as usize] = [Row::Prepare, Row::WorktreeAdd, Row::Setup, Row::Agent];
+
+impl Row {
+    /// Which checklist row a failed [`WorktreeStep`] belongs to. The
+    /// daemon now emits the step that actually aborted (issue #557
+    /// acceptance #2), so the ✗ can land on the right row instead of
+    /// always "Cloning". `Clone`/`Fetch` are both the "Preparing
+    /// worktree" row; `Setup` and the agent launch share the setup row.
+    fn for_step(step: WorktreeStep) -> Self {
+        match step {
+            WorktreeStep::Clone | WorktreeStep::Fetch => Row::Prepare,
+            WorktreeStep::WorktreeAdd => Row::WorktreeAdd,
+            WorktreeStep::Setup => Row::Setup,
+        }
+    }
+}
 
 /// Number of checklist rows: prepare (clone-if-needed + fetch base),
 /// worktree-add, setup, agent launch.
@@ -143,6 +158,10 @@ pub struct WorktreeProgressState {
     /// display and keeps the modal up until the user acknowledges it.
     failed_step: Option<u8>,
     error: Option<String>,
+    /// How the failure can be recovered, classified from the error text
+    /// (issue #557). Drives the modal's per-class hint + retry
+    /// affordance so a failed provision is never just "Esc dismiss".
+    recovery: Option<WorktreeRecovery>,
     /// A step completed but degraded — the base-ref fetch failed and the
     /// worktree branched off a possibly-stale local ref (issue #320).
     /// Unlike a failure this doesn't freeze the checklist (provisioning
@@ -163,6 +182,7 @@ impl WorktreeProgressState {
             dismiss_queued: false,
             failed_step: None,
             error: None,
+            recovery: None,
             warning: None,
         }
     }
@@ -197,11 +217,11 @@ impl WorktreeProgressState {
     /// only flips the row's label to the one-time clone message.
     pub fn apply(&mut self, step: WorktreeStep, status: WorktreeStepStatus) {
         match (step, status) {
-            // A failure freezes the checklist on whatever row is on
-            // screen — the daemon's catch-all failure path doesn't know
-            // which sub-phase aborted, and the error text carries the
-            // real detail regardless.
-            (_, WorktreeStepStatus::Failed(e)) => self.fail_current(e),
+            // A failure freezes the checklist. The daemon now names the
+            // sub-phase that actually aborted (issue #557), so place the
+            // ✗ on that row instead of wherever the display happened to
+            // be; the error text still carries the full detail.
+            (step, WorktreeStepStatus::Failed(e)) => self.fail_current(step, e),
             // A degraded (not failed) step: record the note so the modal
             // surfaces it and holds for acknowledgement, but let the
             // checklist keep advancing — provisioning did succeed.
@@ -245,11 +265,20 @@ impl WorktreeProgressState {
         }
     }
 
-    fn fail_current(&mut self, error: String) {
-        // Freeze on the row currently on screen rather than jumping to a
-        // named step — the modal stays put showing the error.
-        self.failed_step = Some(self.shown);
+    fn fail_current(&mut self, step: WorktreeStep, error: String) {
+        // Land the ✗ on the row the daemon says aborted, but never rewind
+        // it behind a row already shown in-flight (a late/unknown failure
+        // during a later phase shouldn't jump the mark backwards).
+        let row = Row::for_step(step) as u8;
+        self.failed_step = Some(row.max(self.shown));
+        self.recovery = Some(WorktreeRecovery::classify(&error));
         self.error = Some(error);
+    }
+
+    /// The failure's recovery class, once a step has failed. `None` while
+    /// provisioning is in flight or succeeded.
+    pub fn recovery(&self) -> Option<WorktreeRecovery> {
+        self.recovery
     }
 
     /// Queue dismissal: the session is live (`TerminalSpawned`), so the
@@ -310,6 +339,10 @@ pub struct WorktreeProgress {
     steps: [(&'static str, StepState); STEP_COUNT as usize],
     clone_progress: Option<String>,
     error: Option<String>,
+    recovery: Option<WorktreeRecovery>,
+    /// True once a step has failed — gates the `r` retry key so it only
+    /// intercepts on the failure screen (mid-provision `r` is ignored).
+    failed: bool,
     warning: Option<String>,
     spinner_idx: usize,
 }
@@ -320,6 +353,8 @@ impl WorktreeProgress {
             steps: state.steps(),
             clone_progress: state.clone_progress.clone(),
             error: state.error.clone(),
+            recovery: state.recovery,
+            failed: state.failed(),
             warning: state.warning.clone(),
             spinner_idx: 0,
         }
@@ -372,7 +407,18 @@ impl Component for WorktreeProgress {
                 format!("  {err}"),
                 Style::default().fg(theme.error),
             )));
-            lines.push(Line::from(Span::styled("  Esc dismiss", theme.hint())));
+            // Per-class recovery guidance (issue #557): every failure now
+            // names a concrete next step and offers a retry, instead of
+            // dead-ending to a bare "Esc dismiss".
+            let recovery = self.recovery.unwrap_or(WorktreeRecovery::Unknown);
+            lines.push(Line::from(Span::styled(
+                format!("  {}", recovery.hint()),
+                Style::default().fg(theme.warn),
+            )));
+            lines.push(Line::from(Span::styled(
+                "  r retry · Esc dismiss",
+                theme.hint(),
+            )));
         } else if let Some(warn) = &self.warning {
             // Provisioning succeeded but degraded: show the stale-base
             // note in amber and hold for acknowledgement (Esc), so the
@@ -433,6 +479,13 @@ impl AppComponent<Msg, UserEvent> for WorktreeProgress {
                 modifiers,
                 ..
             }) if modifiers.contains(KeyModifiers::CONTROL) => Some(Msg::ModalDismissed),
+            // On the failure screen, `r` retries the provision by
+            // re-issuing the spawn that failed (issue #557). Only bound
+            // once failed so it never shadows a key mid-provision.
+            Event::Keyboard(KeyEvent {
+                code: Key::Char('r'),
+                ..
+            }) if self.failed => Some(Msg::WorktreeRetry),
             // Advance the spinner and ask the run loop to repaint — the
             // checkout phase emits no events for seconds, so without a
             // per-tick redraw the spinner would look frozen.
@@ -739,5 +792,85 @@ mod tests {
         assert!(out.contains('✗'), "{out}");
         assert!(out.contains("could not read from remote"), "{out}");
         assert!(out.contains("Esc dismiss"), "{out}");
+    }
+
+    /// Issue #557 acceptance #2: a failure the daemon reports on the
+    /// `WorktreeAdd` phase lands the ✗ on the "Creating worktree" row —
+    /// with the earlier "Preparing worktree" row already checked ✓ — even
+    /// though the display never dwelt past row 0. No always-"Cloning"
+    /// mislabel.
+    #[test]
+    fn failure_lands_on_the_phase_that_actually_aborted() {
+        let mut st = state();
+        // Blob download during `git worktree add` fails while the display
+        // is still on the Preparing row (shown == 0).
+        st.apply(WorktreeStep::Fetch, WorktreeStepStatus::Started);
+        st.apply(
+            WorktreeStep::WorktreeAdd,
+            WorktreeStepStatus::Failed(
+                "could not download file contents from origin — worktrees from a \
+                 blobless clone need the remote reachable"
+                    .into(),
+            ),
+        );
+        assert_eq!(st.recovery(), Some(WorktreeRecovery::Offline));
+        let steps = st.steps();
+        assert_eq!(steps[Row::Prepare as usize].1, StepState::Done, "prepare ✓");
+        assert_eq!(
+            steps[Row::WorktreeAdd as usize].1,
+            StepState::Failed,
+            "worktree-add ✗ — not the Prepare/Clone row"
+        );
+    }
+
+    /// Issue #557 acceptance #1: every failure offers an actionable
+    /// recovery. The modal renders the class-specific hint AND a retry
+    /// affordance — never a bare "Esc dismiss" dead-end.
+    #[test]
+    fn failed_modal_offers_a_recovery_hint_and_retry() {
+        let mut st = state();
+        st.apply(WorktreeStep::WorktreeAdd, WorktreeStepStatus::Started);
+        st.apply(
+            WorktreeStep::WorktreeAdd,
+            WorktreeStepStatus::Failed(
+                "worktree: checkout_at: branch 'feat' is already checked out at \
+                 /tmp/other — refusing to take it from another live worktree"
+                    .into(),
+            ),
+        );
+        assert_eq!(st.recovery(), Some(WorktreeRecovery::BranchHeldLive));
+        let out = render(&mut WorktreeProgress::from_state(&st), 70, 16);
+        assert!(out.contains('✗'), "{out}");
+        // The per-class guidance …
+        assert!(out.contains("another workspace"), "recovery hint: {out}");
+        // … and both affordances, retry first.
+        assert!(out.contains("r retry"), "retry affordance: {out}");
+        assert!(out.contains("Esc dismiss"), "{out}");
+    }
+
+    /// The `r` key only fires a retry once a step has failed — a stray
+    /// `r` mid-provision must not intercept.
+    #[test]
+    fn retry_key_only_binds_on_the_failure_screen() {
+        use tuirealm::event::{Key, KeyEvent};
+        let mut st = state();
+        st.apply(WorktreeStep::WorktreeAdd, WorktreeStepStatus::Started);
+        // Mid-provision: `r` is inert.
+        let mut live = WorktreeProgress::from_state(&st);
+        assert!(
+            live.on(&Event::Keyboard(KeyEvent::from(Key::Char('r'))))
+                .is_none(),
+            "r must not retry while provisioning is in flight"
+        );
+        // After a failure: `r` asks the model to retry.
+        st.apply(
+            WorktreeStep::WorktreeAdd,
+            WorktreeStepStatus::Failed("boom".into()),
+        );
+        let mut failed = WorktreeProgress::from_state(&st);
+        assert!(matches!(
+            failed.on(&Event::Keyboard(KeyEvent::from(Key::Char('r')))),
+            Some(Msg::WorktreeRetry)
+        ));
     }
 }

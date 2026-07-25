@@ -1256,33 +1256,38 @@ impl<T: TerminalAdapter> Model<T> {
         let workspace = self.sidebar.selected_workspace();
         let selected = self.right.selected_activity_indices();
         let intent = crate::intent::resolve_work(workspace, &selected, agent_id);
-        if let crate::intent::Intent::SpawnAgent {
-            workspace_key,
-            agent_id,
-            prompt,
-        } = intent
-        {
-            // Pin the follow target to the workspace `w` fired on so the
-            // spawned agent's terminal is what focus lands on, even if a
-            // slow first-time worktree provision lets the cursor wander
-            // before the `TerminalSpawned` arrives (consumed in the
-            // spawn-event handler).
-            self.spawn_follow_to = Some((&workspace_key).into());
-            cmds.push(IpcCommand::Spawn {
-                session_key: (&workspace_key).into(),
-                session_id,
-                kind: lazybox_ipc::TerminalKind::Agent(agent_id),
-                cwd: None,
-                initial_prompt: prompt,
-                on_main: false,
-                model_alias,
-            });
-            self.right.clear_activity_selection();
-        } else {
-            // Nothing actionable to spawn (no PR, issue, or selected
-            // comments). Surface that instead of silently swallowing
-            // the keystroke.
-            self.flash_hint("nothing to work on here");
+        match intent {
+            crate::intent::Intent::SpawnAgent {
+                workspace_key,
+                agent_id,
+                prompt,
+            } => {
+                // Pin the follow target to the workspace `w` fired on so the
+                // spawned agent's terminal is what focus lands on, even if a
+                // slow first-time worktree provision lets the cursor wander
+                // before the `TerminalSpawned` arrives (consumed in the
+                // spawn-event handler).
+                self.spawn_follow_to = Some((&workspace_key).into());
+                cmds.push(IpcCommand::Spawn {
+                    session_key: (&workspace_key).into(),
+                    session_id,
+                    kind: lazybox_ipc::TerminalKind::Agent(agent_id),
+                    cwd: None,
+                    initial_prompt: prompt,
+                    on_main: false,
+                    model_alias,
+                });
+                self.right.clear_activity_selection();
+            }
+            // A merged/closed workspace steers to cleanup: surface the
+            // "press x x to archive" notice rather than provisioning a
+            // worktree for finished work (issue #557).
+            crate::intent::Intent::Notice(msg) => self.flash_hint(msg),
+            _ => {
+                // Nothing actionable (no workspace selected). Surface that
+                // instead of silently swallowing the keystroke.
+                self.flash_hint("nothing to work on here");
+            }
         }
     }
 

@@ -372,7 +372,17 @@ impl<T: TerminalAdapter> Model<T> {
     pub(super) fn mount_new_workspace_input(&mut self, project_key: lazybox_core::ProjectKey) {
         use crate::realm::components::input::Input;
 
-        if matches!(self.modal_stack.last(), Some(Id::NewWorkspace)) {
+        // Don't preempt an open modal. The `x p` / start-agent pickers
+        // pop themselves before reaching here (empty stack), but the
+        // async `ProjectUpserted` hand-off can race a modal the user
+        // opened in the meantime — mounting over it would arm a second
+        // `modal_flow` on top of that modal's live continuation
+        // (clobbering it, or tripping `set_modal_flow`'s debug assert).
+        // Mirrors the label / inspector "wait for an empty stack"
+        // convention; the project header is already focused, so the user
+        // can still press `x n`. Subsumes the old NewWorkspace-only
+        // idempotence check.
+        if !self.modal_stack.is_empty() {
             return;
         }
         self.set_modal_flow(ModalFlow::NewWorkspaceProject {

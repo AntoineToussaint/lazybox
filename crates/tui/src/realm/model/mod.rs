@@ -2875,7 +2875,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// Multi-step flows that legitimately carry a flow across a stage
     /// transition (broadcast, handoff, the list→confirm inspectors)
     /// mutate or take `modal_flow` directly instead of calling this.
-    pub(crate) fn set_modal_flow(&mut self, flow: ModalFlow) {
+    pub(super) fn set_modal_flow(&mut self, flow: ModalFlow) {
         if self.modal_flow.is_some() {
             debug_assert!(
                 false,

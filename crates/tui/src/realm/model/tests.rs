@@ -521,6 +521,36 @@ mod effects_tests {
         ));
     }
 
+    /// The async `x p → CreateProject → ProjectUpserted` hand-off
+    /// auto-mounts the new-workspace name input, but it must NOT do so
+    /// over a modal the user opened during the daemon round-trip:
+    /// arming a second `modal_flow` on top of that modal's live
+    /// continuation would clobber it (a reply that never posts) or trip
+    /// `set_modal_flow`'s double-arm assert. With any modal up,
+    /// `mount_new_workspace_input` is a no-op — the project header is
+    /// still focused, so the user can press `x n`.
+    #[test]
+    fn new_workspace_input_does_not_preempt_an_open_modal() {
+        let mut m = build_model();
+        // A live flow modal — e.g. a reply the user opened while the
+        // freshly-created project's ProjectUpserted was in flight.
+        let reply_key = lazybox_core::SessionKey::from("github:o/r#1");
+        m.modal_flow = Some(super::super::ModalFlow::Reply {
+            target: reply_key.clone(),
+        });
+        m.modal_stack.push(Id::Reply);
+
+        m.mount_new_workspace_input(lazybox_core::ProjectKey::local("proj"));
+
+        // The reply flow and its modal survive untouched; no NewWorkspace
+        // input was stacked on top.
+        assert_eq!(m.modal_stack.last(), Some(&Id::Reply));
+        assert!(matches!(
+            &m.modal_flow,
+            Some(super::super::ModalFlow::Reply { target }) if *target == reply_key
+        ));
+    }
+
     /// `f` mounts the composable filter menu with a row per filter,
     /// and picking rows replaces the sidebar's active set (no IPC —
     /// filtering is client-local).

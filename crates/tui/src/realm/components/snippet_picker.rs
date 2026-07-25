@@ -241,13 +241,6 @@ impl SnippetPicker {
         self
     }
 
-    /// Recompute `visible_indices` from `filter`, grouped by category,
-    /// and reset the cursor to the first visible row. A row matches
-    /// when the filter is a case-insensitive substring of its key,
-    /// description, or category — richer than the pre-#244 key-only
-    /// prefix so snippets are discoverable by what they *do*. The
-    /// exact-key auto-submit fast path is decided separately (see
-    /// [`auto_submit_index`]) and is unaffected by description hits.
     /// `Some(idx)` when the picker should auto-submit: the typed filter
     /// exactly equals a snippet key AND that key is the *only* snippet
     /// whose key starts with the filter. Decided over key-prefix
@@ -494,8 +487,7 @@ impl FilterableList for SnippetPicker {
     /// key, description, or category — richer than the pre-#244 key-only
     /// prefix so snippets are discoverable by what they *do*. The
     /// exact-key auto-submit fast path is decided separately (see
-    /// [`SnippetPicker::auto_submit_index`]) and is unaffected by
-    /// description hits.
+    /// `auto_submit_index`) and is unaffected by description hits.
     fn compute_visible(&mut self) -> Vec<usize> {
         let q = self.filter.trim();
         let mut idxs: Vec<usize> = if q.is_empty() {

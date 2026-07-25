@@ -394,7 +394,7 @@ mod tests {
     fn enter_picks_the_cursor_row_by_item_index() {
         let mut f = Fake::new(&["alpha", "beta", "gamma"]);
         // Filter to a single row whose *item* index is 2.
-        for c in "gam".chars() {
+        for c in "gamma".chars() {
             let _ = f.dispatch_key(&ke(c));
         }
         assert_eq!(f.visible_indices, vec![2]);

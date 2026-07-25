@@ -61,9 +61,23 @@ export default defineConfig({
               slug: 'docs/how-to/run-an-agent-per-workspace',
             },
             {
+              label: 'Orchestrate multiple agents',
+              slug: 'docs/how-to/orchestrate-multiple-agents',
+            },
+            { label: 'Use snippets', slug: 'docs/how-to/use-snippets' },
+            {
               label: 'Manage automation policies',
               slug: 'docs/how-to/manage-automation-policies',
             },
+            {
+              label: 'Trigger agents with @lazybox mentions',
+              slug: 'docs/how-to/lazybox-mentions',
+            },
+            {
+              label: 'Get desktop notifications',
+              slug: 'docs/how-to/desktop-notifications',
+            },
+            { label: 'Change the theme', slug: 'docs/how-to/themes' },
             {
               label: 'Per-repo env and mounts',
               slug: 'docs/how-to/per-repo-env-and-mounts',
@@ -71,6 +85,10 @@ export default defineConfig({
             { label: 'Connect Linear', slug: 'docs/how-to/linear' },
             { label: 'Remote over SSH', slug: 'docs/how-to/remote-over-ssh' },
             { label: 'Mirror to Slack', slug: 'docs/how-to/mirror-to-slack' },
+            {
+              label: 'Recover persistent state',
+              slug: 'docs/how-to/recover-state',
+            },
           ],
         },
         {
@@ -80,6 +98,7 @@ export default defineConfig({
             { label: 'CLI', slug: 'docs/reference/cli' },
             { label: 'Keybindings', slug: 'docs/reference/keybindings' },
             { label: 'Configuration', slug: 'docs/reference/configuration' },
+            { label: 'JSON HTTP API', slug: 'docs/reference/json-api' },
           ],
         },
         {

@@ -18,7 +18,7 @@ For day-to-day development, the `Makefile` wraps the common flows.
 
 | Target | What it does |
 | --- | --- |
-| `make setup` | One-shot: download pinned Zig 0.15.2 to `~/.cache/lazybox/zig/` |
+| `make setup` | One-time online prep: fetch the checksum-verified pinned Zig 0.15.2 to `~/.cache/lazybox/zig/`, cache the Ghostty source and the locked Cargo graph, and prebuild the native terminal dependency so later builds run offline |
 | `make run` | Build and run lazybox |
 | `make build` | Build the workspace |
 | `make release` | Build in release mode |

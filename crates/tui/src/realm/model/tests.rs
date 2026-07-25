@@ -9615,6 +9615,8 @@ mod worktree_progress_recovery_tests {
             workspaces: vec![Workspace::empty(key, "main", Utc::now())],
             terminals: vec![],
             projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
         });
         m.handle_daemon_event(IpcEvent::WorktreeProgress {
             session_key: session_key.clone(),

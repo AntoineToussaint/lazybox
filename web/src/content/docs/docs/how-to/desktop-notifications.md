@@ -1,24 +1,24 @@
 ---
 title: Get desktop notifications
-description: Fire an OS notification when an agent needs your input, and pick how the banner is delivered — including over SSH.
+description: Control the OS notifications lazybox fires when an agent needs input or finishes, and pick how the banner is delivered — including over SSH.
 ---
 
-When you're driving several agents, you don't want to babysit the TUI waiting
-for one to ask a question. lazybox can fire an **OS desktop notification the
-moment an agent needs input**, so you can look away and get pulled back only
-when it matters.
+When you're driving several agents, you don't want to babysit the TUI. lazybox
+fires an **OS desktop notification** when an agent needs input, when an agent
+finishes, and when a workspace raises a fresh attention signal (failing CI, a
+requested review, new unread activity) — so you can look away and get pulled
+back only when it matters.
 
-## Turn it on
+## It's on by default
 
-Set `attention.desktop_notify` in `~/.lazybox/config.yaml`:
+Desktop notifications are **enabled by default** (`attention.desktop_notify`
+defaults to `true`). This is independent of the in-app `agent_asking` attention
+badge — set `desktop_notify: false` to keep the badge but silence the OS banner:
 
 ```yaml
 attention:
-  desktop_notify: true
+  desktop_notify: false   # keep the in-app badge, no OS banner
 ```
-
-This is independent of the in-app `agent_asking` attention badge — you can have
-the badge without the banner, or both.
 
 ## Choose how the banner is delivered
 
@@ -33,7 +33,7 @@ attention:
 
 | Value | Behavior |
 | --- | --- |
-| `auto` (default) | Picks per environment: subprocess helpers when running locally, the terminal's OSC escape sequence when over SSH. |
+| `auto` (default) | Picks per environment: a dedicated helper (`terminal-notifier` / `notify-send`) when running locally, the terminal's OSC escape sequence over SSH — or when the only local helper is `osascript` and your terminal supports the escape sequence. |
 | `subprocess` | Force a helper binary: `terminal-notifier` or `osascript` on macOS, `notify-send` on Linux. |
 | `osc` | Force the terminal's OSC notification escape sequence — useful when the notification should come from wherever your terminal emulator runs (e.g. across SSH). |
 

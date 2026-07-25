@@ -3,19 +3,22 @@ title: Trigger agents with @lazybox mentions
 description: Let an @lazybox mention in a GitHub issue or comment auto-spawn the default agent on that workspace.
 ---
 
-lazybox can watch for `@lazybox` mentions in your GitHub issues and comments and
-**auto-spawn the default agent** on the corresponding workspace when one lands —
-so you (or a teammate) can kick off work by leaving a comment, without touching
-the TUI.
+lazybox can watch for `@lazybox` mentions in your GitHub issues and
+**auto-spawn a Claude Code agent** on the corresponding workspace when one lands
+— so you (or an allowed teammate) can kick off work by leaving a comment,
+without touching the TUI.
 
 ## How it works
 
-When the GitHub provider polls and finds a new comment mentioning `@lazybox` on
-a PR or issue in your inbox, lazybox opens that workspace's worktree and spawns
-your [default agent](/docs/how-to/run-an-agent-per-workspace/) with the
-mention's context. By default, **only mentions written by the authenticated
-viewer** (you) trigger a spawn — so a stranger commenting `@lazybox` on your
-public PR can't start an agent on your machine.
+When the GitHub provider polls and finds `@lazybox` in an **issue body or an
+issue comment** (pull requests are not scanned), lazybox opens that issue's
+workspace worktree and spawns an agent with a prompt to implement the issue. By
+default, **only mentions written by the authenticated viewer** (you) trigger a
+spawn — so a stranger commenting `@lazybox` on your public issue can't start an
+agent on your machine.
+
+The spawned agent is currently the **Claude Code agent (`claude`)**, hardcoded —
+it does not follow your `setup.default_agent` setting.
 
 ## Allow other people to trigger it
 
@@ -29,8 +32,12 @@ mention:
     - bob
 ```
 
-An empty (or absent) list keeps the default: only your own mentions count. The
-authenticated viewer is always allowed and does not need to be listed.
+The list is authoritative:
+
+- **Empty (or absent)** — only the authenticated viewer (you) triggers spawns.
+- **Non-empty** — exactly the listed logins trigger spawns. The viewer is *not*
+  added automatically, so include your own login if you want your mentions to
+  keep working alongside your collaborators'.
 
 ## Notes
 
@@ -43,7 +50,7 @@ authenticated viewer is always allowed and does not need to be listed.
 
 ## See also
 
-- [Run an agent per workspace](/docs/how-to/run-an-agent-per-workspace/) — how
-  the default agent is chosen and configured.
+- [Run an agent per workspace](/docs/how-to/run-an-agent-per-workspace/) — what
+  an agent does once it's spawned in a worktree.
 - [Configuration reference → `mention`](/docs/reference/configuration/) — the
   full schema.

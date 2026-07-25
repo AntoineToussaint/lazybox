@@ -27,7 +27,8 @@ workspace** at once:
 
 1. A snippet picker opens — pick a reusable prompt (see
    [Use snippets](/docs/how-to/use-snippets/)), or press `Ctrl-F` to skip
-   straight to free text.
+   straight to free text. (With no snippets configured, it jumps straight to the
+   compose step.)
 2. A compose textarea opens, pre-filled with the snippet body. Edit it into the
    exact instruction you want fanned out.
 3. Submit. lazybox delivers per target:
@@ -58,8 +59,9 @@ planner→executor workflows:
 1. Focus the workspace whose agent produced something worth passing on (a plan,
    a diagnosis, a list of files).
 2. Press `x s`. lazybox captures that agent's on-screen output.
-3. Pick the **target** workspace. The source workspace is excluded from the
-   list, so a handoff can never loop back into itself.
+3. Pick the **target** workspace. The list shows only workspaces with a running
+   agent to receive the brief, and excludes the source workspace — so a handoff
+   can never loop back into itself or land somewhere with no agent.
 4. Edit the brief — the captured output is the starting point, not the final
    text — then submit. lazybox injects it into the target session's agent and
    submits it.

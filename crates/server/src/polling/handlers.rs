@@ -452,13 +452,23 @@ pub async fn handle_close_issue(config: &ServerConfig, workspace_key: WorkspaceK
     // in <5s instead of waiting out the full interval.
     config.wake_poll(true);
 
-    // Fire the workspace-cleanup prompt directly off this successful
-    // close (issue #573). A self-initiated close won't necessarily
+    // Route this successful close directly into the terminal-cleanup
+    // path (issue #573). A self-initiated close won't necessarily
     // generate a viewer notification, and the poll only re-fetches a
     // closed issue via the notifications-driven single fetch — so the
-    // open→closed flip is often never re-observed and the prompt never
-    // runs. The daemon knows the close just succeeded, so route straight
-    // into the same cleanup path. The poll path stays as a backstop.
+    // open→closed flip is often never re-observed and cleanup never
+    // runs. The daemon knows the close just succeeded, so don't wait for
+    // a poll to rediscover it.
+    //
+    // For a closed issue this doesn't always PROMPT: the #552
+    // safe-auto-remove inside `prompt_merged_pr_removal_with` reaps a
+    // clean or session-less issue immediately (footer notice, no modal,
+    // no archive so a reopen resurfaces it); only genuine local work or a
+    // live terminal surfaces the keep/remove modal. The poll path stays
+    // as a backstop and composes safely — a woken poll re-observing the
+    // same close finds the row already gone (`closed_issue_transition`
+    // needs a still-Open predecessor) or is collapsed by the reprompt
+    // throttle + the TUI's per-key dedupe, so neither can double-fire.
     if let Some(cleanup) = closed_issue_cleanup(config, &ws) {
         on_terminal_transition(config, &workspace_key, cleanup).await;
     }

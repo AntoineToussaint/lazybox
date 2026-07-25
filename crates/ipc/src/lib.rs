@@ -1900,6 +1900,181 @@ pub enum WorktreeStepStatus {
 /// confirmation of the user's own cancel rather than an error.
 pub const SPAWN_CANCELLED_NOTE: &str = "workspace setup cancelled";
 
+/// How a worktree-provisioning failure can be recovered — derived
+/// purely from the daemon's error text via [`Self::classify`], so the
+/// wire stays a plain `Failed(String)` and every surface (the daemon
+/// picking the right checklist row, the modal rendering an affordance)
+/// reads the *same* classification instead of re-matching strings
+/// independently.
+///
+/// Issue #557's audit found that every `Failed` variant dead-ended to
+/// the identical `Esc dismiss` footer regardless of what actually
+/// broke. This enum is that audit's failure-mode matrix made
+/// machine-readable: one variant per recoverable class (Bn refs are the
+/// issue's rows), each carrying a one-line [`Self::hint`] telling the
+/// user what to do and whether re-pressing (`r`) can help
+/// ([`Self::retryable`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreeRecovery {
+    /// Transient — a fetch/network hiccup or a ref lock. Re-pressing may
+    /// just work once the blip clears. The safe default when nothing
+    /// more specific matches but the text smells like network.
+    Transient,
+    /// B1: the branch is checked out in another *live* worktree; git
+    /// refuses to co-opt it. The user must free that worktree (close it
+    /// or switch its branch) first.
+    BranchHeldLive,
+    /// B3: a leftover directory holds real uncommitted work, so the
+    /// provisioner refuses to reuse or overwrite it. Manual `mv` aside.
+    DirtyLeftover,
+    /// B5/B6: the head/base branch isn't on `origin` (fork PR, deleted
+    /// head, or a base that no longer exists) and no PR-ref fallback
+    /// resolved it. Re-syncing the PR/repo is the fix, not a bare retry.
+    BranchMissing,
+    /// B9: a blobless clone can't download file contents because the
+    /// remote is unreachable. Reconnect, then retry.
+    Offline,
+    /// B10: the repo's default branch couldn't be resolved (no
+    /// `origin/HEAD`, an unusual default, or offline).
+    DefaultBranchUnresolved,
+    /// B11: the repo string isn't `owner/name` — a config/source problem
+    /// upstream of git that a retry can't fix.
+    BadRepo,
+    /// B14/B17: disk, permission, or generic I/O error (out of space,
+    /// read-only mount, `git init` half-write). Retryable once the
+    /// filesystem problem is cleared.
+    Disk,
+    /// Unclassified — surface the raw text and still offer a retry, since
+    /// a failed provision persists no session and re-pressing is clean.
+    Unknown,
+}
+
+impl WorktreeRecovery {
+    /// Classify a provisioning error from its (already user-facing)
+    /// message. Order matters: the most specific markers are matched
+    /// first so a message that happens to contain a generic word
+    /// (`origin`, `remote`) still lands on its precise class. Every
+    /// marker below is an exact substring the daemon emits — see
+    /// `crates/git-ops/src/lib.rs` and `spawn_handler.rs`.
+    pub fn classify(message: &str) -> Self {
+        // B1 — the collision refusal names the holding worktree.
+        if message.contains("another live worktree") {
+            return Self::BranchHeldLive;
+        }
+        // B3 — the only message that tells the user to move a dir aside.
+        if message.contains("move the directory aside") {
+            return Self::DirtyLeftover;
+        }
+        // B11 — malformed repo string, caught before any git runs.
+        if message.contains("is not owner/name") {
+            return Self::BadRepo;
+        }
+        // B10 — default-branch resolution gave up.
+        if message.contains("could not resolve default branch") {
+            return Self::DefaultBranchUnresolved;
+        }
+        // B9 — blobless clone needs the network for blobs.
+        if message.contains("could not download file contents") {
+            return Self::Offline;
+        }
+        // B5/B6 — head or base ref absent locally and on origin.
+        if message.contains("not found locally or on origin") {
+            return Self::BranchMissing;
+        }
+        // B14/B17 — filesystem-class failures. `I/O error:` is
+        // `GitError::Io`'s Display prefix; the rest are OS strings that
+        // survive into the wrapped message.
+        if message.contains("I/O error")
+            || message.contains("No space left")
+            || message.contains("Permission denied")
+            || message.contains("Read-only file system")
+        {
+            return Self::Disk;
+        }
+        // Network transients that a retry can clear on its own.
+        if message.contains("could not read from remote")
+            || message.contains("Could not resolve host")
+            || message.contains("Connection refused")
+            || message.contains("Connection reset")
+            || message.contains("Temporary failure in name resolution")
+            || message.contains("timed out")
+        {
+            return Self::Transient;
+        }
+        Self::Unknown
+    }
+
+    /// The checklist row a failure of this class belongs to, so the ✗
+    /// lands on the phase that actually aborted instead of always
+    /// "Cloning" (issue #557, acceptance #2). Pre-git failures
+    /// ([`Self::BadRepo`]) and the ref-resolution/fetch phase point at
+    /// the "Preparing worktree" row; the collision, dirty-dir, offline
+    /// blob-download, and disk classes surface on the `git worktree add`
+    /// row where they're raised.
+    pub fn failed_step(&self) -> WorktreeStep {
+        match self {
+            Self::BadRepo
+            | Self::DefaultBranchUnresolved
+            | Self::BranchMissing
+            | Self::Transient => WorktreeStep::Fetch,
+            Self::BranchHeldLive | Self::DirtyLeftover | Self::Offline | Self::Disk => {
+                WorktreeStep::WorktreeAdd
+            }
+            // Unknown: keep it on whatever row the display is showing —
+            // the modal's `fail_current` treats `Fetch` as "use the
+            // current frontier", so an unclassified failure doesn't jump.
+            Self::Unknown => WorktreeStep::Fetch,
+        }
+    }
+
+    /// Whether re-pressing (`r` in the modal / a fresh `w`) can succeed
+    /// *without* the user first doing something out-of-band. `false` for
+    /// the classes that need a manual fix (free the holder, move a dir,
+    /// re-sync the branch, fix the repo string) — the modal still offers
+    /// retry there, but frames it as "after you fix it".
+    pub fn retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::Transient
+                | Self::Offline
+                | Self::DefaultBranchUnresolved
+                | Self::Disk
+                | Self::Unknown
+        )
+    }
+
+    /// One-line, imperative recovery guidance shown under the error in
+    /// the modal. Always names a concrete next step; the modal appends
+    /// the `r retry · Esc dismiss` affordance separately.
+    pub fn hint(&self) -> &'static str {
+        match self {
+            Self::Transient => "Looks transient — press r to retry.",
+            Self::BranchHeldLive => {
+                "That branch is open in another workspace. Close it (or switch its \
+                 branch), then press r."
+            }
+            Self::DirtyLeftover => {
+                "A leftover folder holds uncommitted work. Move it aside, then press r."
+            }
+            Self::BranchMissing => {
+                "The branch isn't on origin (fork or deleted head). Re-sync the PR \
+                 (g s), then press r."
+            }
+            Self::Offline => "Can't download files while offline. Reconnect, then press r.",
+            Self::DefaultBranchUnresolved => {
+                "Couldn't find the repo's default branch. Check connectivity or the \
+                 repo, then press r."
+            }
+            Self::BadRepo => {
+                "This workspace's repo isn't in owner/name form — fix its source \
+                 config; a retry won't help."
+            }
+            Self::Disk => "Disk or permission error. Free space or fix permissions, then press r.",
+            Self::Unknown => "Press r to retry, or Esc to dismiss.",
+        }
+    }
+}
+
 impl Event {
     /// Build a `ProviderError` event with the given source / message
     /// / kind. Replaces ~28 hand-rolled struct literals that all
@@ -2280,6 +2455,133 @@ impl Connection {
     /// at the start of `serve` and spawns the drop-and-resync task.
     pub fn take_forward(&mut self) -> Option<EventForward> {
         self.forward.take()
+    }
+}
+
+#[cfg(test)]
+mod worktree_recovery_tests {
+    use super::*;
+
+    /// Each failure class is recognized from the exact daemon message,
+    /// lands on the checklist row that actually aborted, and carries a
+    /// hint naming a concrete next step (issue #557).
+    #[test]
+    fn classifies_every_failure_mode_from_its_daemon_message() {
+        // (message-substring the daemon emits, expected class, expected row)
+        let cases: &[(&str, WorktreeRecovery, WorktreeStep)] = &[
+            (
+                "branch 'feat' is already checked out at /tmp/w — refusing to take it \
+                 from another live worktree; remove that worktree",
+                WorktreeRecovery::BranchHeldLive,
+                WorktreeStep::WorktreeAdd,
+            ),
+            (
+                "/tmp/w exists but is not a worktree of /bare and holds uncommitted \
+                 work — refusing to reuse or overwrite it; move the directory aside and retry",
+                WorktreeRecovery::DirtyLeftover,
+                WorktreeStep::WorktreeAdd,
+            ),
+            (
+                "checkout_at: branch 'feat' not found locally or on origin",
+                WorktreeRecovery::BranchMissing,
+                WorktreeStep::Fetch,
+            ),
+            (
+                "checkout_new_branch_at: base branch 'develop' not found locally or on origin",
+                WorktreeRecovery::BranchMissing,
+                WorktreeStep::Fetch,
+            ),
+            (
+                "could not download file contents from origin — worktrees from a \
+                 blobless clone need the remote reachable",
+                WorktreeRecovery::Offline,
+                WorktreeStep::WorktreeAdd,
+            ),
+            (
+                "default_branch: could not resolve default branch for acme/widget",
+                WorktreeRecovery::DefaultBranchUnresolved,
+                WorktreeStep::Fetch,
+            ),
+            (
+                "repo 'not-a-slug' is not owner/name",
+                WorktreeRecovery::BadRepo,
+                WorktreeStep::Fetch,
+            ),
+            (
+                "init_standalone_at: I/O error: No space left on device (os error 28)",
+                WorktreeRecovery::Disk,
+                WorktreeStep::WorktreeAdd,
+            ),
+            (
+                "checkout_at: I/O error: Permission denied (os error 13)",
+                WorktreeRecovery::Disk,
+                WorktreeStep::WorktreeAdd,
+            ),
+            (
+                "fatal: could not read from remote repository",
+                WorktreeRecovery::Transient,
+                WorktreeStep::Fetch,
+            ),
+            (
+                "something the classifier has never seen",
+                WorktreeRecovery::Unknown,
+                WorktreeStep::Fetch,
+            ),
+        ];
+        for (msg, class, row) in cases {
+            let got = WorktreeRecovery::classify(msg);
+            assert_eq!(got, *class, "classify({msg:?})");
+            assert_eq!(got.failed_step(), *row, "failed_step for {msg:?}");
+            assert!(
+                !got.hint().is_empty(),
+                "hint for {class:?} must not be empty"
+            );
+        }
+    }
+
+    /// The disk marker must beat the network markers: a message that is
+    /// filesystem-class ("No space left") but also mentions origin must
+    /// not be mis-sorted as a transient network blip.
+    #[test]
+    fn specific_markers_beat_generic_ones() {
+        assert_eq!(
+            WorktreeRecovery::classify(
+                "checkout_at: I/O error: No space left on device writing to origin"
+            ),
+            WorktreeRecovery::Disk,
+        );
+        // A fork-PR miss mentions "remote" in git's phrasing but is a
+        // missing-branch case, not a bare transient.
+        assert_eq!(
+            WorktreeRecovery::classify(
+                "branch 'feat' not found locally or on origin, and its pull-request \
+                 head (refs/pull/9/head) could not be fetched from the remote"
+            ),
+            WorktreeRecovery::BranchMissing,
+        );
+    }
+
+    /// Manual-fix classes don't advertise a bare retry as sufficient;
+    /// the environment/transient classes do.
+    #[test]
+    fn retryability_splits_manual_from_transient() {
+        for c in [
+            WorktreeRecovery::BranchHeldLive,
+            WorktreeRecovery::DirtyLeftover,
+            WorktreeRecovery::BranchMissing,
+            WorktreeRecovery::BadRepo,
+        ] {
+            assert!(!c.retryable(), "{c:?} needs a manual fix first");
+        }
+        for c in [
+            WorktreeRecovery::Transient,
+            WorktreeRecovery::Offline,
+            WorktreeRecovery::DefaultBranchUnresolved,
+            WorktreeRecovery::Disk,
+            WorktreeRecovery::Unknown,
+        ] {
+            assert!(c.retryable(), "{c:?} is retryable on its own");
+        }
     }
 }
 

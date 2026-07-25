@@ -553,6 +553,9 @@ impl<T: TerminalAdapter> Model<T> {
                 kind, session_key, ..
             } = cmd
             {
+                // Remember the spawn so a failed provision's `r` retry
+                // can re-issue it verbatim (issue #557).
+                self.last_spawn = Some(cmd.clone());
                 let label = match kind {
                     lazybox_ipc::TerminalKind::Shell => "shell".to_string(),
                     lazybox_ipc::TerminalKind::Agent(a) => a.to_string(),

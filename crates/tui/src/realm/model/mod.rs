@@ -615,6 +615,11 @@ pub enum Msg {
     /// data — its only job is to be a non-empty message so the run loop
     /// repaints the advancing spinner during the silent checkout.
     WorktreeProgressTick,
+    /// `r` pressed on a failed `WorktreeProgress` modal — re-issue the
+    /// spawn that failed so the user can retry provisioning in place
+    /// after fixing the cause (issue #557), rather than dismissing and
+    /// re-navigating.
+    WorktreeRetry,
     PollingError((String, String, String, String)),
     PollingTimeout,
     PollingEmptyInbox(Vec<String>),
@@ -1199,6 +1204,11 @@ pub struct Model<T: TerminalAdapter> {
     /// first-time worktree provision let the user navigate away before
     /// the terminal landed.
     spawn_follow_to: Option<lazybox_core::SessionKey>,
+    /// The last `IpcCommand::Spawn` sent, kept so the `r` retry on a
+    /// failed `WorktreeProgress` modal can re-issue it verbatim (issue
+    /// #557) — provisioning failures persist no session, so a re-send
+    /// retries the full provision cleanly.
+    last_spawn: Option<IpcCommand>,
     /// Terminal the next `sync_panes` should promote to the active tab.
     /// Set alongside [`Self::spawn_follow_to`] so `w` lands on the
     /// freshly-spawned agent rather than whatever tab the followed
@@ -1516,6 +1526,7 @@ impl<T: TerminalAdapter> Model<T> {
             deferred_focus_project: None,
             merge_follow_from: None,
             spawn_follow_to: None,
+            last_spawn: None,
             deferred_focus_terminal: None,
             snippets: lazybox_config::Snippets::default(),
             recent_snippets: Vec::new(),
@@ -4012,6 +4023,7 @@ impl<T: TerminalAdapter> Model<T> {
             // a queued dismiss has been fully shown. Being a non-empty
             // message is also what flips `redraw` in the run loop.
             Msg::WorktreeProgressTick => self.advance_worktree_progress(),
+            Msg::WorktreeRetry => self.retry_worktree_provision(),
             Msg::Confirmed(yes) => {
                 let cmds = self.handle_confirmed(yes);
                 self.dispatch_cmds(cmds);

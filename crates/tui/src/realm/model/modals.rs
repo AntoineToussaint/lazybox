@@ -1867,6 +1867,31 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// `r` on a failed `WorktreeProgress` modal: re-issue the spawn that
+    /// failed (issue #557). A failed provision persists no session, so a
+    /// clean re-send retries the whole worktree setup — after the user
+    /// has (say) closed the holding worktree or reconnected. Resets the
+    /// frozen checklist so the fresh spawn's progress events mount a new
+    /// modal instead of reusing the stuck failed state.
+    pub(super) fn retry_worktree_provision(&mut self) {
+        // Only meaningful on a failed checklist with a remembered spawn.
+        let is_failed = self.worktree_progress.as_ref().is_some_and(|s| s.failed());
+        let Some(spawn) = self.last_spawn.clone() else {
+            if is_failed {
+                self.flash_hint("nothing to retry");
+            }
+            return;
+        };
+        if !is_failed {
+            return;
+        }
+        self.force_dismiss_worktree_progress();
+        // A superseded checklist would otherwise be treated as
+        // Esc-dismissed; clear the marker so the retry's events mount.
+        self.worktree_progress_dismissed = None;
+        self.flush_dispatched_cmds(vec![spawn]);
+    }
+
     /// Push a modal.
     pub fn push_modal(&mut self, id: Id) {
         self.modal_stack.push(id.clone());

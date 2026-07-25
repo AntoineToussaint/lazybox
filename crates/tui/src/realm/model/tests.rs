@@ -4986,11 +4986,12 @@ mod merge_focus_follow_tests {
         );
     }
 
-    /// Gap #3 of #177: `w` on a workspace with nothing to act on (no PR,
-    /// issue, or selected comments) used to silently do nothing. It must
-    /// now give explicit footer feedback and arm no follow target.
+    /// Issue #557: `w` on an empty/scratch workspace (no PR, issue, or
+    /// selected comments) used to be a silent no-op. It now spawns the
+    /// default agent (bare) and arms the follow target, so a blank
+    /// workspace is a usable starting point rather than a dead key.
     #[test]
-    fn w_on_unworkable_workspace_flashes_feedback() {
+    fn w_on_scratch_workspace_spawns_a_bare_agent() {
         use lazybox_tui_core::action::Action;
 
         let mut m = build_model();
@@ -5005,16 +5006,18 @@ mod merge_focus_follow_tests {
         assert!(m.sidebar.focus_workspace_key(&bare_sk));
 
         let cmds = m.dispatch_action(&Action::Work);
-        assert!(cmds.is_empty(), "`w` with nothing to do emits no Spawn");
-        assert!(
-            m.spawn_follow_to.is_none(),
-            "no follow target armed when nothing spawns",
+        let spawn = cmds.iter().find_map(|c| match c {
+            lazybox_ipc::Command::Spawn { initial_prompt, .. } => Some(initial_prompt.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            spawn,
+            Some(None),
+            "`w` on a scratch workspace spawns a bare agent (no fabricated prompt)",
         );
-        let notice = m.status.notice.as_ref().expect("footer feedback shown");
         assert!(
-            notice.message.contains("nothing to work on"),
-            "explicit feedback instead of a silent no-op: {:?}",
-            notice.message,
+            m.spawn_follow_to.is_some(),
+            "the spawn arms a follow target so focus lands on the new terminal",
         );
     }
 
@@ -9558,6 +9561,91 @@ mod worktree_progress_recovery_tests {
             m.modal_stack.contains(&Id::WorktreeProgress),
             "a failed checklist must survive a recovery snapshot",
         );
+    }
+
+    /// Issue #557's headline regression: a provisioning failure mounts the
+    /// actionable checklist modal (classified error + hint + `r` retry),
+    /// but the daemon *also* emits a redundant `spawn:session`
+    /// provider-error. That footer used to tear the modal down and replace
+    /// it with a single truncated one-liner (`✗ spawn failed — git w… and
+    /// retry`). The modal now owns the failure; the footer is suppressed.
+    #[test]
+    fn provider_error_does_not_clobber_the_actionable_failure_modal() {
+        let mut m = build_model();
+        let key = WorkspaceKey::new("github:acme/widget#42");
+        let session_key: lazybox_core::SessionKey = (&key).into();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![Workspace::empty(key, "main", Utc::now())],
+            terminals: vec![],
+            projects: vec![],
+        });
+        m.handle_daemon_event(IpcEvent::WorktreeProgress {
+            session_key: session_key.clone(),
+            step: WorktreeStep::Fetch,
+            status: WorktreeStepStatus::Failed(
+                "worktree: checkout_at: branch 'feat' not found locally or on origin".into(),
+            ),
+        });
+        assert!(m.modal_stack.contains(&Id::WorktreeProgress));
+
+        m.handle_daemon_event(IpcEvent::provider_error_permanent(
+            "spawn:session",
+            "worktree: git worktree setup failed — spawn aborted, retry once the cause is \
+             fixed: worktree: checkout_at: branch 'feat' not found locally or on origin",
+        ));
+        assert!(
+            m.modal_stack.contains(&Id::WorktreeProgress),
+            "the actionable modal must survive the redundant provider-error footer",
+        );
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_none_or(|n| !n.message.contains("spawn failed")),
+            "no truncated spawn-failed footer when the modal owns the failure",
+        );
+    }
+
+    /// `r` on the failed modal re-issues the remembered spawn so the user
+    /// retries provisioning in place, and clears the frozen checklist so
+    /// the retry's own progress events mount a fresh one (issue #557).
+    #[test]
+    fn retry_re_dispatches_the_failed_spawn() {
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let key = WorkspaceKey::new("github:acme/widget#42");
+        let session_key: lazybox_core::SessionKey = (&key).into();
+        // What `flush_dispatched_cmds` stashes on the original `w`.
+        m.last_spawn = Some(lazybox_ipc::Command::Spawn {
+            model_alias: None,
+            session_key: session_key.clone(),
+            session_id: None,
+            kind: TerminalKind::Agent("claude".into()),
+            cwd: None,
+            initial_prompt: Some("fix it".into()),
+            on_main: false,
+        });
+        m.handle_daemon_event(IpcEvent::WorktreeProgress {
+            session_key,
+            step: WorktreeStep::Fetch,
+            status: WorktreeStepStatus::Failed("boom".into()),
+        });
+        assert!(m.modal_stack.contains(&Id::WorktreeProgress));
+        while server.rx.try_recv().is_ok() {} // drain init traffic
+
+        m.retry_worktree_provision();
+
+        assert!(
+            !m.modal_stack.contains(&Id::WorktreeProgress),
+            "the frozen failed modal is cleared so the retry mounts a fresh one",
+        );
+        let mut saw_spawn = false;
+        while let Ok(cmd) = server.rx.try_recv() {
+            if matches!(cmd, lazybox_ipc::Command::Spawn { .. }) {
+                saw_spawn = true;
+            }
+        }
+        assert!(saw_spawn, "retry must re-issue the spawn to the daemon");
     }
 }
 

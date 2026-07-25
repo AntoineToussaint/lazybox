@@ -140,6 +140,17 @@ pub enum WorkPriority {
     /// Issue-only workspace (no PR yet). Agent gets an "implement
     /// this issue" prompt.
     ImplementIssue,
+    /// Empty / scratch workspace (no PR, no issue, not terminal). `w`
+    /// still spawns the default agent — bare, no fabricated prompt — so
+    /// a blank workspace isn't a silent no-op (issue #557). The old
+    /// behavior dropped the keypress with no spawn and no notice.
+    StartHere,
+    /// The workspace's primary task has reached a terminal lifecycle
+    /// state — a merged/closed PR or a closed issue. `w` steers toward
+    /// cleanup (a notice pointing at archive) rather than kicking off a
+    /// full worktree provision for work that's already done (issue #557,
+    /// ties #499 / #552).
+    TidyUp,
 }
 
 impl WorkPriority {
@@ -154,7 +165,36 @@ impl WorkPriority {
             Self::ReviewCode => "review",
             Self::WorkOnPr => "work on this",
             Self::ImplementIssue => "implement",
+            Self::StartHere => "start",
+            Self::TidyUp => "archive",
         }
+    }
+}
+
+/// True when the workspace's primary task has reached a terminal
+/// lifecycle state (a merged/closed PR or a closed issue). Drives the
+/// [`WorkPriority::TidyUp`] steer so `w` nudges toward cleanup instead of
+/// provisioning a worktree for finished work (issue #557).
+fn workspace_is_terminal(ws: &Workspace) -> bool {
+    ws.primary_task().is_some_and(|t| {
+        matches!(
+            t.state,
+            lazybox_core::TaskState::Merged | lazybox_core::TaskState::Closed
+        )
+    })
+}
+
+/// The steering notice `w` shows on a terminal workspace — names the
+/// state and the archive chord so the user's next step is one keypress.
+fn terminal_steer_message(ws: &Workspace) -> String {
+    let merged = ws
+        .pr
+        .as_ref()
+        .is_some_and(|t| t.state == lazybox_core::TaskState::Merged);
+    if merged {
+        "PR merged — nothing left to work on; press x x to archive this workspace".to_string()
+    } else {
+        "closed — nothing left to work on; press x x to archive this workspace".to_string()
     }
 }
 
@@ -183,6 +223,13 @@ pub fn classify_work(
     if !selected_comments.is_empty() {
         return Some(WorkPriority::AddressComments);
     }
+    // A merged/closed PR or closed issue is done — `w` steers to cleanup
+    // rather than provisioning a fresh worktree (issue #557). Explicit
+    // comment selection above still wins: acting on specific rows is an
+    // intentional override.
+    if workspace_is_terminal(ws) {
+        return Some(WorkPriority::TidyUp);
+    }
     if let Some(pr) = ws.pr.as_ref() {
         if pr.mergeable.is_conflicting() {
             return Some(WorkPriority::FixConflict);
@@ -210,7 +257,10 @@ pub fn classify_work(
     if !ws.gh_issues.is_empty() {
         return Some(WorkPriority::ImplementIssue);
     }
-    None
+    // A real but empty/scratch workspace: `w` still spawns the default
+    // agent (bare) rather than silently dropping the keypress (issue
+    // #557). `None` is now reserved for "no workspace selected at all".
+    Some(WorkPriority::StartHere)
 }
 
 /// Resolve `w` ("work on this") for a workspace + selected-comment
@@ -230,11 +280,17 @@ pub fn resolve_work(
         return Intent::NoOp;
     };
     let session_key = SessionKey::from(&ws.key);
-    let prompt = prompt_for_priority(ws, priority, selected_comments);
+    // A terminal workspace steers to cleanup instead of spawning; a
+    // scratch workspace spawns a bare agent (no fabricated prompt).
+    let prompt = match priority {
+        WorkPriority::TidyUp => return Intent::Notice(terminal_steer_message(ws)),
+        WorkPriority::StartHere => None,
+        _ => Some(prompt_for_priority(ws, priority, selected_comments)),
+    };
     Intent::SpawnAgent {
         workspace_key: session_key,
         agent_id: agent_id.to_string(),
-        prompt: Some(prompt),
+        prompt,
     }
 }
 
@@ -288,6 +344,10 @@ fn prompt_for_priority(
             Some(issue) => lazybox_core::prompts::build_implement_issue_prompt(issue),
             None => fallback(ws),
         },
+        // Handled directly in `resolve_work` (a bare spawn / a steer
+        // notice) and never routed through here; kept exhaustive with a
+        // safe fallback in case a future caller does.
+        WorkPriority::StartHere | WorkPriority::TidyUp => fallback(ws),
     }
 }
 
@@ -880,7 +940,12 @@ mod tests {
                     commented,
                     &[0][..],
                 ),
-                ("empty workspace", None, empty(), &[][..]),
+                (
+                    "empty workspace",
+                    Some(WorkPriority::StartHere),
+                    empty(),
+                    &[][..],
+                ),
             ]
         };
 
@@ -892,6 +957,8 @@ mod tests {
             );
             let intent = resolve_work(Some(&ws), comments, "claude");
             match (classified, &intent) {
+                // StartHere spawns a bare agent (prompt None); the rest
+                // carry a prompt — both are `SpawnAgent`.
                 (Some(_), Intent::SpawnAgent { .. }) => {}
                 (None, Intent::NoOp) => {}
                 _ => panic!(
@@ -913,6 +980,8 @@ mod tests {
             WorkPriority::ReviewCode,
             WorkPriority::WorkOnPr,
             WorkPriority::ImplementIssue,
+            WorkPriority::StartHere,
+            WorkPriority::TidyUp,
         ] {
             let label = p.label();
             assert!(!label.is_empty(), "{p:?} label is empty");
@@ -993,9 +1062,82 @@ mod tests {
         }
     }
 
+    /// Issue #557: `w` on an empty/scratch workspace no longer silently
+    /// drops the keypress — it spawns the default agent, bare (no
+    /// fabricated PR/issue prompt). Only "no workspace selected at all"
+    /// remains a NoOp.
     #[test]
-    fn work_on_empty_workspace_is_noop() {
-        assert_eq!(resolve_work(Some(&empty()), &[], "claude"), Intent::NoOp);
+    fn work_on_empty_workspace_spawns_a_bare_agent() {
+        assert_eq!(
+            classify_work(Some(&empty()), &[]),
+            Some(WorkPriority::StartHere)
+        );
+        match resolve_work(Some(&empty()), &[], "claude") {
+            Intent::SpawnAgent {
+                agent_id, prompt, ..
+            } => {
+                assert_eq!(agent_id, "claude");
+                assert_eq!(prompt, None, "scratch spawn carries no fabricated prompt");
+            }
+            other => panic!("expected a bare SpawnAgent, got {other:?}"),
+        }
+    }
+
+    /// Issue #557: `w` on a merged PR steers to cleanup (a notice
+    /// pointing at the archive chord) instead of provisioning a worktree
+    /// for work that's already done.
+    #[test]
+    fn work_on_merged_pr_steers_to_archive() {
+        let mut ws = pr("o/r#7", CiStatus::Success, ReviewStatus::Approved);
+        ws.pr.as_mut().expect("pr present").state = TaskState::Merged;
+        assert_eq!(classify_work(Some(&ws), &[]), Some(WorkPriority::TidyUp));
+        match resolve_work(Some(&ws), &[], "claude") {
+            Intent::Notice(msg) => {
+                assert!(msg.contains("merged"), "{msg}");
+                assert!(msg.contains("x x"), "names the archive chord: {msg}");
+            }
+            other => panic!("expected a steering Notice, got {other:?}"),
+        }
+    }
+
+    /// A closed issue likewise steers to cleanup rather than spawning an
+    /// "implement" agent on finished work.
+    #[test]
+    fn work_on_closed_issue_steers_to_archive() {
+        let mut ws = issue("o/r#8");
+        ws.gh_issues[0].state = TaskState::Closed;
+        assert_eq!(classify_work(Some(&ws), &[]), Some(WorkPriority::TidyUp));
+        assert!(matches!(
+            resolve_work(Some(&ws), &[], "claude"),
+            Intent::Notice(_)
+        ));
+    }
+
+    /// Explicit comment selection is an intentional override: acting on
+    /// specific rows still spawns even on a merged PR.
+    #[test]
+    fn selected_comments_override_the_terminal_steer() {
+        let mut ws = pr("o/r#9", CiStatus::Success, ReviewStatus::Approved);
+        ws.pr.as_mut().expect("pr present").state = TaskState::Merged;
+        ws.activity.push(lazybox_core::Activity {
+            author: "alice".into(),
+            body: "one more thing".into(),
+            created_at: Utc::now(),
+            kind: lazybox_core::ActivityKind::Comment,
+            node_id: None,
+            path: None,
+            line: None,
+            diff_hunk: None,
+            thread_id: None,
+        });
+        assert_eq!(
+            classify_work(Some(&ws), &[0]),
+            Some(WorkPriority::AddressComments)
+        );
+        assert!(matches!(
+            resolve_work(Some(&ws), &[0], "claude"),
+            Intent::SpawnAgent { .. }
+        ));
     }
 
     #[test]

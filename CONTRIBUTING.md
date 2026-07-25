@@ -1,12 +1,13 @@
 # Contributing to lazybox
 
-Glad you're here. A few ground rules so the codebase stays maintainable.
+Glad you're here. A few ground rules so the codebase stays maintainable. By
+participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Build + run
 
 ```sh
 cargo build                       # first build compiles Zig/ghostty + SQLite (~30s)
-cargo run -p lazybox-tui            # uses `gh auth token` automatically
+cargo run -p lazybox-tui-boot       # uses `gh auth token` automatically
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all

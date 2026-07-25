@@ -188,7 +188,8 @@ main inbox.
 
 Issues and PRs welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md) for the build
 loop and standing rules (tests with every change; the core library crates keep
-their strict dependency layering). Questions, bugs, and feature ideas:
+their strict dependency layering). Participation is under our
+[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md). Questions, bugs, and feature ideas:
 [`SUPPORT.md`](SUPPORT.md) points you at
 [Discussions](https://github.com/AntoineToussaint/lazybox/discussions) and the
 [issue templates](https://github.com/AntoineToussaint/lazybox/issues/new/choose).

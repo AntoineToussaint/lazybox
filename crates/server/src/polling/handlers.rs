@@ -322,6 +322,19 @@ pub async fn handle_merge_pr(config: &ServerConfig, workspace_key: WorkspaceKey)
     // Wake the poll loop so MERGED state lands in <5s instead of
     // waiting out the full interval.
     config.wake_poll(true);
+
+    // Fire the workspace-cleanup prompt directly off this successful
+    // merge (issue #573). A merged PR drops out of the incremental
+    // poll's open-PR search, so the poll-path transition detection only
+    // re-observes the open→merged flip via a periodic `is:merged` sweep
+    // — minutes later, or within the user's attention window never. The
+    // daemon knows the merge just succeeded, so route straight into the
+    // same cleanup path the poll would have. The poll path stays as a
+    // backstop; its re-emit is collapsed by the reprompt throttle + the
+    // TUI's per-key dedupe, so this can't double-prompt.
+    if let Some(cleanup) = merged_pr_cleanup(&ws) {
+        on_terminal_transition(config, &workspace_key, cleanup).await;
+    }
 }
 
 /// Handle `Command::UpdateBranch`: load the workspace, recover the PR's
@@ -438,6 +451,44 @@ pub async fn handle_close_issue(config: &ServerConfig, workspace_key: WorkspaceK
     // Wake the poll loop so CLOSED state (and the removal prompt) lands
     // in <5s instead of waiting out the full interval.
     config.wake_poll(true);
+
+    // Fire the workspace-cleanup prompt directly off this successful
+    // close (issue #573). A self-initiated close won't necessarily
+    // generate a viewer notification, and the poll only re-fetches a
+    // closed issue via the notifications-driven single fetch — so the
+    // open→closed flip is often never re-observed and the prompt never
+    // runs. The daemon knows the close just succeeded, so route straight
+    // into the same cleanup path. The poll path stays as a backstop.
+    if let Some(cleanup) = closed_issue_cleanup(config, &ws) {
+        on_terminal_transition(config, &workspace_key, cleanup).await;
+    }
+}
+
+/// The [`super::TerminalCleanup`] to fire directly off a successful merge
+/// of `ws`'s PR (issue #573), or `None` when the workspace carries no PR
+/// whose id yields a number. Mirrors the poll path's
+/// [`super::merged_transition_pr_number`], minus the predecessor-state
+/// guard: the caller just merged, so the transition is known.
+fn merged_pr_cleanup(ws: &Workspace) -> Option<super::TerminalCleanup> {
+    let n = ws.pr.as_ref().and_then(super::pr_number_from_task)?;
+    Some(super::TerminalCleanup::MergedPr(n))
+}
+
+/// The [`super::TerminalCleanup`] to fire directly off a successful close
+/// of `ws`'s primary issue (issue #573), or `None` when the close should
+/// NOT fire a direct cleanup: the workspace has no github issue, its id
+/// carries no number, or a PR claims it (`Closes #N`) and owns the
+/// cleanup after the issue row collapses into it. That last case is the
+/// same deferral the upsert path makes ([`super::pr_workspace_claiming_issue`])
+/// — firing here too would surface a second, stale prompt for the
+/// soon-to-be-absorbed issue row.
+fn closed_issue_cleanup(config: &ServerConfig, ws: &Workspace) -> Option<super::TerminalCleanup> {
+    let issue = ws.gh_issues.first()?;
+    let n = super::pr_number_from_task(issue)?;
+    if super::pr_workspace_claiming_issue(config, &issue.id).is_some() {
+        return None;
+    }
+    Some(super::TerminalCleanup::ClosedIssue(n))
 }
 
 /// Handle `Command::DeleteOrClose`: remove the workspace's primary
@@ -3798,6 +3849,93 @@ mod inspect_tests {
         assert!(
             load_workspace(&config, &key).is_none(),
             "row should be gone"
+        );
+    }
+
+    /// #573: the merge handler routes a successful merge straight into
+    /// the cleanup path, keyed on the PR's number, instead of waiting for
+    /// a poll to rediscover the open→merged flip. The decision function
+    /// yields `MergedPr(n)` for a PR workspace.
+    #[test]
+    fn merged_pr_cleanup_targets_the_pr_number() {
+        let store = Arc::new(MemoryStore::new());
+        let wt = std::env::temp_dir().join("lb-573-merge");
+        let (key, _sid) = seed_merged_workspace_numbered(&store, wt, "feat", 42);
+        let config = fresh_config(store);
+        let ws = load_workspace(&config, &key).expect("workspace");
+
+        match merged_pr_cleanup(&ws) {
+            Some(crate::polling::TerminalCleanup::MergedPr(n)) => assert_eq!(n, 42),
+            other => panic!("expected MergedPr(42), got {other:?}"),
+        }
+    }
+
+    /// A workspace with no PR (a plain issue row) never fires the
+    /// merged-PR cleanup — the merge handler only reaches this after a
+    /// PR merge, but the guard keeps it total.
+    #[test]
+    fn merged_pr_cleanup_none_without_pr() {
+        let store = Arc::new(MemoryStore::new());
+        let wt = std::env::temp_dir().join("lb-573-noprmerge");
+        let (key, _sid) = seed_closed_issue_workspace(&store, wt, "feat", 9);
+        let config = fresh_config(store);
+        let ws = load_workspace(&config, &key).expect("workspace");
+
+        assert!(merged_pr_cleanup(&ws).is_none());
+    }
+
+    /// #573: the close handler routes a successful close straight into
+    /// the cleanup path, keyed on the issue's number, when no PR claims
+    /// the issue. The decision function yields `ClosedIssue(n)`.
+    #[test]
+    fn closed_issue_cleanup_targets_the_issue_number() {
+        let store = Arc::new(MemoryStore::new());
+        let wt = std::env::temp_dir().join("lb-573-close");
+        let (key, _sid) = seed_closed_issue_workspace(&store, wt, "feat", 17);
+        let config = fresh_config(store);
+        let ws = load_workspace(&config, &key).expect("workspace");
+
+        match closed_issue_cleanup(&config, &ws) {
+            Some(crate::polling::TerminalCleanup::ClosedIssue(n)) => assert_eq!(n, 17),
+            other => panic!("expected ClosedIssue(17), got {other:?}"),
+        }
+    }
+
+    /// #573: when a PR claims the issue (`Closes #N`), the close handler
+    /// defers — that PR's own merge prompt owns the cleanup after the
+    /// issue row collapses into it, exactly as the upsert path defers.
+    /// Firing here too would surface a second, stale prompt.
+    #[test]
+    fn closed_issue_cleanup_defers_when_pr_claims_it() {
+        let store = Arc::new(MemoryStore::new());
+        let wt = std::env::temp_dir().join("lb-573-claimed");
+        let (issue_key, _sid) = seed_closed_issue_workspace(&store, wt, "feat", 21);
+
+        // A separate PR workspace whose PR closes issue #21.
+        let issue_id = lazybox_core::TaskId {
+            source: "github".into(),
+            key: "o/r#21".into(),
+        };
+        let pr_wt = std::env::temp_dir().join("lb-573-claiming-pr");
+        let (pr_key, _pr_sid) = seed_merged_workspace_numbered(&store, pr_wt, "pr-feat", 22);
+        let pr_record = store.get_workspace(&pr_key).unwrap().unwrap();
+        let mut pr_ws: Workspace =
+            serde_json::from_str(pr_record.workspace_json.as_ref().unwrap()).unwrap();
+        pr_ws.pr.as_mut().unwrap().closes_issues.push(issue_id);
+        store
+            .save_workspace(&WorkspaceRecord {
+                key: pr_key.as_str().into(),
+                created_at: chrono::Utc::now(),
+                workspace_json: Some(serde_json::to_string(&pr_ws).unwrap()),
+            })
+            .unwrap();
+
+        let config = fresh_config(store);
+        let issue_ws = load_workspace(&config, &issue_key).expect("issue workspace");
+
+        assert!(
+            closed_issue_cleanup(&config, &issue_ws).is_none(),
+            "a claimed issue must defer to the PR's cleanup prompt"
         );
     }
 }

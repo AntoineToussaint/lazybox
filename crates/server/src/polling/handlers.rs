@@ -480,7 +480,7 @@ pub async fn handle_close_issue(config: &ServerConfig, workspace_key: WorkspaceK
 /// [`super::merged_transition_pr_number`], minus the predecessor-state
 /// guard: the caller just merged, so the transition is known.
 fn merged_pr_cleanup(ws: &Workspace) -> Option<super::TerminalCleanup> {
-    let n = ws.pr.as_ref().and_then(super::pr_number_from_task)?;
+    let n = ws.pr.as_ref().and_then(super::task_number)?;
     Some(super::TerminalCleanup::MergedPr(n))
 }
 
@@ -494,7 +494,7 @@ fn merged_pr_cleanup(ws: &Workspace) -> Option<super::TerminalCleanup> {
 /// soon-to-be-absorbed issue row.
 fn closed_issue_cleanup(config: &ServerConfig, ws: &Workspace) -> Option<super::TerminalCleanup> {
     let issue = ws.gh_issues.first()?;
-    let n = super::pr_number_from_task(issue)?;
+    let n = super::task_number(issue)?;
     if super::pr_workspace_claiming_issue(config, &issue.id).is_some() {
         return None;
     }

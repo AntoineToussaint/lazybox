@@ -28,15 +28,20 @@ use serde::Deserialize;
 /// New shape pulls **15 sub-objects per PR** (`labels(3) +
 /// assignees(5) + reviewRequests(5) + comments(last:1) + commits(1)
 /// = 15`), roughly 1/6 the cost. The fields the sidebar doesn't
-/// render directly — review history, per-check details, closing
-/// issue refs, full comment threads — live in `PR_DETAILS_QUERY`
-/// and only fire when the user opens a PR (or via the post-tick
-/// `prefetch_top_pr_details` for high-attention rows).
+/// render directly — review history, per-check details, full
+/// comment threads — live in `PR_DETAILS_QUERY` and only fire when
+/// the user opens a PR (or via the post-tick `prefetch_top_pr_details`
+/// for high-attention rows). The one heavy field kept eager is
+/// `closingIssuesReferences`: it's a shallow connection (just issue
+/// number and repo name) and it's the *authoritative* PR↔issue link,
+/// so fetching it every poll is what makes issue→PR session transfer
+/// fire reliably instead of only when a heuristic or lazy-fetch
+/// happens to run first (#559).
 ///
 /// Trade-offs the lazy split accepts:
-///   - `closes_issues` is empty on first sight (until lazy-fetch).
-///     `Workspace::attach_task` preserves the lazy-populated value
-///     across subsequent polls so re-polls don't clear it.
+///   - `closes_issues` reflects `closingIssuesReferences` on every
+///     poll (plus title heuristics). `Workspace::attach_task`
+///     preserves it across subsequent polls so re-polls don't clear it.
 ///   - `checks` (per-check names) is empty until lazy-fetch — only
 ///     the aggregate `pr.ci` (from `statusCheckRollup.state`) is
 ///     available at inbox-scan time.
@@ -104,6 +109,12 @@ query($query: String!, $first: Int!, $after: String) {
           nodes {
             author { login }
             createdAt
+          }
+        }
+        closingIssuesReferences(first: 10) {
+          nodes {
+            number
+            repository { nameWithOwner }
           }
         }
       }
@@ -324,12 +335,14 @@ pub struct GqlPr {
     #[serde(default, rename = "reviewThreads")]
     pub review_threads: GqlReviewThreads,
     pub commits: GqlCommits,
-    /// Issues this PR will close on merge. Lazy-fetched: `SEARCH_QUERY`
-    /// dropped this field to cut per-poll cost. On first sight the PR's
-    /// `closes_issues` is empty (or title-derived only); once the user
-    /// opens the workspace OR `prefetch_top_pr_details` picks the row,
-    /// `PR_DETAILS_QUERY` back-fills the canonical `closingIssuesReferences`
-    /// and `Workspace::attach_task` preserves it across subsequent polls.
+    /// Issues this PR will close on merge — GitHub's authoritative
+    /// PR↔issue link (it resolves the body's `Closes #N` keywords
+    /// itself, including cross-repo). Fetched on the poll path by both
+    /// `SEARCH_QUERY` and `PR_DETAILS_QUERY`, so `closes_issues` is
+    /// populated on first sight rather than waiting for a lazy fetch
+    /// (#559). `#[serde(default)]` for any older/partial response that
+    /// omits it; `Workspace::attach_task` preserves the value across
+    /// subsequent polls.
     #[serde(default, rename = "closingIssuesReferences")]
     pub closing_issues_references: Option<GqlClosingIssues>,
 }
@@ -1631,13 +1644,14 @@ pub fn pr_details_to_activities(node: &GqlPrDetailsNode) -> Vec<Activity> {
 /// Convert GraphQL PR data to our Task type.
 ///
 /// This runs on **inbox-scan** results from `SEARCH_QUERY`, which
-/// deliberately omits `reviews`, `reviewThreads`, `closingIssuesReferences`,
-/// and `statusCheckRollup.contexts` to cut per-poll cost. Fields that
-/// depend on those (per-reviewer role detection, `closes_issues`,
-/// per-check details, full `needs_reply`) are derived from the
-/// reduced shape here; `pr_details_to_details` + `merge_pr_details`
-/// back-fill the canonical values on workspace open and via the
-/// post-tick prefetch.
+/// deliberately omits `reviews`, `reviewThreads`, and
+/// `statusCheckRollup.contexts` to cut per-poll cost (but keeps the
+/// cheap, authoritative `closingIssuesReferences`, so `closes_issues`
+/// is correct here). Fields that depend on the omitted ones
+/// (per-reviewer role detection, per-check details, full `needs_reply`)
+/// are derived from the reduced shape here; `pr_details_to_details` +
+/// `merge_pr_details` back-fill the canonical values on workspace open
+/// and via the post-tick prefetch.
 pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
     let repo = extract_repo_from_url(&pr.url);
 
@@ -3443,13 +3457,11 @@ mod tests {
         // is exclusively the lazy `PR_DETAILS_QUERY`'s. Re-adding
         // any of them to the inbox scan would silently re-introduce
         // the rate-budget blowup that motivated the trim (see the
-        // long comment on `SEARCH_QUERY`).
-        for field in [
-            "reviewThreads",
-            "closingIssuesReferences",
-            "reviews(",
-            "contexts(",
-        ] {
+        // long comment on `SEARCH_QUERY`). `closingIssuesReferences`
+        // is deliberately NOT in this list — it's a shallow,
+        // authoritative field kept eager so issue→PR transfer fires
+        // on the poll path (#559); see `search_query_fetches_closing_issue_refs`.
+        for field in ["reviewThreads", "reviews(", "contexts("] {
             assert!(
                 !SEARCH_QUERY.contains(field),
                 "`{field}` must not appear in the inbox-scan query — see PR_DETAILS_QUERY",
@@ -3752,6 +3764,11 @@ mod tests {
                     "nodes": [
                       { "author": { "login": "carol" }, "createdAt": "2026-05-28T11:00:00Z" }
                     ]
+                  },
+                  "closingIssuesReferences": {
+                    "nodes": [
+                      { "number": 1, "repository": { "nameWithOwner": "owner/repo" } }
+                    ]
                   }
                 }
               ]
@@ -3799,8 +3816,52 @@ mod tests {
         // Last commenter still lights up from the bodiless comment's
         // author so the sidebar's "from $login" line works pre-lazy.
         assert_eq!(task.last_commenter.as_deref(), Some("carol"));
+        // The authoritative closing-issue link rides through on the
+        // poll path now (#559): the body `Closes #1.` that GitHub
+        // resolved into `closingIssuesReferences` populates
+        // `closes_issues` without any lazy fetch.
+        let keys: Vec<&str> = task.closes_issues.iter().map(|t| t.key.as_str()).collect();
+        assert_eq!(keys, vec!["owner/repo#1"]);
         // An open PR has no close moment.
         assert_eq!(task.closed_at, None);
+    }
+
+    /// Root fix for #559: the inbox-scan query must select the
+    /// authoritative `closingIssuesReferences` so the PR↔issue link is
+    /// known on every poll — not just after a lazy `PR_DETAILS` fetch.
+    /// The counterpart guard (`pr_query_omits_heavy_fields_entirely`)
+    /// keeps the genuinely-expensive fields out; this one keeps the
+    /// cheap authoritative link in.
+    #[test]
+    fn search_query_fetches_closing_issue_refs() {
+        assert!(
+            SEARCH_QUERY.contains("closingIssuesReferences"),
+            "SEARCH_QUERY must select closingIssuesReferences — issue→PR \
+             session transfer depends on the link being known on the poll path (#559)",
+        );
+    }
+
+    /// A quiet PR that links a **cross-repo** issue only through its
+    /// body (GitHub resolves it into `closingIssuesReferences`; the
+    /// title parsers can't, since they're same-repo only) transfers on
+    /// the poll path once the field is fetched eagerly (#559).
+    #[test]
+    fn search_query_transfers_cross_repo_body_link() {
+        let mut pr = make_pr(42, "carol");
+        // No title keyword and a different repo in the link — the
+        // heuristics deliberately would not catch this.
+        pr.title = "Add foo to bar".into();
+        pr.closing_issues_references = Some(GqlClosingIssues {
+            nodes: vec![GqlClosingIssue {
+                number: 7,
+                repository: GqlIssueRepo {
+                    name_with_owner: "other-org/other-repo".into(),
+                },
+            }],
+        });
+        let task = pr_to_task(&pr, "alice");
+        let keys: Vec<&str> = task.closes_issues.iter().map(|t| t.key.as_str()).collect();
+        assert_eq!(keys, vec!["other-org/other-repo#7"]);
     }
 
     /// `closedAt` rides from the wire onto `Task.closed_at`. The

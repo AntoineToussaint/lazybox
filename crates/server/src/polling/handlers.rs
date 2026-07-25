@@ -889,11 +889,12 @@ pub async fn handle_fetch_pr_details(config: &ServerConfig, workspace_key: Works
 /// user's read marks.
 ///
 /// When the backfill populates a previously-empty `closes_issues`,
-/// the issue→PR collapse re-runs afterwards: the inbox SEARCH_QUERY
-/// omits `closingIssuesReferences`, so for most PRs THIS is the first
-/// moment lazybox learns about the linked issue — without the re-run
-/// the standalone issue workspace would sit next to the PR until some
-/// future poll happened to carry the refs.
+/// the issue→PR collapse re-runs afterwards. The inbox SEARCH_QUERY
+/// now carries `closingIssuesReferences`, so for most PRs the poll
+/// path learns the link first; but a details fetch can still be the
+/// first to resolve a link the poll missed (an empty/late refs
+/// response), and without the re-run the standalone issue workspace
+/// would sit next to the PR until some future poll carried the refs.
 pub async fn apply_pr_details(
     config: &ServerConfig,
     workspace_key: &WorkspaceKey,

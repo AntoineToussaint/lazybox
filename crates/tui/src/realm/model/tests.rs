@@ -78,7 +78,9 @@ mod effects_tests {
     fn textarea_submitted_with_pending_reply_returns_postreply_then_refresh() {
         let mut m = build_model();
         let key = SessionKey::from("github:o/r#1");
-        m.pending_reply = Some(key.clone());
+        m.modal_flow = Some(super::super::ModalFlow::Reply {
+            target: key.clone(),
+        });
         let cmds = m.handle_textarea_submitted("hello".into());
         assert_eq!(cmds.len(), 2);
         match &cmds[0] {
@@ -99,7 +101,9 @@ mod effects_tests {
     fn textarea_submitted_notes_persists_setnotes() {
         let mut m = build_model();
         let key = SessionKey::from("github:o/r#1");
-        m.pending_notes = Some(key.clone());
+        m.modal_flow = Some(super::super::ModalFlow::Notes {
+            target: key.clone(),
+        });
         m.modal_stack.push(Id::Notes);
         let cmds = m.handle_textarea_submitted("check the flaky retry".into());
         assert_eq!(cmds.len(), 1);
@@ -110,7 +114,7 @@ mod effects_tests {
             }
             other => panic!("expected SetNotes, got {other:?}"),
         }
-        assert!(m.pending_notes.is_none());
+        assert!(m.modal_flow.is_none());
     }
 
     /// An empty/whitespace note is a valid submit — it clears the
@@ -120,7 +124,9 @@ mod effects_tests {
     fn textarea_submitted_empty_notes_clears_scratchpad() {
         let mut m = build_model();
         let key = SessionKey::from("github:o/r#1");
-        m.pending_notes = Some(key.clone());
+        m.modal_flow = Some(super::super::ModalFlow::Notes {
+            target: key.clone(),
+        });
         m.modal_stack.push(Id::Notes);
         let cmds = m.handle_textarea_submitted("   ".into());
         assert_eq!(cmds.len(), 1);
@@ -435,10 +441,12 @@ mod effects_tests {
     #[test]
     fn textarea_submitted_with_empty_body_returns_no_commands() {
         let mut m = build_model();
-        m.pending_reply = Some(SessionKey::from("github:o/r#1"));
+        m.modal_flow = Some(super::super::ModalFlow::Reply {
+            target: SessionKey::from("github:o/r#1"),
+        });
         let cmds = m.handle_textarea_submitted("   ".into());
         assert!(cmds.is_empty());
-        assert!(m.pending_reply.is_none());
+        assert!(m.modal_flow.is_none());
     }
 
     /// No pending reply target → no command, even with a body.
@@ -463,7 +471,9 @@ mod effects_tests {
         let mut m = build_model();
         let pk = lazybox_core::ProjectKey::local("my-project");
         m.modal_stack.push(Id::NewWorkspace);
-        m.pending_new_workspace_project = Some(pk.clone());
+        m.modal_flow = Some(super::super::ModalFlow::NewWorkspaceProject {
+            project: pk.clone(),
+        });
         let cmds = m.handle_input_submitted("  my-feature  ".into());
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
@@ -505,7 +515,10 @@ mod effects_tests {
         let cmds = m.handle_choice_picked(vec![ChoicePayload::Project(pk.clone())]);
         assert!(cmds.is_empty(), "picking a project sends no IPC yet");
         assert_eq!(m.modal_stack.last(), Some(&Id::NewWorkspace));
-        assert_eq!(m.pending_new_workspace_project.as_ref(), Some(&pk));
+        assert!(matches!(
+            &m.modal_flow,
+            Some(super::super::ModalFlow::NewWorkspaceProject { project }) if *project == pk
+        ));
     }
 
     /// `f` mounts the composable filter menu with a row per filter,
@@ -602,7 +615,10 @@ mod effects_tests {
         let cmds = m.handle_choice_picked(vec![ChoicePayload::Project(pk.clone())]);
         assert!(cmds.is_empty(), "picking a repo sends no IPC yet");
         assert_eq!(m.modal_stack.last(), Some(&Id::NewWorkspace));
-        assert_eq!(m.pending_new_workspace_project.as_ref(), Some(&pk));
+        assert!(matches!(
+            &m.modal_flow,
+            Some(super::super::ModalFlow::NewWorkspaceProject { project }) if *project == pk
+        ));
     }
 
     /// Picking the trailing escape-hatch row (index past the repo
@@ -646,7 +662,10 @@ mod effects_tests {
     fn confirmed_yes_on_remove_out_of_scope_returns_kill() {
         let mut m = build_model();
         let ws_key = WorkspaceKey::new("github:o/r#1");
-        m.active_removal_prompt = Some((ws_key.clone(), super::super::RemovalReason::OutOfScope));
+        m.modal_flow = Some(super::super::ModalFlow::RemovalPrompt {
+            workspace: ws_key.clone(),
+            reason: super::super::RemovalReason::OutOfScope,
+        });
         m.modal_stack.push(Id::RemoveOutOfScope);
         let cmds = m.handle_confirmed(true);
         assert_eq!(cmds.len(), 1);
@@ -665,7 +684,10 @@ mod effects_tests {
     fn confirmed_yes_on_merged_removal_returns_remove_merged_workspace() {
         let mut m = build_model();
         let ws_key = WorkspaceKey::new("github:o/r#1");
-        m.active_removal_prompt = Some((ws_key.clone(), super::super::RemovalReason::Merged));
+        m.modal_flow = Some(super::super::ModalFlow::RemovalPrompt {
+            workspace: ws_key.clone(),
+            reason: super::super::RemovalReason::Merged,
+        });
         m.modal_stack.push(Id::RemoveOutOfScope);
         let cmds = m.handle_confirmed(true);
         assert_eq!(cmds.len(), 1);
@@ -696,13 +718,16 @@ mod effects_tests {
         m.handle_daemon_event(ev());
         assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
         assert!(matches!(
-            m.active_removal_prompt,
-            Some((_, super::super::RemovalReason::Merged))
+            m.modal_flow,
+            Some(super::super::ModalFlow::RemovalPrompt {
+                reason: super::super::RemovalReason::Merged,
+                ..
+            })
         ));
 
         m.handle_daemon_event(ev());
         assert!(
-            m.pending_removal_prompts.is_empty(),
+            m.removal_prompt_queue.is_empty(),
             "re-emit must not stack a second prompt"
         );
     }
@@ -726,7 +751,7 @@ mod effects_tests {
         m.handle_daemon_event(ev(2));
         assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
         assert_eq!(
-            m.pending_removal_prompts.len(),
+            m.removal_prompt_queue.len(),
             1,
             "second prompt must queue behind the active one"
         );
@@ -743,9 +768,12 @@ mod effects_tests {
             Some(&Id::RemoveOutOfScope),
             "answering the first modal must mount the second"
         );
-        match &m.active_removal_prompt {
-            Some((key, super::super::RemovalReason::Merged)) => {
-                assert_eq!(key.as_str(), "github:o/r#2");
+        match &m.modal_flow {
+            Some(super::super::ModalFlow::RemovalPrompt {
+                workspace,
+                reason: super::super::RemovalReason::Merged,
+            }) => {
+                assert_eq!(workspace.as_str(), "github:o/r#2");
             }
             other => panic!("expected active prompt for #2, got {other:?}"),
         }
@@ -758,7 +786,10 @@ mod effects_tests {
     fn confirmed_no_on_merged_removal_sends_keep() {
         let mut m = build_model();
         let ws_key = WorkspaceKey::new("github:o/r#1");
-        m.active_removal_prompt = Some((ws_key.clone(), super::super::RemovalReason::Merged));
+        m.modal_flow = Some(super::super::ModalFlow::RemovalPrompt {
+            workspace: ws_key.clone(),
+            reason: super::super::RemovalReason::Merged,
+        });
         m.modal_stack.push(Id::RemoveOutOfScope);
         let cmds = m.handle_confirmed(false);
         match &cmds[..] {
@@ -767,7 +798,7 @@ mod effects_tests {
             }
             other => panic!("expected KeepMergedWorkspace, got {other:?}"),
         }
-        assert!(m.active_removal_prompt.is_none());
+        assert!(m.modal_flow.is_none());
     }
 
     /// Esc on a merged removal confirm is a deferral, not an answer:
@@ -776,17 +807,17 @@ mod effects_tests {
     #[test]
     fn modal_dismissed_on_merged_removal_is_silent_deferral() {
         let mut m = build_model();
-        m.active_removal_prompt = Some((
-            WorkspaceKey::new("github:o/r#1"),
-            super::super::RemovalReason::Merged,
-        ));
+        m.modal_flow = Some(super::super::ModalFlow::RemovalPrompt {
+            workspace: WorkspaceKey::new("github:o/r#1"),
+            reason: super::super::RemovalReason::Merged,
+        });
         m.modal_stack.push(Id::RemoveOutOfScope);
         let cmds = m.handle_modal_dismissed();
         assert!(
             cmds.is_empty(),
             "Esc must NOT send KeepMergedWorkspace, got: {cmds:?}"
         );
-        assert!(m.active_removal_prompt.is_none());
+        assert!(m.modal_flow.is_none());
     }
 
     /// `n` on RemoveOutOfScope clears the slot without producing
@@ -794,10 +825,10 @@ mod effects_tests {
     #[test]
     fn confirmed_no_on_remove_out_of_scope_returns_no_commands() {
         let mut m = build_model();
-        m.active_removal_prompt = Some((
-            WorkspaceKey::new("github:o/r#1"),
-            super::super::RemovalReason::OutOfScope,
-        ));
+        m.modal_flow = Some(super::super::ModalFlow::RemovalPrompt {
+            workspace: WorkspaceKey::new("github:o/r#1"),
+            reason: super::super::RemovalReason::OutOfScope,
+        });
         m.modal_stack.push(Id::RemoveOutOfScope);
         let cmds = m.handle_confirmed(false);
         assert!(cmds.is_empty());
@@ -813,7 +844,10 @@ mod effects_tests {
             let mut m = build_model();
             let issue = WorkspaceKey::new("github:o/r#1");
             let pr = WorkspaceKey::new("github:o/r#2");
-            m.active_merge_prompt = Some((issue.clone(), pr.clone()));
+            m.modal_flow = Some(super::super::ModalFlow::MergePrompt {
+                issue: issue.clone(),
+                pr: pr.clone(),
+            });
             m.modal_stack.push(Id::MergeConfirm);
             let cmds = m.handle_confirmed(input);
             assert_eq!(cmds.len(), 1, "input={input}");
@@ -841,10 +875,10 @@ mod effects_tests {
     #[test]
     fn modal_dismissed_on_merge_confirm_is_silent_dismissal() {
         let mut m = build_model();
-        m.active_merge_prompt = Some((
-            WorkspaceKey::new("github:o/r#1"),
-            WorkspaceKey::new("github:o/r#2"),
-        ));
+        m.modal_flow = Some(super::super::ModalFlow::MergePrompt {
+            issue: WorkspaceKey::new("github:o/r#1"),
+            pr: WorkspaceKey::new("github:o/r#2"),
+        });
         m.modal_stack.push(Id::MergeConfirm);
         let cmds = m.handle_modal_dismissed();
         assert!(
@@ -852,8 +886,8 @@ mod effects_tests {
             "Esc on merge modal must NOT signal accept:false, got: {cmds:?}",
         );
         assert!(
-            m.active_merge_prompt.is_none(),
-            "active_merge_prompt slot must clear so the queue can advance",
+            m.modal_flow.is_none(),
+            "merge-prompt flow must clear so the queue can advance",
         );
     }
 
@@ -877,7 +911,7 @@ mod effects_tests {
     #[test]
     fn merge_prompt_defaults_to_yes() {
         let mut m = build_model();
-        m.pending_merge_prompts.push_back((
+        m.merge_prompt_queue.push_back((
             WorkspaceKey::new("github:o/r#1"),
             WorkspaceKey::new("github:o/r#2"),
             "o/r#1".into(),
@@ -899,7 +933,7 @@ mod effects_tests {
     #[test]
     fn removal_prompt_defaults_to_no_from_event_source() {
         let mut m = build_model();
-        m.pending_removal_prompts
+        m.removal_prompt_queue
             .push_back(super::super::RemovalPrompt {
                 workspace_key: WorkspaceKey::new("github:o/r#1"),
                 label: "o/r#1".into(),
@@ -924,7 +958,7 @@ mod effects_tests {
 
         let mut m = build_model();
         m.ui_defaults.confirm_default.event = ConfirmDefault::Yes;
-        m.pending_removal_prompts
+        m.removal_prompt_queue
             .push_back(super::super::RemovalPrompt {
                 workspace_key: WorkspaceKey::new("github:o/r#1"),
                 label: "o/r#1".into(),
@@ -1041,14 +1075,14 @@ mod effects_tests {
     #[test]
     fn modal_dismissed_on_remove_out_of_scope_clears_slot_silently() {
         let mut m = build_model();
-        m.active_removal_prompt = Some((
-            WorkspaceKey::new("github:o/r#1"),
-            super::super::RemovalReason::OutOfScope,
-        ));
+        m.modal_flow = Some(super::super::ModalFlow::RemovalPrompt {
+            workspace: WorkspaceKey::new("github:o/r#1"),
+            reason: super::super::RemovalReason::OutOfScope,
+        });
         m.modal_stack.push(Id::RemoveOutOfScope);
         let cmds = m.handle_modal_dismissed();
         assert!(cmds.is_empty());
-        assert!(m.active_removal_prompt.is_none());
+        assert!(m.modal_flow.is_none());
     }
 
     /// Inter-event cadence of the OS momentum stream (~16 ms frame
@@ -1300,7 +1334,9 @@ mod effects_tests {
         let mut m = build_model();
         let source = WorkspaceKey::new("github:o/r#1");
         let target = WorkspaceKey::new("github:o/r#2");
-        m.pending_adopt_source = Some(source.clone());
+        m.modal_flow = Some(super::super::ModalFlow::AdoptSource {
+            source: source.clone(),
+        });
         m.modal_stack.push(Id::AdoptTarget);
         let cmds = m.handle_choice_picked(vec![ChoicePayload::Workspace(target.clone())]);
         assert_eq!(cmds.len(), 1);
@@ -1315,7 +1351,7 @@ mod effects_tests {
             other => panic!("expected AdoptSessions, got {other:?}"),
         }
         // Side state: the adoption slot clears.
-        assert!(m.pending_adopt_source.is_none());
+        assert!(m.modal_flow.is_none());
     }
 
     /// `Id::RequestReviewers` picker: selecting two rows (each carrying
@@ -1327,7 +1363,9 @@ mod effects_tests {
     fn choice_picked_on_request_reviewers_modal_returns_request_reviewers_cmd() {
         let mut m = build_model();
         let ws_key = WorkspaceKey::new("github:o/r#1");
-        m.pending_review_request = Some(ws_key.clone());
+        m.modal_flow = Some(super::super::ModalFlow::ReviewRequest {
+            workspace: ws_key.clone(),
+        });
         m.modal_stack.push(Id::RequestReviewers);
         let cmds = m.handle_choice_picked(vec![
             ChoicePayload::Text("alice".into()),
@@ -1344,7 +1382,7 @@ mod effects_tests {
             }
             other => panic!("expected RequestReviewers, got {other:?}"),
         }
-        assert!(m.pending_review_request.is_none());
+        assert!(m.modal_flow.is_none());
     }
 
     /// `Id::AddAssignees` picker now fires `SetAssignees` (not Add)
@@ -1355,7 +1393,9 @@ mod effects_tests {
     fn choice_picked_on_add_assignees_modal_returns_set_assignees_cmd() {
         let mut m = build_model();
         let ws_key = WorkspaceKey::new("github:o/r#5");
-        m.pending_assignees_request = Some(ws_key.clone());
+        m.modal_flow = Some(super::super::ModalFlow::AssigneesRequest {
+            workspace: ws_key.clone(),
+        });
         m.modal_stack.push(Id::AddAssignees);
         let cmds = m.handle_choice_picked(vec![ChoicePayload::Text("bob".into())]);
         assert_eq!(cmds.len(), 1);
@@ -1379,7 +1419,9 @@ mod effects_tests {
     fn choice_picked_on_add_assignees_with_empty_picks_clears_assignees() {
         let mut m = build_model();
         let ws_key = WorkspaceKey::new("github:o/r#7");
-        m.pending_assignees_request = Some(ws_key.clone());
+        m.modal_flow = Some(super::super::ModalFlow::AssigneesRequest {
+            workspace: ws_key.clone(),
+        });
         m.modal_stack.push(Id::AddAssignees);
         let cmds = m.handle_choice_picked(vec![]);
         assert_eq!(cmds.len(), 1);
@@ -1399,7 +1441,9 @@ mod effects_tests {
     #[test]
     fn choice_picked_on_request_reviewers_with_empty_picks_returns_no_commands() {
         let mut m = build_model();
-        m.pending_review_request = Some(WorkspaceKey::new("github:o/r#1"));
+        m.modal_flow = Some(super::super::ModalFlow::ReviewRequest {
+            workspace: WorkspaceKey::new("github:o/r#1"),
+        });
         m.modal_stack.push(Id::RequestReviewers);
         let cmds = m.handle_choice_picked(vec![]);
         assert!(cmds.is_empty());
@@ -1760,9 +1804,11 @@ snippets:
             Some(lazybox_ipc::TerminalKind::Agent("codex".into())),
             None,
         ]);
-        m.pending_broadcast = Some(BroadcastDraft {
-            targets: keys,
-            snippet_key: None,
+        m.modal_flow = Some(super::super::ModalFlow::Broadcast {
+            draft: BroadcastDraft {
+                targets: keys,
+                snippet_key: None,
+            },
         });
         m.modal_stack.push(Id::BroadcastText);
         let cmds = m.handle_textarea_submitted("merge when the PR is green".into());
@@ -1796,7 +1842,7 @@ snippets:
             !cmds.iter().any(|c| matches!(c, IpcCommand::Write { .. })),
             "agents must not ALSO get a raw write",
         );
-        assert!(m.pending_broadcast.is_none(), "draft consumed");
+        assert!(m.modal_flow.is_none(), "draft consumed");
         let notice = m.status.notice.as_ref().expect("summary notice");
         assert!(
             notice.message.contains("sent to 2 workspaces"),
@@ -1820,9 +1866,11 @@ snippets:
             Some(lazybox_ipc::TerminalKind::Shell),
             None,
         ]);
-        m.pending_broadcast = Some(BroadcastDraft {
-            targets: keys.clone(),
-            snippet_key: Some("rev".into()),
+        m.modal_flow = Some(super::super::ModalFlow::Broadcast {
+            draft: BroadcastDraft {
+                targets: keys.clone(),
+                snippet_key: Some("rev".into()),
+            },
         });
         m.modal_stack.push(Id::BroadcastText);
         let cmds = m.handle_textarea_submitted("review the diff".into());
@@ -1853,9 +1901,11 @@ snippets:
     #[test]
     fn broadcast_to_shell_target_writes_encoded_bytes() {
         let (mut m, keys) = model_with_broadcast_targets(&[Some(lazybox_ipc::TerminalKind::Shell)]);
-        m.pending_broadcast = Some(BroadcastDraft {
-            targets: keys,
-            snippet_key: None,
+        m.modal_flow = Some(super::super::ModalFlow::Broadcast {
+            draft: BroadcastDraft {
+                targets: keys,
+                snippet_key: None,
+            },
         });
         m.modal_stack.push(Id::BroadcastText);
         let cmds = m.handle_textarea_submitted("ls -la".into());
@@ -1885,9 +1935,11 @@ snippets:
             no_permission: false,
             on_main: false,
         });
-        m.pending_broadcast = Some(BroadcastDraft {
-            targets: keys,
-            snippet_key: None,
+        m.modal_flow = Some(super::super::ModalFlow::Broadcast {
+            draft: BroadcastDraft {
+                targets: keys,
+                snippet_key: None,
+            },
         });
         m.modal_stack.push(Id::BroadcastText);
         let cmds = m.handle_textarea_submitted("go".into());
@@ -1920,9 +1972,11 @@ snippets:
             "broadcast-compose",
             "\nsnippets:\n  rev:\n    description: Review\n    body: review the diff\n",
         );
-        m.pending_broadcast = Some(BroadcastDraft {
-            targets: keys,
-            snippet_key: None,
+        m.modal_flow = Some(super::super::ModalFlow::Broadcast {
+            draft: BroadcastDraft {
+                targets: keys,
+                snippet_key: None,
+            },
         });
         m.modal_stack.push(Id::BroadcastSnippet);
 
@@ -1934,9 +1988,12 @@ snippets:
             "pick funnels into the compose step",
         );
         assert_eq!(
-            m.pending_broadcast
-                .as_ref()
-                .and_then(|d| d.snippet_key.as_deref()),
+            match &m.modal_flow {
+                Some(super::super::ModalFlow::Broadcast { draft }) => {
+                    draft.snippet_key.as_deref()
+                }
+                _ => None,
+            },
             Some("rev"),
         );
 
@@ -1978,15 +2035,19 @@ snippets:
             "broadcast-freetext",
             "\nsnippets:\n  rev:\n    description: Review\n    body: review the diff\n",
         );
-        m.pending_broadcast = Some(BroadcastDraft {
-            targets: keys,
-            snippet_key: None,
+        m.modal_flow = Some(super::super::ModalFlow::Broadcast {
+            draft: BroadcastDraft {
+                targets: keys,
+                snippet_key: None,
+            },
         });
         m.modal_stack.push(Id::BroadcastSnippet);
         let cmds = m.handle_choice_picked(Vec::new());
         assert!(cmds.is_empty());
         assert_eq!(m.modal_stack.last(), Some(&Id::BroadcastText));
-        let draft = m.pending_broadcast.as_ref().expect("draft survives");
+        let Some(super::super::ModalFlow::Broadcast { draft }) = &m.modal_flow else {
+            panic!("draft survives");
+        };
         assert_eq!(draft.snippet_key, None, "free text only — no snippet");
         let cmds = m.handle_textarea_submitted("ad-hoc prompt".into());
         assert!(
@@ -2018,9 +2079,11 @@ snippets:
 
         // All-skipped broadcast (only the session-less target): the
         // selection survives for a retry.
-        m.pending_broadcast = Some(BroadcastDraft {
-            targets: vec![keys[1].clone()],
-            snippet_key: None,
+        m.modal_flow = Some(super::super::ModalFlow::Broadcast {
+            draft: BroadcastDraft {
+                targets: vec![keys[1].clone()],
+                snippet_key: None,
+            },
         });
         m.modal_stack.push(Id::BroadcastText);
         let cmds = m.handle_textarea_submitted("hello".into());
@@ -2040,7 +2103,10 @@ snippets:
             "empty snippet library skips straight to compose",
         );
         assert_eq!(
-            m.pending_broadcast.as_ref().map(|d| d.targets.clone()),
+            match &m.modal_flow {
+                Some(super::super::ModalFlow::Broadcast { draft }) => Some(draft.targets.clone()),
+                _ => None,
+            },
             Some(expected_targets),
             "targets resolved from the multi-select in sidebar order",
         );
@@ -2067,14 +2133,16 @@ snippets:
         )]);
         assert!(m.sidebar.focus_workspace_key(&keys[0]));
         assert_eq!(m.sidebar.toggle_broadcast_select(), Some(true));
-        m.pending_broadcast = Some(BroadcastDraft {
-            targets: keys,
-            snippet_key: None,
+        m.modal_flow = Some(super::super::ModalFlow::Broadcast {
+            draft: BroadcastDraft {
+                targets: keys,
+                snippet_key: None,
+            },
         });
         m.modal_stack.push(Id::BroadcastText);
         let cmds = m.handle_modal_dismissed();
         assert!(cmds.is_empty());
-        assert!(m.pending_broadcast.is_none(), "Esc cancels the flow");
+        assert!(m.modal_flow.is_none(), "Esc cancels the flow");
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
             1,
@@ -2089,7 +2157,7 @@ snippets:
         let (mut m, _keys) = model_with_broadcast_targets(&[None]);
         m.mount_broadcast_picker();
         assert!(m.modal_stack.is_empty(), "no selection, no modal");
-        assert!(m.pending_broadcast.is_none());
+        assert!(m.modal_flow.is_none());
         let notice = m.status.notice.as_ref().expect("nudge notice");
         assert!(notice.message.contains("v"), "nudge names the select key");
     }
@@ -2128,7 +2196,10 @@ snippets:
             "the pick funnels into the compose step",
         );
         assert_eq!(
-            m.pending_handoff.as_ref().and_then(|d| d.target.clone()),
+            match &m.modal_flow {
+                Some(super::super::ModalFlow::Handoff { draft }) => draft.target.clone(),
+                _ => None,
+            },
             Some(keys[1].clone()),
         );
 
@@ -2149,7 +2220,7 @@ snippets:
             )),
             "the target's recap line updates: {cmds:?}",
         );
-        assert!(m.pending_handoff.is_none(), "draft consumed");
+        assert!(m.modal_flow.is_none(), "draft consumed");
         let notice = m.status.notice.as_ref().expect("handoff notice");
         assert!(
             notice.message.contains("handoff:") && notice.message.contains('→'),
@@ -2182,7 +2253,10 @@ snippets:
         let cmds = m.handle_choice_picked(vec![ChoicePayload::Session(keys[1].clone())]);
         assert!(cmds.is_empty(), "picking the target sends nothing yet");
         assert_eq!(
-            m.pending_handoff.as_ref().and_then(|d| d.target.clone()),
+            match &m.modal_flow {
+                Some(super::super::ModalFlow::Handoff { draft }) => draft.target.clone(),
+                _ => None,
+            },
             Some(keys[1].clone()),
             "the only candidate is the other running session",
         );
@@ -2199,7 +2273,7 @@ snippets:
         assert!(m.sidebar.focus_workspace_key(&keys[0]));
         m.dispatch_action(&Action::SendToSession);
         assert!(m.modal_stack.is_empty(), "no target, no picker");
-        assert!(m.pending_handoff.is_none());
+        assert!(m.modal_flow.is_none());
         let notice = m.status.notice.as_ref().expect("nudge notice");
         assert!(
             notice.message.contains("no other running agent"),
@@ -2220,7 +2294,7 @@ snippets:
         assert!(m.sidebar.focus_workspace_key(&keys[0]));
         m.dispatch_action(&Action::SendToSession);
         assert!(m.modal_stack.is_empty(), "no agent source, no picker");
-        assert!(m.pending_handoff.is_none());
+        assert!(m.modal_flow.is_none());
         let notice = m.status.notice.as_ref().expect("nudge notice");
         assert!(
             notice.message.contains("no agent session"),
@@ -2242,7 +2316,7 @@ snippets:
         assert!(m.sidebar.focus_workspace_key(&keys[0]));
         m.dispatch_action(&Action::SendToSession);
         assert!(m.modal_stack.is_empty(), "a shell isn't a handoff target");
-        assert!(m.pending_handoff.is_none());
+        assert!(m.modal_flow.is_none());
         let notice = m.status.notice.as_ref().expect("nudge notice");
         assert!(
             notice.message.contains("no other running agent"),
@@ -2291,7 +2365,7 @@ snippets:
         m.handle_choice_picked(vec![ChoicePayload::Session(keys[1].clone())]);
         let cmds = m.handle_textarea_submitted("   \n".into());
         assert!(cmds.is_empty(), "empty body sends nothing: {cmds:?}");
-        assert!(m.pending_handoff.is_none(), "draft consumed even on cancel");
+        assert!(m.modal_flow.is_none(), "draft consumed even on cancel");
         let notice = m.status.notice.as_ref().expect("cancel notice");
         assert!(notice.message.contains("cancelled"), "{}", notice.message);
     }
@@ -2308,11 +2382,13 @@ snippets:
             Some(lazybox_ipc::TerminalKind::Agent("codex".into())),
         ]);
         // The user picked keys[1], but its session is gone by submit time.
-        m.pending_handoff = Some(HandoffDraft {
-            source: keys[0].clone(),
-            source_name: "planner".into(),
-            seed: "original brief".into(),
-            target: Some(keys[1].clone()),
+        m.modal_flow = Some(super::super::ModalFlow::Handoff {
+            draft: HandoffDraft {
+                source: keys[0].clone(),
+                source_name: "planner".into(),
+                seed: "original brief".into(),
+                target: Some(keys[1].clone()),
+            },
         });
         m.modal_stack.push(Id::HandoffText);
 
@@ -2327,17 +2403,21 @@ snippets:
             "the picker re-opens instead of dropping the work",
         );
         assert_eq!(
-            m.pending_handoff.as_ref().map(|d| d.seed.as_str()),
+            match &m.modal_flow {
+                Some(super::super::ModalFlow::Handoff { draft }) => Some(draft.seed.as_str()),
+                _ => None,
+            },
             Some("refined brief"),
             "the edited brief becomes the new seed — not lost",
         );
         // The target slot cleared so the re-opened picker starts unbound;
         // the still-live other session (keys[2]) is the sole candidate.
         assert!(
-            m.pending_handoff
-                .as_ref()
-                .and_then(|d| d.target.clone())
-                .is_none(),
+            match &m.modal_flow {
+                Some(super::super::ModalFlow::Handoff { draft }) => draft.target.clone(),
+                _ => None,
+            }
+            .is_none(),
             "the dead target is cleared before the picker re-opens",
         );
         let cmds = m.handle_choice_picked(vec![ChoicePayload::Session(keys[2].clone())]);
@@ -2346,7 +2426,10 @@ snippets:
             "re-picking the live target sends nothing yet"
         );
         assert_eq!(
-            m.pending_handoff.as_ref().and_then(|d| d.target.clone()),
+            match &m.modal_flow {
+                Some(super::super::ModalFlow::Handoff { draft }) => draft.target.clone(),
+                _ => None,
+            },
             Some(keys[2].clone()),
             "only the still-live other session can be re-picked",
         );
@@ -2364,7 +2447,7 @@ snippets:
         assert!(m.sidebar.focus_workspace_key(&keys[0]));
         m.dispatch_action(&Action::SendToSession);
         m.handle_modal_dismissed();
-        assert!(m.pending_handoff.is_none(), "Esc on the picker cancels");
+        assert!(m.modal_flow.is_none(), "Esc on the picker cancels");
     }
 
     /// mount_snippet_picker with an empty collection flashes a hint
@@ -4409,7 +4492,7 @@ mod merge_focus_follow_tests {
             }
             other => panic!("expected SetAutoMergeOnGreen, got {other:?}"),
         }
-        assert!(m.pending_policy_workspace.is_none());
+        assert!(m.modal_flow.is_none());
     }
 
     /// Picking an auto-fix row toggles the per-session arm. On a default
@@ -4544,7 +4627,10 @@ mod merge_focus_follow_tests {
             Some(&Id::PolicyPicker),
             "g p mounts the policies menu",
         );
-        assert_eq!(m.pending_policy_workspace.as_ref(), Some(&ws_key));
+        assert!(matches!(
+            &m.modal_flow,
+            Some(super::super::ModalFlow::PolicyWorkspace { workspace }) if *workspace == ws_key
+        ));
     }
 
     /// Regression for #160: the daemon's issue→PR merge burst
@@ -4896,11 +4982,10 @@ mod merge_focus_follow_tests {
             Some(&Id::WorkAgentPicker),
             "the multi-agent chooser is up",
         );
-        let agents = m
-            .pending_work_picker
-            .as_ref()
-            .map(|p| p.agents.clone())
-            .expect("picker stash armed");
+        let agents = match &m.modal_flow {
+            Some(super::super::ModalFlow::WorkPicker { picker }) => picker.agents.clone(),
+            _ => panic!("picker stash armed"),
+        };
         assert_eq!(
             agents,
             vec!["claude".to_string(), "codex".to_string()],
@@ -4920,7 +5005,7 @@ mod merge_focus_follow_tests {
             ] => assert_eq!(id, "codex"),
             other => panic!("expected one Spawn(Agent(codex), prompt), got {other:?}"),
         }
-        assert!(m.pending_work_picker.is_none(), "stash consumed");
+        assert!(m.modal_flow.is_none(), "stash consumed");
     }
 
     /// Issue #418: the chooser's pick rides the same spawn→inject
@@ -4999,11 +5084,14 @@ mod merge_focus_follow_tests {
         m.set_focus_attr();
         assert!(m.sidebar.focus_workspace_key(&sk));
         assert!(m.dispatch_action(&Action::Work).is_empty());
-        assert!(m.pending_work_picker.is_some());
+        assert!(matches!(
+            m.modal_flow,
+            Some(super::super::ModalFlow::WorkPicker { .. })
+        ));
 
         let cmds = m.handle_modal_dismissed();
         assert!(cmds.is_empty(), "Esc fires nothing: {cmds:?}");
-        assert!(m.pending_work_picker.is_none(), "stash dropped on Esc");
+        assert!(m.modal_flow.is_none(), "stash dropped on Esc");
     }
 
     /// Issue #418: a `w S` tier chord that lands on several running
@@ -6637,7 +6725,9 @@ mod leader_tile_tests {
 
         // If the target agent exited while the picker was open, picking
         // sends nothing and doesn't falsely claim a resend.
-        m.prompt_history_target = Some(TerminalId(404));
+        m.modal_flow = Some(super::super::ModalFlow::PromptHistory {
+            terminal: TerminalId(404),
+        });
         m.push_modal(Id::PromptHistoryPicker);
         let cmds =
             m.handle_choice_picked(vec![ChoicePayload::Text("rebase onto main".to_string())]);
@@ -6693,7 +6783,7 @@ mod destructive_confirm_tests {
     //!    time. Daemon events can move the sidebar cursor while the
     //!    modal is up; "Yes" must not act on whatever the cursor
     //!    drifted onto.
-    use super::super::{ActionConfirmTarget, ChoicePayload, Id, Model};
+    use super::super::{ActionConfirmTarget, ChoicePayload, Id, ModalFlow, Model};
     use chrono::Utc;
     use lazybox_core::{SessionKey, Task, TaskId, Workspace, WorkspaceKey};
     use lazybox_ipc::{Command as IpcCommand, Event as IpcEvent, channel};
@@ -6717,7 +6807,10 @@ mod destructive_confirm_tests {
         let mut m = build_model();
         let wk = seed(&mut m, "github:o/r#1");
         let sk = SessionKey::from(&wk);
-        m.pending_sidebar_context = Some((sk.clone(), vec![Action::MergePr, Action::Archive]));
+        m.modal_flow = Some(ModalFlow::SidebarContext {
+            session_key: sk.clone(),
+            actions: vec![Action::MergePr, Action::Archive],
+        });
         m.modal_stack.push(Id::SidebarContext);
 
         // Row 1 is Archive in the stashed action list.
@@ -6746,7 +6839,10 @@ mod destructive_confirm_tests {
         let mut m = build_model();
         let wk = seed(&mut m, "github:o/r#1");
         let sk = SessionKey::from(&wk);
-        m.pending_sidebar_context = Some((sk.clone(), vec![Action::MergePr, Action::Archive]));
+        m.modal_flow = Some(ModalFlow::SidebarContext {
+            session_key: sk.clone(),
+            actions: vec![Action::MergePr, Action::Archive],
+        });
         m.modal_stack.push(Id::SidebarContext);
 
         // Row 0 is MergePr in the stashed action list.
@@ -6756,8 +6852,11 @@ mod destructive_confirm_tests {
             "MergePr picked from the context menu must not emit MergePr directly: {cmds:?}",
         );
         assert_eq!(m.modal_stack.last(), Some(&Id::ActionConfirm));
-        match &m.pending_action_confirm {
-            Some((Action::MergePr, ActionConfirmTarget::Workspace(k))) => assert_eq!(k, &sk),
+        match &m.modal_flow {
+            Some(ModalFlow::ActionConfirm {
+                action: Action::MergePr,
+                target: ActionConfirmTarget::Workspace(k),
+            }) => assert_eq!(k, &sk),
             other => panic!("expected a stashed MergePr aimed at the menu's row, got {other:?}"),
         }
     }
@@ -7053,7 +7152,7 @@ mod queued_prompt_drain_tests {
     //! modal is up gets queued. Re-emits are deduped, so EVERY
     //! handler that pops the stack empty must drain the queue —
     //! including the picker handlers, not just dismiss/confirm.
-    use super::super::{Id, Model};
+    use super::super::{Id, ModalFlow, Model};
     use crate::realm::ChoicePayload;
     use lazybox_core::{SessionKey, WorkspaceKey};
     use lazybox_ipc::{Event as IpcEvent, channel};
@@ -7077,7 +7176,9 @@ mod queued_prompt_drain_tests {
     fn removal_prompt_mounts_after_a_choice_picker_resolves() {
         let mut m = build_model();
         // A snooze picker is open when the daemon prompt arrives.
-        m.pending_snooze_workspace = Some(SessionKey::from("github:o/r#1"));
+        m.modal_flow = Some(ModalFlow::Snooze {
+            workspace: SessionKey::from("github:o/r#1"),
+        });
         m.modal_stack.push(Id::SnoozeDuration);
         queue_removal_prompt(&mut m);
         assert_eq!(
@@ -7097,7 +7198,10 @@ mod queued_prompt_drain_tests {
             Some(&Id::RemoveOutOfScope),
             "queued removal prompt must mount once the picker resolves",
         );
-        assert!(m.active_removal_prompt.is_some());
+        assert!(matches!(
+            m.modal_flow,
+            Some(ModalFlow::RemovalPrompt { .. })
+        ));
     }
 
     #[test]
@@ -7119,7 +7223,9 @@ mod queued_prompt_drain_tests {
     #[test]
     fn removal_prompt_mounts_after_a_textarea_submit() {
         let mut m = build_model();
-        m.pending_reply = Some(SessionKey::from("github:o/r#1"));
+        m.modal_flow = Some(ModalFlow::Reply {
+            target: SessionKey::from("github:o/r#1"),
+        });
         m.modal_stack.push(Id::Reply);
         queue_removal_prompt(&mut m);
         assert_eq!(m.modal_stack.last(), Some(&Id::Reply));
@@ -10370,7 +10476,10 @@ mod help_ask_tests {
         finish_help_turn(&mut m, add_snippet_answer("integrate"));
 
         assert_eq!(m.modal_stack.last(), Some(&Id::HelpActionConfirm));
-        match m.pending_help_action.clone().expect("intent stashed") {
+        let Some(super::super::ModalFlow::HelpAction { intent }) = m.modal_flow.clone() else {
+            panic!("intent stashed");
+        };
+        match intent {
             lazybox_tui_core::help::HelpActionIntent::AddSnippet {
                 key,
                 category,
@@ -10405,7 +10514,7 @@ mod help_ask_tests {
 
         let before = m.snippets.len();
         let _ = m.handle_modal_dismissed();
-        assert!(m.pending_help_action.is_none());
+        assert!(m.modal_flow.is_none());
         assert_eq!(
             m.modal_stack.last(),
             Some(&Id::HelpAsk),
@@ -10466,7 +10575,7 @@ mod help_ask_tests {
         let _ = m.handle_help_asked("add a snippet".into());
         finish_help_turn(&mut m, add_snippet_answer("integrate"));
 
-        assert!(m.pending_help_action.is_none());
+        assert!(m.modal_flow.is_none());
         assert_ne!(m.modal_stack.last(), Some(&Id::HelpActionConfirm));
         let answer = m.help_convo_mut().turns[0].answer.clone();
         assert!(
@@ -10492,7 +10601,7 @@ mod help_ask_tests {
                 .into(),
         );
 
-        assert!(m.pending_help_action.is_none());
+        assert!(m.modal_flow.is_none());
         assert_ne!(m.modal_stack.last(), Some(&Id::HelpActionConfirm));
         let convo = m.help_convo_mut();
         assert!(
@@ -10590,7 +10699,7 @@ mod help_ask_tests {
         let _ = m.handle_help_asked("disable permissions".into());
         finish_help_turn(&mut m, edit_config_answer("agent.skip_permissions", "true"));
 
-        assert!(m.pending_help_action.is_none());
+        assert!(m.modal_flow.is_none());
         assert_ne!(m.modal_stack.last(), Some(&Id::HelpActionConfirm));
         assert!(
             m.help_convo_mut()
@@ -11087,7 +11196,9 @@ mod mutation_failure_notice_tests {
     fn reply_failure_names_action_and_preserves_text() {
         let mut m = build_model();
         m.status.polling = None;
-        m.pending_reply = Some(SessionKey::from("github:o/r#1"));
+        m.modal_flow = Some(super::super::ModalFlow::Reply {
+            target: SessionKey::from("github:o/r#1"),
+        });
         let cmds = m.handle_textarea_submitted("my carefully composed reply".into());
         assert!(!cmds.is_empty(), "reply submit dispatches PostReply");
 
@@ -11790,7 +11901,7 @@ mod repo_labels_failure_tests {
         let wk = ws.key.clone();
         m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
 
-        m.pending_labels_request = Some(wk);
+        m.awaiting_repo_labels = Some(wk);
         m.handle_daemon_event(repo_labels_error("network down"));
 
         assert_eq!(
@@ -11805,12 +11916,12 @@ mod repo_labels_failure_tests {
         use crate::realm::components::footer::NoticeSeverity;
         let mut m = build_model();
         m.status.polling = None;
-        m.pending_labels_request = Some(lazybox_core::WorkspaceKey::new("github:owner/repo#7"));
+        m.awaiting_repo_labels = Some(lazybox_core::WorkspaceKey::new("github:owner/repo#7"));
 
         m.handle_daemon_event(repo_labels_error("network down"));
 
         assert!(
-            m.pending_labels_request.is_none(),
+            m.awaiting_repo_labels.is_none(),
             "the stale stash must not stay armed after a failed fetch"
         );
         assert!(m.modal_stack.is_empty(), "nothing to pick from — no modal");
@@ -11854,7 +11965,7 @@ mod async_modal_preempt_tests {
     fn slow_repo_labels_reply_does_not_preempt_reply_textarea() {
         let mut m = build_model();
         let wk = lazybox_core::WorkspaceKey::new("github:owner/repo#1");
-        m.pending_labels_request = Some(wk.clone());
+        m.awaiting_repo_labels = Some(wk.clone());
 
         // User opened the reply composer while the fetch was in flight.
         m.mount_reply(SessionKey::from("github:owner/repo#1"));
@@ -11875,7 +11986,7 @@ mod async_modal_preempt_tests {
             "picker deferred (dropped), not stacked underneath"
         );
         assert!(
-            m.pending_labels_request.is_none(),
+            m.awaiting_repo_labels.is_none(),
             "the stash is disarmed so a stray later reply can't mount unprompted"
         );
     }
@@ -11885,7 +11996,7 @@ mod async_modal_preempt_tests {
     fn repo_labels_reply_mounts_on_an_empty_stack() {
         let mut m = build_model();
         let wk = lazybox_core::WorkspaceKey::new("github:owner/repo#1");
-        m.pending_labels_request = Some(wk.clone());
+        m.awaiting_repo_labels = Some(wk.clone());
         m.handle_daemon_event(IpcEvent::RepoLabels {
             workspace_key: wk,
             labels: vec![lazybox_core::Label::new("bug")],
@@ -12249,8 +12360,11 @@ mod keybinding_audit_tests {
             "`g m` completes to the merge confirm",
         );
         assert!(matches!(
-            m.pending_action_confirm,
-            Some((Action::MergePr, _)),
+            m.modal_flow,
+            Some(super::super::ModalFlow::ActionConfirm {
+                action: Action::MergePr,
+                ..
+            }),
         ));
     }
 
@@ -13205,7 +13319,9 @@ mod optimistic_mutation_tests {
         let mut m = build_model();
         let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#3");
         let sk: SessionKey = (&ws_key).into();
-        m.pending_review_request = Some(ws_key.clone());
+        m.modal_flow = Some(super::super::ModalFlow::ReviewRequest {
+            workspace: ws_key.clone(),
+        });
         m.modal_stack.push(Id::RequestReviewers);
 
         let cmds = m.handle_choice_picked(vec![
@@ -13238,7 +13354,9 @@ mod optimistic_mutation_tests {
         let mut m = build_model();
         let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#4");
         let sk: SessionKey = (&ws_key).into();
-        m.pending_review_request = Some(ws_key.clone());
+        m.modal_flow = Some(super::super::ModalFlow::ReviewRequest {
+            workspace: ws_key.clone(),
+        });
         m.modal_stack.push(Id::RequestReviewers);
         m.handle_choice_picked(vec![ChoicePayload::Text("alice".into())]);
         assert_eq!(reviewers_of(&m, &sk), vec!["alice".to_string()]);
@@ -13266,7 +13384,7 @@ mod optimistic_mutation_tests {
         let mut m = build_model();
         let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#5");
         let sk: SessionKey = (&ws_key).into();
-        m.pending_labels_request = Some(ws_key.clone());
+        m.awaiting_repo_labels = Some(ws_key.clone());
         m.modal_stack.push(Id::ManageLabels);
         m.handle_choice_picked(vec![
             ChoicePayload::Text("bug".into()),
@@ -13305,7 +13423,9 @@ mod optimistic_mutation_tests {
         let mut m = build_model();
         let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#6");
         let sk: SessionKey = (&ws_key).into();
-        m.pending_assignees_request = Some(ws_key.clone());
+        m.modal_flow = Some(super::super::ModalFlow::AssigneesRequest {
+            workspace: ws_key.clone(),
+        });
         m.modal_stack.push(Id::AddAssignees);
         m.handle_choice_picked(vec![ChoicePayload::Text("alice".into())]);
         assert_eq!(

@@ -14,7 +14,7 @@
 //! `mount_setup_modal`, `unmount_setup_modal`) co-locates here
 //! since it's the same modal-state-mutation shape.
 
-use super::{ChoicePayload, Id, Model, Msg, dismissed_update_key};
+use super::{ChoicePayload, Id, ModalFlow, Model, Msg, dismissed_update_key};
 use crate::realm::UserEvent;
 use lazybox_ipc::{Command as IpcCommand, TerminalId};
 use tuirealm::terminal::TerminalAdapter;
@@ -55,7 +55,10 @@ impl<T: TerminalAdapter> Model<T> {
         // non-empty (issue #458).
         if matches!(top, Some(Id::Notes)) {
             let mut cmds = Vec::new();
-            if let Some(session_key) = self.pending_notes.take() {
+            if let Some(ModalFlow::Notes {
+                target: session_key,
+            }) = self.modal_flow.take()
+            {
                 let cleared = body.trim().is_empty();
                 cmds.push(IpcCommand::SetNotes {
                     session_key,
@@ -71,7 +74,10 @@ impl<T: TerminalAdapter> Model<T> {
             return cmds;
         }
         let mut cmds = Vec::new();
-        let target = self.pending_reply.take();
+        let target = match self.modal_flow.take() {
+            Some(ModalFlow::Reply { target }) => Some(target),
+            _ => None,
+        };
         if let Some(session_key) = target
             && !body.trim().is_empty()
         {
@@ -156,7 +162,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// The snippet MRU counts the bulk send once, and the sidebar
     /// selection clears only after something was actually delivered.
     fn dispatch_broadcast(&mut self, body: &str) -> Vec<IpcCommand> {
-        let Some(draft) = self.pending_broadcast.take() else {
+        let Some(ModalFlow::Broadcast { draft }) = self.modal_flow.take() else {
             return Vec::new();
         };
         // The compose step may leave the snippet's pre-fill padding (or
@@ -232,7 +238,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// (the user cleared the seed) or a target that lost its session
     /// between pick and submit cancels with a notice, sending nothing.
     fn dispatch_handoff(&mut self, body: &str) -> Vec<IpcCommand> {
-        let Some(draft) = self.pending_handoff.take() else {
+        let Some(ModalFlow::Handoff { draft }) = self.modal_flow.take() else {
             return Vec::new();
         };
         let Some(target) = draft.target else {
@@ -302,7 +308,10 @@ impl<T: TerminalAdapter> Model<T> {
         match top {
             Some(Id::NewWorkspace) => {
                 let name = text.trim().to_string();
-                let project_key = self.pending_new_workspace_project.take();
+                let project_key = match self.modal_flow.take() {
+                    Some(ModalFlow::NewWorkspaceProject { project }) => Some(project),
+                    _ => None,
+                };
                 match (name.is_empty(), project_key) {
                     (false, Some(project_key)) => {
                         // Land the user in a live session immediately:
@@ -343,7 +352,7 @@ impl<T: TerminalAdapter> Model<T> {
                     // new-workspace input. Without this hand-off, the
                     // freshly-created project is unreachable via j/k
                     // (header rows are skipped by `move_cursor_by`).
-                    self.pending_focus_project_name = Some(name.clone());
+                    self.deferred_focus_project = Some(name.clone());
                     cmds.push(IpcCommand::CreateProject { name });
                 }
             }
@@ -540,14 +549,14 @@ showing keybinding search only",
         if matches!(self.modal_stack.last(), Some(Id::BroadcastSnippet)) {
             let key = picks.first().and_then(|p| p.as_text()).map(str::to_string);
             self.pop_modal();
-            if self.pending_broadcast.is_none() {
+            if !matches!(self.modal_flow, Some(ModalFlow::Broadcast { .. })) {
                 return cmds;
             }
             let body = key
                 .as_ref()
                 .and_then(|k| self.snippets.get(k))
                 .map(|s| s.body.clone());
-            if let Some(draft) = self.pending_broadcast.as_mut() {
+            if let Some(ModalFlow::Broadcast { draft }) = self.modal_flow.as_mut() {
                 // Only remember the key when it resolved to a body —
                 // the MRU must not record a snippet that wasn't sent.
                 draft.snippet_key = key.filter(|_| body.is_some());
@@ -612,7 +621,10 @@ showing keybinding search only",
         // the stash without sending.
         if matches!(self.modal_stack.last(), Some(Id::PromptHistoryPicker)) {
             let text = picks.first().and_then(|p| p.as_text()).map(str::to_string);
-            let target = self.prompt_history_target.take();
+            let target = match self.modal_flow.take() {
+                Some(ModalFlow::PromptHistory { terminal }) => Some(terminal),
+                _ => None,
+            };
             self.pop_modal();
             // The target is always an agent at mount (history is
             // agent-only); if it exited while the picker was open, don't
@@ -747,7 +759,13 @@ showing keybinding search only",
         // "merge" must not merge a PR with no confirmation). Empty
         // pick (Esc) clears the stash silently.
         if matches!(self.modal_stack.last(), Some(Id::SidebarContext)) {
-            let stash = self.pending_sidebar_context.take();
+            let stash = match self.modal_flow.take() {
+                Some(ModalFlow::SidebarContext {
+                    session_key,
+                    actions,
+                }) => Some((session_key, actions)),
+                _ => None,
+            };
             self.pop_modal();
             let idx = picks.first().and_then(|p| p.as_index());
             if let (Some((session_key, actions)), Some(idx)) = (stash.as_ref(), idx)
@@ -778,7 +796,10 @@ showing keybinding search only",
                 .next()
                 .and_then(ChoicePayload::into_workspace);
             self.pop_modal();
-            let source = self.pending_adopt_source.take();
+            let source = match self.modal_flow.take() {
+                Some(ModalFlow::AdoptSource { source }) => Some(source),
+                _ => None,
+            };
             if let (Some(source_key), Some(target_key)) = (source, target) {
                 cmds.push(IpcCommand::AdoptSessions {
                     source_workspace_key: source_key.clone(),
@@ -798,13 +819,13 @@ showing keybinding search only",
                 .next()
                 .and_then(ChoicePayload::into_session);
             self.pop_modal();
-            match (target, self.pending_handoff.as_mut()) {
-                (Some(target), Some(draft)) => {
+            match (target, self.modal_flow.as_mut()) {
+                (Some(target), Some(ModalFlow::Handoff { draft })) => {
                     draft.target = Some(target);
                     self.mount_handoff_textarea();
                 }
                 _ => {
-                    self.pending_handoff = None;
+                    self.modal_flow = None;
                 }
             }
             return cmds;
@@ -855,7 +876,10 @@ showing keybinding search only",
                 .filter_map(|p| p.as_text().map(str::to_string))
                 .collect();
             self.pop_modal();
-            let workspace_key = self.pending_review_request.take();
+            let workspace_key = match self.modal_flow.take() {
+                Some(ModalFlow::ReviewRequest { workspace }) => Some(workspace),
+                _ => None,
+            };
             if let (Some(workspace_key), false) = (workspace_key, logins.is_empty()) {
                 let count = logins.len();
                 // Optimistic: union the picked logins onto the PR's
@@ -890,7 +914,10 @@ showing keybinding search only",
                 .into_iter()
                 .next()
                 .and_then(ChoicePayload::into_policy);
-            let workspace_key = self.pending_policy_workspace.take();
+            let workspace_key = match self.modal_flow.take() {
+                Some(ModalFlow::PolicyWorkspace { workspace }) => Some(workspace),
+                _ => None,
+            };
             self.pop_modal();
             let (Some(toggle), Some(workspace_key)) = (toggle, workspace_key) else {
                 return cmds;
@@ -952,7 +979,10 @@ showing keybinding search only",
         // rewrites it to an inject into that agent's terminal. Empty /
         // Esc pick drops the stash without spawning anything.
         if matches!(self.modal_stack.last(), Some(Id::WorkAgentPicker)) {
-            let stash = self.pending_work_picker.take();
+            let stash = match self.modal_flow.take() {
+                Some(ModalFlow::WorkPicker { picker }) => Some(picker),
+                _ => None,
+            };
             self.pop_modal();
             let idx = picks.first().and_then(|p| p.as_index());
             if let (Some(picker), Some(idx)) = (stash, idx)
@@ -967,7 +997,10 @@ showing keybinding search only",
         // snooze deadline. Empty / Esc dismisses without snoozing.
         if matches!(self.modal_stack.last(), Some(Id::SnoozeDuration)) {
             let duration = picks.first().and_then(|p| p.as_duration());
-            let workspace_key = self.pending_snooze_workspace.take();
+            let workspace_key = match self.modal_flow.take() {
+                Some(ModalFlow::Snooze { workspace }) => Some(workspace),
+                _ => None,
+            };
             self.pop_modal();
             if let (Some(session_key), Some(duration)) = (workspace_key, duration) {
                 let until = chrono::Utc::now()
@@ -995,7 +1028,7 @@ showing keybinding search only",
                 .filter_map(|p| p.as_text().map(str::to_string))
                 .collect();
             self.pop_modal();
-            if let Some(workspace_key) = self.pending_labels_request.take() {
+            if let Some(workspace_key) = self.awaiting_repo_labels.take() {
                 let count = names.len();
                 let msg = if count == 0 {
                     "cleared labels".to_string()
@@ -1053,7 +1086,10 @@ showing keybinding search only",
                 .filter_map(|p| p.as_text().map(str::to_string))
                 .collect();
             self.pop_modal();
-            if let Some(workspace_key) = self.pending_assignees_request.take() {
+            if let Some(workspace_key) = match self.modal_flow.take() {
+                Some(ModalFlow::AssigneesRequest { workspace }) => Some(workspace),
+                _ => None,
+            } {
                 let count = logins.len();
                 let msg = if count == 0 {
                     "cleared assignees".to_string()
@@ -1082,7 +1118,10 @@ showing keybinding search only",
         // checkout, then mount the real-checkout warning confirm.
         if matches!(self.modal_stack.last(), Some(Id::ImportCheckoutList)) {
             self.pop_modal();
-            let rows = std::mem::take(&mut self.pending_import_rows);
+            let rows = match self.modal_flow.take() {
+                Some(ModalFlow::ImportList { rows }) => rows,
+                _ => Vec::new(),
+            };
             if let Some(target) = picks
                 .first()
                 .and_then(|p| p.as_index())
@@ -1114,11 +1153,13 @@ showing keybinding search only",
             // Drop the picker first so the confirm modal lands on
             // top of a clean stack.
             self.pop_modal();
+            let rows = match self.modal_flow.take() {
+                Some(ModalFlow::InspectList { rows }) => rows,
+                _ => Vec::new(),
+            };
             let Some(idx) = picks.first().and_then(|p| p.as_index()) else {
-                self.pending_inspect_rows.clear();
                 return cmds;
             };
-            let rows = std::mem::take(&mut self.pending_inspect_rows);
             // Rebuild the same logical index space the picker used:
             // sentinel at slot 0 when any safe rows exist, real
             // rows after that. Picker indices map 1:1.
@@ -1231,7 +1272,7 @@ showing keybinding search only",
     pub fn handle_modal_dismissed(&mut self) -> Vec<IpcCommand> {
         if self.modal_stack.last() == Some(&Id::Update) {
             self.pop_modal();
-            if let Some(target) = self.pending_update_target.take() {
+            if let Some(ModalFlow::UpdateTarget { target }) = self.modal_flow.take() {
                 if let Some(store) = self.update_store.take() {
                     let key = dismissed_update_key(&target);
                     let result_tx = self.update_dismissal_tx.clone();
@@ -1267,73 +1308,30 @@ showing keybinding search only",
         // route the "no" decision correctly.
         let top = self.modal_stack.last().cloned();
         self.pop_modal();
+        // Cancelling any modal drops its [`ModalFlow`] continuation.
+        // This one line replaces the ~two-dozen per-variant clears that
+        // used to be here (each `pending_* = None`) — a missed one was
+        // the leak the enum exists to prevent. Notable semantics that
+        // still hold by dropping the flow:
+        //   * RemoveOutOfScope Esc = defer; the daemon re-emits later.
+        //   * MergeConfirm Esc = "decide later" — it does NOT send
+        //     `ConfirmMerge { accept: false }` (that pins the issue as
+        //     rejected until restart); the daemon's `prompted_merge`
+        //     re-fires after `MERGE_REPROMPT_AFTER`. Only an explicit N
+        //     (`handle_confirmed`) pins the rejection.
+        //   * Broadcast / Handoff Esc cancels compose; the sidebar
+        //     multi-select survives (only composing was abandoned).
+        self.modal_flow = None;
         let mut cmds: Vec<IpcCommand> = Vec::new();
+        // A few modals carry cancel state that is NOT part of the flow
+        // enum — release it here.
         match top {
-            Some(Id::RemoveOutOfScope) => {
-                self.active_removal_prompt = None;
-            }
-            Some(Id::MergeConfirm) => {
-                // Esc on the merge modal = "dismiss for now, I'll
-                // decide later." Pre-fix this sent
-                // `ConfirmMerge { accept: false }`, which pinned the
-                // issue in the daemon's `rejected_merge` for the
-                // session and the user never saw the prompt again
-                // until restart. Now: just close the modal. The
-                // daemon's `prompted_merge` re-fires after
-                // `MERGE_REPROMPT_AFTER` (5 min) so the prompt
-                // self-heals; an explicit N (via `handle_confirmed`
-                // below) is the only path that pins as rejected.
-                self.active_merge_prompt = None;
-            }
-            Some(Id::ActionConfirm) => {
-                // Esc = cancel destructive action; drop the
-                // queued Action without firing.
-                self.pending_action_confirm = None;
-            }
-            Some(Id::InspectList) => {
-                // Picker closed without a pick — release the cached
-                // rows so they don't bleed into a later inspector run
-                // with stale paths.
-                self.pending_inspect_rows.clear();
-            }
-            Some(Id::InspectConfirm) => {
-                self.pending_inspect_target = None;
-            }
-            Some(Id::ImportCheckoutList) => {
-                self.pending_import_rows.clear();
-            }
-            Some(Id::ImportCheckoutConfirm) => {
-                self.pending_import_target = None;
-            }
-            Some(Id::HelpActionConfirm) => {
-                // Esc = decline the proposed action; drop the stash,
-                // change nothing (#353).
-                self.pending_help_action = None;
-            }
-            Some(Id::RequestReviewers) => {
-                // Esc cancels; drop the stashed workspace key so a later
-                // mount on a *different* workspace doesn't pick up the
-                // wrong target. (Candidate logins now ride the picker
-                // rows, so there's no separate stash to release.)
-                self.pending_review_request = None;
-            }
-            Some(Id::AddAssignees) => {
-                self.pending_assignees_request = None;
-            }
             Some(Id::ManageLabels) => {
-                self.pending_labels_request = None;
-            }
-            Some(Id::SnoozeDuration) => {
-                self.pending_snooze_workspace = None;
-            }
-            Some(Id::WorkAgentPicker) => {
-                self.pending_work_picker = None;
-            }
-            Some(Id::PolicyPicker) => {
-                self.pending_policy_workspace = None;
-            }
-            Some(Id::FilterMenu) => {
-                // Esc = leave the active filters untouched.
+                // The label picker's target lives in `awaiting_repo_labels`
+                // (armed before the modal, coexists with others), not in
+                // `modal_flow` — drop it so a later stray `RepoLabels`
+                // can't re-mount on a stale target.
+                self.awaiting_repo_labels = None;
             }
             Some(Id::WorktreeProgress) => {
                 // Esc on the checklist — remember WHICH provisioning op
@@ -1363,30 +1361,6 @@ showing keybinding search only",
                     .as_ref()
                     .map(|s| s.session_key.clone());
                 self.worktree_progress = None;
-            }
-            Some(Id::PromptHistoryPicker) => {
-                // The prompt text rode on the picked row, so there's no
-                // text stash to release — just drop the resend target.
-                self.prompt_history_target = None;
-            }
-            // Esc anywhere in the broadcast flow cancels the whole
-            // thing — drop the stashed targets so a later flow starts
-            // clean. The sidebar selection survives: the user only
-            // backed out of composing, not of selecting.
-            Some(Id::BroadcastSnippet) => {
-                self.pending_broadcast = None;
-            }
-            Some(Id::BroadcastText) => {
-                self.pending_broadcast = None;
-            }
-            // Esc anywhere in the handoff flow (#431) cancels it — drop
-            // the target candidates and the stashed source/seed so a
-            // later handoff starts clean.
-            Some(Id::HandoffTarget) => {
-                self.pending_handoff = None;
-            }
-            Some(Id::HandoffText) => {
-                self.pending_handoff = None;
             }
             Some(Id::ThemePicker) => {
                 // Esc cancels the preview: restore the palette that was
@@ -1429,7 +1403,9 @@ showing keybinding search only",
         let mut cmds = Vec::new();
         match top {
             Some(Id::RemoveOutOfScope) => {
-                if let Some((workspace_key, reason)) = self.active_removal_prompt.take() {
+                if let Some(ModalFlow::RemovalPrompt { workspace, reason }) = self.modal_flow.take()
+                {
+                    let workspace_key = workspace;
                     let session_key: lazybox_core::SessionKey = (&workspace_key).into();
                     match (yes, reason) {
                         // Out-of-scope: drop the row + kill terminals
@@ -1458,10 +1434,10 @@ showing keybinding search only",
                 }
             }
             Some(Id::MergeConfirm) => {
-                if let Some((issue_key, pr_key)) = self.active_merge_prompt.take() {
+                if let Some(ModalFlow::MergePrompt { issue, pr }) = self.modal_flow.take() {
                     cmds.push(IpcCommand::ConfirmMerge {
-                        issue_workspace_key: issue_key,
-                        pr_workspace_key: pr_key,
+                        issue_workspace_key: issue,
+                        pr_workspace_key: pr,
                         accept: yes,
                     });
                 }
@@ -1472,8 +1448,8 @@ showing keybinding search only",
                 // stashed at mount time (the sidebar selection may
                 // have drifted while the modal was up). No / Esc →
                 // drop the stash silently.
-                let pending = self.pending_action_confirm.take();
-                if yes && let Some((action, target)) = pending {
+                let pending = self.modal_flow.take();
+                if yes && let Some(ModalFlow::ActionConfirm { action, target }) = pending {
                     cmds.extend(self.dispatch_action_confirmed(&action, &target));
                     self.redraw = true;
                 }
@@ -1491,7 +1467,10 @@ showing keybinding search only",
                 }
             }
             Some(Id::InspectConfirm) => {
-                let target = self.pending_inspect_target.take();
+                let target = match self.modal_flow.take() {
+                    Some(ModalFlow::InspectConfirm { target }) => Some(target),
+                    _ => None,
+                };
                 if yes && let Some(row) = target {
                     let force = row.has_uncommitted_changes || row.has_unpushed_commits;
                     cmds.push(IpcCommand::DeleteOrphanedWorktree {
@@ -1501,7 +1480,10 @@ showing keybinding search only",
                 }
             }
             Some(Id::ImportCheckoutConfirm) => {
-                let target = self.pending_import_target.take();
+                let target = match self.modal_flow.take() {
+                    Some(ModalFlow::ImportConfirm { target }) => Some(target),
+                    _ => None,
+                };
                 if yes && let Some(row) = target {
                     cmds.push(IpcCommand::ImportLocalCheckout {
                         path: row.path,
@@ -1514,8 +1496,8 @@ showing keybinding search only",
                 // Action proposed by the Ask Lazybox help agent (#353).
                 // Yes → apply it; No / Esc → drop the stash, nothing
                 // changes.
-                let pending = self.pending_help_action.take();
-                if yes && let Some(intent) = pending {
+                let pending = self.modal_flow.take();
+                if yes && let Some(ModalFlow::HelpAction { intent }) = pending {
                     self.apply_help_action(intent);
                 }
             }

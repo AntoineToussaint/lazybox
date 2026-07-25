@@ -11,7 +11,7 @@
 //! `handle_choice_picked` / `handle_confirmed` arms (in mod.rs or
 //! events.rs) read the stashed state and execute on submit.
 
-use super::{ChoicePayload, HandoffDraft, Id, Model};
+use super::{ChoicePayload, HandoffDraft, Id, ModalFlow, Model};
 use tuirealm::terminal::TerminalAdapter;
 
 /// Choice-modal item wrapper for the worktree inspector. Picker
@@ -331,7 +331,9 @@ impl<T: TerminalAdapter> Model<T> {
 
         let label = workspace_key.to_string();
         let modal = Textarea::new("Reply").with_header(format!("on {label}"));
-        self.pending_reply = Some(workspace_key);
+        self.set_modal_flow(ModalFlow::Reply {
+            target: workspace_key,
+        });
         self.mount_modal(Id::Reply, modal);
     }
 
@@ -356,7 +358,9 @@ impl<T: TerminalAdapter> Model<T> {
             .with_header(format!("local scratchpad — {label} (never synced)"))
             .with_body(existing)
             .allow_empty();
-        self.pending_notes = Some(workspace_key);
+        self.set_modal_flow(ModalFlow::Notes {
+            target: workspace_key,
+        });
         self.mount_modal(Id::Notes, modal);
     }
 
@@ -371,7 +375,9 @@ impl<T: TerminalAdapter> Model<T> {
         if matches!(self.modal_stack.last(), Some(Id::NewWorkspace)) {
             return;
         }
-        self.pending_new_workspace_project = Some(project_key);
+        self.set_modal_flow(ModalFlow::NewWorkspaceProject {
+            project: project_key,
+        });
 
         let modal = Input::new("Name this workspace")
             .title("New workspace")
@@ -473,7 +479,9 @@ impl<T: TerminalAdapter> Model<T> {
                 .label(|l: &String| format!("@{l}"))
                 .payload_for(|l: &String| ChoicePayload::Text(l.clone()))
         };
-        self.pending_review_request = Some(workspace_key);
+        self.set_modal_flow(ModalFlow::ReviewRequest {
+            workspace: workspace_key,
+        });
         self.mount_modal(Id::RequestReviewers, modal);
     }
 
@@ -502,7 +510,9 @@ impl<T: TerminalAdapter> Model<T> {
         // Pair each label with the toggle it fires so the pick carries
         // its own `PolicyToggle` (#512).
         let items: Vec<(String, PolicyToggle)> = labels.into_iter().zip(toggles).collect();
-        self.pending_policy_workspace = Some(workspace_key);
+        self.set_modal_flow(ModalFlow::PolicyWorkspace {
+            workspace: workspace_key,
+        });
         let modal = Choice::single("● armed · ○ off — Enter toggles", items)
             .title("Automation policies")
             .label(|(l, _): &(String, PolicyToggle)| l.clone())
@@ -568,10 +578,12 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         }
         let labels = agents.clone();
-        self.pending_work_picker = Some(PendingWorkPicker {
-            agents,
-            session_id,
-            model_alias,
+        self.set_modal_flow(ModalFlow::WorkPicker {
+            picker: PendingWorkPicker {
+                agents,
+                session_id,
+                model_alias,
+            },
         });
         let modal = Choice::single("Several agents are running — inject into…", labels)
             .title("Work with which agent?")
@@ -609,7 +621,9 @@ impl<T: TerminalAdapter> Model<T> {
             .unwrap_or_default()
             .into_iter()
             .collect();
-        self.pending_assignees_request = Some(workspace_key);
+        self.set_modal_flow(ModalFlow::AssigneesRequest {
+            workspace: workspace_key,
+        });
         // Items are bare logins; `@` is display-only, the payload is the
         // login (#512).
         let modal = Choice::multi("Assign to", candidates)
@@ -645,7 +659,7 @@ impl<T: TerminalAdapter> Model<T> {
             tracing::info!(?top, "label picker skipped — another modal owns the stack");
             // Disarm the request stash so a later stray `RepoLabels`
             // broadcast can't mount the picker unprompted.
-            self.pending_labels_request = None;
+            self.awaiting_repo_labels = None;
             if !matches!(top, Id::ManageLabels) {
                 self.flash_hint("labels loaded, but another dialog was open — press g l again");
             }
@@ -681,7 +695,7 @@ impl<T: TerminalAdapter> Model<T> {
         // upstream); each row renders `[name]` to match the sidebar's
         // chip framing, and carries its bare name as the payload (#512).
         let names: Vec<String> = repo_labels.into_iter().map(|l| l.name).collect();
-        self.pending_labels_request = Some(workspace_key);
+        self.awaiting_repo_labels = Some(workspace_key);
         let modal = Choice::multi("Apply labels", names)
             .title("Labels (toggle to add/remove)")
             .label(|name: &String| format!("[{name}]"))
@@ -753,7 +767,9 @@ impl<T: TerminalAdapter> Model<T> {
             ("1 month", Duration::from_secs(30 * 24 * 3600)),
             ("Forever (1 year)", Duration::from_secs(365 * 24 * 3600)),
         ];
-        self.pending_snooze_workspace = Some(session_key);
+        self.set_modal_flow(ModalFlow::Snooze {
+            workspace: session_key,
+        });
         // Each row carries its own duration (#512).
         let modal = Choice::single("Snooze for…", options)
             .title("Snooze duration")
@@ -982,7 +998,7 @@ impl<T: TerminalAdapter> Model<T> {
         if !self.modal_stack.is_empty() {
             return;
         }
-        let Some(prompt) = self.pending_removal_prompts.pop_front() else {
+        let Some(prompt) = self.removal_prompt_queue.pop_front() else {
             return;
         };
         let copy = match prompt.reason {
@@ -1000,7 +1016,10 @@ impl<T: TerminalAdapter> Model<T> {
         } else {
             modal.default_no()
         };
-        self.active_removal_prompt = Some((prompt.workspace_key, prompt.reason));
+        self.set_modal_flow(ModalFlow::RemovalPrompt {
+            workspace: prompt.workspace_key,
+            reason: prompt.reason,
+        });
         self.mount_modal(Id::RemoveOutOfScope, modal);
     }
 
@@ -1009,7 +1028,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// are no other workspaces — show a hint instead since there's
     /// nothing to pick.
     /// Unified Confirm-modal mount for any destructive catalog
-    /// action. Stashes the action in `pending_action_confirm`;
+    /// action. Stashes the action in `ModalFlow::ActionConfirm`;
     /// `Msg::Confirmed(true)` reads it back, dispatches via
     /// `dispatch_action_unchecked`, and drains IPC commands.
     /// `Msg::Confirmed(false)` (or Esc) drops the stash silently.
@@ -1048,7 +1067,7 @@ impl<T: TerminalAdapter> Model<T> {
                 .confirm_default
                 .destructive_shortcut
                 .is_yes();
-        self.pending_action_confirm = Some((action, target));
+        self.set_modal_flow(ModalFlow::ActionConfirm { action, target });
         let modal = Confirm::new(&prompt);
         let modal = if default_yes {
             modal.default_yes()
@@ -1134,7 +1153,7 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
         };
-        self.pending_help_action = Some(intent);
+        self.set_modal_flow(ModalFlow::HelpAction { intent });
         let modal = Confirm::new(preview);
         let modal = if default_yes {
             modal.default_yes()
@@ -1164,7 +1183,7 @@ impl<T: TerminalAdapter> Model<T> {
 
     /// Mount the inspector list. Called from the
     /// `Event::WorktreesInspected` handler. Stashes the report in
-    /// `pending_inspect_rows` so the choice handler can index back.
+    /// `ModalFlow::InspectList` so the choice handler can index back.
     ///
     /// Row layout:
     /// - sentinel "delete all N safe" row (only when N > 0)
@@ -1221,8 +1240,13 @@ impl<T: TerminalAdapter> Model<T> {
         }
 
         // Stash the full list so the pick handler can resolve indices
-        // back to inspections (skipping the sentinel as needed).
-        self.pending_inspect_rows = rows;
+        // back to inspections (skipping the sentinel as needed). Assign
+        // directly, not via `set_modal_flow`: a delete-and-re-inspect
+        // legitimately replaces a still-live `InspectList` /
+        // `InspectConfirm` flow (the `inspector_owned` guard above
+        // permits exactly that), so the "no flow armed" assertion does
+        // not apply here.
+        self.modal_flow = Some(ModalFlow::InspectList { rows });
 
         if items.is_empty() {
             self.flash_info("no worktrees found under <state_root>/worktrees/");
@@ -1279,7 +1303,7 @@ impl<T: TerminalAdapter> Model<T> {
         // risk warrants caution beyond the general shortcut policy, and
         // No is never less safe than that knob would ask for.
         let modal = Confirm::new(&prompt).default_no();
-        self.pending_inspect_target = Some(target);
+        self.set_modal_flow(ModalFlow::InspectConfirm { target });
         self.mount_modal(Id::InspectConfirm, modal);
     }
 
@@ -1311,7 +1335,7 @@ impl<T: TerminalAdapter> Model<T> {
 
     /// Mount the import picker. Called from the
     /// `Event::CheckoutsDiscovered` handler. Stashes the discovered
-    /// rows in `pending_import_rows` so the choice handler can index
+    /// rows in `ModalFlow::ImportList` so the choice handler can index
     /// back to the picked checkout.
     pub(super) fn mount_import_checkout_picker(
         &mut self,
@@ -1336,7 +1360,11 @@ impl<T: TerminalAdapter> Model<T> {
         }
 
         let labels: Vec<String> = checkouts.iter().map(format_discovered_checkout).collect();
-        self.pending_import_rows = checkouts;
+        // Direct assign, not `set_modal_flow`: a rescan legitimately
+        // replaces a still-live import flow (the `import_owned` guard
+        // permits `ImportCheckoutList` / `ImportCheckoutConfirm`), so the
+        // "no flow armed" assertion does not apply.
+        self.modal_flow = Some(ModalFlow::ImportList { rows: checkouts });
 
         let modal = Choice::single("Import which checkout?", labels)
             .title("Import local checkout")
@@ -1369,7 +1397,7 @@ impl<T: TerminalAdapter> Model<T> {
             target.path.display(),
         );
         let modal = Confirm::new(&prompt).default_yes();
-        self.pending_import_target = Some(target);
+        self.set_modal_flow(ModalFlow::ImportConfirm { target });
         self.mount_modal(Id::ImportCheckoutConfirm, modal);
     }
 
@@ -1454,7 +1482,10 @@ impl<T: TerminalAdapter> Model<T> {
             })
             .collect();
 
-        self.pending_sidebar_context = Some((session_key, actions));
+        self.set_modal_flow(ModalFlow::SidebarContext {
+            session_key,
+            actions,
+        });
         let modal = Choice::single("Actions", labels)
             .title("Workspace actions")
             .label(|s: &String| s.clone());
@@ -1482,7 +1513,7 @@ impl<T: TerminalAdapter> Model<T> {
             self.flash_info("no other workspace to adopt sessions into");
             return;
         }
-        self.pending_adopt_source = Some(source_key);
+        self.set_modal_flow(ModalFlow::AdoptSource { source: source_key });
 
         // Each row carries its workspace key (#512).
         type AdoptRow = (lazybox_core::WorkspaceKey, String);
@@ -1499,7 +1530,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// itself, and excluding shell-only workspaces since the brief is
     /// meant for another agent, not a shell prompt. The source name +
     /// the seed captured from its agent screen are stashed in
-    /// `pending_handoff`; the pick funnels into the compose textarea
+    /// `ModalFlow::Handoff`; the pick funnels into the compose textarea
     /// (`mount_handoff_textarea`). No eligible target → a footer nudge
     /// and nothing stashed.
     pub(super) fn mount_handoff_picker(
@@ -1529,11 +1560,13 @@ impl<T: TerminalAdapter> Model<T> {
             self.flash_info("no other running agent to hand off to");
             return;
         }
-        self.pending_handoff = Some(HandoffDraft {
-            source: source_key.clone(),
-            source_name,
-            seed,
-            target: None,
+        self.set_modal_flow(ModalFlow::Handoff {
+            draft: HandoffDraft {
+                source: source_key.clone(),
+                source_name,
+                seed,
+                target: None,
+            },
         });
 
         // Each row carries its session key (#512).
@@ -1551,7 +1584,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// (`dispatch_handoff`).
     pub(super) fn mount_handoff_textarea(&mut self) {
         use crate::realm::components::textarea::Textarea;
-        let Some(draft) = &self.pending_handoff else {
+        let Some(ModalFlow::Handoff { draft }) = &self.modal_flow else {
             return;
         };
         let Some(target) = &draft.target else {
@@ -1629,7 +1662,7 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         }
         let Some((issue_key, pr_key, issue_label, pr_label, count)) =
-            self.pending_merge_prompts.pop_front()
+            self.merge_prompt_queue.pop_front()
         else {
             return;
         };
@@ -1641,7 +1674,10 @@ impl<T: TerminalAdapter> Model<T> {
         // one (#525).
         let modal =
             Confirm::new(merge_prompt_question(&pr_label, &issue_label, count)).default_yes();
-        self.active_merge_prompt = Some((issue_key, pr_key));
+        self.set_modal_flow(ModalFlow::MergePrompt {
+            issue: issue_key,
+            pr: pr_key,
+        });
         self.mount_modal(Id::MergeConfirm, modal);
     }
 

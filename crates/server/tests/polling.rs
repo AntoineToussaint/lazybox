@@ -1480,6 +1480,86 @@ fn linear_filter_drops_disallowed_roles() {
     assert_eq!(kept[0].id.key, "LIN-1");
 }
 
+/// Helper: an issue with the given role carrying one `lazybox:*` label.
+fn labeled_issue(key: &str, role: TaskRole, label: &str) -> Task {
+    let mut t = make_typed_task(key, role, false);
+    t.labels = vec![lazybox_core::Label::new(label)];
+    t
+}
+
+fn spawn_agent_fields(
+    action: &polling::ProviderAction,
+) -> (String, Option<String>, Option<String>) {
+    match action {
+        polling::ProviderAction::AutoSpawnAgent {
+            agent_id,
+            model_alias,
+            dedup_key,
+            ..
+        } => (agent_id.clone(), model_alias.clone(), dedup_key.clone()),
+        _ => panic!("expected AutoSpawnAgent"),
+    }
+}
+
+#[test]
+fn label_spawn_actions_parses_agent_and_model_for_owned_issue() {
+    let issue = labeled_issue("1", TaskRole::Author, "lazybox:codex/xhigh");
+    let acts = polling::label_spawn_actions(&[issue], &std::collections::HashSet::new());
+    assert_eq!(acts.len(), 1);
+    let (agent, model, dedup) = spawn_agent_fields(&acts[0].1);
+    assert_eq!(agent, "codex");
+    assert_eq!(model.as_deref(), Some("xhigh"));
+    assert!(
+        dedup.is_some_and(|k| k.contains("lazybox:codex/xhigh")),
+        "label path must carry an idempotency key"
+    );
+}
+
+#[test]
+fn label_spawn_actions_bare_label_uses_agent_default_model() {
+    let issue = labeled_issue("1", TaskRole::Assignee, "lazybox:claude");
+    let acts = polling::label_spawn_actions(&[issue], &std::collections::HashSet::new());
+    assert_eq!(acts.len(), 1);
+    let (agent, model, _) = spawn_agent_fields(&acts[0].1);
+    assert_eq!(agent, "claude");
+    assert_eq!(model, None);
+}
+
+#[test]
+fn label_spawn_actions_ignores_issues_the_user_does_not_own() {
+    // A third party labelled an issue you're merely mentioned in /
+    // reviewing — must NOT spend your tokens.
+    let mentioned = labeled_issue("1", TaskRole::Mentioned, "lazybox:codex/xhigh");
+    let reviewer = labeled_issue("2", TaskRole::Reviewer, "lazybox:codex/xhigh");
+    let acts =
+        polling::label_spawn_actions(&[mentioned, reviewer], &std::collections::HashSet::new());
+    assert!(acts.is_empty(), "only authored/assigned issues trigger");
+}
+
+#[test]
+fn label_spawn_actions_skips_prs() {
+    let mut pr = make_typed_task("1", TaskRole::Author, true);
+    pr.labels = vec![lazybox_core::Label::new("lazybox:codex/xhigh")];
+    let acts = polling::label_spawn_actions(&[pr], &std::collections::HashSet::new());
+    assert!(
+        acts.is_empty(),
+        "the implement-issue prompt is wrong for a PR"
+    );
+}
+
+#[test]
+fn label_spawn_actions_skips_workspace_a_mention_already_queued() {
+    let issue = labeled_issue("1", TaskRole::Author, "lazybox:codex/xhigh");
+    let key = lazybox_core::workspace_key_for(&issue);
+    let mut queued = std::collections::HashSet::new();
+    queued.insert(key);
+    let acts = polling::label_spawn_actions(&[issue], &queued);
+    assert!(
+        acts.is_empty(),
+        "a mention + a label on one issue must not start two agents"
+    );
+}
+
 #[test]
 fn empty_filter_drops_everything() {
     // Defensive: if the user somehow ends up with an empty filter,

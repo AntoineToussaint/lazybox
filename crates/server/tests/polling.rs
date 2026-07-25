@@ -3594,6 +3594,88 @@ async fn adopt_sessions_moves_sessions_between_workspaces() {
 }
 
 #[tokio::test]
+async fn adopt_sessions_carries_user_state_and_activity() {
+    // Issue #554: adopt used to drain only sessions, dropping the source's
+    // snippet count, notes, snooze, arms and even its activity. It must now
+    // route through the shared user-state + activity carriers.
+    use lazybox_core::WorkspaceKey;
+
+    let config = ServerConfig::in_memory();
+    let (source_key, _session_id) = seed_issue_with_session(&config, "o/r#71").await;
+
+    // Load the seeded source, decorate it with every user-owned field, and
+    // an activity item, then save it back.
+    let mut source_ws: lazybox_core::Workspace = serde_json::from_str(
+        &config
+            .store
+            .get_workspace(&source_key)
+            .unwrap()
+            .unwrap()
+            .workspace_json
+            .unwrap(),
+    )
+    .unwrap();
+    source_ws.notes = "carry me".into();
+    source_ws.record_sent_snippet("rev".into());
+    source_ws.record_sent_snippet("plan".into());
+    source_ws.snoozed_until = Some(Utc::now() + chrono::Duration::hours(3));
+    source_ws.auto_merge_on_green = true;
+    source_ws.merge_activity(&[lazybox_core::Activity {
+        author: "alice".into(),
+        body: "please rebase".into(),
+        created_at: Utc::now(),
+        kind: lazybox_core::ActivityKind::Comment,
+        node_id: Some("IC_1".into()),
+        path: None,
+        line: None,
+        diff_hunk: None,
+        thread_id: None,
+    }]);
+    config
+        .store
+        .save_workspace(&WorkspaceRecord {
+            key: source_key.as_str().to_string(),
+            created_at: source_ws.created_at,
+            workspace_json: Some(serde_json::to_string(&source_ws).unwrap()),
+        })
+        .unwrap();
+
+    polling::upsert(&config, make_task("o/r#999")).await;
+    let target_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_task("o/r#999")));
+
+    polling::handle_adopt_sessions(&config, source_key.clone(), target_key.clone()).await;
+
+    let target_ws: lazybox_core::Workspace = serde_json::from_str(
+        &config
+            .store
+            .get_workspace(&target_key)
+            .unwrap()
+            .unwrap()
+            .workspace_json
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(target_ws.notes, "carry me", "notes must follow the adopt");
+    assert_eq!(
+        target_ws.sent_snippets,
+        vec!["plan", "rev"],
+        "the snippet MRU (the `]N` badge) must follow the adopt",
+    );
+    assert_eq!(
+        target_ws.snoozed_until, source_ws.snoozed_until,
+        "snooze must follow the adopt",
+    );
+    assert!(
+        target_ws.auto_merge_on_green,
+        "the merge-on-green arm must follow the adopt",
+    );
+    assert!(
+        target_ws.activity.iter().any(|a| a.body == "please rebase"),
+        "activity must follow the adopt",
+    );
+}
+
+#[tokio::test]
 async fn failed_adopt_batch_cannot_duplicate_or_lose_sessions() {
     use lazybox_core::{SessionKey, WorkspaceKey};
     use lazybox_ipc::TerminalId;

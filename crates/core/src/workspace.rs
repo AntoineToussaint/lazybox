@@ -144,6 +144,19 @@ pub enum CleanupPrompt {
     Declined,
 }
 
+impl CleanupPrompt {
+    /// The more decisive of two answers when merging across a workspace
+    /// transfer (issue #554): a recorded `Declined` beats `Unresolved`, so
+    /// a "keep" the user made on either side is never re-prompted after a
+    /// move.
+    fn most_decided(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Declined, _) | (_, Self::Declined) => Self::Declined,
+            _ => Self::Unresolved,
+        }
+    }
+}
+
 /// Version stamped into every persisted `Workspace` JSON blob.
 ///
 /// Bump this when a field is renamed, retyped, or otherwise changed in
@@ -713,6 +726,91 @@ impl Workspace {
         }
     }
 
+    /// Fold every **user-owned** field of `other` into this workspace,
+    /// each by an explicit merge rule. The single source of truth for
+    /// what survives when a session moves between workspaces — the
+    /// issue→PR collapse and the `Shift-A` adopt both route through here
+    /// (issue #554), so the two flows can't diverge and neither silently
+    /// drops state the way the old hand-copied allowlist did.
+    ///
+    /// The `match`-style destructure is load-bearing: adding **any** field
+    /// to [`Workspace`] is a compile error here until the field is
+    /// classified — given a merge rule (user-owned state) or bound to `_`
+    /// (identity, structure, or provider-derived state that is re-synced,
+    /// not transferred). New session state therefore transfers
+    /// automatically, or forces a decision; it can no longer be lost by
+    /// omission.
+    ///
+    /// Out of scope, by design: **terminal-keyed** state (prompt history,
+    /// composing draft, no-perm flag, PTY generation) already transfers
+    /// automatically. It's keyed by the terminal's `backend_key` — a stable
+    /// tmux identity that doesn't change on a move — and centralized behind
+    /// `TerminalPersistedField::ALL` in the server. Nothing here touches it.
+    ///
+    /// Activity + read/seen state has its own carrier,
+    /// [`Self::absorb_activity_from`] (it remaps read marks content-wise),
+    /// so `activity`/`seen_count`/`read_indices` are intentionally ignored
+    /// below — the caller invokes both. `other` is left untouched; the
+    /// caller decides whether to keep or delete its row.
+    pub fn absorb_user_state_from(&mut self, other: &Workspace) {
+        let Workspace {
+            // ── identity & structure: belong to the destination row ──
+            schema: _,
+            key: _,
+            project_key: _,
+            local: _,
+            linked_checkout: _,
+            name: _,
+            branch: _,
+            // Sessions are moved by the caller — a move needs the terminal
+            // rebadge plan committed in the same transaction, which lives
+            // in the server, not here.
+            sessions: _,
+            created_at: _,
+            // ── provider-derived: re-synced from tasks, never hand-copied ──
+            pr: _,
+            gh_issues: _,
+            linear_issues: _,
+            // Carried by `absorb_activity_from` (remaps read/seen too).
+            activity: _,
+            seen_count: _,
+            read_indices: _,
+            // ── user-owned state: one explicit merge rule each ──
+            snoozed_until,
+            auto_merge_on_green,
+            track_main,
+            base_branch,
+            track_main_behind,
+            policies,
+            notes,
+            sent_snippets,
+            cleanup_prompt,
+            last_viewed_at,
+        } = other;
+
+        // Snooze: keep the later deadline — the longer snooze wins.
+        self.snoozed_until = later_opt(self.snoozed_until, *snoozed_until);
+        // Automation arms are OR: if either row armed it, stay armed.
+        self.auto_merge_on_green |= *auto_merge_on_green;
+        self.track_main |= *track_main;
+        self.track_main_behind |= *track_main_behind;
+        // Base branch: keep whichever side already resolved one; the next
+        // sweep re-derives it if neither did.
+        if self.base_branch.is_none() {
+            self.base_branch = base_branch.clone();
+        }
+        // Policies: fold per arm, most-decisive choice wins.
+        self.policies.absorb_from(policies);
+        // Notes: concatenate so neither scratchpad is lost.
+        self.notes = merge_notes(&self.notes, notes);
+        // Snippet MRU: union, destination recency first, capped.
+        self.sent_snippets = merge_sent_snippets(&self.sent_snippets, sent_snippets);
+        // Cleanup answer: a recorded "keep" on either side is kept.
+        self.cleanup_prompt = self.cleanup_prompt.most_decided(*cleanup_prompt);
+        // Last viewed: the more recent view of either row.
+        self.last_viewed_at = later_opt(self.last_viewed_at, *last_viewed_at);
+    }
+
     /// The "headline" task for this workspace — the one components
     /// like the sidebar row and the right-pane header render. PRs
     /// always win over issues; among issues we pick the first GitHub
@@ -1053,6 +1151,44 @@ pub fn project_key_for_task(task: &Task) -> Option<crate::ProjectKey> {
             sanitize_key(repo)
         ))),
     }
+}
+
+/// The later of two optional timestamps (issue #554 user-state merge).
+/// `None` is treated as "no value", so a present timestamp always wins
+/// over an absent one.
+fn later_opt(a: Option<DateTime<Utc>>, b: Option<DateTime<Utc>>) -> Option<DateTime<Utc>> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// Merge two workspace notes losslessly (issue #554): an empty side
+/// contributes nothing, identical notes stay single, otherwise both are
+/// kept, destination first, separated by a blank line. Concatenating
+/// rather than picking a winner means a move never discards a scratchpad.
+fn merge_notes(dst: &str, src: &str) -> String {
+    match (dst.trim().is_empty(), src.trim().is_empty()) {
+        (true, _) => src.to_string(),
+        (_, true) => dst.to_string(),
+        _ if dst == src => dst.to_string(),
+        _ => format!("{dst}\n\n{src}"),
+    }
+}
+
+/// Union two sent-snippet MRUs (issue #554), destination recency first,
+/// de-duplicated and capped at [`SENT_SNIPPETS_MAX`]. The `]N` badge on
+/// the surviving workspace then reflects everything told to either
+/// session's agent rather than resetting on a move.
+fn merge_sent_snippets(dst: &[String], src: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(dst.len() + src.len());
+    for key in dst.iter().chain(src.iter()) {
+        if !out.iter().any(|k| k == key) {
+            out.push(key.clone());
+        }
+    }
+    out.truncate(SENT_SNIPPETS_MAX);
+    out
 }
 
 fn sanitize_key(raw: &str) -> String {
@@ -2877,5 +3013,138 @@ mod tests {
         value.as_object_mut().unwrap().remove("sent_snippets");
         let legacy: Workspace = serde_json::from_value(value).unwrap();
         assert!(legacy.sent_snippets.is_empty());
+    }
+
+    /// Populate every user-owned field with a distinctive, non-default
+    /// value so a round-trip through `absorb_user_state_from` proves each
+    /// one is actually carried. Deliberately does NOT set structural /
+    /// provider-derived fields — those are the destination's own.
+    fn source_with_all_user_state() -> Workspace {
+        let mut w = Workspace::empty(WorkspaceKey::new("issue-src"), "scratch", now());
+        w.snoozed_until = Some(now() + chrono::Duration::hours(5));
+        w.auto_merge_on_green = true;
+        w.track_main = true;
+        w.base_branch = Some("main".into());
+        w.track_main_behind = true;
+        w.policies
+            .set(crate::AutoFixKind::CiFailure, crate::PolicyArm::Arm);
+        w.policies
+            .set(crate::AutoFixKind::MergeConflict, crate::PolicyArm::Disarm);
+        w.notes = "source note".into();
+        w.record_sent_snippet("rev".into());
+        w.record_sent_snippet("plan".into());
+        w.cleanup_prompt = CleanupPrompt::Declined;
+        w.last_viewed_at = Some(now() + chrono::Duration::hours(2));
+        w
+    }
+
+    /// The core #554 guarantee: transferring a session's workspace carries
+    /// **every** user-owned field. A blank destination absorbs a fully-
+    /// populated source and each field lands per its merge rule.
+    #[test]
+    fn absorb_user_state_carries_every_field_onto_blank_target() {
+        let source = source_with_all_user_state();
+        let mut target = Workspace::empty(WorkspaceKey::new("pr-dst"), "feature", now());
+        target.absorb_user_state_from(&source);
+
+        assert_eq!(target.snoozed_until, source.snoozed_until, "snooze carried");
+        assert!(target.auto_merge_on_green, "merge-on-green arm carried");
+        assert!(target.track_main, "track-main arm carried");
+        assert_eq!(target.base_branch.as_deref(), Some("main"), "base carried");
+        assert!(target.track_main_behind, "behind flag carried");
+        assert_eq!(
+            target.policies.arm(crate::AutoFixKind::CiFailure),
+            crate::PolicyArm::Arm,
+            "auto-fix-ci policy carried",
+        );
+        assert_eq!(
+            target.policies.arm(crate::AutoFixKind::MergeConflict),
+            crate::PolicyArm::Disarm,
+            "auto-fix-conflict policy carried",
+        );
+        assert_eq!(target.notes, "source note", "notes carried");
+        assert_eq!(
+            target.sent_snippets,
+            vec!["plan", "rev"],
+            "snippet MRU carried in order",
+        );
+        assert_eq!(
+            target.cleanup_prompt,
+            CleanupPrompt::Declined,
+            "cleanup answer carried",
+        );
+        assert_eq!(
+            target.last_viewed_at, source.last_viewed_at,
+            "last-viewed carried",
+        );
+    }
+
+    /// When both sides carry state, the merge rules combine rather than
+    /// clobber: snooze/last-viewed take the later value, arms OR, notes
+    /// concatenate, snippets union, policies keep the more decisive arm,
+    /// cleanup keeps a recorded "keep".
+    #[test]
+    fn absorb_user_state_merges_when_both_sides_populated() {
+        let source = source_with_all_user_state();
+
+        let mut target = Workspace::empty(WorkspaceKey::new("pr-dst"), "feature", now());
+        // Target has an EARLIER snooze and an EARLIER view than source.
+        target.snoozed_until = Some(now() + chrono::Duration::hours(1));
+        target.last_viewed_at = Some(now() + chrono::Duration::hours(1));
+        target.notes = "target note".into();
+        target.record_sent_snippet("test".into()); // distinct key
+        target.record_sent_snippet("rev".into()); // shared with source
+        // Target disarms auto-fix-ci; source armed it — Disarm is stronger.
+        target
+            .policies
+            .set(crate::AutoFixKind::CiFailure, crate::PolicyArm::Disarm);
+
+        target.absorb_user_state_from(&source);
+
+        assert_eq!(
+            target.snoozed_until,
+            Some(now() + chrono::Duration::hours(5)),
+            "the later snooze deadline wins",
+        );
+        assert_eq!(
+            target.last_viewed_at,
+            Some(now() + chrono::Duration::hours(2)),
+            "the more recent view wins",
+        );
+        assert_eq!(
+            target.notes, "target note\n\nsource note",
+            "both notes kept, destination first",
+        );
+        // Union, destination MRU first (rev de-duped, not doubled).
+        assert_eq!(target.sent_snippets, vec!["rev", "test", "plan"]);
+        assert_eq!(
+            target.policies.arm(crate::AutoFixKind::CiFailure),
+            crate::PolicyArm::Disarm,
+            "an explicit Disarm outranks the source's Arm",
+        );
+    }
+
+    /// Merging notes must never drop a scratchpad: an empty side yields the
+    /// other verbatim, and identical notes stay single (no doubling).
+    #[test]
+    fn merge_notes_is_lossless() {
+        assert_eq!(merge_notes("", "src"), "src");
+        assert_eq!(merge_notes("dst", ""), "dst");
+        assert_eq!(merge_notes("same", "same"), "same");
+        assert_eq!(merge_notes("a", "b"), "a\n\nb");
+        assert_eq!(merge_notes("   ", "b"), "b", "whitespace-only counts empty");
+    }
+
+    /// The absorb is non-destructive on the source (the adopt flow keeps
+    /// the source as a tracking row).
+    #[test]
+    fn absorb_user_state_leaves_source_untouched() {
+        let source = source_with_all_user_state();
+        let mut target = Workspace::empty(WorkspaceKey::new("pr-dst"), "feature", now());
+        target.absorb_user_state_from(&source);
+        // Source retains its own state — re-absorbing must be idempotent.
+        assert_eq!(source.notes, "source note");
+        assert_eq!(source.sent_snippets, vec!["plan", "rev"]);
+        assert_eq!(source.cleanup_prompt, CleanupPrompt::Declined);
     }
 }

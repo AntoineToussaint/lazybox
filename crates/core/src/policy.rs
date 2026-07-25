@@ -164,6 +164,25 @@ impl PolicyArm {
             PolicyArm::Disarm => "disarm",
         }
     }
+
+    /// The more decisive of two arms when merging policy across a workspace
+    /// transfer: an explicit `Disarm` outranks an explicit `Arm`, which
+    /// outranks the implicit `Default`. Mirrors the precedence in
+    /// [`auto_fix_permitted`] (an explicit "off" beats all).
+    fn max_decided(self, other: PolicyArm) -> PolicyArm {
+        fn rank(a: PolicyArm) -> u8 {
+            match a {
+                PolicyArm::Default => 0,
+                PolicyArm::Arm => 1,
+                PolicyArm::Disarm => 2,
+            }
+        }
+        if rank(other) > rank(self) {
+            other
+        } else {
+            self
+        }
+    }
 }
 
 /// Per-workspace automation-policy set. Persisted on [`crate::Workspace`]
@@ -209,6 +228,23 @@ impl AutomationPolicies {
     /// "armed policy" pill so an explicit per-session choice is visible.
     pub fn any_auto_fix_armed(&self) -> bool {
         self.auto_fix_ci == PolicyArm::Arm || self.auto_fix_conflict == PolicyArm::Arm
+    }
+
+    /// Fold another policy set into this one, per arm, keeping the more
+    /// decisive choice (`Disarm` > `Arm` > `Default`). Used when a session
+    /// moves between workspaces (issue #554) so an explicit arm/disarm the
+    /// user set on the source survives the transfer.
+    ///
+    /// The exhaustive destructure is deliberate: a new policy arm added to
+    /// [`AutomationPolicies`] is a compile error here until it's given a
+    /// merge rule, so workspace state can't silently fail to transfer.
+    pub fn absorb_from(&mut self, other: &AutomationPolicies) {
+        let AutomationPolicies {
+            auto_fix_ci,
+            auto_fix_conflict,
+        } = other;
+        self.auto_fix_ci = self.auto_fix_ci.max_decided(*auto_fix_ci);
+        self.auto_fix_conflict = self.auto_fix_conflict.max_decided(*auto_fix_conflict);
     }
 }
 
@@ -289,6 +325,32 @@ mod tests {
         assert_eq!(p.arm(AutoFixKind::MergeConflict), PolicyArm::Default);
         p.set(AutoFixKind::MergeConflict, PolicyArm::Arm);
         assert!(p.any_auto_fix_armed());
+    }
+
+    /// Merging policies across a workspace transfer keeps the more
+    /// decisive arm per kind: `Disarm` > `Arm` > `Default` (issue #554).
+    #[test]
+    fn absorb_from_keeps_most_decisive_arm() {
+        // Disarm on either side wins over Arm.
+        let mut a = AutomationPolicies::default();
+        a.set(AutoFixKind::CiFailure, PolicyArm::Arm);
+        let mut b = AutomationPolicies::default();
+        b.set(AutoFixKind::CiFailure, PolicyArm::Disarm);
+        a.absorb_from(&b);
+        assert_eq!(a.arm(AutoFixKind::CiFailure), PolicyArm::Disarm);
+
+        // An explicit arm on the source lands on a Default destination.
+        let mut c = AutomationPolicies::default();
+        let mut d = AutomationPolicies::default();
+        d.set(AutoFixKind::MergeConflict, PolicyArm::Arm);
+        c.absorb_from(&d);
+        assert_eq!(c.arm(AutoFixKind::MergeConflict), PolicyArm::Arm);
+
+        // A Default source never downgrades an armed destination.
+        let mut e = AutomationPolicies::default();
+        e.set(AutoFixKind::CiFailure, PolicyArm::Arm);
+        e.absorb_from(&AutomationPolicies::default());
+        assert_eq!(e.arm(AutoFixKind::CiFailure), PolicyArm::Arm);
     }
 
     /// Pre-#363 workspace JSON has no `policies` key; it must read back

@@ -37,6 +37,11 @@ pub struct SocketService {
     socket: PathBuf,
     pid_file: PathBuf,
     shutdown: Arc<Notify>,
+    /// Graceful-stop broadcast to every connection's serve loop.
+    /// Raised on shutdown BEFORE the connection tasks are aborted so
+    /// each loop gets its bounded in-flight-mutation drain (a SIGTERM
+    /// used to abort a merge save or worktree teardown mid-write).
+    graceful_stop: tokio::sync::watch::Sender<bool>,
     /// Server config used to serve each new connection.
     config_factory: Box<dyn Fn() -> ServerConfig + Send + Sync>,
     max_connections: usize,
@@ -56,6 +61,7 @@ impl SocketService {
             socket,
             pid_file,
             shutdown: Arc::new(Notify::new()),
+            graceful_stop: tokio::sync::watch::channel(false).0,
             config_factory: Box::new(config_factory),
             max_connections: DEFAULT_MAX_SOCKET_CONNECTIONS,
             handshake_timeout: socket::HANDSHAKE_TIMEOUT,
@@ -161,6 +167,7 @@ impl SocketService {
                     };
                     let config = (self.config_factory)();
                     let handshake_timeout = self.handshake_timeout;
+                    let graceful_stop = self.graceful_stop.subscribe();
                     connections.spawn(async move {
                         let _permit = permit;
                         // Handshake before the frame loop: a client from
@@ -195,7 +202,7 @@ impl SocketService {
                             );
                         }
                         let server = socket::serve(rd, wr);
-                        let daemon = Server::new(config);
+                        let daemon = Server::new(config).with_graceful_stop(graceful_stop);
                         if let Err(e) = daemon.serve(server).await {
                             tracing::warn!("daemon serve: {e}");
                         }
@@ -204,9 +211,33 @@ impl SocketService {
             }
         }
 
-        // The service owns every accepted connection task. Explicit daemon
-        // shutdown cancels and joins them instead of leaving detached socket
-        // readers/writers alive past listener cleanup.
+        // The service owns every accepted connection task. On explicit
+        // shutdown (SIGTERM via the signal handler), first raise the
+        // graceful-stop signal: each serve loop breaks and runs its own
+        // bounded in-flight-mutation drain (`MUTATION_DRAIN_TIMEOUT`),
+        // exactly as it would on a client disconnect. Aborting straight
+        // away used to cancel a merge that had already succeeded
+        // remotely before its local save, or a workspace delete between
+        // terminal kill and worktree removal. The wait here is one
+        // second longer than the per-connection drain so a healthy loop
+        // always finishes on its own; anything still running past that
+        // (a wedged transport, a stuck handshake) is cancelled and
+        // joined as before, so shutdown stays bounded.
+        let _ = self.graceful_stop.send(true);
+        let drain_bound = crate::MUTATION_DRAIN_TIMEOUT + Duration::from_secs(1);
+        let drain = async {
+            while let Some(result) = connections.join_next().await {
+                if let Err(error) = result {
+                    tracing::warn!("socket connection task failed: {error}");
+                }
+            }
+        };
+        if tokio::time::timeout(drain_bound, drain).await.is_err() {
+            tracing::warn!(
+                ?drain_bound,
+                "shutdown: connection task(s) still running past the drain bound — aborting them"
+            );
+        }
         connections.shutdown().await;
 
         // Cleanup: drop the socket file + pid file so next `start`

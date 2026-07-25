@@ -817,6 +817,47 @@ async fn migrate_picks_up_pr_title_rename() {
     );
 }
 #[tokio::test]
+async fn migrate_keeps_old_scheme_issue_checkout_resolving() {
+    // The worktree-slug scheme changed for non-PR workspaces (issue
+    // number prefix, so two same-titled issues stop sharing one
+    // checkout). Existing checkouts were provisioned under the bare
+    // title slug: their persisted session paths must keep resolving —
+    // a live old-scheme worktree is reused in place, never chased to
+    // the new `issue-N-…` path.
+    use lazybox_core::WorkspaceSession;
+    let root = tempfile::tempdir().unwrap();
+    let old_dir = root.path().join("bump-dependencies"); // old scheme
+    std::fs::create_dir_all(old_dir.join(".git")).unwrap();
+
+    // An ISSUE task (no /pull/ URL → no PR slot).
+    let mut task = make_task("o/r#42");
+    task.title = "Bump dependencies".into();
+    task.url = "https://github.com/o/r/issues/42".into();
+    let mut ws = lazybox_core::Workspace::from_task(task, Utc::now());
+    assert!(ws.pr.is_none(), "fixture must be an issue workspace");
+    assert!(
+        ws.worktree_slug().starts_with("issue-42-"),
+        "new scheme disambiguates with the issue number: {}",
+        ws.worktree_slug()
+    );
+    ws.add_session(WorkspaceSession::new(
+        ws.key.clone(),
+        lazybox_core::SessionKind::Shell,
+        old_dir.clone(),
+        Utc::now(),
+    ));
+
+    let moved =
+        lazybox_server::spawn_handler::migrate_session_paths_if_needed_under(&mut ws, root.path())
+            .await;
+    assert!(!moved, "a live old-scheme worktree is not rewritten");
+    assert_eq!(
+        ws.sessions[0].worktree_path, old_dir,
+        "the existing checkout keeps resolving at its old-scheme path"
+    );
+}
+
+#[tokio::test]
 async fn migrate_reuses_live_worktree_in_place_on_slug_change() {
     // The issue→PR absorb (and an upstream PR-title edit) leaves a
     // session attached to a workspace whose slug differs from the
@@ -1737,6 +1778,64 @@ async fn rescope_removes_workspaces_with_no_active_session() {
     );
     assert!(after.iter().any(|k| k.contains("current")));
 }
+
+/// A session-less out-of-scope workspace carrying a non-empty user
+/// note is user work exactly like a session is: the rescope sweep
+/// must preserve it (it goes Inactive) instead of deleting the note
+/// with the row.
+#[tokio::test]
+async fn rescope_preserves_sessionless_workspaces_with_notes() {
+    use lazybox_core::WorkspaceKey;
+    let config = ServerConfig::in_memory();
+    polling::upsert(&config, make_task("o/r#noted")).await;
+    polling::upsert(&config, make_task("o/r#current")).await;
+
+    // The user wrote a note on `#noted`; no sessions, no terminals.
+    let noted_key = lazybox_core::workspace_key_for(&make_task("o/r#noted"));
+    let record = config
+        .store
+        .list_workspaces()
+        .unwrap()
+        .into_iter()
+        .find(|r| r.key == noted_key)
+        .expect("noted workspace persisted");
+    let mut ws: lazybox_core::Workspace =
+        serde_json::from_str(record.workspace_json.as_deref().unwrap()).unwrap();
+    ws.notes = "remember: blocked on upstream fix".into();
+    config
+        .store
+        .save_workspace(&lazybox_store::WorkspaceRecord {
+            key: record.key.clone(),
+            created_at: record.created_at,
+            workspace_json: Some(serde_json::to_string(&ws).unwrap()),
+        })
+        .unwrap();
+
+    // A poll that no longer lists `#noted`.
+    let outcome = polling::TickOutcome {
+        polled: vec![WorkspaceKey::new(lazybox_core::workspace_key_for(
+            &make_task("o/r#current"),
+        ))],
+        any_source_succeeded: true,
+        retry_after_secs: None,
+        saw_unknown_mergeable: false,
+        source_scopes: std::collections::HashMap::new(),
+        all_full: true,
+    };
+    polling::rescope(&config, &outcome).await;
+
+    let after: Vec<String> = config
+        .store
+        .list_workspaces()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.key)
+        .collect();
+    assert!(
+        after.iter().any(|k| k == &noted_key),
+        "a workspace with user notes must survive rescope; got: {after:?}"
+    );
+}
 #[tokio::test]
 async fn rescope_keeps_workspaces_with_active_sessions_and_emits_prompt() {
     use lazybox_core::{SessionKey, WorkspaceKey};
@@ -2467,6 +2566,135 @@ async fn pr_polled_after_issue_collapses_them_into_one_row() {
         "silent merges must emit WorkspaceMerged for the footer notice",
     );
 }
+/// `make_activity` with a deterministic timestamp so newest-first
+/// ordering (and therefore index-based read marks) is stable across
+/// the merge these tests exercise.
+fn activity_at_secs(author: &str, body: &str, secs: i64) -> Activity {
+    let mut a = make_activity(author, body);
+    a.created_at = Utc::now() - chrono::Duration::seconds(10_000 - secs);
+    a
+}
+
+#[tokio::test]
+async fn collapse_preserves_issue_activity_and_read_state() {
+    // Regression (docs/resiliency-review.md): folding an issue into
+    // its closing PR moved sessions and tasks but dropped the issue
+    // workspace's activity feed AND its read marks — the comment
+    // history vanished and anything the user had read resurfaced as
+    // unread. The collapse must carry both onto the PR workspace.
+    let config = ServerConfig::in_memory();
+
+    // Issue polled first, carrying three comments.
+    let mut issue = make_issue_task("o/r#71");
+    issue.recent_activity = vec![
+        activity_at_secs("alice", "issue oldest", 10),
+        activity_at_secs("bob", "issue middle", 20),
+        activity_at_secs("carol", "issue newest", 30),
+    ];
+    polling::upsert(&config, issue.clone()).await;
+
+    // The user reads the middle row (index 1, newest-first) through
+    // the production mark path.
+    let issue_key = lazybox_core::WorkspaceKey::new(lazybox_core::workspace_key_for(&issue));
+    polling::mark_activity_read(&config, &issue_key, 1, None).await;
+
+    // The claiming PR arrives with its own comment → silent collapse.
+    let mut pr = make_pr_closing("o/r#141", &["o/r#71"]);
+    pr.recent_activity = vec![activity_at_secs("dave", "pr comment", 40)];
+    polling::upsert(&config, pr).await;
+
+    let records = config.store.list_workspaces().unwrap();
+    assert_eq!(records.len(), 1, "issue + PR must collapse to one row");
+    let ws: lazybox_core::Workspace =
+        serde_json::from_str(&records[0].workspace_json.clone().unwrap()).unwrap();
+
+    let bodies: Vec<&str> = ws.activity.iter().map(|a| a.body.as_str()).collect();
+    assert_eq!(
+        bodies,
+        ["pr comment", "issue newest", "issue middle", "issue oldest"],
+        "the PR workspace must inherit the issue's full comment history"
+    );
+    assert!(
+        ws.is_activity_unread(0),
+        "the PR's own fresh comment stays unread"
+    );
+    assert!(
+        ws.is_activity_unread(1),
+        "an issue comment the user never read stays unread"
+    );
+    assert!(
+        !ws.is_activity_unread(2),
+        "the issue's read mark must survive the collapse at the row's new index"
+    );
+    assert!(
+        ws.is_activity_unread(3),
+        "the issue's other unread comment stays unread"
+    );
+}
+
+#[tokio::test]
+async fn mark_activity_read_fingerprint_survives_list_shift() {
+    // Regression: `Command::MarkActivityRead` shipped only a raw
+    // index resolved against the CLIENT's snapshot. A poll committing
+    // a new top-of-feed comment between snapshot and command shifted
+    // every index, so the daemon marked whatever row had slid into
+    // that slot. With the fingerprint riding along, the daemon
+    // re-resolves against its CURRENT list.
+    let config = ServerConfig::in_memory();
+    let older = activity_at_secs("alice", "older target", 10);
+    let mut task = make_task("o/r#9");
+    task.recent_activity = vec![older.clone(), activity_at_secs("bob", "newer", 20)];
+    polling::upsert(&config, task.clone()).await;
+    let key = lazybox_core::WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
+
+    // Client snapshot: ["newer"(0), "older target"(1)] — it resolves
+    // index 1 + fingerprint. Before the command lands, a poll commits
+    // a fresh comment: ["fresh"(0), "newer"(1), "older target"(2)].
+    let fingerprint = lazybox_core::ActivityFingerprint::of(&older);
+    task.recent_activity
+        .push(activity_at_secs("carol", "fresh", 30));
+    polling::upsert(&config, task.clone()).await;
+
+    polling::mark_activity_read(&config, &key, 1, Some(&fingerprint)).await;
+
+    let records = config.store.list_workspaces().unwrap();
+    let ws: lazybox_core::Workspace =
+        serde_json::from_str(&records[0].workspace_json.clone().unwrap()).unwrap();
+    assert_eq!(ws.activity[2].body, "older target");
+    assert!(
+        !ws.is_activity_unread(2),
+        "the fingerprinted row must be marked at its SHIFTED index"
+    );
+    assert!(
+        ws.is_activity_unread(1),
+        "the row now occupying the stale raw index must NOT be marked"
+    );
+    assert!(ws.is_activity_unread(0), "the fresh row stays unread");
+}
+
+#[tokio::test]
+async fn mark_activity_read_vanished_fingerprint_is_a_noop() {
+    // A fingerprint that no longer matches any row (comment deleted
+    // upstream between snapshot and command) must mark NOTHING — a
+    // logged no-op beats flipping a stranger to read.
+    let config = ServerConfig::in_memory();
+    let mut task = make_task("o/r#9");
+    task.recent_activity = vec![activity_at_secs("bob", "survivor", 20)];
+    polling::upsert(&config, task.clone()).await;
+    let key = lazybox_core::WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
+
+    let gone = lazybox_core::ActivityFingerprint::of(&activity_at_secs("alice", "deleted", 10));
+    polling::mark_activity_read(&config, &key, 0, Some(&gone)).await;
+
+    let records = config.store.list_workspaces().unwrap();
+    let ws: lazybox_core::Workspace =
+        serde_json::from_str(&records[0].workspace_json.clone().unwrap()).unwrap();
+    assert!(
+        ws.is_activity_unread(0),
+        "no matching row — the daemon must not mark whatever sits at the raw index"
+    );
+}
+
 #[tokio::test]
 async fn issue_polled_after_pr_routes_into_pr_workspace() {
     // PR polled first (carrying closes_issues); issue polled next.
@@ -3195,8 +3423,17 @@ async fn unarchive_clears_persisted_and_live_spawn_tombstones() {
     let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
     assert!(polling::delete_workspace(&config, &key).await);
     assert!(polling::load_archived_set(&config).contains(key.as_str()));
-    assert!(config.deleted_workspaces.lock().contains(key.as_str()));
+    // A settled delete releases its own spawn tombstone (a recreated
+    // same-key workspace must not have its spawns silently killed).
+    assert!(!config.deleted_workspaces.lock().contains(key.as_str()));
 
+    // Unarchive also clears a still-live tombstone — e.g. one whose
+    // delete is waiting out an in-flight spawn when the user restores
+    // the row.
+    config
+        .deleted_workspaces
+        .lock()
+        .insert(key.as_str().to_string());
     assert!(polling::unarchive_workspace_key(&config, key.as_str()));
     assert!(!polling::load_archived_set(&config).contains(key.as_str()));
     assert!(!config.deleted_workspaces.lock().contains(key.as_str()));
@@ -3998,6 +4235,225 @@ async fn tick_outcome_does_not_flag_unknown_when_all_tasks_are_resolved() {
     let mut state = polling::TickState::default();
     let outcome = polling::tick_with_state(&config, &[source], &mut state).await;
     assert!(!outcome.saw_unknown_mergeable);
+}
+
+/// Terminal tasks must never arm the fast re-poll: GitHub never
+/// computes mergeability for merged/closed PRs, and the merged sweep
+/// re-surfaces them every tick — before the guard this kept the 5s
+/// loop armed permanently.
+#[tokio::test]
+async fn terminal_task_with_unknown_mergeable_does_not_flag_fast_repoll() {
+    let config = ServerConfig::in_memory();
+    let mut merged = make_task("o/r#77");
+    merged.state = TaskState::Merged;
+    merged.mergeable = lazybox_core::Mergeable::Unknown;
+    let mut closed = make_task("o/r#78");
+    closed.state = TaskState::Closed;
+    closed.mergeable = lazybox_core::Mergeable::Unknown;
+    let source: Box<dyn TaskSource> = Box::new(FakeSource {
+        name: "github".into(),
+        tasks: vec![merged, closed],
+    });
+    let mut state = polling::TickState::default();
+    let outcome = polling::tick_with_state(&config, &[source], &mut state).await;
+    assert!(
+        !outcome.saw_unknown_mergeable,
+        "merged/closed PRs must not arm the 5s unknown-mergeable re-poll"
+    );
+}
+
+/// A PR that stays `Unknown` across consecutive polls only earns a
+/// bounded number of fast probes; after that it falls back to the
+/// normal cadence instead of 5s-polling indefinitely. The counter
+/// resets once a definitive value lands.
+#[tokio::test]
+async fn unknown_mergeable_fast_repoll_is_capped_per_task() {
+    let config = ServerConfig::in_memory();
+    let mut state = polling::TickState::default();
+    let unknown_source = || -> Box<dyn TaskSource> {
+        let mut t = make_task("o/r#9");
+        t.mergeable = lazybox_core::Mergeable::Unknown;
+        Box::new(FakeSource {
+            name: "github".into(),
+            tasks: vec![t],
+        })
+    };
+
+    // First 3 sightings arm the fast probe…
+    for i in 1..=3 {
+        let outcome = polling::tick_with_state(&config, &[unknown_source()], &mut state).await;
+        assert!(
+            outcome.saw_unknown_mergeable,
+            "probe {i} should still arm the fast re-poll"
+        );
+    }
+    // …the 4th consecutive one falls back to the normal cadence.
+    let outcome = polling::tick_with_state(&config, &[unknown_source()], &mut state).await;
+    assert!(
+        !outcome.saw_unknown_mergeable,
+        "after 3 consecutive fast probes the task must stop arming the 5s loop"
+    );
+
+    // A definitive value resets the streak…
+    let resolved: Box<dyn TaskSource> = Box::new(FakeSource {
+        name: "github".into(),
+        tasks: vec![make_task("o/r#9")], // Mergeable::Mergeable
+    });
+    let outcome = polling::tick_with_state(&config, &[resolved], &mut state).await;
+    assert!(!outcome.saw_unknown_mergeable);
+    // …so a NEW unknown episode (e.g. a fresh push) fast-probes again.
+    let outcome = polling::tick_with_state(&config, &[unknown_source()], &mut state).await;
+    assert!(
+        outcome.saw_unknown_mergeable,
+        "a resolved value must reset the probe budget"
+    );
+}
+
+// ── next-tick scheduling: retry_after vs unknown-mergeable ─────────────
+
+/// Provider-reported backoff always beats the 5s unknown-mergeable
+/// override. The old code applied the 5s override AFTER the
+/// retry-after clamp, stomping a rate-limit reset window down to 5s
+/// and hammering the throttled token.
+#[test]
+fn retry_after_beats_unknown_mergeable_fast_probe() {
+    let d = polling::next_tick_delay(
+        Duration::from_secs(60),
+        Some(300),
+        true,
+        Duration::from_secs(5),
+    );
+    assert_eq!(d, Duration::from_secs(300));
+}
+
+#[test]
+fn unknown_mergeable_shortens_to_fast_probe_without_backoff() {
+    let d = polling::next_tick_delay(Duration::from_secs(60), None, true, Duration::from_secs(5));
+    assert_eq!(d, Duration::from_secs(5));
+}
+
+#[test]
+fn next_tick_delay_defaults_to_interval() {
+    let d = polling::next_tick_delay(Duration::from_secs(60), None, false, Duration::from_secs(5));
+    assert_eq!(d, Duration::from_secs(60));
+}
+
+#[test]
+fn short_retry_after_never_shortens_the_interval() {
+    // retry_after only ever LENGTHENS the sleep; a 2s hint with a 60s
+    // cadence keeps the 60s cadence.
+    let d = polling::next_tick_delay(
+        Duration::from_secs(60),
+        Some(2),
+        false,
+        Duration::from_secs(5),
+    );
+    assert_eq!(d, Duration::from_secs(60));
+}
+
+// ── gh client cache: token rotation + auth invalidation ────────────────
+
+struct AuthFailingSource(String);
+
+impl TaskSource for AuthFailingSource {
+    fn name(&self) -> &str {
+        &self.0
+    }
+    fn fetch<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, lazybox_core::ProviderError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            Err(lazybox_core::ProviderError::auth(
+                self.0.clone(),
+                "401 Unauthorized (test)",
+            ))
+        })
+    }
+}
+
+/// An auth-classified poll failure must clear the cached GitHub
+/// client. The cache-reuse filter compares the freshly-resolved
+/// credential, but a stale cache + an unchanged-looking credential
+/// would otherwise keep serving the bricked client until restart.
+#[tokio::test]
+async fn auth_poll_failure_clears_gh_client_cache() {
+    let config = ServerConfig::in_memory();
+    let stub =
+        lazybox_gh::GhClient::stub_for_tests("cmd:gh auth token", "fp-old").expect("stub client");
+    *config.gh_client_cache.lock() = Some(stub);
+
+    let source: Box<dyn TaskSource> = Box::new(AuthFailingSource("github".into()));
+    let mut state = polling::TickState::default();
+    polling::tick_with_state(&config, &[source], &mut state).await;
+
+    assert!(
+        config.gh_client_cache.lock().is_none(),
+        "an auth failure must drop the cached client so the next tick rebuilds"
+    );
+}
+
+/// A merely-retryable failure keeps the cache — rebuilding the client
+/// on every network blip would waste the `/user` round-trip.
+#[tokio::test]
+async fn retryable_poll_failure_keeps_gh_client_cache() {
+    let config = ServerConfig::in_memory();
+    let stub =
+        lazybox_gh::GhClient::stub_for_tests("cmd:gh auth token", "fp-old").expect("stub client");
+    *config.gh_client_cache.lock() = Some(stub);
+
+    let source: Box<dyn TaskSource> = Box::new(FailingSource("github".into()));
+    let mut state = polling::TickState::default();
+    polling::tick_with_state(&config, &[source], &mut state).await;
+
+    assert!(
+        config.gh_client_cache.lock().is_some(),
+        "a transient failure must not evict the cached client"
+    );
+}
+
+/// An auth failure from a NON-GitHub source must not evict GitHub's
+/// client.
+#[tokio::test]
+async fn other_sources_auth_failure_leaves_gh_client_cache_alone() {
+    let config = ServerConfig::in_memory();
+    let stub =
+        lazybox_gh::GhClient::stub_for_tests("cmd:gh auth token", "fp-old").expect("stub client");
+    *config.gh_client_cache.lock() = Some(stub);
+
+    let source: Box<dyn TaskSource> = Box::new(AuthFailingSource("linear".into()));
+    let mut state = polling::TickState::default();
+    polling::tick_with_state(&config, &[source], &mut state).await;
+
+    assert!(config.gh_client_cache.lock().is_some());
+}
+
+/// The pure cache-reuse decision: rotation shows up as a fingerprint
+/// change under an unchanged source label — the exact case the old
+/// label-only filter got wrong (it reused the startup token forever).
+#[test]
+fn gh_client_reuse_requires_matching_token_fingerprint() {
+    // Unchanged label + unchanged token → reuse.
+    assert!(polling::gh_client_reusable(
+        "cmd:gh auth token",
+        "fp-a",
+        "cmd:gh auth token",
+        "fp-a"
+    ));
+    // Rotated token: same label, new fingerprint → rebuild.
+    assert!(!polling::gh_client_reusable(
+        "cmd:gh auth token",
+        "fp-a",
+        "cmd:gh auth token",
+        "fp-b"
+    ));
+    // Different credential source → rebuild.
+    assert!(!polling::gh_client_reusable(
+        "cmd:gh auth token",
+        "fp-a",
+        "GH_TOKEN env",
+        "fp-a"
+    ));
 }
 
 // ── FetchMode plumbing (issue #19: notifications-driven sync) ───────

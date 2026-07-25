@@ -61,12 +61,13 @@ Status is best-effort as of this catalog's first pass; correct it as you audit.
 | [Provider polling / sync loop](inbox-and-sync.md#provider-polling--sync-loop) | stable | `server` |
 | [Manual refresh](inbox-and-sync.md#manual-refresh) | stable | `server`, `tui` |
 | [Sync-status window](inbox-and-sync.md#sync-status-window) | stable | `tui`, `server` |
-| [Role filter](inbox-and-sync.md#role-filter) | stable | `tui` |
+| [Filter menu](inbox-and-sync.md#filter-menu) | stable | `tui-core`, `tui` |
 | [Sort order](inbox-and-sync.md#sort-order) | stable | `tui` |
 | [Search](inbox-and-sync.md#search) | stable | `tui` |
 | [Mailbox cycle](inbox-and-sync.md#mailbox-cycle) | stable | `tui` |
 | [Read/unread tracking](inbox-and-sync.md#readunread-tracking) | stable | `tui`, `store` |
 | [Snooze](inbox-and-sync.md#snooze) | stable | `tui`, `store` |
+| [Multi-select & broadcast](inbox-and-sync.md#multi-select--broadcast) | stable | `tui-core`, `tui` |
 
 ### Providers
 | Feature | Status | Crate(s) |
@@ -86,6 +87,8 @@ Status is best-effort as of this catalog's first pass; correct it as you audit.
 | [Editor integration](workspaces-and-worktrees.md#editor-integration) | stable | `config`, `tui` |
 | [Per-repo overrides](workspaces-and-worktrees.md#per-repo-overrides) | stable | `config`, `git-ops` |
 | [Merge PR](workspaces-and-worktrees.md#merge-pr) | stable | `tui`, `gh-provider` |
+| [Update branch](workspaces-and-worktrees.md#update-branch) | stable | `tui-core`, `server`, `gh-provider` |
+| [Automation policies menu](workspaces-and-worktrees.md#automation-policies-menu) | stable | `tui-core`, `tui`, `server` |
 | [Archive workspace](workspaces-and-worktrees.md#archive-workspace) | stable | `tui`, `git-ops` |
 | [Adopt sessions](workspaces-and-worktrees.md#adopt-sessions) | beta | `tui` |
 | [Collapse into PR](workspaces-and-worktrees.md#collapse-into-pr) | beta | `tui` |
@@ -102,6 +105,7 @@ Status is best-effort as of this catalog's first pass; correct it as you audit.
 | [Structured agent runtime](terminals-and-agents.md#structured-agent-runtime) | experimental | `server`, `ipc` |
 | [LLM gateway](terminals-and-agents.md#llm-gateway) | shipped | `server`, `agents`, `config` |
 | [Snippets](terminals-and-agents.md#snippets) | stable | `config`, `tui` |
+| [Agent-to-agent handoff](terminals-and-agents.md#agent-to-agent-handoff-x-s-send-to-session) | stable | `tui-core`, `tui`, `server` |
 | [Terminal interaction model](terminals-and-agents.md#terminal-interaction-model) | stable | `tui` |
 
 ### TUI & UX
@@ -109,7 +113,7 @@ Status is best-effort as of this catalog's first pass; correct it as you audit.
 |---|---|---|
 | [Three-pane layout & focus](tui-and-ux.md#three-pane-layout--focus) | stable | `tui` |
 | [Key-binding system & chords](tui-and-ux.md#key-binding-system--chords) | stable | `tui-core`, `tui` |
-| [Help overlay](tui-and-ux.md#help-overlay) | stable | `tui` |
+| [Ask Lazybox & shortcut index](tui-and-ux.md#ask-lazybox--shortcut-index) | stable | `tui` |
 | [Settings palette & setup wizard](tui-and-ux.md#settings-palette--setup-wizard) | stable | `tui`, `config` |
 | [Guided tour](tui-and-ux.md#guided-tour) | beta | `tui` |
 | [Activity feed](tui-and-ux.md#activity-feed) | stable | `tui` |

@@ -104,19 +104,20 @@ and a "lazybox online" message in `#lazybox`.
    `#<owner>-<repo>-<n>` (e.g. `#acme-widget-186`) and posts the
    primary task's description (or workspace name) as the first message.
 3. From Slack (web / mobile), type a message in a per-workspace
-   channel:
+   channel whose workspace has a running agent terminal. Anything that
+   isn't a status keyword is forwarded **verbatim** to that terminal's
+   agent — so plain text like `also add a regression test` lands in the
+   running Claude/Codex session's input. Messages to a channel with no
+   routed terminal are ignored (Slack cannot spawn an agent).
+4. The only chat commands lazybox answers itself are status queries —
+   the leading word must be one of `status`, `state`, `ls`, or `list`:
    ```
-   @lazybox work
+   status                       # in a workspace channel: that agent's state + recent activity
+   ls                           # in an unrouted channel: a summary of every tracked agent
    ```
-   Lazybox spawns claude in that workspace's worktree with the
-   role-aware prompt (review for reviewer-role, address-comments
-   for author-with-unread, etc.).
-4. Other commands:
-   ```
-   @lazybox status              # show session state + agent activity
-   @lazybox ping                # liveness check
-   @lazybox stop                # interrupt the current agent
-   ```
+   The set is deliberately tiny (lazybox is an inbox, not a chatbot);
+   everything else is forwarded, or dropped when the sender is not on
+   `slack.allowed_users`.
 
 ## Notes / Gotchas
 

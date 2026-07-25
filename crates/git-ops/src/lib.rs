@@ -69,14 +69,24 @@ pub enum TrackSyncOutcome {
     /// not on the base (diverged); a fast-forward is impossible, so
     /// skipped rather than rebasing/resetting the user's commits away.
     SkippedDiverged,
+    /// HEAD is detached or a bisect / rebase / merge / cherry-pick is
+    /// in progress in the worktree — advancing the tree under an
+    /// operation the user (or an agent shell) is mid-way through would
+    /// yank state out from under it, so the sync refuses to touch it.
+    SkippedUnsafeState,
 }
 
 impl TrackSyncOutcome {
-    /// Whether the worktree is behind `origin/<base>` and could not be
-    /// brought up to date automatically — drives the sidebar's "behind"
-    /// badge and the surfaced hint.
+    /// Whether the worktree could not be brought up to date
+    /// automatically — drives the sidebar's "behind" badge and the
+    /// surfaced hint. `SkippedUnsafeState` counts: like `SkippedDirty`
+    /// (also returned before the behind-count is known), the truthful
+    /// signal is "not synced", never a silent "up to date".
     pub fn is_behind(self) -> bool {
-        matches!(self, Self::SkippedDirty | Self::SkippedDiverged)
+        matches!(
+            self,
+            Self::SkippedDirty | Self::SkippedDiverged | Self::SkippedUnsafeState
+        )
     }
 }
 
@@ -863,6 +873,23 @@ impl WorktreeManager {
             return Err(GitError::Command(format!(
                 "base ref '{base_ref}' not found for {owner}/{repo}"
             )));
+        }
+
+        // Detached HEAD / bisect / rebase / merge in progress → never
+        // touch it. The sweep runs lock-free against whatever shell or
+        // agent is working inside the worktree; `merge --ff-only` on a
+        // detached HEAD would happily move HEAD (without advancing the
+        // branch), pulling the checkout out from under a bisect or a
+        // plain `git checkout <sha>` inspection. Checked before the
+        // dirty probe because a mid-operation tree can be status-clean
+        // (a clean detached HEAD, a bisect at a clean step).
+        if let Some(reason) = worktree_unsafe_to_advance(wt_path).await? {
+            tracing::debug!(
+                worktree = %wt_path.display(),
+                reason,
+                "track-main: refusing fast-forward (unsafe HEAD state)"
+            );
+            return Ok(TrackSyncOutcome::SkippedUnsafeState);
         }
 
         // Tracked-file changes → never touch it: a fast-forward `git
@@ -1977,6 +2004,17 @@ async fn add_worktree_resilient(
         Err(e) => e,
     };
     let Some(holder) = branch_already_checked_out_at(&err) else {
+        // Same-path collision: the target path itself is registered
+        // (its directory was `rm -rf`'d by hand) — a stale entry prune
+        // clears, after which the plain add succeeds. Distinct from
+        // the branch-holder ladder below because git names the path,
+        // not a holding worktree.
+        if worktree_missing_but_registered(&err) {
+            let _ = run_git_in(bare_path, &["worktree", "prune"]).await;
+            return run_git_transfer(bare_path, &plain, auth, None)
+                .await
+                .map_err(explain_promisor_failure);
+        }
         return Err(explain_promisor_failure(err));
     };
 
@@ -2030,6 +2068,105 @@ fn branch_already_checked_out_at(err: &GitError) -> Option<PathBuf> {
     let start = rest.find('\'')? + 1;
     let end = rest[start..].find('\'')? + start;
     Some(PathBuf::from(rest[start..end].trim()))
+}
+
+/// Companion matcher to [`branch_already_checked_out_at`] for the
+/// *same-path* re-add case: after a manual `rm -rf` of a worktree its
+/// registration in `<bare>/worktrees/` survives, and `git worktree add`
+/// at that same path fails with `'<path>' is a missing but already
+/// registered worktree; use 'add -f' to override, or 'prune' or
+/// 'remove' to clear`. That message names the path, not the branch, so
+/// the branch-collision matcher never fires and the prune-and-retry
+/// ladder used to be skipped — leaving the session permanently
+/// unprovisionable. A stale registration whose directory is gone is
+/// exactly what `git worktree prune` clears, so the caller retries
+/// after pruning.
+fn worktree_missing_but_registered(err: &GitError) -> bool {
+    let GitError::Command(msg) = err else {
+        return false;
+    };
+    msg.contains("missing but already registered worktree")
+}
+
+/// Whether the worktree at `wt_path` is in a state a background sync
+/// must not advance: detached HEAD, or a bisect / rebase / merge /
+/// cherry-pick in progress. Returns the human-readable reason, `None`
+/// when the tree is on a plain branch with no operation underway.
+///
+/// Checks the way git itself does: `symbolic-ref -q HEAD` fails on a
+/// detached HEAD, and each in-progress operation leaves a marker in
+/// the worktree's private git dir (`BISECT_LOG`, `rebase-merge/`,
+/// `rebase-apply/`, `MERGE_HEAD`, `CHERRY_PICK_HEAD`). Errors only
+/// when the git dir itself can't be resolved (not a worktree at all).
+async fn worktree_unsafe_to_advance(wt_path: &Path) -> Result<Option<&'static str>, GitError> {
+    // Resolve the worktree's own git dir first (where per-worktree
+    // operation state lives). Failure here means "not a usable
+    // worktree" — a real error the caller should surface, not an
+    // unsafe-state skip.
+    let gitdir = run_git_in(wt_path, &["rev-parse", "--absolute-git-dir"]).await?;
+    let gitdir = PathBuf::from(gitdir.trim());
+
+    if run_git_in(wt_path, &["symbolic-ref", "-q", "HEAD"])
+        .await
+        .is_err()
+    {
+        return Ok(Some("detached HEAD"));
+    }
+    for (marker, reason) in [
+        ("BISECT_LOG", "bisect in progress"),
+        ("rebase-merge", "rebase in progress"),
+        ("rebase-apply", "rebase/am in progress"),
+        ("MERGE_HEAD", "merge in progress"),
+        ("CHERRY_PICK_HEAD", "cherry-pick in progress"),
+    ] {
+        if tokio::fs::metadata(gitdir.join(marker)).await.is_ok() {
+            return Ok(Some(reason));
+        }
+    }
+    Ok(None)
+}
+
+/// Cheap health probe for an existing directory at a lazybox worktree
+/// path, usable without knowing the owning bare clone. `true` when the
+/// directory plausibly is a completed checkout:
+/// - `.git` is a directory (a standalone-init worktree or a full
+///   clone), or
+/// - `.git` is a worktree pointer file whose `gitdir:` target exists
+///   and has an `index` (i.e. the `git worktree add` finished).
+///
+/// `false` for everything else — an empty dir left by an old failed
+/// provision, a `.git` dangling after the bare clone was deleted, a
+/// half-checked-out tree. Callers on the spawn fast path use this to
+/// decide whether to short-circuit or route through the full
+/// provision/repair machinery ([`WorktreeManager::checkout_at`]'s
+/// validation), which owns the actual reclaim/repair decisions.
+pub async fn worktree_dir_ready(wt_path: &Path) -> bool {
+    let dot_git = wt_path.join(".git");
+    let Ok(meta) = tokio::fs::metadata(&dot_git).await else {
+        return false;
+    };
+    if meta.is_dir() {
+        return true;
+    }
+    let Ok(contents) = tokio::fs::read_to_string(&dot_git).await else {
+        return false;
+    };
+    let Some(gitdir) = contents
+        .lines()
+        .find_map(|l| l.strip_prefix("gitdir:"))
+        .map(|p| PathBuf::from(p.trim()))
+    else {
+        return false;
+    };
+    // `git worktree add` writes absolute gitdir paths, but tolerate a
+    // relative one (hand-crafted / repaired pointers) by resolving it
+    // against the worktree itself, the way git does.
+    let gitdir = if gitdir.is_absolute() {
+        gitdir
+    } else {
+        wt_path.join(gitdir)
+    };
+    tokio::fs::metadata(gitdir.join("index")).await.is_ok()
 }
 
 /// A blobless clone materializes file contents through origin at
@@ -2842,6 +2979,79 @@ mod health_probe_tests {
         );
     }
 
+    /// The bare-path-free fast probe (`worktree_dir_ready`, used by the
+    /// spawn fast path): true only for a completed checkout — a real
+    /// worktree with its index landed, or a plain `.git`-dir repo — and
+    /// false for the debris shapes that used to pass the old bare
+    /// `exists()` check (empty dir, dangling `.git` pointer).
+    #[tokio::test]
+    async fn worktree_dir_ready_accepts_only_completed_checkouts() {
+        let (tmp, bare) = local_bare_clone();
+        let wt = tmp.path().join("wt");
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                wt.to_str().expect("utf8 path"),
+                "-B",
+                "wt-branch",
+                "HEAD",
+            ],
+        );
+        assert!(worktree_dir_ready(&wt).await, "a real worktree is ready");
+
+        // A standalone repo (`.git` is a directory) is ready too.
+        let standalone = tmp.path().join("standalone");
+        std::fs::create_dir(&standalone).expect("mkdir");
+        git(&standalone, &["init", "-q"]);
+        assert!(worktree_dir_ready(&standalone).await);
+
+        // The empty dir an old failed-provision fallback fabricated.
+        let empty = tmp.path().join("empty");
+        std::fs::create_dir(&empty).expect("mkdir");
+        assert!(!worktree_dir_ready(&empty).await);
+
+        // Missing path entirely.
+        assert!(!worktree_dir_ready(&tmp.path().join("nope")).await);
+
+        // `.git` pointer whose gitdir target is gone (bare clone
+        // deleted from under the worktree).
+        let dangling = tmp.path().join("dangling");
+        std::fs::create_dir(&dangling).expect("mkdir");
+        std::fs::write(
+            dangling.join(".git"),
+            format!("gitdir: {}\n", tmp.path().join("gone").display()),
+        )
+        .expect("write pointer");
+        assert!(!worktree_dir_ready(&dangling).await);
+
+        // Registered but incomplete: metadata + `.git` file exist, the
+        // index never landed (killed `worktree add`).
+        let half = tmp.path().join("half");
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                half.to_str().expect("utf8 path"),
+                "-B",
+                "half-branch",
+                "HEAD",
+            ],
+        );
+        let gitdir_file = std::fs::read_to_string(half.join(".git")).expect("read .git");
+        let gitdir = gitdir_file
+            .strip_prefix("gitdir:")
+            .expect("gitdir pointer")
+            .trim();
+        std::fs::remove_file(Path::new(gitdir).join("index")).expect("drop index");
+        assert!(
+            !worktree_dir_ready(&half).await,
+            "an interrupted checkout is not ready — the repair path must run"
+        );
+    }
+
     /// A `git worktree add` killed mid-checkout (timeout, Esc-cancel)
     /// leaves registered metadata and a `.git` file but no index — a
     /// shape that used to validate `Valid` forever, landing every
@@ -3375,6 +3585,68 @@ mod resilient_add_tests {
             "no half-provisioned target is left behind"
         );
     }
+
+    /// The matcher recognizes git's same-path refusal (a registered
+    /// worktree whose directory was `rm -rf`'d by hand) and stays quiet
+    /// on everything else.
+    #[test]
+    fn recognizes_missing_but_registered_worktree() {
+        let missing = GitError::Command(
+            "fatal: '/tmp/wt' is a missing but already registered worktree;\n\
+             use 'add -f' to override, or 'prune' or 'remove' to clear\n"
+                .into(),
+        );
+        assert!(worktree_missing_but_registered(&missing));
+        let unrelated = GitError::Command("fatal: invalid reference: refs/heads/feat\n".into());
+        assert!(!worktree_missing_but_registered(&unrelated));
+        assert!(!worktree_missing_but_registered(&GitError::Io(
+            std::io::Error::other("io")
+        )));
+    }
+
+    /// Manual `rm -rf` of a worktree, then a re-provision at the SAME
+    /// path. When the branch being added matches the stale
+    /// registration's, git's branch-collision wording fires and the
+    /// existing prune rung recovers. But when the derived branch has
+    /// CHANGED in between (issue title edit, issue→PR attach) git
+    /// instead refuses with "'<path>' is a missing but already
+    /// registered worktree" — a path-shaped message the branch matcher
+    /// never caught, so the prune-and-retry ladder used to be skipped
+    /// entirely and the session stayed unprovisionable. Both shapes
+    /// must recover.
+    #[tokio::test]
+    async fn rm_rfed_worktree_readded_at_same_path_recovers() {
+        let (tmp, bare) = local_bare_clone();
+        let target = tmp.path().join("target");
+        add_worktree_resilient(&bare, &target, "feat", "HEAD", &[])
+            .await
+            .expect("initial provision");
+        // Simulate the user's manual `rm -rf`: the directory is gone,
+        // the registration in `<bare>/worktrees/` survives.
+        std::fs::remove_dir_all(&target).expect("rm -rf the worktree");
+
+        // Re-add on a DIFFERENT branch → the "missing but already
+        // registered worktree" refusal, the shape the new matcher owns.
+        add_worktree_resilient(&bare, &target, "feat-renamed", "HEAD", &[])
+            .await
+            .expect("re-add at the same path must prune the stale registration and retry");
+        assert_eq!(
+            validate_worktree_dir(&target, &bare).await.unwrap(),
+            WorktreeDirState::Valid,
+            "the recovered directory is a real worktree again"
+        );
+
+        // And the same-branch shape (branch matcher + prune rung)
+        // keeps working.
+        std::fs::remove_dir_all(&target).expect("rm -rf again");
+        add_worktree_resilient(&bare, &target, "feat-renamed", "HEAD", &[])
+            .await
+            .expect("same-branch re-add also recovers");
+        assert_eq!(
+            validate_worktree_dir(&target, &bare).await.unwrap(),
+            WorktreeDirState::Valid,
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3535,6 +3807,60 @@ mod track_main_tests {
             wt.join("local.txt").exists(),
             "the local commit's file survives"
         );
+    }
+
+    /// A detached HEAD (the user or an agent shell inspecting a commit,
+    /// a bisect step) must never be advanced: `merge --ff-only` happily
+    /// moves a detached HEAD without advancing the branch, yanking the
+    /// checkout out from under whoever detached it.
+    #[tokio::test]
+    async fn detached_head_worktree_is_never_advanced() {
+        let (_tmp, mgr, src, wt) = tracked_worktree().await;
+        let before = head(&wt);
+        git(&wt, &["checkout", "-q", "--detach"]);
+        advance_main(&src, "c2\n");
+
+        let outcome = mgr
+            .fast_forward_to_base(&wt, "acme", "widgets", "main")
+            .await
+            .expect("sync runs");
+        assert_eq!(outcome, TrackSyncOutcome::SkippedUnsafeState);
+        assert!(
+            outcome.is_behind(),
+            "a refused sync must not render as up to date"
+        );
+        assert_eq!(head(&wt), before, "detached HEAD is left exactly in place");
+        assert_eq!(
+            std::fs::read_to_string(wt.join("f.txt")).expect("read"),
+            "c1\n",
+            "the working tree is untouched"
+        );
+    }
+
+    /// A bisect in progress (HEAD may still be on the branch before the
+    /// first good/bad answer) must also refuse — the marker file, not
+    /// just detachment, gates the sync.
+    #[tokio::test]
+    async fn bisecting_worktree_is_never_advanced() {
+        let (_tmp, mgr, src, wt) = tracked_worktree().await;
+        let before = head(&wt);
+        git(&wt, &["bisect", "start"]);
+        advance_main(&src, "c2\n");
+
+        let outcome = mgr
+            .fast_forward_to_base(&wt, "acme", "widgets", "main")
+            .await
+            .expect("sync runs");
+        assert_eq!(outcome, TrackSyncOutcome::SkippedUnsafeState);
+        assert_eq!(head(&wt), before, "mid-bisect HEAD is left in place");
+
+        // Once the bisect ends, the same worktree syncs normally again.
+        git(&wt, &["bisect", "reset"]);
+        let outcome = mgr
+            .fast_forward_to_base(&wt, "acme", "widgets", "main")
+            .await
+            .expect("sync runs");
+        assert_eq!(outcome, TrackSyncOutcome::FastForwarded);
     }
 
     /// Untracked debris (build output, scratch notes) is exactly what a

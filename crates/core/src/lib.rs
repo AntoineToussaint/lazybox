@@ -32,7 +32,10 @@ pub use config::{
 };
 pub use error_class::{ErrorClass, HttpErrorSignals, classify, classify_message, classify_status};
 pub use issue_links::{IssueLink, extract as extract_issue_links};
-pub use policy::{AutomationPolicies, PolicyArm, auto_fix_permitted, toggled_arm};
+pub use policy::{
+    AutomationPolicies, PolicyArm, auto_fix_permitted, auto_merge_block_reason, merge_block_reason,
+    should_auto_merge, toggled_arm,
+};
 pub use priority::{PriorityTier, resolve_priority_tier};
 pub use project::{Project, ProjectKey, github_owner_repo_from_url};
 pub use provider::{ProviderError, TaskProvider};
@@ -41,6 +44,7 @@ pub use session_key::SessionKey;
 pub use task::*;
 pub use workspace::{
     CleanupPrompt, MAX_ACTIVITY_ITEMS, SENT_SNIPPETS_MAX, Session as WorkspaceSession, SessionId,
-    SessionKind, SessionLayout, SessionRunState, TileDirection, TileTree, Workspace, WorkspaceKey,
-    project_key_for_task, workspace_key_for, workspace_project_key,
+    SessionKind, SessionLayout, SessionRunState, TileDirection, TileTree, WORKSPACE_SCHEMA_VERSION,
+    Workspace, WorkspaceDecodeError, WorkspaceKey, project_key_for_task, workspace_key_for,
+    workspace_project_key,
 };

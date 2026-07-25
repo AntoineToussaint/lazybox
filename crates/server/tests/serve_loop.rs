@@ -103,6 +103,111 @@ async fn shutdown_closes_loop_cleanly() {
         .expect("daemon exits promptly on Shutdown")
         .unwrap();
 }
+/// SIGTERM-equivalent shutdown (the socket service raising the
+/// graceful-stop watch) must give an in-flight detached mutation the
+/// same bounded drain a client disconnect gets — pre-fix the service
+/// aborted serve tasks outright and a merge/delete mid-write was
+/// cancelled between its remote side effect and the local save.
+#[tokio::test]
+async fn graceful_stop_drains_in_flight_mutation_before_exit() {
+    let _home = IsolatedHome::new();
+    let (config, mock) = ServerConfig::in_memory_with_mock();
+    // Slow enough to still be mid-provision when the stop lands, fast
+    // enough to finish well inside the drain bound.
+    mock.set_spawn_delay(Duration::from_millis(400)).await;
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let (client, server) = channel::pair();
+    let handle = tokio::spawn({
+        let config = config.clone();
+        async move {
+            Server::new(config)
+                .with_graceful_stop(stop_rx)
+                .serve(server)
+                .await
+        }
+    });
+
+    client
+        .send(Command::Spawn {
+            model_alias: None,
+            session_key: "test:drain".into(),
+            session_id: None,
+            kind: TerminalKind::Shell,
+            cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
+            initial_prompt: None,
+            on_main: false,
+        })
+        .expect("spawn");
+    // Let the serve loop dequeue Spawn onto the mutations JoinSet and
+    // enter the backend's artificial delay.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(
+        mock.list().await.expect("list").is_empty(),
+        "spawn must still be in flight when the stop signal lands"
+    );
+
+    stop_tx.send(true).expect("signal");
+    tokio::time::timeout(Duration::from_secs(3), handle)
+        .await
+        .expect("serve exits on graceful stop")
+        .expect("join")
+        .expect("serve result");
+
+    assert_eq!(
+        mock.list().await.expect("list").len(),
+        1,
+        "the in-flight mutation must complete during the drain, not be aborted"
+    );
+}
+
+/// The drain is bounded: a mutation that outlives the bound is
+/// abandoned (with a breadcrumb) instead of holding shutdown hostage.
+#[tokio::test]
+async fn graceful_stop_abandons_mutation_past_the_drain_bound() {
+    let _home = IsolatedHome::new();
+    let (config, mock) = ServerConfig::in_memory_with_mock();
+    // Effectively wedged relative to the shortened bound below.
+    mock.set_spawn_delay(Duration::from_secs(60)).await;
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let (client, server) = channel::pair();
+    let handle = tokio::spawn({
+        let config = config.clone();
+        async move {
+            Server::new(config)
+                .with_graceful_stop(stop_rx)
+                .with_mutation_drain_timeout(Duration::from_millis(200))
+                .serve(server)
+                .await
+        }
+    });
+
+    client
+        .send(Command::Spawn {
+            model_alias: None,
+            session_key: "test:wedged".into(),
+            session_id: None,
+            kind: TerminalKind::Shell,
+            cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
+            initial_prompt: None,
+            on_main: false,
+        })
+        .expect("spawn");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    stop_tx.send(true).expect("signal");
+    // Joining well before the 60s backend delay proves the bound
+    // abandoned the wedged task rather than waiting it out.
+    tokio::time::timeout(Duration::from_secs(3), handle)
+        .await
+        .expect("serve exits once the drain bound elapses")
+        .expect("join")
+        .expect("serve result");
+    assert!(
+        mock.list().await.expect("list").is_empty(),
+        "the wedged mutation was abandoned, not completed"
+    );
+}
+
 #[tokio::test]
 async fn start_agent_run_unknown_agent_reports_error() {
     let (mut client, server) = channel::pair();
@@ -383,6 +488,7 @@ fn all_non_shutdown_commands() -> Vec<Command> {
         Command::MarkActivityRead {
             session_key: "test:ws".into(),
             index: 0,
+            fingerprint: None,
         },
         Command::UnmarkActivityRead {
             session_key: "test:ws".into(),

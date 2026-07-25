@@ -129,8 +129,21 @@ impl RateBudget {
     }
 
     fn refill(&mut self) {
-        let now = Instant::now();
-        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
+        self.refill_at(Instant::now());
+    }
+
+    /// Refill math with the clock passed in — the parameterized-now
+    /// pattern (mirrors `pick_repos_for_tick(known, now)` in the
+    /// server's scheduler) so the per-minute arithmetic is unit-
+    /// testable without sleeping. A `now` earlier than `last_refill`
+    /// (monotonic clocks shouldn't produce one, but a stale snapshot
+    /// clone could) contributes zero elapsed time rather than
+    /// draining the bucket.
+    fn refill_at(&mut self, now: Instant) {
+        let elapsed = now
+            .checked_duration_since(self.last_refill)
+            .unwrap_or_default()
+            .as_secs_f64();
         self.available = (self.available + elapsed * self.refill_per_sec).min(self.capacity as f64);
         self.last_refill = now;
     }
@@ -143,6 +156,15 @@ impl RateBudget {
     /// then local. So the surfaced reason matches the actual
     /// blocker.
     pub fn try_acquire(&mut self) -> Result<(), AcquireError> {
+        self.try_acquire_at(Instant::now())
+    }
+
+    /// [`try_acquire`](Self::try_acquire) with the monotonic clock
+    /// passed in — lets tests drive the local-bucket refill math
+    /// deterministically. The remote-window check still reads the
+    /// wall clock (`Utc::now`): GitHub's `reset_at` is a wall-clock
+    /// deadline and has no meaningful `Instant` representation.
+    fn try_acquire_at(&mut self, now: Instant) -> Result<(), AcquireError> {
         #[cfg(test)]
         if let Some(forced) = self.force_fail.take() {
             return Err(forced);
@@ -150,8 +172,8 @@ impl RateBudget {
 
         // 1. Remote check.
         if let Some(remote) = &self.remote {
-            let now = Utc::now();
-            if remote.remaining <= LOW_THRESHOLD && remote.reset_at > now {
+            let wall_now = Utc::now();
+            if remote.remaining <= LOW_THRESHOLD && remote.reset_at > wall_now {
                 return Err(AcquireError::RemoteLow {
                     remaining: remote.remaining,
                     reset_at: remote.reset_at,
@@ -160,7 +182,7 @@ impl RateBudget {
         }
 
         // 2. Local refill + spend.
-        self.refill();
+        self.refill_at(now);
         if self.available >= 1.0 {
             self.available -= 1.0;
             Ok(())
@@ -252,6 +274,132 @@ mod tests {
         let s = b.snapshot();
         assert!((s.local_available - 10.0).abs() < 0.01);
         assert_eq!(s.local_capacity, 10);
+    }
+
+    // ── refill math (parameterized now — issue: `refill` read
+    // `Instant::now()` internally so none of this was testable) ──
+
+    /// Drain a bucket to zero at a fixed `now` without letting the
+    /// wall clock refill anything mid-drain.
+    fn drain_at(b: &mut RateBudget, now: Instant) {
+        while b.try_acquire_at(now).is_ok() {}
+    }
+
+    #[test]
+    fn refill_exact_after_sixty_seconds() {
+        // 30 tokens/min: a fully drained bucket is exactly full again
+        // after 60s — no more, no less.
+        let now = Instant::now();
+        let mut b = RateBudget::new(30, 30.0);
+        drain_at(&mut b, now);
+        assert!(b.available < 1.0, "bucket should be drained");
+        b.refill_at(now + std::time::Duration::from_secs(60));
+        assert!(
+            (b.available - 30.0).abs() < 1e-6,
+            "60s at 30/min refills exactly to capacity, got {}",
+            b.available
+        );
+    }
+
+    #[test]
+    fn refill_partial_is_proportional() {
+        // 30/min = 0.5/s → 10s refills 5 tokens.
+        let now = Instant::now();
+        let mut b = RateBudget::new(30, 30.0);
+        drain_at(&mut b, now);
+        let leftover = b.available; // fractional remainder < 1.0
+        b.refill_at(now + std::time::Duration::from_secs(10));
+        assert!(
+            (b.available - (leftover + 5.0)).abs() < 1e-6,
+            "10s at 0.5 tok/s should add exactly 5 tokens, got {}",
+            b.available
+        );
+    }
+
+    #[test]
+    fn refill_zero_elapsed_changes_nothing() {
+        let now = Instant::now();
+        let mut b = RateBudget::new(30, 30.0);
+        assert!(b.try_acquire_at(now).is_ok());
+        let before = b.available;
+        b.refill_at(now);
+        assert!(
+            (b.available - before).abs() < 1e-9,
+            "no time passed → no refill (got {} vs {})",
+            b.available,
+            before
+        );
+    }
+
+    #[test]
+    fn refill_clamps_at_capacity() {
+        // An hour of idle must not overfill past capacity.
+        let now = Instant::now();
+        let mut b = RateBudget::new(30, 30.0);
+        assert!(b.try_acquire_at(now).is_ok());
+        b.refill_at(now + std::time::Duration::from_secs(3600));
+        assert!(
+            (b.available - 30.0).abs() < 1e-9,
+            "refill clamps at capacity, got {}",
+            b.available
+        );
+    }
+
+    #[test]
+    fn refill_tolerates_now_before_last_refill() {
+        // A `now` older than `last_refill` contributes zero elapsed
+        // time instead of panicking or going negative.
+        let now = Instant::now();
+        let mut b = RateBudget::new(30, 30.0);
+        b.refill_at(now + std::time::Duration::from_secs(5));
+        let before = b.available;
+        b.refill_at(now);
+        assert!((b.available - before).abs() < 1e-9);
+    }
+
+    #[test]
+    fn local_wait_secs_matches_refill_rate() {
+        // Drained bucket at 30/min: the surfaced wait for one token
+        // is ceil(1 token / 0.5 tok-per-s) = 2s.
+        let now = Instant::now();
+        let mut b = RateBudget::new(30, 30.0);
+        drain_at(&mut b, now);
+        // Consume the fractional leftover so `needed` is deterministic:
+        // available is in [0,1) after the drain; wait covers 1-available.
+        match b.try_acquire_at(now) {
+            Err(AcquireError::LocalBudgetExhausted { wait_secs }) => {
+                assert!(
+                    (1..=2).contains(&wait_secs),
+                    "one-token wait at 0.5 tok/s is 1-2s, got {wait_secs}"
+                );
+            }
+            other => panic!("expected LocalBudgetExhausted, got {other:?}"),
+        }
+    }
+
+    /// The 429/secondary-limit feedback path: the client observes a
+    /// throttle response as `remaining: 0, reset_at: now + retry_after`
+    /// — from then on `try_acquire` must refuse admission until the
+    /// window passes, even with a full local bucket.
+    #[test]
+    fn observed_throttle_blocks_admission_until_reset() {
+        let mut b = RateBudget::new(30, 30.0);
+        b.observe(RemoteRateLimit {
+            remaining: 0,
+            limit: 5000,
+            reset_at: Utc::now() + Duration::seconds(30),
+            observed_at: Instant::now(),
+        });
+        match b.try_acquire() {
+            Err(AcquireError::RemoteLow {
+                remaining,
+                reset_at,
+            }) => {
+                assert_eq!(remaining, 0);
+                assert!(reset_at > Utc::now());
+            }
+            other => panic!("expected RemoteLow after a 429 observation, got {other:?}"),
+        }
     }
 
     #[test]

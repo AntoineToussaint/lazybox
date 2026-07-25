@@ -289,43 +289,13 @@ fn task_ref_label(task: &lazybox_core::Task) -> String {
 /// Stable enough identifier for one activity row, used by the `z`
 /// undo flow to find the row's *current* index after a poll that
 /// reshuffled the list (a new top-of-feed comment shifts every
-/// older row down by one). Prefers the upstream `node_id` (GitHub
-/// gives this for comments and reviews); falls back to a
-/// content tuple for kinds that don't carry one (CI events,
-/// status changes).
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ActivityFingerprint {
-    NodeId(String),
-    Content {
-        author: String,
-        created_at: chrono::DateTime<chrono::Utc>,
-        body_prefix: String,
-    },
-}
-
-impl ActivityFingerprint {
-    fn of(activity: &lazybox_core::Activity) -> Self {
-        if let Some(id) = &activity.node_id
-            && !id.is_empty()
-        {
-            return Self::NodeId(id.clone());
-        }
-        // Keep the prefix short — comparing whole bodies is wasteful
-        // and the prefix is enough to distinguish row from row in
-        // practice. 64 chars survives auto-formatting that trims or
-        // wraps trailing whitespace.
-        let body_prefix: String = activity.body.chars().take(64).collect();
-        Self::Content {
-            author: activity.author.clone(),
-            created_at: activity.created_at,
-            body_prefix,
-        }
-    }
-
-    fn matches(&self, activity: &lazybox_core::Activity) -> bool {
-        *self == Self::of(activity)
-    }
-}
+/// older row down by one), and shipped inside
+/// `Command::MarkActivityRead` so the daemon resolves the row
+/// against ITS current list instead of trusting a possibly-shifted
+/// raw index. Canonical definition lives in core (next to the
+/// `merge_activity` identity logic) so client and daemon can't
+/// drift.
+use lazybox_core::ActivityFingerprint;
 
 #[derive(Debug, Clone)]
 struct AutoMarkRecord {
@@ -341,12 +311,7 @@ impl AutoMarkRecord {
     /// return its current index. None when the row is gone (e.g.
     /// removed upstream between the mark and the undo).
     fn resolve(&self, activity: &[lazybox_core::Activity]) -> Option<usize> {
-        if let Some(act) = activity.get(self.last_index)
-            && self.fingerprint.matches(act)
-        {
-            return Some(self.last_index);
-        }
-        activity.iter().position(|a| self.fingerprint.matches(a))
+        self.fingerprint.resolve(activity, self.last_index)
     }
 }
 
@@ -515,9 +480,11 @@ impl RightPane {
     }
 
     /// Flip the cursor's activity to read and remember the index for
-    /// undo. Returns `(session_key, index)` so the caller can persist
-    /// via `Command::MarkActivityRead`.
-    fn fire_auto_mark(&mut self) -> Option<(lazybox_core::SessionKey, usize)> {
+    /// undo. Returns `(session_key, index, fingerprint)` so the
+    /// caller can persist via `Command::MarkActivityRead` — the
+    /// fingerprint rides along so the daemon re-resolves the row
+    /// against its own (possibly newer) list.
+    fn fire_auto_mark(&mut self) -> Option<(lazybox_core::SessionKey, usize, ActivityFingerprint)> {
         let cursor = self.feed.cursor;
         // Resolve the row the timer was ARMED on. New activities
         // insert at the TOP of the feed and shift every index, so
@@ -578,10 +545,10 @@ impl RightPane {
         let session_key = lazybox_core::SessionKey::from(&workspace.key);
         self.last_marked_read = Some(AutoMarkRecord {
             last_index: i,
-            fingerprint,
+            fingerprint: fingerprint.clone(),
         });
         self.disarm_mark_timer();
-        Some((session_key, i))
+        Some((session_key, i, fingerprint))
     }
 
     /// Mark the activity row under the cursor read — the explicit
@@ -604,14 +571,16 @@ impl RightPane {
         }
         let cursor = self.feed.cursor;
         if workspace.is_activity_unread(cursor) {
+            let fingerprint = workspace.activity.get(cursor).map(ActivityFingerprint::of);
             cmds.push(Command::MarkActivityRead {
                 session_key: workspace.key.clone().into(),
                 index: cursor,
+                fingerprint: fingerprint.clone(),
             });
-            if let Some(act) = workspace.activity.get(cursor) {
+            if let Some(fingerprint) = fingerprint {
                 self.last_marked_read = Some(AutoMarkRecord {
                     last_index: cursor,
-                    fingerprint: ActivityFingerprint::of(act),
+                    fingerprint,
                 });
             }
             // Local echo, same as the auto-mark timer path: flip the
@@ -657,9 +626,13 @@ impl RightPane {
     }
 
     /// Drive the auto-mark timer. Called from the App's per-tick
-    /// path. Returns `(session_key, index)` when the timer fired and
-    /// an activity was just marked, so the App can persist via IPC.
-    pub fn tick(&mut self, focused: bool) -> Option<(lazybox_core::SessionKey, usize)> {
+    /// path. Returns `(session_key, index, fingerprint)` when the
+    /// timer fired and an activity was just marked, so the App can
+    /// persist via IPC.
+    pub fn tick(
+        &mut self,
+        focused: bool,
+    ) -> Option<(lazybox_core::SessionKey, usize, ActivityFingerprint)> {
         // `focused` parameter kept for API compatibility but no
         // longer gates the fire. The reasoning was originally "user
         // navigated away, stop the countdown" but in practice the
@@ -1047,6 +1020,18 @@ impl RightPane {
         let mut v: Vec<usize> = self.feed.selected().iter().copied().collect();
         v.sort_unstable();
         v
+    }
+
+    /// Fingerprint of the activity row at `index` in the current
+    /// snapshot, for shipping alongside the raw index in
+    /// `Command::MarkActivityRead` (the daemon re-resolves it against
+    /// its own list). None when the index is out of range.
+    pub fn activity_fingerprint_at(&self, index: usize) -> Option<ActivityFingerprint> {
+        self.workspace
+            .as_ref()?
+            .activity
+            .get(index)
+            .map(ActivityFingerprint::of)
     }
 
     /// Drop the multi-select set. Called after `w` consumes the

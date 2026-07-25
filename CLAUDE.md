@@ -161,9 +161,11 @@ via YAML config without recompilation.
 
 Nearly every key lives in the action catalog
 (`crates/tui-core/src/action.rs`, remappable via `ui.action_keys`) and
-dispatches through `Model::handle_pane_key` → `dispatch_action`; only
-per-pane cursor navigation (`j/k`, arrows) stays as pane match arms in
-`components/{sidebar,right_pane,terminal_stack}`. A catalog row is one
+dispatches through `Model::handle_pane_key` → `dispatch_action`; per-pane
+cursor navigation (`j/k`, arrows) plus a small allowlisted set of
+pane-native arms (`PANE_NATIVE_KINDS` in `realm/model/keys.rs`, ~a dozen
+kinds — some of which don't honor remaps) stay as match arms in
+`components/{sidebar,right_pane,terminal_stack}` and `keys.rs`. A catalog row is one
 enriched binding (#102): `chords: Vec<Chord>` where `Chord = Key |
 Seq` — `Seq` is every leader/double-press (`g m`, `q q`, `] ]`), and
 multiple chords are alternatives (a user override like
@@ -220,7 +222,7 @@ selection), mouse-click any pane to focus it, mouse-drag splitters to
 resize.
 
 **Sidebar**: `j/k` or arrows navigate, `Enter` open (focus activity),
-`w` work on this (contextual agent prompt), `s` shell, `e` editor,
+`w w` work on this (contextual agent prompt), `s` shell, `e` editor,
 `m` mark read, `z` snooze, `f` open the filter
 menu (a multi-select over state / role / kind predicates — with-agent,
 CI-failing, conflict, unread, asking, review-requested, auto-merge,
@@ -291,7 +293,7 @@ scope.
 
 **RightPane (Activity)**: `j/k` or arrows move the row cursor,
 `g/G` top/bottom, `→/l` expand row, `←/h` collapse row, `Enter`
-toggle the section, `Space`/`v` multi-select rows, `w` work on
+toggle the section, `Space`/`v` multi-select rows, `w w` work on
 selection, `d` toggle the PR/issue description teaser (Collapsed ⇄
 Preview); a second `d` on a long — or richly-formatted (tables, fenced
 code, images) — preview, or clicking `+N more lines`, opens the full

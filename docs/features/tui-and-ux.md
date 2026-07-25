@@ -74,8 +74,11 @@ catalog; leader groups are multi-stroke `Chord::Seq` rows in it (the which-key
 popup is a pure function of the armed prefix). Key routing is
 `handle_pane_key` (`crates/tui/src/realm/model/keys.rs`); dispatch is
 `dispatch_action_unchecked` (`dispatch.rs`). Effective keys honor `ui.action_keys`
-overrides. Some sidebar/activity keys (`j/k`, `f`, `o`, `/`) are handled inline
-in their pane handlers rather than as catalog actions.
+overrides. `f` (filter menu), `o` (sort), and `/` (search) are catalog actions
+and remappable; only per-pane cursor navigation (`j/k`, arrows) plus a small
+allowlisted set of pane-native arms (`PANE_NATIVE_KINDS`,
+`crates/tui/src/realm/model/keys.rs`) are handled inline — and some of those
+don't honor remaps.
 
 ### Test checklist
 - [ ] `q q` within 800ms quits; a single `q` does not.
@@ -206,7 +209,7 @@ gates the auto-launch).
 **Status:** stable
 **Crate(s):** `tui` (`components/activity_feed.rs`, `right_pane/`)
 **Config / flags:** `ui.task_body_max_rows` (description clamp)
-**Key bindings:** `j/k` (or `↑/↓`) navigate, `g/G` top/bottom, `h/l` (or `←/→`) collapse/expand row, `d` toggle description, `Enter/Space/o` collapse/expand whole Activity section, `v` multi-select, `m` mark read, `z` undo auto-mark, `PageUp/PageDown` screenful
+**Key bindings:** `j/k` (or `↑/↓`) navigate, `g/G` top/bottom, `h/l` (or `←/→`) collapse/expand row, `d` toggle description, `Enter` collapse/expand whole Activity section, `Space`/`v` multi-select, `m` mark read, `z` undo auto-mark, `PageUp/PageDown` screenful
 
 ### What it does
 The right pane: the focused workspace's merged feed of comments, reviews, status
@@ -215,7 +218,11 @@ expand/collapse. Multi-select drives bulk mark-read and the `w w`/reply targetin
 
 ### How to use it
 Navigate with `j/k`; `g/G` jump top/bottom; `h/l` collapse/expand the focused
-card; `d` toggles the PR/issue description; `Enter` collapses/expands the whole
+card; `d` toggles the PR/issue description teaser — a second `d` on a long or
+richly-formatted preview (tables, fenced code, images), or clicking
+`+N more lines`, opens the full body in a scrollable markdown reader modal
+(#448: headings/lists/code/links/tables, `j/k`·PgUp/PgDn·wheel scroll, click a
+link to open it, `Esc` closes); `Enter` collapses/expands the whole
 Activity section; `v` (or `Space`/click) toggles multi-select; `m` marks read;
 `z` undoes the last auto-mark; double-click a card to expand/collapse it.
 

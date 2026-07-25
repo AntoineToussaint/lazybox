@@ -1699,6 +1699,116 @@ async fn inject_prompt_waits_for_input_needed_to_clear() {
     .expect("deadline");
 }
 
+/// Injection-safety regression: a permission chooser that appears AFTER
+/// the paste landed must abort the submit-confirm loop's Enter resends.
+/// The inject path gates on `InputNeeded` once, up front; pre-fix, when
+/// a chooser surfaced while the submit evidence was awaited, the loop
+/// resent bare Enter up to its limit — and Enter into a Claude chooser
+/// selects the default answer (typically "Yes"), silently auto-approving
+/// a tool the user never saw, with the injected text lost anyway. The
+/// give-up must be loud (`TerminalInputRejected`), never more Enters.
+// Paused time: the 250ms paste-settle window and the 3s+ confirm waits
+// ride tokio's auto-advance instead of sleeping for real.
+#[tokio::test(start_paused = true)]
+async fn chooser_after_paste_suppresses_submit_resends() {
+    timeout(Duration::from_secs(60), async {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config).await;
+        let terminal_id = spawn_and_wait(&mut client, TerminalKind::Agent("claude".into())).await;
+        let key = mock.list().await.unwrap().into_iter().next().unwrap();
+
+        const WORK: &str = "Apply the review feedback on PR #12.";
+        client
+            .send(Command::InjectPrompt {
+                terminal_id,
+                prompt: WORK.into(),
+                fallback_spawn: None,
+                submit: true,
+            })
+            .unwrap();
+
+        // The paste and the initial submit Enter both land: two writes.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let writes = mock.writes_for(&key).await;
+            if writes.len() >= 2 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "paste + Enter never delivered; writes = {writes:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // A permission chooser now appears (hook-driven, the same
+        // `InputNeeded` a live dialog produces) — the dialog swallowed
+        // the submit, so no UserPromptSubmit / Working evidence will
+        // ever arrive.
+        client
+            .send(Command::IngestHook {
+                terminal_id,
+                hook: lazybox_ipc::HookEvent {
+                    kind: lazybox_ipc::HookEventKind::Notification,
+                    session_id: Some("claude-session".into()),
+                    cwd: None,
+                    tool_name: None,
+                    notification: Some("Claude needs your permission to use Bash".into()),
+                },
+                backend_key: Some(key.clone()),
+            })
+            .unwrap();
+        wait_for(
+            &mut client,
+            |e| {
+                matches!(
+                    e,
+                    Event::AgentState {
+                        state: lazybox_ipc::AgentState::InputNeeded,
+                        ..
+                    }
+                )
+            },
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("permission hook must raise InputNeeded");
+
+        // The confirm loop finds no submit evidence. Pre-fix it resent
+        // bare Enter into the chooser; it must abort loudly instead.
+        let rejected = wait_for(
+            &mut client,
+            |e| {
+                matches!(
+                    e,
+                    Event::TerminalInputRejected { terminal_id: tid, .. } if *tid == terminal_id
+                )
+            },
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("the suppressed submit must fail loudly");
+        if let Event::TerminalInputRejected { message, .. } = &rejected {
+            assert!(
+                message.contains("permission prompt"),
+                "the notice must name the chooser hazard, got {message:?}"
+            );
+        }
+
+        // Still exactly the paste and the one pre-chooser submit — no
+        // Enter was resent into the permission chooser.
+        let writes = mock.writes_for(&key).await;
+        assert_eq!(
+            writes.len(),
+            2,
+            "bare Enter was resent into a permission chooser; writes = {writes:?}"
+        );
+        assert_eq!(writes[1], b"\r".to_vec());
+    })
+    .await
+    .expect("deadline");
+}
+
 /// Regression: a single wedged backend session must not block the
 /// daemon's Subscribe handler. Pre-fix, `snapshot_terminals` would
 /// `.await` `backend.snapshot(key)` with no timeout — one stuck tmux
@@ -2534,6 +2644,184 @@ async fn streaming_holds_working_until_quiet_window_elapses() {
     .expect("deadline");
 }
 
+/// The spawn-inject ladder's last rung: a detector-less agent (no
+/// authoritative readiness signal, `requires_ready` false) whose PTY
+/// produces NO output at all — so neither the ready rung nor the
+/// first-output + settle rung can ever fire — still receives its work
+/// prompt, pasted blindly when the 10s hard deadline elapses, rather
+/// than losing it to a cold-start hang.
+// Paused time: the 10s deadline rides tokio's auto-advance.
+#[tokio::test(start_paused = true)]
+async fn detectorless_spawn_prompt_pastes_blindly_at_the_hard_deadline() {
+    timeout(Duration::from_secs(60), async {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config).await;
+
+        const WORK: &str = "Fix the flaky login test.";
+        client
+            .send(Command::Spawn {
+                model_alias: None,
+                session_key: "test:ws-deadline".into(),
+                session_id: None,
+                // cursor-agent inherits the line-oriented protocol:
+                // best-effort readiness, no composer detector.
+                kind: TerminalKind::Agent("cursor-agent".into()),
+                cwd: test_cwd(),
+                initial_prompt: Some(WORK.into()),
+                on_main: false,
+            })
+            .unwrap();
+        wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalSpawned { .. }),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("TerminalSpawned arrived");
+        let key = mock.list().await.unwrap().into_iter().next().unwrap();
+
+        // 8s in: still inside the deadline, and with zero output the
+        // ready/settle rungs have no evidence — nothing may be written.
+        tokio::time::sleep(Duration::from_secs(8)).await;
+        assert!(
+            mock.writes_for(&key).await.is_empty(),
+            "prompt written before the hard deadline with no readiness evidence"
+        );
+
+        // Crossing the 10s deadline delivers the blind paste.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let joined = mock
+                .writes_for(&key)
+                .await
+                .into_iter()
+                .flatten()
+                .collect::<Vec<u8>>();
+            if String::from_utf8_lossy(&joined).contains(WORK) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "hard-deadline rung never pasted the prompt; writes = {:?}",
+                String::from_utf8_lossy(&joined)
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("deadline");
+}
+
+/// The Working watchdog (#398) must not be starved by churn-only output
+/// arriving just under the quiet window. Chunks every 4.9s re-arm the
+/// 5s quiet timer forever, so `classify_quiet_screen` never runs on its
+/// own; the watchdog instead anchors on the last content-fingerprint
+/// CHANGE — identical repaints don't move it — and must still fire 15s
+/// after the frame froze, forcing the pinned `Working` turn closed.
+// Paused time makes the 4.9s cadence vs the 5s/15s windows exact.
+#[tokio::test(start_paused = true)]
+async fn sub_quiet_churn_does_not_starve_the_working_watchdog() {
+    timeout(Duration::from_secs(120), async {
+        // The 5s quiet / 15s watchdog defaults are config-driven; pin
+        // them to an empty config so a dev-machine override can't skew
+        // the cadence math.
+        let _home = IsolatedConfigHome::new();
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config).await;
+        let _ = spawn_and_wait(&mut client, TerminalKind::Agent("claude".into())).await;
+        let key = mock.list().await.unwrap().into_iter().next().unwrap();
+
+        // Boot to Idle at the composer first (see the quiet-window test
+        // above for why byte flow reads as boot chrome until then).
+        let idle_composer = include_bytes!("../../agents/tests/fixtures/idle_composer.bin");
+        mock.emit(&key, idle_composer).await;
+        tokio::time::sleep(Duration::from_secs(6)).await; // past the quiet window
+        assert!(
+            wait_for(
+                &mut client,
+                |e| matches!(
+                    e,
+                    Event::AgentState {
+                        state: lazybox_ipc::AgentState::Idle,
+                        ..
+                    }
+                ),
+                Duration::from_secs(2),
+            )
+            .await
+            .is_some(),
+            "the booted agent settles to Idle at its composer",
+        );
+
+        // The turn starts: one real content change anchors the watchdog.
+        let spinner = "✻ Cogitating… (8s · ↑ 412 tokens · esc to interrupt)";
+        mock.emit(&key, spinner).await;
+        assert!(
+            wait_for(
+                &mut client,
+                |e| matches!(
+                    e,
+                    Event::AgentState {
+                        state: lazybox_ipc::AgentState::Working,
+                        ..
+                    }
+                ),
+                Duration::from_secs(2),
+            )
+            .await
+            .is_some(),
+            "byte flow past boot must read as Working",
+        );
+
+        // The frame freezes: identical repaints every 4.9s. Each chunk
+        // re-arms the quiet timer (never fires) but, being churn (same
+        // content fingerprint), never moves the watchdog anchor.
+        for _ in 0..3 {
+            tokio::time::sleep(Duration::from_millis(4_900)).await;
+            mock.emit(&key, spinner).await;
+        }
+        // ~14.7s of churn: neither timer may have classified anything.
+        let early = wait_for(
+            &mut client,
+            |e| matches!(e, Event::AgentState { .. }),
+            Duration::from_millis(100),
+        )
+        .await;
+        assert!(
+            early.is_none(),
+            "no classification may fire while churn re-arms the quiet timer, got {early:?}"
+        );
+
+        // Keep the churn flowing across the 15s watchdog boundary — the
+        // watchdog must observe the frozen content and force the turn
+        // closed even though bytes never stop.
+        for _ in 0..2 {
+            tokio::time::sleep(Duration::from_millis(4_900)).await;
+            mock.emit(&key, spinner).await;
+        }
+        let done = wait_for(
+            &mut client,
+            |e| {
+                matches!(
+                    e,
+                    Event::AgentState {
+                        state: lazybox_ipc::AgentState::Done,
+                        ..
+                    }
+                )
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            done.is_some(),
+            "the watchdog starved: churn-only output pinned Working past its window"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
 /// Minimal GitHub `Task` for the collapse test.
 fn collapse_task(key: &str, url: &str, closes: Vec<lazybox_core::TaskId>) -> lazybox_core::Task {
     lazybox_core::Task {
@@ -2598,7 +2886,21 @@ async fn collapse_into_pr_carries_live_terminal_to_the_pr() {
         // provisioning. Seed an existing local session so it never
         // clones the fake `o/r` remote or depends on network latency,
         // credentials, and the developer's global git configuration.
+        // The seeded dir must be a real checkout: the spawn path now
+        // validates the worktree (a bare/empty dir would be routed
+        // through re-provisioning — and the fake remote — instead of
+        // being trusted).
         let worktree = tempfile::tempdir().unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .arg("init")
+                .arg("-q")
+                .current_dir(worktree.path())
+                .status()
+                .unwrap()
+                .success(),
+            "git init the seeded worktree"
+        );
         issue.add_session(lazybox_core::WorkspaceSession::new(
             issue_key.clone(),
             lazybox_core::SessionKind::Agent {
@@ -2929,6 +3231,174 @@ async fn fetch_scrollback_without_history_source_is_silent() {
         )
         .await;
         assert!(ev.is_none(), "no history source must reply nothing: {ev:?}");
+    })
+    .await
+    .expect("deadline");
+}
+
+/// Startup recovery runs under a wall-clock bound in the TUI, and the
+/// timeout cancels `recover_sessions` MID-LOOP — backend sessions it
+/// hadn't registered yet stay alive but absent from `terminal_meta`.
+/// `restore_persisted_sessions` used to dedupe against `terminal_meta`
+/// alone, so it spawned a SECOND agent into the same worktree beside
+/// the surviving (unregistered) backend session. It must fold the
+/// backend's own listing into the dedupe set: a live backend session
+/// for key K must never coexist with a fresh spawn for K.
+#[tokio::test]
+async fn restore_skips_live_but_unregistered_backend_sessions() {
+    let _home = IsolatedConfigHome::new();
+    timeout(Duration::from_secs(20), async {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+
+        // A persisted workspace with one agent session record.
+        let ws_key = lazybox_core::WorkspaceKey::new("test:restore-live");
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut ws = lazybox_core::Workspace::empty(ws_key.clone(), "main", chrono::Utc::now());
+        let session = lazybox_core::WorkspaceSession::new(
+            ws_key.clone(),
+            lazybox_core::SessionKind::Agent {
+                agent_id: "claude".into(),
+            },
+            tmp.path().join("wt"),
+            chrono::Utc::now(),
+        );
+        let session_id = session.id;
+        ws.add_session(session);
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: ws_key.as_str().to_string(),
+                created_at: ws.created_at,
+                workspace_json: Some(serde_json::to_string(&ws).unwrap()),
+            })
+            .unwrap();
+
+        // Spawn it for real once — this persists the terminal meta the
+        // way a live daemon does.
+        lazybox_server::spawn_handler::handle_spawn(
+            &config,
+            "test:restore-live".into(),
+            Some(session_id),
+            TerminalKind::Agent("claude".into()),
+            None,
+            None,
+            false, // autonomous
+            false, // on_main
+            None,  // model_alias
+            false, // resume
+        )
+        .await;
+        assert_eq!(
+            mock.list().await.unwrap().len(),
+            1,
+            "sanity: one live backend session"
+        );
+
+        // Simulate the restart whose recovery got cancelled before
+        // registering this session: the in-memory maps are empty, the
+        // backend session and its persisted meta survive.
+        config.terminals.lock().await.clear();
+        config.terminal_meta.lock().await.clear();
+
+        lazybox_server::spawn_handler::restore_persisted_sessions(&config).await;
+        assert_eq!(
+            mock.list().await.unwrap().len(),
+            1,
+            "restore must not spawn a second agent beside the live unregistered session"
+        );
+        assert!(
+            config.terminal_meta.lock().await.is_empty(),
+            "nothing was registered by the skipped restore"
+        );
+
+        // Control: once the backend survivor no longer maps to this
+        // record (its persisted meta is gone — the mock backend keeps
+        // exited sessions listed, unlike tmux, so drop the attribution
+        // instead), the same record IS restored — proving this harness
+        // detects a spawn.
+        let backend_key = mock.list().await.unwrap().into_iter().next().unwrap();
+        config
+            .store
+            .delete_kv(&format!("terminal:{backend_key}"))
+            .unwrap();
+        lazybox_server::spawn_handler::restore_persisted_sessions(&config).await;
+        assert!(
+            !config.terminal_meta.lock().await.is_empty(),
+            "restore spawns normally once no live backend session maps to the record"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
+/// A spawn whose worktree provision fails must fail LOUDLY — a
+/// `spawn:session` provider error, no terminal — and leave nothing
+/// spawnable behind. The old fallback `mkdir`'d an empty dir,
+/// persisted the session, and opened the terminal in a non-git folder;
+/// every later spawn then short-circuited into it forever.
+#[tokio::test]
+async fn failed_provision_fails_spawn_loudly_and_leaves_no_session() {
+    timeout(TEST_DEADLINE, async {
+        let _home = IsolatedConfigHome::new();
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+
+        // A task whose repo can't be provisioned (not `owner/name`)
+        // fails deterministically before any git or network work.
+        let mut task = collapse_task("o/r#60", "https://github.com/o/r/issues/60", vec![]);
+        task.repo = Some("not-owner-name-format".into());
+        let ws = lazybox_core::Workspace::from_task(task, chrono::Utc::now());
+        let ws_key = ws.key.clone();
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: ws_key.as_str().to_string(),
+                created_at: ws.created_at,
+                workspace_json: Some(serde_json::to_string(&ws).unwrap()),
+            })
+            .unwrap();
+
+        let mut client = subscribed(config.clone()).await;
+        client
+            .send(Command::Spawn {
+                model_alias: None,
+                session_key: ws_key.as_str().into(),
+                session_id: None,
+                kind: TerminalKind::Agent("claude".into()),
+                cwd: None,
+                initial_prompt: None,
+                on_main: false,
+            })
+            .unwrap();
+
+        let error = wait_for(
+            &mut client,
+            |e| matches!(e, Event::ProviderError { source, .. } if source == "spawn:session"),
+            Duration::from_secs(2),
+        )
+        .await;
+        assert!(
+            error.is_some(),
+            "the failed provision must surface as a spawn:session provider error"
+        );
+
+        assert!(
+            mock.list().await.unwrap().is_empty(),
+            "no terminal may be spawned into an unprovisioned workspace"
+        );
+        let after: lazybox_core::Workspace = serde_json::from_str(
+            &config
+                .store
+                .get_workspace(&ws_key)
+                .unwrap()
+                .unwrap()
+                .workspace_json
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            after.sessions.is_empty(),
+            "no session may be persisted for a worktree that was never provisioned"
+        );
     })
     .await
     .expect("deadline");

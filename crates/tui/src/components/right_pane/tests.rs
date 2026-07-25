@@ -358,7 +358,7 @@ mod undo_auto_mark_tests {
         pane.feed.cursor = 1;
         pane.rearm_mark_timer_for_new_row(true);
         let fired = pane.fire_auto_mark();
-        assert_eq!(fired.map(|(_k, i)| i), Some(1));
+        assert_eq!(fired.map(|(_k, i, _fp)| i), Some(1));
 
         // Poll injects a new row at the top, shifting everything down.
         let mut shifted = activities.clone();
@@ -597,7 +597,7 @@ mod auto_mark_fingerprint_tests {
 
         let fired = pane.fire_auto_mark();
         assert_eq!(
-            fired.map(|(_k, i)| i),
+            fired.map(|(_k, i, _fp)| i),
             Some(1),
             "the armed row must be marked at its SHIFTED index",
         );
@@ -639,7 +639,19 @@ mod auto_mark_fingerprint_tests {
         assert!(pane.mark_cursor_row_read(&mut cmds));
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
-            Command::MarkActivityRead { index, .. } => assert_eq!(*index, 0),
+            Command::MarkActivityRead {
+                index, fingerprint, ..
+            } => {
+                assert_eq!(*index, 0);
+                // The command must carry the FOCUSED row's stable
+                // identity so a daemon whose list shifted since this
+                // snapshot still marks the intended row.
+                assert_eq!(
+                    fingerprint.as_ref(),
+                    Some(&lazybox_core::ActivityFingerprint::NodeId("n-A".into())),
+                    "MarkActivityRead must ship the cursor row's fingerprint",
+                );
+            }
             other => panic!("expected MarkActivityRead, got {other:?}"),
         }
         let ws = pane.workspace.as_ref().expect("workspace");

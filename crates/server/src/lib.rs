@@ -236,6 +236,15 @@ pub const INLINE_BUDGET: std::time::Duration = std::time::Duration::from_millis(
 /// is reached, new detached mutations are rejected before spawning a task.
 pub const MAX_CONNECTION_MUTATIONS: usize = 32;
 
+/// How long a closing connection waits for its in-flight detached
+/// mutation tasks (merge saves, worktree teardowns, spawns) before
+/// abandoning them. Applied on EVERY serve-loop exit — client
+/// disconnect, `Command::Shutdown`, and the graceful-stop signal the
+/// socket service raises on SIGTERM — so a mutation that already
+/// succeeded remotely isn't cancelled before its local save/broadcast.
+/// Bounded: a wedged clone or git op must not hold shutdown hostage.
+pub const MUTATION_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 const CONNECTION_ROUTER_TASKS: usize = 2;
 
 /// Canonical lock-acquisition order for the per-terminal maps when
@@ -440,6 +449,14 @@ pub struct ServerConfig {
     /// decoupled from it is worth keeping. See
     /// [`polling::MergePromptMemory`].
     pub merge_prompts: Arc<Mutex<polling::MergePromptMemory>>,
+    /// Daemon-side "auto-merge on green" one-shot latch (the trigger
+    /// moved out of the TUI client — see [`polling::auto_merge`]).
+    /// Own `parking_lot::Mutex` for the same reason as `merge_prompts`:
+    /// it's touched from inside the upsert/commit path and must stay
+    /// decoupled from `poll_state`'s non-reentrant lock. In-memory on
+    /// purpose — a restart re-evaluates and may re-attempt an
+    /// idempotent merge, which GitHub answers "already merged".
+    pub auto_merge: Arc<parking_lot::Mutex<polling::AutoMergeMemory>>,
     /// Workspace-removal prompt memory (level-triggered
     /// `MergedPrRemovable` re-emits + "keep" pins). Own lock for the
     /// same reason as `merge_prompts`: it's touched from inside the
@@ -497,6 +514,15 @@ pub struct ServerConfig {
     /// set insert; without this lock two concurrent deletes can each load the
     /// old set and overwrite the other's tombstone.
     pub archive_updates: Arc<parking_lot::Mutex<()>>,
+    /// Debounce memory for "stored workspace row is unreadable —
+    /// preserved, not overwritten" reports, keyed by workspace key →
+    /// last report time. The poll tick re-hits the same corrupt row
+    /// every cycle; without this each ~60s tick would re-broadcast an
+    /// identical storage error per corrupt row. Its own lock (not a
+    /// `TickState` field) because `prepare_upsert` runs decoupled from
+    /// `poll_state` — see the `MergePromptMemory` deadlock note in
+    /// `polling`.
+    pub undecodable_row_reports: Arc<parking_lot::Mutex<HashMap<String, std::time::Instant>>>,
     /// Shape of the last `InputNeeded` decision per terminal — whether
     /// a bare chooser keystroke (`1`-`9`, y/n, Esc) is a complete
     /// answer. Written by the PTY detector (its structural triggers
@@ -616,6 +642,7 @@ impl ServerConfig {
             poll_state: Arc::new(Mutex::new(polling::TickState::default())),
             gh_client_cache: Arc::new(parking_lot::Mutex::new(None)),
             merge_prompts: Arc::new(Mutex::new(polling::MergePromptMemory::default())),
+            auto_merge: Arc::new(parking_lot::Mutex::new(polling::AutoMergeMemory::default())),
             removal_prompts: Arc::new(Mutex::new(polling::RemovalPromptMemory::default())),
             viewer_identities: Arc::new(parking_lot::Mutex::new(Vec::new())),
             poll_wake: Arc::new(tokio::sync::Notify::new()),
@@ -623,6 +650,7 @@ impl ServerConfig {
             inflight_spawn_changed: Arc::new(tokio::sync::Notify::new()),
             deleted_workspaces: Arc::new(parking_lot::Mutex::new(HashSet::new())),
             archive_updates: Arc::new(parking_lot::Mutex::new(())),
+            undecodable_row_reports: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             input_needed_shapes: Arc::new(Mutex::new(HashMap::new())),
             event_metrics: Arc::new(metrics::EventMetrics::default()),
             workspace_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
@@ -813,11 +841,44 @@ impl ServerConfig {
 
 pub struct Server {
     config: ServerConfig,
+    /// Graceful-stop signal shared by every connection served through
+    /// this instance. `None` (the default) means only client-side
+    /// triggers (`Command::Shutdown`, disconnect) end the serve loop.
+    /// The socket service raises it on SIGTERM so each connection runs
+    /// its bounded mutation drain instead of being aborted mid-write.
+    graceful_stop: Option<tokio::sync::watch::Receiver<bool>>,
+    /// Bound on the exit-time drain of detached mutation tasks.
+    /// [`MUTATION_DRAIN_TIMEOUT`] by default; overridable so tests can
+    /// pin the abandon path without a five-second wall-clock wait.
+    mutation_drain_timeout: std::time::Duration,
 }
 
 impl Server {
     pub fn new(config: ServerConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            graceful_stop: None,
+            mutation_drain_timeout: MUTATION_DRAIN_TIMEOUT,
+        }
+    }
+
+    /// Arm a graceful-stop signal: when `rx` observes `true` (or its
+    /// sender drops), the serve loop stops as if the client had sent
+    /// `Command::Shutdown` — including the bounded drain of in-flight
+    /// detached mutations. Used by the socket service so SIGTERM
+    /// doesn't abort a mutation between its remote side effect and the
+    /// local save/broadcast.
+    pub fn with_graceful_stop(mut self, rx: tokio::sync::watch::Receiver<bool>) -> Self {
+        self.graceful_stop = Some(rx);
+        self
+    }
+
+    /// Override the exit-time mutation drain bound (default
+    /// [`MUTATION_DRAIN_TIMEOUT`]). Primarily for deterministic tests
+    /// of the abandon path.
+    pub fn with_mutation_drain_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.mutation_drain_timeout = timeout;
+        self
     }
 
     /// Accept a client connection (either an in-process `Server` from
@@ -879,11 +940,20 @@ impl Server {
         // manufacture an arbitrarily large structured-event backlog; live
         // recovery uses the bus-lag snapshot and RequestTerminalResync paths.
         let mut subscribed = false;
+        // Cloned per connection: several serve loops can share one
+        // service-owned watch channel.
+        let mut graceful_stop = self.graceful_stop.clone();
         loop {
             while mutations.try_join_next().is_some() {}
             tokio::select! {
                 _ = conn.tx.closed() => {
                     tracing::warn!("client event forwarder closed — ending connection");
+                    break;
+                }
+                _ = graceful_stop_requested(&mut graceful_stop) => {
+                    tracing::info!(
+                        "graceful stop requested — ending connection and draining mutations"
+                    );
                     break;
                 }
                 cmd = conn.rx.recv() => {
@@ -1148,16 +1218,18 @@ impl Server {
         // Drain detached mutation tasks before returning — `Shutdown =>
         // break` used to abandon an in-flight Kill / Spawn / inject
         // mid-write. Bounded: a wedged clone or git op must not hold
-        // shutdown hostage, so anything still running after 5s is
-        // abandoned (with a breadcrumb).
+        // shutdown hostage, so anything still running after
+        // `mutation_drain_timeout` is abandoned (with a breadcrumb).
         if !mutations.is_empty() {
             let drain = async { while mutations.join_next().await.is_some() {} };
-            if tokio::time::timeout(std::time::Duration::from_secs(5), drain)
+            if tokio::time::timeout(self.mutation_drain_timeout, drain)
                 .await
                 .is_err()
             {
                 tracing::warn!(
-                    "shutdown: detached mutation task(s) still running after 5s — abandoning them"
+                    drain_timeout = ?self.mutation_drain_timeout,
+                    "shutdown: detached mutation task(s) still running past the drain bound — \
+                     abandoning them"
                 );
             }
         }
@@ -1170,6 +1242,22 @@ impl Server {
             let _ = forward_task.await;
         }
         Ok(())
+    }
+}
+
+/// Resolve once a graceful stop has been requested: `true` observed on
+/// the watch channel, or its sender (the socket service) gone. Pends
+/// forever when the server has no graceful-stop channel armed. Watch
+/// semantics are level-triggered, so recreating this future on every
+/// serve-loop turn cannot lose the signal.
+async fn graceful_stop_requested(rx: &mut Option<tokio::sync::watch::Receiver<bool>>) {
+    match rx {
+        // Err means the sender dropped — the service side is going
+        // away, which is a stop request too.
+        Some(rx) => {
+            let _ = rx.wait_for(|stop| *stop).await;
+        }
+        None => std::future::pending().await,
     }
 }
 
@@ -1506,9 +1594,13 @@ pub async fn dispatch_command(
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
             polling::set_focused_workspace(config, &key).await;
         }
-        lazybox_ipc::Command::MarkActivityRead { session_key, index } => {
+        lazybox_ipc::Command::MarkActivityRead {
+            session_key,
+            index,
+            fingerprint,
+        } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
-            polling::mark_activity_read(config, &key, index).await;
+            polling::mark_activity_read(config, &key, index, fingerprint.as_ref()).await;
         }
         lazybox_ipc::Command::UnmarkActivityRead { session_key, index } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
@@ -1805,7 +1897,11 @@ fn load_workspaces(store: &dyn Store) -> LoadOutcome<lazybox_core::Workspace> {
     let mut outcome = LoadOutcome::default();
     for record in records {
         match record.workspace_json {
-            Some(json) => match serde_json::from_str::<lazybox_core::Workspace>(&json) {
+            // `decode_persisted`, not a lenient `from_str`: a row
+            // stamped with a NEWER schema version (downgraded build)
+            // must land in the preserve-and-report branch too, or a
+            // later rewrite would silently drop the newer fields.
+            Some(json) => match lazybox_core::Workspace::decode_persisted(&json) {
                 Ok(workspace) => outcome.values.push(workspace),
                 Err(error) => {
                     tracing::warn!("preserving unreadable workspace {}: {error}", record.key);

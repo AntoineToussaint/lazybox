@@ -98,10 +98,11 @@ impl ProviderHandle {
     pub async fn merge(
         &self,
         ws: &lazybox_core::Workspace,
+        expected_head_oid: Option<&str>,
     ) -> Result<(), lazybox_core::ProviderError> {
         match self {
-            Self::Github(c) => lazybox_core::TaskProvider::merge(c, ws).await,
-            Self::Linear(c) => lazybox_core::TaskProvider::merge(c, ws).await,
+            Self::Github(c) => lazybox_core::TaskProvider::merge(c, ws, expected_head_oid).await,
+            Self::Linear(c) => lazybox_core::TaskProvider::merge(c, ws, expected_head_oid).await,
         }
     }
     pub async fn update_branch(
@@ -246,11 +247,20 @@ async fn build_provider_for_workspace(
     }
 }
 
-/// Handle `Command::MergePr`: load the workspace, recover the PR's
-/// GraphQL node id from its primary task, and ship a `mergePullRequest`
-/// mutation. On success the next poll cycle picks up the new MERGED
-/// state and the workspace lands in the Inactive mailbox (or folds
-/// into nothing if `closingIssuesReferences` had set up a collapse).
+/// Handle `Command::MergePr` — the MANUAL merge path (`g m`): load the
+/// workspace, recover the PR's GraphQL node id from its primary task,
+/// and ship a `mergePullRequest` mutation. On success the next poll
+/// cycle picks up the new MERGED state and the workspace lands in the
+/// Inactive mailbox (or folds into nothing if
+/// `closingIssuesReferences` had set up a collapse).
+///
+/// Deliberately NO fresh eligibility re-check and NO `expectedHeadOid`
+/// pin here: the user pressed the key against the state they're
+/// looking at, and user intent wins — GitHub's own rejection is the
+/// backstop, surfaced verbatim. (`Task` carries no head OID, so there
+/// is no locally-known head to pin; the daemon-internal AUTO path —
+/// `polling::auto_merge` — re-fetches, re-verifies, and pins the OID
+/// instead. The `Command::MergePr` wire contract is unchanged.)
 ///
 /// Errors surface as `Event::ProviderError` so the TUI can flash the
 /// reason without us inventing a bespoke event variant.
@@ -278,7 +288,7 @@ pub async fn handle_merge_pr(config: &ServerConfig, workspace_key: WorkspaceKey)
             return;
         }
     };
-    if let Err(e) = provider.merge(&ws).await {
+    if let Err(e) = provider.merge(&ws, None).await {
         tracing::warn!("merge {workspace_key}: {e:?}");
         // A user-initiated merge that GitHub rejected is not a
         // transient blip — surface it as a distinct, persistent error
@@ -731,7 +741,7 @@ pub async fn handle_fetch_repo_labels(config: &ServerConfig, workspace_key: Work
 /// call (issue #92); the cache lives outside `poll_state` so this
 /// never contends with a running poll tick. `None` means credentials
 /// or client init failed — the caller skips the user-triggered fetch.
-async fn resolve_gh_client(config: &ServerConfig) -> Option<GhClient> {
+pub(super) async fn resolve_gh_client(config: &ServerConfig) -> Option<GhClient> {
     if let Some(client) = config.gh_client_cache.lock().clone() {
         return Some(client);
     }
@@ -761,7 +771,7 @@ async fn resolve_gh_client(config: &ServerConfig) -> Option<GhClient> {
 /// (`"owner/repo"`) and the trailing `#N` of its `TaskId` key. `None`
 /// for a task that isn't GitHub-shaped — no repo, or an unparseable
 /// number.
-fn github_target(task: &lazybox_core::Task) -> Option<(String, String, u64)> {
+pub(super) fn github_target(task: &lazybox_core::Task) -> Option<(String, String, u64)> {
     let (owner, name) = task.repo.as_deref()?.split_once('/')?;
     let number = task
         .id
@@ -910,6 +920,20 @@ pub async fn apply_pr_details(
         // The primitive's single-key guard is dropped on return before the
         // collapse takes the PR plus every source issue lock.
         super::collapse_closing_issues_for(config, workspace_key).await;
+    }
+    if outcome.is_applied() {
+        // The lazy detail fetch overwrites `pr.ci` / `pr.review`, so it
+        // can be the first place lazybox observes an armed PR going
+        // green — run the same auto-merge hook the poll commit path
+        // runs, off the freshly-committed state.
+        if let Some(ws) = super::load_workspace(config, workspace_key) {
+            super::auto_merge::on_workspace_committed(
+                config,
+                workspace_key,
+                super::auto_merge::signal_for(&ws),
+                true,
+            );
+        }
     }
 }
 

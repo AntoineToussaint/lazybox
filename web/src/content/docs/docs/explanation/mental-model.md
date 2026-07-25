@@ -1,6 +1,6 @@
 ---
 title: Mental model
-description: Workspace = worktree + agent, the reactive inbox, read/unread, and the isolation rationale.
+description: Workspace = worktree + agent sessions, the reactive inbox, read/unread, and the isolation rationale.
 ---
 
 This page explains how to think about lazybox. Once these few ideas click, the
@@ -13,10 +13,12 @@ bound together:
 
 1. **A git worktree** — an isolated checkout of the repository, separate from
    your main working copy and from every other workspace.
-2. **An agent (or shell) session** — one embedded terminal running Claude Code,
+2. **Agent (or shell) sessions** — embedded terminals running Claude Code,
    Codex, Cursor, or a plain shell, scoped to that worktree.
 
-One worktree per workspace. One agent per workspace. A task — a pull request, an
+One worktree per workspace — that is the invariant. A workspace can host
+several terminals at once (splits or tabs: an agent plus a shell, or even
+multiple agents) all working in the same worktree. A task — a pull request, an
 issue, a piece of pre-PR work — maps to exactly one workspace.
 
 ## The reactive inbox model
@@ -49,9 +51,9 @@ Isolating each task in its own git worktree buys two things:
   branch, its own build artifacts, its own agent — without stashing or switching
   branches.
 
-## Why an agent per workspace
+## Why agent sessions are scoped to a workspace
 
-Binding a single agent session to a single worktree keeps the agent's context
+Binding agent sessions to a single worktree keeps their context
 and blast radius scoped to one task. The agent works directly with `git` and
 `gh` in that worktree — lazybox does not wrap those actions behind an approval
 layer, so the agent has exactly the tools it would have in any checkout. When

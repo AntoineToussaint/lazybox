@@ -63,6 +63,7 @@ Status: foundation implemented.
 The server exposes an HTTP gateway for non-Rust clients:
 
 - `GET /v1/health`
+- `GET /v1/metrics` (event-pipeline drop/lag counters)
 - `GET /v1/workspaces`
 - `GET /v1/events`
 - `POST /v1/commands`
@@ -131,12 +132,17 @@ Status: localhost-only foundation.
 Current API is intended for local clients:
 
 - localhost bind by default;
-- optional bearer token;
+- bearer token required unless `--insecure-no-auth` is passed explicitly
+  (shipped);
+- non-loopback plaintext binds refused without `--allow-insecure-http`
+  (shipped);
 - no CORS by default.
 
 Before remote/mobile use:
 
-- Require bearer auth for non-loopback binds.
+- ~~Require bearer auth for non-loopback binds~~ — shipped: the gateway
+  refuses to start without an auth decision on any bind, and non-loopback
+  additionally requires the `--allow-insecure-http` acknowledgement.
 - Document SSH tunnel and reverse tunnel setups.
 - Add token rotation and a generated-token bootstrap command.
 - Consider mTLS or platform-specific secure pairing only after the

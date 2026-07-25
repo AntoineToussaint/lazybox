@@ -9,6 +9,10 @@ publish.workspace = true
 [dependencies]
 chrono = { workspace = true }
 serde = { workspace = true, features = ["derive", "rc"] }
+# The store persists Workspace as JSON; the strict persisted-blob
+# decoder (`Workspace::decode_persisted`) lives next to the schema
+# version it enforces, so the JSON codec is a real dependency here.
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { version = "1", features = ["serde", "v4"] }
 

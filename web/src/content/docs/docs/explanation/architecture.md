@@ -26,8 +26,10 @@ The socket starts with an explicit protocol/build handshake. A stale client or
 daemon is rejected with a restart message before application frames flow,
 rather than failing later as a decode error. Frames, command queues, event
 forwarders, and connection admission are bounded; malformed trailing bytes and
-oversized payloads are rejected. Protocol v11 clients and daemons must be
-upgraded together.
+oversized payloads are rejected. There is no hand-bumped protocol version:
+compatibility is negotiated with a build-derived wire fingerprint (a hash over
+the wire-defining sources), so client and daemon connect only when built from
+identical wire code — anything else is told to restart/upgrade together.
 
 ## The crates
 

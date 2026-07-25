@@ -281,6 +281,13 @@ pub struct GqlPr {
     pub deletions: u32,
     #[serde(rename = "headRefName")]
     pub head_ref_name: String,
+    /// Head commit OID. Selected only by `SINGLE_PR_QUERY` (the
+    /// targeted merge-time re-fetch) — the inbox-scan query omits it
+    /// to keep its per-PR cost budget untouched, and `Task` doesn't
+    /// carry it. The auto-merge path reads it straight off this node
+    /// and threads it into `mergePullRequest`'s `expectedHeadOid`.
+    #[serde(default, rename = "headRefOid")]
+    pub head_ref_oid: Option<String>,
     #[serde(rename = "baseRefName", default)]
     pub base_ref_name: String,
     /// MERGEABLE, CONFLICTING, or UNKNOWN.
@@ -508,11 +515,23 @@ pub struct GqlReviews {
 
 #[derive(Deserialize, Debug)]
 pub struct GqlReview {
+    /// GraphQL node id of the review. Carried onto the built
+    /// `Activity::node_id` so a review's identity is stable across
+    /// polls — without it, a PENDING review (null `submittedAt`) fell
+    /// back to content-tuple identity with a fresh timestamp every
+    /// poll and duplicated as a new unread row forever.
+    #[serde(default)]
+    pub id: Option<String>,
     pub author: Option<GqlAuthor>,
     pub body: Option<String>,
     pub state: String, // APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, PENDING
     #[serde(rename = "submittedAt")]
     pub submitted_at: Option<DateTime<Utc>>,
+    /// When the review was created. Non-null in GitHub's schema (unlike
+    /// `submittedAt`, which is null while PENDING) — the stable
+    /// timestamp fallback that replaces the old `Utc::now()` one.
+    #[serde(default, rename = "createdAt")]
+    pub created_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -712,9 +731,16 @@ pub struct GqlMergeMethodRepository {
 /// fails outright on repos that disallow merge commits — it does not
 /// fall back to the repo's allowed method. Callers pass the repo's
 /// `viewerDefaultMergeMethod` (see `PR_MERGE_METHOD_QUERY`).
+///
+/// `expectedHeadOid` is GitHub's compare-and-swap guard: when non-null,
+/// the merge is rejected ("Head branch was modified…") if the PR's head
+/// no longer sits at that commit — closing the force-push window
+/// between "lazybox observed the PR green at OID X" and "the merge
+/// landed". The input field is nullable, so passing `null` preserves
+/// the old unguarded behavior for callers with no known head.
 const MERGE_PR_MUTATION: &str = r#"
-mutation($id: ID!, $method: PullRequestMergeMethod!) {
-  mergePullRequest(input: { pullRequestId: $id, mergeMethod: $method }) {
+mutation($id: ID!, $method: PullRequestMergeMethod!, $expectedHeadOid: GitObjectID) {
+  mergePullRequest(input: { pullRequestId: $id, mergeMethod: $method, expectedHeadOid: $expectedHeadOid }) {
     pullRequest { id state merged }
   }
 }
@@ -826,10 +852,20 @@ pub fn remove_assignees_body(
     })
 }
 
-pub fn merge_pr_body(pull_request_node_id: &str, merge_method: &str) -> serde_json::Value {
+pub fn merge_pr_body(
+    pull_request_node_id: &str,
+    merge_method: &str,
+    expected_head_oid: Option<&str>,
+) -> serde_json::Value {
     serde_json::json!({
         "query": MERGE_PR_MUTATION,
-        "variables": { "id": pull_request_node_id, "method": merge_method },
+        "variables": {
+            "id": pull_request_node_id,
+            "method": merge_method,
+            // `null` when the caller has no known head — the input
+            // field is nullable and GitHub then skips the guard.
+            "expectedHeadOid": expected_head_oid,
+        },
     })
 }
 
@@ -1066,10 +1102,12 @@ query($id: ID!) {
       }
       reviews(first: 10) {
         nodes {
+          id
           author { login }
           body
           state
           submittedAt
+          createdAt
         }
       }
       closingIssuesReferences(first: 10) {
@@ -1210,13 +1248,19 @@ pub fn pr_details_to_details(node: &GqlPrDetailsNode, my_username: &str) -> PrDe
     // `pr_to_task`.
     let mut activities = activities_from_comments(&node.comments);
     activities.extend(pr_details_to_activities(node));
+    // Last-resort timestamp for a review with neither submittedAt nor
+    // createdAt (payloads predating the createdAt selection): the
+    // newest known review timestamp, else the epoch. NEVER a
+    // wall-clock now() — an unstable timestamp changes a node-id-less
+    // review's merge identity every poll, so a pending review
+    // re-appended as a brand-new unread row forever.
     let fallback_when = node
         .reviews
         .nodes
         .iter()
-        .filter_map(|r| r.submitted_at)
+        .filter_map(|r| r.submitted_at.or(r.created_at))
         .max()
-        .unwrap_or_else(chrono::Utc::now);
+        .unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
     for r in &node.reviews.nodes {
         let body = r.body.as_deref().unwrap_or("");
         if body.is_empty() && r.state != "APPROVED" && r.state != "CHANGES_REQUESTED" {
@@ -1234,9 +1278,12 @@ pub fn pr_details_to_details(node: &GqlPrDetailsNode, my_username: &str) -> PrDe
                 .map(|a| a.login.clone())
                 .unwrap_or_else(|| "?".into()),
             body: display,
-            created_at: r.submitted_at.unwrap_or(fallback_when),
+            created_at: r.submitted_at.or(r.created_at).unwrap_or(fallback_when),
             kind: ActivityKind::Review,
-            node_id: None,
+            // Stable identity for `Workspace::merge_activity` — an
+            // edited or later-submitted review REPLACES its stored
+            // copy instead of duplicating.
+            node_id: r.id.clone(),
             path: None,
             line: None,
             diff_hunk: None,
@@ -1343,6 +1390,7 @@ query($owner: String!, $name: String!, $number: Int!) {
       additions
       deletions
       headRefName
+      headRefOid
       baseRefName
       mergeable
       mergeStateStatus
@@ -1395,10 +1443,12 @@ query($owner: String!, $name: String!, $number: Int!) {
       }
       reviews(first: 10) {
         nodes {
+          id
           author { login }
           body
           state
           submittedAt
+          createdAt
         }
       }
       closingIssuesReferences(first: 10) {
@@ -1727,9 +1777,18 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
                 .map(|a| a.login.clone())
                 .unwrap_or_else(|| "?".into()),
             body: display,
-            created_at: r.submitted_at.unwrap_or(pr.updated_at),
+            // Prefer submittedAt, then the (schema-non-null) createdAt.
+            // Both are STABLE across polls; `pr.updated_at` is the
+            // last-resort for payloads that predate the createdAt
+            // selection and must never be a wall-clock now() — an
+            // unstable timestamp gives a node-id-less review a new
+            // identity every poll, duplicating it as unread forever.
+            created_at: r.submitted_at.or(r.created_at).unwrap_or(pr.updated_at),
             kind: ActivityKind::Review,
-            node_id: None, // Reviews don't have reply-to IDs.
+            // The review's own node id — not a reply-to target (replies
+            // go through review THREADS), but the stable identity
+            // `Workspace::merge_activity` de-dupes on.
+            node_id: r.id.clone(),
             path: None,
             line: None,
             diff_hunk: None,
@@ -1813,8 +1872,22 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
         mergeable: match pr.mergeable.as_deref() {
             Some("CONFLICTING") => lazybox_core::Mergeable::Conflicting,
             Some("MERGEABLE") => lazybox_core::Mergeable::Mergeable,
-            // GitHub returns "UNKNOWN" while it lazily computes
-            // mergeability — surface as Unknown rather than guess.
+            // Merged / closed PRs: GitHub NEVER computes mergeability
+            // for terminal PRs — their `mergeable` stays null (or
+            // UNKNOWN) forever. Classifying that as `Unknown` put the
+            // poll scheduler in a permanent 5s fast-loop, because the
+            // merged sweep re-surfaces these PRs every tick and
+            // `Unknown` is its "re-poll soon, GitHub is still
+            // computing" trigger. A terminal PR has no merge-conflict
+            // question left to answer — mirror `issue_to_task` (which
+            // reports `Mergeable` for issues, another kind that can
+            // never conflict) and settle on a definitive value.
+            _ if matches!(state, TaskState::Merged | TaskState::Closed) => {
+                lazybox_core::Mergeable::Mergeable
+            }
+            // Open PR: GitHub returns "UNKNOWN" (or null) while it
+            // lazily computes mergeability — surface as Unknown
+            // rather than guess; a re-query nudges the computation.
             _ => lazybox_core::Mergeable::Unknown,
         },
         is_behind_base: pr.merge_state_status.as_deref() == Some("BEHIND"),
@@ -2681,6 +2754,37 @@ mod tests {
         assert!(query.contains("closePullRequest"));
     }
 
+    /// The merge mutation must carry `expectedHeadOid` — GitHub's
+    /// compare-and-swap guard against a force-push landing between
+    /// "observed green at OID X" and the merge itself. `Some` pins the
+    /// OID; `None` serializes as JSON null (the nullable input field's
+    /// "skip the guard" value), preserving the unguarded manual path.
+    #[test]
+    fn merge_pr_body_pins_expected_head_oid() {
+        let body = merge_pr_body("PR_kwDO", "SQUASH", Some("abc123"));
+        assert_eq!(body["variables"]["expectedHeadOid"], "abc123");
+        let query = body["query"].as_str().unwrap();
+        assert!(
+            query.contains("expectedHeadOid: $expectedHeadOid"),
+            "the mutation input must wire the variable through"
+        );
+
+        let unguarded = merge_pr_body("PR_kwDO", "SQUASH", None);
+        assert!(
+            unguarded["variables"]["expectedHeadOid"].is_null(),
+            "no known head must serialize as null, not be omitted"
+        );
+    }
+
+    /// The targeted single-PR fetch is the auto-merge path's source of
+    /// the verified head — it must keep selecting `headRefOid`.
+    #[test]
+    fn single_pr_query_selects_head_ref_oid() {
+        let body = single_pr_body("o", "r", 7);
+        let query = body["query"].as_str().unwrap();
+        assert!(query.contains("headRefOid"));
+    }
+
     #[test]
     fn delete_issue_body_targets_the_node() {
         let body = delete_issue_body("I_kwDOabc123");
@@ -2956,6 +3060,7 @@ mod tests {
             additions: 0,
             deletions: 0,
             head_ref_name: "feature".into(),
+            head_ref_oid: None,
             base_ref_name: "main".into(),
             mergeable: None,
             merge_state_status: None,
@@ -2998,6 +3103,8 @@ mod tests {
                     body: Some("please review".into()),
                     state: "COMMENTED".into(),
                     submitted_at: Some(ts(-100)),
+                    id: None,
+                    created_at: None,
                 },
                 GqlReview {
                     author: Some(GqlAuthor {
@@ -3006,6 +3113,8 @@ mod tests {
                     body: Some("looks good".into()),
                     state: "APPROVED".into(),
                     submitted_at: Some(ts(-10)),
+                    id: None,
+                    created_at: None,
                 },
             ],
         };
@@ -3029,6 +3138,8 @@ mod tests {
                     body: Some("approve".into()),
                     state: "APPROVED".into(),
                     submitted_at: Some(ts(-100)),
+                    id: None,
+                    created_at: None,
                 },
                 GqlReview {
                     author: Some(GqlAuthor {
@@ -3037,6 +3148,8 @@ mod tests {
                     body: Some("nit found".into()),
                     state: "CHANGES_REQUESTED".into(),
                     submitted_at: Some(ts(-10)),
+                    id: None,
+                    created_at: None,
                 },
             ],
         };
@@ -3712,6 +3825,61 @@ mod tests {
         assert_eq!(task.closed_at, Some(merged_at));
     }
 
+    /// Regression: GitHub never computes mergeability for merged PRs
+    /// (their `mergeable` stays null forever), and the merged sweep
+    /// re-surfaces them every tick. Classifying that null as `Unknown`
+    /// armed the poll scheduler's 5s fast re-poll on essentially every
+    /// tick — a permanent hot loop. Terminal PRs must land on a
+    /// definitive value.
+    #[test]
+    fn merged_pr_with_null_mergeable_is_not_unknown() {
+        let mut pr = make_pr(7, "bob");
+        pr.merged = true;
+        pr.state = "MERGED".into();
+        pr.mergeable = None;
+        let task = pr_to_task(&pr, "alice");
+        assert_eq!(task.state, TaskState::Merged);
+        assert_ne!(
+            task.mergeable,
+            lazybox_core::Mergeable::Unknown,
+            "a merged PR must never re-arm the unknown-mergeable fast re-poll"
+        );
+    }
+
+    /// Same for closed-without-merge PRs — and GitHub sometimes sends
+    /// the literal "UNKNOWN" for them instead of null; both shapes
+    /// must settle.
+    #[test]
+    fn closed_pr_with_unknown_mergeable_is_not_unknown() {
+        let mut pr = make_pr(8, "bob");
+        pr.state = "CLOSED".into();
+        pr.mergeable = Some("UNKNOWN".into());
+        let task = pr_to_task(&pr, "alice");
+        assert_eq!(task.state, TaskState::Closed);
+        assert_ne!(task.mergeable, lazybox_core::Mergeable::Unknown);
+    }
+
+    /// OPEN PRs keep the Unknown classification — that's the real
+    /// "GitHub is still computing, re-query soon" signal.
+    #[test]
+    fn open_pr_with_null_mergeable_stays_unknown() {
+        let mut pr = make_pr(9, "bob");
+        pr.mergeable = None;
+        let task = pr_to_task(&pr, "alice");
+        assert_eq!(task.mergeable, lazybox_core::Mergeable::Unknown);
+    }
+
+    /// A definitive wire value always wins, even on a terminal PR —
+    /// the terminal-state fallback only covers null/UNKNOWN.
+    #[test]
+    fn closed_pr_with_conflicting_keeps_conflicting() {
+        let mut pr = make_pr(10, "bob");
+        pr.state = "CLOSED".into();
+        pr.mergeable = Some("CONFLICTING".into());
+        let task = pr_to_task(&pr, "alice");
+        assert_eq!(task.mergeable, lazybox_core::Mergeable::Conflicting);
+    }
+
     /// `createdAt` rides from the wire onto `Task.created_at`, and
     /// `opened_at()` returns it even when `updated_at` is far more
     /// recent — the age signal the sidebar reads for the stale-issue
@@ -3799,6 +3967,8 @@ mod tests {
                 body: None,
                 state: "APPROVED".into(),
                 submitted_at: Some(chrono::Utc::now()),
+                id: None,
+                created_at: None,
             }],
         };
         let task = pr_to_task(&pr, "alice");
@@ -3848,6 +4018,8 @@ mod tests {
                     body: Some("lgtm".into()),
                     state: "APPROVED".into(),
                     submitted_at: Some(when),
+                    id: None,
+                    created_at: None,
                 }],
             },
             closing_issues_references: Some(GqlClosingIssues {
@@ -3885,5 +4057,131 @@ mod tests {
         assert!(details.closes_issues.is_empty());
         assert!(details.checks.is_empty());
         assert_eq!(details.ci, CiStatus::None);
+    }
+
+    fn fixed_time() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-06-01T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    /// A PENDING review (null `submittedAt`) with a body used to get
+    /// `created_at: Utc::now()` and `node_id: None` — a brand-new
+    /// (author, body, created_at) identity every poll, so
+    /// `Workspace::merge_activity` appended it as a new unread row
+    /// forever. Same payload across two synthetic polls must now
+    /// produce identity-equal activities carrying the review's node id.
+    #[test]
+    fn pending_review_activity_identity_is_stable_across_polls() {
+        let node_for_poll = || GqlPrDetailsNode {
+            reviews: GqlReviews {
+                nodes: vec![GqlReview {
+                    id: Some("PRR_pending1".into()),
+                    author: Some(GqlAuthor {
+                        login: "carol".into(),
+                    }),
+                    body: Some("wip: still looking".into()),
+                    state: "PENDING".into(),
+                    submitted_at: None,
+                    created_at: Some(fixed_time()),
+                }],
+            },
+            ..GqlPrDetailsNode::default()
+        };
+
+        let first = pr_details_to_details(&node_for_poll(), "alice");
+        let second = pr_details_to_details(&node_for_poll(), "alice");
+
+        let review_of = |d: &PrDetails| {
+            d.activities
+                .iter()
+                .find(|a| a.kind == ActivityKind::Review)
+                .cloned()
+                .expect("pending review with a body becomes an activity")
+        };
+        let (a, b) = (review_of(&first), review_of(&second));
+        assert_eq!(
+            a.node_id.as_deref(),
+            Some("PRR_pending1"),
+            "review activity must carry the review's GraphQL id"
+        );
+        assert_eq!(a.node_id, b.node_id);
+        assert_eq!(
+            a.created_at, b.created_at,
+            "timestamp must be poll-independent (was Utc::now() per poll)"
+        );
+        assert_eq!(a.created_at, fixed_time(), "createdAt is the fallback");
+        assert_eq!(
+            (a.author.clone(), a.body.clone(), a.created_at),
+            (b.author.clone(), b.body.clone(), b.created_at),
+            "full node-id-less identity tuple must also be stable"
+        );
+    }
+
+    /// Even with NO id and NO createdAt (a payload shape from before
+    /// those selections), the fallback must be deterministic — never a
+    /// wall clock. Two polls of the same payload agree.
+    #[test]
+    fn pending_review_fallback_timestamp_never_uses_wall_clock() {
+        let node_for_poll = || GqlPrDetailsNode {
+            reviews: GqlReviews {
+                nodes: vec![GqlReview {
+                    id: None,
+                    author: Some(GqlAuthor {
+                        login: "carol".into(),
+                    }),
+                    body: Some("legacy pending".into()),
+                    state: "PENDING".into(),
+                    submitted_at: None,
+                    created_at: None,
+                }],
+            },
+            ..GqlPrDetailsNode::default()
+        };
+        let a = pr_details_to_details(&node_for_poll(), "alice");
+        let b = pr_details_to_details(&node_for_poll(), "alice");
+        let when_of = |d: &PrDetails| {
+            d.activities
+                .iter()
+                .find(|x| x.kind == ActivityKind::Review)
+                .expect("activity built")
+                .created_at
+        };
+        assert_eq!(when_of(&a), when_of(&b), "fallback must be deterministic");
+        assert_eq!(when_of(&a), DateTime::<Utc>::UNIX_EPOCH);
+    }
+
+    /// The eager `pr_to_task` review loop rides the same fix: node id
+    /// populated, stable createdAt fallback for a pending review.
+    #[test]
+    fn pr_to_task_review_activity_has_stable_identity() {
+        let mut pr = make_pr(9, "bob");
+        pr.reviews = GqlReviews {
+            nodes: vec![GqlReview {
+                id: Some("PRR_eager1".into()),
+                author: Some(GqlAuthor {
+                    login: "carol".into(),
+                }),
+                body: Some("wip note".into()),
+                state: "PENDING".into(),
+                submitted_at: None,
+                created_at: Some(fixed_time()),
+            }],
+        };
+        let t1 = pr_to_task(&pr, "alice");
+        let t2 = pr_to_task(&pr, "alice");
+        let act1 = t1
+            .recent_activity
+            .iter()
+            .find(|a| a.kind == ActivityKind::Review)
+            .expect("review activity");
+        let act2 = t2
+            .recent_activity
+            .iter()
+            .find(|a| a.kind == ActivityKind::Review)
+            .expect("review activity");
+        assert_eq!(act1.node_id.as_deref(), Some("PRR_eager1"));
+        assert_eq!(act1.created_at, fixed_time());
+        assert_eq!(act1.created_at, act2.created_at);
     }
 }

@@ -1189,7 +1189,11 @@ impl RightPane {
         if title_row < area.bottom() {
             self.click_hits.header_title = Some((title_row, task.url.clone()));
         }
-        lines.push(Line::from(vec![
+        // The `↗` is pinned to the row's end so a long title truncates
+        // ahead of the affordance instead of dropping it — the whole
+        // row is the hit region, so it must stay legible as a link even
+        // when the pane is narrow.
+        let title_body = Line::from(vec![
             Span::styled(
                 format!(" {icon} {label} "),
                 Style::default().bg(bg).fg(fg).add_modifier(Modifier::BOLD),
@@ -1203,8 +1207,15 @@ impl RightPane {
                     .add_modifier(Modifier::BOLD)
                     .add_modifier(Modifier::UNDERLINED),
             ),
-            Span::styled(" ↗", Style::default().fg(theme.accent)),
-        ]));
+        ]);
+        lines.push(crate::components::table::truncate_line_keep_suffix(
+            title_body,
+            Span::styled(
+                format!(" {}", icons::EXTERNAL_LINK),
+                Style::default().fg(theme.accent),
+            ),
+            area.width as usize,
+        ));
 
         // Branch line — confirms which worktree lazybox will spawn an
         // agent into. Cyan accent on a "Branch:" dim label.

@@ -69,6 +69,13 @@ pub const PR_WIP: &str = "";
 /// status footer + PR state pill.
 pub const POWERLINE_RIGHT: &str = "";
 
+/// "Opens in browser" affordance on clickable links. The trailing
+/// `U+FE0E` (variation selector-15) forces *text* presentation, so
+/// terminals that would otherwise render U+2197 as a 2-cell emoji keep
+/// it to the single cell `unicode-width` budgets for it — without this
+/// the glyph can overhang the layout on emoji-presentation terminals.
+pub const EXTERNAL_LINK: &str = "↗\u{FE0E}";
+
 /// Pick the right runner-kind icon for an agent id. Falls back to the
 /// generic `AGENT` glyph for unknown ids — e.g. user-defined agents
 /// from `~/.lazybox/config.yaml`.

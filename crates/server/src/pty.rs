@@ -524,16 +524,25 @@ pub(crate) fn content_end(bytes: &[u8]) -> usize {
 /// bottom row, so dropping it would glue a respawned child's first
 /// output onto the last content line (b793caca — never empty the tail on
 /// a trailing newline).
+///
+/// "Blank" is the shared `is_blank_capture_line` definition — a trailing
+/// row of only whitespace (plain spaces the raw stream keeps but a tmux
+/// capture would have stripped) counts as blank here too. That is
+/// deliberate: such a row is visually empty, so trimming it ends the seed
+/// at the last visible content while keeping both seed paths' blank-row
+/// definition identical, with no drift. A single printable glyph anywhere
+/// on the row keeps it.
 pub(crate) fn trim_trailing_blank_seed(buf: &mut Vec<u8>) {
     let ce = content_end(buf);
     if ce == 0 {
         buf.clear();
     } else if ce < buf.len() {
-        let keep = buf[ce..]
-            .iter()
-            .position(|&b| b == b'\n')
-            .map_or(buf.len(), |rel| ce + rel + 1);
-        buf.truncate(keep);
+        // When `content_end` stops short of the end it settles exactly on
+        // the `\n` terminating the last content line (it only lowers its
+        // cursor to a newline index, and the all-blank `ce == 0` case is
+        // handled above), so `buf[ce]` is that terminator: keep it and
+        // drop every blank row after.
+        buf.truncate(ce + 1);
     }
 }
 
@@ -1686,6 +1695,31 @@ mod scrollback_trim_tests {
         assert_eq!(content_end(b""), 0);
     }
 
+    /// Whenever `content_end` stops strictly inside the buffer it settles
+    /// exactly on the `\n` terminating the last content line — the
+    /// invariant `trim_trailing_blank_seed` relies on to keep one
+    /// terminator with a bare `truncate(ce + 1)`. Guards against a future
+    /// `content_end` change that lands the cursor elsewhere.
+    #[test]
+    fn content_end_settles_on_the_terminating_newline() {
+        for input in [
+            b"a\r\nb\r\n".as_slice(),
+            b"a\r\nb\r\n\r\n\r\n",
+            b"foo\nbar\n\n\n",
+            b"top\r\n\r\nmid\r\n\r\n\r\n",
+            b"body\r\n\x1b[48;5;236m   \x1b[0m\r\n",
+            b"content\r\n     \r\n",
+        ] {
+            let ce = content_end(input);
+            if 0 < ce && ce < input.len() {
+                assert_eq!(
+                    input[ce], b'\n',
+                    "content_end settled off a newline in {input:?} at {ce}"
+                );
+            }
+        }
+    }
+
     /// The raw-PTY reseed drops trailing grid-padding blanks so they
     /// don't re-inject spurious empty lines on restart (#442/#589), but
     /// keeps a single terminator so a respawned child's first output
@@ -1707,6 +1741,11 @@ mod scrollback_trim_tests {
             trimmed(b"top\r\n\r\nmid\r\n\r\n\r\n"),
             b"top\r\n\r\nmid\r\n"
         );
+        // A plain-whitespace trailing row (spaces the raw stream keeps but
+        // a tmux capture would strip) is visually empty and trims too —
+        // the deliberate shared blank-row definition, no drift between the
+        // two seed paths.
+        assert_eq!(trimmed(b"body\r\n     \r\n"), b"body\r\n");
         // Styled-but-empty padding rows (SGR reset, background-colored
         // spaces) count as blank and trim.
         assert_eq!(trimmed(b"body\r\n\x1b[0m\r\n"), b"body\r\n");

@@ -174,7 +174,12 @@ pub fn plan_round_robin_tick(
     );
     // Bump the cursor for repos we're about to query (even a
     // 0-result query advances the rotation — without it, an empty
-    // repo stays "stalest" forever).
+    // repo stays "stalest" forever). This also lands forced/focused
+    // repos in the cursor, so `known.len()` — and thus the global
+    // sweep's `K = ceil(known.len()/n)` cadence — grows with the
+    // session set: with many sessioned repos the discovery sweep fires
+    // marginally less often, which is fine (those repos are genuinely
+    // known and already fetched every tick).
     for repo in &pick.repos {
         state.record_sync(repo, now);
     }
@@ -194,13 +199,19 @@ pub fn plan_round_robin_tick(
 /// - `forced` — repos that must be in EVERY pick regardless of the
 ///   round-robin budget (the session-anchored Tier 0: every repo
 ///   backing a workspace with a persisted session). Uncapped — bounded
-///   naturally by how many worktrees the user has open.
+///   naturally by how many worktrees the user has open. Each forced
+///   repo costs one `repo:`-scoped PR search per full-sweep tick, so at
+///   an extreme worktree count a single sweep's fan-out grows with the
+///   session set; at the daily-driver scale (tens of worktrees) it
+///   stays well inside the tick budget.
 /// - `tick` — monotonic counter incremented per `sources_for` call.
 ///   Used to determine the K-th refresh tick.
 /// - `n` — round-robin fan-out budget for the NON-forced tier. `0` is
 ///   treated as [`DEFAULT_ROUND_ROBIN_N`] so a misconfigured caller
-///   still gets something sensible. The forced/focused repos are added
-///   on top of these `n` slots.
+///   still gets something sensible. `forced` repos are added on top of
+///   these `n` slots; the `focused` repo instead RIDES one of them (it
+///   is force-included, but consumes a round-robin slot rather than
+///   adding to the fan-out).
 ///
 /// Output rules:
 /// 1. **Cold start** (`known` empty AND nothing forced/focused):
@@ -471,6 +482,38 @@ mod tests {
             pick.repos,
             vec!["s/x".to_string(), "a/a".to_string(), "b/b".to_string()],
         );
+    }
+
+    /// Rate-budget regression: one tick's `repo:`-scoped fan-out is
+    /// bounded by the session set plus the round-robin budget `n`, NOT
+    /// by how many repos are in scope. A user with dozens of cold repos
+    /// still pays only `sessioned + n` scoped searches per tick, and the
+    /// focused repo rides a round-robin slot rather than inflating that.
+    #[test]
+    fn per_tick_fetch_count_is_bounded_by_sessions_plus_n() {
+        // 50 cold repos in the cursor — past the reported 31-scoped scale.
+        let entries: Vec<(&str, u64)> = (0..50)
+            .map(|i| (Box::leak(format!("cold/r{i}").into_boxed_str()) as &str, i))
+            .collect();
+        let known = cursor(&entries);
+        let sessioned = forced(&["s/a", "s/b", "s/c", "s/d", "s/e", "s/f"]);
+        let n = 3;
+
+        let pick = pick_repos_for_tick(&known, None, &sessioned, 7, n);
+        assert_eq!(
+            pick.repos.len(),
+            sessioned.len() + n,
+            "scoped fan-out must be sessioned + n, independent of the 50-repo cursor"
+        );
+        for repo in ["s/a", "s/b", "s/c", "s/d", "s/e", "s/f"] {
+            assert!(pick.repos.contains(&repo.to_string()));
+        }
+
+        // A focused cursor repo consumes one of the `n` slots — it must
+        // not push the per-tick count above the bound.
+        let focused = pick_repos_for_tick(&known, Some("cold/r0"), &sessioned, 7, n);
+        assert_eq!(focused.repos.len(), sessioned.len() + n);
+        assert!(focused.repos.contains(&"cold/r0".to_string()));
     }
 
     /// Large inbox runs the global every K ticks, where K = ceil(known/n).

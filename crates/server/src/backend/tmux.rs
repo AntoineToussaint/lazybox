@@ -188,23 +188,12 @@ fn transparent_conf() -> String {
 /// nothing visible is lost. Reconstructing that boundary faithfully is the
 /// lossy screen-grid problem #393 tracks separately.
 fn normalize_capture(stdout: &[u8]) -> Vec<u8> {
-    // Peel the trailing run of blank rows off the raw bytes without
-    // materializing a line vector: each step takes the slice after the
-    // final `\n` and, while it has no visible content, drops it plus the
-    // `\n` that separated it. `rposition` scans back only to that newline,
-    // so the whole trim is O(trailing-blank bytes), not O(input) per row.
-    let mut end = stdout.len();
-    while end > 0 {
-        let line_start = stdout[..end]
-            .iter()
-            .rposition(|&b| b == b'\n')
-            .map_or(0, |nl| nl + 1);
-        if !is_blank_capture_line(&stdout[line_start..end]) {
-            break;
-        }
-        end = line_start.saturating_sub(1);
-    }
-    let trimmed = &stdout[..end];
+    // Peel the trailing run of blank rows via the shared scrollback-seed
+    // helper, so this path and the raw-PTY reseed detect blank rows
+    // identically and never drift. Unlike the raw seed, the trailing
+    // terminator is dropped entirely: the seed ends exactly at the last
+    // content row, where tmux's live attach repaint resumes.
+    let trimmed = &stdout[..crate::pty::content_end(stdout)];
     let newlines = trimmed.iter().filter(|&&b| b == b'\n').count();
     let mut seed = Vec::with_capacity(trimmed.len() + newlines);
     for &b in trimmed {
@@ -214,55 +203,6 @@ fn normalize_capture(stdout: &[u8]) -> Vec<u8> {
         seed.push(b);
     }
     seed
-}
-
-/// Whether a capture row carries no VISIBLE glyph — grid padding tmux
-/// emits for unused / cleared cells. capture-pane strips trailing spaces,
-/// so an unstyled padding row arrives empty, but with `-e` a row cleared
-/// under a non-default background (agents paint one, then clear) comes back
-/// as SGR/OSC escapes around blank space. Those escape sequences are
-/// skipped so such a row still counts as blank: only a real printable
-/// character keeps the row — that is what protects styled *content* from
-/// being trimmed.
-fn is_blank_capture_line(line: &[u8]) -> bool {
-    let mut i = 0;
-    while i < line.len() {
-        match line[i] {
-            0x1b => {
-                i += 1;
-                match line.get(i) {
-                    // CSI (`ESC [` … final byte 0x40–0x7e), e.g. SGR color.
-                    Some(b'[') => {
-                        i += 1;
-                        while i < line.len() && !(0x40..=0x7e).contains(&line[i]) {
-                            i += 1;
-                        }
-                        i += 1;
-                    }
-                    // OSC (`ESC ]` … BEL or ST), e.g. an OSC 8 hyperlink.
-                    Some(b']') => {
-                        i += 1;
-                        while i < line.len() {
-                            if line[i] == 0x07 {
-                                i += 1;
-                                break;
-                            }
-                            if line[i] == 0x1b && line.get(i + 1) == Some(&b'\\') {
-                                i += 2;
-                                break;
-                            }
-                            i += 1;
-                        }
-                    }
-                    // Any other escape: skip ESC and its single next byte.
-                    _ => i += 1,
-                }
-            }
-            b if b.is_ascii_whitespace() => i += 1,
-            _ => return false,
-        }
-    }
-    true
 }
 
 /// `set-option` invocations that bring an ALREADY-RUNNING tmux server
@@ -1364,28 +1304,6 @@ mod tests {
             normalize_capture(b"a\n\x1b[31mred\x1b[0m\n"),
             b"a\r\n\x1b[31mred\x1b[0m"
         );
-    }
-
-    /// A row counts as blank only when it holds no printable glyph:
-    /// whitespace and `-e` escape sequences (SGR colors, OSC 8 hyperlinks)
-    /// around blank space are grid padding, but a single real character
-    /// keeps the row so styled content is never trimmed.
-    #[test]
-    fn is_blank_capture_line_skips_escapes_but_keeps_glyphs() {
-        assert!(is_blank_capture_line(b""));
-        assert!(is_blank_capture_line(b"   \t"));
-        assert!(is_blank_capture_line(b"\x1b[0m"));
-        assert!(is_blank_capture_line(b"\x1b[48;5;236m   \x1b[0m"));
-        // OSC 8 open/close with no visible label between them.
-        assert!(is_blank_capture_line(
-            b"\x1b]8;;https://x\x1b\\\x1b]8;;\x1b\\"
-        ));
-        // A printable char anywhere keeps the row, escapes notwithstanding.
-        assert!(!is_blank_capture_line(b"\x1b[31mred\x1b[0m"));
-        assert!(!is_blank_capture_line(b"  x  "));
-        assert!(!is_blank_capture_line(
-            b"\x1b]8;;https://x\x1b\\LINK\x1b]8;;\x1b\\"
-        ));
     }
 
     /// The `-S` capture depth and the conf's `history-limit` come from

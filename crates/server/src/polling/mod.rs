@@ -6808,6 +6808,53 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+/// How much on-disk worktree space a teardown reclaimed. Threaded up to
+/// the top-level user action so the "space came back" notice is emitted
+/// once per action (aggregated across a project cascade, folded into the
+/// closed-issue removal notice) rather than once per workspace.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Reclaimed {
+    pub worktrees: usize,
+    pub bytes: u64,
+}
+
+impl Reclaimed {
+    fn add(&mut self, other: Reclaimed) {
+        self.worktrees += other.worktrees;
+        self.bytes += other.bytes;
+    }
+}
+
+/// Human phrase for a reclaimed total, or `None` when nothing came back
+/// (a session-less workspace). Omits the byte figure for empty worktrees
+/// so the notice never reads "reclaimed 0 B".
+pub(crate) fn reclaimed_notice_body(reclaimed: Reclaimed) -> Option<String> {
+    if reclaimed.worktrees == 0 {
+        return None;
+    }
+    let plural = if reclaimed.worktrees == 1 { "" } else { "s" };
+    Some(if reclaimed.bytes == 0 {
+        format!("removed {} worktree{plural}", reclaimed.worktrees)
+    } else {
+        format!(
+            "reclaimed {} from {} worktree{plural}",
+            format_bytes(reclaimed.bytes),
+            reclaimed.worktrees,
+        )
+    })
+}
+
+/// Emit the reclaimed-space footer notice under `title`, if anything was
+/// reclaimed. No-op otherwise.
+pub(crate) fn notify_reclaimed(config: &ServerConfig, title: &str, reclaimed: Reclaimed) {
+    if let Some(body) = reclaimed_notice_body(reclaimed) {
+        let _ = config.bus.send(Event::Notification {
+            title: title.to_string(),
+            body,
+        });
+    }
+}
+
 /// Force-reclaim every persisted session's worktree directory for a
 /// workspace being torn down, mirroring the per-session removal
 /// [`handle_clean_worktrees`] performs: `remove_by_path` when the
@@ -6817,10 +6864,7 @@ fn format_bytes(bytes: u64) -> String {
 /// backing terminal, so there is no live checkout to protect, and
 /// ephemeral on-main / linked checkouts are never persisted as sessions
 /// (issue #452) so this never touches the user's real repo.
-///
-/// Returns `(count, bytes)` of worktrees actually removed so the caller
-/// can tell the user how much disk came back.
-async fn reclaim_workspace_worktrees(config: &ServerConfig, workspace: &Workspace) -> (usize, u64) {
+async fn reclaim_workspace_worktrees(config: &ServerConfig, workspace: &Workspace) -> Reclaimed {
     let mgr = config.worktree_manager();
     let bare_path = workspace
         .primary_task()
@@ -6828,8 +6872,7 @@ async fn reclaim_workspace_worktrees(config: &ServerConfig, workspace: &Workspac
         .and_then(|repo| repo.split_once('/'))
         .map(|(owner, name)| mgr.bare_path(owner, name));
 
-    let mut removed = 0usize;
-    let mut bytes = 0u64;
+    let mut reclaimed = Reclaimed::default();
     for session in &workspace.sessions {
         let path = &session.worktree_path;
         if !path.exists() {
@@ -6848,14 +6891,17 @@ async fn reclaim_workspace_worktrees(config: &ServerConfig, workspace: &Workspac
             );
             continue;
         }
-        removed += 1;
-        bytes += size;
+        reclaimed.worktrees += 1;
+        reclaimed.bytes += size;
     }
-    (removed, bytes)
+    reclaimed
 }
 
+/// Delete a workspace, returning the worktree space reclaimed on success
+/// or `None` when the row was preserved (a prerequisite failed). The
+/// caller surfaces the reclaimed total; see [`notify_reclaimed`].
 #[must_use]
-pub async fn delete_workspace(config: &ServerConfig, key: &WorkspaceKey) -> bool {
+pub async fn delete_workspace(config: &ServerConfig, key: &WorkspaceKey) -> Option<Reclaimed> {
     delete_workspace_with_archive(config, key, /*archive=*/ true).await
 }
 
@@ -6871,7 +6917,7 @@ pub async fn delete_workspace_with_archive(
     config: &ServerConfig,
     key: &WorkspaceKey,
     archive: bool,
-) -> bool {
+) -> Option<Reclaimed> {
     // Own the delete-vs-spawn serialization here so every destructive caller
     // (single workspace, merged cleanup, project cascade) gets it. Keeping
     // this only in one command-dispatch arm let other callers race a late
@@ -6882,7 +6928,7 @@ pub async fn delete_workspace_with_archive(
         .insert(key.as_str().to_string());
     crate::spawn_handler::await_inflight_spawns(config, key.as_str()).await;
     let _workspace_guard = config.lock_workspace(key.as_str()).await;
-    let deleted = delete_workspace_internal(config, key, archive).await;
+    let reclaimed = delete_workspace_internal(config, key, archive).await;
     // The tombstone must not outlive the delete it guarded: a
     // recreated same-name workspace re-allocates the same key
     // (`allocate_workspace_key` only consults the store), and a stale
@@ -6891,10 +6937,10 @@ pub async fn delete_workspace_with_archive(
     // it on rollback; the success path releases it here, once no
     // in-flight spawn that could still race the teardown remains (see
     // `release_delete_tombstone` for why that's the safe point).
-    if deleted {
+    if reclaimed.is_some() {
         crate::spawn_handler::release_delete_tombstone(config, key.as_str());
     }
-    deleted
+    reclaimed
 }
 
 /// Inner delete with the archive decision explicit. User-intent
@@ -6908,7 +6954,7 @@ async fn delete_workspace_internal(
     config: &ServerConfig,
     key: &WorkspaceKey,
     archive: bool,
-) -> bool {
+) -> Option<Reclaimed> {
     let key_str = key.as_str();
 
     // Snapshot the sessions before the store row is dropped — deleting
@@ -6965,7 +7011,7 @@ async fn delete_workspace_internal(
                 // rolls back its optimistic row removal off this "terminal"
                 // error (#476).
                 config.deleted_workspaces.lock().remove(key_str);
-                return false;
+                return None;
             }
             drop(interaction);
             // One lifecycle owner handles every map, persisted terminal key,
@@ -6986,7 +7032,7 @@ async fn delete_workspace_internal(
             format!("could not archive workspace {key}; it was not deleted"),
         ));
         config.deleted_workspaces.lock().remove(key_str);
-        return false;
+        return None;
     }
 
     if let Err(e) = config.store.delete_workspace(key) {
@@ -7005,7 +7051,7 @@ async fn delete_workspace_internal(
         if rollback_ok {
             config.deleted_workspaces.lock().remove(key_str);
         }
-        return false;
+        return None;
     }
     let _ = config.bus.send(Event::WorkspaceRemoved(key.clone()));
 
@@ -7013,31 +7059,25 @@ async fn delete_workspace_internal(
     // directories on disk. Without this every teardown that routes
     // through delete_workspace (x x archive, project cascade,
     // rescope/retire) leaked multi-GB worktrees forever (issue #575).
-    if let Some(workspace) = workspace_snapshot {
-        let (removed, bytes) = reclaim_workspace_worktrees(config, &workspace).await;
-        if removed > 0 {
-            tracing::info!(
-                workspace = %key,
-                removed,
-                bytes,
-                "delete_workspace: reclaimed worktree directories",
-            );
-            let _ = config.bus.send(Event::Notification {
-                title: "Workspace removed".to_string(),
-                body: format!(
-                    "reclaimed {} from {removed} worktree{}",
-                    format_bytes(bytes),
-                    if removed == 1 { "" } else { "s" },
-                ),
-            });
-        }
-    } else {
+    // The reclaimed total is returned, not announced here: the top-level
+    // caller emits one notice per user action (see `notify_reclaimed`).
+    let Some(workspace) = workspace_snapshot else {
         tracing::warn!(
             workspace = %key,
             "delete_workspace: no readable row to reclaim worktrees from",
         );
+        return Some(Reclaimed::default());
+    };
+    let reclaimed = reclaim_workspace_worktrees(config, &workspace).await;
+    if reclaimed.worktrees > 0 {
+        tracing::info!(
+            workspace = %key,
+            worktrees = reclaimed.worktrees,
+            bytes = reclaimed.bytes,
+            "delete_workspace: reclaimed worktree directories",
+        );
     }
-    true
+    Some(reclaimed)
 }
 
 /// Delete a Project: cascade through every workspace whose
@@ -7107,15 +7147,17 @@ pub async fn delete_project(config: &ServerConfig, project_key: &lazybox_core::P
         workspace_count = child_keys.len(),
         "delete_project: cascading workspace deletes"
     );
+    let mut reclaimed = Reclaimed::default();
     for key in &child_keys {
-        if !delete_workspace(config, key).await {
+        let Some(child) = delete_workspace(config, key).await else {
             tracing::warn!(
                 project_key = %project_key,
                 workspace = %key,
                 "delete_project: child deletion failed — preserving project for retry",
             );
             return;
-        }
+        };
+        reclaimed.add(child);
     }
 
     if let Err(e) = config.store.delete_project(project_key) {
@@ -7127,6 +7169,7 @@ pub async fn delete_project(config: &ServerConfig, project_key: &lazybox_core::P
         return;
     }
     let _ = config.bus.send(Event::ProjectRemoved(project_key.clone()));
+    notify_reclaimed(config, "Project removed", reclaimed);
     tracing::info!(project_key = %project_key, "delete_project: done");
 }
 

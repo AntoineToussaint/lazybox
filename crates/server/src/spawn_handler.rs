@@ -7102,7 +7102,11 @@ mod tests {
             })
             .expect("save workspace");
 
-        assert!(crate::polling::delete_workspace(&config, &key).await);
+        assert!(
+            crate::polling::delete_workspace(&config, &key)
+                .await
+                .is_some()
+        );
         assert!(
             !config.deleted_workspaces.lock().contains("test:del-clear"),
             "the tombstone is released once the delete has fully settled"
@@ -7149,7 +7153,11 @@ mod tests {
         // The delete waits out `KILL_INFLIGHT_WAIT` (auto-advanced
         // under paused time) and proceeds anyway — the wedged-spawn
         // shape.
-        assert!(crate::polling::delete_workspace(&config, &key).await);
+        assert!(
+            crate::polling::delete_workspace(&config, &key)
+                .await
+                .is_some()
+        );
         assert!(
             config.deleted_workspaces.lock().contains("test:del-busy"),
             "the tombstone must survive while the wedged spawn can still race registration"

@@ -2487,7 +2487,11 @@ async fn delete_workspace_kills_terminals_via_terminal_meta() {
         .await
         .insert(TerminalId(42), lazybox_ipc::AgentState::Working);
 
-    assert!(polling::delete_workspace(&config, &workspace_key).await);
+    assert!(
+        polling::delete_workspace(&config, &workspace_key)
+            .await
+            .is_some()
+    );
 
     assert!(
         config.terminals.lock().await.get(&TerminalId(42)).is_none(),
@@ -2557,7 +2561,11 @@ async fn failed_terminal_kill_preserves_workspace_and_retryable_mappings() {
         .await;
     let mut bus = config.bus.subscribe();
 
-    assert!(!polling::delete_workspace(&config, &workspace_key).await);
+    assert!(
+        polling::delete_workspace(&config, &workspace_key)
+            .await
+            .is_none()
+    );
 
     assert!(
         config
@@ -3500,7 +3508,7 @@ async fn user_delete_archives_and_blocks_resurrection() {
     polling::upsert(&config, make_task("o/r#1")).await;
     let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_task("o/r#1")));
 
-    assert!(polling::delete_workspace(&config, &key).await);
+    assert!(polling::delete_workspace(&config, &key).await.is_some());
     polling::upsert(&config, make_task("o/r#1")).await;
 
     assert!(
@@ -3517,7 +3525,7 @@ async fn unarchive_clears_persisted_and_live_spawn_tombstones() {
     let task = make_task("o/r#restore");
     polling::upsert(&config, task.clone()).await;
     let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
-    assert!(polling::delete_workspace(&config, &key).await);
+    assert!(polling::delete_workspace(&config, &key).await.is_some());
     assert!(polling::load_archived_set(&config).contains(key.as_str()));
     // A settled delete releases its own spawn tombstone (a recreated
     // same-key workspace must not have its spawns silently killed).

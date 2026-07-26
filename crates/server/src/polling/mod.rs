@@ -6899,7 +6899,7 @@ async fn reclaim_workspace_worktrees(config: &ServerConfig, workspace: &Workspac
 
 /// Delete a workspace, returning the worktree space reclaimed on success
 /// or `None` when the row was preserved (a prerequisite failed). The
-/// caller surfaces the reclaimed total; see [`notify_reclaimed`].
+/// caller surfaces the reclaimed total via `notify_reclaimed`.
 #[must_use]
 pub async fn delete_workspace(config: &ServerConfig, key: &WorkspaceKey) -> Option<Reclaimed> {
     delete_workspace_with_archive(config, key, /*archive=*/ true).await

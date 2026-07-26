@@ -2,7 +2,7 @@
 source: crates/tui/tests/snapshots.rs
 expression: rendered
 ---
- LAZYBOX v0.1.7 (dev)       0 items  7d
+ LAZYBOX v0.1.8 (dev)       0 items  7d
  f [filter]  o [split]
 
  ──────────────────────────────────────

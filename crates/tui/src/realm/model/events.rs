@@ -20,6 +20,36 @@ use tuirealm::terminal::TerminalAdapter;
 const ACTION_DROPPED_NOTE: &str =
     "\n\n_(Proposed an action, but Ask was closed before you could confirm — ask again to apply.)_";
 
+/// Compose a readable action-failure banner (merge/close/update/delete
+/// rejected). Leads with the reason — the part that matters — and trims
+/// the `owner/repo#NNN` label to just `#NNN`, so the footer's
+/// middle-ellipsis keeps the reason instead of spending its budget on
+/// the repo-owner prefix and dropping it in the elided middle (#588).
+fn action_failure_notice(verb: &str, label: &str, reason: &str) -> String {
+    let reason = strip_graphql_path(reason);
+    let short = label
+        .rsplit_once('#')
+        .map(|(_, n)| format!("#{n}"))
+        .unwrap_or_else(|| label.to_string());
+    format!("✗ {verb} failed: {reason} ({short})")
+}
+
+/// Strip the ` [at graphqlPath]` diagnostic suffix GitHub's GraphQL
+/// error text carries (`GqlError::full`). It's debugging noise that,
+/// mid-truncation, survives as a meaningless `…[at mergePullRequest]`
+/// tail while the human reason is elided (#588). Leaves the human
+/// message verbatim.
+fn strip_graphql_path(reason: &str) -> String {
+    let mut s = reason.to_string();
+    while let Some(start) = s.find(" [at ") {
+        match s[start..].find(']') {
+            Some(rel) => s.replace_range(start..start + rel + 1, ""),
+            None => break,
+        }
+    }
+    s.trim().to_string()
+}
+
 impl<T: TerminalAdapter> Model<T> {
     /// Flip lazybox's mouse capture on/off. Issues
     /// `EnableMouseCapture` / `DisableMouseCapture` to stdout so the
@@ -695,6 +725,9 @@ impl<T: TerminalAdapter> Model<T> {
             self.merge_confirmed.insert(workspace_key.clone());
             self.sidebar.mark_workspace_merged(workspace_key);
             self.right.mark_workspace_merged(workspace_key);
+            // A prior "merge failed" for this workspace no longer
+            // describes reality — clear it so the success can show (#588).
+            self.clear_action_error(workspace_key);
             self.flash_info(format!("merged {pr_label}"));
             // The removal prompt is NOT queued here. Both user-initiated
             // (`g m`) and externally-merged PRs are surfaced by the
@@ -712,17 +745,28 @@ impl<T: TerminalAdapter> Model<T> {
         // "your merge failed," not a transient sync blip. The PR stays
         // Open/actionable; no optimistic MERGED flip here.
         if let IpcEvent::PrMergeFailed {
-            pr_label, reason, ..
+            workspace_key,
+            pr_label,
+            reason,
         } = &event
         {
-            self.flash_error(format!("✗ merge failed — {pr_label}: {reason}"));
+            self.flash_action_error(
+                workspace_key,
+                action_failure_notice("merge", pr_label, reason),
+            );
             self.redraw = true;
             return;
         }
         // `g u` / `Shift-U` reached GitHub and the branch was updated.
         // The BEHIND tag clears on the next poll (which the handler
         // woke), so flash a notice now so the keypress reads as done.
-        if let IpcEvent::BranchUpdated { pr_label, .. } = &event {
+        if let IpcEvent::BranchUpdated {
+            workspace_key,
+            pr_label,
+            ..
+        } = &event
+        {
+            self.clear_action_error(workspace_key);
             self.flash_info(format!("updated branch {pr_label}"));
             self.redraw = true;
             return;
@@ -731,10 +775,15 @@ impl<T: TerminalAdapter> Model<T> {
         // — the update did NOT happen. Persistent error naming the
         // reason, mirroring `PrMergeFailed`. The PR stays actionable.
         if let IpcEvent::BranchUpdateFailed {
-            pr_label, reason, ..
+            workspace_key,
+            pr_label,
+            reason,
         } = &event
         {
-            self.flash_error(format!("✗ update branch failed — {pr_label}: {reason}"));
+            self.flash_action_error(
+                workspace_key,
+                action_failure_notice("update branch", pr_label, reason),
+            );
             self.redraw = true;
             return;
         }
@@ -742,7 +791,12 @@ impl<T: TerminalAdapter> Model<T> {
         // Task still reads `Open` until the next poll, so flash a notice
         // now; the daemon's open→closed detection (which the close
         // handler woke) follows with the workspace-removal prompt.
-        if let IpcEvent::IssueClosed { issue_label, .. } = &event {
+        if let IpcEvent::IssueClosed {
+            workspace_key,
+            issue_label,
+        } = &event
+        {
+            self.clear_action_error(workspace_key);
             self.flash_info(format!("closed {issue_label}"));
             self.redraw = true;
             return;
@@ -751,19 +805,27 @@ impl<T: TerminalAdapter> Model<T> {
         // happen. Surface a distinct, persistent error naming the reason
         // (mirrors `PrMergeFailed`). The issue stays Open/actionable.
         if let IpcEvent::IssueCloseFailed {
+            workspace_key,
             issue_label,
             reason,
-            ..
         } = &event
         {
-            self.flash_error(format!("✗ close failed — {issue_label}: {reason}"));
+            self.flash_action_error(
+                workspace_key,
+                action_failure_notice("close", issue_label, reason),
+            );
             self.redraw = true;
             return;
         }
         // `g d` reached GitHub and the PR was closed without merging.
         // Same "flash now, poll reconciles later" contract as the
         // merge/close notices; the rescope sweep retires the row.
-        if let IpcEvent::PrClosed { pr_label, .. } = &event {
+        if let IpcEvent::PrClosed {
+            workspace_key,
+            pr_label,
+        } = &event
+        {
+            self.clear_action_error(workspace_key);
             self.flash_info(format!("closed {pr_label}"));
             self.redraw = true;
             return;
@@ -773,11 +835,12 @@ impl<T: TerminalAdapter> Model<T> {
         // as not-planned. Name the degradation so "delete" never
         // silently means "closed, still exists."
         if let IpcEvent::IssueDeleted {
+            workspace_key,
             issue_label,
             fell_back_to_close,
-            ..
         } = &event
         {
+            self.clear_action_error(workspace_key);
             if *fell_back_to_close {
                 self.flash_error(format!(
                     "delete not permitted — closed {issue_label} as not-planned instead"
@@ -791,8 +854,16 @@ impl<T: TerminalAdapter> Model<T> {
         // `g d` reached GitHub and was rejected — nothing was deleted
         // or closed. Persistent error naming the reason, mirroring
         // `PrMergeFailed` / `IssueCloseFailed`.
-        if let IpcEvent::DeleteOrCloseFailed { label, reason, .. } = &event {
-            self.flash_error(format!("✗ delete/close failed — {label}: {reason}"));
+        if let IpcEvent::DeleteOrCloseFailed {
+            workspace_key,
+            label,
+            reason,
+        } = &event
+        {
+            self.flash_action_error(
+                workspace_key,
+                action_failure_notice("delete/close", label, reason),
+            );
             self.redraw = true;
             return;
         }
@@ -1902,5 +1973,36 @@ fn mutation_failure_label(source: &str) -> Option<&'static str> {
         "merge" => Some("merge"),
         "close-issue" => Some("close issue"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod failure_notice_tests {
+    use super::{action_failure_notice, strip_graphql_path};
+
+    #[test]
+    fn reason_leads_and_label_is_trimmed_to_number() {
+        let n = action_failure_notice("merge", "AntoineToussaint/lazybox#588", "not mergeable");
+        assert_eq!(n, "✗ merge failed: not mergeable (#588)");
+        // The reason precedes the label so middle-truncation keeps it.
+        assert!(n.find("not mergeable") < n.find("#588"));
+        // The owner/repo prefix that used to eat the width budget is gone.
+        assert!(!n.contains("AntoineToussaint"));
+    }
+
+    #[test]
+    fn strips_every_graphql_path_segment() {
+        // Joined multi-error reasons carry one suffix per error.
+        let cleaned = strip_graphql_path(
+            "A merge is already in progress [at mergePullRequest]; base modified [at repository]",
+        );
+        assert_eq!(cleaned, "A merge is already in progress; base modified",);
+    }
+
+    #[test]
+    fn label_without_hash_is_kept_whole() {
+        // Fallback labels (workspace keys) may lack a `#NNN`.
+        let n = action_failure_notice("close", "github:local-ws", "permission denied");
+        assert!(n.contains("(github:local-ws)"), "{n}");
     }
 }

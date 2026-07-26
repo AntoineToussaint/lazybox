@@ -18,14 +18,13 @@ The fastest path is a prebuilt binary.
 **Homebrew** (macOS arm64/x86_64 or Linux x86_64):
 
 ```sh
-brew install AntoineToussaint/lazybox/lazybox
+brew tap AntoineToussaint/lazybox && brew trust AntoineToussaint/lazybox && brew install lazybox
 ```
 
 **Or `curl | sh`:**
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/AntoineToussaint/lazybox/releases/latest/download/lazybox-tui-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/AntoineToussaint/lazybox/releases/latest/download/lazybox-tui-installer.sh | sh
 ```
 
 Both drop a `lazybox` binary on your `PATH`. Skip to [Launch](#2-launch).
@@ -75,6 +74,8 @@ credentials and detect installed agents and editors. When it finishes you land
 on the main screen: the **sidebar inbox** on the left lists your workspaces
 grouped by repo, and the larger pane on the right shows activity for the
 selected row.
+
+![lazybox inbox with repository workspaces in the sidebar, activity in the upper-right pane, and embedded agent terminals below](/demo/lazybox.png)
 
 :::tip[Want to see the UI with zero setup?]
 Run `lazybox --test` (or `cargo run -p lazybox-tui-boot -- --test`). It boots a

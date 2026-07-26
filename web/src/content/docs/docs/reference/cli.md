@@ -4,10 +4,10 @@ description: Every lazybox subcommand, flag, and run mode.
 ---
 
 All commands assume a `lazybox` binary on your `PATH` — installed via Homebrew
-(`brew install AntoineToussaint/lazybox/lazybox`), the `curl | sh` installer, or
-a source build (see the [Quickstart](/docs/tutorials/quickstart/)). From a
-source checkout without a built binary on `PATH`, substitute
-`cargo run -p lazybox-tui-boot --`.
+(`brew tap AntoineToussaint/lazybox && brew trust AntoineToussaint/lazybox &&
+brew install lazybox`), the `curl | sh` installer, or a source build (see the
+[Quickstart](/docs/tutorials/quickstart/)). From a source checkout without a
+built binary on `PATH`, substitute `cargo run -p lazybox-tui-boot --`.
 
 An `lb` binary ships alongside `lazybox` — a short alias with the identical
 entrypoint, so every command below works as `lb …` too.
@@ -150,7 +150,7 @@ an unreadable row was preserved and omitted from the decoded workspace list.
 
 | Command | What it does |
 | --- | --- |
-| `lazybox slack init` | Set up the Slack mirror from your config |
+| `lazybox slack init` | Interactively validate and store bot/app tokens, then join the configured anchor channel |
 | `lazybox slack doctor` | Diagnose token, scope, and connectivity issues |
 | `lazybox slack prune` | **Archive** stale per-workspace channels (Slack has no channel delete) |
 
@@ -171,6 +171,8 @@ The command computes a plan, prints it, and prompts before archiving anything.
 | --- | --- |
 | `GH_TOKEN`, `GITHUB_TOKEN` | GitHub credential (otherwise `gh auth token` is used) |
 | `LINEAR_API_KEY` | Credential for the Linear provider |
+| `SLACK_BOT_TOKEN` | Slack bot credential; overrides `slack.bot_token` |
+| `SLACK_APP_TOKEN` | Slack Socket Mode app credential; overrides `slack.app_token` |
 | `RUST_LOG` | Log filter, e.g. `RUST_LOG=lazybox=debug` for verbose logs |
 | `LAZYBOX_HOME` | Overrides every path lazybox writes under `~/.lazybox`: state, config, worktrees, runtime dir, tmux socket. Logs are separate — they default to `/tmp/lazybox.log` (override with `ui.log_path`) |
 | `LAZYBOX_RUNTIME_DIR` | Overrides just the daemon runtime directory (`daemon.sock` / `daemon.pid`); wins over `LAZYBOX_HOME`'s default `<home>/run/` |

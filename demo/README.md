@@ -15,7 +15,7 @@ in CI.
   extracted from that render.
 
 For the parts the sandbox tape can't show — live GitHub events, a real
-agent working via `w`, the Slack-from-your-phone loop — see
+agent working via `w w`, the Slack-from-your-phone loop — see
 [`screencast.md`](screencast.md), a version-controlled shot list for a
 human-recorded screencast.
 
@@ -52,7 +52,7 @@ capture changes on every render and can't be a golden.
    tapes from the repo root with the binary on `PATH`:
 
    ```bash
-   cargo build -p lazybox-tui                     # or: make build
+   cargo build -p lazybox-tui-boot                # or: make build
    PATH="$PWD/target/debug:$PATH" vhs demo/golden.tape
    PATH="$PWD/target/debug:$PATH" vhs demo/lazybox.tape
    # golden.tape writes the full scrollback; reduce it to just the table

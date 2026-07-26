@@ -20,6 +20,10 @@ dist = true
 # (`lazybox-tui-boot`), so installs read `brew install …/lazybox`.
 formula = "lazybox"
 
+[[package.metadata.dist.extra-artifacts]]
+artifacts = ["lazybox-tui-installer.sh"]
+build = ["sh", "-n", "lazybox-tui-installer.sh"]
+
 [[bin]]
 name = "lazybox"
 path = "src/main.rs"

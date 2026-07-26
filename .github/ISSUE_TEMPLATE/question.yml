@@ -1,0 +1,42 @@
+name: Question / setup help
+description: Ask how to install, configure, or use lazybox.
+title: "[question]: "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for asking. Share the outcome you want and what you have already
+        tried so someone can give you a useful answer.
+  - type: textarea
+    id: goal
+    attributes:
+      label: What are you trying to do?
+      description: Describe the workflow or result you want.
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What have you tried?
+      description: Include relevant config (without secrets), commands, and error output.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: lazybox version
+      description: Paste the output of `lazybox --version`.
+      placeholder: lazybox 0.1.8
+    validations:
+      required: true
+  - type: dropdown
+    id: operating-system
+    attributes:
+      label: Operating system
+      options:
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Linux (x86_64)
+    validations:
+      required: true

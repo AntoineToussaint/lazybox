@@ -6,6 +6,13 @@ contain explicitly documented compatibility changes.
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-07-26
+
+This release makes lazybox a steadier control surface for long-running agent
+fleets: prompts and terminals survive restarts more faithfully, worktrees are
+safer to inspect and reclaim, and the inbox gains focused tools for handing off,
+filtering, syncing, and updating work.
+
 ### Added
 
 - A dismissable startup notice detects newer source commits or published
@@ -32,6 +39,33 @@ contain explicitly documented compatibility changes.
 - Activity-pane cycling (`Shift-P`): full → one-line summary → hidden,
   remembered per workspace with a `ui.activity_pane_default` starting mode
   (#487).
+
+### Changed
+
+- Engaged GitHub workspaces stay prominent, while multi-axis filters make it
+  practical to narrow a busy inbox by state, role, and task kind.
+- Contextual `w w` launches, explicit agent launches, and priority/model-tier
+  selection now resolve consistently and keep their chosen model visible.
+- Terminal prompt history, scrollback, and reconnect replay now share the same
+  persisted lifecycle, including restored sessions after a restart.
+- The docs, install paths, support forms, provider setup, and mobile homepage
+  have been audited against the current CLI, config schema, and action catalog.
+
+### Fixed
+
+- Shell sessions now honor `shell.command` from
+  `~/.lazybox/config.yaml`.
+- Workspace deletion, merge, close, and garbage collection preserve dirty or
+  unpushed work while reclaiming safe orphaned worktrees.
+- Issue-to-PR joins retain session ownership and surface the originating issue
+  without duplicating or losing workspace state.
+- Terminal exits, failed starts, reconnects, and status transitions remain
+  visible and ordered instead of leaving stale or disappearing tabs.
+- Provider polling and persistence paths avoid duplicate Slack delivery,
+  stale GitHub state, and silent loss of malformed stored records.
+- Release binaries no longer inherit a false `-dirty` version suffix from
+  cargo-dist's generated manifest output, and the pre-split shell-installer URL
+  remains valid.
 
 ## [0.1.7] - 2026-07-19
 
@@ -111,5 +145,6 @@ contain explicitly documented compatibility changes.
   have explicit capacity and shutdown bounds instead of growing or hanging
   indefinitely under load.
 
-[Unreleased]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.8...HEAD
+[0.1.8]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.6...v0.1.7

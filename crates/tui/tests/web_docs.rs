@@ -110,3 +110,48 @@ fn homepage_never_advertises_the_removed_single_w_action() {
     assert!(page.contains("Automation you can see"));
     assert!(page.contains("Terminals fail visibly"));
 }
+
+#[test]
+fn launch_surfaces_use_current_support_and_provider_contracts() {
+    for relative in [
+        "README.md",
+        "CONTRIBUTING.md",
+        "SUPPORT.md",
+        ".github/ISSUE_TEMPLATE/config.yml",
+        ".github/ISSUE_TEMPLATE/feature_request.yml",
+    ] {
+        let page = read(relative);
+        assert!(
+            !page.contains("/discussions"),
+            "{relative} links to disabled GitHub Discussions"
+        );
+    }
+    assert!(read(".github/ISSUE_TEMPLATE/question.yml").contains("Question / setup help"));
+
+    let readme = read("README.md");
+    assert!(readme.contains("lazybox-tui-installer.sh | sh"));
+    let release_config = read("crates/tui-boot/Cargo.toml");
+    assert!(release_config.contains("lazybox-tui-installer.sh"));
+    let installer_compat = read("crates/tui-boot/lazybox-tui-installer.sh");
+    assert!(installer_compat.contains("lazybox-tui-boot-installer.sh"));
+
+    let cli = read("web/src/content/docs/docs/reference/cli.md");
+    for expected in ["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "Archive"] {
+        assert!(cli.contains(expected), "CLI reference missing {expected:?}");
+    }
+
+    let config = read("web/src/content/docs/docs/reference/configuration.md");
+    for expected in [
+        "`name`",
+        "`command`",
+        "`args`",
+        "`resume_args`",
+        "`asking_patterns`",
+        "`shell`",
+    ] {
+        assert!(
+            config.contains(expected),
+            "configuration reference missing {expected:?}"
+        );
+    }
+}

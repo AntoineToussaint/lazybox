@@ -247,12 +247,13 @@ hand.
 | `working_watchdog_secs` | int | `15` | Fail-safe window: seconds a `Working` agent terminal may sit with no meaningful screen change before the daemon classifies the screen and forces the turn out of `Working`. `0` disables the watchdog. |
 | `quiet_classify_secs` | int | `5` | Quiet-timer window: seconds of PTY silence before a `Working` turn settles to `Done`. Cannot be disabled (`0` falls back to 5); raise it to be less eager to call a turn finished. |
 
-There is no per-agent argv customization here — the built-in agents (Claude,
-Codex, Cursor) own their spawn/resume command lines, and per-agent knobs (the
-model-tier menu, auto-update) live under [`agents.<id>`](#agentsid). Extra
-per-spawn args come from the model-tier menu's `args`
-([`agents.<id>.models`](#agentsid)); arbitrary CLIs are the `GenericCli`
-agent's territory (`crates/agents/`).
+The legacy `name`, `command`, `args`, `resume_args`, and `asking_patterns`
+fields are still accepted under `agent` so old config files parse, but the
+current registry does not read them. Built-in agents (Claude, Codex, Cursor)
+own their spawn/resume command lines, and per-agent knobs (the model-tier menu,
+auto-update) live under [`agents.<id>`](#agentsid). Extra per-spawn args come
+from the model-tier menu's `args` ([`agents.<id>.models`](#agentsid));
+arbitrary CLIs are the `GenericCli` agent's territory (`crates/agents/`).
 
 ## `agents.<id>`
 

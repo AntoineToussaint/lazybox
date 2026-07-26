@@ -13,6 +13,22 @@ fleets: prompts and terminals survive restarts more faithfully, worktrees are
 safer to inspect and reclaim, and the inbox gains focused tools for handing off,
 filtering, syncing, and updating work.
 
+### Install
+
+Homebrew (macOS or Linux):
+
+```sh
+brew tap AntoineToussaint/lazybox && brew trust AntoineToussaint/lazybox && brew install lazybox
+```
+
+Shell installer (macOS arm64/x86_64 or Linux x86_64):
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/AntoineToussaint/lazybox/releases/download/v0.1.8/lazybox-tui-installer.sh | sh
+```
+
+Then run `gh auth login` if needed and launch `lazybox`.
+
 ### Added
 
 - A dismissable startup notice detects newer source commits or published

@@ -11,6 +11,41 @@ permissions:
   contents: read
 
 jobs:
+  release-notes:
+    runs-on: ubuntu-22.04
+    env:
+      PLAN: ${{ inputs.plan }}
+    steps:
+      - name: Check public release identity and install commands
+        run: |
+          jq -e '
+            .releases[]
+            | select(.app_name == "lazybox-tui-boot")
+            | .display_name == "lazybox"
+          ' <<< "$PLAN"
+          jq -e '
+            .announcement_changelog
+            | contains("brew tap AntoineToussaint/lazybox && brew trust AntoineToussaint/lazybox && brew install lazybox")
+          ' <<< "$PLAN"
+          jq -e '
+            .announcement_changelog
+            | contains("brew install AntoineToussaint/lazybox/lazybox")
+            | not
+          ' <<< "$PLAN"
+          jq -e '
+            .announcement_changelog
+            | contains("lazybox-tui-boot")
+            | not
+          ' <<< "$PLAN"
+          jq -e '
+            . as $plan
+            | .releases[]
+            | select(.app_name == "lazybox-tui-boot")
+            | .app_version as $version
+            | $plan.announcement_changelog
+            | contains("releases/download/v\($version)/lazybox-tui-installer.sh")
+          ' <<< "$PLAN"
+
   archives:
     name: ${{ matrix.target }}
     strategy:

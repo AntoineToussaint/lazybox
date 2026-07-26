@@ -5,10 +5,10 @@
 //! `auth.test`, app token shape + `apps.connections.open`, anchor
 //! channel reachable). `init` writes results to
 //! `~/.lazybox/config.yaml::slack.{bot_token, app_token}` via
-//! `Config::save_with` and best-effort joins `#lazybox` so step 3 of
-//! `docs/slack-setup.md` ("/invite @lazybox") goes away. `doctor` runs
-//! the same validations read-only on the existing config so a user
-//! who edited YAML by hand can confirm it still works.
+//! `Config::save_with` and best-effort joins the configured anchor
+//! channel. `doctor` runs the same validations read-only on the
+//! existing config so a user who edited YAML by hand can confirm it
+//! still works.
 //!
 //! ## Why the wizard isn't a tui-realm modal
 //!
@@ -198,7 +198,15 @@ impl SlackProbe for LiveProbe {
 pub async fn run_init() -> std::io::Result<InitOutcome> {
     let probe = LiveProbe::new();
     let mut io = StdioPrompt;
-    run_init_with(&probe, &mut io, ConfigWriter::Real).await
+    let config = match Config::load() {
+        Ok(config) => config,
+        Err(error) => {
+            io.print(&format!("✗ load ~/.lazybox/config.yaml: {error}"))?;
+            return Ok(InitOutcome::Failed);
+        }
+    };
+    let anchor_channel = config.slack.normalized_anchor_channel();
+    run_init_with(&probe, &mut io, &anchor_channel, ConfigWriter::Real).await
 }
 
 /// Real-mode `lazybox slack doctor` entry point. Doesn't prompt, just
@@ -240,6 +248,7 @@ impl ConfigWriter {
 pub async fn run_init_with<P: SlackProbe + ?Sized, I: PromptIo + ?Sized>(
     probe: &P,
     io: &mut I,
+    anchor_channel: &str,
     writer: ConfigWriter,
 ) -> std::io::Result<InitOutcome> {
     io.print("lazybox slack init — interactive setup")?;
@@ -293,15 +302,12 @@ pub async fn run_init_with<P: SlackProbe + ?Sized, I: PromptIo + ?Sized>(
     io.print("✓ wrote tokens to ~/.lazybox/config.yaml")?;
 
     // ── Anchor channel ───────────────────────────────────────────
-    // Default name matches `SlackConfig::default_anchor_channel`.
-    let anchor = "lazybox";
-    let outcome =
-        ensure_anchor_channel(probe, &bot_token, anchor, io, /*write_on_join=*/ false).await?;
+    let outcome = ensure_anchor_channel(probe, &bot_token, anchor_channel, io).await?;
 
     Ok(match outcome {
         AnchorResult::Joined | AnchorResult::AlreadyMember => InitOutcome::Ready,
         AnchorResult::NotVisible => InitOutcome::ReadyNeedsInvite {
-            anchor_channel: anchor.to_string(),
+            anchor_channel: anchor_channel.to_string(),
         },
         AnchorResult::Errored => InitOutcome::Failed,
     })
@@ -369,10 +375,7 @@ pub async fn run_doctor_with<P: SlackProbe + ?Sized, I: PromptIo + ?Sized>(
     io.print("✓ app token OK — Socket Mode reachable")?;
 
     let anchor = cfg.slack.normalized_anchor_channel();
-    let outcome = ensure_anchor_channel(
-        probe, &bot_token, &anchor, io, /*write_on_join=*/ false,
-    )
-    .await?;
+    let outcome = ensure_anchor_channel(probe, &bot_token, &anchor, io).await?;
 
     Ok(match outcome {
         AnchorResult::Joined | AnchorResult::AlreadyMember => DoctorOutcome::Healthy,
@@ -398,19 +401,13 @@ enum AnchorResult {
     Errored,
 }
 
-/// Idempotent anchor-channel resolution: look up by name, self-join
-/// if found. Used by both `init` and `doctor`. `write_on_join` is
-/// reserved for a future "create the channel on init" path; today
-/// lazybox relies on the user (or the workspace having a `#general`-
-/// style default) to have `#lazybox` available. This keeps the wizard
-/// from accidentally creating a public channel that nobody else
-/// will see.
+/// Idempotent anchor-channel resolution: look up by name and self-join
+/// if found. Used by both `init` and `doctor`.
 async fn ensure_anchor_channel<P: SlackProbe + ?Sized, I: PromptIo + ?Sized>(
     probe: &P,
     bot_token: &str,
     anchor: &str,
     io: &mut I,
-    _write_on_join: bool,
 ) -> std::io::Result<AnchorResult> {
     match probe.find_channel_id(bot_token, anchor).await {
         Ok(Some(id)) => match probe.join_channel(bot_token, &id).await {
@@ -553,6 +550,7 @@ mod tests {
         // None = channel not visible; Some(id) = found.
         anchor_id: Option<String>,
         join: Result<(), SlackError>,
+        channel_lookups: Mutex<Vec<String>>,
     }
 
     impl FakeProbe {
@@ -568,6 +566,7 @@ mod tests {
                 app: Ok(()),
                 anchor_id: Some("C123".into()),
                 join: Ok(()),
+                channel_lookups: Mutex::new(Vec::new()),
             }
         }
     }
@@ -596,11 +595,17 @@ mod tests {
         fn find_channel_id<'a>(
             &'a self,
             _bot_token: &'a str,
-            _name: &'a str,
+            name: &'a str,
         ) -> std::pin::Pin<
             Box<dyn std::future::Future<Output = Result<Option<String>, SlackError>> + Send + 'a>,
         > {
-            Box::pin(async move { Ok(self.anchor_id.clone()) })
+            Box::pin(async move {
+                self.channel_lookups
+                    .lock()
+                    .expect("channel lookup lock")
+                    .push(name.to_string());
+                Ok(self.anchor_id.clone())
+            })
         }
         fn join_channel<'a>(
             &'a self,
@@ -663,7 +668,9 @@ mod tests {
         let slot = Arc::new(Mutex::new(None));
         let writer = ConfigWriter::Captured(slot.clone());
 
-        let outcome = run_init_with(&probe, &mut io, writer).await.unwrap();
+        let outcome = run_init_with(&probe, &mut io, "lazybox", writer)
+            .await
+            .unwrap();
         assert_eq!(outcome, InitOutcome::Ready);
         let saved = slot.lock().unwrap().clone().unwrap();
         assert_eq!(saved.0, "xoxb-good");
@@ -683,6 +690,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn init_joins_the_configured_anchor_channel() {
+        let probe = FakeProbe::ok();
+        let mut io = ScriptedIo::new(vec!["xoxb-good", "xapp-good"]);
+        let slot = Arc::new(Mutex::new(None));
+
+        let outcome = run_init_with(
+            &probe,
+            &mut io,
+            "lazybox-inbox",
+            ConfigWriter::Captured(slot),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, InitOutcome::Ready);
+        assert_eq!(
+            *probe.channel_lookups.lock().expect("channel lookup lock"),
+            vec!["lazybox-inbox"]
+        );
+        assert!(io.joined().contains("#lazybox-inbox"));
+    }
+
+    #[tokio::test]
     async fn init_bails_on_wrong_token_type_before_calling_api() {
         let probe = FakeProbe::ok();
         // User pasted the app token (xapp-...) into the bot slot.
@@ -690,7 +720,9 @@ mod tests {
         let slot = Arc::new(Mutex::new(None));
         let writer = ConfigWriter::Captured(slot.clone());
 
-        let outcome = run_init_with(&probe, &mut io, writer).await.unwrap();
+        let outcome = run_init_with(&probe, &mut io, "lazybox", writer)
+            .await
+            .unwrap();
         assert_eq!(outcome, InitOutcome::Failed);
         // Critically: no token was written.
         assert!(slot.lock().unwrap().is_none());
@@ -707,9 +739,14 @@ mod tests {
         let mut io = ScriptedIo::new(vec!["xoxb-stale", "unused"]);
         let slot = Arc::new(Mutex::new(None));
 
-        let outcome = run_init_with(&probe, &mut io, ConfigWriter::Captured(slot.clone()))
-            .await
-            .unwrap();
+        let outcome = run_init_with(
+            &probe,
+            &mut io,
+            "lazybox",
+            ConfigWriter::Captured(slot.clone()),
+        )
+        .await
+        .unwrap();
         assert_eq!(outcome, InitOutcome::Failed);
         assert!(slot.lock().unwrap().is_none());
         let log = io.joined();
@@ -723,9 +760,14 @@ mod tests {
         let mut io = ScriptedIo::new(vec!["xoxb-good", "xapp-wrong-scope"]);
         let slot = Arc::new(Mutex::new(None));
 
-        let outcome = run_init_with(&probe, &mut io, ConfigWriter::Captured(slot.clone()))
-            .await
-            .unwrap();
+        let outcome = run_init_with(
+            &probe,
+            &mut io,
+            "lazybox",
+            ConfigWriter::Captured(slot.clone()),
+        )
+        .await
+        .unwrap();
         assert_eq!(outcome, InitOutcome::Failed);
         // App-token failure must not write the bot token alone —
         // partial writes turn a re-run of the wizard into a guessing
@@ -741,9 +783,14 @@ mod tests {
         let mut io = ScriptedIo::new(vec!["xoxb-good", "xapp-good"]);
         let slot = Arc::new(Mutex::new(None));
 
-        let outcome = run_init_with(&probe, &mut io, ConfigWriter::Captured(slot.clone()))
-            .await
-            .unwrap();
+        let outcome = run_init_with(
+            &probe,
+            &mut io,
+            "lazybox",
+            ConfigWriter::Captured(slot.clone()),
+        )
+        .await
+        .unwrap();
         assert!(matches!(outcome, InitOutcome::ReadyNeedsInvite { .. }));
         // Tokens still get written — they're valid; the missing
         // channel is the only gap.
@@ -759,9 +806,14 @@ mod tests {
         let mut io = ScriptedIo::new(vec!["xoxb-good", "xapp-good"]);
         let slot = Arc::new(Mutex::new(None));
 
-        let outcome = run_init_with(&probe, &mut io, ConfigWriter::Captured(slot.clone()))
-            .await
-            .unwrap();
+        let outcome = run_init_with(
+            &probe,
+            &mut io,
+            "lazybox",
+            ConfigWriter::Captured(slot.clone()),
+        )
+        .await
+        .unwrap();
         assert_eq!(outcome, InitOutcome::Ready);
     }
 
@@ -773,9 +825,14 @@ mod tests {
         let mut io = ScriptedIo::new(vec!["  xoxb-good  ", "\txapp-good\t"]);
         let slot = Arc::new(Mutex::new(None));
 
-        let outcome = run_init_with(&probe, &mut io, ConfigWriter::Captured(slot.clone()))
-            .await
-            .unwrap();
+        let outcome = run_init_with(
+            &probe,
+            &mut io,
+            "lazybox",
+            ConfigWriter::Captured(slot.clone()),
+        )
+        .await
+        .unwrap();
         assert_eq!(outcome, InitOutcome::Ready);
         let saved = slot.lock().unwrap().clone().unwrap();
         assert_eq!(saved.0, "xoxb-good");

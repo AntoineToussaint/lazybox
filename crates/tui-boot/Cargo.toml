@@ -1,6 +1,6 @@
 [package]
 name = "lazybox-tui-boot"
-description = "Boot crate for lazybox: hosts the `lazybox` binary and the wide daemon/provider wiring the thin UI library must not carry."
+description = "A reactive PR inbox and agent workspace manager for the terminal."
 default-run = "lazybox"
 version.workspace = true
 edition.workspace = true
@@ -16,6 +16,7 @@ readme = "../../README.md"
 # This crate produces the `lazybox` binary, so opt it back into releases.
 [package.metadata.dist]
 dist = true
+display-name = "lazybox"
 # Name the Homebrew formula after the binary (`lazybox`), not the crate
 # (`lazybox-tui-boot`), so installs read `brew install …/lazybox`.
 formula = "lazybox"

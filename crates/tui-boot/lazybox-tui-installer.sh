@@ -3,7 +3,8 @@
 # Preserve the public installer URL after the executable moved to its boot crate.
 set -eu
 
-installer_url="https://github.com/AntoineToussaint/lazybox/releases/latest/download/lazybox-tui-boot-installer.sh"
+release_version="0.1.8"
+installer_url="https://github.com/AntoineToussaint/lazybox/releases/download/v${release_version}/lazybox-tui-boot-installer.sh"
 installer_tmp="$(mktemp "${TMPDIR:-/tmp}/lazybox-installer.XXXXXX")"
 trap 'rm -f -- "$installer_tmp"' EXIT HUP INT TERM
 

@@ -5,6 +5,7 @@
 //! config section while the website stayed silently stale.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -164,4 +165,101 @@ fn launch_surfaces_use_current_support_and_provider_contracts() {
     }
     assert!(!mentions.contains("hardcoded"));
     assert!(config.contains("when an agent needs input or finishes"));
+}
+
+#[test]
+fn release_surfaces_use_public_product_metadata_and_curated_notes() {
+    let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+        .args(["metadata", "--no-deps", "--format-version=1"])
+        .current_dir(repo_root())
+        .output()
+        .expect("read Cargo metadata");
+    assert!(
+        output.status.success(),
+        "cargo metadata failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("parse Cargo metadata");
+    let package = metadata["packages"]
+        .as_array()
+        .and_then(|packages| {
+            packages
+                .iter()
+                .find(|package| package["name"] == "lazybox-tui-boot")
+        })
+        .expect("find release package");
+    assert_eq!(
+        package["description"],
+        "A reactive PR inbox and agent workspace manager for the terminal."
+    );
+    assert_eq!(package["metadata"]["dist"]["display-name"], "lazybox");
+
+    let workflow = read(".github/workflows/release.yml");
+    assert!(workflow.contains(
+        "ANNOUNCEMENT_BODY: \"${{ fromJson(steps.host.outputs.manifest).announcement_changelog }}\""
+    ));
+    assert!(!workflow.contains(
+        "ANNOUNCEMENT_BODY: \"${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}\""
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn compatibility_installer_delegates_to_the_same_release() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().expect("create installer test directory");
+    let bin_dir = temp.path().join("bin");
+    std::fs::create_dir(&bin_dir).expect("create fake binary directory");
+    let captured_url = temp.path().join("url");
+    let fake_curl = bin_dir.join("curl");
+    std::fs::write(
+        &fake_curl,
+        r#"#!/bin/sh
+set -eu
+url=
+output=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        https://*) url="$1" ;;
+        --output) shift; output="$1" ;;
+    esac
+    shift
+done
+printf '%s\n' "$url" > "$CAPTURE_URL"
+printf '%s\n' 'exit 0' > "$output"
+"#,
+    )
+    .expect("write fake curl");
+    let mut permissions = std::fs::metadata(&fake_curl)
+        .expect("read fake curl metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake_curl, permissions).expect("make fake curl executable");
+
+    let path = std::env::join_paths(std::iter::once(bin_dir).chain(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )))
+    .expect("compose test PATH");
+    let output = Command::new("sh")
+        .arg(repo_root().join("crates/tui-boot/lazybox-tui-installer.sh"))
+        .env("PATH", path)
+        .env("CAPTURE_URL", &captured_url)
+        .output()
+        .expect("run compatibility installer");
+    assert!(
+        output.status.success(),
+        "compatibility installer failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let requested_url = std::fs::read_to_string(captured_url).expect("read captured URL");
+    assert_eq!(
+        requested_url.trim(),
+        format!(
+            "https://github.com/AntoineToussaint/lazybox/releases/download/v{}/lazybox-tui-boot-installer.sh",
+            env!("CARGO_PKG_VERSION")
+        )
+    );
 }

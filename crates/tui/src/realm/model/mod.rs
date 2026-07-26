@@ -270,6 +270,12 @@ pub enum Id {
     /// [`ChoicePayload::Text`], and `Msg::ChoicePicked` re-sends the
     /// chosen one. See `realm::components::prompt_history_picker`.
     PromptHistoryPicker,
+    /// Terminal URL picker (`]]u`, issue #596). Single-pick `Choice`
+    /// over the `http(s)://…` URLs scanned from the focused terminal's
+    /// visible grid, newest-first, each row carrying its URL as a
+    /// [`ChoicePayload::Text`]. Pick → open it in the browser. A single
+    /// on-screen URL skips the picker and opens directly.
+    UrlPicker,
     /// Theme picker (`t`, or the `,` Settings palette). Single-pick
     /// `Choice` over `theme::list()` with live preview on highlight:
     /// arrowing applies a palette at once, Enter keeps it and writes
@@ -3059,6 +3065,43 @@ impl<T: TerminalAdapter> Model<T> {
             ClickTarget::Issue { repo, number } => self.open_issue_ref(repo, number),
             ClickTarget::Path { path, line, col } => self.open_path_in_editor(&path, line, col),
         }
+    }
+
+    /// `]]u` — scan the focused terminal for `http(s)://…` URLs and open
+    /// one in the browser (issue #596). An emulator-independent path to
+    /// agent-output links that sidesteps every right-click / mouse-capture
+    /// quirk. Nothing on screen → a footer hint; a single URL opens
+    /// straight away; several → the picker (newest-first, so `]]u` + Enter
+    /// opens the last).
+    fn open_terminal_urls(&mut self) {
+        let Some(urls) = self.terminals.focused_urls() else {
+            self.flash_info("no terminal focused");
+            return;
+        };
+        match urls.len() {
+            0 => self.flash_info("no URLs on screen"),
+            1 => self.open_external_url(&urls[0]),
+            _ => self.mount_url_picker(urls),
+        }
+    }
+
+    /// Mount the terminal URL picker (`]]u`, issue #596) over `urls`.
+    /// Rows are ordered newest-first (bottom of the screen — the most
+    /// recent agent output — first) so the pre-selected top row is the
+    /// last URL, making `]]u` + Enter a one-chord "open the last link".
+    /// Each row carries its URL as a [`ChoicePayload::Text`]; the pick
+    /// opens it in the browser (`handle_choice_picked`).
+    fn mount_url_picker(&mut self, urls: Vec<String>) {
+        use crate::realm::components::choice::Choice;
+        if matches!(self.modal_stack.last(), Some(Id::UrlPicker)) {
+            return;
+        }
+        let rows: Vec<String> = urls.into_iter().rev().collect();
+        let modal = Choice::single("Enter opens the highlighted link in your browser", rows)
+            .title("Open URL")
+            .label(|u: &String| u.clone())
+            .payload_for(|u: &String| ChoicePayload::Text(u.clone()));
+        self.mount_modal(Id::UrlPicker, modal);
     }
 
     /// Hand `url` to the platform browser launcher and surface the

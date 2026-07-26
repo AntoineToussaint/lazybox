@@ -1905,14 +1905,17 @@ impl TerminalStack {
     }
 
     /// If the cell at frame-space `(col, row)` lies inside a URL,
-    /// file path, or `#N` / `owner/repo#N` issue reference on its
-    /// row, return the matching [`ClickTarget`]. Otherwise `None`.
+    /// file path, or `#N` / `owner/repo#N` issue reference, return the
+    /// matching [`ClickTarget`]. Otherwise `None`.
     /// Drives right-click-to-open: the click coordinates arrive in
     /// the same frame-space the renderer used, so we translate the
     /// same way `grid_bounds` does (skip the pane border + tab strip
-    /// + any recap rows via `recap_rows`). Single-row only — wrapped
-    /// tokens aren't detected (per the issue: "stay simple, terminal
-    /// URLs/paths are virtually always on one row").
+    /// + any recap rows via `recap_rows`). Soft-wrapped tokens are
+    /// stitched back together: a long URL that spilled onto the next
+    /// row(s) is one logical string here, so a click on any of its
+    /// rows resolves the whole link (#596). The VT flags soft-wrap per
+    /// row (`Row::is_wrapped`), so we only ever join genuine
+    /// continuations — never two unrelated lines.
     pub fn target_at(
         &mut self,
         rect: tuirealm::ratatui::layout::Rect,
@@ -1934,60 +1937,95 @@ impl TerminalStack {
             return None;
         }
         let cell_col = col - inner_x;
-        let target_row = row - inner_y;
-        let hyperlink = hyperlink_uri_at(&slot.vt.terminal, cell_col, target_row);
+        let target_row = (row - inner_y) as usize;
+        let hyperlink = hyperlink_uri_at(&slot.vt.terminal, cell_col, row - inner_y);
         let snapshot = slot.vt.render_state.update(&slot.vt.terminal).ok()?;
         let mut row_iter = slot.vt.row_iter.update(&snapshot).ok()?;
-        // Walk graphemes — wide-glyph cells contribute one grapheme
-        // on cell N and an empty cell N+1, so we record the byte
-        // offset at the START of each cell's contribution into
-        // `row_text`. `cell_byte_starts[cell_col]` then maps the
-        // clicked cell back to a byte position in the row's text.
-        let mut y: u16 = 0;
-        let mut row_text = String::new();
-        let mut cell_byte_starts: Vec<usize> = Vec::new();
-        let mut found = false;
-        while let Some(row) = row_iter.next() {
-            if y == target_row {
-                if let Ok(mut cell_iter) = slot.vt.cell_iter.update(row) {
-                    while let Some(cell) = cell_iter.next() {
-                        // A blank spacer cell of a wide glyph emits no
-                        // text, but it still occupies a screen column, so
-                        // a click on it must resolve into the glyph. Map
-                        // its byte offset back to the wide base (the last
-                        // recorded start) and append nothing — otherwise
-                        // the column→byte map drifts past wide text and
-                        // right-click resolves the wrong token. Covers both
-                        // the post-glyph `SpacerTail` and the soft-wrap
-                        // `SpacerHead`.
-                        if matches!(
-                            cell.wide(),
-                            Ok(vt::screen::CellWide::SpacerTail | vt::screen::CellWide::SpacerHead)
-                        ) {
-                            cell_byte_starts.push(cell_byte_starts.last().copied().unwrap_or(0));
-                            continue;
-                        }
-                        cell_byte_starts.push(row_text.len());
-                        let graphemes = cell.graphemes().unwrap_or_default();
-                        if graphemes.is_empty() {
-                            row_text.push(' ');
-                        } else {
-                            for g in graphemes {
-                                row_text.push(g);
-                            }
-                        }
-                    }
-                }
-                found = true;
-                break;
-            }
-            y += 1;
+        // Collect every visible row's text, its column→byte map, and
+        // whether it soft-wraps into the row below. `cell_byte_starts`
+        // maps the clicked cell back to a byte position in that row's
+        // text; the wrap flag lets us stitch a wrapped token across rows.
+        let mut rows: Vec<(String, Vec<usize>, bool)> = Vec::new();
+        while let Some(r) = row_iter.next() {
+            let wrapped = r
+                .raw_row()
+                .ok()
+                .and_then(|raw| raw.is_wrapped().ok())
+                .unwrap_or(false);
+            let (text, starts) = row_text_and_starts(&mut slot.vt.cell_iter, r);
+            rows.push((text, starts, wrapped));
         }
-        if !found {
+        if target_row >= rows.len() {
             return None;
         }
-        let byte_pos = *cell_byte_starts.get(cell_col as usize)?;
-        detect_target(&row_text, byte_pos, hyperlink.as_deref())
+        // Widen to the whole soft-wrap group: walk back over predecessors
+        // that wrap into us, forward over rows we (or our successors) wrap
+        // into. Joining their text with no separator reconstructs the
+        // original unbroken token.
+        let mut start = target_row;
+        while start > 0 && rows[start - 1].2 {
+            start -= 1;
+        }
+        let mut end = target_row;
+        while rows[end].2 && end + 1 < rows.len() {
+            end += 1;
+        }
+        let mut joined = String::new();
+        let mut target_offset = 0;
+        for (i, (text, _, _)) in rows[start..=end].iter().enumerate() {
+            if start + i == target_row {
+                target_offset = joined.len();
+            }
+            joined.push_str(text);
+        }
+        let byte_pos = target_offset + *rows[target_row].1.get(cell_col as usize)?;
+        detect_target(&joined, byte_pos, hyperlink.as_deref())
+    }
+
+    /// Every `http(s)://…` URL visible in the focused terminal's grid,
+    /// top-to-bottom in screen order and de-duplicated (first occurrence
+    /// wins). Soft-wrapped rows are stitched before scanning so a URL
+    /// that spilled across rows is captured whole — the same join
+    /// `target_at` does for a click. Drives the `]]u` keyboard URL
+    /// picker (#596), which sidesteps every mouse/emulator quirk that
+    /// blocks right-click-to-open. `None` when the focused terminal is
+    /// unknown or its VT snapshot can't be read; an empty `Vec` when
+    /// nothing on screen is a URL.
+    pub fn focused_urls(&mut self) -> Option<Vec<String>> {
+        let id = self.focused_terminal_id()?;
+        let slot = self.terminals.get_mut(&id)?;
+        // Reflect every byte received, not just what arrived on screen —
+        // mirrors `visible_text` / `target_at`.
+        slot.flush_pending();
+        let snapshot = slot.vt.render_state.update(&slot.vt.terminal).ok()?;
+        let mut row_iter = slot.vt.row_iter.update(&snapshot).ok()?;
+        let mut rows: Vec<(String, bool)> = Vec::new();
+        while let Some(r) = row_iter.next() {
+            let wrapped = r
+                .raw_row()
+                .ok()
+                .and_then(|raw| raw.is_wrapped().ok())
+                .unwrap_or(false);
+            let (text, _) = row_text_and_starts(&mut slot.vt.cell_iter, r);
+            rows.push((text, wrapped));
+        }
+        let mut urls: Vec<String> = Vec::new();
+        let mut i = 0;
+        while i < rows.len() {
+            // Fold this row and any it wraps into one logical line.
+            let mut line = rows[i].0.clone();
+            while rows[i].1 && i + 1 < rows.len() {
+                i += 1;
+                line.push_str(&rows[i].0);
+            }
+            i += 1;
+            for url in scan_urls(&line) {
+                if !urls.iter().any(|u| u == url) {
+                    urls.push(url.to_string());
+                }
+            }
+        }
+        Some(urls)
     }
 
     /// Translate a screen `(col, row)` into 0-based grid-cell
@@ -4227,26 +4265,64 @@ fn is_border_row(row: &str) -> bool {
             .all(|c| c.is_whitespace() || ('\u{2500}'..='\u{257F}').contains(&c))
 }
 
-/// Scan `row_text` for an `http(s)://…` token whose byte range
-/// contains `byte_pos`. Returns the URL as a borrowed slice when
-/// found. URL terminates at the first whitespace; trailing
-/// punctuation that's almost never part of the URL (`.,;:!?` plus
-/// the closing brackets and quotes) is trimmed so a sentence like
-/// `see https://example.com.` opens `https://example.com`.
-pub(crate) fn find_url_at_byte(row_text: &str, byte_pos: usize) -> Option<&str> {
+/// Build a row's plain text plus a per-column byte-offset map from a
+/// render-state row, applying the wide-glyph spacer handling both the
+/// click resolver and the URL scan depend on. `starts[col]` is the byte
+/// offset in the returned string where the glyph at screen column `col`
+/// begins; a blank spacer cell of a wide glyph carries no text but still
+/// occupies a column, so it maps back to the wide base (the last
+/// recorded start). Covers the post-glyph `SpacerTail` and the soft-wrap
+/// `SpacerHead`.
+fn row_text_and_starts(
+    cell_iter: &mut vt::render::CellIterator<'static>,
+    row: &vt::render::RowIteration<'static, '_>,
+) -> (String, Vec<usize>) {
+    let mut text = String::new();
+    let mut starts: Vec<usize> = Vec::new();
+    if let Ok(mut cell_iter) = cell_iter.update(row) {
+        while let Some(cell) = cell_iter.next() {
+            if matches!(
+                cell.wide(),
+                Ok(vt::screen::CellWide::SpacerTail | vt::screen::CellWide::SpacerHead)
+            ) {
+                starts.push(starts.last().copied().unwrap_or(0));
+                continue;
+            }
+            starts.push(text.len());
+            let graphemes = cell.graphemes().unwrap_or_default();
+            if graphemes.is_empty() {
+                text.push(' ');
+            } else {
+                for g in graphemes {
+                    text.push(g);
+                }
+            }
+        }
+    }
+    (text, starts)
+}
+
+/// The byte spans of every `http(s)://…` token in `text`, in order. A
+/// URL terminates at the first whitespace; trailing punctuation that's
+/// almost never part of the URL (`.,;:!?` plus the closing brackets and
+/// quotes) is trimmed so `see https://example.com.` yields
+/// `https://example.com`. Empty matches (nothing left after trimming)
+/// are skipped.
+fn url_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
     let mut search_start = 0;
-    while search_start < row_text.len() {
-        let rest = &row_text[search_start..];
+    while search_start < text.len() {
+        let rest = &text[search_start..];
         let http = rest.find("http://");
         let https = rest.find("https://");
         let off = match (http, https) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
-        }?;
+            (Some(a), Some(b)) => a.min(b),
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => break,
+        };
         let url_start = search_start + off;
-        let after_scheme = &row_text[url_start..];
+        let after_scheme = &text[url_start..];
         let raw_end_off = after_scheme
             .char_indices()
             .find(|(_, c)| c.is_whitespace())
@@ -4256,7 +4332,7 @@ pub(crate) fn find_url_at_byte(row_text: &str, byte_pos: usize) -> Option<&str> 
         // Trim trailing punctuation that's almost never part of a
         // URL. Stop once we hit something URL-valid.
         loop {
-            let slice = &row_text[url_start..url_end];
+            let slice = &text[url_start..url_end];
             let Some(last) = slice.chars().next_back() else {
                 break;
             };
@@ -4269,14 +4345,33 @@ pub(crate) fn find_url_at_byte(row_text: &str, byte_pos: usize) -> Option<&str> 
                 break;
             }
         }
-        if byte_pos >= url_start && byte_pos < url_end {
-            return Some(&row_text[url_start..url_end]);
+        if url_end > url_start {
+            spans.push((url_start, url_end));
         }
-        // Advance past this URL match (or the leading whitespace if
-        // url_end == url_start after trimming) to look for the next.
+        // Advance past this match (or the leading whitespace if the whole
+        // token trimmed away) to look for the next.
         search_start = url_end.max(url_start + 1);
     }
-    None
+    spans
+}
+
+/// Scan `row_text` for an `http(s)://…` token whose byte range contains
+/// `byte_pos`. Returns the trimmed URL as a borrowed slice when found.
+pub(crate) fn find_url_at_byte(row_text: &str, byte_pos: usize) -> Option<&str> {
+    url_spans(row_text)
+        .into_iter()
+        .find(|&(start, end)| byte_pos >= start && byte_pos < end)
+        .map(|(start, end)| &row_text[start..end])
+}
+
+/// Every `http(s)://…` URL in `text`, in order, each trimmed the same
+/// way [`find_url_at_byte`] trims a single hit. Shared with the `]]u`
+/// URL picker so the picker and right-click agree on URL boundaries.
+fn scan_urls(text: &str) -> Vec<&str> {
+    url_spans(text)
+        .into_iter()
+        .map(|(start, end)| &text[start..end])
+        .collect()
 }
 
 /// Read the OSC 8 hyperlink URI attached to the viewport cell at
@@ -5354,6 +5449,89 @@ mod selection_offset_tests {
             target,
             Some(ClickTarget::Url("https://example.com/x".into())),
         );
+    }
+
+    /// A long URL that soft-wraps across rows is one logical link:
+    /// right-clicking ANY of its rows resolves the whole URL, not the
+    /// fragment on that row (#596). Before the fix `target_at` was
+    /// single-row and returned `None` off the first row.
+    #[test]
+    fn right_click_resolves_a_soft_wrapped_url() {
+        let sk = SessionKey::new("session");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        let mut slot = TerminalStack::make_slot(
+            sk.clone(),
+            TerminalKind::Shell,
+            0,
+            false,
+            false,
+            None,
+            Vec::new(),
+            String::new(),
+        );
+        // A narrow grid forces the 54-char URL to soft-wrap over 3 rows.
+        slot.vt.ensure_size(20, 10);
+        slot.vt
+            .feed(b"https://example.com/a/very/long/path/that/wraps/around\r\n");
+        stack.terminals.insert(TerminalId(1), slot);
+        stack.set_active_session(Some(sk));
+
+        let rect = Rect::new(0, 0, 80, 30);
+        let want =
+            ClickTarget::Url("https://example.com/a/very/long/path/that/wraps/around".into());
+        // Grid row 0 renders at screen row 3 (shell, no recap); the
+        // wrapped continuations follow at 4 and 5. Every one resolves the
+        // whole URL.
+        for screen_row in 3..=5 {
+            assert_eq!(
+                stack.target_at(rect, 1, screen_row),
+                Some(want.clone()),
+                "click on wrapped row {screen_row} resolves the full URL",
+            );
+        }
+    }
+
+    #[test]
+    fn focused_urls_collects_scans_and_dedups_including_wrapped() {
+        let sk = SessionKey::new("session");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        let mut slot = TerminalStack::make_slot(
+            sk.clone(),
+            TerminalKind::Shell,
+            0,
+            false,
+            false,
+            None,
+            Vec::new(),
+            String::new(),
+        );
+        slot.vt.ensure_size(20, 12);
+        // A plain URL, the SAME URL again (deduped), a soft-wrapped one
+        // (stitched whole), and a non-URL line.
+        slot.vt.feed(b"https://a.example.com\r\n");
+        slot.vt.feed(b"https://a.example.com\r\n");
+        slot.vt
+            .feed(b"https://b.example.com/a/long/wrapping/path\r\n");
+        slot.vt.feed(b"no link on this line\r\n");
+        stack.terminals.insert(TerminalId(1), slot);
+        stack.set_active_session(Some(sk));
+
+        assert_eq!(
+            stack.focused_urls(),
+            Some(vec![
+                "https://a.example.com".to_string(),
+                "https://b.example.com/a/long/wrapping/path".to_string(),
+            ]),
+        );
+    }
+
+    #[test]
+    fn scan_urls_finds_every_url_trimming_punctuation() {
+        assert_eq!(
+            scan_urls("go to https://a.example.com, then https://b.example.com."),
+            vec!["https://a.example.com", "https://b.example.com"],
+        );
+        assert!(scan_urls("no urls at all here").is_empty());
     }
 
     #[test]

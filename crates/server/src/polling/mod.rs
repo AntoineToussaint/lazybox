@@ -105,6 +105,7 @@ pub struct EngagementSnapshot {
     cold_targets: std::collections::BTreeSet<lazybox_gh::NotificationTarget>,
     cold_only_repos: std::collections::HashSet<String>,
     active_repos: std::collections::HashSet<String>,
+    sessioned_repos: std::collections::HashSet<String>,
 }
 
 impl EngagementSnapshot {
@@ -136,6 +137,14 @@ impl EngagementSnapshot {
 
     pub fn active_repos(&self) -> &std::collections::HashSet<String> {
         &self.active_repos
+    }
+
+    /// Repos backing a workspace with a persisted session (any kind,
+    /// live or idle). These are Tier 0 — force-included in every
+    /// `repo:`-scoped fetch, uncapped, so a repo you're actively
+    /// working in never goes stale.
+    pub fn sessioned_repos(&self) -> &std::collections::HashSet<String> {
+        &self.sessioned_repos
     }
 
     pub fn hot_count(&self) -> usize {
@@ -185,6 +194,12 @@ struct EngagementCandidate {
     cold: bool,
     live_agent: bool,
     own_open_pr: bool,
+    /// Workspace has a persisted session (any [`lazybox_core::SessionKind`],
+    /// live process or not). This is the Tier 0 "I'm actively working
+    /// in this repo" signal — stronger than `live_agent`, which only
+    /// counts a live Agent PTY and misses shells and post-restart idle
+    /// sessions.
+    sessioned: bool,
 }
 
 fn select_engagement_snapshot(
@@ -195,7 +210,8 @@ fn select_engagement_snapshot(
     let mut eligible: Vec<&EngagementCandidate> = candidates
         .iter()
         .filter(|candidate| {
-            candidate.live_agent
+            candidate.sessioned
+                || candidate.live_agent
                 || focused_workspace == Some(candidate.workspace_key.as_str())
                 || (!candidate.cold
                     && candidate.own_open_pr
@@ -207,6 +223,7 @@ fn select_engagement_snapshot(
         let right_focused = focused_workspace == Some(right.workspace_key.as_str());
         right_focused
             .cmp(&left_focused)
+            .then_with(|| right.sessioned.cmp(&left.sessioned))
             .then_with(|| right.live_agent.cmp(&left.live_agent))
             .then_with(|| right.own_open_pr.cmp(&left.own_open_pr))
             .then_with(|| right.updated_at.cmp(&left.updated_at))
@@ -217,18 +234,31 @@ fn select_engagement_snapshot(
             })
     });
 
-    let hot_keys: std::collections::HashSet<String> = eligible
-        .into_iter()
-        .take(HOT_SET_MAX)
-        .map(|candidate| candidate.workspace_key.as_str().to_string())
-        .collect();
+    // Sessioned workspaces (Tier 0) are ALWAYS hot — uncapped, bounded
+    // only by how many worktrees the user has open. `HOT_SET_MAX` caps
+    // only the remaining engagement signals (focus / live agent / recent
+    // own PR) so those can't drown out a repo the user is working in.
+    let mut hot_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut capped_used = 0usize;
+    for candidate in eligible {
+        if candidate.sessioned {
+            hot_keys.insert(candidate.workspace_key.as_str().to_string());
+        } else if capped_used < HOT_SET_MAX {
+            hot_keys.insert(candidate.workspace_key.as_str().to_string());
+            capped_used += 1;
+        }
+    }
 
     let mut entries = std::collections::HashMap::new();
     let mut hot_targets = Vec::new();
     let mut cold_targets = std::collections::BTreeSet::new();
     let mut repos = std::collections::HashSet::new();
     let mut non_cold_repos = std::collections::HashSet::new();
+    let mut sessioned_repos = std::collections::HashSet::new();
     for candidate in candidates {
+        if candidate.sessioned {
+            sessioned_repos.insert(candidate.repo.clone());
+        }
         let focused = focused_workspace == Some(candidate.workspace_key.as_str());
         let tier = if hot_keys.contains(candidate.workspace_key.as_str()) {
             EngagementTier::Hot
@@ -292,6 +322,7 @@ fn select_engagement_snapshot(
         cold_targets,
         cold_only_repos,
         active_repos: non_cold_repos,
+        sessioned_repos,
     }
 }
 
@@ -361,6 +392,7 @@ pub async fn refresh_github_engagement(config: &ServerConfig) -> EngagementSnaps
             cold,
             live_agent: live_agent_workspaces.contains(workspace.key.as_str()),
             own_open_pr,
+            sessioned: !workspace.sessions.is_empty(),
         });
     }
 
@@ -403,6 +435,7 @@ mod engagement_tier_tests {
             cold: false,
             live_agent: false,
             own_open_pr: true,
+            sessioned: false,
         }
     }
 
@@ -479,6 +512,82 @@ mod engagement_tier_tests {
         );
         assert!(snapshot.cold_only_repos().contains("o/cold"));
         assert!(!snapshot.cold_only_repos().contains("o/warm"));
+    }
+
+    /// Every sessioned workspace stays hot even when there are more of
+    /// them than `HOT_SET_MAX` — the Tier 0 cap-bypass. Pre-fix the
+    /// `.take(HOT_SET_MAX)` dropped session-bearing repos past the top 3.
+    #[test]
+    fn all_sessioned_repos_stay_hot_beyond_the_cap() {
+        let candidates: Vec<_> = (1..=6)
+            .map(|n| {
+                let mut c = candidate(n);
+                c.own_open_pr = false;
+                c.sessioned = true;
+                c.repo = format!("o/r{n}");
+                c
+            })
+            .collect();
+        let keys: Vec<_> = candidates.iter().map(|c| c.workspace_key.clone()).collect();
+
+        let snapshot = select_engagement_snapshot(candidates, None, Utc::now());
+        assert!(
+            snapshot.hot_count() >= 6,
+            "all 6 sessioned repos must be hot"
+        );
+        for key in &keys {
+            assert_eq!(snapshot.tier_for(key), EngagementTier::Hot);
+        }
+        assert_eq!(snapshot.sessioned_repos().len(), 6);
+        assert!(snapshot.cold_only_repos().is_empty());
+    }
+
+    /// A persisted-but-idle session (no live agent PTY, no own PR) is
+    /// engaged, not cold — the signal is `workspace.sessions`, not a
+    /// live Agent terminal. A shell session behaves identically.
+    #[test]
+    fn persisted_session_without_live_agent_is_engaged() {
+        let mut idle = candidate(1);
+        idle.cold = true;
+        idle.own_open_pr = false;
+        idle.live_agent = false;
+        idle.sessioned = true;
+        let key = idle.workspace_key.clone();
+
+        let snapshot = select_engagement_snapshot(vec![idle], None, Utc::now());
+        assert_eq!(snapshot.tier_for(&key), EngagementTier::Hot);
+        assert!(snapshot.sessioned_repos().contains("o/r"));
+        assert!(snapshot.cold_only_repos().is_empty());
+    }
+
+    /// Non-sessioned engagement signals (focus / live agent / recent own
+    /// PR) still share the `HOT_SET_MAX` cap so they can't drown out the
+    /// round-robin, while sessioned repos ride above it.
+    #[test]
+    fn non_sessioned_hot_stays_capped_alongside_uncapped_sessioned() {
+        let mut sessioned: Vec<_> = (1..=4)
+            .map(|n| {
+                let mut c = candidate(n);
+                c.own_open_pr = false;
+                c.sessioned = true;
+                c.repo = format!("o/s{n}");
+                c
+            })
+            .collect();
+        // Five recent own-PR (non-sessioned) candidates competing for the
+        // 3 capped slots.
+        let recent: Vec<_> = (10..=14)
+            .map(|n| {
+                let mut c = candidate(n);
+                c.repo = format!("o/w{n}");
+                c
+            })
+            .collect();
+        sessioned.extend(recent);
+
+        let snapshot = select_engagement_snapshot(sessioned, None, Utc::now());
+        // 4 sessioned (uncapped) + 3 capped own-PR = 7 hot.
+        assert_eq!(snapshot.hot_count(), 7);
     }
 
     #[test]
@@ -583,6 +692,43 @@ mod engagement_tier_tests {
         let snapshot = refresh_github_engagement(&config).await;
         assert_eq!(snapshot.tier_for(&key), EngagementTier::Hot);
         assert!(snapshot.signals_for(&key).live_agent);
+    }
+
+    /// End-to-end: a workspace with a persisted (non-live) session — no
+    /// Agent terminal in `terminal_meta` — is classified engaged and its
+    /// repo lands in `sessioned_repos`, even when the underlying task is
+    /// a reviewer PR with no live agent. Pre-fix this workspace was cold
+    /// unless it happened to win one of the three hot slots.
+    #[tokio::test]
+    async fn persisted_session_repo_flows_into_sessioned_repos() {
+        use lazybox_core::{SessionKind, WorkspaceSession};
+
+        let config = ServerConfig::in_memory();
+        let task = task(51, TaskRole::Reviewer);
+        let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
+        let mut workspace = Workspace::from_task(task, Utc::now());
+        workspace.add_session(WorkspaceSession::new(
+            workspace.key.clone(),
+            SessionKind::Shell,
+            std::path::PathBuf::from("/nonexistent/worktree"),
+            Utc::now(),
+        ));
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: workspace.key.as_str().to_string(),
+                created_at: workspace.created_at,
+                workspace_json: Some(serde_json::to_string(&workspace).unwrap()),
+            })
+            .unwrap();
+
+        // No terminal_meta entry — this is NOT a live agent.
+        assert!(config.terminal_meta.lock().await.is_empty());
+
+        let snapshot = refresh_github_engagement(&config).await;
+        assert_eq!(snapshot.tier_for(&key), EngagementTier::Hot);
+        assert!(!snapshot.signals_for(&key).live_agent);
+        assert!(snapshot.sessioned_repos().contains("o/r"));
     }
 
     #[tokio::test]
@@ -2728,8 +2874,10 @@ async fn sources_for_with_engagement(
                         //      rule observes the value we passed in.
                         let will_full_sweep = client.should_full_sweep();
                         let now = std::time::Instant::now();
+                        let sessioned_repos = engagement.sessioned_repos();
                         let scheduling = plan_round_robin_tick(
                             &mut state.round_robin,
+                            sessioned_repos,
                             will_full_sweep,
                             DEFAULT_ROUND_ROBIN_N,
                             now,
@@ -2740,6 +2888,7 @@ async fn sources_for_with_engagement(
                                 tick = state.round_robin.tick,
                                 run_global = scheduling.run_global,
                                 round_robin = ?scheduling.repos,
+                                sessioned = sessioned_repos.len(),
                                 known_repos = state.round_robin.cursor.len(),
                                 focused = state.round_robin.focused_repo.as_deref().unwrap_or(""),
                                 "round-robin scheduling decision"

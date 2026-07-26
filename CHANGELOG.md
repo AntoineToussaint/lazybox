@@ -8,6 +8,27 @@ contain explicitly documented compatibility changes.
 
 ## [0.1.8] - 2026-07-26
 
+This release makes lazybox a steadier control surface for long-running agent
+fleets: prompts and terminals survive restarts more faithfully, worktrees are
+safer to inspect and reclaim, and the inbox gains focused tools for handing off,
+filtering, syncing, and updating work.
+
+### Install
+
+Homebrew (macOS or Linux):
+
+```sh
+brew tap AntoineToussaint/lazybox && brew trust AntoineToussaint/lazybox && brew install lazybox
+```
+
+Shell installer (macOS arm64/x86_64 or Linux x86_64):
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/AntoineToussaint/lazybox/releases/download/v0.1.8/lazybox-tui-installer.sh | sh
+```
+
+Then run `gh auth login` if needed and launch `lazybox`.
+
 ### Added
 
 - `lazybox worktree list` and `lazybox worktree gc` report managed worktrees
@@ -38,10 +59,32 @@ contain explicitly documented compatibility changes.
   remembered per workspace with a `ui.activity_pane_default` starting mode
   (#487).
 
+### Changed
+
+- Engaged GitHub workspaces stay prominent, while multi-axis filters make it
+  practical to narrow a busy inbox by state, role, and task kind.
+- Contextual `w w` launches, explicit agent launches, and priority/model-tier
+  selection now resolve consistently and keep their chosen model visible.
+- Terminal prompt history, scrollback, and reconnect replay now share the same
+  persisted lifecycle, including restored sessions after a restart.
+- The docs, install paths, support forms, provider setup, and mobile homepage
+  have been audited against the current CLI, config schema, and action catalog.
+
 ### Fixed
 
-- Deleting, merging, or closing a workspace now reclaims its worktree
-  directory instead of leaking a multi-gigabyte checkout on disk (#573, #575).
+- Shell sessions now honor `shell.command` from
+  `~/.lazybox/config.yaml`.
+- Workspace deletion, merge, close, and garbage collection preserve dirty or
+  unpushed work while reclaiming safe orphaned worktrees (#573, #575).
+- Issue-to-PR joins retain session ownership and surface the originating issue
+  without duplicating or losing workspace state.
+- Terminal exits, failed starts, reconnects, and status transitions remain
+  visible and ordered instead of leaving stale or disappearing tabs.
+- Provider polling and persistence paths avoid duplicate Slack delivery,
+  stale GitHub state, and silent loss of malformed stored records.
+- Release binaries no longer inherit a false `-dirty` version suffix from
+  cargo-dist's generated manifest output, and the pre-split shell-installer URL
+  remains valid.
 
 ## [0.1.7] - 2026-07-19
 

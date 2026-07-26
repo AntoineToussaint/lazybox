@@ -7,9 +7,8 @@ body:
     attributes:
       value: |
         Thanks for the idea. Describing the problem you're hitting — not just the
-        feature you have in mind — helps us find the right solution. If this is
-        more of a question or open-ended discussion, consider starting a
-        [Discussion](https://github.com/AntoineToussaint/lazybox/discussions) instead.
+        feature you have in mind — helps us find the right solution. For setup
+        help or usage questions, choose the Question / setup help form instead.
   - type: textarea
     id: problem
     attributes:

@@ -56,7 +56,8 @@ crates/
   server/         # Server library.
 
   # ── client / binary ─────────────────────────────────────────────────
-  tui/            # tuirealm-based TUI client + `lazybox` and `lb` binaries.
+  tui/            # tuirealm-based TUI library.
+  tui-boot/       # `lazybox` / `lb` binaries and daemon/provider wiring.
 ```
 
 More detail in [`CLAUDE.md`](./CLAUDE.md) (architecture decisions, key patterns).
@@ -90,7 +91,7 @@ attention:
 
 ## Where to get help
 
-- **Questions, setup help, sharing configs** → [GitHub Discussions](https://github.com/AntoineToussaint/lazybox/discussions).
+- **Questions, setup help, sharing configs** → [Question / setup help form](https://github.com/AntoineToussaint/lazybox/issues/new?template=question.yml).
 - **Bugs and feature requests** → [Issues](https://github.com/AntoineToussaint/lazybox/issues/new/choose) (use the templates).
 - **Docs & architecture** → the [docs site](https://lazybox.ai/docs/), plus [`CLAUDE.md`](./CLAUDE.md) and `DESIGN.md` for deeper notes.
 

@@ -36,6 +36,9 @@ warnings = "deny"
 
 # Config for 'dist'
 [workspace.metadata.dist]
+# The release workflow publishes the curated changelog because cargo-dist's
+# Homebrew hint cannot express Homebrew 6's required tap-and-trust sequence.
+allow-dirty = ["ci"]
 # The preferred dist version to use in CI (Cargo.toml SemVer syntax)
 cargo-dist-version = "0.31.0"
 # CI backends to support

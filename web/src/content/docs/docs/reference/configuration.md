@@ -247,12 +247,13 @@ hand.
 | `working_watchdog_secs` | int | `15` | Fail-safe window: seconds a `Working` agent terminal may sit with no meaningful screen change before the daemon classifies the screen and forces the turn out of `Working`. `0` disables the watchdog. |
 | `quiet_classify_secs` | int | `5` | Quiet-timer window: seconds of PTY silence before a `Working` turn settles to `Done`. Cannot be disabled (`0` falls back to 5); raise it to be less eager to call a turn finished. |
 
-There is no per-agent argv customization here — the built-in agents (Claude,
-Codex, Cursor) own their spawn/resume command lines, and per-agent knobs (the
-model-tier menu, auto-update) live under [`agents.<id>`](#agentsid). Extra
-per-spawn args come from the model-tier menu's `args`
-([`agents.<id>.models`](#agentsid)); arbitrary CLIs are the `GenericCli`
-agent's territory (`crates/agents/`).
+The legacy `name`, `command`, `args`, `resume_args`, and `asking_patterns`
+fields are still accepted under `agent` so old config files parse, but the
+current registry does not read them. Built-in agents (Claude, Codex, Cursor)
+own their spawn/resume command lines, and per-agent knobs (the model-tier menu,
+auto-update) live under [`agents.<id>`](#agentsid). Extra per-spawn args come
+from the model-tier menu's `args` ([`agents.<id>.models`](#agentsid));
+arbitrary CLIs are the `GenericCli` agent's territory (`crates/agents/`).
 
 ## `agents.<id>`
 
@@ -429,7 +430,7 @@ booleans all default to `true`.
 | `review_pending` | bool | A review is requested of you |
 | `agent_asking` | bool | An agent is waiting on input |
 | `mentioned` | bool | You were mentioned |
-| `desktop_notify` | bool | Fire an OS desktop notification when an agent needs input (independent of `agent_asking`) |
+| `desktop_notify` | bool | Fire OS desktop notifications when an agent needs input or finishes, and when a workspace gains an enabled attention signal |
 | `notifier` | `auto` \| `osc` \| `subprocess` | How the desktop banner is delivered. `auto` (default) picks per environment — subprocess helpers (`terminal-notifier` / `osascript` on macOS, `notify-send` on Linux) locally, the terminal's OSC escape sequence over SSH; `osc` / `subprocess` force one path. |
 
 ## `providers`
@@ -481,7 +482,7 @@ Auto-spawn settings for `@lazybox` mentions in issues / comments.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `allowed_logins` | list of string | `[]` | GitHub logins whose `@lazybox` mentions auto-spawn the default agent. Empty = just the authenticated viewer. |
+| `allowed_logins` | list of string | `[]` | GitHub logins whose `@lazybox [agent] [model-alias]` directives can auto-spawn an agent. Empty = just the authenticated viewer. |
 
 ## `auto_fix`
 

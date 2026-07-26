@@ -40,7 +40,7 @@ full schema.
 ## 3. Initialize and check
 
 ```sh
-lazybox slack init       # set up channels / mirror from your config
+lazybox slack init       # validate and store tokens, then join the anchor channel
 lazybox slack doctor     # diagnose token, scope, and connectivity issues
 ```
 
@@ -50,7 +50,7 @@ missing scopes or bad tokens directly.
 ## Housekeeping
 
 ```sh
-lazybox slack prune      # remove stale per-workspace channels
+lazybox slack prune      # archive stale per-workspace channels
 ```
 
 ## Related

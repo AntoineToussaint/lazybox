@@ -6,7 +6,7 @@ what you need.
 ## Questions & help
 
 For "how do I…", setup help, or sharing your configuration, start a
-[GitHub Discussion](https://github.com/AntoineToussaint/lazybox/discussions).
+[question / setup help report](https://github.com/AntoineToussaint/lazybox/issues/new?template=question.yml).
 
 ## Bugs & feature requests
 

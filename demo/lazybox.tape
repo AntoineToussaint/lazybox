@@ -4,7 +4,7 @@
 # binary blob: edit it here, regenerate, commit the outputs.
 #
 # Regenerate locally:
-#   cargo build -p lazybox-tui            # produces target/debug/lazybox
+#   cargo build -p lazybox-tui-boot       # produces target/debug/lazybox
 #   PATH="$PWD/target/debug:$PATH" vhs demo/lazybox.tape
 #
 # Requires `vhs` (brew install vhs) and a `lazybox` binary on PATH.

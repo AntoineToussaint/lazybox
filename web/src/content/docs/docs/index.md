@@ -48,7 +48,7 @@ The documentation is split into four sections, following the
 ## Fastest path
 
 ```sh
-brew install AntoineToussaint/lazybox/lazybox
+brew tap AntoineToussaint/lazybox && brew trust AntoineToussaint/lazybox && brew install lazybox
 gh auth login   # if you haven't already
 lazybox
 ```

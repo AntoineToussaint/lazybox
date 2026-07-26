@@ -1,4 +1,6 @@
 /target
+/dist-manifest.json
+/plan-dist-manifest.json
 *.swp
 *.swo
 .DS_Store

@@ -16,7 +16,7 @@
 # `golden.ascii`.
 #
 # Regenerate alongside lazybox.tape whenever the UI changes:
-#   cargo build -p lazybox-tui
+#   cargo build -p lazybox-tui-boot
 #   PATH="$PWD/target/debug:$PATH" vhs demo/golden.tape
 #   # then extract the table into golden.ascii:
 #   awk '/Tab .* cycle panes/{c=1;b=""} c{b=b $0 ORS} c&&/exit to sidebar/{last=b;c=0} END{printf "%s",last}' \

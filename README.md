@@ -48,10 +48,16 @@ workspace — built for developers juggling many PRs and AI coding agents at onc
 
 Prebuilt binaries (macOS arm64/x86_64 and Linux x86_64):
 
+**Homebrew:**
+
 ```sh
-brew install AntoineToussaint/lazybox/lazybox
-# …or: curl --proto '=https' --tlsv1.2 -LsSf \
-#   https://github.com/AntoineToussaint/lazybox/releases/latest/download/lazybox-tui-installer.sh | sh
+brew tap AntoineToussaint/lazybox && brew trust AntoineToussaint/lazybox && brew install lazybox
+```
+
+**Shell installer:**
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/AntoineToussaint/lazybox/releases/latest/download/lazybox-tui-installer.sh | sh
 ```
 
 Then `gh auth login` (if you haven't) and run `lazybox`.
@@ -191,8 +197,7 @@ loop and standing rules (tests with every change; the core library crates keep
 their strict dependency layering). Participation is under our
 [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md). Questions, bugs, and feature ideas:
 [`SUPPORT.md`](SUPPORT.md) points you at
-[Discussions](https://github.com/AntoineToussaint/lazybox/discussions) and the
-[issue templates](https://github.com/AntoineToussaint/lazybox/issues/new/choose).
+the [question, bug, and feature templates](https://github.com/AntoineToussaint/lazybox/issues/new/choose).
 
 ## License
 

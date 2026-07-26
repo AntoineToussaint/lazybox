@@ -4,7 +4,7 @@ The [VHS tape](lazybox.tape) renders the README GIF deterministically, but
 by design it runs `lazybox --test` — a credential-free sandbox. It can show
 the *shape* of the app (inbox → workspace → shell → git) but not the parts
 that need a live account: GitHub events landing in real time, a real agent
-working via `w`, and the Slack "control it from your phone" loop.
+working via `w w`, and the Slack "control it from your phone" loop.
 
 This is the shot list for a **human-recorded screencast** that captures
 those moments. It lives next to the tape so the recording is reproducible:
@@ -45,9 +45,10 @@ Target: **90–120s**, terminal-only, stitched from short takes.
    created and the embedded terminal appears in the workspace — a real
    shell in a real checkout, not a preview.
 
-3. **`w` — Work the failing PR (35–60s).**
-   With the failing-CI row selected, press `w`. The default agent (Claude)
-   spawns in the worktree with a context-aware prompt already filled in —
+3. **`w w` — Work the failing PR (35–60s).**
+   With the failing-CI row selected, press `w w`. The first `w` opens the work
+   menu and the second starts the default agent (Claude) in the worktree with a
+   context-aware prompt already filled in —
    on a PR with failing CI it's the "fix the failing checks" prompt, not a
    blank box. Let a few lines of the agent's first turn play.
 
@@ -69,5 +70,5 @@ Target: **90–120s**, terminal-only, stitched from short takes.
 - Trim dead air between key presses, but keep each live moment (the row
   lighting up, the agent's first lines, the phone reply landing) on screen
   long enough to read.
-- Caption the keys as they're pressed (`w`, `g m`) so the screencast
+- Caption the keys as they're pressed (`w w`, `g m`) so the screencast
   doubles as a quick keybinding reference.

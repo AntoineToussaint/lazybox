@@ -105,6 +105,7 @@ pub struct EngagementSnapshot {
     cold_targets: std::collections::BTreeSet<lazybox_gh::NotificationTarget>,
     cold_only_repos: std::collections::HashSet<String>,
     active_repos: std::collections::HashSet<String>,
+    sessioned_repos: std::collections::HashSet<String>,
 }
 
 impl EngagementSnapshot {
@@ -136,6 +137,14 @@ impl EngagementSnapshot {
 
     pub fn active_repos(&self) -> &std::collections::HashSet<String> {
         &self.active_repos
+    }
+
+    /// Repos backing a workspace with a persisted session (any kind,
+    /// live or idle). These are Tier 0 — force-included in every
+    /// `repo:`-scoped fetch, uncapped, so a repo you're actively
+    /// working in never goes stale.
+    pub fn sessioned_repos(&self) -> &std::collections::HashSet<String> {
+        &self.sessioned_repos
     }
 
     pub fn hot_count(&self) -> usize {
@@ -185,6 +194,12 @@ struct EngagementCandidate {
     cold: bool,
     live_agent: bool,
     own_open_pr: bool,
+    /// Workspace has a persisted session (any [`lazybox_core::SessionKind`],
+    /// live process or not). This is the Tier 0 "I'm actively working
+    /// in this repo" signal — stronger than `live_agent`, which only
+    /// counts a live Agent PTY and misses shells and post-restart idle
+    /// sessions.
+    sessioned: bool,
 }
 
 fn select_engagement_snapshot(
@@ -195,7 +210,8 @@ fn select_engagement_snapshot(
     let mut eligible: Vec<&EngagementCandidate> = candidates
         .iter()
         .filter(|candidate| {
-            candidate.live_agent
+            candidate.sessioned
+                || candidate.live_agent
                 || focused_workspace == Some(candidate.workspace_key.as_str())
                 || (!candidate.cold
                     && candidate.own_open_pr
@@ -207,6 +223,7 @@ fn select_engagement_snapshot(
         let right_focused = focused_workspace == Some(right.workspace_key.as_str());
         right_focused
             .cmp(&left_focused)
+            .then_with(|| right.sessioned.cmp(&left.sessioned))
             .then_with(|| right.live_agent.cmp(&left.live_agent))
             .then_with(|| right.own_open_pr.cmp(&left.own_open_pr))
             .then_with(|| right.updated_at.cmp(&left.updated_at))
@@ -217,18 +234,31 @@ fn select_engagement_snapshot(
             })
     });
 
-    let hot_keys: std::collections::HashSet<String> = eligible
-        .into_iter()
-        .take(HOT_SET_MAX)
-        .map(|candidate| candidate.workspace_key.as_str().to_string())
-        .collect();
+    // Sessioned workspaces (Tier 0) are ALWAYS hot — uncapped, bounded
+    // only by how many worktrees the user has open. `HOT_SET_MAX` caps
+    // only the remaining engagement signals (focus / live agent / recent
+    // own PR) so those can't drown out a repo the user is working in.
+    let mut hot_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut capped_used = 0usize;
+    for candidate in eligible {
+        if candidate.sessioned {
+            hot_keys.insert(candidate.workspace_key.as_str().to_string());
+        } else if capped_used < HOT_SET_MAX {
+            hot_keys.insert(candidate.workspace_key.as_str().to_string());
+            capped_used += 1;
+        }
+    }
 
     let mut entries = std::collections::HashMap::new();
     let mut hot_targets = Vec::new();
     let mut cold_targets = std::collections::BTreeSet::new();
     let mut repos = std::collections::HashSet::new();
     let mut non_cold_repos = std::collections::HashSet::new();
+    let mut sessioned_repos = std::collections::HashSet::new();
     for candidate in candidates {
+        if candidate.sessioned {
+            sessioned_repos.insert(candidate.repo.clone());
+        }
         let focused = focused_workspace == Some(candidate.workspace_key.as_str());
         let tier = if hot_keys.contains(candidate.workspace_key.as_str()) {
             EngagementTier::Hot
@@ -292,6 +322,7 @@ fn select_engagement_snapshot(
         cold_targets,
         cold_only_repos,
         active_repos: non_cold_repos,
+        sessioned_repos,
     }
 }
 
@@ -361,6 +392,7 @@ pub async fn refresh_github_engagement(config: &ServerConfig) -> EngagementSnaps
             cold,
             live_agent: live_agent_workspaces.contains(workspace.key.as_str()),
             own_open_pr,
+            sessioned: !workspace.sessions.is_empty(),
         });
     }
 
@@ -403,6 +435,7 @@ mod engagement_tier_tests {
             cold: false,
             live_agent: false,
             own_open_pr: true,
+            sessioned: false,
         }
     }
 
@@ -479,6 +512,82 @@ mod engagement_tier_tests {
         );
         assert!(snapshot.cold_only_repos().contains("o/cold"));
         assert!(!snapshot.cold_only_repos().contains("o/warm"));
+    }
+
+    /// Every sessioned workspace stays hot even when there are more of
+    /// them than `HOT_SET_MAX` — the Tier 0 cap-bypass. Pre-fix the
+    /// `.take(HOT_SET_MAX)` dropped session-bearing repos past the top 3.
+    #[test]
+    fn all_sessioned_repos_stay_hot_beyond_the_cap() {
+        let candidates: Vec<_> = (1..=6)
+            .map(|n| {
+                let mut c = candidate(n);
+                c.own_open_pr = false;
+                c.sessioned = true;
+                c.repo = format!("o/r{n}");
+                c
+            })
+            .collect();
+        let keys: Vec<_> = candidates.iter().map(|c| c.workspace_key.clone()).collect();
+
+        let snapshot = select_engagement_snapshot(candidates, None, Utc::now());
+        assert!(
+            snapshot.hot_count() >= 6,
+            "all 6 sessioned repos must be hot"
+        );
+        for key in &keys {
+            assert_eq!(snapshot.tier_for(key), EngagementTier::Hot);
+        }
+        assert_eq!(snapshot.sessioned_repos().len(), 6);
+        assert!(snapshot.cold_only_repos().is_empty());
+    }
+
+    /// A persisted-but-idle session (no live agent PTY, no own PR) is
+    /// engaged, not cold — the signal is `workspace.sessions`, not a
+    /// live Agent terminal. A shell session behaves identically.
+    #[test]
+    fn persisted_session_without_live_agent_is_engaged() {
+        let mut idle = candidate(1);
+        idle.cold = true;
+        idle.own_open_pr = false;
+        idle.live_agent = false;
+        idle.sessioned = true;
+        let key = idle.workspace_key.clone();
+
+        let snapshot = select_engagement_snapshot(vec![idle], None, Utc::now());
+        assert_eq!(snapshot.tier_for(&key), EngagementTier::Hot);
+        assert!(snapshot.sessioned_repos().contains("o/r"));
+        assert!(snapshot.cold_only_repos().is_empty());
+    }
+
+    /// Non-sessioned engagement signals (focus / live agent / recent own
+    /// PR) still share the `HOT_SET_MAX` cap so they can't drown out the
+    /// round-robin, while sessioned repos ride above it.
+    #[test]
+    fn non_sessioned_hot_stays_capped_alongside_uncapped_sessioned() {
+        let mut sessioned: Vec<_> = (1..=4)
+            .map(|n| {
+                let mut c = candidate(n);
+                c.own_open_pr = false;
+                c.sessioned = true;
+                c.repo = format!("o/s{n}");
+                c
+            })
+            .collect();
+        // Five recent own-PR (non-sessioned) candidates competing for the
+        // 3 capped slots.
+        let recent: Vec<_> = (10..=14)
+            .map(|n| {
+                let mut c = candidate(n);
+                c.repo = format!("o/w{n}");
+                c
+            })
+            .collect();
+        sessioned.extend(recent);
+
+        let snapshot = select_engagement_snapshot(sessioned, None, Utc::now());
+        // 4 sessioned (uncapped) + 3 capped own-PR = 7 hot.
+        assert_eq!(snapshot.hot_count(), 7);
     }
 
     #[test]
@@ -583,6 +692,43 @@ mod engagement_tier_tests {
         let snapshot = refresh_github_engagement(&config).await;
         assert_eq!(snapshot.tier_for(&key), EngagementTier::Hot);
         assert!(snapshot.signals_for(&key).live_agent);
+    }
+
+    /// End-to-end: a workspace with a persisted (non-live) session — no
+    /// Agent terminal in `terminal_meta` — is classified engaged and its
+    /// repo lands in `sessioned_repos`, even when the underlying task is
+    /// a reviewer PR with no live agent. Pre-fix this workspace was cold
+    /// unless it happened to win one of the three hot slots.
+    #[tokio::test]
+    async fn persisted_session_repo_flows_into_sessioned_repos() {
+        use lazybox_core::{SessionKind, WorkspaceSession};
+
+        let config = ServerConfig::in_memory();
+        let task = task(51, TaskRole::Reviewer);
+        let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
+        let mut workspace = Workspace::from_task(task, Utc::now());
+        workspace.add_session(WorkspaceSession::new(
+            workspace.key.clone(),
+            SessionKind::Shell,
+            std::path::PathBuf::from("/nonexistent/worktree"),
+            Utc::now(),
+        ));
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: workspace.key.as_str().to_string(),
+                created_at: workspace.created_at,
+                workspace_json: Some(serde_json::to_string(&workspace).unwrap()),
+            })
+            .unwrap();
+
+        // No terminal_meta entry — this is NOT a live agent.
+        assert!(config.terminal_meta.lock().await.is_empty());
+
+        let snapshot = refresh_github_engagement(&config).await;
+        assert_eq!(snapshot.tier_for(&key), EngagementTier::Hot);
+        assert!(!snapshot.signals_for(&key).live_agent);
+        assert!(snapshot.sessioned_repos().contains("o/r"));
     }
 
     #[tokio::test]
@@ -2728,8 +2874,10 @@ async fn sources_for_with_engagement(
                         //      rule observes the value we passed in.
                         let will_full_sweep = client.should_full_sweep();
                         let now = std::time::Instant::now();
+                        let sessioned_repos = engagement.sessioned_repos();
                         let scheduling = plan_round_robin_tick(
                             &mut state.round_robin,
+                            sessioned_repos,
                             will_full_sweep,
                             DEFAULT_ROUND_ROBIN_N,
                             now,
@@ -2740,6 +2888,7 @@ async fn sources_for_with_engagement(
                                 tick = state.round_robin.tick,
                                 run_global = scheduling.run_global,
                                 round_robin = ?scheduling.repos,
+                                sessioned = sessioned_repos.len(),
                                 known_repos = state.round_robin.cursor.len(),
                                 focused = state.round_robin.focused_repo.as_deref().unwrap_or(""),
                                 "round-robin scheduling decision"
@@ -5531,12 +5680,67 @@ fn issue_id_from_branch(pr: &Task) -> Option<lazybox_core::TaskId> {
     })
 }
 
+/// True when the PR body references `issue` with a NON-closing keyword
+/// (`part of` / `refs` / `ref` / `related to`) immediately before `#<n>`.
+/// GitHub turns only *closing* keywords into `closingIssuesReferences`, so
+/// a body that says "Part of #<n>" is explicit intent that the PR does NOT
+/// close the issue — the weak branch-name heuristic must defer to it (#581).
+/// A body with `Closes #<n>` not yet resolved matches no non-closing keyword
+/// here, so the branch fallback still fires during that timing gap.
+fn body_references_issue_non_closing(pr: &Task, issue: &lazybox_core::TaskId) -> bool {
+    let Some(number) = issue.key.rsplit('#').next().filter(|n| !n.is_empty()) else {
+        return false;
+    };
+    let Some(body) = pr.body.as_deref() else {
+        return false;
+    };
+    let lower = body.to_ascii_lowercase();
+    const NON_CLOSING_KEYWORDS: &[&str] = &["part of", "refs", "ref", "related to"];
+    for keyword in NON_CLOSING_KEYWORDS {
+        let mut from = 0;
+        while let Some(rel) = lower[from..].find(keyword) {
+            let after = from + rel + keyword.len();
+            if reference_number_follows(&lower[after..], number) {
+                return true;
+            }
+            from = after;
+        }
+    }
+    false
+}
+
+/// After a keyword, does `#<number>` follow (allowing `:`/whitespace in
+/// between)? The trailing boundary check keeps `#57` from matching a `#579`
+/// reference.
+fn reference_number_follows(after_keyword: &str, number: &str) -> bool {
+    let rest = after_keyword.trim_start_matches([' ', '\t', '\r', '\n', ':']);
+    let Some(rest) = rest.strip_prefix('#') else {
+        return false;
+    };
+    match rest.strip_prefix(number) {
+        Some(tail) => !tail.starts_with(|c: char| c.is_ascii_digit()),
+        None => false,
+    }
+}
+
 /// Workspace rows a PR may absorb, including the lazybox branch-name
 /// fallback. Kept in one helper so lock planning and the merge pass cannot
 /// drift into recognizing different source rows.
+///
+/// The branch-name link is a WEAK signal: an agent that named its branch
+/// `issue-<n>-…` usually does close that issue, but a PR that deliberately
+/// does NOT ("Part of #<n>", tracking/checklist issues) must win. So the
+/// branch fallback fires only in the timing gap where GitHub has resolved
+/// no closing reference yet (`closes_issues` empty) AND the body carries no
+/// explicit non-closing reference to the branch-derived issue (#581). Once
+/// `closingIssuesReferences` is populated it is authoritative and the branch
+/// stem is ignored entirely.
 fn closing_issue_workspace_keys(pr: &Task) -> Vec<WorkspaceKey> {
     let mut ids = pr.closes_issues.clone();
-    if let Some(id) = issue_id_from_branch(pr) {
+    if pr.closes_issues.is_empty()
+        && let Some(id) = issue_id_from_branch(pr)
+        && !body_references_issue_non_closing(pr, &id)
+    {
         ids.push(id);
     }
     let mut keys: Vec<_> = ids
@@ -5595,6 +5799,15 @@ async fn merge_closing_issue_workspaces(
         return pending;
     };
     let issue_keys = closing_issue_workspace_keys(pr);
+    // Snapshot which candidates came from GitHub's `closingIssuesReferences`
+    // (vs the weak branch-name fallback) so the merge log names the real
+    // source (#581) — the immutable `pr` borrow ends before the loop mutates
+    // `workspace`.
+    let closes_keys: std::collections::HashSet<String> = pr
+        .closes_issues
+        .iter()
+        .map(|id| issue_id_to_workspace_key(id).as_str().to_string())
+        .collect();
     if issue_keys.is_empty() {
         tracing::trace!(
             workspace = %workspace.key,
@@ -5693,10 +5906,16 @@ async fn merge_closing_issue_workspaces(
             moved_session_ids,
         });
 
+        let link_source = if closes_keys.contains(issue_key.as_str()) {
+            "closingIssuesReferences"
+        } else {
+            "branch-name inference"
+        };
         tracing::info!(
             issue_workspace = %issue_key,
             pr_workspace = %workspace.key,
-            "merged issue workspace into PR (closingIssuesReferences)"
+            link_source,
+            "merged issue workspace into PR"
         );
     }
     pending
@@ -7807,6 +8026,67 @@ mod merge_detection_tests {
             keys.contains(&expected),
             "branch fallback must surface the issue workspace key, got {keys:?}"
         );
+    }
+
+    fn branch_issue_key() -> WorkspaceKey {
+        issue_id_to_workspace_key(&TaskId {
+            source: "github".into(),
+            key: "o/r#42".into(),
+        })
+    }
+
+    #[test]
+    fn closing_issue_workspace_keys_branch_fallback_survives_body_closes() {
+        // Timing gap: body says `Closes #42` but GitHub hasn't resolved it
+        // into `closingIssuesReferences` yet — the branch fallback still
+        // fires because a closing keyword is not a non-closing one.
+        let mut pr = pr_on_branch("issue-42-fix-the-thing");
+        pr.body = Some("Closes #42.\n\nSome work.".into());
+        assert!(closing_issue_workspace_keys(&pr).contains(&branch_issue_key()));
+    }
+
+    #[test]
+    fn closing_issue_workspace_keys_branch_fallback_suppressed_by_part_of() {
+        // #581: an explicit non-closing reference to the branch issue must
+        // win over the weak branch-name heuristic.
+        let mut pr = pr_on_branch("issue-42-fix-the-thing");
+        pr.body = Some("Part of #42 — deliberately not Closes.".into());
+        assert!(
+            !closing_issue_workspace_keys(&pr).contains(&branch_issue_key()),
+            "Part of #42 must suppress the branch-name collapse"
+        );
+    }
+
+    #[test]
+    fn closing_issue_workspace_keys_branch_fallback_suppressed_when_closes_populated() {
+        // Once GitHub resolves any closing reference, `closes_issues` is
+        // authoritative and the branch stem is ignored.
+        let mut pr = pr_on_branch("issue-42-fix-the-thing");
+        pr.closes_issues = vec![TaskId {
+            source: "github".into(),
+            key: "o/r#7".into(),
+        }];
+        let keys = closing_issue_workspace_keys(&pr);
+        assert!(!keys.contains(&branch_issue_key()));
+        assert!(keys.contains(&issue_id_to_workspace_key(&TaskId {
+            source: "github".into(),
+            key: "o/r#7".into(),
+        })));
+    }
+
+    #[test]
+    fn body_references_issue_non_closing_respects_number_boundary() {
+        let issue_42 = TaskId {
+            source: "github".into(),
+            key: "o/r#42".into(),
+        };
+        let mut pr = pr_on_branch("issue-42-fix-the-thing");
+        // A `Refs #421` mention must NOT count as a non-closing ref to #42.
+        pr.body = Some("Refs #421 for context.".into());
+        assert!(!body_references_issue_non_closing(&pr, &issue_42));
+        // Recognizes the keyword variants and `:`/whitespace separators.
+        pr.body = Some("related to: #42".into());
+        assert!(body_references_issue_non_closing(&pr, &issue_42));
     }
 }
 

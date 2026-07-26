@@ -31,6 +31,9 @@ Then run `gh auth login` if needed and launch `lazybox`.
 
 ### Added
 
+- `lazybox worktree list` and `lazybox worktree gc` report managed worktrees
+  with their disk totals and reclaim the orphaned ones left behind by
+  interrupted or crashed provisioning (`--dry-run` / `--force`) (#574).
 - A dismissable startup notice detects newer source commits or published
   releases, shows a checkout- and install-channel-specific manual update
   command, and stays quiet for a previously dismissed target.
@@ -72,7 +75,7 @@ Then run `gh auth login` if needed and launch `lazybox`.
 - Shell sessions now honor `shell.command` from
   `~/.lazybox/config.yaml`.
 - Workspace deletion, merge, close, and garbage collection preserve dirty or
-  unpushed work while reclaiming safe orphaned worktrees.
+  unpushed work while reclaiming safe orphaned worktrees (#573, #575).
 - Issue-to-PR joins retain session ownership and surface the originating issue
   without duplicating or losing workspace state.
 - Terminal exits, failed starts, reconnects, and status transitions remain

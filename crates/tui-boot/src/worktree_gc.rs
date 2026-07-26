@@ -18,8 +18,8 @@
 //! a worktree is only ever reclaimed when it is flagged orphaned AND has
 //! no uncommitted changes, no unpushed commits, and isn't locked. Dirty /
 //! unpushed / locked orphans are surfaced but never touched from here —
-//! reclaim those deliberately in the TUI (`Shift-D` inspector) where the
-//! per-row force lives.
+//! reclaim those deliberately in the TUI worktree inspector (Settings →
+//! Inspect worktrees…) where the per-row force lives.
 //!
 //! Output goes to stdout because `init_tracing` redirects fd 2 into the
 //! log file.
@@ -101,7 +101,7 @@ async fn list() -> anyhow::Result<()> {
         println!("\nRun `lazybox worktree gc` to reclaim the safe orphans.");
     }
     if !review.is_empty() {
-        println!("Review the rest in the TUI inspector (`Shift-D`).");
+        println!("Review the rest in the worktree inspector (Settings → Inspect worktrees…).");
     }
     Ok(())
 }
@@ -122,7 +122,8 @@ async fn gc(args: &[String]) -> anyhow::Result<()> {
         println!(
             "lazybox is running (pid {pid}) — refusing to reclaim worktrees while it may hold \
              live agent/shell sessions.\n\
-             Quit lazybox first, or reclaim a row from the TUI inspector (`Shift-D`)."
+             Quit lazybox first, or reclaim a row from the worktree inspector \
+             (Settings → Inspect worktrees…)."
         );
         std::process::exit(2);
     }
@@ -140,7 +141,7 @@ async fn gc(args: &[String]) -> anyhow::Result<()> {
             let bytes: u64 = review.iter().map(|r| r.size_bytes).sum();
             println!(
                 "{} across {} orphan{} need review (no bare clone / uncommitted / unpushed / \
-                 locked) — reclaim in the TUI inspector (`Shift-D`).",
+                 locked) — reclaim in the worktree inspector (Settings → Inspect worktrees…).",
                 format_size(bytes),
                 review.len(),
                 if review.len() == 1 { "" } else { "s" },

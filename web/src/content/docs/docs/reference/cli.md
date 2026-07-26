@@ -95,8 +95,9 @@ lazybox worktree gc --dry-run   # show what gc would reclaim
 lazybox worktree gc             # reclaim the safe orphans (confirms first)
 ```
 
-`list` prints every managed worktree with its size, age, and orphan reasons,
-then the totals that make a leak visible: bytes on disk, bytes auto-reclaimable
+`list` prints every managed worktree with its branch, size, and orphan reasons
+(tagged `DIRTY` / `UNPUSHED` / `safe-reclaim`), then the totals that make a leak
+visible: bytes on disk, bytes auto-reclaimable
 across the safe orphans, and bytes held by orphans that need a look first (no
 backing bare clone, or uncommitted, unpushed, or locked). Bare clones under
 `repos/` are not counted.
@@ -110,10 +111,11 @@ backing bare clone, or uncommitted, unpushed, or locked). Bare clones under
 
 `gc` only ever deletes a worktree that is flagged orphaned **and** passes the
 safety gate — it never removes one with uncommitted or unpushed work, a lock,
-or a live session. Orphans that need review are left for the in-app inspector
-(`Shift-D`), which can force a per-row reclaim. `gc` also refuses to run while
-lazybox is open, since a standalone reap can't see the daemon's live sessions;
-quit lazybox first, or reclaim from the inspector.
+or a live session. Orphans that need review are left for the in-app worktree
+inspector — open the Settings palette (`,`) and choose **Inspect worktrees…**,
+which can force a per-row reclaim. `gc` also refuses to run while lazybox is
+open, since a standalone reap can't see the daemon's live sessions; quit lazybox
+first, or reclaim from the inspector.
 
 ## `lazybox server`
 

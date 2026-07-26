@@ -438,6 +438,114 @@ fn read_scrollback_tail(path: &Path, max: usize) -> Vec<u8> {
     buf
 }
 
+/// Whether a captured / replayed row carries no VISIBLE glyph — grid
+/// padding a backend emits for unused / cleared cells. A row cleared
+/// under a non-default background (agents paint one, then clear) comes
+/// back as SGR / OSC escapes around blank space; those escape sequences
+/// are skipped so such a row still counts as blank. Only a real
+/// printable character keeps the row — that is what protects styled
+/// *content* from being trimmed.
+///
+/// Shared by every scrollback seed path (tmux `normalize_capture`, the
+/// raw-PTY reseed) so their blank-row detection can never drift.
+pub(crate) fn is_blank_capture_line(line: &[u8]) -> bool {
+    let mut i = 0;
+    while i < line.len() {
+        match line[i] {
+            0x1b => {
+                i += 1;
+                match line.get(i) {
+                    // CSI (`ESC [` … final byte 0x40–0x7e), e.g. SGR color.
+                    Some(b'[') => {
+                        i += 1;
+                        while i < line.len() && !(0x40..=0x7e).contains(&line[i]) {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                    // OSC (`ESC ]` … BEL or ST), e.g. an OSC 8 hyperlink.
+                    Some(b']') => {
+                        i += 1;
+                        while i < line.len() {
+                            if line[i] == 0x07 {
+                                i += 1;
+                                break;
+                            }
+                            if line[i] == 0x1b && line.get(i + 1) == Some(&b'\\') {
+                                i += 2;
+                                break;
+                            }
+                            i += 1;
+                        }
+                    }
+                    // Any other escape: skip ESC and its single next byte.
+                    _ => i += 1,
+                }
+            }
+            b if b.is_ascii_whitespace() => i += 1,
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Index just past the last `\n`-separated line in `bytes` that carries
+/// a visible glyph — i.e. the length after peeling the trailing run of
+/// blank rows. Interior blank lines are genuine output and survive; only
+/// the trailing run is dropped. `bytes.len()` when the last line has
+/// content, `0` when every line is blank.
+///
+/// Peels without materializing a line vector: each step takes the slice
+/// after the final `\n` and, while it has no visible content, drops it
+/// plus the `\n` that separated it. `rposition` scans back only to that
+/// newline, so the whole scan is O(trailing-blank bytes), not O(input).
+pub(crate) fn content_end(bytes: &[u8]) -> usize {
+    let mut end = bytes.len();
+    while end > 0 {
+        let line_start = bytes[..end]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(0, |nl| nl + 1);
+        if !is_blank_capture_line(&bytes[line_start..end]) {
+            break;
+        }
+        end = line_start.saturating_sub(1);
+    }
+    end
+}
+
+/// Peel a trailing run of blank (grid-padding-like) rows off a raw-PTY
+/// reseed, but keep the single terminator that parks the cursor on a
+/// fresh line. Without the trim, a persisted scrollback that ended in
+/// blank rows re-injects them as spurious empty lines on restart — the
+/// same "random extra empty lines after restart" the tmux capture seed
+/// strips in `normalize_capture` (#442). Unlike that path we retain the
+/// terminator: the raw seed has no live attach repaint to redraw the
+/// bottom row, so dropping it would glue a respawned child's first
+/// output onto the last content line (b793caca — never empty the tail on
+/// a trailing newline).
+///
+/// "Blank" is the shared `is_blank_capture_line` definition — a trailing
+/// row of only whitespace (plain spaces the raw stream keeps but a tmux
+/// capture would have stripped) counts as blank here too. That is
+/// deliberate: such a row is visually empty, so trimming it ends the seed
+/// at the last visible content while keeping both seed paths' blank-row
+/// definition identical, with no drift. A single printable glyph anywhere
+/// on the row keeps it.
+pub(crate) fn trim_trailing_blank_seed(buf: &mut Vec<u8>) {
+    let ce = content_end(buf);
+    if ce == 0 {
+        buf.clear();
+    } else if ce < buf.len() {
+        // When `content_end` stops short of the end it settles exactly on
+        // the `\n` terminating the last content line (it only lowers its
+        // cursor to a newline index, and the all-blank `ce == 0` case is
+        // handled above), so `buf[ce]` is that terminator: keep it and
+        // drop every blank row after.
+        buf.truncate(ce + 1);
+    }
+}
+
 /// A subscription to a `DaemonPty`'s output. Includes the replay so
 /// the caller can reconstruct the screen, then the live stream for
 /// everything after.
@@ -491,7 +599,8 @@ impl DaemonPty {
         env: Vec<(String, String)>,
         persist_path: PathBuf,
     ) -> Result<Self, PtyError> {
-        let initial = read_scrollback_tail(&persist_path, SCROLLBACK_PERSIST_BYTES);
+        let mut initial = read_scrollback_tail(&persist_path, SCROLLBACK_PERSIST_BYTES);
+        trim_trailing_blank_seed(&mut initial);
         let log = ScrollbackLog::open(persist_path);
         Self::spawn_inner(cmd, size, cwd, env, &initial, log)
     }
@@ -1536,6 +1645,122 @@ mod persist_tests {
             tail, b"cccc\n",
             "partial leading line dropped, got {tail:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod scrollback_trim_tests {
+    use super::{content_end, is_blank_capture_line, trim_trailing_blank_seed};
+
+    fn trimmed(bytes: &[u8]) -> Vec<u8> {
+        let mut buf = bytes.to_vec();
+        trim_trailing_blank_seed(&mut buf);
+        buf
+    }
+
+    /// A row counts as blank only when it holds no printable glyph:
+    /// whitespace and `-e` escape sequences (SGR colors, OSC 8 hyperlinks)
+    /// around blank space are grid padding, but a single real character
+    /// keeps the row so styled content is never trimmed.
+    #[test]
+    fn is_blank_capture_line_skips_escapes_but_keeps_glyphs() {
+        assert!(is_blank_capture_line(b""));
+        assert!(is_blank_capture_line(b"   \t"));
+        assert!(is_blank_capture_line(b"\x1b[0m"));
+        assert!(is_blank_capture_line(b"\x1b[48;5;236m   \x1b[0m"));
+        // OSC 8 open/close with no visible label between them.
+        assert!(is_blank_capture_line(
+            b"\x1b]8;;https://x\x1b\\\x1b]8;;\x1b\\"
+        ));
+        // A printable char anywhere keeps the row, escapes notwithstanding.
+        assert!(!is_blank_capture_line(b"\x1b[31mred\x1b[0m"));
+        assert!(!is_blank_capture_line(b"  x  "));
+        assert!(!is_blank_capture_line(
+            b"\x1b]8;;https://x\x1b\\LINK\x1b]8;;\x1b\\"
+        ));
+    }
+
+    /// `content_end` lands at the end of the last row with real content
+    /// (its `\r` terminator prefix included); interior blank lines
+    /// survive, only the trailing run is peeled.
+    #[test]
+    fn content_end_peels_only_the_trailing_blank_run() {
+        assert_eq!(content_end(b"a\r\nb"), 4);
+        assert_eq!(content_end(b"a\r\nb\r\n"), 5);
+        assert_eq!(content_end(b"a\r\nb\r\n\r\n\r\n"), 5);
+        // Interior blanks are genuine output.
+        assert_eq!(content_end(b"a\r\n\r\nb\r\n\r\n"), 7);
+        // All-blank input reduces to nothing.
+        assert_eq!(content_end(b"\r\n\r\n"), 0);
+        assert_eq!(content_end(b""), 0);
+    }
+
+    /// Whenever `content_end` stops strictly inside the buffer it settles
+    /// exactly on the `\n` terminating the last content line — the
+    /// invariant `trim_trailing_blank_seed` relies on to keep one
+    /// terminator with a bare `truncate(ce + 1)`. Guards against a future
+    /// `content_end` change that lands the cursor elsewhere.
+    #[test]
+    fn content_end_settles_on_the_terminating_newline() {
+        for input in [
+            b"a\r\nb\r\n".as_slice(),
+            b"a\r\nb\r\n\r\n\r\n",
+            b"foo\nbar\n\n\n",
+            b"top\r\n\r\nmid\r\n\r\n\r\n",
+            b"body\r\n\x1b[48;5;236m   \x1b[0m\r\n",
+            b"content\r\n     \r\n",
+        ] {
+            let ce = content_end(input);
+            if 0 < ce && ce < input.len() {
+                assert_eq!(
+                    input[ce], b'\n',
+                    "content_end settled off a newline in {input:?} at {ce}"
+                );
+            }
+        }
+    }
+
+    /// The raw-PTY reseed drops trailing grid-padding blanks so they
+    /// don't re-inject spurious empty lines on restart (#442/#589), but
+    /// keeps a single terminator so a respawned child's first output
+    /// starts on a fresh line instead of gluing onto the last content row.
+    #[test]
+    fn trim_trailing_blank_seed_drops_padding_keeps_one_terminator() {
+        // A run of trailing blank rows collapses to the last content line
+        // plus its terminator.
+        assert_eq!(trimmed(b"foo\r\nbar\r\n\r\n\r\n"), b"foo\r\nbar\r\n");
+        // A lone trailing newline is cursor parking — kept verbatim.
+        assert_eq!(trimmed(b"foo\r\nbar\r\n"), b"foo\r\nbar\r\n");
+        // No trailing newline at all — nothing to trim.
+        assert_eq!(trimmed(b"foo\r\nbar"), b"foo\r\nbar");
+        // Bare-LF stream (no carriage returns) trims the same way.
+        assert_eq!(trimmed(b"foo\nbar\n\n\n"), b"foo\nbar\n");
+        // Interior blank lines are content and survive; only the trailing
+        // run is peeled.
+        assert_eq!(
+            trimmed(b"top\r\n\r\nmid\r\n\r\n\r\n"),
+            b"top\r\n\r\nmid\r\n"
+        );
+        // A plain-whitespace trailing row (spaces the raw stream keeps but
+        // a tmux capture would strip) is visually empty and trims too —
+        // the deliberate shared blank-row definition, no drift between the
+        // two seed paths.
+        assert_eq!(trimmed(b"body\r\n     \r\n"), b"body\r\n");
+        // Styled-but-empty padding rows (SGR reset, background-colored
+        // spaces) count as blank and trim.
+        assert_eq!(trimmed(b"body\r\n\x1b[0m\r\n"), b"body\r\n");
+        assert_eq!(
+            trimmed(b"body\r\n\x1b[48;5;236m   \x1b[0m\r\n"),
+            b"body\r\n"
+        );
+        // A trailing row with a real glyph is content and survives.
+        assert_eq!(
+            trimmed(b"a\r\n\x1b[31mred\x1b[0m\r\n"),
+            b"a\r\n\x1b[31mred\x1b[0m\r\n"
+        );
+        // An all-blank seed reduces to nothing — no empty rows injected.
+        assert_eq!(trimmed(b"\r\n\r\n\r\n"), b"");
+        assert_eq!(trimmed(b""), b"");
     }
 }
 

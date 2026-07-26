@@ -1,9 +1,9 @@
 # ~/.lazybox/config.yaml — autonomous agent settings
 #
 # lazybox can run Claude Code autonomously to handle work for you — for example
-# when you mention @lazybox on a PR/issue, or press `w w` ("work") on a
-# workspace to spawn an agent with the right prompt for its state (fix CI,
-# resolve a conflict, address review comments, implement an issue).
+# when you mention @lazybox on an issue, or press `w w` ("work") on a workspace
+# to spawn an agent with the right prompt for its state (fix CI, resolve a
+# conflict, address review comments, implement an issue).
 #
 # These flags control whether those agents run with permission prompts. The
 # tradeoff is real: skipping prompts lets the agent move without stopping to

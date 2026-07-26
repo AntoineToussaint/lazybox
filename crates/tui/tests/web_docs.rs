@@ -154,4 +154,14 @@ fn launch_surfaces_use_current_support_and_provider_contracts() {
             "configuration reference missing {expected:?}"
         );
     }
+
+    let mentions = read("web/src/content/docs/docs/how-to/lazybox-mentions.md");
+    for expected in ["@lazybox claude S", "lazybox:claude/S", "Unknown agent ids"] {
+        assert!(
+            mentions.contains(expected),
+            "mentions guide missing {expected:?}"
+        );
+    }
+    assert!(!mentions.contains("hardcoded"));
+    assert!(config.contains("when an agent needs input or finishes"));
 }

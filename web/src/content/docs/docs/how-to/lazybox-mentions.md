@@ -1,12 +1,12 @@
 ---
 title: Trigger agents with @lazybox mentions
-description: Let an @lazybox mention in a GitHub issue or comment auto-spawn the default agent on that workspace.
+description: Let an @lazybox mention or lazybox label on a GitHub issue auto-spawn an agent on that workspace.
 ---
 
 lazybox can watch for `@lazybox` mentions in your GitHub issues and
-**auto-spawn a Claude Code agent** on the corresponding workspace when one lands
-— so you (or an allowed teammate) can kick off work by leaving a comment,
-without touching the TUI.
+**auto-spawn an agent** on the corresponding workspace when one lands — so you
+(or an allowed teammate) can kick off work by leaving a comment, without
+touching the TUI.
 
 ## How it works
 
@@ -17,8 +17,31 @@ default, **only mentions written by the authenticated viewer** (you) trigger a
 spawn — so a stranger commenting `@lazybox` on your public issue can't start an
 agent on your machine.
 
-The spawned agent is currently the **Claude Code agent (`claude`)**, hardcoded —
-it does not follow your `setup.default_agent` setting.
+A bare `@lazybox` starts Claude Code. To choose a registered agent and an
+optional model-tier alias, put them after the mention on the same line:
+
+```text
+@lazybox claude S
+@lazybox codex
+```
+
+The first example starts Claude at its built-in `S` (Haiku) tier; the second
+starts Codex at its configured default tier. Unknown agent ids fall back to
+Claude, and an unknown model alias falls back to that agent's default.
+
+## Trigger from a label
+
+For an issue you authored or are assigned to, a
+`lazybox:<agent>[/<model-alias>]` label provides the same one-shot trigger:
+
+```text
+lazybox:claude/S
+lazybox:codex
+```
+
+Pull requests and issues where you are only mentioned or requested as a
+reviewer are ignored. The first matching label is handled once and persisted,
+so leaving it on the issue does not restart the agent on every poll.
 
 ## Allow other people to trigger it
 
@@ -43,7 +66,7 @@ The list is authoritative:
 
 - This reacts to GitHub activity on the normal poll cycle (see
   `providers.github.poll_interval`), so there's a short delay between the
-  comment landing and the agent starting.
+  mention or label landing and the agent starting.
 - The spawned agent runs with the same tools and repository access as any other
   lazybox agent — see the [security boundaries](https://github.com/AntoineToussaint/lazybox/blob/main/SECURITY.md).
   Only add logins you trust to run an agent against your checkout.

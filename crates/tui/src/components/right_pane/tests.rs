@@ -1520,6 +1520,65 @@ mod originating_issue_header_tests {
     }
 
     #[test]
+    fn title_row_shows_external_link_affordance() {
+        // A mouse user who doesn't know `g o` needs a visible cue that
+        // the title is clickable — the trailing `↗` (#590). Locate it by
+        // rendered content, then click that row and assert it opens the
+        // task: the visible affordance and the clickable region are the
+        // same row.
+        let ws = Workspace::from_task(task("pull", 172, vec![]), Utc::now());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        let rendered = rows(&mut pane, 80, 24);
+
+        let affordance_row = rendered
+            .iter()
+            .position(|r| r.contains('↗'))
+            .expect("a header row shows the ↗ link affordance") as u16;
+        assert!(pane.handle_mouse_click(0, affordance_row));
+        assert_eq!(
+            pane.take_open_url().as_deref(),
+            Some("https://github.com/o/r/pull/172"),
+        );
+    }
+
+    #[test]
+    fn long_title_keeps_the_link_affordance_when_truncated() {
+        // The `↗` is pinned to the row end, so even a title long enough
+        // to force truncation (with `…`) must still show the affordance
+        // — that's exactly the narrow case where discoverability matters
+        // most (#590).
+        let mut t = task("pull", 172, vec![]);
+        t.title = "an extraordinarily long pull request title that will not fit \
+                   into a narrow right pane and forces the header to truncate"
+            .into();
+        let ws = Workspace::from_task(t, Utc::now());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        let rendered = rows(&mut pane, 40, 24);
+
+        let affordance_row = rendered
+            .iter()
+            .position(|r| r.contains('↗'))
+            .expect("truncated title still shows the ↗ affordance");
+        let line = &rendered[affordance_row];
+        assert!(
+            line.contains('…'),
+            "the title was actually truncated:\n{line}"
+        );
+        // The affordance stays at the end, past the ellipsis.
+        assert!(
+            line.rfind('↗') > line.find('…'),
+            "the ↗ sits after the truncation cut:\n{line}",
+        );
+        assert!(pane.handle_mouse_click(0, affordance_row as u16));
+        assert_eq!(
+            pane.take_open_url().as_deref(),
+            Some("https://github.com/o/r/pull/172"),
+        );
+    }
+
+    #[test]
     fn plain_pr_has_no_issue_line() {
         let ws = Workspace::from_task(task("pull", 172, vec![]), Utc::now());
         let mut pane = RightPane::new(PaneId::new(0));

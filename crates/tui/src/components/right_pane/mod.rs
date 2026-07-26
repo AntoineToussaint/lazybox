@@ -1178,16 +1178,22 @@ impl RightPane {
         };
         let (bg, fg) = lazybox_theme::state_pill(theme, bucket);
         // The title line is a live link: clicking it opens the task
-        // in the browser (#567). Underline the title so it reads as
-        // clickable, matching the reader-modal link affordance. Only
-        // register the click target when the row actually falls inside
-        // the (possibly squished) header area — otherwise a clipped row
-        // would record a hit region over whatever paints below it.
+        // in the browser (#567). Underline the title and trail an `↗`
+        // so it reads as clickable to a mouse user without knowing the
+        // `g o` chord (#590) — the whole row is the hit region, so the
+        // glyph is clickable too. Only register the click target when
+        // the row actually falls inside the (possibly squished) header
+        // area — otherwise a clipped row would record a hit region over
+        // whatever paints below it.
         let title_row = area.y + lines.len() as u16;
         if title_row < area.bottom() {
             self.click_hits.header_title = Some((title_row, task.url.clone()));
         }
-        lines.push(Line::from(vec![
+        // The `↗` is pinned to the row's end so a long title truncates
+        // ahead of the affordance instead of dropping it — the whole
+        // row is the hit region, so it must stay legible as a link even
+        // when the pane is narrow.
+        let title_body = Line::from(vec![
             Span::styled(
                 format!(" {icon} {label} "),
                 Style::default().bg(bg).fg(fg).add_modifier(Modifier::BOLD),
@@ -1201,7 +1207,15 @@ impl RightPane {
                     .add_modifier(Modifier::BOLD)
                     .add_modifier(Modifier::UNDERLINED),
             ),
-        ]));
+        ]);
+        lines.push(crate::components::table::truncate_line_keep_suffix(
+            title_body,
+            Span::styled(
+                format!(" {}", icons::EXTERNAL_LINK),
+                Style::default().fg(theme.accent),
+            ),
+            area.width as usize,
+        ));
 
         // Branch line — confirms which worktree lazybox will spawn an
         // agent into. Cyan accent on a "Branch:" dim label.

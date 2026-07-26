@@ -430,6 +430,28 @@ pub fn truncate_line<'a>(
     ratatui::text::Line::from(out)
 }
 
+/// Like [`truncate_line`], but pins `suffix` to the end of the line:
+/// the body is cut (with `…`) to make room so the suffix stays visible
+/// even when the content overflows. For lines that carry a trailing
+/// affordance — e.g. the clickable `↗` on the header title — that must
+/// not be the first thing dropped when the pane narrows.
+pub fn truncate_line_keep_suffix<'a>(
+    body: ratatui::text::Line<'a>,
+    suffix: ratatui::text::Span<'a>,
+    max_cells: usize,
+) -> ratatui::text::Line<'a> {
+    let suffix_w = crate::util::visual_width(suffix.content.as_ref());
+    // No room to honor the reservation without erasing the body — fall
+    // back to a plain truncation rather than emit a bare, contextless
+    // affordance.
+    if suffix_w >= max_cells {
+        return truncate_line(body, max_cells);
+    }
+    let mut out = truncate_line(body, max_cells - suffix_w);
+    out.spans.push(suffix);
+    out
+}
+
 /// Render a table of rows to ratatui Lines, with each cell padded
 /// (right) to its computed column width. Cells wider than their
 /// column get their last span truncated with `…`. This is the
@@ -965,5 +987,31 @@ mod tests {
         let line = ratatui::text::Line::from(Span::raw("anything"));
         let out = truncate_line(line, 0);
         assert!(out.spans.is_empty());
+    }
+
+    /// The pinned suffix survives truncation: the body is cut with `…`
+    /// and the suffix stays at the end, within budget.
+    #[test]
+    fn keep_suffix_preserves_the_trailing_affordance() {
+        let body = ratatui::text::Line::from(Span::raw("a very long header title that overflows"));
+        let out = truncate_line_keep_suffix(body, Span::raw(" ↗"), 12);
+        let s: String = out.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(s.ends_with(" ↗"), "suffix pinned to the end, got: {s:?}");
+        assert!(s.contains('…'), "body was truncated with `…`, got: {s:?}");
+        assert!(
+            crate::util::visual_width(&s) <= 12,
+            "stays within budget, got width {} for {s:?}",
+            crate::util::visual_width(&s),
+        );
+    }
+
+    /// When the body already fits, the suffix is simply appended with
+    /// no ellipsis.
+    #[test]
+    fn keep_suffix_appends_without_truncation_when_it_fits() {
+        let body = ratatui::text::Line::from(Span::raw("short"));
+        let out = truncate_line_keep_suffix(body, Span::raw(" ↗"), 40);
+        let s: String = out.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(s, "short ↗");
     }
 }

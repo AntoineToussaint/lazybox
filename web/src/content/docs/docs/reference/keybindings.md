@@ -116,6 +116,7 @@ A focused terminal forwards every key to the PTY; only the chords below are inte
 | `]]s` | Open the snippet picker (typing a full key auto-submits — `]]srev`) |
 | `]]r` | Restore the in-flight draft, or the last submitted agent prompt, without sending it |
 | `]]h` | Browse this session's prompt history (newest-first, snippets tagged); Enter re-sends one |
+| `]]u` | Scan the visible terminal for URLs and open the picked one in the browser (a lone URL opens straight away) |
 | `]]f` | Toggle focus mode |
 | `]]q` | Exit to the sidebar |
 | `` ]]` `` | Open the fuzzy jump-to-workspace picker |

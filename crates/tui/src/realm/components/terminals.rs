@@ -285,6 +285,13 @@ impl Terminals {
         self.inner.visible_text(id)
     }
 
+    /// Forward `focused_urls` — every `http(s)://…` URL visible in the
+    /// focused terminal's grid, screen order, de-duplicated. Drives the
+    /// `]]u` keyboard URL picker (#596).
+    pub fn focused_urls(&mut self) -> Option<Vec<String>> {
+        self.inner.focused_urls()
+    }
+
     /// Forward `agent_terminal_for` — the agent terminal for a session
     /// (live, else a kept exited pane). Resolves the handoff source so a
     /// finished-and-exited agent's final output can still be captured.

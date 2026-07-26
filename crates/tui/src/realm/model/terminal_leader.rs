@@ -28,6 +28,11 @@ pub(super) enum LeaderCmd {
     /// every prompt sent to this agent, newest-first, snippet entries
     /// tagged; Enter re-sends the picked one.
     PromptHistory,
+    /// `]]u` — scan the visible terminal for `http(s)://…` URLs and open
+    /// the picked one in the browser (issue #596). An emulator-independent
+    /// path to agent-output links: a single URL opens straight away, else
+    /// a picker lists them newest-first so `]]u` + Enter opens the last.
+    OpenUrls,
     /// `]]f` — toggle focus mode.
     ToggleFocusMode,
     /// `]]q` — exit the terminal back to the sidebar.
@@ -77,6 +82,12 @@ const FIXED_COMMANDS: &[FixedCommandSpec] = &[
         command: LeaderCmd::PromptHistory,
         menu_label: "prompt history",
         reference: "Browse this session's prompt history (newest-first, snippets tagged); Enter re-sends one",
+    },
+    FixedCommandSpec {
+        key: 'u',
+        command: LeaderCmd::OpenUrls,
+        menu_label: "open url",
+        reference: "Scan the visible terminal for URLs and open the picked one in the browser (a lone URL opens straight away)",
     },
     FixedCommandSpec {
         key: 'f',

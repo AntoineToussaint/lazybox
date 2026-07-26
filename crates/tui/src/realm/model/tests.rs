@@ -6733,11 +6733,12 @@ mod leader_tile_tests {
         assert_eq!(m.terminal_leader_highlight(), Some(1));
         m.dispatch_key(RealmKey::new(Key::Char('k'), RealmMods::NONE));
         assert_eq!(m.terminal_leader_highlight(), Some(0));
-        // Menu order: s,r,h,f,… — step to `focus mode` at index 3.
+        // Menu order: s,r,h,u,f,… — step to `focus mode` at index 4.
         m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
         m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
         m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
-        assert_eq!(m.terminal_leader_highlight(), Some(3));
+        m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
+        assert_eq!(m.terminal_leader_highlight(), Some(4));
 
         assert!(!m.focus_mode, "focus mode starts off");
         m.dispatch_key(RealmKey::new(Key::Enter, RealmMods::NONE));
@@ -6786,27 +6787,27 @@ mod leader_tile_tests {
         while server.rx.try_recv().is_ok() {}
         arm_leader(&mut m);
 
-        // Splits menu order: s,r,h,f,q,`,|,- then the `move tile`
-        // aggregate at index 8, then `x` at index 9. Eight `j` presses
-        // reach index 7.
-        for _ in 0..8 {
+        // Splits menu order: s,r,h,u,f,q,`,|,- then the `move tile`
+        // aggregate at index 9, then `x` at index 10. Nine `j` presses
+        // reach index 8.
+        for _ in 0..9 {
             m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
         }
         assert_eq!(
             m.terminal_leader_highlight(),
-            Some(7),
+            Some(8),
             "reached the last row before the aggregate"
         );
         m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
         assert_eq!(
             m.terminal_leader_highlight(),
-            Some(9),
-            "`j` jumps over the aggregate at index 8"
+            Some(10),
+            "`j` jumps over the aggregate at index 9"
         );
         m.dispatch_key(RealmKey::new(Key::Char('k'), RealmMods::NONE));
         assert_eq!(
             m.terminal_leader_highlight(),
-            Some(7),
+            Some(8),
             "`k` skips it going back too"
         );
     }
@@ -6828,6 +6829,53 @@ mod leader_tile_tests {
             }
         }
         assert!(saw_close, "`]]x` kills the focused tile's PTY");
+    }
+
+    /// Issue #596: `]]u` scans the focused terminal for URLs. Several
+    /// on-screen URLs open the keyboard picker rather than opening blind.
+    #[test]
+    fn leader_u_opens_the_url_picker_when_several_urls_are_visible() {
+        let (mut m, mut server) = build_model_with_terminals(1);
+        while server.rx.try_recv().is_ok() {}
+        m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
+            terminal_id: TerminalId(1),
+            bytes: b"see https://a.example.com and https://b.example.com\r\n".to_vec(),
+            first_seq: 1,
+            seq: 1,
+        });
+        arm_leader(&mut m);
+        m.dispatch_key(RealmKey::new(Key::Char('u'), RealmMods::NONE));
+        assert!(!m.terminal_leader_pending(), "leader consumed");
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::UrlPicker),
+            "`]]u` mounts the URL picker for multiple URLs",
+        );
+    }
+
+    /// With nothing openable on screen, `]]u` opens no picker — just a
+    /// footer hint (which mounts no modal).
+    #[test]
+    fn leader_u_with_no_urls_opens_no_picker() {
+        let (mut m, mut server) = build_model_with_terminals(1);
+        while server.rx.try_recv().is_ok() {}
+        m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
+            terminal_id: TerminalId(1),
+            bytes: b"no links here\r\n".to_vec(),
+            first_seq: 1,
+            seq: 1,
+        });
+        arm_leader(&mut m);
+        m.dispatch_key(RealmKey::new(Key::Char('u'), RealmMods::NONE));
+        assert!(!m.terminal_leader_pending(), "leader consumed");
+        assert!(m.top_modal().is_none(), "no URLs → no picker");
+        // A focused-but-URL-less terminal reports "no URLs", never the
+        // "no terminal focused" message reserved for the absent-terminal
+        // case (#596 review, finding #1).
+        assert_eq!(
+            m.status.messages.recent().next().map(|e| e.message.clone()),
+            Some("no URLs on screen".to_string()),
+        );
     }
 
     /// Issue #373: after a restart the daemon snapshot restores the

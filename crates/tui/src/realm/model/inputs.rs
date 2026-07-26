@@ -659,6 +659,16 @@ showing keybinding search only",
             }
             return cmds;
         }
+        // URL picker (Id::UrlPicker, #596) — pick → open the chosen
+        // terminal URL in the browser. Empty / Esc opens nothing.
+        if matches!(self.modal_stack.last(), Some(Id::UrlPicker)) {
+            let url = picks.first().and_then(|p| p.as_text()).map(str::to_string);
+            self.pop_modal();
+            if let Some(url) = url {
+                self.open_external_url(&url);
+            }
+            return cmds;
+        }
         // Theme picker — the highlighted palette is already live (the
         // on_highlight preview applied it as the cursor moved). Pick →
         // keep it and persist to `ui.theme`; the prev-theme stash is

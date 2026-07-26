@@ -326,7 +326,13 @@ per-session prompt-history picker (#523 — every prompt sent to this
 agent, newest-first and timestamped, snippet-sourced entries tagged
 with their key; Enter re-sends the picked prompt; the full history is
 persisted per terminal as `terminal-msgs:*` and survives restart, and
-the pinned `you ▸` recap is just its latest entry), `]]f`
+the pinned `you ▸` recap is just its latest entry), `]]u` scans the
+visible terminal for `http(s)://…` URLs and opens the picked one in
+the browser (#596 — a single on-screen URL opens straight away, else a
+picker lists them newest-first so `]]u`+Enter opens the last; an
+emulator-independent path that sidesteps right-click / mouse-capture
+quirks, and `target_at` now stitches soft-wrapped URLs so a right-click
+on any row of a wrapped link resolves the whole URL), `]]f`
 toggles focus mode, `]]q` exits to the sidebar, `]]<digit>` jumps to
 the Nth agent workspace, and `` ]]` `` opens the fuzzy workspace
 switcher. The snippet picker (see

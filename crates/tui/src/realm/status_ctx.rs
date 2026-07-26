@@ -162,11 +162,14 @@ const INFO_FADE: Duration = Duration::from_secs(15);
 /// One-shot hints (e.g. "scroll: this view manages its own scrollback")
 /// fade quickly so they don't follow the user around the UI.
 const HINT_FADE: Duration = Duration::from_secs(3);
-/// How long a Permanent error banner (merge/close/update failed) stays
-/// before fading. Long — the failure is worth inspecting and the full
-/// text lives in the messages log (`Shift-M`) regardless — but finite,
-/// so a toast for an already-resolved condition doesn't own the footer
-/// until an explicit `Esc` (#588). `Esc` still dismisses immediately.
+/// How long an action-error toast (a merge/close/update/delete failure,
+/// i.e. a workspace-tagged Permanent notice — see
+/// [`Notice::is_action_toast`]) stays before fading. Long — the failure
+/// is worth inspecting and the full text lives in the messages log
+/// (`Shift-M`) regardless — but finite, so a toast for an
+/// already-resolved condition doesn't own the footer until an explicit
+/// `Esc` (#588). `Esc` still dismisses immediately. Untagged Permanent
+/// system banners ignore this and never auto-fade.
 const PERMANENT_FADE: Duration = Duration::from_secs(45);
 /// Heartbeat interval for the polling-modal spinner. Cheap, keeps
 /// the spinner glyph advancing at ~12 fps.

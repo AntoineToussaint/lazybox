@@ -1007,10 +1007,15 @@ pub async fn apply_pr_details(
 /// issue-only workspaces upstream so this is mostly defensive).
 ///
 /// Field rules:
-/// - `closes_issues`, `checks`, `ci`, `review`, `role`, `needs_reply`,
-///   `last_commenter` — overwrite with the lazy result. The lazy
-///   query is authoritative; it has the data the inbox-scan path
-///   could only approximate.
+/// - `ci`, `review`, `role`, `needs_reply`, `last_commenter` —
+///   overwrite with the lazy result. The lazy query is authoritative;
+///   it has the data the inbox-scan path could only approximate.
+/// - `closes_issues`, `checks` — overwrite only when the lazy result
+///   is non-empty. Both can be legitimately populated on the poll path
+///   yet absent from a given lazy response (`closes_issues` lacks the
+///   title fallback; `checks` come from a field the inbox scan drops),
+///   so a lazy empty must not clobber the stored value. See the inline
+///   note on `closes_issues` (#581).
 /// - `unread_count` — recompute from the activity list since lazy
 ///   knows the full activity count. The workspace-level
 ///   `Workspace::unread_count()` still respects `read_indices`, so

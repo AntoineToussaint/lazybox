@@ -6869,6 +6869,13 @@ mod leader_tile_tests {
         m.dispatch_key(RealmKey::new(Key::Char('u'), RealmMods::NONE));
         assert!(!m.terminal_leader_pending(), "leader consumed");
         assert!(m.top_modal().is_none(), "no URLs → no picker");
+        // A focused-but-URL-less terminal reports "no URLs", never the
+        // "no terminal focused" message reserved for the absent-terminal
+        // case (#596 review, finding #1).
+        assert_eq!(
+            m.status.messages.recent().next().map(|e| e.message.clone()),
+            Some("no URLs on screen".to_string()),
+        );
     }
 
     /// Issue #373: after a restart the daemon snapshot restores the

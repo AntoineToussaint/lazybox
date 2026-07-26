@@ -1983,22 +1983,34 @@ impl TerminalStack {
     }
 
     /// Every `http(s)://…` URL visible in the focused terminal's grid,
-    /// top-to-bottom in screen order and de-duplicated (first occurrence
-    /// wins). Soft-wrapped rows are stitched before scanning so a URL
-    /// that spilled across rows is captured whole — the same join
-    /// `target_at` does for a click. Drives the `]]u` keyboard URL
-    /// picker (#596), which sidesteps every mouse/emulator quirk that
-    /// blocks right-click-to-open. `None` when the focused terminal is
-    /// unknown or its VT snapshot can't be read; an empty `Vec` when
-    /// nothing on screen is a URL.
+    /// de-duplicated and ordered top-to-bottom by each URL's *most
+    /// recent* on-screen row — so a URL echoed twice sorts by its latest
+    /// appearance, and the `]]u` picker's newest-first list (which
+    /// reverses this) stays accurate. Soft-wrapped rows are stitched
+    /// before scanning so a URL that spilled across rows is captured
+    /// whole — the same join `target_at` does for a click. Drives the
+    /// `]]u` keyboard URL picker (#596), which sidesteps every
+    /// mouse/emulator quirk that blocks right-click-to-open.
+    ///
+    /// `None` means specifically "no terminal is focused" — the caller's
+    /// signal to say so. A focused terminal always yields `Some`, even
+    /// when the grid holds no URL (empty `Vec`) or its VT snapshot can't
+    /// be read (also empty — we scanned, there was nothing to open).
     pub fn focused_urls(&mut self) -> Option<Vec<String>> {
         let id = self.focused_terminal_id()?;
         let slot = self.terminals.get_mut(&id)?;
         // Reflect every byte received, not just what arrived on screen —
         // mirrors `visible_text` / `target_at`.
         slot.flush_pending();
-        let snapshot = slot.vt.render_state.update(&slot.vt.terminal).ok()?;
-        let mut row_iter = slot.vt.row_iter.update(&snapshot).ok()?;
+        // A snapshot-read failure is not "no terminal" — the terminal is
+        // right here, we just couldn't extract its grid. Report it as an
+        // empty scan so the caller says "no URLs", not "no terminal".
+        let Ok(snapshot) = slot.vt.render_state.update(&slot.vt.terminal) else {
+            return Some(Vec::new());
+        };
+        let Ok(mut row_iter) = slot.vt.row_iter.update(&snapshot) else {
+            return Some(Vec::new());
+        };
         let mut rows: Vec<(String, bool)> = Vec::new();
         while let Some(r) = row_iter.next() {
             let wrapped = r
@@ -2020,9 +2032,12 @@ impl TerminalStack {
             }
             i += 1;
             for url in scan_urls(&line) {
-                if !urls.iter().any(|u| u == url) {
-                    urls.push(url.to_string());
+                // Keep the URL at its LATEST position: drop any earlier
+                // sighting before re-appending, so recency ordering holds.
+                if let Some(prev) = urls.iter().position(|u| u == url) {
+                    urls.remove(prev);
                 }
+                urls.push(url.to_string());
             }
         }
         Some(urls)
@@ -4306,8 +4321,10 @@ fn row_text_and_starts(
 /// URL terminates at the first whitespace; trailing punctuation that's
 /// almost never part of the URL (`.,;:!?` plus the closing brackets and
 /// quotes) is trimmed so `see https://example.com.` yields
-/// `https://example.com`. Empty matches (nothing left after trimming)
-/// are skipped.
+/// `https://example.com`. Trailing box-drawing glyphs (`│`, `╮`, …) are
+/// trimmed too, so a URL butting against an agent's composer border with
+/// no separating space (`https://x│`) doesn't carry the frame into the
+/// opened link. Empty matches (nothing left after trimming) are skipped.
 fn url_spans(text: &str) -> Vec<(usize, usize)> {
     let mut spans = Vec::new();
     let mut search_start = 0;
@@ -4339,7 +4356,8 @@ fn url_spans(text: &str) -> Vec<(usize, usize)> {
             if matches!(
                 last,
                 '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '\'' | '"'
-            ) {
+            ) || ('\u{2500}'..='\u{257F}').contains(&last)
+            {
                 url_end -= last.len_utf8();
             } else {
                 break;
@@ -5532,6 +5550,63 @@ mod selection_offset_tests {
             vec!["https://a.example.com", "https://b.example.com"],
         );
         assert!(scan_urls("no urls at all here").is_empty());
+    }
+
+    /// A URL butting against an agent composer's box-drawing frame with
+    /// no separating space must not carry the border glyph into the
+    /// opened link (right-click and `]]u` share this scanner).
+    #[test]
+    fn scan_urls_trims_a_trailing_box_drawing_border() {
+        assert_eq!(
+            scan_urls("│ https://example.com/path│"),
+            vec!["https://example.com/path"],
+        );
+        // A leading border is already excluded — the scan starts at the
+        // scheme — so both sides come out clean.
+        assert_eq!(
+            scan_urls("│https://example.com╮"),
+            vec!["https://example.com"],
+        );
+    }
+
+    /// `focused_urls` returns `None` ONLY when no terminal is focused —
+    /// the caller's cue to say "no terminal focused" rather than
+    /// "no URLs". A focused-but-URL-less terminal yields `Some(empty)`.
+    #[test]
+    fn focused_urls_is_none_without_a_focused_terminal() {
+        let mut empty = TerminalStack::new(PaneId::new(0));
+        assert_eq!(empty.focused_urls(), None);
+
+        let mut stack = stack_with(TerminalKind::Shell, None, &["no links on this line"]);
+        assert_eq!(
+            stack.focused_urls(),
+            Some(Vec::new()),
+            "a focused terminal with no URLs scans to an empty Vec, not None",
+        );
+    }
+
+    /// A URL echoed twice is kept once, at its MOST RECENT (lowest on
+    /// screen) row — so the `]]u` picker's newest-first list is accurate.
+    #[test]
+    fn focused_urls_dedups_keeping_the_latest_position() {
+        let mut stack = stack_with(
+            TerminalKind::Shell,
+            None,
+            &[
+                "https://a.example.com",
+                "https://b.example.com",
+                "https://a.example.com",
+            ],
+        );
+        // `a` first appears on row 0 but is re-echoed on row 2, below
+        // `b` on row 1 — so recency order is [b, a], not [a, b].
+        assert_eq!(
+            stack.focused_urls(),
+            Some(vec![
+                "https://b.example.com".to_string(),
+                "https://a.example.com".to_string(),
+            ]),
+        );
     }
 
     #[test]

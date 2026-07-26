@@ -1478,18 +1478,26 @@ pub(crate) async fn prompt_merged_pr_removal_with(
     if terminal_state == lazybox_ipc::RemovableTerminalState::Closed {
         let session_paths = workspace_worktree_paths(&workspace);
         let local_work = workspace_local_work(config, mgr, key, &session_paths).await;
-        if local_work == Some(false) && count_live_terminals(config, key).await == 0 {
-            remove_merged_workspace_with(config, mgr, key, /*archive=*/ false).await;
-            if load_workspace(config, key).is_none() {
-                let _ = config.bus.send(Event::Notification {
-                    title: "lazybox".into(),
-                    body: format!("Removed workspace for closed {label}"),
-                });
-                return;
+        let idle = local_work == Some(false) && count_live_terminals(config, key).await == 0;
+        let removed = if idle {
+            remove_merged_workspace_with(config, key, /*archive=*/ false).await
+        } else {
+            None
+        };
+        if let Some(reclaimed) = removed {
+            let mut body = format!("Removed workspace for closed {label}");
+            if let Some(space) = super::reclaimed_notice_body(reclaimed) {
+                body.push_str(" · ");
+                body.push_str(&space);
             }
-            // Removal failed (row still present) — fall through to the
-            // throttled prompt rather than retry on every tick.
+            let _ = config.bus.send(Event::Notification {
+                title: "lazybox".into(),
+                body,
+            });
+            return;
         }
+        // Removal skipped (not idle) or failed (row still present) — fall
+        // through to the throttled prompt rather than retry every tick.
     }
 
     {
@@ -1529,46 +1537,35 @@ pub(crate) async fn prompt_merged_pr_removal_with(
 }
 
 /// Handle `Command::RemoveMergedWorkspace`: the user confirmed the
-/// merged-PR removal modal. Snapshot the worktree paths, kill the
-/// sessions + drop the row via [`super::delete_workspace`], then
-/// force-delete the now-idle worktree directories — the deletion
-/// `delete_workspace` (used by `x x`) deliberately skips. A confirmed
-/// removal archives, so the next poll doesn't resurrect the row.
-pub async fn remove_merged_workspace(config: &ServerConfig, key: &WorkspaceKey) {
-    remove_merged_workspace_with(
-        config,
-        &config.worktree_manager(),
-        key,
-        /*archive=*/ true,
-    )
-    .await
+/// merged-PR removal modal. Kills the sessions, drops the row, and
+/// reclaims the now-idle worktree directories via
+/// [`super::delete_workspace_with_archive`]. A confirmed removal
+/// archives, so the next poll doesn't resurrect the row. Returns the
+/// reclaimed worktree space, or `None` if the removal was preserved.
+pub async fn remove_merged_workspace(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+) -> Option<super::Reclaimed> {
+    remove_merged_workspace_with(config, key, /*archive=*/ true).await
 }
 
-/// Test seam for [`remove_merged_workspace`] — explicit manager so
-/// tests can root it at a tempdir without mutating `LAZYBOX_HOME`.
+/// Shared removal for the confirmed and closed-issue-auto paths.
 /// `archive` controls whether the row is recorded in `KV_KEY_ARCHIVED`:
 /// a user-confirmed removal archives (stay gone), the closed-issue
-/// auto-remove (issue #552) does not (so a reopen resurfaces it).
+/// auto-remove (issue #552) does not (so a reopen resurfaces it). The
+/// worktree directories are reclaimed inside `delete_workspace_with_archive`
+/// (issue #575); this only adds the removal-prompt bookkeeping cleanup.
 pub(crate) async fn remove_merged_workspace_with(
     config: &ServerConfig,
-    mgr: &lazybox_git_ops::WorktreeManager,
     key: &WorkspaceKey,
     archive: bool,
-) {
-    // Capture the worktree paths before the row is gone —
-    // `delete_workspace` drops the store record (and with it the
-    // session → path mapping we need to find the dirs).
-    let session_paths = load_workspace(config, key)
-        .map(|w| workspace_worktree_paths(&w))
-        .unwrap_or_default();
-
-    // Kills backing terminals and removes the row; `archive` decides
-    // whether the next poll may resurrect it.
-    if !super::delete_workspace_with_archive(config, key, archive).await {
-        // The lifecycle/store path already emitted a precise error. Keep the
-        // worktrees and removal-prompt memory intact so the user can retry.
-        return;
-    }
+) -> Option<super::Reclaimed> {
+    // Kills backing terminals, removes the row, and reclaims each
+    // session's worktree dir; `archive` decides whether the next poll
+    // may resurrect it. `None` means a prerequisite failed and the
+    // lifecycle/store path already emitted a precise error — keep the
+    // removal-prompt memory intact so the user can retry.
+    let reclaimed = super::delete_workspace_with_archive(config, key, archive).await?;
 
     // The row is actually gone — now drop its reprompt bookkeeping. On a
     // failed prerequisite it must remain so the level-triggered prompt can
@@ -1580,47 +1577,7 @@ pub(crate) async fn remove_merged_workspace_with(
         .prompted
         .remove(key.as_str());
 
-    if session_paths.is_empty() {
-        return;
-    }
-
-    // The terminals are dead now, so the dirs aren't a live process's
-    // cwd — inspect to recover each worktree's bare clone (needed for
-    // `git worktree remove`), then force-delete. The confirm modal
-    // already warned about any uncommitted/unpushed work.
-    let tracked = collect_tracked_sessions(config).await;
-    let inspections = match mgr.inspect_worktrees(&tracked).await {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::warn!(workspace = %key, "remove_merged_workspace: inspect failed: {e}");
-            return;
-        }
-    };
-    for row in &inspections {
-        if !session_paths.contains(&canon(&row.path)) {
-            continue;
-        }
-        match mgr.delete_inspected(row, /*force=*/ true).await {
-            Ok(()) => {
-                tracing::info!(
-                    workspace = %key,
-                    worktree = %row.path.display(),
-                    "remove_merged_workspace: removed worktree",
-                );
-                let _ = config.bus.send(Event::OrphanedWorktreeDeleted {
-                    path: row.path.clone(),
-                    ok: true,
-                    error: None,
-                });
-            }
-            Err(e) => {
-                tracing::warn!(
-                    worktree = %row.path.display(),
-                    "remove_merged_workspace: delete failed: {e}",
-                );
-            }
-        }
-    }
+    Some(reclaimed)
 }
 
 /// Canonicalize a path for cross-referencing inspector rows (reported
@@ -3801,10 +3758,9 @@ mod inspect_tests {
         let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
 
         let config = fresh_config(store);
-        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
         let mut rx = config.bus.subscribe();
 
-        remove_merged_workspace_with(&config, &mgr, &key, /*archive=*/ true).await;
+        remove_merged_workspace_with(&config, &key, /*archive=*/ true).await;
 
         drain_until(&mut rx, |e| matches!(e, Event::WorkspaceRemoved(_))).await;
         assert!(!wt.exists(), "merged worktree should be deleted");
@@ -3828,12 +3784,76 @@ mod inspect_tests {
         let mut rx = config.bus.subscribe();
         let key = lazybox_core::WorkspaceKey::new("github:o/r#1".to_string());
 
-        assert!(crate::polling::delete_workspace(&config, &key).await);
+        assert!(
+            crate::polling::delete_workspace(&config, &key)
+                .await
+                .is_some()
+        );
         drain_until(&mut rx, |e| matches!(e, Event::WorkspaceRemoved(_))).await;
         assert!(load_workspace(&config, &key).is_none(), "store row removed");
         assert!(
             crate::polling::load_archived_set(&config).contains(key.as_str()),
             "archive tombstone recorded so the next poll won't resurrect it",
+        );
+    }
+
+    /// #575: deleting a workspace must reclaim its session worktree
+    /// directories on disk, not just drop the store row — the leak that
+    /// filled disks with multi-GB orphaned worktrees. The reclaimed total
+    /// is returned so the caller can announce the freed space.
+    #[tokio::test]
+    async fn delete_workspace_reclaims_worktree_dir() {
+        let store = Arc::new(MemoryStore::new());
+        let wt = std::env::temp_dir().join(format!("lb-reclaim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&wt);
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join("payload.bin"), vec![0u8; 8192]).unwrap();
+        seed_workspace(&store, wt.clone(), /*stopped=*/ true);
+        let config = fresh_config(store);
+        let key = lazybox_core::WorkspaceKey::new("github:o/r#1".to_string());
+
+        let reclaimed = crate::polling::delete_workspace(&config, &key)
+            .await
+            .expect("delete should succeed");
+
+        assert!(
+            !wt.exists(),
+            "worktree directory must be reclaimed on delete"
+        );
+        assert_eq!(reclaimed.worktrees, 1, "one worktree reclaimed");
+        assert!(
+            reclaimed.bytes >= 8192,
+            "reclaimed byte total: {}",
+            reclaimed.bytes
+        );
+        let body = crate::polling::reclaimed_notice_body(reclaimed)
+            .expect("non-empty reclaim produces a notice body");
+        assert!(
+            body.contains("reclaimed") && body.contains("worktree"),
+            "notice should report reclaimed space: {body}"
+        );
+    }
+
+    /// The reclaimed-space notice: nothing reclaimed → no notice; an
+    /// empty worktree drops the "0 B" figure (#575 review); a non-empty
+    /// reclaim reports the size; the count pluralizes.
+    #[test]
+    fn reclaimed_notice_body_formats() {
+        use crate::polling::{Reclaimed, reclaimed_notice_body};
+        assert_eq!(reclaimed_notice_body(Reclaimed::default()), None);
+        assert_eq!(
+            reclaimed_notice_body(Reclaimed {
+                worktrees: 1,
+                bytes: 0
+            }),
+            Some("removed 1 worktree".to_string()),
+        );
+        assert_eq!(
+            reclaimed_notice_body(Reclaimed {
+                worktrees: 3,
+                bytes: 2 * 1024 * 1024,
+            }),
+            Some("reclaimed 2.0 MB from 3 worktrees".to_string()),
         );
     }
 
@@ -3851,9 +3871,8 @@ mod inspect_tests {
         let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
 
         let config = fresh_config(store);
-        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
 
-        remove_merged_workspace_with(&config, &mgr, &key, /*archive=*/ true).await;
+        remove_merged_workspace_with(&config, &key, /*archive=*/ true).await;
 
         assert!(!wt.exists(), "force-delete must remove the dirty worktree");
         assert!(

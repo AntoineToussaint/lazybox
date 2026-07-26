@@ -1736,7 +1736,9 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::Kill { session_key } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
-            let _ = polling::delete_workspace(config, &key).await;
+            if let Some(reclaimed) = polling::delete_workspace(config, &key).await {
+                polling::notify_reclaimed(config, "Workspace removed", reclaimed);
+            }
         }
         lazybox_ipc::Command::KeepMergedWorkspace { session_key } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
@@ -1744,7 +1746,9 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::RemoveMergedWorkspace { session_key } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
-            polling::remove_merged_workspace(config, &key).await;
+            if let Some(reclaimed) = polling::remove_merged_workspace(config, &key).await {
+                polling::notify_reclaimed(config, "Workspace removed", reclaimed);
+            }
         }
         lazybox_ipc::Command::DeleteProject { project_key } => {
             polling::delete_project(config, &project_key).await;

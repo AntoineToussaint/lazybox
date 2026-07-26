@@ -6637,11 +6637,9 @@ pub async fn set_auto_fix_policy(
 /// `WorkspaceRemoved` so every connected TUI prunes its sidebar row.
 /// Used by the sidebar's confirmed `x x` archive flow.
 ///
-/// Does NOT delete the worktree directories on disk — that's a
-/// future enhancement (needs to also kill any live PTY runners
-/// rooted in those paths). For now we just drop the metadata; the
-/// worktree dirs survive as ordinary git checkouts the user can
-/// reuse or remove manually.
+/// Reclaims the worktree directories on disk once the backing
+/// terminals are dead and the store row is dropped (issue #575) — see
+/// [`reclaim_workspace_worktrees`].
 ///
 /// Also kills every backing terminal (PTY / tmux session) that
 /// belonged to the workspace — without this the user's confirmed `x x`
@@ -6762,8 +6760,148 @@ pub fn unarchive_workspace_key(config: &ServerConfig, key: &str) -> bool {
     true
 }
 
+/// Recursively sum the byte size of a directory tree. Best-effort: any
+/// entry it can't stat is skipped, and symlinks are counted as their own
+/// (near-zero) size rather than followed — so a symlinked directory can't
+/// send the walk into a loop or double-count a target outside the tree.
+/// The walk runs on `spawn_blocking` (sync `std::fs`) so a multi-GB
+/// worktree can't pin an async runtime worker.
+async fn dir_size(path: &std::path::Path) -> u64 {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        fn walk(dir: &std::path::Path) -> u64 {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return 0;
+            };
+            let mut total = 0u64;
+            for entry in entries.flatten() {
+                let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+                    continue;
+                };
+                if meta.is_dir() {
+                    total += walk(&entry.path());
+                } else {
+                    total += meta.len();
+                }
+            }
+            total
+        }
+        walk(&path)
+    })
+    .await
+    .unwrap_or(0)
+}
+
+/// Human-readable byte size for the reclaimed-space notice.
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
+}
+
+/// How much on-disk worktree space a teardown reclaimed. Threaded up to
+/// the top-level user action so the "space came back" notice is emitted
+/// once per action (aggregated across a project cascade, folded into the
+/// closed-issue removal notice) rather than once per workspace.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Reclaimed {
+    pub worktrees: usize,
+    pub bytes: u64,
+}
+
+impl Reclaimed {
+    fn add(&mut self, other: Reclaimed) {
+        self.worktrees += other.worktrees;
+        self.bytes += other.bytes;
+    }
+}
+
+/// Human phrase for a reclaimed total, or `None` when nothing came back
+/// (a session-less workspace). Omits the byte figure for empty worktrees
+/// so the notice never reads "reclaimed 0 B".
+pub(crate) fn reclaimed_notice_body(reclaimed: Reclaimed) -> Option<String> {
+    if reclaimed.worktrees == 0 {
+        return None;
+    }
+    let plural = if reclaimed.worktrees == 1 { "" } else { "s" };
+    Some(if reclaimed.bytes == 0 {
+        format!("removed {} worktree{plural}", reclaimed.worktrees)
+    } else {
+        format!(
+            "reclaimed {} from {} worktree{plural}",
+            format_bytes(reclaimed.bytes),
+            reclaimed.worktrees,
+        )
+    })
+}
+
+/// Emit the reclaimed-space footer notice under `title`, if anything was
+/// reclaimed. No-op otherwise.
+pub(crate) fn notify_reclaimed(config: &ServerConfig, title: &str, reclaimed: Reclaimed) {
+    if let Some(body) = reclaimed_notice_body(reclaimed) {
+        let _ = config.bus.send(Event::Notification {
+            title: title.to_string(),
+            body,
+        });
+    }
+}
+
+/// Force-reclaim every persisted session's worktree directory for a
+/// workspace being torn down, mirroring the per-session removal
+/// [`handle_clean_worktrees`] performs: `remove_by_path` when the
+/// upstream repo is known (so git's `worktrees/` index is pruned too),
+/// falling back to `remove_dir_all` for repo-less scratch / pre-PR
+/// checkouts. Unconditional — the delete path has already killed every
+/// backing terminal, so there is no live checkout to protect, and
+/// ephemeral on-main / linked checkouts are never persisted as sessions
+/// (issue #452) so this never touches the user's real repo.
+async fn reclaim_workspace_worktrees(config: &ServerConfig, workspace: &Workspace) -> Reclaimed {
+    let mgr = config.worktree_manager();
+    let bare_path = workspace
+        .primary_task()
+        .and_then(|t| t.repo.as_deref())
+        .and_then(|repo| repo.split_once('/'))
+        .map(|(owner, name)| mgr.bare_path(owner, name));
+
+    let mut reclaimed = Reclaimed::default();
+    for session in &workspace.sessions {
+        let path = &session.worktree_path;
+        if !path.exists() {
+            continue;
+        }
+        let size = dir_size(path).await;
+        if let Some(bare) = bare_path.as_ref() {
+            let _ = mgr.remove_by_path(bare, path).await;
+        } else {
+            let _ = tokio::fs::remove_dir_all(path).await;
+        }
+        if path.exists() {
+            tracing::warn!(
+                worktree = %path.display(),
+                "delete_workspace: worktree directory could not be reclaimed",
+            );
+            continue;
+        }
+        reclaimed.worktrees += 1;
+        reclaimed.bytes += size;
+    }
+    reclaimed
+}
+
+/// Delete a workspace, returning the worktree space reclaimed on success
+/// or `None` when the row was preserved (a prerequisite failed). The
+/// caller surfaces the reclaimed total via `notify_reclaimed`.
 #[must_use]
-pub async fn delete_workspace(config: &ServerConfig, key: &WorkspaceKey) -> bool {
+pub async fn delete_workspace(config: &ServerConfig, key: &WorkspaceKey) -> Option<Reclaimed> {
     delete_workspace_with_archive(config, key, /*archive=*/ true).await
 }
 
@@ -6779,7 +6917,7 @@ pub async fn delete_workspace_with_archive(
     config: &ServerConfig,
     key: &WorkspaceKey,
     archive: bool,
-) -> bool {
+) -> Option<Reclaimed> {
     // Own the delete-vs-spawn serialization here so every destructive caller
     // (single workspace, merged cleanup, project cascade) gets it. Keeping
     // this only in one command-dispatch arm let other callers race a late
@@ -6790,7 +6928,7 @@ pub async fn delete_workspace_with_archive(
         .insert(key.as_str().to_string());
     crate::spawn_handler::await_inflight_spawns(config, key.as_str()).await;
     let _workspace_guard = config.lock_workspace(key.as_str()).await;
-    let deleted = delete_workspace_internal(config, key, archive).await;
+    let reclaimed = delete_workspace_internal(config, key, archive).await;
     // The tombstone must not outlive the delete it guarded: a
     // recreated same-name workspace re-allocates the same key
     // (`allocate_workspace_key` only consults the store), and a stale
@@ -6799,10 +6937,10 @@ pub async fn delete_workspace_with_archive(
     // it on rollback; the success path releases it here, once no
     // in-flight spawn that could still race the teardown remains (see
     // `release_delete_tombstone` for why that's the safe point).
-    if deleted {
+    if reclaimed.is_some() {
         crate::spawn_handler::release_delete_tombstone(config, key.as_str());
     }
-    deleted
+    reclaimed
 }
 
 /// Inner delete with the archive decision explicit. User-intent
@@ -6816,8 +6954,13 @@ async fn delete_workspace_internal(
     config: &ServerConfig,
     key: &WorkspaceKey,
     archive: bool,
-) -> bool {
+) -> Option<Reclaimed> {
     let key_str = key.as_str();
+
+    // Snapshot the sessions before the store row is dropped — deleting
+    // the row also drops the session → worktree_path mapping we need to
+    // reclaim the on-disk directories afterwards.
+    let workspace_snapshot = load_workspace(config, key);
 
     // Find every terminal whose session_key matches via
     // terminal_meta — the authoritative wire-side mapping. Earlier
@@ -6868,7 +7011,7 @@ async fn delete_workspace_internal(
                 // rolls back its optimistic row removal off this "terminal"
                 // error (#476).
                 config.deleted_workspaces.lock().remove(key_str);
-                return false;
+                return None;
             }
             drop(interaction);
             // One lifecycle owner handles every map, persisted terminal key,
@@ -6889,7 +7032,7 @@ async fn delete_workspace_internal(
             format!("could not archive workspace {key}; it was not deleted"),
         ));
         config.deleted_workspaces.lock().remove(key_str);
-        return false;
+        return None;
     }
 
     if let Err(e) = config.store.delete_workspace(key) {
@@ -6908,10 +7051,33 @@ async fn delete_workspace_internal(
         if rollback_ok {
             config.deleted_workspaces.lock().remove(key_str);
         }
-        return false;
+        return None;
     }
     let _ = config.bus.send(Event::WorkspaceRemoved(key.clone()));
-    true
+
+    // The row (and its terminals) are gone — reclaim the worktree
+    // directories on disk. Without this every teardown that routes
+    // through delete_workspace (x x archive, project cascade,
+    // rescope/retire) leaked multi-GB worktrees forever (issue #575).
+    // The reclaimed total is returned, not announced here: the top-level
+    // caller emits one notice per user action (see `notify_reclaimed`).
+    let Some(workspace) = workspace_snapshot else {
+        tracing::warn!(
+            workspace = %key,
+            "delete_workspace: no readable row to reclaim worktrees from",
+        );
+        return Some(Reclaimed::default());
+    };
+    let reclaimed = reclaim_workspace_worktrees(config, &workspace).await;
+    if reclaimed.worktrees > 0 {
+        tracing::info!(
+            workspace = %key,
+            worktrees = reclaimed.worktrees,
+            bytes = reclaimed.bytes,
+            "delete_workspace: reclaimed worktree directories",
+        );
+    }
+    Some(reclaimed)
 }
 
 /// Delete a Project: cascade through every workspace whose
@@ -6981,15 +7147,17 @@ pub async fn delete_project(config: &ServerConfig, project_key: &lazybox_core::P
         workspace_count = child_keys.len(),
         "delete_project: cascading workspace deletes"
     );
+    let mut reclaimed = Reclaimed::default();
     for key in &child_keys {
-        if !delete_workspace(config, key).await {
+        let Some(child) = delete_workspace(config, key).await else {
             tracing::warn!(
                 project_key = %project_key,
                 workspace = %key,
                 "delete_project: child deletion failed — preserving project for retry",
             );
             return;
-        }
+        };
+        reclaimed.add(child);
     }
 
     if let Err(e) = config.store.delete_project(project_key) {
@@ -7001,6 +7169,7 @@ pub async fn delete_project(config: &ServerConfig, project_key: &lazybox_core::P
         return;
     }
     let _ = config.bus.send(Event::ProjectRemoved(project_key.clone()));
+    notify_reclaimed(config, "Project removed", reclaimed);
     tracing::info!(project_key = %project_key, "delete_project: done");
 }
 

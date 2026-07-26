@@ -1520,6 +1520,27 @@ mod originating_issue_header_tests {
     }
 
     #[test]
+    fn title_row_shows_external_link_affordance() {
+        // A mouse user who doesn't know `g o` needs a visible cue that
+        // the title is clickable — the trailing `↗` (#590).
+        let ws = Workspace::from_task(task("pull", 172, vec![]), Utc::now());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        let rendered = rows(&mut pane, 80, 24);
+
+        let (title_row, _) = pane
+            .click_hits
+            .header_title
+            .clone()
+            .expect("title line registers a click target");
+        assert!(
+            rendered[title_row as usize].contains('↗'),
+            "the clickable title row carries the ↗ affordance:\n{}",
+            rendered[title_row as usize],
+        );
+    }
+
+    #[test]
     fn plain_pr_has_no_issue_line() {
         let ws = Workspace::from_task(task("pull", 172, vec![]), Utc::now());
         let mut pane = RightPane::new(PaneId::new(0));

@@ -1178,11 +1178,13 @@ impl RightPane {
         };
         let (bg, fg) = lazybox_theme::state_pill(theme, bucket);
         // The title line is a live link: clicking it opens the task
-        // in the browser (#567). Underline the title so it reads as
-        // clickable, matching the reader-modal link affordance. Only
-        // register the click target when the row actually falls inside
-        // the (possibly squished) header area — otherwise a clipped row
-        // would record a hit region over whatever paints below it.
+        // in the browser (#567). Underline the title and trail an `↗`
+        // so it reads as clickable to a mouse user without knowing the
+        // `g o` chord (#590) — the whole row is the hit region, so the
+        // glyph is clickable too. Only register the click target when
+        // the row actually falls inside the (possibly squished) header
+        // area — otherwise a clipped row would record a hit region over
+        // whatever paints below it.
         let title_row = area.y + lines.len() as u16;
         if title_row < area.bottom() {
             self.click_hits.header_title = Some((title_row, task.url.clone()));
@@ -1201,6 +1203,7 @@ impl RightPane {
                     .add_modifier(Modifier::BOLD)
                     .add_modifier(Modifier::UNDERLINED),
             ),
+            Span::styled(" ↗", Style::default().fg(theme.accent)),
         ]));
 
         // Branch line — confirms which worktree lazybox will spawn an

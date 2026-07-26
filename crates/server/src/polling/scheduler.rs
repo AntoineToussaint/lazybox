@@ -23,7 +23,7 @@
 //! [`RoundRobinState::prune`] so the cursor stays bounded by the
 //! user's *current* involvement set rather than their lifetime one.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 /// Default fan-out per warm tick. Three is the issue's recommended
@@ -153,6 +153,7 @@ pub struct RoundRobinPick {
 /// sweep rather than an empty one.
 pub fn plan_round_robin_tick(
     state: &mut RoundRobinState,
+    forced: &HashSet<String>,
     will_full_sweep: bool,
     n: usize,
     now: Instant,
@@ -164,7 +165,13 @@ pub fn plan_round_robin_tick(
         };
     }
     state.prune(now);
-    let pick = pick_repos_for_tick(&state.cursor, state.focused_repo.as_deref(), state.tick, n);
+    let pick = pick_repos_for_tick(
+        &state.cursor,
+        state.focused_repo.as_deref(),
+        forced,
+        state.tick,
+        n,
+    );
     // Bump the cursor for repos we're about to query (even a
     // 0-result query advances the rotation — without it, an empty
     // repo stays "stalest" forever).
@@ -180,41 +187,77 @@ pub fn plan_round_robin_tick(
 /// Inputs:
 /// - `known` — per-repo cursor. Empty = cold start.
 /// - `focused` — repo of the workspace the user is actively viewing.
-///   Bumped to the front of `repos` when present; never causes
-///   `run_global` on its own.
+///   Force-included in every pick — even when it's absent from the
+///   cursor or suspended cold — so a manual `Shift-R` while sitting on
+///   a starved repo always re-fetches it. Never causes `run_global` on
+///   its own.
+/// - `forced` — repos that must be in EVERY pick regardless of the
+///   round-robin budget (the session-anchored Tier 0: every repo
+///   backing a workspace with a persisted session). Uncapped — bounded
+///   naturally by how many worktrees the user has open.
 /// - `tick` — monotonic counter incremented per `sources_for` call.
 ///   Used to determine the K-th refresh tick.
-/// - `n` — fan-out budget. `0` is treated as [`DEFAULT_ROUND_ROBIN_N`]
-///   so a misconfigured caller still gets something sensible.
+/// - `n` — round-robin fan-out budget for the NON-forced tier. `0` is
+///   treated as [`DEFAULT_ROUND_ROBIN_N`] so a misconfigured caller
+///   still gets something sensible. The forced/focused repos are added
+///   on top of these `n` slots.
 ///
-/// Output rules, in order:
-/// 1. **Cold start** (`known` empty): `repos=[]`, `run_global=true`.
-///    Nothing to round-robin yet; let the global sweep populate the
-///    cursor.
-/// 2. **Small inbox** (`known.len() <= n`): `repos=known sorted by
-///    stalest`, `run_global = (tick % 2 == 0)`. With ≤ N known repos
-///    the per-repo branch already covers them every tick; the global
-///    pass runs every other tick just for new-repo discovery.
-/// 3. **Large inbox** (`known.len() > n`): `repos = N stalest (focus
-///    first if present and in `known`)`, `run_global = (tick % K == 0)`
-///    where `K = ceil(known.len() / n).max(2)`. Each warm tick advances
-///    the rotation by N; the global pass fires often enough that the
-///    round-robin doesn't miss new repos the user just got pulled into.
+/// Output rules:
+/// 1. **Cold start** (`known` empty AND nothing forced/focused):
+///    `repos=[]`, `run_global=true`. Nothing to round-robin yet; let
+///    the global sweep populate the cursor.
+/// 2. Otherwise `repos = focused ∪ forced ∪ (N stalest cursor entries
+///    not already forced/focused)`. `run_global` follows the cursor
+///    size: every other tick for a small inbox (`known.len() <= n`),
+///    every `K = ceil(known.len() / n).max(2)` ticks for a large one,
+///    so the round-robin doesn't miss new repos the user just got
+///    pulled into.
 ///
 /// Determinism: ties on the same `last_synced_at` instant break by
-/// repo name (lexicographic) so the order is reproducible — that's
-/// what the unit tests assert against.
+/// repo name (lexicographic), and forced repos are emitted in sorted
+/// order, so the whole pick is reproducible — that's what the unit
+/// tests assert against.
 pub fn pick_repos_for_tick(
     known: &HashMap<String, Instant>,
     focused: Option<&str>,
+    forced: &HashSet<String>,
     tick: u64,
     n: usize,
 ) -> RoundRobinPick {
     let n = if n == 0 { DEFAULT_ROUND_ROBIN_N } else { n };
 
+    let mut repos: Vec<String> = Vec::new();
+    let mut included: HashSet<&str> = HashSet::new();
+
+    // Tier 0 — forced (sessioned) repos. Uncapped: every repo backing a
+    // workspace with a persisted session is in every pick, bounded only
+    // by how many worktrees the user has open. Emitted in name order so
+    // the pick stays deterministic.
+    let mut forced_sorted: Vec<&String> = forced.iter().collect();
+    forced_sorted.sort();
+    for repo in forced_sorted {
+        if included.insert(repo.as_str()) {
+            repos.push(repo.clone());
+        }
+    }
+
+    // The focused repo is force-included even when it's absent from the
+    // cursor (starved / suspended cold), so a manual Shift-R while
+    // sitting on it always re-fetches. It rides the round-robin budget
+    // rather than adding to it.
+    let mut round_robin_budget = n;
+    if let Some(focus) = focused
+        && included.insert(focus)
+    {
+        repos.push(focus.to_string());
+        round_robin_budget = round_robin_budget.saturating_sub(1);
+    }
+
     if known.is_empty() {
+        // Cold start: nothing to round-robin. Still emit any forced /
+        // focused repos and run the global sweep to populate the cursor.
         return RoundRobinPick {
-            repos: Vec::new(),
+            repos,
             run_global: true,
         };
     }
@@ -222,20 +265,17 @@ pub fn pick_repos_for_tick(
     let mut sorted: Vec<(&String, &Instant)> = known.iter().collect();
     sorted.sort_by(|a, b| a.1.cmp(b.1).then_with(|| a.0.cmp(b.0)));
 
-    let focus_in_known = focused.filter(|f| known.contains_key(*f));
-
-    let mut repos: Vec<String> = Vec::with_capacity(n);
-    if let Some(focus) = focus_in_known {
-        repos.push(focus.to_string());
-    }
+    let mut round_robin = 0usize;
     for (repo, _) in sorted {
-        if repos.len() >= n {
+        if round_robin >= round_robin_budget {
             break;
         }
-        if Some(repo.as_str()) == focus_in_known {
+        if included.contains(repo.as_str()) {
             continue;
         }
         repos.push(repo.clone());
+        included.insert(repo.as_str());
+        round_robin += 1;
     }
 
     let run_global = if known.len() <= n {
@@ -252,6 +292,14 @@ pub fn pick_repos_for_tick(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    fn no_forced() -> HashSet<String> {
+        HashSet::new()
+    }
+
+    fn forced(repos: &[&str]) -> HashSet<String> {
+        repos.iter().map(|r| (*r).to_string()).collect()
+    }
 
     fn cursor(entries: &[(&str, u64)]) -> HashMap<String, Instant> {
         // Single `Instant::now()` snapshot so equal-`secs` entries
@@ -270,17 +318,31 @@ mod tests {
     /// fan-out. The global sweep populates the cursor for next tick.
     #[test]
     fn cold_start_runs_global_only() {
-        let pick = pick_repos_for_tick(&HashMap::new(), None, 0, 3);
+        let pick = pick_repos_for_tick(&HashMap::new(), None, &no_forced(), 0, 3);
         assert_eq!(pick.repos, Vec::<String>::new());
         assert!(pick.run_global, "cold start MUST run the global sweep");
     }
 
-    /// Cold-start applies even with a focused repo — focus alone
-    /// can't bootstrap the cursor (the repo isn't known yet).
+    /// A focused repo is fetched even on a cold start: the global sweep
+    /// still runs to populate the cursor, but the repo the user is
+    /// staring at gets its own `repo:` query rather than waiting for the
+    /// sweep to discover it.
     #[test]
-    fn cold_start_ignores_focus() {
-        let pick = pick_repos_for_tick(&HashMap::new(), Some("a/b"), 5, 3);
-        assert!(pick.repos.is_empty());
+    fn cold_start_still_fetches_focus() {
+        let pick = pick_repos_for_tick(&HashMap::new(), Some("a/b"), &no_forced(), 5, 3);
+        assert_eq!(pick.repos, vec!["a/b".to_string()]);
+        assert!(
+            pick.run_global,
+            "cold start MUST still run the global sweep"
+        );
+    }
+
+    /// Sessioned (forced) repos are fetched on a cold start too, even
+    /// before the cursor knows about them.
+    #[test]
+    fn cold_start_still_fetches_forced() {
+        let pick = pick_repos_for_tick(&HashMap::new(), None, &forced(&["o/sessioned"]), 0, 3);
+        assert_eq!(pick.repos, vec!["o/sessioned".to_string()]);
         assert!(pick.run_global);
     }
 
@@ -339,17 +401,17 @@ mod tests {
     fn warm_picks_stalest_first() {
         // a synced at t=10, b at t=20, c at t=30 — a is stalest.
         let known = cursor(&[("a/a", 10), ("b/b", 20), ("c/c", 30)]);
-        let pick = pick_repos_for_tick(&known, None, 1, 2);
+        let pick = pick_repos_for_tick(&known, None, &no_forced(), 1, 2);
         assert_eq!(pick.repos, vec!["a/a".to_string(), "b/b".to_string()]);
     }
 
     /// Focused repo is bumped to the front even when it's not the
-    /// stalest. Bump only fires when the focus is actually in `known`.
+    /// stalest, and rides one of the N round-robin slots.
     #[test]
     fn focus_repo_is_bumped_to_front() {
         // c/c is the FRESHEST, so it'd normally be last in line.
         let known = cursor(&[("a/a", 10), ("b/b", 20), ("c/c", 30)]);
-        let pick = pick_repos_for_tick(&known, Some("c/c"), 1, 2);
+        let pick = pick_repos_for_tick(&known, Some("c/c"), &no_forced(), 1, 2);
         assert_eq!(
             pick.repos,
             vec!["c/c".to_string(), "a/a".to_string()],
@@ -357,13 +419,58 @@ mod tests {
         );
     }
 
-    /// Focus that points outside the cursor doesn't deform the
-    /// ordering — the cursor's stalest-first rotation wins.
+    /// A focused repo absent from the cursor (starved / suspended cold)
+    /// is STILL fetched — this is the Shift-R-misses-the-focused-repo
+    /// fix. It rides one round-robin slot; the rest keep rotating.
     #[test]
-    fn focus_outside_cursor_is_ignored() {
+    fn focus_outside_cursor_is_still_fetched() {
         let known = cursor(&[("a/a", 10), ("b/b", 20)]);
-        let pick = pick_repos_for_tick(&known, Some("unknown/repo"), 1, 3);
-        assert_eq!(pick.repos, vec!["a/a".to_string(), "b/b".to_string()]);
+        let pick = pick_repos_for_tick(&known, Some("unknown/repo"), &no_forced(), 1, 3);
+        assert_eq!(
+            pick.repos,
+            vec![
+                "unknown/repo".to_string(),
+                "a/a".to_string(),
+                "b/b".to_string()
+            ],
+        );
+    }
+
+    /// Every forced (sessioned) repo is included in every pick, uncapped
+    /// — even far more than the round-robin budget N — and the N stalest
+    /// non-forced repos still rotate on top.
+    #[test]
+    fn forced_repos_are_all_included_uncapped() {
+        let known = cursor(&[
+            ("cold/1", 10),
+            ("cold/2", 20),
+            ("cold/3", 30),
+            ("cold/4", 40),
+        ]);
+        let sessioned = forced(&["s/a", "s/b", "s/c", "s/d", "s/e"]);
+        let pick = pick_repos_for_tick(&known, None, &sessioned, 1, 2);
+        for repo in ["s/a", "s/b", "s/c", "s/d", "s/e"] {
+            assert!(
+                pick.repos.contains(&repo.to_string()),
+                "sessioned repo {repo} MUST be fetched every tick"
+            );
+        }
+        // The two stalest non-forced cursor repos still rotate on top.
+        assert!(pick.repos.contains(&"cold/1".to_string()));
+        assert!(pick.repos.contains(&"cold/2".to_string()));
+        assert_eq!(pick.repos.len(), 7);
+    }
+
+    /// A repo that is both focused and sessioned isn't double-counted,
+    /// and doesn't steal an extra round-robin slot.
+    #[test]
+    fn focus_that_is_also_forced_is_not_double_counted() {
+        let known = cursor(&[("a/a", 10), ("b/b", 20)]);
+        let pick = pick_repos_for_tick(&known, Some("s/x"), &forced(&["s/x"]), 1, 2);
+        assert_eq!(
+            pick.repos,
+            vec!["s/x".to_string(), "a/a".to_string(), "b/b".to_string()],
+        );
     }
 
     /// Large inbox runs the global every K ticks, where K = ceil(known/n).
@@ -376,7 +483,7 @@ mod tests {
         let known = cursor(&entries);
         // K should be ceil(10/3)=4, max(2)=4.
         let global_ticks: Vec<u64> = (0..16)
-            .filter(|t| pick_repos_for_tick(&known, None, *t, 3).run_global)
+            .filter(|t| pick_repos_for_tick(&known, None, &no_forced(), *t, 3).run_global)
             .collect();
         assert_eq!(
             global_ticks,
@@ -385,7 +492,7 @@ mod tests {
         );
         // And every warm tick STILL covers 3 repos.
         for t in 1..16 {
-            let p = pick_repos_for_tick(&known, None, t, 3);
+            let p = pick_repos_for_tick(&known, None, &no_forced(), t, 3);
             assert_eq!(p.repos.len(), 3, "tick {t} should fan out to N=3 repos");
         }
     }
@@ -399,7 +506,7 @@ mod tests {
         // With known=2 and n=3, every warm tick fans out both
         // repos; global runs at tick 0, 2, 4, ...
         for t in 0..6 {
-            let p = pick_repos_for_tick(&known, None, t, 3);
+            let p = pick_repos_for_tick(&known, None, &no_forced(), t, 3);
             assert_eq!(
                 p.repos.len(),
                 2,
@@ -415,7 +522,7 @@ mod tests {
     #[test]
     fn ties_break_by_repo_name() {
         let known = cursor(&[("b/b", 10), ("a/a", 10), ("c/c", 10)]);
-        let pick = pick_repos_for_tick(&known, None, 1, 2);
+        let pick = pick_repos_for_tick(&known, None, &no_forced(), 1, 2);
         assert_eq!(pick.repos, vec!["a/a".to_string(), "b/b".to_string()]);
     }
 
@@ -424,7 +531,7 @@ mod tests {
     #[test]
     fn zero_n_falls_back_to_default() {
         let known = cursor(&[("a/a", 10), ("b/b", 20), ("c/c", 30), ("d/d", 40)]);
-        let pick = pick_repos_for_tick(&known, None, 1, 0);
+        let pick = pick_repos_for_tick(&known, None, &no_forced(), 1, 0);
         assert_eq!(pick.repos.len(), DEFAULT_ROUND_ROBIN_N);
     }
 
@@ -464,7 +571,13 @@ mod tests {
             .insert("a/a".into(), now - Duration::from_secs(60));
         state.tick = 3;
 
-        let pick = plan_round_robin_tick(&mut state, /*will_full_sweep=*/ false, 3, now);
+        let pick = plan_round_robin_tick(
+            &mut state,
+            &no_forced(),
+            /*will_full_sweep=*/ false,
+            3,
+            now,
+        );
 
         assert!(pick.repos.is_empty(), "no repos queried on a fast tick");
         assert!(
@@ -491,7 +604,13 @@ mod tests {
         state.cursor.insert("b/b".into(), stale);
         state.tick = 1;
 
-        let pick = plan_round_robin_tick(&mut state, /*will_full_sweep=*/ true, 3, now);
+        let pick = plan_round_robin_tick(
+            &mut state,
+            &no_forced(),
+            /*will_full_sweep=*/ true,
+            3,
+            now,
+        );
 
         assert_eq!(pick.repos.len(), 2, "both known repos fan out");
         assert_eq!(state.tick, 2, "tick counter advances after the pick");
@@ -500,6 +619,38 @@ mod tests {
                 state.cursor.get(repo),
                 Some(&now),
                 "queried repo must be stamped as just-synced"
+            );
+        }
+    }
+
+    /// A full-sweep tick fetches every forced (sessioned) repo even
+    /// when the cursor has never seen it, and stamps it synced so it
+    /// enters the active rotation.
+    #[test]
+    fn plan_includes_and_stamps_forced_repos() {
+        let mut state = RoundRobinState::default();
+        let now = Instant::now();
+        state
+            .cursor
+            .insert("warm/a".into(), now - Duration::from_secs(600));
+
+        let pick = plan_round_robin_tick(
+            &mut state,
+            &forced(&["s/one", "s/two"]),
+            /*will_full_sweep=*/ true,
+            3,
+            now,
+        );
+
+        for repo in ["s/one", "s/two"] {
+            assert!(
+                pick.repos.contains(&repo.to_string()),
+                "sessioned repo {repo} MUST be queried"
+            );
+            assert_eq!(
+                state.cursor.get(repo),
+                Some(&now),
+                "queried sessioned repo must be stamped as just-synced"
             );
         }
     }

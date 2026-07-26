@@ -1148,15 +1148,26 @@ impl<T: TerminalAdapter> Model<T> {
                         // a single truncated footer line (the exact
                         // regression this issue reported). The redundant
                         // provider-error footer is suppressed; the modal
-                        // owns the failure. Any OTHER spawn error (backend
-                        // spawn, target-moved) has no failed checklist, so
-                        // it still surfaces + clears as before.
+                        // owns the failure.
                         let modal_owns_failure =
                             self.worktree_progress.as_ref().is_some_and(|s| s.failed());
                         if !modal_owns_failure {
-                            self.worktree_progress_dismissed = None;
-                            self.force_dismiss_worktree_progress();
-                            self.flash_error(format!("✗ spawn failed — {message}"));
+                            // No live checklist caught the `Failed` step
+                            // (retry, fast spawn, or a dismissed
+                            // checklist), yet a *classified* worktree
+                            // failure must still reach the recovery modal
+                            // rather than leak to a middle-truncated footer
+                            // line that elides the recovery text (#594).
+                            // Unclassified spawn errors (unknown agent,
+                            // target-moved race) stay on the footer as
+                            // before — a retry there wouldn't help.
+                            let classified = lazybox_ipc::WorktreeRecovery::classify(message)
+                                != lazybox_ipc::WorktreeRecovery::Unknown;
+                            if !(classified && self.route_spawn_failure_to_recovery(message)) {
+                                self.worktree_progress_dismissed = None;
+                                self.force_dismiss_worktree_progress();
+                                self.flash_error(format!("✗ spawn failed — {message}"));
+                            }
                         }
                     } else if source == "repo-labels" {
                         self.handle_repo_labels_failed(message);

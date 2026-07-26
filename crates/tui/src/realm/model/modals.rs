@@ -1867,6 +1867,41 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// Route a classified worktree-provisioning failure that reached the
+    /// client only as a `spawn*` `ProviderError` — with no live progress
+    /// checklist to absorb its `Failed` step — onto the recovery modal
+    /// (#594). Without this a fully-classified failure (e.g.
+    /// `BranchHeldLive`) fell through to a single middle-truncated footer
+    /// line that elided the actionable recovery text — the exact #557/#562
+    /// regression. Reuses the same classification the daemon does so the ✗
+    /// lands on the phase that aborted and the modal renders its per-class
+    /// hint + `r` retry. Returns whether the modal was mounted; `false`
+    /// (no remembered spawn to attach the retry to) leaves the caller its
+    /// footer fallback.
+    pub(super) fn route_spawn_failure_to_recovery(&mut self, message: &str) -> bool {
+        use crate::realm::components::worktree_progress::{
+            WorktreeProgress, WorktreeProgressState,
+        };
+        let Some(lazybox_ipc::Command::Spawn { session_key, .. }) = self.last_spawn.clone() else {
+            return false;
+        };
+        let step = lazybox_ipc::WorktreeRecovery::classify(message).failed_step();
+        let mut state = WorktreeProgressState::new(session_key);
+        state.apply(
+            step,
+            lazybox_ipc::WorktreeStepStatus::Failed(message.to_string()),
+        );
+        self.worktree_progress_dismissed = None;
+        self.worktree_progress = Some(state);
+        let modal = WorktreeProgress::from_state(
+            self.worktree_progress.as_ref().expect("just assigned Some"),
+        );
+        self.modal_stack.retain(|id| id != &Id::WorktreeProgress);
+        self.mount_modal(Id::WorktreeProgress, modal);
+        self.redraw = true;
+        true
+    }
+
     /// `r` on a failed `WorktreeProgress` modal: re-issue the spawn that
     /// failed (issue #557). A failed provision persists no session, so a
     /// clean re-send retries the whole worktree setup — after the user

@@ -3332,7 +3332,7 @@ async fn restore_skips_live_but_unregistered_backend_sessions() {
 }
 
 /// A spawn whose worktree provision fails must fail LOUDLY — a
-/// `spawn:session` provider error, no terminal — and leave nothing
+/// `spawn:worktree` provider error, no terminal — and leave nothing
 /// spawnable behind. The old fallback `mkdir`'d an empty dir,
 /// persisted the session, and opened the terminal in a non-git folder;
 /// every later spawn then short-circuited into it forever.
@@ -3372,13 +3372,13 @@ async fn failed_provision_fails_spawn_loudly_and_leaves_no_session() {
 
         let error = wait_for(
             &mut client,
-            |e| matches!(e, Event::ProviderError { source, .. } if source == "spawn:session"),
+            |e| matches!(e, Event::ProviderError { source, .. } if source == "spawn:worktree"),
             Duration::from_secs(2),
         )
         .await;
         assert!(
             error.is_some(),
-            "the failed provision must surface as a spawn:session provider error"
+            "the failed provision must surface as a spawn:worktree provider error"
         );
 
         assert!(

@@ -1154,18 +1154,26 @@ impl<T: TerminalAdapter> Model<T> {
                         if !modal_owns_failure {
                             // No live checklist caught the `Failed` step
                             // (retry, fast spawn, or a dismissed
-                            // checklist), yet a *classified* worktree
-                            // failure must still reach the recovery modal
-                            // rather than leak to a middle-truncated footer
-                            // line that elides the recovery text (#594).
-                            // Unclassified spawn errors (unknown agent,
-                            // target-moved race) stay on the footer as
-                            // before — a retry there wouldn't help.
-                            let classified = lazybox_ipc::WorktreeRecovery::classify(message)
-                                != lazybox_ipc::WorktreeRecovery::Unknown;
-                            if !(classified && self.route_spawn_failure_to_recovery(message)) {
-                                self.worktree_progress_dismissed = None;
-                                self.force_dismiss_worktree_progress();
+                            // checklist), yet a worktree-provisioning
+                            // failure — which the daemon labels
+                            // `spawn:worktree` — must still reach the
+                            // recovery modal rather than leak to a
+                            // middle-truncated footer line that elides the
+                            // recovery text (#594). Other spawn errors
+                            // (unknown agent, backend spawn, target-moved
+                            // race) stay on the footer as before — a retry
+                            // there wouldn't help, so the daemon marks them
+                            // with a different source.
+                            let routed = source == "spawn:worktree"
+                                && self.route_spawn_failure_to_recovery(message);
+                            if !routed {
+                                // Tear down only a stale checklist for
+                                // *this* failing spawn — never a concurrent
+                                // spawn's live checklist (finding 3).
+                                if !self.worktree_checklist_is_foreign_and_live() {
+                                    self.worktree_progress_dismissed = None;
+                                    self.force_dismiss_worktree_progress();
+                                }
                                 self.flash_error(format!("✗ spawn failed — {message}"));
                             }
                         }

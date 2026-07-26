@@ -764,10 +764,19 @@ pub async fn handle_spawn(
         match resolved {
             Ok((path, sid, landed)) => (Some(path), Some(sid), landed),
             Err(e) => {
-                let _ = config.bus.send(Event::provider_error_permanent(
-                    "spawn:session",
-                    e.to_string(),
-                ));
+                // Label a worktree-provisioning failure distinctly so the
+                // client routes it to the recovery modal without having to
+                // re-classify the free-text message (#594) — every
+                // provisioning failure is wrapped as `ServerError::Worktree`
+                // above. A session/workspace race keeps `spawn:session`,
+                // which the client footers as before.
+                let source = match e {
+                    crate::ServerError::Worktree(_) => "spawn:worktree",
+                    _ => "spawn:session",
+                };
+                let _ = config
+                    .bus
+                    .send(Event::provider_error_permanent(source, e.to_string()));
                 return;
             }
         }

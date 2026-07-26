@@ -1867,17 +1867,39 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
-    /// Route a classified worktree-provisioning failure that reached the
-    /// client only as a `spawn*` `ProviderError` — with no live progress
+    /// The session the last remembered spawn targets, if any — the spawn
+    /// a `spawn:worktree` failure is attributed to (the provider error
+    /// carries no session key of its own).
+    pub(super) fn last_spawn_session_key(&self) -> Option<&lazybox_core::SessionKey> {
+        match &self.last_spawn {
+            Some(lazybox_ipc::Command::Spawn { session_key, .. }) => Some(session_key),
+            _ => None,
+        }
+    }
+
+    /// Whether a worktree-provisioning checklist is live for a *different*
+    /// spawn than the one a current failure is attributed to. Such a
+    /// checklist must never be torn down by an unrelated spawn's failure
+    /// (finding 3 / concurrent spawns); an absent or unattributable
+    /// checklist is also treated as not-ours so it is left intact.
+    pub(super) fn worktree_checklist_is_foreign_and_live(&self) -> bool {
+        self.worktree_progress
+            .as_ref()
+            .is_some_and(|s| !s.failed() && self.last_spawn_session_key() != Some(&s.session_key))
+    }
+
+    /// Route a worktree-provisioning failure that reached the client only
+    /// as a `spawn:worktree` `ProviderError` — with no live progress
     /// checklist to absorb its `Failed` step — onto the recovery modal
     /// (#594). Without this a fully-classified failure (e.g.
     /// `BranchHeldLive`) fell through to a single middle-truncated footer
     /// line that elided the actionable recovery text — the exact #557/#562
-    /// regression. Reuses the same classification the daemon does so the ✗
-    /// lands on the phase that aborted and the modal renders its per-class
-    /// hint + `r` retry. Returns whether the modal was mounted; `false`
-    /// (no remembered spawn to attach the retry to) leaves the caller its
-    /// footer fallback.
+    /// regression. Classifies the message once to place the ✗ on the phase
+    /// that aborted and render the per-class hint + `r` retry. Returns
+    /// whether the modal was mounted; `false` — no remembered spawn to
+    /// attach the retry to, or a *different* spawn's checklist is still
+    /// live and must not be clobbered — leaves the caller its footer
+    /// fallback.
     pub(super) fn route_spawn_failure_to_recovery(&mut self, message: &str) -> bool {
         use crate::realm::components::worktree_progress::{
             WorktreeProgress, WorktreeProgressState,
@@ -1885,6 +1907,15 @@ impl<T: TerminalAdapter> Model<T> {
         let Some(lazybox_ipc::Command::Spawn { session_key, .. }) = self.last_spawn.clone() else {
             return false;
         };
+        // This failure belongs to `session_key`; a live checklist for
+        // another session must keep advancing rather than be replaced.
+        if self
+            .worktree_progress
+            .as_ref()
+            .is_some_and(|s| !s.failed() && s.session_key != session_key)
+        {
+            return false;
+        }
         let step = lazybox_ipc::WorktreeRecovery::classify(message).failed_step();
         let mut state = WorktreeProgressState::new(session_key);
         state.apply(

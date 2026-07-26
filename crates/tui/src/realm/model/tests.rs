@@ -9785,13 +9785,14 @@ mod worktree_progress_recovery_tests {
 
     /// Issue #594: some spawn paths (retry, fast spawn, a dismissed
     /// checklist) never mount a live `WorktreeProgress`, so a
-    /// fully-classified worktree failure arrives ONLY as a `spawn:session`
-    /// provider-error. It used to fall through to a middle-truncated footer
-    /// line (`✗ spawn failed — …switch it to a different branch) and retry`)
-    /// that elided the actionable recovery text. It must instead route to
-    /// the recovery modal — same surface #557/#562 built — with no footer.
+    /// worktree-provisioning failure the daemon labels `spawn:worktree`
+    /// arrives ONLY as a provider-error. It used to fall through to a
+    /// middle-truncated footer line (`✗ spawn failed — …switch it to a
+    /// different branch) and retry`) that elided the actionable recovery
+    /// text. It must instead route to the recovery modal — the same surface
+    /// #557/#562 built — with no footer.
     #[test]
-    fn classified_spawn_error_without_a_checklist_routes_to_the_recovery_modal() {
+    fn worktree_spawn_error_without_a_checklist_routes_to_the_recovery_modal() {
         let mut m = build_model();
         let key = WorkspaceKey::new("github:acme/widget#42");
         let session_key: lazybox_core::SessionKey = (&key).into();
@@ -9802,7 +9803,7 @@ mod worktree_progress_recovery_tests {
         );
 
         m.handle_daemon_event(IpcEvent::provider_error_permanent(
-            "spawn:session",
+            "spawn:worktree",
             "worktree: git worktree setup failed — spawn aborted, retry once the cause is \
              fixed: branch 'feat' is already checked out at /tmp/other — refusing to take it \
              from another live worktree; remove that worktree (or switch it to a different \
@@ -9811,7 +9812,7 @@ mod worktree_progress_recovery_tests {
 
         assert!(
             m.modal_stack.contains(&Id::WorktreeProgress),
-            "a classified worktree failure must reach the recovery modal even with no checklist",
+            "a worktree failure must reach the recovery modal even with no checklist",
         );
         assert_eq!(
             m.worktree_progress.as_ref().and_then(|s| s.recovery()),
@@ -9827,12 +9828,47 @@ mod worktree_progress_recovery_tests {
         );
     }
 
-    /// The routing is gated on classification: an *unclassified* spawn
-    /// error (unknown agent id, a target-moved race) is not a worktree
-    /// failure a retry could fix, so it keeps its plain footer notice and
-    /// never mounts the recovery modal.
+    /// Finding 1: routing is gated on the daemon's *source*, not on
+    /// re-classifying the free-text message. A non-worktree spawn error
+    /// (backend PTY spawn, unknown agent) that happens to contain a
+    /// classifier substring — here a PTY `Permission denied`, which
+    /// classifies as `Disk` — must still footer, never mount the worktree
+    /// recovery modal, because its source isn't `spawn:worktree`.
     #[test]
-    fn unclassified_spawn_error_still_goes_to_the_footer() {
+    fn non_worktree_spawn_error_footers_even_when_its_text_classifies() {
+        let mut m = build_model();
+        let key = WorkspaceKey::new("github:acme/widget#42");
+        let session_key: lazybox_core::SessionKey = (&key).into();
+        m.last_spawn = Some(remembered_spawn(session_key));
+        // Prove the text WOULD classify — so the gate can't be leaning on it.
+        assert_ne!(
+            lazybox_ipc::WorktreeRecovery::classify("backend: Permission denied (os error 13)"),
+            lazybox_ipc::WorktreeRecovery::Unknown,
+        );
+
+        m.handle_daemon_event(IpcEvent::provider_error_permanent(
+            "spawn",
+            "backend: Permission denied (os error 13)",
+        ));
+
+        assert!(
+            !m.modal_stack.contains(&Id::WorktreeProgress),
+            "a non-worktree spawn error must not fabricate a recovery modal",
+        );
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|n| n.message.contains("spawn failed")),
+            "the footer notice still carries the backend failure",
+        );
+    }
+
+    /// A session/workspace race (`spawn:session`) is not a worktree failure
+    /// a retry could fix, so it keeps its plain footer notice and never
+    /// mounts the recovery modal.
+    #[test]
+    fn spawn_session_race_still_goes_to_the_footer() {
         let mut m = build_model();
         let key = WorkspaceKey::new("github:acme/widget#42");
         let session_key: lazybox_core::SessionKey = (&key).into();
@@ -9845,14 +9881,66 @@ mod worktree_progress_recovery_tests {
 
         assert!(
             !m.modal_stack.contains(&Id::WorktreeProgress),
-            "an unclassified spawn error must not fabricate a recovery modal",
+            "a session-race spawn error must not fabricate a recovery modal",
         );
         assert!(
             m.status
                 .notice
                 .as_ref()
                 .is_some_and(|n| n.message.contains("spawn failed")),
-            "the footer notice still carries the unclassified failure",
+            "the footer notice still carries the race failure",
+        );
+    }
+
+    /// Finding 3: a worktree failure attributed (via `last_spawn`) to one
+    /// spawn must not tear down a *different* spawn's live, in-progress
+    /// checklist. The other session's checklist keeps advancing; the
+    /// unrelated failure still surfaces on the footer.
+    #[test]
+    fn spawn_failure_does_not_clobber_a_concurrent_live_checklist() {
+        let mut m = build_model();
+        let other_key = WorkspaceKey::new("github:acme/widget#7");
+        let other_session: lazybox_core::SessionKey = (&other_key).into();
+        // A different spawn's checklist is live and still provisioning.
+        m.handle_daemon_event(IpcEvent::WorktreeProgress {
+            session_key: other_session.clone(),
+            step: WorktreeStep::Fetch,
+            status: WorktreeStepStatus::Started,
+        });
+        assert!(m.modal_stack.contains(&Id::WorktreeProgress));
+
+        // A worktree failure for a *different* spawn arrives.
+        let failing_key = WorkspaceKey::new("github:acme/widget#42");
+        let failing_session: lazybox_core::SessionKey = (&failing_key).into();
+        m.last_spawn = Some(remembered_spawn(failing_session));
+        m.handle_daemon_event(IpcEvent::provider_error_permanent(
+            "spawn:worktree",
+            "worktree: branch 'feat' is already checked out at /tmp/other — refusing to \
+             take it from another live worktree",
+        ));
+
+        assert!(
+            m.modal_stack.contains(&Id::WorktreeProgress),
+            "the concurrent spawn's checklist must survive",
+        );
+        let state = m
+            .worktree_progress
+            .as_ref()
+            .expect("the other session's checklist is retained");
+        assert_eq!(
+            state.session_key, other_session,
+            "the live checklist must still belong to the other, in-flight spawn",
+        );
+        assert!(
+            !state.failed(),
+            "the other spawn's checklist keeps provisioning, not frozen on a foreign failure",
+        );
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|n| n.message.contains("spawn failed")),
+            "the unrelated failure still surfaces on the footer",
         );
     }
 

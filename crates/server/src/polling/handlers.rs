@@ -1019,10 +1019,12 @@ fn merge_pr_details_into_workspace(ws: &mut Workspace, details: lazybox_gh::PrDe
     let Some(pr) = ws.pr.as_mut() else {
         return;
     };
-    if !details.closes_issues.is_empty() {
-        // Replace verbatim — lazy is authoritative.
-        pr.closes_issues = details.closes_issues;
-    }
+    // Replace verbatim — lazy is authoritative. `PR_DETAILS_QUERY` always
+    // selects `closingIssuesReferences`, so an empty list means the PR
+    // closes no issue, not "not fetched". Overwriting even when empty is
+    // what clears a stale reference after a PR drops its `Closes #N`
+    // (#581); gating on `!is_empty()` kept the old link alive forever.
+    pr.closes_issues = details.closes_issues;
     if !details.checks.is_empty() {
         pr.checks = details.checks;
     }

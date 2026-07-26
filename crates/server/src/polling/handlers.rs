@@ -1007,10 +1007,15 @@ pub async fn apply_pr_details(
 /// issue-only workspaces upstream so this is mostly defensive).
 ///
 /// Field rules:
-/// - `closes_issues`, `checks`, `ci`, `review`, `role`, `needs_reply`,
-///   `last_commenter` — overwrite with the lazy result. The lazy
-///   query is authoritative; it has the data the inbox-scan path
-///   could only approximate.
+/// - `ci`, `review`, `role`, `needs_reply`, `last_commenter` —
+///   overwrite with the lazy result. The lazy query is authoritative;
+///   it has the data the inbox-scan path could only approximate.
+/// - `closes_issues`, `checks` — overwrite only when the lazy result
+///   is non-empty. Both can be legitimately populated on the poll path
+///   yet absent from a given lazy response (`closes_issues` lacks the
+///   title fallback; `checks` come from a field the inbox scan drops),
+///   so a lazy empty must not clobber the stored value. See the inline
+///   note on `closes_issues` (#581).
 /// - `unread_count` — recompute from the activity list since lazy
 ///   knows the full activity count. The workspace-level
 ///   `Workspace::unread_count()` still respects `read_indices`, so
@@ -1020,7 +1025,13 @@ fn merge_pr_details_into_workspace(ws: &mut Workspace, details: lazybox_gh::PrDe
         return;
     };
     if !details.closes_issues.is_empty() {
-        // Replace verbatim — lazy is authoritative.
+        // Replace verbatim — lazy wins WHEN it has data. But its list comes
+        // from `closingIssuesReferences` ALONE (no title fallback), so a lazy
+        // empty is not authoritative for our `closes_issues` (= refs ∪ title,
+        // built on the poll path) and must not clobber a title-derived close.
+        // Clearing a genuinely-removed reference (#581) is the poll path's
+        // job — `preserve_lazy_pr_fields` no longer pins the stale value, so
+        // every sweep re-derives the authoritative list.
         pr.closes_issues = details.closes_issues;
     }
     if !details.checks.is_empty() {
@@ -1032,6 +1043,100 @@ fn merge_pr_details_into_workspace(ws: &mut Workspace, details: lazybox_gh::PrDe
     pr.needs_reply = details.needs_reply;
     pr.last_commenter = details.last_commenter;
     pr.unread_count = details.activities.len() as u32;
+}
+
+#[cfg(test)]
+mod merge_pr_details_tests {
+    use super::*;
+    use lazybox_core::{Task, TaskId, TaskRole, TaskState, Workspace};
+
+    fn pr_task(closes: Vec<TaskId>) -> Task {
+        Task {
+            id: TaskId {
+                source: "github".into(),
+                key: "o/r#1".into(),
+            },
+            title: "t".into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: "https://github.com/o/r/pull/1".into(),
+            repo: Some("o/r".into()),
+            branch: Some("feat".into()),
+            base_branch: None,
+            updated_at: chrono::Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            kind: None,
+            closes_issues: closes,
+        }
+    }
+
+    fn details(closes: Vec<TaskId>) -> lazybox_gh::PrDetails {
+        lazybox_gh::PrDetails {
+            activities: vec![],
+            closes_issues: closes,
+            checks: vec![],
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            role: TaskRole::Author,
+            needs_reply: false,
+            last_commenter: None,
+        }
+    }
+
+    fn issue_42() -> TaskId {
+        TaskId {
+            source: "github".into(),
+            key: "o/r#42".into(),
+        }
+    }
+
+    /// The lazy details list is `closingIssuesReferences` ALONE (no title
+    /// fallback), so an empty lazy result is not authoritative for our
+    /// `closes_issues` (= refs ∪ title). It must NOT clobber a stored
+    /// title-derived close — clearing genuinely-removed refs is the poll
+    /// path's job (#581).
+    #[test]
+    fn empty_details_does_not_clobber_stored_closes() {
+        let mut ws = Workspace::from_task(pr_task(vec![issue_42()]), chrono::Utc::now());
+        merge_pr_details_into_workspace(&mut ws, details(vec![]));
+        let closes = &ws.pr.as_ref().unwrap().closes_issues;
+        assert_eq!(closes.len(), 1);
+        assert_eq!(closes[0], issue_42());
+    }
+
+    /// When lazy DOES carry refs, it wins verbatim — the authoritative
+    /// `closingIssuesReferences` replaces whatever was stored.
+    #[test]
+    fn non_empty_details_replaces_stored_closes() {
+        let mut ws = Workspace::from_task(pr_task(vec![issue_42()]), chrono::Utc::now());
+        let other = TaskId {
+            source: "github".into(),
+            key: "o/r#99".into(),
+        };
+        merge_pr_details_into_workspace(&mut ws, details(vec![other.clone()]));
+        let closes = &ws.pr.as_ref().unwrap().closes_issues;
+        assert_eq!(closes.len(), 1);
+        assert_eq!(closes[0], other);
+    }
 }
 
 /// Admin: walk every persisted workspace, drop sessions whose

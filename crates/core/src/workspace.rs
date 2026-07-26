@@ -1065,22 +1065,21 @@ fn upsert_by_id(list: &mut Vec<Task>, mut task: Task) {
 }
 
 /// Preserve fields whose canonical value can be absent from a given
-/// inbox-scan response — `checks` (from `statusCheckRollup.contexts`,
-/// which the inbox query drops entirely) and `closes_issues` (from
-/// `closingIssuesReferences`, fetched on the poll path but empty for a
-/// PR that links no issue or in a transiently-empty response). Both
-/// are also populated by the lazy `PR_DETAILS_QUERY`; without this
-/// preservation, a poll carrying the empty value would clobber the
-/// stored one and the issue↔PR collapse / per-check sidebar would
-/// flicker off.
+/// inbox-scan response — today just `checks` (from
+/// `statusCheckRollup.contexts`, which the inbox query drops
+/// entirely). It's also populated by the lazy `PR_DETAILS_QUERY`;
+/// without this preservation, a poll carrying the empty value would
+/// clobber the stored one and the per-check sidebar would flicker off.
+///
+/// `closes_issues` is deliberately NOT preserved: every PR-producing
+/// query (inbox scan, single-PR, hot-tasks, lazy details) selects
+/// `closingIssuesReferences`, so an incoming empty list means the PR
+/// closes no issue — not "not fetched". Preserving the stored value on
+/// empty kept a stale `closes_issues` alive after a PR dropped its
+/// `Closes #N`, re-firing the issue→PR collapse on every poll (#581).
 ///
 /// Rule: incoming wins for any field it has populated; existing
 /// wins only for the listed lazy fields when incoming is empty.
-/// This keeps "PR actually has no closing refs" working correctly
-/// — the inbox-scan path always emits empty so we'd never know the
-/// difference, but the post-workspace-open lazy-fetch IS authoritative
-/// (it pulls the field directly) and a refresh there will reset to
-/// the new truth.
 ///
 /// `mergeable` follows the same shape with `Unknown` as its "empty"
 /// sentinel. GitHub computes mergeability lazily and *evicts* it
@@ -1094,9 +1093,6 @@ fn upsert_by_id(list: &mut Vec<Task>, mut task: Task) {
 /// is only meaningful when `mergeable` resolved — preserve it on the
 /// same condition.
 fn preserve_lazy_pr_fields(mut incoming: Task, existing: &Task) -> Task {
-    if incoming.closes_issues.is_empty() && !existing.closes_issues.is_empty() {
-        incoming.closes_issues = existing.closes_issues.clone();
-    }
     if incoming.checks.is_empty() && !existing.checks.is_empty() {
         incoming.checks = existing.checks.clone();
     }
@@ -1900,18 +1896,13 @@ mod tests {
     }
 
     /// Regression for the GraphQL trim: the inbox-scan query does not
-    /// fetch `statusCheckRollup.contexts` (and any response can carry
-    /// an empty `closingIssuesReferences`), so the incoming PR's
-    /// `checks` / `closes_issues` can arrive empty. Without
-    /// preservation, such a poll cycle would wipe out the stored
-    /// values and the issue↔PR collapse would flicker off.
+    /// fetch `statusCheckRollup.contexts`, so the incoming PR's `checks`
+    /// can arrive empty. Without preservation, such a poll cycle would
+    /// wipe out the stored value and the per-check sidebar would flicker
+    /// off.
     #[test]
-    fn attach_pr_preserves_lazy_fields_when_incoming_is_empty() {
+    fn attach_pr_preserves_checks_when_incoming_is_empty() {
         let mut first = pr("o/r#1");
-        first.closes_issues = vec![TaskId {
-            source: "github".into(),
-            key: "o/r#42".into(),
-        }];
         first.checks = vec![crate::CheckRun {
             name: "lint".into(),
             status: CiStatus::Success,
@@ -1919,23 +1910,41 @@ mod tests {
         }];
         let mut ws = Workspace::from_task(first, now());
 
-        // Subsequent poll: same PR id, empty lazy fields (inbox-scan shape).
+        // Subsequent poll: same PR id, empty checks (inbox-scan shape).
         let next = pr("o/r#1");
         ws.attach_task(next);
 
         let pr_ref = ws.pr.as_ref().unwrap();
-        assert_eq!(
-            pr_ref.closes_issues.len(),
-            1,
-            "closes_issues must survive an inbox-scan-shaped re-poll",
-        );
-        assert_eq!(pr_ref.closes_issues[0].key, "o/r#42");
         assert_eq!(
             pr_ref.checks.len(),
             1,
             "checks must survive an inbox-scan-shaped re-poll",
         );
         assert_eq!(pr_ref.checks[0].name, "lint");
+    }
+
+    /// Regression for #581: every PR-producing query selects
+    /// `closingIssuesReferences`, so an incoming empty `closes_issues`
+    /// means the PR closes no issue — not "not fetched". A PR that drops
+    /// its `Closes #N` must clear the stored link; preserving it kept the
+    /// issue→PR collapse re-firing on every poll.
+    #[test]
+    fn attach_pr_clears_closes_issues_when_incoming_is_empty() {
+        let mut first = pr("o/r#1");
+        first.closes_issues = vec![TaskId {
+            source: "github".into(),
+            key: "o/r#42".into(),
+        }];
+        let mut ws = Workspace::from_task(first, now());
+
+        // Subsequent poll: PR removed its closing reference.
+        let next = pr("o/r#1");
+        ws.attach_task(next);
+
+        assert!(
+            ws.pr.as_ref().unwrap().closes_issues.is_empty(),
+            "a removed closing reference must clear the stored closes_issues",
+        );
     }
 
     /// Regression for the "merge conflicts are not detected

@@ -54,6 +54,8 @@ first.
 | `lazybox --workspace <key>` | Preselect a workspace on startup |
 | `lazybox --session <id>` | Preselect a session on startup |
 | `lazybox scan [ROOTS...] [--depth N] [--hidden]` | Find existing git clones and linked worktrees without modifying them |
+| `lazybox worktree list` | Report every managed worktree with its size and orphan reasons, plus the on-disk and reclaimable totals |
+| `lazybox worktree gc [--force] [--dry-run]` | Reclaim the safe orphaned worktrees (confirms first unless `--force`) |
 | `lazybox hook-ingest --backend-key <key>` | Internal: forward an agent lifecycle hook payload (stdin JSON) to the daemon — lazybox injects this into spawned agents' hook config; not typically run by hand |
 
 ## `lazybox scan`
@@ -79,6 +81,41 @@ Lazybox's own managed worktree directory is excluded. The command is read-only �
 it only reports what it finds. To import a discovered checkout in place, use
 the in-app import flow: press `x i` inside lazybox to scan and link a checkout
 as a workspace without moving it.
+
+## `lazybox worktree`
+
+Every workspace opens an isolated git worktree. Over time some are left behind —
+their PR merged, their branch gone, their session removed — and the disk they
+hold adds up. `lazybox worktree` inspects and reclaims the worktrees lazybox
+provisions, without touching checkouts you created yourself.
+
+```bash
+lazybox worktree list           # read-only report
+lazybox worktree gc --dry-run   # show what gc would reclaim
+lazybox worktree gc             # reclaim the safe orphans (confirms first)
+```
+
+`list` prints every managed worktree with its branch, size, and orphan reasons
+(tagged `DIRTY` / `UNPUSHED` / `safe-reclaim`), then the totals that make a leak
+visible: bytes on disk, bytes auto-reclaimable
+across the safe orphans, and bytes held by orphans that need a look first (no
+backing bare clone, or uncommitted, unpushed, or locked). Bare clones under
+`repos/` are not counted.
+
+| Command | What it does |
+| --- | --- |
+| `lazybox worktree list` | Read-only inventory of every managed worktree and the disk totals |
+| `lazybox worktree gc` | Reclaim the safe orphaned worktrees, confirming first |
+| `lazybox worktree gc --dry-run` | Report what `gc` would reclaim without deleting anything |
+| `lazybox worktree gc --force` | Reclaim without the confirmation prompt |
+
+`gc` only ever deletes a worktree that is flagged orphaned **and** passes the
+safety gate — it never removes one with uncommitted or unpushed work, a lock,
+or a live session. Orphans that need review are left for the in-app worktree
+inspector — open the Settings palette (`,`) and choose **Inspect worktrees…**,
+which can force a per-row reclaim. `gc` also refuses to run while lazybox is
+open, since a standalone reap can't see the daemon's live sessions; quit lazybox
+first, or reclaim from the inspector.
 
 ## `lazybox server`
 

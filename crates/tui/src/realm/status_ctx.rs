@@ -162,6 +162,12 @@ const INFO_FADE: Duration = Duration::from_secs(15);
 /// One-shot hints (e.g. "scroll: this view manages its own scrollback")
 /// fade quickly so they don't follow the user around the UI.
 const HINT_FADE: Duration = Duration::from_secs(3);
+/// How long a Permanent error banner (merge/close/update failed) stays
+/// before fading. Long — the failure is worth inspecting and the full
+/// text lives in the messages log (`Shift-M`) regardless — but finite,
+/// so a toast for an already-resolved condition doesn't own the footer
+/// until an explicit `Esc` (#588). `Esc` still dismisses immediately.
+const PERMANENT_FADE: Duration = Duration::from_secs(45);
 /// Heartbeat interval for the polling-modal spinner. Cheap, keeps
 /// the spinner glyph advancing at ~12 fps.
 const POLLING_TICK_INTERVAL: Duration = Duration::from_millis(80);
@@ -453,14 +459,17 @@ impl StatusCtx {
     /// - Retryable: 5s. Hiccups self-heal, no need to linger.
     /// - Info: 15s. Long enough for a slow spawn; short enough that
     ///   a stuck notice doesn't follow the user around forever.
-    /// - Permanent / Auth: stay until dismissed.
+    /// - Permanent: 45s. Long, but finite — the full text persists in
+    ///   the messages log, so the footer needn't hold it forever (#588).
+    /// - Auth: stays until dismissed (an actionable, still-true error).
     pub fn tick_notice(&mut self) -> bool {
         let Some(n) = &self.notice else { return false };
         let timeout = match n.severity {
             NoticeSeverity::Retryable => Some(RETRYABLE_FADE),
             NoticeSeverity::Info => Some(INFO_FADE),
             NoticeSeverity::Hint => Some(HINT_FADE),
-            NoticeSeverity::Auth | NoticeSeverity::Permanent => None,
+            NoticeSeverity::Permanent => Some(PERMANENT_FADE),
+            NoticeSeverity::Auth => None,
         };
         if let Some(t) = timeout
             && n.set_at.elapsed() >= t
@@ -540,6 +549,7 @@ mod tests {
             message: "x".into(),
             severity,
             set_at: Instant::now() - age,
+            workspace: None,
         }
     }
 
@@ -570,14 +580,27 @@ mod tests {
     }
 
     #[test]
-    fn tick_never_fades_permanent_or_auth() {
-        for sev in [NoticeSeverity::Auth, NoticeSeverity::Permanent] {
-            let mut s = StatusCtx::new();
-            // Even ancient — should not fade.
-            s.notice = Some(notice(sev, Duration::from_secs(60 * 60)));
-            assert!(!s.tick_notice(), "{sev:?} should not auto-fade");
-            assert!(s.notice.is_some());
-        }
+    fn tick_never_fades_auth() {
+        let mut s = StatusCtx::new();
+        // Even ancient — an actionable auth error stays until dismissed.
+        s.notice = Some(notice(NoticeSeverity::Auth, Duration::from_secs(60 * 60)));
+        assert!(!s.tick_notice(), "Auth should not auto-fade");
+        assert!(s.notice.is_some());
+    }
+
+    #[test]
+    fn permanent_fades_on_a_long_timeout() {
+        // A fresh error stays; an old one fades — bounded, not infinite
+        // (#588). Full text still lives in the messages log.
+        let mut fresh = StatusCtx::new();
+        fresh.notice = Some(notice(NoticeSeverity::Permanent, Duration::from_secs(10)));
+        assert!(!fresh.tick_notice(), "a fresh error must stay up");
+        assert!(fresh.notice.is_some());
+
+        let mut stale = StatusCtx::new();
+        stale.notice = Some(notice(NoticeSeverity::Permanent, Duration::from_secs(120)));
+        assert!(stale.tick_notice(), "a long-stale error must fade");
+        assert!(stale.notice.is_none());
     }
 
     #[test]

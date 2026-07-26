@@ -316,14 +316,140 @@ mod effects_tests {
         assert_eq!(
             n.severity,
             NoticeSeverity::Permanent,
-            "a failed merge must not auto-fade like a transient blip",
+            "a failed merge is a prominent, not-transient error",
         );
         assert!(n.message.contains("merge failed"), "message: {}", n.message);
-        assert!(n.message.contains("o/r#1"), "message: {}", n.message);
+        // The label is trimmed to just `#1` (the reason, not the
+        // owner/repo prefix, is what the footer's truncation must keep).
+        assert!(n.message.contains("#1"), "message: {}", n.message);
+        // The reason leads, ahead of the label (#588).
         assert!(
             n.message.contains("Required status check"),
             "the GitHub reason must be quoted: {}",
             n.message,
+        );
+        assert!(
+            n.message.find("Required status check") < n.message.find("#1"),
+            "reason must lead, label trails: {}",
+            n.message,
+        );
+    }
+
+    /// The ` [at mergePullRequest]` GraphQL-path suffix GitHub's error
+    /// text carries is noise that, mid-truncation, survived while the
+    /// real reason was elided (#588). It must be stripped, leaving the
+    /// human message verbatim.
+    #[test]
+    fn merge_failed_strips_graphql_path_suffix() {
+        use lazybox_ipc::Event as IpcEvent;
+
+        let mut m = build_model();
+        m.status.polling = None;
+
+        m.handle_daemon_event(IpcEvent::PrMergeFailed {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
+            pr_label: "o/r#1".into(),
+            reason: "A merge is already in progress [at mergePullRequest]".into(),
+        });
+
+        let n = m.status.notice.as_ref().expect("merge-failed banner");
+        assert!(
+            n.message.contains("A merge is already in progress"),
+            "human reason must survive: {}",
+            n.message,
+        );
+        assert!(
+            !n.message.contains("[at "),
+            "GraphQL-path noise must be stripped: {}",
+            n.message,
+        );
+    }
+
+    /// A "merge failed" banner is tagged with its workspace, so a later
+    /// `PrMerged` for that same workspace self-clears the stale error
+    /// and the success notice shows in its place (#588).
+    #[test]
+    fn pr_merged_clears_a_stale_merge_failed_banner() {
+        use lazybox_ipc::Event as IpcEvent;
+
+        let mut m = build_model();
+        m.status.polling = None;
+        let ws = lazybox_core::WorkspaceKey::new("github:o/r#1");
+
+        m.handle_daemon_event(IpcEvent::PrMergeFailed {
+            workspace_key: ws.clone(),
+            pr_label: "o/r#1".into(),
+            reason: "base branch was modified".into(),
+        });
+        assert!(m.status.notice.is_some(), "error banner is up");
+
+        // The same PR later merges (retry, auto-merge, or a poll).
+        m.handle_daemon_event(IpcEvent::PrMerged {
+            workspace_key: ws,
+            pr_label: "o/r#1".into(),
+        });
+        let n = m
+            .status
+            .notice
+            .as_ref()
+            .expect("success notice replaces it");
+        assert!(
+            n.message.contains("merged"),
+            "the merge success must show, not the stale error: {}",
+            n.message,
+        );
+    }
+
+    /// Self-clearing is workspace-scoped: a success for a *different*
+    /// workspace must not wipe another workspace's failure banner.
+    #[test]
+    fn pr_merged_leaves_another_workspaces_error_alone() {
+        use lazybox_ipc::Event as IpcEvent;
+
+        let mut m = build_model();
+        m.status.polling = None;
+
+        m.handle_daemon_event(IpcEvent::PrMergeFailed {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
+            pr_label: "o/r#1".into(),
+            reason: "not mergeable".into(),
+        });
+
+        // A different PR merges.
+        m.handle_daemon_event(IpcEvent::PrMerged {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            pr_label: "o/r#2".into(),
+        });
+        let n = m.status.notice.as_ref().expect("banner survives");
+        assert!(
+            n.message.contains("merge failed"),
+            "another workspace's success must not clear this error: {}",
+            n.message,
+        );
+    }
+
+    /// A retried merge that fails the same way must not stack duplicate
+    /// rows in the messages log — the footer just refreshes (#588).
+    #[test]
+    fn repeated_identical_merge_failure_does_not_stack() {
+        use lazybox_ipc::Event as IpcEvent;
+
+        let mut m = build_model();
+        m.status.polling = None;
+        let fail = || IpcEvent::PrMergeFailed {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
+            pr_label: "o/r#1".into(),
+            reason: "not mergeable".into(),
+        };
+
+        m.handle_daemon_event(fail());
+        let after_first = m.status.messages.recent().count();
+        m.handle_daemon_event(fail());
+        m.handle_daemon_event(fail());
+        assert_eq!(
+            m.status.messages.recent().count(),
+            after_first,
+            "identical retries must not append duplicate messages-log rows",
         );
     }
 

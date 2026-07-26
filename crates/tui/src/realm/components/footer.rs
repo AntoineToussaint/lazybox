@@ -47,9 +47,12 @@ pub enum NoticeSeverity {
 }
 
 impl NoticeSeverity {
-    /// Sticky severities own the footer slot until acknowledged: they
-    /// never auto-fade and demand an explicit dismiss. These are the
-    /// "error toasts" whose full text is worth inspecting (#453).
+    /// Sticky severities own the footer slot: a routine lower-severity
+    /// flash cannot displace them, and they carry the full-text inspect
+    /// affordance (`Enter`, #453). Auth stays until acknowledged;
+    /// Permanent errors are still sticky in this sense but now also
+    /// auto-fade on a long timeout (#588) so a resolved condition's
+    /// toast doesn't sit in the footer forever.
     pub fn is_sticky(self) -> bool {
         matches!(self, Self::Permanent | Self::Auth)
     }
@@ -62,6 +65,10 @@ pub struct Notice {
     pub message: String,
     pub severity: NoticeSeverity,
     pub set_at: std::time::Instant,
+    /// Workspace this notice is about, when it names a specific
+    /// PR/issue action (merge/close/update failed). Lets a superseding
+    /// success for the same workspace self-clear a stale error (#588).
+    pub workspace: Option<String>,
 }
 
 impl Notice {
@@ -70,6 +77,7 @@ impl Notice {
             message: message.into(),
             severity,
             set_at: std::time::Instant::now(),
+            workspace: None,
         }
     }
 }

@@ -2563,16 +2563,57 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     pub fn flash_error(&mut self, msg: impl Into<String>) {
+        use crate::realm::components::footer::NoticeSeverity;
         let msg = msg.into();
         // The footer width-caps its notice segment, so a long error
         // (merge rejection reasons, spawn failures) can render
         // truncated. Record the full text in the sync log so the
-        // sync-status window (`Shift-D`) can always show it.
-        self.status.sync.note_error("ui", "", &msg, "");
-        self.flash(
-            msg,
-            crate::realm::components::footer::NoticeSeverity::Permanent,
-        );
+        // sync-status window (`Shift-D`) can always show it — but skip
+        // an identical repeat of the banner already up, so a retried
+        // failure doesn't stack duplicate rows there (#588).
+        let dup = self
+            .status
+            .notice
+            .as_ref()
+            .is_some_and(|n| n.severity == NoticeSeverity::Permanent && n.message == msg);
+        if !dup {
+            self.status.sync.note_error("ui", "", &msg, "");
+        }
+        self.flash(msg, NoticeSeverity::Permanent);
+    }
+
+    /// Like [`Self::flash_error`], but tags the banner with the
+    /// workspace whose action (merge/close/update) failed, so a later
+    /// success for that same workspace can self-clear the stale error
+    /// (#588). See [`Self::clear_action_error`].
+    pub fn flash_action_error(
+        &mut self,
+        workspace: &lazybox_core::WorkspaceKey,
+        msg: impl Into<String>,
+    ) {
+        self.flash_error(msg);
+        if let Some(n) = self.status.notice.as_mut() {
+            n.workspace = Some(workspace.as_str().to_string());
+        }
+    }
+
+    /// Clear a sticky action-failure banner once a superseding success
+    /// (`PrMerged`, `IssueClosed`, `PrClosed`, `IssueDeleted`,
+    /// `BranchUpdated`) arrives for the *same* workspace — the failure
+    /// no longer describes reality (#588). Only touches a Permanent
+    /// notice tagged with this workspace; an unrelated error or another
+    /// workspace's banner is left alone. Returns true if one cleared.
+    pub fn clear_action_error(&mut self, workspace: &lazybox_core::WorkspaceKey) -> bool {
+        use crate::realm::components::footer::NoticeSeverity;
+        if let Some(n) = self.status.notice.as_ref()
+            && n.severity == NoticeSeverity::Permanent
+            && n.workspace.as_deref() == Some(workspace.as_str())
+        {
+            self.status.notice = None;
+            self.redraw = true;
+            return true;
+        }
+        false
     }
 
     /// Surface a sticky banner when the daemon we connected to was built
@@ -2710,6 +2751,18 @@ impl<T: TerminalAdapter> Model<T> {
         // displaced by a routine flash.
         let sticky = NoticeSeverity::is_sticky;
         let msg = msg.into();
+        // De-dupe an identical repeated notice (a retried merge that
+        // fails the same way, a re-emitted error): just refresh the
+        // fade timer instead of stacking a second copy in the messages
+        // log (#588). Keeps the workspace tag intact.
+        if let Some(existing) = self.status.notice.as_mut()
+            && existing.message == msg
+            && existing.severity == severity
+        {
+            existing.set_at = std::time::Instant::now();
+            self.redraw = true;
+            return;
+        }
         // Severity-aware replacement: a lower-severity flash must not
         // displace a live sticky error — pre-fix, a Permanent
         // "✗ merge failed" could be wiped within a second by an Info

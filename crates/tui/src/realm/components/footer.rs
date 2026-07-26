@@ -80,6 +80,17 @@ impl Notice {
             workspace: None,
         }
     }
+
+    /// True for an action-error toast — a Permanent failure tagged with
+    /// the workspace whose merge/close/update/delete GitHub rejected.
+    /// These carry a bounded auto-fade and self-clear on a superseding
+    /// success (#588). Untagged Permanent banners (daemon disconnected,
+    /// build mismatch, sync failed) are persistent system state and must
+    /// stay until dismissed or resolved — so the fade keys off this, not
+    /// off `Permanent` severity alone.
+    pub fn is_action_toast(&self) -> bool {
+        self.severity == NoticeSeverity::Permanent && self.workspace.is_some()
+    }
 }
 
 /// Pure render. The orchestrator passes in everything Footer needs:
@@ -105,7 +116,19 @@ pub fn render(
     // capped at ~40% of the row and its message ellipsis-truncated —
     // agent notices used to interpolate full issue titles and wipe
     // out the hint zone entirely (#291).
-    let right_cap = (area.width as usize) * 2 / 5;
+    //
+    // Sticky notices (error / auth banners) get a wider ~50% cap: their
+    // text is the reason a merge/close/auth failed and is worth reading,
+    // and middle-truncation otherwise spends the head budget on the
+    // fixed `✗ <verb> failed:` prefix and clips the reason (#588). The
+    // hint zone still elides gracefully around it (#303), so quit stays
+    // findable. Routine notices and polling status keep the 40% cap.
+    let sticky_notice = notice.is_some_and(|n| n.severity.is_sticky());
+    let right_cap = if sticky_notice {
+        (area.width as usize) / 2
+    } else {
+        (area.width as usize) * 2 / 5
+    };
     let right_text = if let Some(n) = notice {
         let sev_color = match n.severity {
             NoticeSeverity::Retryable | NoticeSeverity::Auth => theme.warn,
@@ -466,6 +489,38 @@ mod tests {
             "actionable tail truncated away: {row:?}",
         );
         assert!(row.contains("work on this"), "contextual hint displaced");
+    }
+
+    /// A sticky error banner gets the wider ~50% cap so more of its
+    /// leading reason survives truncation, where a routine notice at
+    /// ~40% would clip it — and the hint zone still keeps `q q` (#588).
+    /// The reason leads, so the extra head budget is what makes it
+    /// readable; the marker `RATELIMIT` sits just past the 40% head
+    /// budget but inside the 50% one.
+    #[test]
+    fn sticky_error_gets_more_room_for_its_reason() {
+        let keymap = [binding("w", "work on this")];
+        let globals = [binding("?", "help"), binding("q q", "quit")];
+        let reason = "RATELIMITED secondary rate limit hit please retry after the window closes";
+        let msg = format!("✗ merge failed: {reason} (#588)");
+
+        let sticky = Notice::new(msg.clone(), NoticeSeverity::Permanent);
+        let sticky_row = render_row_full(&keymap, &globals, None, Some(&sticky));
+        assert!(
+            sticky_row.contains("RATELIMIT"),
+            "sticky error must reveal the leading reason: {sticky_row:?}",
+        );
+        assert!(sticky_row.contains("q q"), "quit displaced: {sticky_row:?}");
+
+        // The very same text at Info severity keeps the 40% cap, where
+        // the reason head is clipped — proving the widening is what
+        // reveals it, not a change in the message.
+        let routine = Notice::new(msg, NoticeSeverity::Info);
+        let routine_row = render_row_full(&keymap, &globals, None, Some(&routine));
+        assert!(
+            !routine_row.contains("RATELIMIT"),
+            "a routine notice must stay at the 40% cap: {routine_row:?}",
+        );
     }
 
     /// The cap is enforced in terminal cells, not chars: a CJK/emoji

@@ -11619,6 +11619,31 @@ mod daemon_disconnect_tests {
         let n = m.status.notice.as_ref().expect("banner");
         assert_eq!(n.severity, NoticeSeverity::Permanent);
     }
+
+    /// Regression for #588: the disconnect banner is one-shot (the guard
+    /// is never reset), so it must outlive the action-toast auto-fade —
+    /// otherwise it silently vanishes after ~45s while commands still
+    /// fail and never returns. It carries no workspace tag, so
+    /// `tick_notice` must leave it up no matter how much time passes.
+    #[test]
+    fn disconnect_banner_outlives_the_action_toast_fade() {
+        use std::time::{Duration, Instant};
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        m.note_daemon_disconnected();
+        // Backdate far past any fade window.
+        if let Some(n) = m.status.notice.as_mut() {
+            n.set_at = Instant::now() - Duration::from_secs(60 * 60);
+        }
+        assert!(
+            !m.status.tick_notice(),
+            "the disconnect banner must not auto-fade"
+        );
+        assert!(
+            m.status.notice.is_some(),
+            "the disconnect banner must survive an hour of ticks"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -459,17 +459,23 @@ impl StatusCtx {
     /// - Retryable: 5s. Hiccups self-heal, no need to linger.
     /// - Info: 15s. Long enough for a slow spawn; short enough that
     ///   a stuck notice doesn't follow the user around forever.
-    /// - Permanent: 45s. Long, but finite — the full text persists in
-    ///   the messages log, so the footer needn't hold it forever (#588).
-    /// - Auth: stays until dismissed (an actionable, still-true error).
+    /// - Action-error toast (Permanent + workspace-tagged): 45s. Long,
+    ///   but finite — the full text persists in the messages log, so the
+    ///   footer needn't hold a merge/close failure forever (#588).
+    /// - Other Permanent / Auth: persistent system banners (daemon
+    ///   disconnected, build mismatch, sync failed) — stay until
+    ///   dismissed or resolved, never auto-fade.
     pub fn tick_notice(&mut self) -> bool {
         let Some(n) = &self.notice else { return false };
-        let timeout = match n.severity {
-            NoticeSeverity::Retryable => Some(RETRYABLE_FADE),
-            NoticeSeverity::Info => Some(INFO_FADE),
-            NoticeSeverity::Hint => Some(HINT_FADE),
-            NoticeSeverity::Permanent => Some(PERMANENT_FADE),
-            NoticeSeverity::Auth => None,
+        let timeout = if n.is_action_toast() {
+            Some(PERMANENT_FADE)
+        } else {
+            match n.severity {
+                NoticeSeverity::Retryable => Some(RETRYABLE_FADE),
+                NoticeSeverity::Info => Some(INFO_FADE),
+                NoticeSeverity::Hint => Some(HINT_FADE),
+                NoticeSeverity::Auth | NoticeSeverity::Permanent => None,
+            }
         };
         if let Some(t) = timeout
             && n.set_at.elapsed() >= t
@@ -588,19 +594,45 @@ mod tests {
         assert!(s.notice.is_some());
     }
 
+    /// A workspace-tagged action-error toast (merge/close failed) fades
+    /// on a long timeout — bounded, not infinite (#588). Full text still
+    /// lives in the messages log.
     #[test]
-    fn permanent_fades_on_a_long_timeout() {
-        // A fresh error stays; an old one fades — bounded, not infinite
-        // (#588). Full text still lives in the messages log.
+    fn action_toast_fades_on_a_long_timeout() {
+        let action_toast = |age| Notice {
+            workspace: Some("github:o/r#1".into()),
+            ..notice(NoticeSeverity::Permanent, age)
+        };
+
         let mut fresh = StatusCtx::new();
-        fresh.notice = Some(notice(NoticeSeverity::Permanent, Duration::from_secs(10)));
+        fresh.notice = Some(action_toast(Duration::from_secs(10)));
         assert!(!fresh.tick_notice(), "a fresh error must stay up");
         assert!(fresh.notice.is_some());
 
         let mut stale = StatusCtx::new();
-        stale.notice = Some(notice(NoticeSeverity::Permanent, Duration::from_secs(120)));
-        assert!(stale.tick_notice(), "a long-stale error must fade");
+        stale.notice = Some(action_toast(Duration::from_secs(120)));
+        assert!(stale.tick_notice(), "a long-stale action toast must fade");
         assert!(stale.notice.is_none());
+    }
+
+    /// Regression for #588: the auto-fade must NOT extend to persistent
+    /// system banners. An untagged Permanent notice (daemon
+    /// disconnected, build mismatch, sync failed) has no workspace tag
+    /// and must stay up indefinitely — even long past the action-toast
+    /// timeout — until the user dismisses it or the condition resolves.
+    #[test]
+    fn untagged_permanent_banner_never_fades() {
+        let mut s = StatusCtx::new();
+        // Ancient, but untagged → a persistent system banner.
+        s.notice = Some(notice(
+            NoticeSeverity::Permanent,
+            Duration::from_secs(60 * 60),
+        ));
+        assert!(
+            !s.tick_notice(),
+            "an untagged Permanent system banner must not auto-fade"
+        );
+        assert!(s.notice.is_some());
     }
 
     #[test]

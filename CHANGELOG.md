@@ -6,8 +6,13 @@ contain explicitly documented compatibility changes.
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-07-26
+
 ### Added
 
+- `lazybox worktree list` and `lazybox worktree gc` report managed worktrees
+  with their disk totals and reclaim the orphaned ones left behind by
+  interrupted or crashed provisioning (`--dry-run` / `--force`) (#574).
 - A dismissable startup notice detects newer source commits or published
   releases, shows a checkout- and install-channel-specific manual update
   command, and stays quiet for a previously dismissed target.
@@ -32,6 +37,11 @@ contain explicitly documented compatibility changes.
 - Activity-pane cycling (`Shift-P`): full → one-line summary → hidden,
   remembered per workspace with a `ui.activity_pane_default` starting mode
   (#487).
+
+### Fixed
+
+- Deleting, merging, or closing a workspace now reclaims its worktree
+  directory instead of leaking a multi-gigabyte checkout on disk (#573, #575).
 
 ## [0.1.7] - 2026-07-19
 
@@ -111,5 +121,6 @@ contain explicitly documented compatibility changes.
   have explicit capacity and shutdown bounds instead of growing or hanging
   indefinitely under load.
 
-[Unreleased]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.8...HEAD
+[0.1.8]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.6...v0.1.7

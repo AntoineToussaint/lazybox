@@ -552,6 +552,10 @@ pub struct ServerConfig {
     /// bounded by the number of distinct workspace keys seen in this
     /// process (inbox-sized), and a `Mutex<()>` is a few dozen bytes.
     pub workspace_locks: Arc<parking_lot::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// Serializes claims of existing untracked worktrees across workspace
+    /// keys. Two empty PR workspaces can otherwise concurrently discover
+    /// the same already-held checkout before either persists its owner.
+    pub(crate) worktree_adoption_lock: Arc<Mutex<()>>,
 }
 
 impl ServerConfig {
@@ -674,6 +678,7 @@ impl ServerConfig {
             input_needed_shapes: Arc::new(Mutex::new(HashMap::new())),
             event_metrics: Arc::new(metrics::EventMetrics::default()),
             workspace_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            worktree_adoption_lock: Arc::new(Mutex::new(())),
         }
     }
 

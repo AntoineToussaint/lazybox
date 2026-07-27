@@ -2154,8 +2154,8 @@ async fn add_worktree_resilient(
 
     Err(GitError::Command(format!(
         "branch '{branch}' is already checked out at {} — refusing to take it \
-         from another live worktree; remove that worktree (or switch it to a \
-         different branch) and retry",
+         from another live worktree; safely join or adopt the workspace that \
+         owns that checkout before retrying",
         holder.display()
     )))
 }

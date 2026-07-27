@@ -1959,8 +1959,8 @@ pub enum WorktreeRecovery {
     /// more specific matches but the text smells like network.
     Transient,
     /// B1: the branch is checked out in another *live* worktree; git
-    /// refuses to co-opt it. The user must free that worktree (close it
-    /// or switch its branch) first.
+    /// refuses to co-opt it. The user must explicitly join or adopt the
+    /// workspace that owns the checkout.
     BranchHeldLive,
     /// B3: a leftover directory holds real uncommitted work, so the
     /// provisioner refuses to reuse or overwrite it. Manual `mv` aside.
@@ -2088,8 +2088,8 @@ impl WorktreeRecovery {
         match self {
             Self::Transient => "Looks transient — press r to retry.",
             Self::BranchHeldLive => {
-                "That branch is open in another workspace. Close it (or switch its \
-                 branch), then press r."
+                "That branch is open in another workspace. Join or adopt it here, \
+                 then press r."
             }
             Self::DirtyLeftover => {
                 "A leftover folder holds uncommitted work. Move it aside, then press r."

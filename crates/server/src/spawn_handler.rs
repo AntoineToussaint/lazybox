@@ -1905,8 +1905,8 @@ async fn await_pending_ready(
 /// - `Some(session_id)` → look it up in the workspace, error if it's
 ///   gone (rare race where the user removed the session between
 ///   selecting it and pressing the spawn key).
-/// - `None` → use `Workspace::default_session`, or auto-create one
-///   when the workspace is empty. Auto-creation emits
+/// - `None` → use `Workspace::default_session`, or adopt/create one
+///   when the workspace is empty. Adoption and creation emit
 ///   `Event::SessionCreated` so the sidebar's expansion-on-multi-
 ///   session UI reacts.
 async fn resolve_or_create_session(
@@ -2030,6 +2030,11 @@ async fn resolve_or_create_session(
     // only the path is human-friendly.
     let kind_for_session = session_kind_from_terminal(kind);
     let path = worktree_path_for_session(&workspace, 0);
+    if let Some((adopted_path, session_id)) =
+        adopt_untracked_pr_worktree(config, &workspace_key, &kind_for_session, &path).await?
+    {
+        return Ok((adopted_path, session_id, false));
+    }
 
     let prov_start = std::time::Instant::now();
     let provisioned = provision_worktree(config, &workspace, &path, session_key, false).await;
@@ -2093,6 +2098,116 @@ async fn resolve_or_create_session(
     persist_and_broadcast(config, &workspace).await?;
     let _ = config.bus.send(Event::SessionCreated(Box::new(session)));
     Ok((path, new_session_id, false))
+}
+
+async fn adopt_untracked_pr_worktree(
+    config: &ServerConfig,
+    workspace_key: &WorkspaceKey,
+    kind: &SessionKind,
+    intended_path: &Path,
+) -> Result<Option<(PathBuf, SessionId)>, crate::ServerError> {
+    let _adoption_guard = config.worktree_adoption_lock.lock().await;
+    let _workspace_guard = config.lock_workspace(workspace_key.as_str()).await;
+    let mut workspace = load_workspace(config, workspace_key)?;
+    if let Some(session) = workspace.default_session() {
+        return Ok(Some((session.worktree_path.clone(), session.id)));
+    }
+
+    let Some(task) = workspace.primary_task().filter(|task| task.is_pr()) else {
+        return Ok(None);
+    };
+    let (Some(repo), Some(branch)) = (task.repo.clone(), task.branch.clone()) else {
+        return Ok(None);
+    };
+    let Some((owner, name)) = repo.split_once('/') else {
+        return Ok(None);
+    };
+
+    let candidates = match config
+        .worktree_manager()
+        .managed_worktrees_for_branch(owner, name, &branch)
+        .await
+    {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            tracing::warn!(
+                workspace = workspace_key.as_str(),
+                repo,
+                branch,
+                "could not inspect managed worktrees before provisioning: {error}"
+            );
+            return Ok(None);
+        }
+    };
+    let [candidate] = candidates.as_slice() else {
+        return Ok(None);
+    };
+    if paths_match(candidate, intended_path)
+        || managed_worktree_has_session_owner(config, candidate)
+    {
+        return Ok(None);
+    }
+
+    let session = Session::new(
+        workspace_key.clone(),
+        kind.clone(),
+        candidate.clone(),
+        Utc::now(),
+    );
+    let session_id = session.id;
+    workspace.add_session(session.clone());
+    persist_and_broadcast(config, &workspace).await?;
+    let _ = config.bus.send(Event::SessionCreated(Box::new(session)));
+    tracing::info!(
+        workspace = workspace_key.as_str(),
+        repo,
+        branch,
+        worktree = %candidate.display(),
+        "adopted untracked managed worktree for PR"
+    );
+    Ok(Some((candidate.clone(), session_id)))
+}
+
+fn managed_worktree_has_session_owner(config: &ServerConfig, candidate: &Path) -> bool {
+    let records = match config.store.list_workspaces() {
+        Ok(records) => records,
+        Err(error) => {
+            tracing::warn!(
+                worktree = %candidate.display(),
+                "could not verify worktree ownership before adoption: {error}"
+            );
+            return true;
+        }
+    };
+    for record in records {
+        let Some(json) = record.workspace_json else {
+            return true;
+        };
+        let workspace = match serde_json::from_str::<Workspace>(&json) {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                tracing::warn!(
+                    workspace = record.key,
+                    "could not verify worktree ownership from stored workspace: {error}"
+                );
+                return true;
+            }
+        };
+        if workspace
+            .sessions
+            .iter()
+            .any(|session| paths_match(&session.worktree_path, candidate))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn paths_match(left: &Path, right: &Path) -> bool {
+    let canonical =
+        |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    canonical(left) == canonical(right)
 }
 
 /// Build a deterministic branch name for a task that has no upstream

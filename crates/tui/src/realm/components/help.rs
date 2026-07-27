@@ -1,6 +1,6 @@
 //! `Help` — compact, searchable shortcut reference.
 //!
-//! A second `?` swaps it for the "Ask Lazybox" modal (#302). Arrow /
+//! `?` opens "Ask Lazybox"; a second `?` swaps it for this panel (#302). Arrow /
 //! `j` `k` / PgUp / PgDn / Home / End scroll the panel when it overflows
 //! a short terminal (#338); any other keyboard event dismisses.
 

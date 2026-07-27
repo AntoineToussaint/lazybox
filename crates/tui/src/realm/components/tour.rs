@@ -17,6 +17,7 @@
 
 use crate::realm::Msg;
 use crate::realm::UserEvent;
+use lazybox_tui_core::action::{ActionDef, ActionKind};
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
 use tuirealm::event::{
@@ -29,123 +30,282 @@ use tuirealm::ratatui::prelude::*;
 use tuirealm::ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use tuirealm::state::State;
 
-/// One tour card: a heading plus the body lines under it. Body keeps
-/// inline key hints (`w w`, `Tab`, `x p`) as plain text — the
-/// default bindings are stable and a card reads cleaner than a table.
-/// Keys mirror the action catalog (`lazybox_tui_core::action`); when a
-/// binding moves there, update the matching hint here.
+#[derive(Debug, Clone, Copy)]
+enum TourSegment {
+    Text(&'static str),
+    Hint(ActionKind),
+    Leader(ActionKind),
+}
+
+type TourLine = &'static [TourSegment];
+
+macro_rules! line {
+    ($text:literal) => {
+        &[TourSegment::Text($text)]
+    };
+    ($($segment:expr),+ $(,)?) => {
+        &[$($segment),+]
+    };
+}
+
 struct TourStep {
     title: &'static str,
-    body: &'static [&'static str],
+    body: &'static [TourLine],
+}
+
+fn render_line(line: TourLine) -> String {
+    let mut rendered = String::new();
+    for segment in line {
+        match segment {
+            TourSegment::Text(text) => rendered.push_str(text),
+            TourSegment::Hint(kind) => {
+                rendered.push_str(ActionDef::for_kind(*kind).default_keys);
+            }
+            TourSegment::Leader(kind) => {
+                let keys = ActionDef::for_kind(*kind).default_keys;
+                rendered.push_str(keys.split_whitespace().next().unwrap_or(keys));
+            }
+        }
+    }
+    rendered
 }
 
 const STEPS: &[TourStep] = &[
     TourStep {
         title: "Welcome to lazybox",
         body: &[
-            "lazybox turns work into sessions: every task gets its own",
-            "git worktree with an agent (Claude Code) or a shell running",
-            "in it — and lazybox hides the worktree juggling for you.",
-            "",
-            "Track GitHub repos and their PRs/issues flow into your",
-            "inbox, but you don't need any of that to start — a",
-            "worktree-backed session works from an empty inbox too.",
-            "",
-            "Keyboard or mouse — lazybox drives fully with either.",
-            "Step with → / Enter (or click below); ← goes back,",
-            "Esc skips. Re-open this tour any time with Shift-T.",
+            line!("lazybox turns work into sessions: every task gets its own"),
+            line!("git worktree with an agent (Claude Code) or a shell running"),
+            line!("in it — and lazybox hides the worktree juggling for you."),
+            line!(""),
+            line!("Track GitHub repos and their PRs/issues flow into your"),
+            line!("inbox, but you don't need any of that to start — a"),
+            line!("worktree-backed session works from an empty inbox too."),
+            line!(""),
+            line!("Keyboard or mouse — lazybox drives fully with either."),
+            line!("Step with → / Enter (or click below); ← goes back,"),
+            line!(
+                TourSegment::Text("Esc skips. Re-open this tour any time with "),
+                TourSegment::Hint(ActionKind::OpenTour),
+                TourSegment::Text("."),
+            ),
         ],
     },
     TourStep {
         title: "1 · Start from scratch",
         body: &[
-            "Empty inbox? Here's a first move that needs no PRs:",
-            "",
-            "  x p       new project (register a repo or local space)",
-            "  x n       new workspace inside it",
-            "  a c / s   start Claude Code, or a plain shell in it",
-            "",
-            "You land in a fresh git worktree + session, zero setup.",
-            "",
-            "In a hurry? Shift-W does project → workspace → agent in",
-            "one step, from any pane.",
+            line!("Empty inbox? Here's a first move that needs no PRs:"),
+            line!(""),
+            line!(
+                TourSegment::Text("  "),
+                TourSegment::Hint(ActionKind::NewProject),
+                TourSegment::Text("       new project (register a repo or local space)"),
+            ),
+            line!(
+                TourSegment::Text("  "),
+                TourSegment::Hint(ActionKind::NewWorkspace),
+                TourSegment::Text("       new workspace inside it"),
+            ),
+            line!(
+                TourSegment::Text("  "),
+                TourSegment::Hint(ActionKind::SpawnAgent),
+                TourSegment::Text(" / "),
+                TourSegment::Hint(ActionKind::SpawnShell),
+                TourSegment::Text("   start an agent or shell in it"),
+            ),
+            line!(""),
+            line!("You land in a fresh git worktree + session, zero setup."),
+            line!(""),
+            line!(
+                TourSegment::Text("In a hurry? "),
+                TourSegment::Hint(ActionKind::StartAgent),
+                TourSegment::Text(" does project → workspace → agent in"),
+            ),
+            line!("one step, from any pane."),
         ],
     },
     TourStep {
         title: "2 · Your inbox",
         body: &[
-            "Once you track GitHub repos, PRs and issues flow in,",
-            "grouped by repo and sorted by what needs you.",
-            "",
-            "Rows carry attention signals so you triage at a glance:",
-            "  • CI failing            • review pending",
-            "  • agent asking          • unread activity",
-            "",
-            "↑ / ↓ move    Enter opens    / searches",
-            "Shift-S cycles mailboxes: Inbox → Inactive → Snoozed.",
-            "",
-            "Prefer the mouse? lazybox is fully clickable:",
-            "  • click a pane to focus it, a row to select it",
-            "  • drag the splitters to resize, wheel scrolls back",
-            "  • right-click a link in a terminal to open it",
+            line!("Once you track GitHub repos, PRs and issues flow in,"),
+            line!("grouped by repo and sorted by what needs you."),
+            line!(""),
+            line!("Rows carry attention signals so you triage at a glance:"),
+            line!("  • CI failing            • review pending"),
+            line!("  • agent asking          • unread activity"),
+            line!(""),
+            line!(
+                TourSegment::Text("↑ / ↓ move    "),
+                TourSegment::Hint(ActionKind::OpenWorkspace),
+                TourSegment::Text(" opens    "),
+                TourSegment::Hint(ActionKind::OpenSearch),
+                TourSegment::Text(" searches"),
+            ),
+            line!(
+                TourSegment::Hint(ActionKind::CycleMailbox),
+                TourSegment::Text(" cycles mailboxes: Inbox → Inactive → Snoozed."),
+            ),
+            line!(""),
+            line!("Prefer the mouse? lazybox is fully clickable:"),
+            line!("  • click a pane to focus it, a row to select it"),
+            line!("  • drag the splitters to resize, wheel scrolls back"),
+            line!("  • right-click a link in a terminal to open it"),
         ],
     },
     TourStep {
         title: "3 · Put an agent on it",
         body: &[
-            "Press w w on any row and lazybox opens a worktree, then",
-            "launches Claude Code with a prompt fit to the task. A few",
-            "ways that plays out:",
-            "",
-            "  • A PR you review has failing CI → Shift-F jumps to it,",
-            "    then w w lets the agent fix the build.",
-            "  • An open issue → w w starts an agent to implement it.",
-            "  • A scratch idea on a repo → x n, a c, done.",
-            "",
-            "a opens the agent menu: a c / a x / a u pick Claude /",
-            "Codex / Cursor; s is a plain shell; e opens the worktree",
-            "in your editor.",
+            line!(
+                TourSegment::Text("Press "),
+                TourSegment::Hint(ActionKind::Work),
+                TourSegment::Text(" on any row and lazybox opens a worktree, then"),
+            ),
+            line!("launches Claude Code with a prompt fit to the task. A few"),
+            line!("ways that plays out:"),
+            line!(""),
+            line!(
+                TourSegment::Text("  • A PR you review has failing CI → "),
+                TourSegment::Hint(ActionKind::JumpToFailingCi),
+                TourSegment::Text(" jumps to it,"),
+            ),
+            line!(
+                TourSegment::Text("    then "),
+                TourSegment::Hint(ActionKind::Work),
+                TourSegment::Text(" lets the agent fix the build."),
+            ),
+            line!(
+                TourSegment::Text("  • An open issue → "),
+                TourSegment::Hint(ActionKind::Work),
+                TourSegment::Text(" starts an agent to implement it."),
+            ),
+            line!(
+                TourSegment::Text("  • A scratch idea on a repo → "),
+                TourSegment::Hint(ActionKind::NewWorkspace),
+                TourSegment::Text(", "),
+                TourSegment::Hint(ActionKind::SpawnAgent),
+                TourSegment::Text(", done."),
+            ),
+            line!(""),
+            line!(
+                TourSegment::Leader(ActionKind::SpawnAgent),
+                TourSegment::Text(" opens the agent menu: "),
+                TourSegment::Hint(ActionKind::SpawnAgent),
+                TourSegment::Text(" pick Claude /"),
+            ),
+            line!(
+                TourSegment::Text("Codex / Cursor; "),
+                TourSegment::Hint(ActionKind::SpawnShell),
+                TourSegment::Text(" is a plain shell; "),
+                TourSegment::Hint(ActionKind::OpenEditor),
+                TourSegment::Text(" opens the worktree"),
+            ),
+            line!("in your editor."),
         ],
     },
     TourStep {
         title: "4 · Juggle many sessions",
         body: &[
-            "Every task is its own worktree-backed session, so you can",
-            "run several at once without minding the git plumbing.",
-            "",
-            "  `          jump to any workspace (fuzzy picker, all repos)",
-            "  !          jump to the next agent waiting on your input",
-            "  Shift-F    jump to the next PR with failing CI",
-            "  x a        adopt worktrees/agents started elsewhere",
-            "  Tab        cycle the sidebar, activity and terminal panes",
-            "",
-            "Jump works from anywhere — inside an agent, press ]] then `.",
+            line!("Every task is its own worktree-backed session, so you can"),
+            line!("run several at once without minding the git plumbing."),
+            line!(""),
+            line!(
+                TourSegment::Text("  "),
+                TourSegment::Hint(ActionKind::JumpToWorkspace),
+                TourSegment::Text("          jump to any workspace (fuzzy picker, all repos)"),
+            ),
+            line!(
+                TourSegment::Text("  "),
+                TourSegment::Hint(ActionKind::JumpToAsking),
+                TourSegment::Text("          jump to the next agent waiting on your input"),
+            ),
+            line!(
+                TourSegment::Text("  "),
+                TourSegment::Hint(ActionKind::JumpToFailingCi),
+                TourSegment::Text("    jump to the next PR with failing CI"),
+            ),
+            line!(
+                TourSegment::Text("  "),
+                TourSegment::Hint(ActionKind::AdoptSessions),
+                TourSegment::Text("        adopt worktrees/agents started elsewhere"),
+            ),
+            line!(
+                TourSegment::Text("  "),
+                TourSegment::Hint(ActionKind::CyclePane),
+                TourSegment::Text("        cycle the sidebar, activity and terminal panes"),
+            ),
+            line!(""),
+            line!(
+                TourSegment::Text("Jump works from anywhere — inside an agent, press ]] then "),
+                TourSegment::Hint(ActionKind::JumpToWorkspace),
+                TourSegment::Text("."),
+            ),
         ],
     },
     TourStep {
         title: "5 · Ship it & make it yours",
         body: &[
-            "When a PR is ready, press g — a which-key menu pops up",
-            "showing everything you can do to this PR:",
-            "",
-            "  g m  merge PR    g r  reviewers   g a  assignees",
-            "  g l  labels      g o  open in browser",
-            "",
-            "g shows the menu; the second key picks. Grouped actions",
-            "live behind their leader only — re-add direct aliases via",
-            "ui.action_keys if you miss them.",
-            "",
-            "? opens Ask Lazybox (press ? again for all keys); , opens",
-            "Settings, t themes, q q quits. In a terminal, press ]]q",
-            "to return first—the embedded program owns other keys.",
-            "",
-            "t opens the theme picker: light + dark, live preview,",
-            "and your pick persists across restarts.",
-            "",
-            "It's all plain YAML in ~/.lazybox/config.yaml: scopes,",
-            "agents, keybindings, theme.",
-            "",
-            "That's the tour — Enter to finish, Shift-T to re-open it.",
+            line!(
+                TourSegment::Text("When a PR is ready, press "),
+                TourSegment::Leader(ActionKind::MergePr),
+                TourSegment::Text(" — a which-key menu pops up"),
+            ),
+            line!("showing everything you can do to this PR:"),
+            line!(""),
+            line!(
+                TourSegment::Text("  "),
+                TourSegment::Hint(ActionKind::MergePr),
+                TourSegment::Text("  merge PR    "),
+                TourSegment::Hint(ActionKind::RequestReviewers),
+                TourSegment::Text("  reviewers   "),
+                TourSegment::Hint(ActionKind::AddAssignees),
+                TourSegment::Text("  assignees"),
+            ),
+            line!(
+                TourSegment::Text("  "),
+                TourSegment::Hint(ActionKind::ManageLabels),
+                TourSegment::Text("  labels      "),
+                TourSegment::Hint(ActionKind::OpenInBrowser),
+                TourSegment::Text("  open in browser"),
+            ),
+            line!(""),
+            line!(
+                TourSegment::Leader(ActionKind::MergePr),
+                TourSegment::Text(" shows the menu; the second key picks. Grouped actions"),
+            ),
+            line!("live behind their leader only — re-add direct aliases via"),
+            line!("ui.action_keys if you miss them."),
+            line!(""),
+            line!(
+                TourSegment::Hint(ActionKind::OpenHelp),
+                TourSegment::Text(" opens Ask Lazybox (press "),
+                TourSegment::Hint(ActionKind::OpenHelp),
+                TourSegment::Text(" again for all keys); "),
+                TourSegment::Hint(ActionKind::OpenSettings),
+                TourSegment::Text(" opens"),
+            ),
+            line!(
+                TourSegment::Text("Settings, "),
+                TourSegment::Hint(ActionKind::OpenThemePicker),
+                TourSegment::Text(" themes, "),
+                TourSegment::Hint(ActionKind::Quit),
+                TourSegment::Text(" quits. In a terminal, press ]]q"),
+            ),
+            line!("to return first—the embedded program owns other keys."),
+            line!(""),
+            line!(
+                TourSegment::Hint(ActionKind::OpenThemePicker),
+                TourSegment::Text(" opens the theme picker: light + dark, live preview,"),
+            ),
+            line!("and your pick persists across restarts."),
+            line!(""),
+            line!("It's all plain YAML in ~/.lazybox/config.yaml: scopes,"),
+            line!("agents, keybindings, theme."),
+            line!(""),
+            line!(
+                TourSegment::Text("That's the tour — Enter to finish, "),
+                TourSegment::Hint(ActionKind::OpenTour),
+                TourSegment::Text(" to re-open it."),
+            ),
         ],
     },
 ];
@@ -283,9 +443,9 @@ impl Component for Tour {
             )),
             Line::raw(""),
         ];
-        for &l in step.body {
+        for &line in step.body {
             lines.push(Line::from(Span::styled(
-                format!("  {l}"),
+                format!("  {}", render_line(line)),
                 Style::default().fg(theme.text_strong),
             )));
         }
@@ -440,12 +600,13 @@ mod tests {
         // The card is 68 cols wide with a 2-space gutter, so a body
         // line over ~62 chars would clip. Guard the new copy.
         for s in STEPS {
-            for l in s.body {
+            for &line in s.body {
+                let rendered = render_line(line);
                 assert!(
-                    l.chars().count() <= 62,
-                    "step {:?} line too wide ({}): {l:?}",
+                    rendered.chars().count() <= 62,
+                    "step {:?} line too wide ({}): {rendered:?}",
                     s.title,
-                    l.chars().count(),
+                    rendered.chars().count(),
                 );
             }
         }
@@ -481,63 +642,25 @@ mod tests {
     }
 
     #[test]
-    fn key_hints_match_the_action_catalog() {
-        use lazybox_tui_core::action::{ActionDef, ActionKind};
-        // Each hint shown in the tour must be the catalog's current
-        // default for that action — the catalog is the source of truth.
-        let all = render_all();
-        for (kind, hint) in [
-            (ActionKind::NewProject, "x p"),
-            (ActionKind::NewWorkspace, "x n"),
-            (ActionKind::AdoptSessions, "x a"),
-            (ActionKind::Work, "w w"),
-            (ActionKind::JumpToWorkspace, "`"),
-            (ActionKind::JumpToAsking, "!"),
-            (ActionKind::JumpToFailingCi, "Shift-F"),
-            (ActionKind::StartAgent, "Shift-W"),
-            (ActionKind::CyclePane, "Tab"),
-            // Previously unchecked hints (#188): a rename/remap of any
-            // of these would silently desync the onboarding copy.
-            (ActionKind::SpawnShell, "s"),
-            (ActionKind::OpenEditor, "e"),
-            (ActionKind::CycleMailbox, "Shift-S"),
-            (ActionKind::OpenHelp, "?"),
-            (ActionKind::OpenSettings, ","),
-        ] {
-            assert_eq!(
-                ActionDef::for_kind(kind).default_keys,
-                hint,
-                "catalog default for {kind:?} drifted from the tour hint",
-            );
-            assert!(all.contains(hint), "tour no longer shows {hint}");
+    fn key_hints_reference_the_action_catalog() {
+        let mut hint_count = 0;
+        for step in STEPS {
+            for line in step.body {
+                for segment in *line {
+                    let kind = match segment {
+                        TourSegment::Hint(kind) | TourSegment::Leader(kind) => *kind,
+                        TourSegment::Text(_) => continue,
+                    };
+                    assert_eq!(ActionDef::for_kind(kind).kind, kind);
+                    hint_count += 1;
+                }
+            }
         }
-        // The agent-pick hints (`a c` / `a x` / `a u`) are per-agent
-        // SpawnAgent chords, not a single `ActionDef::default_keys` —
-        // they come from the agent-id → key convention under the `a`
-        // leader (#304). Pin them against that source.
-        for (agent, chord) in [("claude", "a c"), ("codex", "a x"), ("cursor", "a u")] {
-            let display = ActionDef::catalog(&[agent.to_string()], &Default::default())
-                .into_iter()
-                .find(|e| e.label == format!("spawn {agent}"))
-                .map(|e| e.keys_display.to_string())
-                .unwrap_or_else(|| panic!("no spawn row for {agent}"));
-            assert_eq!(display, chord, "spawn {agent} default chord drifted");
-            assert!(
-                all.contains(chord),
-                "tour no longer shows {chord} for {agent}"
-            );
-        }
-        // The `q q` quit chord and the `]]` return-to-sidebar hint round
-        // out the ship-it card.
-        assert_eq!(ActionDef::for_kind(ActionKind::Quit).default_keys, "q q");
-        assert!(all.contains("q q"), "tour no longer shows the quit chord");
+        assert!(hint_count > 0);
+
         // `]]` is `terminal.escape_char` (default `]`) doubled, owned
-        // by the terminal latch rather than the catalog (#188); the tour
-        // documents the default form.
-        assert!(
-            all.contains("]]"),
-            "tour no longer shows the `]]` return hint",
-        );
+        // by the terminal latch rather than the catalog.
+        assert!(render_all().contains("]]"));
     }
 
     #[test]

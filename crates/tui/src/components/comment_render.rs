@@ -141,6 +141,7 @@ pub fn render_body(body: &str, width: u16, max_lines: usize) -> Vec<Line<'static
     let cleaned = strip_html_tags(&strip_html_comments(body));
     let mut out: Vec<Line<'static>> = Vec::new();
     let mut in_fence = false;
+    let rule_width = usize::from(if width == 0 { 8 } else { width });
     // Collapse runs of blank lines to at most one, and drop the
     // leading run entirely. PR comments (especially bot output) often
     // pad with three or four blanks between sections — left alone
@@ -153,7 +154,7 @@ pub fn render_body(body: &str, width: u16, max_lines: usize) -> Vec<Line<'static
         if raw_line.trim().starts_with("```") {
             in_fence = !in_fence;
             out.push(Line::from(Span::styled(
-                "─".repeat(width.max(8) as usize),
+                "─".repeat(rule_width),
                 Style::default().fg(Color::DarkGray),
             )));
             prev_emitted_empty = false;
@@ -180,7 +181,7 @@ pub fn render_body(body: &str, width: u16, max_lines: usize) -> Vec<Line<'static
         // as stray "---" segments.
         if is_thematic_break(raw_line) {
             out.push(Line::from(Span::styled(
-                "─".repeat(width.max(8) as usize),
+                "─".repeat(rule_width),
                 Style::default().fg(Color::DarkGray),
             )));
             prev_emitted_empty = false;
@@ -490,7 +491,7 @@ pub(crate) fn wrap_one(line: Line<'static>, width: u16) -> Vec<Line<'static>> {
                      current_w: &mut usize,
                      word: String,
                      style: Style| {
-        let w = word.chars().count();
+        let w = crate::util::visual_width(&word);
         if *current_w + w > width && !current.is_empty() {
             out.push(Line::from(std::mem::take(current)));
             *current_w = 0;
@@ -500,14 +501,15 @@ pub(crate) fn wrap_one(line: Line<'static>, width: u16) -> Vec<Line<'static>> {
             let mut chunk = String::new();
             let mut chunk_w = 0;
             for ch in word.chars() {
-                if chunk_w + 1 > width.saturating_sub(*current_w) && !chunk.is_empty() {
+                let ch_w = crate::util::char_visual_width(ch);
+                if chunk_w + ch_w > width.saturating_sub(*current_w) && !chunk.is_empty() {
                     current.push(Span::styled(std::mem::take(&mut chunk), style));
                     out.push(Line::from(std::mem::take(current)));
                     *current_w = 0;
                     chunk_w = 0;
                 }
                 chunk.push(ch);
-                chunk_w += 1;
+                chunk_w += ch_w;
             }
             if !chunk.is_empty() {
                 current.push(Span::styled(chunk, style));
@@ -798,6 +800,19 @@ mod tests {
         assert_eq!(rule.spans[0].style.fg, Some(Color::DarkGray));
     }
 
+    #[test]
+    fn rules_respect_tiny_widths() {
+        for body in ["---", "```"] {
+            let out = render_body(body, 3, 10);
+            let text: String = out[0]
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            assert_eq!(crate::util::visual_width(&text), 3);
+        }
+    }
+
     /// A `---` inside a fenced code block is code, not a rule — it
     /// must stay verbatim.
     #[test]
@@ -820,6 +835,23 @@ mod tests {
             assert!(len <= 10, "wrapped line is {len} cells: {l:?}");
         }
         assert!(lines.len() > 1);
+    }
+
+    #[test]
+    fn wrap_one_budgets_wide_characters_in_terminal_cells() {
+        let lines = wrap_one(Line::from("界界界"), 4);
+        assert_eq!(lines.len(), 2);
+        for line in lines {
+            let text: String = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            assert!(
+                crate::util::visual_width(&text) <= 4,
+                "wrapped line exceeds its cell budget: {text:?}"
+            );
+        }
     }
 
     #[test]

@@ -142,10 +142,5 @@ pub(crate) fn teaser_text(body: &str, max_cells: usize) -> String {
         }
     }
     let out = out.trim().to_string();
-    if out.chars().count() <= max_cells {
-        return out;
-    }
-    let mut clipped: String = out.chars().take(max_cells.saturating_sub(1)).collect();
-    clipped.push('…');
-    clipped
+    crate::util::truncate_ellipsis(&out, max_cells).into_owned()
 }

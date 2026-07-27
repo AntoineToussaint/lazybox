@@ -80,19 +80,19 @@ impl Component for Confirm {
         let theme = crate::theme::current();
         // Width: prefer wide so most questions fit on one line, but
         // clamp to the available area.
-        let modal_w = 80u16.min(area.width.saturating_sub(4)).max(20);
+        let modal_w = 80u16.min(area.width.saturating_sub(4));
         let inner_w = modal_w.saturating_sub(2).max(1) as usize;
 
         // Height: 1 empty + N question lines + 1 empty + 1 buttons +
-        // 2 borders. Estimate N by character-count over inner_w —
+        // 2 borders. Estimate N by terminal-cell count over inner_w —
         // ratatui's `Wrap { trim: false }` is word-wrap with
         // character-break fallback, so dividing total chars by width
         // is a safe upper bound. Without this dynamic sizing, the
         // hardcoded 6-row modal hid the Y/N buttons whenever the
         // question wrapped past one line, leaving the user stuck.
-        let q_chars = self.question.chars().count();
-        let q_lines = q_chars.div_ceil(inner_w).max(1) as u16;
-        let modal_h = (5 + q_lines).min(area.height.saturating_sub(2)).max(6);
+        let question_width = crate::util::visual_width(&self.question);
+        let q_lines = question_width.div_ceil(inner_w).max(1) as u16;
+        let modal_h = (5 + q_lines).max(6).min(area.height.saturating_sub(2));
         let x = area.x + area.width.saturating_sub(modal_w) / 2;
         let y = area.y + area.height.saturating_sub(modal_h) / 2;
         let modal = Rect::new(x, y, modal_w, modal_h);
@@ -264,6 +264,11 @@ mod tests {
         terminal.draw(|f| confirm.view(f, f.area())).unwrap();
     }
 
+    fn render_at(confirm: &mut Confirm, width: u16, height: u16) {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| confirm.view(f, f.area())).unwrap();
+    }
+
     fn left_click(col: u16, row: u16) -> Event<UserEvent> {
         Event::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -398,5 +403,13 @@ mod tests {
         render(&mut c);
         assert_eq!(c.on(&left_click(0, 0)), None);
         assert!(c.last_click.is_none());
+    }
+
+    #[test]
+    fn tiny_terminal_does_not_paint_outside_the_viewport() {
+        let mut c = Confirm::new("界".repeat(40));
+        render_at(&mut c, 12, 5);
+        let yes = c.yes_rect.expect("render records the button row");
+        assert!(yes.y < 5);
     }
 }

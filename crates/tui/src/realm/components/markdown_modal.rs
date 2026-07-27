@@ -225,15 +225,7 @@ impl AppComponent<Msg, UserEvent> for MarkdownModal {
 
 /// Clip a modal title to `max` display columns with an ellipsis.
 fn trim_title(title: &str, max: u16) -> String {
-    let max = max as usize;
-    if title.chars().count() <= max || max == 0 {
-        title.to_string()
-    } else if max == 1 {
-        "…".to_string()
-    } else {
-        let kept: String = title.chars().take(max - 1).collect();
-        format!("{kept}…")
-    }
+    crate::util::truncate_ellipsis(title, max as usize).into_owned()
 }
 
 #[cfg(test)]
@@ -341,6 +333,14 @@ mod tests {
         let out = render(&mut comp, 30, 4);
         assert!(out.lines().count() <= 4, "modal must fit the 4-row pane");
         assert!(comp.modal_rect.height <= 4);
+    }
+
+    #[test]
+    fn title_trimming_uses_terminal_cells() {
+        let title = trim_title("界界界", 4);
+        assert_eq!(title, "界…");
+        assert!(crate::util::visual_width(&title) <= 4);
+        assert_eq!(trim_title("title", 0), "");
     }
 
     #[test]

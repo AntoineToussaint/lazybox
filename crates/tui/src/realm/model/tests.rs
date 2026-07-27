@@ -10595,6 +10595,33 @@ mod inspect_list_remount_tests {
 }
 
 #[cfg(test)]
+mod modal_stack_remount_tests {
+    use super::super::{Id, Model};
+    use crate::realm::components::confirm::Confirm;
+    use lazybox_ipc::channel;
+    use tuirealm::ratatui::layout::Size;
+
+    #[test]
+    fn remount_moves_an_existing_modal_to_the_top_without_duplication() {
+        let (client, _server) = channel::pair();
+        let mut model =
+            Model::new_for_test(client, Size::new(120, 40)).expect("model initialization");
+
+        model.mount_modal(Id::Error, Confirm::new("first"));
+        model.mount_modal(Id::Update, Confirm::new("second"));
+        model.mount_modal(Id::Error, Confirm::new("replacement"));
+
+        assert_eq!(model.modal_stack, vec![Id::Update, Id::Error]);
+        model.pop_modal();
+        assert_eq!(
+            model.modal_stack,
+            vec![Id::Update],
+            "dismissing the replacement must reveal the previous modal"
+        );
+    }
+}
+
+#[cfg(test)]
 mod flash_log_tests {
     //! Sticky footer errors are width-capped at render time (#291),
     //! so `flash_error` must keep the full text recoverable in the

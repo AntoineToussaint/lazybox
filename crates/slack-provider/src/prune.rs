@@ -347,6 +347,17 @@ mod tests {
         assert_eq!(parts.agent, "claude");
     }
 
+    #[test]
+    fn parse_round_trips_long_terminal_channel_names() {
+        let workspace = format!("github-{}", "a".repeat(100));
+        let name = channel_name_for_terminal(&workspace, "a3f1c277-9abc", "claude", "pr-");
+        let parts = parse_channel_name(&name, "pr-")
+            .expect("length capping must preserve the session and agent suffix");
+        assert_eq!(parts.session8, "a3f1c277");
+        assert_eq!(parts.agent, "claude");
+        assert!(parts.workspace_slug.len() < workspace.len());
+    }
+
     // ── classify ────────────────────────────────────────────────
 
     fn empty_live() -> HashSet<String> {

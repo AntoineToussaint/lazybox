@@ -212,6 +212,53 @@ fn body_prefix_bytes(body: &str, max_bytes: usize) -> &str {
     &body[..end]
 }
 
+fn next_page_cursor(
+    page_info: graphql::GqlPageInfo,
+    operation: &str,
+) -> Result<Option<String>, GhError> {
+    if !page_info.has_next_page {
+        return Ok(None);
+    }
+    page_info.end_cursor.map(Some).ok_or_else(|| {
+        GhError::Graphql(format!("{operation}: hasNextPage=true but endCursor=null"))
+    })
+}
+
+type SelectedFetchResult = Result<(Vec<Task>, Option<String>, Vec<crate::LazyboxMention>), GhError>;
+
+fn combine_selected_fetches(
+    pr_side_requested: bool,
+    issue_side_requested: bool,
+    prs: Result<Vec<Task>, GhError>,
+    issues: Result<(Vec<Task>, Vec<crate::LazyboxMention>), GhError>,
+) -> SelectedFetchResult {
+    match (prs, issues) {
+        (Ok(mut prs), Ok((issues, mentions))) => {
+            prs.extend(issues);
+            Ok((prs, None, mentions))
+        }
+        (Ok(prs), Err(error)) => {
+            if !pr_side_requested {
+                return Err(error);
+            }
+            let message = format!("issues sync failed (PRs OK): {error}");
+            tracing::warn!("{message}");
+            Ok((prs, Some(message), Vec::new()))
+        }
+        (Err(error), Ok((issues, mentions))) => {
+            if !issue_side_requested {
+                return Err(error);
+            }
+            let message = format!("PRs sync failed (issues OK): {error}");
+            tracing::warn!("{message}");
+            Ok((issues, Some(message), mentions))
+        }
+        (Err(pr_error), Err(issue_error)) => Err(GhError::Graphql(format!(
+            "both PR and issue fetches failed: PRs={pr_error}; issues={issue_error}"
+        ))),
+    }
+}
+
 /// Construct a `GhError::HttpStatus` from a status + content-type +
 /// body. Centralised so the canonical-reason lookup and the body
 /// excerpting stay in sync between the raw-HTTP path and any future
@@ -2064,15 +2111,12 @@ impl GhClient {
                     .iter()
                     .map(|pr| graphql::pr_to_task(pr, &self.user)),
             );
-            let page_info = data.search.page_info.unwrap_or_default();
-            if !page_info.has_next_page {
+            let Some(next_cursor) =
+                next_page_cursor(data.search.page_info.unwrap_or_default(), "PR search")?
+            else {
                 break;
-            }
-            cursor = page_info.end_cursor;
-            if cursor.is_none() {
-                tracing::warn!("GraphQL paged: hasNextPage=true but endCursor=null");
-                break;
-            }
+            };
+            cursor = Some(next_cursor);
             page += 1;
             if page >= 20 {
                 tracing::error!(
@@ -2142,15 +2186,12 @@ impl GhClient {
                     .iter()
                     .map(|pr| graphql::pr_to_task(pr, &self.user)),
             );
-            let page_info = data.search.page_info.unwrap_or_default();
-            if !page_info.has_next_page {
+            let Some(next_cursor) =
+                next_page_cursor(data.search.page_info.unwrap_or_default(), op)?
+            else {
                 break;
-            }
-            cursor = page_info.end_cursor;
-            if cursor.is_none() {
-                tracing::warn!("{op} paged: hasNextPage=true but endCursor=null");
-                break;
-            }
+            };
+            cursor = Some(next_cursor);
             page += 1;
             if page >= 20 {
                 // Same safety-cap visibility as the main paginated
@@ -2252,15 +2293,12 @@ impl GhClient {
                 }
             }
 
-            let page_info = data.search.page_info.unwrap_or_default();
-            if !page_info.has_next_page {
+            let Some(next_cursor) =
+                next_page_cursor(data.search.page_info.unwrap_or_default(), "issues search")?
+            else {
                 break;
-            }
-            cursor = page_info.end_cursor;
-            if cursor.is_none() {
-                tracing::warn!("Issues paged: hasNextPage=true but endCursor=null");
-                break;
-            }
+            };
+            cursor = Some(next_cursor);
             page += 1;
             if page >= 20 {
                 // Same safety-cap visibility as fetch_all_prs.
@@ -2347,38 +2385,20 @@ impl GhClient {
         tracing::info!(
             "fetch_selected: completed in {elapsed_ms}ms (PRs={want_prs}, Issues={want_issues})"
         );
-        match (prs, issues) {
-            (Ok(mut p), Ok(i)) => {
-                p.extend(i);
-                Ok(p)
-            }
-            (Ok(p), Err(e)) => {
-                if want_issues && p.is_empty() {
-                    Err(e)
-                } else {
-                    tracing::warn!("issues fetch failed (using PRs only): {e}");
-                    Ok(p)
-                }
-            }
-            (Err(e), Ok(i)) => {
-                if want_prs && i.is_empty() {
-                    Err(e)
-                } else {
-                    tracing::warn!("PRs fetch failed (using issues only): {e}");
-                    Ok(i)
-                }
-            }
-            (Err(pr_err), Err(issue_err)) => Err(GhError::Graphql(format!(
-                "both PR and issue fetches failed: PRs={pr_err}; issues={issue_err}"
-            ))),
-        }
+        combine_selected_fetches(
+            want_prs,
+            want_issues,
+            prs,
+            issues.map(|tasks| (tasks, Vec::new())),
+        )
+        .map(|(tasks, _, _)| tasks)
     }
 
     /// Variant of `fetch_selected` that surfaces partial failures
     /// to the caller as a structured side-channel instead of just a
     /// `tracing::warn`. Returns `(tasks, partial_failure)` — the
     /// second slot is `Some` when one side errored but the other
-    /// returned results AND we returned `Ok` to keep the inbox
+    /// completed successfully AND we returned `Ok` to keep the inbox
     /// alive (the silent-partial behaviour the polling layer wants
     /// to surface to the user).
     ///
@@ -2408,33 +2428,13 @@ impl GhClient {
             }
         };
         let (prs, issues) = tokio::join!(pr_fut, issue_fut);
-        match (prs, issues) {
-            (Ok(mut p), Ok(i)) => {
-                p.extend(i);
-                Ok((p, None))
-            }
-            (Ok(p), Err(e)) => {
-                if want_issues && p.is_empty() {
-                    Err(e)
-                } else {
-                    let msg = format!("issues sync failed (PRs OK): {e}");
-                    tracing::warn!("{msg}");
-                    Ok((p, Some(msg)))
-                }
-            }
-            (Err(e), Ok(i)) => {
-                if want_prs && i.is_empty() {
-                    Err(e)
-                } else {
-                    let msg = format!("PRs sync failed (issues OK): {e}");
-                    tracing::warn!("{msg}");
-                    Ok((i, Some(msg)))
-                }
-            }
-            (Err(pr_err), Err(issue_err)) => Err(GhError::Graphql(format!(
-                "both PR and issue fetches failed: PRs={pr_err}; issues={issue_err}"
-            ))),
-        }
+        combine_selected_fetches(
+            want_prs,
+            want_issues,
+            prs,
+            issues.map(|tasks| (tasks, Vec::new())),
+        )
+        .map(|(tasks, partial, _)| (tasks, partial))
     }
 
     /// Round-robin variant of
@@ -2496,33 +2496,7 @@ impl GhClient {
             }
         };
         let (prs, issues) = tokio::join!(pr_fut, issue_fut);
-        match (prs, issues) {
-            (Ok(mut p), Ok((i, m))) => {
-                p.extend(i);
-                Ok((p, None, m))
-            }
-            (Ok(p), Err(e)) => {
-                if want_issues && p.is_empty() {
-                    Err(e)
-                } else {
-                    let msg = format!("issues sync failed (PRs OK): {e}");
-                    tracing::warn!("{msg}");
-                    Ok((p, Some(msg), Vec::new()))
-                }
-            }
-            (Err(e), Ok((i, m))) => {
-                if do_pr_side && i.is_empty() {
-                    Err(e)
-                } else {
-                    let msg = format!("PRs sync failed (issues OK): {e}");
-                    tracing::warn!("{msg}");
-                    Ok((i, Some(msg), m))
-                }
-            }
-            (Err(pr_err), Err(issue_err)) => Err(GhError::Graphql(format!(
-                "both PR and issue fetches failed: PRs={pr_err}; issues={issue_err}"
-            ))),
-        }
+        combine_selected_fetches(do_pr_side, want_issue_side, prs, issues)
     }
 
     /// Like `fetch_selected_with_status` but also runs the
@@ -2561,33 +2535,7 @@ impl GhClient {
             }
         };
         let (prs, issues) = tokio::join!(pr_fut, issue_fut);
-        match (prs, issues) {
-            (Ok(mut p), Ok((i, m))) => {
-                p.extend(i);
-                Ok((p, None, m))
-            }
-            (Ok(p), Err(e)) => {
-                if want_issues && p.is_empty() {
-                    Err(e)
-                } else {
-                    let msg = format!("issues sync failed (PRs OK): {e}");
-                    tracing::warn!("{msg}");
-                    Ok((p, Some(msg), Vec::new()))
-                }
-            }
-            (Err(e), Ok((i, m))) => {
-                if want_prs && i.is_empty() {
-                    Err(e)
-                } else {
-                    let msg = format!("PRs sync failed (issues OK): {e}");
-                    tracing::warn!("{msg}");
-                    Ok((i, Some(msg), m))
-                }
-            }
-            (Err(pr_err), Err(issue_err)) => Err(GhError::Graphql(format!(
-                "both PR and issue fetches failed: PRs={pr_err}; issues={issue_err}"
-            ))),
-        }
+        combine_selected_fetches(want_prs, want_issue_side, prs, issues)
     }
 
     /// Post a top-level comment on an issue or PR. PRs ARE issues in
@@ -3546,6 +3494,93 @@ mod tests {
 
     fn logins(names: &[&str]) -> std::collections::BTreeSet<String> {
         names.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn graphql_error(message: &str) -> GhError {
+        GhError::Graphql(message.to_string())
+    }
+
+    #[test]
+    fn successful_empty_side_keeps_degraded_sync_alive() {
+        let (tasks, partial, _) = combine_selected_fetches(
+            true,
+            true,
+            Ok(Vec::new()),
+            Err(graphql_error("issues unavailable")),
+        )
+        .expect("an empty successful PR fetch is still a successful side");
+        assert!(tasks.is_empty());
+        assert!(
+            partial
+                .as_deref()
+                .is_some_and(|message| message.contains("issues unavailable"))
+        );
+
+        let (tasks, partial, _) = combine_selected_fetches(
+            true,
+            true,
+            Err(graphql_error("PRs unavailable")),
+            Ok((Vec::new(), Vec::new())),
+        )
+        .expect("an empty successful issue fetch is still a successful side");
+        assert!(tasks.is_empty());
+        assert!(
+            partial
+                .as_deref()
+                .is_some_and(|message| message.contains("PRs unavailable"))
+        );
+    }
+
+    #[test]
+    fn failure_of_the_only_requested_side_still_fails_sync() {
+        assert!(
+            combine_selected_fetches(
+                false,
+                true,
+                Ok(Vec::new()),
+                Err(graphql_error("issues unavailable")),
+            )
+            .is_err()
+        );
+        assert!(
+            combine_selected_fetches(
+                true,
+                false,
+                Err(graphql_error("PRs unavailable")),
+                Ok((Vec::new(), Vec::new())),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn next_page_requires_a_cursor() {
+        let error = next_page_cursor(
+            graphql::GqlPageInfo {
+                has_next_page: true,
+                end_cursor: None,
+            },
+            "test search",
+        )
+        .expect_err("a next page without its cursor is incomplete coverage");
+        assert!(matches!(error, GhError::Graphql(message) if message.contains("endCursor=null")));
+        assert_eq!(
+            next_page_cursor(
+                graphql::GqlPageInfo {
+                    has_next_page: true,
+                    end_cursor: Some("CURSOR".into()),
+                },
+                "test search",
+            )
+            .unwrap()
+            .as_deref(),
+            Some("CURSOR")
+        );
+        assert!(
+            next_page_cursor(graphql::GqlPageInfo::default(), "test search")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

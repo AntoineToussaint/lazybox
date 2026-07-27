@@ -476,6 +476,35 @@ async fn full_pagination_marks_result_complete() {
     mock.shutdown().await;
 }
 
+#[tokio::test]
+async fn missing_next_page_cursor_marks_result_partial() {
+    let page = serde_json::json!([
+        {
+            "id": "a", "identifier": "ENG-1", "title": "one", "description": null,
+            "url": "https://l.app/1", "updatedAt": "2026-01-01T00:00:00Z",
+            "priority": null,
+            "state": { "name": "", "type": "unstarted" },
+            "assignee": null, "creator": null,
+            "team": { "key": "ENG" }, "labels": { "nodes": [] }
+        }
+    ]);
+    let mock = spawn_mock(vec![
+        viewer_response("me"),
+        issues_response(page, true, None),
+    ])
+    .await;
+
+    let client = LinearClient::with_key("k").with_endpoint(mock.url());
+    let outcome = client.fetch_all_with_coverage().await.unwrap();
+    assert_eq!(outcome.tasks.len(), 1, "the fetched prefix is preserved");
+    assert!(
+        outcome.is_partial(),
+        "missing cursor means the fetch did not cover every page"
+    );
+
+    mock.shutdown().await;
+}
+
 /// Env-var wiring. Combined into one test so the two cases don't
 /// race each other through the shared process env in parallel
 /// execution.

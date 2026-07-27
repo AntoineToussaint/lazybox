@@ -398,7 +398,16 @@ pub fn channel_name_for_terminal(
         .filter(|c| c.is_ascii_hexdigit())
         .take(8)
         .collect::<String>();
-    sluggify(&format!("{prefix}{workspace_key}-{short}-{agent_id}",))
+    const MAX_NAME_LEN: usize = 80;
+    const MIN_WORKSPACE_LEN: usize = 10;
+    let agent_limit = MAX_NAME_LEN - MIN_WORKSPACE_LEN - short.len() - 2;
+    let agent = sluggify_with_limit(agent_id, agent_limit);
+    let suffix = format!("-{short}-{agent}");
+    let workspace = sluggify_with_limit(
+        &format!("{prefix}{workspace_key}"),
+        MAX_NAME_LEN - suffix.len(),
+    );
+    format!("{workspace}{suffix}")
 }
 
 /// Slug a string into a valid Slack channel name: lowercase letters,
@@ -415,6 +424,11 @@ pub fn channel_name_for_terminal(
 /// input (e.g. `acme/widget#186`) the same way before matching it
 /// against parsed channel names.
 pub fn sluggify(input: &str) -> String {
+    sluggify_with_limit(input, 80)
+}
+
+fn sluggify_with_limit(input: &str, limit: usize) -> String {
+    debug_assert!(limit >= 9);
     let mut s = String::with_capacity(input.len());
     for c in input.chars() {
         if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
@@ -423,9 +437,9 @@ pub fn sluggify(input: &str) -> String {
             s.push('-');
         }
     }
-    if s.chars().count() > 80 {
+    if s.chars().count() > limit {
         let digest = fnv1a_64(s.as_bytes());
-        let mut head: String = s.chars().take(71).collect();
+        let mut head: String = s.chars().take(limit - 9).collect();
         while matches!(head.chars().last(), Some('-' | '.' | '_')) {
             head.pop();
         }
@@ -575,6 +589,7 @@ mod tests {
         let long = format!("github-{}", "a".repeat(100));
         let n = channel_name_for_terminal(&long, "deadbeef", "claude", "");
         assert!(n.chars().count() <= 80);
+        assert!(n.ends_with("-deadbeef-claude"));
     }
 
     /// One-shot raw HTTP server returning a fixed status line +
@@ -654,11 +669,9 @@ mod tests {
     }
 
     /// Two long (session, agent) pairs sharing their first 80 chars
-    /// used to truncate to the SAME channel name — the `name_taken`
-    /// recovery then silently routed both agents into one channel.
-    /// The hash suffix keeps them distinct (and deterministic).
+    /// must keep their ownership suffixes distinct and deterministic.
     #[test]
-    fn long_names_get_distinct_hash_suffixes() {
+    fn long_names_keep_distinct_terminal_suffixes() {
         let shared = format!("github-{}", "a".repeat(100));
         // Distinct sessions in the same long-named workspace: the
         // 8-char session shorts differ but sit past the 80-char cut.
@@ -674,6 +687,8 @@ mod tests {
             );
             assert!(!n.ends_with(['-', '.', '_']));
         }
+        assert!(one.ends_with("-11111111-claude"));
+        assert!(two.ends_with("-22222222-claude"));
         // Deterministic across calls — the name must be findable on
         // the next lazybox boot.
         assert_eq!(

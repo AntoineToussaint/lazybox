@@ -183,15 +183,17 @@ counterweight to relaxed approvals.
 
 ## Agent state detection
 
-**Status:** beta
+**Status:** stable
 **Crate(s):** `agents` (`src/detect.rs`, `src/state_machine.rs`, `tests/detect_fixtures.rs`), `ipc` (`AgentState`)
 **Config / flags:** `agent.quiet_classify_secs` (quiet-timer → `Done` window, default 5), `agent.working_watchdog_secs` (stuck-`Working` fail-safe, default 15, `0` disables)
 **Key bindings:** `!` jump to next waiting agent, `Shift-F` jump to next failing-CI PR
 
 ### What it does
-Infers whether an agent is **Working**, needs input (**InputNeeded**), or is
-**Idle** from its terminal output, so the sidebar can badge waiting sessions and
-`!` can jump to the next one needing you.
+Tracks whether an agent is **Working**, needs input (**InputNeeded**), or has
+finished a turn (**Done**) so the sidebar can accurately badge sessions and `!`
+can jump to the next one needing you. Structured lifecycle hooks are
+authoritative where the agent provides them; tested terminal-state detection
+and settle invariants cover the remaining paths.
 
 ### How to use it
 Watch the sidebar agent-state chips. Press `!` to move the cursor to the next
@@ -231,8 +233,9 @@ since a ticking counter can mask a genuinely long silent tool call.
 - [ ] `Shift-F` jumps to the next PR with failing/mixed CI.
 
 ### Known sharp edges
-- Detection is heuristic over rendered terminal bytes; novel agent UIs or themes can fool it. The structured runtime is the longer-term replacement.
-- Codex/Cursor pattern sets are narrower than Claude's and miss custom prompt phrasings.
+- Generic CLIs rely on their configured `asking_patterns`; add a pattern when a
+  custom agent uses a prompt lazybox cannot identify.
+- Novel third-party agent UI changes can require a detector fixture update.
 
 ---
 

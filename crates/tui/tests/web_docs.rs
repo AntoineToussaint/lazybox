@@ -108,8 +108,80 @@ fn homepage_never_advertises_the_removed_single_w_action() {
         page.matches("w w").count() >= 5,
         "homepage barely teaches `w w`"
     );
-    assert!(page.contains("Automation you can see"));
-    assert!(page.contains("Terminals fail visibly"));
+}
+
+#[test]
+fn flagship_workflows_are_prominent_across_public_discovery_surfaces() {
+    let homepage = read("web/src/pages/index.astro");
+    assert_eq!(
+        homepage.matches("<article class=\"story").count(),
+        10,
+        "homepage must give each flagship workflow its own visual story"
+    );
+    for expected in [
+        "Always open in the right folder",
+        "Working, Input Needed, and Done are stable, accurate",
+        "Recent snippets",
+        "sidebar’s <code>]N</code> badge",
+        "Start on the issue. Keep the same live session",
+        "tmux 3.3 or newer",
+        "Complete GitHub workflow",
+        "10 repositories",
+        "15 live sessions",
+        "Ask Lazybox",
+        "Claude Code, Codex, and Cursor",
+        "non-racing which-key popup",
+    ] {
+        assert!(
+            homepage.contains(expected),
+            "homepage flagship story missing {expected:?}"
+        );
+    }
+
+    let core = read("web/src/content/docs/docs/tutorials/core-workflows.md");
+    for expected in [
+        "Always open in the right folder",
+        "stable and accurate enough",
+        "Recent order persists",
+        "workspace's `]N`",
+        "Start on an issue and continue on its PR",
+        "same live tmux session",
+        "Complete GitHub work inside lazybox",
+        "10 repositories and 15 live",
+        "allowlisted",
+        "Claude Code, Codex, and Cursor",
+        "Learn shortcuts as you use them",
+    ] {
+        assert!(
+            core.contains(expected),
+            "core-workflows guide missing {expected:?}"
+        );
+    }
+
+    let docs_home = read("web/src/content/docs/docs/index.md");
+    assert!(
+        docs_home.contains("[Core workflows](/docs/tutorials/core-workflows/)"),
+        "docs landing page does not lead into the core workflows"
+    );
+    let sidebar = read("web/astro.config.mjs");
+    assert!(
+        sidebar.contains("docs/tutorials/core-workflows"),
+        "core workflows are not linked from the docs sidebar"
+    );
+
+    let snippets = read("web/src/content/docs/docs/how-to/use-snippets.md");
+    for expected in [
+        "Recent order persists",
+        "`]N` badge",
+        "confirm-with-preview",
+        "hot-reloads",
+        "lazybox—not the agent—owns the filesystem write",
+    ] {
+        assert!(
+            snippets.contains(expected),
+            "snippet reuse loop missing {expected:?}"
+        );
+    }
 }
 
 #[test]

@@ -8,9 +8,10 @@ classic snippet-system flaw of "expand, then wait for me to press
 Enter."
 
 Snippets are **plain YAML files** you own and keep in version control
-or your dotfiles. There is no in-app editor by design: creating,
-editing, and deleting a snippet all mean editing a file. Discovery,
-though, lives in the app: a read-only **snippets browser** (press `]`
+or your dotfiles. You can edit those files directly, or ask **Ask
+Lazybox** to create or improve a snippet through a validated
+confirm-with-preview. Discovery lives in the app too: a read-only
+**snippets browser** (press `]`
 from the sidebar / activity panes, or pick **Browse snippets** from the
 `,` Settings palette) lists every snippet — key, origin, description,
 and body — so you can see what's available without already knowing a
@@ -45,7 +46,8 @@ built-in; you never have to start from an empty library.
          surrounding code.
    ```
 
-2. (Re)start lazybox — snippet files are read once at launch.
+2. (Re)start lazybox after a manual YAML edit. Ask Lazybox additions
+   hot-reload without a restart.
 3. Open a session, focus its terminal, and type `]]s` to open the
    snippet picker, then `rev`. As soon as the typed text uniquely
    matches the key, the body is sent to the agent and submitted
@@ -72,8 +74,9 @@ The outer key (`pr`) is the shortcut you type after the `]]` leader.
 The `description` is an optional one-line label shown in the picker;
 `body` is the text sent to the agent.
 
-Snippets are loaded once, at startup. After editing a file by hand,
-**restart lazybox** (or relaunch it) to pick up the change.
+Snippets edited by hand are loaded at startup, so **restart lazybox**
+(or relaunch it) to pick up a manual file change. Ask Lazybox additions
+take the validated native write path and hot-reload immediately.
 
 #### Let Ask Lazybox add it for you
 
@@ -160,10 +163,11 @@ matches.
 
 ### Edit
 
-Edit the entry in the YAML file and restart lazybox. Because repo-local
-snippets override global ones on key conflict, you can also "edit" a
-shared global snippet for one project by redefining the same key in
-that repo's `.lazybox/snippets.yaml`.
+Edit the entry in the YAML file and restart lazybox, or ask Ask Lazybox
+to improve the existing key and approve its preview for an immediate
+hot reload. Because repo-local snippets override global ones on key
+conflict, you can also "edit" a shared global snippet for one project
+by redefining the same key in that repo's `.lazybox/snippets.yaml`.
 
 ### Delete
 

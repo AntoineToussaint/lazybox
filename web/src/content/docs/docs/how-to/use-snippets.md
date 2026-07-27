@@ -1,6 +1,6 @@
 ---
 title: Use snippets
-description: Put repeated, multi-sentence agent prompts a few keystrokes away — create, browse, and auto-submit snippets from any agent terminal.
+description: Reuse agent prompts, repeat recent instructions, track per-workspace progress, and create snippets safely through Ask Lazybox.
 ---
 
 Snippets are short keys that expand into a pre-written prompt and **auto-submit**
@@ -18,7 +18,22 @@ sent and submitted immediately — no `Enter`. The whole chord reads `]]srev`.
 In the picker: keep typing to filter (it matches key, description, and
 category), `↑`/`↓` to move, `Enter` to send the highlighted row, `Esc` to
 cancel. Snippets you've sent float into a **Recent** group at the top, so
-repeating one is `]]s` then `Enter`.
+repeating one is `]]s` then `Enter`. Recent order persists in the state
+database across lazybox restarts.
+
+## Read workspace progress at a glance
+
+Each workspace remembers the distinct snippet keys sent to it. Its sidebar row
+shows a dim `]N` badge, where `N` is the number of distinct snippets applied:
+
+1. Send `]]srev`; the row shows `]1`.
+2. Send `]]stest`; it becomes `]2`.
+3. Send `rev` again; it stays `]2` because the badge tracks workflows started,
+   not total invocations.
+
+This makes it easy to return later and see that review or testing has already
+begun. The snippet history moves with the workspace when sessions are adopted
+or an issue session continues in its PR.
 
 ## Browse what's available
 
@@ -27,10 +42,10 @@ settings palette) for a read-only catalog of every snippet — key, origin,
 description, and full body. Press `e` there to open the YAML file. Unlike the
 `]]s` picker, the browser needs no focused terminal.
 
-## Write your own
+## Write your own in YAML
 
-Snippets are plain YAML you own — there's no in-app editor by design. Add an
-entry under `snippets:` in `~/.lazybox/snippets.yaml`:
+Snippets remain plain YAML you own. For the manual path, add an entry under
+`snippets:` in `~/.lazybox/snippets.yaml`:
 
 ```yaml
 snippets:
@@ -43,8 +58,29 @@ snippets:
 ```
 
 The outer key (`pr`) is what you type after `]]s`. `description` and `category`
-are optional (category adds a group header and colored tag). Files are read
-**once at startup** — restart lazybox after editing.
+are optional (category adds a group header and colored tag). Manual file edits
+are read at startup, so restart lazybox after changing YAML by hand.
+
+## Create or improve a snippet with Ask Lazybox
+
+Ask Lazybox closes the loop from product guidance to a reusable instruction:
+
+1. Press `?` and ask how to run the workflow you have in mind.
+2. Ask it to create a new snippet or improve an existing key.
+3. Inspect the proposed key, category, description, and full body in the
+   confirm-with-preview.
+4. Confirm. lazybox validates and writes the global YAML entry itself, then
+   hot-reloads the merged catalog.
+5. Use the new key immediately through `]]s<key>`—no restart required.
+
+The safety boundary is intentionally small. The assistant can only propose
+allowlisted structured actions and config keys; lazybox validates values
+against live state, shows the preview, and applies nothing until you confirm.
+lazybox—not the agent—owns the filesystem write.
+
+After you send the new snippet it joins **Recent**, persists across restarts,
+and increments that workspace's `]N` badge if the key is new there. This turns
+one conversation into a repeatable workflow with visible progress.
 
 ## Layer global and per-repo libraries
 

@@ -1,11 +1,11 @@
 //! `Tour` — the in-app onboarding walkthrough (issue #146, #112).
 //!
 //! A skippable, stepped overlay card built around the workflows a
-//! first-time user actually runs: starting a worktree-backed session
-//! from scratch, triaging the inbox, putting an agent on a task,
-//! juggling several sessions, and shipping. Each card is a short
-//! user story rather than a feature dump, and the flow works even
-//! from an empty inbox (a fresh user has no row to act on yet).
+//! first-time user actually runs: opening every tool in the correct
+//! task checkout, following reliable attention signals, preserving
+//! work across issue→PR and process restarts, and shipping through
+//! GitHub. Each card is a short user story rather than a feature dump,
+//! and the flow works even from an empty inbox.
 //!
 //! Launched automatically the first time lazybox boots into the panes
 //! (tracked by `~/.lazybox/config.yaml::ui.tour_seen`) and re-invocable
@@ -43,109 +43,188 @@ const STEPS: &[TourStep] = &[
     TourStep {
         title: "Welcome to lazybox",
         body: &[
-            "lazybox turns work into sessions: every task gets its own",
-            "git worktree with an agent (Claude Code) or a shell running",
-            "in it — and lazybox hides the worktree juggling for you.",
+            "lazybox keeps GitHub work, agents, and terminals together",
+            "so you can run many tasks and step in only where needed.",
             "",
-            "Track GitHub repos and their PRs/issues flow into your",
-            "inbox, but you don't need any of that to start — a",
-            "worktree-backed session works from an empty inbox too.",
+            "This tour follows the complete workflow: open the right",
+            "folder, let agents work, follow attention, and ship.",
             "",
-            "Keyboard or mouse — lazybox drives fully with either.",
+            "Keyboard or mouse — use either throughout the app.",
+            "Click a pane to focus, a row to select, drag to resize;",
+            "the wheel scrolls and right-click opens links.",
+            "",
             "Step with → / Enter (or click below); ← goes back,",
             "Esc skips. Re-open this tour any time with Shift-T.",
         ],
     },
     TourStep {
-        title: "1 · Start from scratch",
+        title: "1 · Always open in the right folder",
         body: &[
-            "Empty inbox? Here's a first move that needs no PRs:",
+            "Select a task in any repo. lazybox creates, locates, and",
+            "later cleans up its isolated checkout automatically.",
             "",
-            "  x p       new project (register a repo or local space)",
-            "  x n       new workspace inside it",
-            "  a c / s   start Claude Code, or a plain shell in it",
+            "  w w   put the default agent to work",
+            "  s     open a shell",
+            "  e     open your editor",
             "",
-            "You land in a fresh git worktree + session, zero setup.",
+            "All three land in the same task folder. No cd, branch",
+            "switching, path lookup, or worktree command is yours.",
             "",
-            "In a hurry? Shift-W does project → workspace → agent in",
-            "one step, from any pane.",
+            "Starting from empty? x p adds a project, x n creates a",
+            "new workspace, and Shift-W runs both steps plus an agent.",
         ],
     },
     TourStep {
-        title: "2 · Your inbox",
+        title: "2 · Use your agent, with a fast default",
         body: &[
-            "Once you track GitHub repos, PRs and issues flow in,",
-            "grouped by repo and sorted by what needs you.",
+            "Claude Code, Codex, and Cursor are built in. Generic YAML",
+            "agent entries add any other CLI without recompiling.",
             "",
-            "Rows carry attention signals so you triage at a glance:",
-            "  • CI failing            • review pending",
-            "  • agent asking          • unread activity",
+            "Choose a default agent once; w w then starts it with the",
+            "task, repository, and prompt already in context.",
+            "",
+            "Need a different tool here? Press a for its which-key menu:",
+            "  a c  Claude      a x  Codex      a u  Cursor",
+            "",
+            "w S / w M / w L pick a model tier. Default means speed,",
+            "not lock-in; every agent gets the same lazybox workflow.",
+        ],
+    },
+    TourStep {
+        title: "3 · Stay Git-native from task to result",
+        body: &[
+            "An agent edits, tests, commits, pushes, and opens a PR with",
+            "the normal git and gh tools inside the isolated checkout.",
+            "",
+            "Nothing is trapped behind a lazybox-only workflow: inspect",
+            "the branch from a shell, open it in your editor, or use any",
+            "other developer tool at any point.",
+            "",
+            "Pushes, comments, checks, reviews, and merge state then flow",
+            "back into the same workspace through GitHub.",
+        ],
+    },
+    TourStep {
+        title: "4 · Trust what needs attention",
+        body: &[
+            "Working, Input Needed, and Done are stable, accurate agent",
+            "states — not guesses that make you poll every terminal.",
+            "",
+            "They combine with CI, conflicts, reviews, unread activity,",
+            "and sync state so the inbox names the next workspace.",
+            "",
+            "  !         jump to the agent asking for input",
+            "  Shift-F   jump to failing CI",
+            "  Shift-S   cycle Inbox → Inactive → Snoozed",
             "",
             "↑ / ↓ move    Enter opens    / searches",
-            "Shift-S cycles mailboxes: Inbox → Inactive → Snoozed.",
             "",
-            "Prefer the mouse? lazybox is fully clickable:",
-            "  • click a pane to focus it, a row to select it",
-            "  • drag the splitters to resize, wheel scrolls back",
-            "  • right-click a link in a terminal to open it",
+            "Answer or fix it, then return to the fleet.",
         ],
     },
     TourStep {
-        title: "3 · Put an agent on it",
+        title: "5 · Keep 10 repos and 15 sessions calm",
         body: &[
-            "Press w w on any row and lazybox opens a worktree, then",
-            "launches Claude Code with a prompt fit to the task. A few",
-            "ways that plays out:",
+            "A real workload can span 10 repositories and 15 live",
+            "sessions without becoming 15 terminals to babysit.",
             "",
-            "  • A PR you review has failing CI → Shift-F jumps to it,",
-            "    then w w lets the agent fix the build.",
-            "  • An open issue → w w starts an agent to implement it.",
-            "  • A scratch idea on a repo → x n, a c, done.",
+            "Rows stay grouped by workspace; agent attention, GitHub",
+            "activity, terminal tabs, and task state remain together.",
             "",
-            "a opens the agent menu: a c / a x / a u pick Claude /",
-            "Codex / Cursor; s is a plain shell; e opens the worktree",
-            "in your editor.",
+            "  `         fuzzy-jump across every repo",
+            "  !         go straight to the agent asking",
+            "  Shift-F   go straight to the broken build",
+            "  x a       adopt sessions started elsewhere",
+            "",
+            "Tab cycles panes; from a terminal, ]] then ` jumps too.",
         ],
     },
     TourStep {
-        title: "4 · Juggle many sessions",
+        title: "6 · Snippets remember your progress",
         body: &[
-            "Every task is its own worktree-backed session, so you can",
-            "run several at once without minding the git plumbing.",
+            "Send a review prompt with ]]srev. Sent snippets move into",
+            "Recent and persist across lazybox restarts.",
             "",
-            "  `          jump to any workspace (fuzzy picker, all repos)",
-            "  !          jump to the next agent waiting on your input",
-            "  Shift-F    jump to the next PR with failing CI",
-            "  x a        adopt worktrees/agents started elsewhere",
-            "  Tab        cycle the sidebar, activity and terminal panes",
+            "Switch away and come back later: the workspace keeps the",
+            "distinct snippet keys it has received, and its ]N sidebar",
+            "badge shows how many workflows have already started.",
             "",
-            "Jump works from anywhere — inside an agent, press ]] then `.",
+            "Open ]]s and press Enter to repeat the latest immediately.",
+            "Review, test, and release prompts stay easy to resume.",
         ],
     },
     TourStep {
-        title: "5 · Ship it & make it yours",
+        title: "7 · Start on an issue, continue on its PR",
         body: &[
-            "When a PR is ready, press g — a which-key menu pops up",
-            "showing everything you can do to this PR:",
+            "Put an agent on an issue before a pull request exists.",
+            "When its implementation PR appears, lazybox carries the",
+            "live session and task checkout into the PR workspace.",
             "",
+            "The terminal, agent context, prompts, snippets, notes, and",
+            "activity continue under the PR — no duplicate terminal or",
+            "manual handoff.",
+            "",
+            "The transfer can happen from the closing-issue link or",
+            "branch match. Use x j to join it manually when needed.",
+        ],
+    },
+    TourStep {
+        title: "8 · Restart without stopping the work",
+        body: &[
+            "With tmux 3.3 or newer installed, agents and shells outlive",
+            "the lazybox UI and server process.",
+            "",
+            "Start a long task, close lazybox, then reopen it: lazybox",
+            "reattaches to that same live tmux session and reconstructs",
+            "its screen and scrollback so you continue where you left.",
+            "",
+            "Without supported tmux, lazybox falls back automatically to",
+            "raw PTYs; those sessions do not survive the process.",
+        ],
+    },
+    TourStep {
+        title: "9 · Finish GitHub work without bouncing out",
+        body: &[
+            "Read full issue or PR descriptions and comments, reply,",
+            "inspect CI and reviews, and keep the activity in one place.",
+            "",
+            "When a PR is ready, press g for its which-key menu:",
             "  g m  merge PR    g r  reviewers   g a  assignees",
             "  g l  labels      g o  open in browser",
             "",
-            "g shows the menu; the second key picks. Grouped actions",
-            "live behind their leader only — re-add direct aliases via",
-            "ui.action_keys if you miss them.",
+            "You can also enable merge-on-green, close an issue, then",
+            "archive and clean up the finished workspace.",
+        ],
+    },
+    TourStep {
+        title: "10 · Ask Lazybox — and let it act safely",
+        body: &[
+            "Press ? to search your live keys or ask a workflow question",
+            "in plain language.",
             "",
-            "? opens Ask Lazybox (press ? again for all keys); , opens",
-            "Settings, t themes, q q quits. In a terminal, press ]]q",
-            "to return first—the embedded program owns other keys.",
+            "Ask for a review snippet and the assistant proposes its key,",
+            "category, description, and full body in a preview.",
             "",
-            "t opens the theme picker: light + dark, live preview,",
-            "and your pick persists across restarts.",
+            "Nothing changes until you confirm. Actions are allowlisted",
+            "and validated; lazybox, not the agent, writes the file.",
+            "The snippet hot-reloads and works through ]]s immediately.",
+        ],
+    },
+    TourStep {
+        title: "11 · Learn only the next key you need",
+        body: &[
+            "Context keeps primary actions small. Related actions live",
+            "behind leaders: a for agents, g for GitHub, x for workspace.",
             "",
-            "It's all plain YAML in ~/.lazybox/config.yaml: scopes,",
-            "agents, keybindings, theme.",
+            "Press a leader and a non-racing which-key popup shows every",
+            "valid continuation. From a terminal, ]] opens lazybox",
+            "commands while ordinary keys still reach the agent or shell.",
             "",
-            "That's the tour — Enter to finish, Shift-T to re-open it.",
+            "Footer hints, context menus, Ask Lazybox, and ? help all use",
+            "your effective action catalog. Switch a preset or remap an",
+            "action with alternatives; the generated guidance follows.",
+            "",
+            ", opens Settings; q q quits. Shift-T reopens this tour.",
         ],
     },
 ];
@@ -459,7 +538,7 @@ mod tests {
         assert!(all.contains("x p"), "new-project key missing");
         assert!(all.contains("new workspace"), "new-workspace step missing");
         assert!(
-            all.contains("Start from scratch"),
+            all.contains("Starting from empty"),
             "from-scratch step missing",
         );
     }
@@ -470,14 +549,29 @@ mod tests {
     }
 
     #[test]
-    fn snippets_step_is_gone() {
-        // Snippets are a power-user feature; onboarding shouldn't carry
-        // them. Guard against the step creeping back in.
-        let all = render_all().to_lowercase();
-        assert!(
-            !all.contains("snippet"),
-            "snippets leaked back into the tour"
-        );
+    fn covers_the_flagship_workflows() {
+        let all = render_all();
+        for expected in [
+            "Always open in the right folder",
+            "Stay Git-native from task to result",
+            "Working, Input Needed, and Done are stable, accurate",
+            "10 repositories and 15 live",
+            "Snippets remember your progress",
+            "Start on an issue, continue on its PR",
+            "same live tmux session",
+            "Finish GitHub work without bouncing out",
+            "Ask Lazybox — and let it act safely",
+            "Use your agent, with a fast default",
+            "Learn only the next key you need",
+        ] {
+            assert!(all.contains(expected), "tour missing {expected:?}");
+        }
+        for expected in ["]]srev", "Recent", "]N sidebar", "hot-reloads"] {
+            assert!(
+                all.contains(expected),
+                "snippet workflow missing {expected:?}"
+            );
+        }
     }
 
     #[test]
@@ -490,6 +584,7 @@ mod tests {
             (ActionKind::NewProject, "x p"),
             (ActionKind::NewWorkspace, "x n"),
             (ActionKind::AdoptSessions, "x a"),
+            (ActionKind::CollapseIntoPr, "x j"),
             (ActionKind::Work, "w w"),
             (ActionKind::JumpToWorkspace, "`"),
             (ActionKind::JumpToAsking, "!"),
@@ -527,8 +622,8 @@ mod tests {
                 "tour no longer shows {chord} for {agent}"
             );
         }
-        // The `q q` quit chord and the `]]` return-to-sidebar hint round
-        // out the ship-it card.
+        // The `q q` quit chord and the `]]` terminal leader round out
+        // the generated-guidance card.
         assert_eq!(ActionDef::for_kind(ActionKind::Quit).default_keys, "q q");
         assert!(all.contains("q q"), "tour no longer shows the quit chord");
         // `]]` is `terminal.escape_char` (default `]`) doubled, owned

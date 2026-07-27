@@ -3,82 +3,28 @@ import Layout from '../layouts/Layout.astro';
 
 const repo = 'https://github.com/AntoineToussaint/lazybox';
 const docs = '/docs/';
+const workflows = '/docs/tutorials/core-workflows/';
 const installCmd =
   'brew tap AntoineToussaint/lazybox && brew trust AntoineToussaint/lazybox && brew install lazybox';
 
-const features = [
-  {
-    icon: '⌗',
-    title: 'A fleet, not a tab',
-    body: 'Every PR and issue becomes a workspace with its own agent. Run dozens at once — each in its own embedded terminal — and flip between them instantly without losing your place.',
-    wide: true,
-  },
-  {
-    icon: '◉',
-    title: 'It pings you when an agent is stuck',
-    body: 'The instant an agent hits a permission prompt or needs a decision, lazybox fires a native desktop notification and flags the row. Press ! to jump straight to it. Stop babysitting terminals.',
-    wide: true,
-  },
-  {
-    icon: '⑂',
-    title: 'Worktrees, handled',
-    body: 'Every task gets a fresh, isolated git checkout — created automatically. No branches to make, nothing to stash, no collisions between agents running side by side. You never think about it.',
-  },
-  {
-    icon: '⇄',
-    title: 'GitHub and Linear, one inbox',
-    body: 'PRs, issues, and Linear tickets surface the same way, with read/unread tracking. Mirror activity to Slack — and kick off work with an @lazybox mention.',
-  },
-  {
-    icon: '⌁',
-    title: 'The right prompt, one key',
-    body: 'Press w w and lazybox reads the row — failing CI, a merge conflict, an open issue, review comments — and launches the agent with exactly the right brief.',
-  },
-  {
-    icon: '◎',
-    title: 'Automation you can see',
-    body: 'Press g p for one policies surface: merge on green, auto-fix CI and conflicts, and GitHub auto-merge status — every switch and override visible in one place.',
-  },
-  {
-    icon: '↻',
-    title: 'Terminals fail visibly',
-    body: 'Choose splits or tabs, recall the last prompt after a restart, and inspect the final screen when an agent crashes or fails to start. Clean exits disappear; failures never do.',
-    wide: true,
-  },
-  {
-    icon: '∑',
-    title: 'Route agents through your gateway',
-    body: 'Set one llm_gateway_url and every spawned agent points at your own LLM gateway — lazybox injects the right base-URL env var per provider (Anthropic or OpenAI). Your API key goes straight to the gateway; the daemon never sees it.',
-    wide: true,
-  },
-  {
-    icon: '⇲',
-    title: 'Local or remote',
-    body: 'Runs as an in-process daemon by default, or split client and daemon over a Unix socket and forward it across SSH — heavy lifting on a remote box, inbox on your laptop.',
-    wide: true,
-  },
-];
-
-const steps = [
-  {
-    title: 'Connect your sources',
-    body: 'Point lazybox at your GitHub repos and Linear. Every PR, issue, and ticket lands in one keyboard-driven inbox — grouped, tracked, read/unread.',
-    code: 'owner/name',
-  },
-  {
-    title: 'Spawn agents in parallel',
-    body: 'Press a c, a x, or a u for Claude Code, Codex, or Cursor — or w w to let lazybox pick the brief. Each gets its own isolated checkout. Run as many as you like.',
-    code: 'a c · a x · a u · w w',
-  },
-  {
-    title: 'Step in only when needed',
-    body: 'Agents work on their own. lazybox notifies you the moment one needs a decision — jump to it with !, unblock it, and move on.',
-    code: '!',
-  },
+const fleet = [
+  { repo: 'lazybox', sessions: 3, item: '#609 docs showcase', state: 'working', tone: 'blue' },
+  { repo: 'api-gateway', sessions: 2, item: '#184 rate limits', state: 'input needed', tone: 'amber' },
+  { repo: 'ios-client', sessions: 1, item: '#72 offline sync', state: 'done', tone: 'green' },
+  { repo: 'docs-site', sessions: 1, item: '#91 migration guide', state: 'unread', tone: 'bright' },
+  { repo: 'billing', sessions: 2, item: '#311 invoice retry', state: 'CI failed', tone: 'red' },
+  { repo: 'design-system', sessions: 1, item: '#48 focus ring', state: 'review', tone: 'purple' },
+  { repo: 'infra', sessions: 2, item: '#207 runner image', state: 'working', tone: 'blue' },
+  { repo: 'mobile', sessions: 1, item: '#156 deep links', state: 'done', tone: 'green' },
+  { repo: 'sdk-js', sessions: 1, item: '#229 streams', state: 'working', tone: 'blue' },
+  { repo: 'telemetry', sessions: 1, item: '#63 sampling', state: 'done', tone: 'green' },
 ];
 ---
 
-<Layout>
+<Layout
+  title="lazybox — one reactive workflow for GitHub and coding agents"
+  description="lazybox keeps tasks, managed worktrees, coding agents, GitHub activity, and live terminals together across every repository."
+>
   <a href="#main" class="skip-link">Skip to content</a>
 
   <div class="nav-wrap" id="nav">
@@ -94,8 +40,7 @@ const steps = [
           lazybox
         </a>
         <div class="links">
-          <a href="#features" class="hide-sm">Features</a>
-          <a href="#how" class="hide-sm">How it works</a>
+          <a href="#workflows" class="hide-sm">Workflows</a>
           <a href={docs}>Docs</a>
           <a href={repo} class="ghbtn" aria-label="Star lazybox on GitHub">
             <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
@@ -109,20 +54,16 @@ const steps = [
   <main id="main">
     <header class="hero">
       <div class="container">
-        <span class="eyebrow"><span class="dot"></span> many agents · one terminal inbox</span>
-        <h1>Run a fleet of agents.<br /><span class="grad">Step in only when it matters.</span></h1>
+        <span class="eyebrow"><span class="dot"></span> many repositories · one continuous workflow</span>
+        <h1>Let the work come to you.<br /><span class="grad">Keep its context all the way to done.</span></h1>
         <p class="lead">
-          lazybox turns every PR and issue — across GitHub and Linear — into a workspace
-          with its own coding agent. Run dozens in parallel; it pings you the moment one
-          needs you. No branches or worktrees to wrangle — lazybox handles all of that.
-        </p>
-
-        <p class="quip">
-          <span class="c">//</span> basically: <b>email and Claude&nbsp;Code had a baby</b> — the inbox brings you the work, the agent does it.
+          lazybox keeps GitHub tasks, coding agents, managed worktrees, and live terminals
+          together. Run work across many repositories, then jump straight to the one agent,
+          check, review, or comment that needs you.
         </p>
 
         <div class="cta-row">
-          <a class="btn btn-primary" href={docs}>Get started →</a>
+          <a class="btn btn-primary" href={workflows}>Explore the core workflows →</a>
           <a class="btn btn-ghost" href={repo}>★ Star on GitHub</a>
         </div>
 
@@ -137,12 +78,12 @@ const steps = [
         <div class="term" data-reveal aria-label="lazybox managing several agents in a terminal">
           <div class="bar">
             <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
-            <span class="title">lazybox — inbox</span>
+            <span class="title">lazybox — reactive inbox</span>
           </div>
           <video
             src="/demo/lazybox.mp4"
             poster="/demo/lazybox.png"
-            aria-label="lazybox inbox with workspaces, CI status, and an embedded terminal"
+            aria-label="lazybox inbox with workspaces, CI status, activity, and embedded agent terminals"
             data-demo
             autoplay
             loop
@@ -158,134 +99,373 @@ const steps = [
     <div class="strip">
       <div class="container">
         <div class="row">
-          <span><b class="mk">⌘</b> <b>Built in Rust</b></span>
-          <span><b class="mk">⇄</b> GitHub + Linear</span>
-          <span><b class="mk">⌁</b> Claude · Codex · Cursor</span>
-          <span><b class="mk">◉</b> Native desktop alerts</span>
+          <span><b class="mk">⌁</b> Claude Code · Codex · Cursor · custom CLIs</span>
+          <span><b class="mk">⑂</b> Transparent task worktrees</span>
+          <span><b class="mk">◉</b> Stable, accurate agent status</span>
+          <span><b class="mk">↻</b> Restart-safe tmux sessions</span>
         </div>
       </div>
     </div>
 
-    <section id="features">
+    <section id="workflows" class="workflows">
       <div class="container">
         <div class="section-head" data-reveal>
-          <p class="kicker">An inbox, not a dashboard</p>
-          <h2>Built to run a lot of agents at once</h2>
-          <p>Many agents in flight, one calm inbox — and it tells you which one needs you.</p>
-        </div>
-        <div class="bento">
-          {features.map((f, i) => (
-            <div class={f.wide ? 'card wide' : 'card'} data-reveal style={`transition-delay:${(i % 3) * 60}ms`}>
-              <div class="icon">{f.icon}</div>
-              <h3>{f.title}</h3>
-              <p>{f.body}</p>
-            </div>
-          ))}
-        </div>
-      </div>
-    </section>
-
-    <section id="how">
-      <div class="container">
-        <div class="section-head" data-reveal>
-          <p class="kicker">How it works</p>
-          <h2>From zero to a fleet in three steps</h2>
-          <p>Wire up your sources, spawn agents in parallel, and let the inbox triage itself.</p>
-        </div>
-        <div class="steps">
-          {steps.map((s, i) => (
-            <div class="step" data-reveal style={`transition-delay:${i * 80}ms`}>
-              <span class="n">{i + 1}</span>
-              <h3>{s.title}</h3>
-              <p>{s.body}</p>
-              <p style="margin-top:0.9rem"><code>{s.code}</code></p>
-            </div>
-          ))}
-        </div>
-      </div>
-    </section>
-
-    <section id="compare">
-      <div class="container">
-        <div class="section-head" data-reveal>
-          <p class="kicker">The shift</p>
-          <h2>The same work, minus the busywork</h2>
-          <p>What chasing tasks across browser tabs turns into once the inbox does the chasing.</p>
-        </div>
-        <div class="compare-grid">
-          <div class="compare-col before" data-reveal>
-            <div class="lbl">Without lazybox</div>
-            <ul>
-              <li>Refresh GitHub. Scan tabs for what changed.</li>
-              <li>Copy an issue into your agent, paste the context by hand.</li>
-              <li>Cut a branch; stash whatever you were on.</li>
-              <li>Babysit the run in case it stops to ask a question.</li>
-              <li>Do it again for the next task — and lose your place.</li>
-            </ul>
-          </div>
-          <div class="compare-col after" data-reveal style="transition-delay:80ms">
-            <div class="lbl">With lazybox</div>
-            <ul>
-              <li>Issues and PRs land in one inbox, flagged unread.</li>
-              <li>Press <kbd>w w</kbd> — the agent starts with the right brief, already in context.</li>
-              <li>A fresh worktree appears on its own. Nothing to stash.</li>
-              <li>Get a desktop ping the moment one needs a decision.</li>
-              <li>Run a dozen at once. Step in only where it counts.</li>
-            </ul>
-          </div>
-        </div>
-        <div class="workflow" data-reveal>
-          <span class="tag">in practice</span>
+          <p class="kicker">The workflows already built in</p>
+          <h2>One task, one thread of context, all the way through</h2>
           <p>
-            <span class="c">$</span> I keep a workspace called <b>Issues &amp; Features</b>. When something
-            comes up, I drop a GitHub issue in it. It shows up in lazybox, I hit <kbd>w w</kbd>, and the
-            agent goes to work — I only look up when it needs me.
+            These are connected product stories, not a list of buttons. Start anywhere,
+            keep the right checkout and session, and let GitHub bring the outcome back.
           </p>
         </div>
-      </div>
-    </section>
 
-    <section class="keys-section">
-      <div class="container">
-        <div class="keys-grid">
-          <div class="keys-copy" data-reveal>
-            <p class="kicker">Terminal-native</p>
-            <h2>Your hands never leave the keyboard</h2>
-            <p>
-              Every pane has its own keymap and the hint bar always shows what's live.
-              Navigate a fleet, unblock the agent that's waiting, and ship — all without
-              reaching for a mouse.
-            </p>
-            <div class="keys-list">
-              <div class="k"><kbd>j</kbd><kbd>k</kbd> navigate the inbox</div>
-              <div class="k"><kbd>a c</kbd>&nbsp;·&nbsp;<kbd>a x</kbd>&nbsp;·&nbsp;<kbd>a u</kbd> spawn Claude / Codex / Cursor</div>
-              <div class="k"><kbd>w w</kbd> auto-prompt for the row's state</div>
-              <div class="k"><kbd>!</kbd> jump to the next agent that needs you</div>
+        <div class="story-list">
+          <article class="story" data-reveal>
+            <div class="story-copy">
+              <span class="story-number">01 · Git-native work</span>
+              <h3>Always open in the right folder—without managing a worktree</h3>
+              <p>
+                Pick a task in any repository. lazybox creates and tracks its isolated checkout,
+                then opens the agent, shell, and editor directly inside that same task folder.
+                No path lookup, <code>cd</code>, branch switch, stash, or cleanup ceremony.
+              </p>
+              <p>
+                From there everything stays ordinary Git: inspect the diff, let an agent commit
+                and push, use <code>gh</code> to open the PR, and watch the resulting checks,
+                comments, reviews, and merge state return to the workspace.
+              </p>
+              <a class="story-link" href={workflows}>Follow the end-to-end guide →</a>
             </div>
-          </div>
-          <div class="keys-card" data-reveal>
-            <div class="bar">
-              <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+            <div class="story-visual" aria-label="A task opening an agent, shell, and editor in one managed worktree">
+              <div class="ui-title"><span>github/acme-api#184</span><b>worktree ready</b></div>
+              <div class="launch-grid">
+                <div class="launch active"><kbd>w w</kbd><strong>Agent</strong><small>~/…/acme-api/issue-184</small></div>
+                <div class="launch"><kbd>s</kbd><strong>Shell</strong><small>~/…/acme-api/issue-184</small></div>
+                <div class="launch"><kbd>e</kbd><strong>Editor</strong><small>~/…/acme-api/issue-184</small></div>
+              </div>
+              <div class="flow-line" aria-hidden="true">
+                <span>select task</span><i>→</i><span>edit · test</span><i>→</i><span>git push</span><i>→</i><span>GitHub flows back</span>
+              </div>
+              <pre><span class="c-dim">$</span> git status --short
+<span class="c-green">M  src/rate_limit.rs</span>
+<span class="c-dim">$</span> gh pr create <span class="c-dim">--fill</span>
+<span class="c-accent">✓ https://github.com/acme/api/pull/185</span></pre>
             </div>
-            <pre><span class="c-dim">┌─ inbox ──────────────────────────────┐</span>
-<span class="unread">● #209  Implement export endpoint</span>     <span class="c-amber">⚠ needs you</span>
-<span class="unread">● #207  Bucket untyped workspaces</span>     <span class="c-accent">◐ working</span>
-<span class="c-dim">○ #206  Wrap multi-line snippet bodies</span>  <span class="c-green">✓ ci</span>
-<span class="unread">● #197  Drop bot-authored Slack msgs</span>    <span class="c-red">✗ ci failed</span>
-<span class="c-dim">○ #195  Collapse out-of-scope issue</span>      <span class="c-green">merged</span>
-<span class="c-dim">└──────────────────────────────────────┘</span>
-  <span class="c-accent">a</span> agent  <span class="c-accent">w</span> work  <span class="c-accent">s</span> shell  <span class="c-accent">!</span> waiting</pre>
-          </div>
+          </article>
+
+          <article class="story reverse" data-reveal>
+            <div class="story-copy">
+              <span class="story-number">02 · Reactive status</span>
+              <h3>Trust the inbox to tell you exactly where attention belongs</h3>
+              <p>
+                Working, Input Needed, and Done are stable, accurate agent states. Combined with
+                failing CI, conflicts, reviews, unread activity, and sync state, they replace
+                terminal polling with a clear next move.
+              </p>
+              <p>
+                Let agents run in parallel. Press <kbd>!</kbd> for the one waiting on you or
+                <kbd>Shift-F</kbd> for the broken build, use <kbd>w w</kbd>, then return to
+                everything else.
+              </p>
+              <a class="story-link" href={workflows}>Learn the attention loop →</a>
+            </div>
+            <div class="story-visual status-demo" aria-label="Agent status moving from Working to Input Needed to Done">
+              <div class="ui-title"><span>agent status</span><b>live</b></div>
+              <div class="state-timeline">
+                <div><i class="pulse blue"></i><strong>Working</strong><small>editing authentication.rs</small></div>
+                <span>→</span>
+                <div class="selected"><i class="pulse amber"></i><strong>Input Needed</strong><small>approve migration?</small></div>
+                <span>→</span>
+                <div><i class="pulse green"></i><strong>Done</strong><small>tests passed</small></div>
+              </div>
+              <div class="attention-row">
+                <kbd>!</kbd><span>jumped to <strong>api-gateway #184</strong></span><b>input needed</b>
+              </div>
+            </div>
+          </article>
+
+          <article class="story" data-reveal>
+            <div class="story-copy">
+              <span class="story-number">03 · Snippets with memory</span>
+              <h3>Reuse the instruction—and see what this workspace has already done</h3>
+              <p>
+                Send a review snippet, switch workspaces, and return later. Recent snippets
+                persist across restarts and float to the top of the picker, so repeating the
+                latest is simply <kbd>]]s</kbd> then <kbd>Enter</kbd>.
+              </p>
+              <p>
+                Each workspace separately remembers the distinct snippets sent to it. The
+                sidebar’s <code>]N</code> badge is a compact progress cue: review, tests, or
+                release prep has already started here.
+              </p>
+              <a class="story-link" href="/docs/how-to/use-snippets/">Use snippets with memory →</a>
+            </div>
+            <div class="story-visual snippet-demo" aria-label="Recent snippets and a per-workspace snippet progress badge">
+              <div class="snippet-sidebar">
+                <div class="mini-label">workspaces</div>
+                <div><span>api #184</span><b>]2</b></div>
+                <div class="active"><span>lazybox #609</span><b>]3</b></div>
+                <div><span>docs #91</span><b>]1</b></div>
+              </div>
+              <div class="snippet-picker">
+                <div class="ui-title"><span>snippets</span><b>Recent</b></div>
+                <div class="snippet-row active"><kbd>rev</kbd><span>Review current diff</span><small>most recent</small></div>
+                <div class="snippet-row"><kbd>test</kbd><span>Run targeted tests</span></div>
+                <div class="snippet-row"><kbd>pr</kbd><span>Open a pull request</span></div>
+                <div class="snippet-command"><span class="c-dim">repeat now</span><strong>]]s + Enter</strong></div>
+              </div>
+            </div>
+          </article>
+
+          <article class="story spotlight reverse" data-reveal>
+            <div class="story-copy">
+              <span class="story-number">04 · Issue → PR continuity</span>
+              <h3>Start on the issue. Keep the same live session when it becomes a PR.</h3>
+              <p>
+                Work does not reset when the GitHub object changes. Start an agent directly on
+                an issue; when its implementation PR appears, lazybox carries the running
+                session and task checkout forward into the PR workspace.
+              </p>
+              <p>
+                Agent context, terminal, prompts, snippets, notes, and activity stay with the
+                work. There is no duplicate terminal or manual handoff. Closing-issue links and
+                branch matches can connect it automatically; <kbd>x j</kbd> is the manual join.
+              </p>
+              <a class="story-link" href={workflows}>See the focused issue-to-PR walkthrough →</a>
+            </div>
+            <div class="story-visual handoff-demo" aria-label="An issue session continuing unchanged after the pull request appears">
+              <div class="handoff-step">
+                <small>1 · start from issue</small>
+                <strong>Issue #184</strong>
+                <span class="session-pill">● claude · session 7f2a</span>
+              </div>
+              <div class="handoff-arrow">→</div>
+              <div class="handoff-step">
+                <small>2 · PR discovered</small>
+                <strong>PR #185 closes #184</strong>
+                <span class="session-pill">● claude · session 7f2a</span>
+              </div>
+              <div class="handoff-arrow">→</div>
+              <div class="handoff-step final">
+                <small>3 · continue</small>
+                <strong>PR #185</strong>
+                <span class="session-pill">● same session 7f2a</span>
+              </div>
+            </div>
+          </article>
+
+          <article class="story spotlight" data-reveal>
+            <div class="story-copy">
+              <span class="story-number">05 · Restart-safe sessions</span>
+              <h3>Close lazybox, not the long-running work</h3>
+              <p>
+                With tmux 3.3 or newer installed, agent and shell sessions outlive the lazybox
+                UI and server. Restart or reconnect and lazybox reattaches to the same running
+                process, reconstructing its screen and scrollback.
+              </p>
+              <p>
+                If supported tmux is unavailable, lazybox falls back automatically to raw PTYs.
+                The terminal still works, but the child process does not survive a lazybox
+                process restart.
+              </p>
+              <a class="story-link" href={workflows}>Verify the restart workflow →</a>
+            </div>
+            <div class="story-visual restart-demo" aria-label="A live tmux session surviving a lazybox restart">
+              <div class="restart-frame">
+                <small>before restart</small>
+                <strong>agent · session 7f2a</strong>
+                <pre><span class="c-accent">Working</span>  running workspace tests…
+<span class="c-dim">142 / 380 passed</span></pre>
+              </div>
+              <div class="restart-action"><span>lazybox restarts</span><b>↻</b></div>
+              <div class="restart-frame after">
+                <small>reattached</small>
+                <strong>agent · same session 7f2a</strong>
+                <pre><span class="c-green">Done</span>  380 tests passed
+<span class="c-dim">scrollback restored · prompt ready</span></pre>
+              </div>
+            </div>
+          </article>
+
+          <article class="story reverse" data-reveal>
+            <div class="story-copy">
+              <span class="story-number">06 · Complete GitHub workflow</span>
+              <h3>Receive the event, understand it, act, and clean up—right here</h3>
+              <p>
+                Read issue and PR descriptions, comments, checks, reviews, and conflicts without
+                reconstructing context in browser tabs. Reply, manage reviewers, assignees, and
+                labels, then merge or arm merge-on-green.
+              </p>
+              <p>
+                Close issues and archive finished workspaces from the same flow. lazybox is the
+                place where GitHub work gets completed, not only where it gets noticed.
+              </p>
+              <a class="story-link" href={workflows}>Follow a GitHub event to completion →</a>
+            </div>
+            <div class="story-visual github-demo" aria-label="A GitHub comment inspected and acted on inside lazybox">
+              <div class="github-event">
+                <small>new review · unread</small>
+                <strong>maya requested changes on PR #185</strong>
+                <p>“Please keep the retry budget scoped per route.”</p>
+              </div>
+              <div class="github-actions">
+                <span><kbd>r</kbd> reply</span>
+                <span><kbd>g r</kbd> reviewers</span>
+                <span><kbd>g a</kbd> assignees</span>
+                <span><kbd>g l</kbd> labels</span>
+                <span><kbd>g g</kbd> merge on green</span>
+                <span><kbd>g m</kbd> merge</span>
+              </div>
+              <div class="github-result"><b>✓ merged</b><span>workspace ready to archive</span></div>
+            </div>
+          </article>
+
+          <article class="story fleet-story" data-reveal>
+            <div class="story-copy">
+              <span class="story-number">07 · Multi-repository scale</span>
+              <h3>Ten repositories. Fifteen live sessions. One controlled inbox.</h3>
+              <p>
+                This is designed for a real workload, not a two-session demo. Workspaces keep
+                task state, agent attention, GitHub activity, and terminals organized even when
+                many repositories are moving at once.
+              </p>
+              <p>
+                Use <kbd>!</kbd> for the agent asking, <kbd>Shift-F</kbd> for failing CI, or the
+                fuzzy workspace jump to reach any relevant event directly. You never need to
+                check all fifteen terminals.
+              </p>
+              <a class="story-link" href="/docs/how-to/orchestrate-multiple-agents/">Orchestrate the fleet →</a>
+            </div>
+            <div class="story-visual fleet-demo" aria-label="Ten repositories with fifteen live sessions organized in one inbox">
+              <div class="ui-title"><span>10 repositories</span><b>15 live sessions</b></div>
+              <div class="fleet-list">
+                {fleet.map((row) => (
+                  <div class="fleet-row">
+                    <span class="repo-name">▾ {row.repo}</span>
+                    <span class="session-count">{row.sessions} {row.sessions === 1 ? 'session' : 'sessions'}</span>
+                    <span class="fleet-item">{row.item}</span>
+                    <b class={`tone-${row.tone}`}>{row.state}</b>
+                  </div>
+                ))}
+              </div>
+              <div class="fleet-jumps">
+                <span><kbd>!</kbd> api-gateway needs input</span>
+                <span><kbd>Shift-F</kbd> billing CI failed</span>
+                <span><kbd>`</kbd> jump anywhere</span>
+              </div>
+            </div>
+          </article>
+
+          <article class="story reverse" data-reveal>
+            <div class="story-copy">
+              <span class="story-number">08 · Embedded help that acts</span>
+              <h3>Describe a workflow, approve it safely, then reuse it immediately</h3>
+              <p>
+                Ask Lazybox searches the live keymap and answers product questions in plain
+                language. Ask it to create or improve a review snippet and it proposes the key,
+                category, description, and full body in a confirm-with-preview.
+              </p>
+              <p>
+                Actions are allowlisted and validated. You confirm every change, and lazybox—not
+                the agent—owns the filesystem write. The catalog hot-reloads, so the new snippet
+                is available immediately and then joins Recent and the workspace’s <code>]N</code>
+                progress cue as you use it.
+              </p>
+              <a class="story-link" href="/docs/how-to/use-snippets/#create-or-improve-a-snippet-with-ask-lazybox">Create a snippet with Ask Lazybox →</a>
+            </div>
+            <div class="story-visual ask-demo" aria-label="Ask Lazybox creating a validated snippet after a user confirms the preview">
+              <div class="ask-chat"><b>you</b><span>Create a focused review snippet.</span></div>
+              <div class="ask-preview">
+                <small>confirm proposed action</small>
+                <div><span>key</span><strong>review-api</strong></div>
+                <div><span>category</span><strong>Review</strong></div>
+                <div><span>description</span><strong>Review API changes</strong></div>
+                <p>Review the current API diff for compatibility breaks…</p>
+                <div class="confirm-row"><span>Cancel</span><b>Confirm &amp; add</b></div>
+              </div>
+              <div class="hot-reload"><span>✓ validated · saved by lazybox · hot-reloaded</span><kbd>]]sreview-api</kbd></div>
+            </div>
+          </article>
+
+          <article class="story" data-reveal>
+            <div class="story-copy">
+              <span class="story-number">09 · Agent choice without friction</span>
+              <h3>Use any coding agent—and keep a one-action default</h3>
+              <p>
+                Claude Code, Codex, and Cursor have first-class support. Add arbitrary agent CLIs
+                through YAML without recompiling, then choose a preferred default so
+                <kbd>w w</kbd> remains the immediate everyday path.
+              </p>
+              <p>
+                Override that choice for one task from the agent leader. Every tool still shares
+                the same managed worktree, status model, tmux persistence, model tiers, snippets,
+                and GitHub continuity.
+              </p>
+              <a class="story-link" href="/docs/how-to/run-an-agent-per-workspace/">Choose and configure agents →</a>
+            </div>
+            <div class="story-visual agents-demo" aria-label="Claude Code selected as a default while Codex is explicitly chosen for one task">
+              <div class="agent-default">
+                <small>preferred default</small>
+                <strong>Claude Code</strong>
+                <span><kbd>w w</kbd> work on this</span>
+              </div>
+              <div class="agent-menu">
+                <div><kbd>a c</kbd><strong>Claude Code</strong><small>built in · default</small></div>
+                <div class="active"><kbd>a x</kbd><strong>Codex</strong><small>override this task</small></div>
+                <div><kbd>a u</kbd><strong>Cursor</strong><small>built in</small></div>
+                <div><kbd>a z</kbd><strong>my-agent</strong><small>generic YAML CLI</small></div>
+              </div>
+              <div class="agent-shared"><span>same workspace</span><b>worktree · status · tmux · snippets · GitHub</b></div>
+            </div>
+          </article>
+
+          <article class="story reverse" data-reveal>
+            <div class="story-copy">
+              <span class="story-number">10 · Discoverable shortcuts</span>
+              <h3>Keyboard speed without a wall of keys to memorize</h3>
+              <p>
+                Primary keys act on the focused context. Related operations sit behind memorable
+                leaders, and pressing one opens a non-racing which-key popup with every valid
+                continuation. Learn only the next key you need.
+              </p>
+              <p>
+                Footer hints, context menus, Ask Lazybox, and help all derive from your effective
+                action catalog. Switch the starter preset or remap an action with alternative
+                chords and the guidance updates. Inside a terminal, <kbd>]]</kbd> opens lazybox
+                commands while ordinary keys keep flowing to the agent or shell.
+              </p>
+              <a class="story-link" href="/docs/reference/keybindings/">Explore the shortcut model →</a>
+            </div>
+            <div class="story-visual keys-demo" aria-label="Which-key leader menus and generated help reflecting a remapped binding">
+              <div class="leader-stage">
+                <small>press a leader</small>
+                <div class="leader-row"><kbd>a</kbd><span>agent</span><kbd>g</kbd><span>GitHub</span><kbd>x</kbd><span>workspace</span></div>
+                <div class="which-key">
+                  <b>g · GitHub</b>
+                  <span><kbd>m</kbd> merge</span>
+                  <span><kbd>r</kbd> reviewers</span>
+                  <span><kbd>l</kbd> labels</span>
+                  <span><kbd>g</kbd> merge on green</span>
+                </div>
+              </div>
+              <div class="generated-help">
+                <small>effective help after remap</small>
+                <span><kbd>Ctrl-m</kbd> merge PR</span>
+                <span><kbd>w w</kbd> work on this</span>
+                <span><kbd>]]s</kbd> snippets from terminal</span>
+                <b>preset: vim · custom bindings applied</b>
+              </div>
+            </div>
+          </article>
         </div>
       </div>
     </section>
 
     <section class="band">
       <div class="container" data-reveal>
-        <h2>Spend your attention where it counts.</h2>
-        <p>Free and open source, built in Rust. Run a fleet of agents and let lazybox tell you when one needs you.</p>
+        <h2>Spend your attention where it changes the outcome.</h2>
+        <p>Start with a task, keep its context through Git and GitHub, and let the reactive inbox bring you back only when needed.</p>
         <div class="cta-row">
-          <a class="btn btn-primary" href={docs}>Read the docs →</a>
+          <a class="btn btn-primary" href={workflows}>Start with the core workflows →</a>
           <a class="btn btn-ghost" href={repo}>View source</a>
         </div>
       </div>
@@ -304,13 +484,11 @@ const steps = [
   </footer>
 
   <script>
-    // Nav border on scroll
     const nav = document.getElementById('nav');
     const onScroll = () => nav?.classList.toggle('scrolled', window.scrollY > 8);
     onScroll();
     window.addEventListener('scroll', onScroll, { passive: true });
 
-    // Copy-to-clipboard for the install command
     document.querySelectorAll<HTMLButtonElement>('.copy').forEach((btn) => {
       btn.addEventListener('click', async () => {
         const text = btn.dataset.copy ?? '';
@@ -332,7 +510,6 @@ const steps = [
       });
     });
 
-    // Scroll reveal
     const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     const demo = document.querySelector<HTMLVideoElement>('[data-demo]');
     if (reduce && demo) {
@@ -345,10 +522,10 @@ const steps = [
     } else {
       const io = new IntersectionObserver(
         (entries) => {
-          entries.forEach((e) => {
-            if (e.isIntersecting) {
-              e.target.classList.add('in');
-              io.unobserve(e.target);
+          entries.forEach((entry) => {
+            if (entry.isIntersecting) {
+              entry.target.classList.add('in');
+              io.unobserve(entry.target);
             }
           });
         },

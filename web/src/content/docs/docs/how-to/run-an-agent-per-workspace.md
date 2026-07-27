@@ -1,11 +1,11 @@
 ---
 title: Run an agent per workspace
-description: Spawn Claude Code, Codex, or Cursor scoped to one worktree, including autonomous runs.
+description: Point lazybox at a task and route its context, agent, model, and effort automatically.
 ---
 
 Goal: spawn a coding agent (Claude Code, Codex, or Cursor) scoped to a single
-workspace's git worktree — including letting lazybox pick the right prompt for
-the row's state, and running autonomously.
+workspace's git worktree — or let lazybox route the task's context, agent,
+model, and effort for you.
 
 Each workspace gets one worktree; agent and shell sessions — one or several,
 as splits or tabs — all operate in that worktree. The agent works directly
@@ -35,30 +35,111 @@ Press `]]` then `q` to return to the sidebar; the session keeps running.
 (Prefer the old top-level keys? Remap them via `ui.action_keys`, keyed
 `spawn_agent.<id>` — e.g. `spawn_agent.claude: "c"`.)
 
-## Let lazybox choose the prompt: `w w`
+## Point at the work and press `w w`
 
-Press `w w` for **work** instead of picking an agent manually. The first `w`
-opens the work menu; the second chooses the default or already-running agent.
-lazybox spawns
-your **default agent** (`setup.default_agent`, falling back to Claude Code)
-with a prompt tailored to the selected row's current state:
+`w w` is the primary **work on this** action. The first `w` opens the work
+menu; the second tells lazybox to infer the intent from the focused workspace
+instead of making you copy context into a prompt.
 
-- failing CI → fix CI
-- merge conflict → fix the conflict
-- review comments → address the comments
-- an issue → implement the issue
+The generated brief follows this precedence:
 
-This is the fastest way to act on whatever the inbox is telling you about a row.
+1. Activity rows selected with `v` → address exactly those comments.
+2. A merge-conflicted PR → rebase and resolve the conflict.
+3. A PR with failing CI → diagnose and fix CI.
+4. A healthy PR assigned to you for review → review the code.
+5. New activity on your own or assigned PR → address the unread feedback.
+6. An open issue → implement the issue.
+7. A PR without a more specific signal → continue work on the PR.
 
-## Pick a model tier
+A closed or merged task is not restarted: lazybox points you to archive it.
+On a scratch workspace, it starts the agent without inventing task context.
 
-Both leaders carry model-tier chords: `w S` / `w M` / `w L` run the work
-prompt at a small / medium / large model, and `a S` / `a M` / `a L` spawn the
-default agent at that tier. Claude ships a built-in Haiku / Sonnet / Opus
-menu; other agents define theirs under `agents.<id>.models` in
-`~/.lazybox/config.yaml` (see the
-[configuration reference](/docs/reference/configuration/#agentsid)). The
-picked tier's label rides a `◆ Opus`-style badge on the terminal tab.
+The action also chooses where the brief goes:
+
+- one agent already running on the workspace → inject the brief into it;
+- no running agent → launch `setup.default_agent` (Claude Code when unset) in
+  that task's worktree;
+- several different agents running → ask which one should take the work.
+
+The focused workspace remains the reference frame even while you select rows
+in the Activity pane, so you do not need to find a task folder, prompt
+template, or existing terminal yourself.
+
+## Let GitHub choose the model and effort
+
+A GitHub task can select its compute profile before an agent starts. Add a
+case-insensitive `high`, `medium`, or `low` label, or put `@high`, `@medium`,
+or `@low` in the task body:
+
+| GitHub priority | Intended tier |
+| --- | --- |
+| `high` / `@high` | strongest or deepest configured tier |
+| `medium` / `@medium` | balanced configured tier |
+| `low` / `@low` | fastest or cheapest configured tier |
+
+This is agent routing, not merely inbox sorting. At spawn time, lazybox maps
+the task priority through the target agent's `models.priority` table, then
+appends that tier's `args` to the agent command. Those arguments can choose
+both a concrete model and its reasoning effort.
+
+Claude ships a built-in mapping: `low` → Haiku (`S`), `medium` → Sonnet (`M`),
+and `high` → Opus (`L`). Other agents can define their own meanings for the
+same three priorities:
+
+```yaml
+agents:
+  codex:
+    models:
+      default: M
+      tiers:
+        - alias: S
+          label: Fast / low effort
+          args: ["-m", "your-fast-model", "-c", 'model_reasoning_effort="low"']
+        - alias: M
+          label: Balanced / medium effort
+          args: ["-m", "your-balanced-model", "-c", 'model_reasoning_effort="medium"']
+        - alias: L
+          label: Deep / high effort
+          args: ["-m", "your-strong-model", "-c", 'model_reasoning_effort="high"']
+      priority:
+        low: S
+        medium: M
+        high: L
+```
+
+Replace the example model ids and flags with values supported by your agent
+CLI. The labels become `◆ Fast / low effort`-style terminal badges.
+
+Priority is resolved only when a terminal is spawned. If `w w` injects into an
+already-running agent, that session keeps its current model. A priority label
+wins over a body marker; if several labels or several markers are present, the
+strongest one wins.
+
+### Override the priority in the TUI
+
+Use `w S`, `w M`, or `w L` when you want to choose the tier directly. These
+chords build the same contextual brief and target the same running/default
+agent as `w w`, but the explicit tier wins over the GitHub priority for a new
+spawn. `a S` / `a M` / `a L` spawn the default agent at a tier without the
+contextual work brief.
+
+## Trigger the whole workflow from GitHub
+
+Put the priority marker and trigger in the issue body:
+
+```text
+@high
+@lazybox codex
+```
+
+On the next GitHub poll, lazybox authenticates the trigger, opens the issue's
+workspace, chooses Codex's configured `high` tier, and starts the agent with
+the issue-implementation brief. The issue chooses the work, agent, model, and
+reasoning effort without opening the TUI. A `high` label plus a bare
+`@lazybox` trigger does the same with Claude.
+
+See [Trigger agents with @lazybox mentions](/docs/how-to/lazybox-mentions/)
+for the allowlist and autonomous-permission settings.
 
 ## Choose splits or tabs
 

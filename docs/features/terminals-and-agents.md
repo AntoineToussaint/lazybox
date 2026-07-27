@@ -96,36 +96,54 @@ builtins; the server's `spawn_handler` builds the worktree, env, and
 
 **Status:** stable
 **Crate(s):** `tui-core` (`src/prompts.rs`, `src/intent.rs`), `core` (`src/prompts.rs`, `prompts/agent-work.md`)
-**Config / flags:** uses `setup.default_agent`
-**Key bindings:** `w` menu (`w w` default, `w c`/`w x`/`w u` explicit)
+**Config / flags:** `setup.default_agent`, `agents.<id>.models`
+**Key bindings:** `w` menu (`w w` contextual, `w c`/`w x`/`w u` explicit agent, `w S`/`w M`/`w L` explicit tier)
 
 ### What it does
-Spawns the default agent with a **state-aware prompt** chosen from the
-workspace's situation: fix a merge conflict, fix failing CI, address selected
-review comments, or implement an issue.
+Turns the focused workspace state into a **contextual work brief**, then routes
+it to the relevant running agent or starts the configured default agent in the
+task's worktree.
 
 ### How to use it
-Press `w w` on a workspace. With Activity rows multi-selected (`v`), `w w` targets
-those comments ("address these comments"). Otherwise it picks the prompt by
-priority: conflict → CI failure → issue-implementation / review.
+Press `w w` on a workspace. With Activity rows multi-selected (`v`), `w w`
+targets exactly those comments, even when the PR also has a conflict or failing
+CI. Otherwise the prompt precedence is: terminal task → conflict → CI failure →
+healthy assigned review → unread feedback on your PR → issue implementation →
+general PR work → bare scratch-workspace spawn.
+
+One running agent receives the prompt through injection. With no running agent,
+lazybox starts `setup.default_agent` in the workspace worktree. With several
+different agents, it asks which one should take the work.
+
+A GitHub `high` / `medium` / `low` label or `@high` / `@medium` / `@low` task
+body marker is resolved at spawn time through the target agent's
+`models.priority` map. The chosen tier's arbitrary `args` can select both a
+concrete model and reasoning effort. `w S` / `w M` / `w L` keeps the same
+context and agent routing but explicitly overrides the task priority for a new
+spawn.
 
 ### How it works (brief)
-Priority chain in `crates/tui-core/src/prompts.rs`: `build_fix_conflict_prompt`
-→ `build_fix_ci_prompt` → `build_implement_issue_prompt`
-(`crates/core/src/prompts.rs`) / `build_address_comments_prompt`
-(`crates/tui-core/src/intent.rs`). All include `AGENT_WORK_PREAMBLE` from
+`classify_work` / `resolve_work` in `crates/tui-core/src/intent.rs` own the
+priority chain and call the conflict, CI, issue, review, and comment prompt
+builders. All prompts include `AGENT_WORK_PREAMBLE` from
 `crates/core/prompts/agent-work.md` (the no-destructive-shortcuts /
-root-cause-over-masking principles).
+root-cause-over-masking principles). `Model::dispatch_work` picks the live or
+default agent; the server's `priority_alias_for` maps task priority to the
+agent-specific tier before building the spawn argv.
 
 ### Test checklist
 - [ ] On a PR with a conflict, `w w` produces the rebase/resolve/force-push prompt.
 - [ ] On a PR with failing CI (no conflict), `w w` produces the fix-CI prompt.
 - [ ] On an issue workspace with no PR, `w w` produces the implement-issue prompt.
 - [ ] With comments selected (`v`), `w w` produces the address-comments prompt scoped to the selection.
+- [ ] One running agent receives the brief; no running agent starts the default in the worktree.
+- [ ] `high` / `medium` / `low` labels and `@` markers resolve through the target agent's tier map.
+- [ ] `w S` / `w M` / `w L` overrides the task priority on a new spawn.
 - [ ] Every prompt carries the work preamble.
 
 ### Known sharp edges
-- Priority order means a PR with *both* a conflict and CI failure gets the conflict prompt first.
+- Priority is spawn-time routing; injecting into an already-running agent does not change that session's model.
+- A task label wins over a body marker. Within the same source, the strongest declared priority wins.
 
 ---
 

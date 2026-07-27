@@ -922,18 +922,88 @@ impl AgentSection {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct ShellSection {
-    pub command: String,
+    /// Shell executable for new plain-shell sessions. Unset means the
+    /// account's login shell, then `$SHELL`, then `/bin/sh`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
-impl Default for ShellSection {
-    fn default() -> Self {
-        Self {
-            command: "bash".into(),
-        }
+impl ShellSection {
+    /// Return the explicitly configured shell command, if any.
+    pub fn configured_command(&self) -> Option<&str> {
+        self.command
+            .as_deref()
+            .map(str::trim)
+            .filter(|command| !command.is_empty())
     }
+
+    /// Resolve the executable used for a newly spawned plain shell.
+    pub fn resolved_command(&self) -> String {
+        self.resolve_command_with(login_shell_from_passwd_db, || std::env::var("SHELL").ok())
+    }
+
+    fn resolve_command_with(
+        &self,
+        login_shell: impl FnOnce() -> Option<String>,
+        env_shell: impl FnOnce() -> Option<String>,
+    ) -> String {
+        if let Some(command) = self.configured_command() {
+            return command.to_string();
+        }
+        resolve_shell_command(login_shell().as_deref(), env_shell().as_deref())
+    }
+}
+
+fn resolve_shell_command(login_shell: Option<&str>, env_shell: Option<&str>) -> String {
+    [login_shell, env_shell]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|shell| !shell.is_empty())
+        .unwrap_or("/bin/sh")
+        .to_string()
+}
+
+#[cfg(unix)]
+fn login_shell_from_passwd_db() -> Option<String> {
+    let mut passwd = unsafe { std::mem::zeroed::<libc::passwd>() };
+    let mut result = std::ptr::null_mut();
+    let mut buffer = vec![0_u8; 1024];
+
+    loop {
+        // SAFETY: `passwd`, `result`, and `buffer` remain valid for the
+        // call, and any returned string is copied before `buffer` is dropped.
+        let status = unsafe {
+            libc::getpwuid_r(
+                libc::getuid(),
+                &mut passwd,
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+        if status == libc::ERANGE {
+            buffer.resize(buffer.len() * 2, 0);
+            continue;
+        }
+        if status != 0 || result.is_null() || passwd.pw_shell.is_null() {
+            return None;
+        }
+        // SAFETY: a successful `getpwuid_r` points `pw_shell` at a
+        // NUL-terminated string inside `buffer`, which is still alive.
+        return unsafe { std::ffi::CStr::from_ptr(passwd.pw_shell) }
+            .to_str()
+            .ok()
+            .map(str::to_string);
+    }
+}
+
+#[cfg(not(unix))]
+fn login_shell_from_passwd_db() -> Option<String> {
+    None
 }
 
 /// How the user opens lazybox's command menu from an embedded terminal.
@@ -979,6 +1049,23 @@ impl Default for TerminalSection {
 }
 
 impl Config {
+    /// Parse config YAML, including migrations from older serialized defaults.
+    pub fn parse(contents: &str) -> Result<Self, ConfigError> {
+        let mut config: Self = serde_yaml::from_str(contents)?;
+        config.migrate_legacy_shell_default();
+        Ok(config)
+    }
+
+    fn migrate_legacy_shell_default(&mut self) {
+        // Older lazybox versions serialized their Rust default (`bash`) into
+        // every wizard-generated config. Treat that exact legacy value as
+        // automatic; an intentional bash selection can be written as an
+        // explicit path such as `/bin/bash`.
+        if self.shell.configured_command() == Some("bash") {
+            self.shell.command = None;
+        }
+    }
+
     /// Resolve the UI defaults, folding in cross-section knobs the
     /// `ui` block alone can't see — currently the terminal escape /
     /// `]]` leader window, which lives under `terminal`.
@@ -1054,7 +1141,7 @@ impl Config {
     /// Load from a specific path.
     pub fn load_from(path: &Path) -> Result<Self, ConfigError> {
         let contents = std::fs::read_to_string(path)?;
-        let config: Config = serde_yaml::from_str(&contents)?;
+        let config = Self::parse(&contents)?;
         tracing::info!("Loaded config from {}", path.display());
         // The file can hold Slack tokens — tighten pre-existing
         // group/other-readable configs to owner-only. Best-effort:
@@ -1635,6 +1722,56 @@ mod tests {
         let cfg: Config = serde_yaml::from_str("ui:\n  keep_awake: true\n").expect("parse");
         assert!(cfg.ui.keep_awake);
         assert!(cfg.ui.resolved().keep_awake);
+    }
+
+    #[test]
+    fn shell_command_prefers_login_shell_then_environment() {
+        assert_eq!(
+            resolve_shell_command(Some("/bin/zsh"), Some("/bin/bash")),
+            "/bin/zsh"
+        );
+        assert_eq!(resolve_shell_command(None, Some("/bin/bash")), "/bin/bash");
+        assert_eq!(resolve_shell_command(None, None), "/bin/sh");
+    }
+
+    #[test]
+    fn explicit_shell_command_skips_automatic_discovery() {
+        let shell = ShellSection {
+            command: Some("  /bin/zsh  ".into()),
+        };
+        assert_eq!(shell.configured_command(), Some("/bin/zsh"));
+        assert_eq!(
+            shell.resolve_command_with(
+                || panic!("login shell lookup must not run"),
+                || panic!("environment lookup must not run")
+            ),
+            "/bin/zsh"
+        );
+    }
+
+    #[test]
+    fn parse_migrates_the_serialized_legacy_bash_default() {
+        let config = Config::parse("shell:\n  command: bash\n").expect("parse legacy config");
+
+        assert_eq!(config.shell.configured_command(), None);
+        let serialized = serde_yaml::to_string(&config).expect("serialize migrated config");
+        assert!(!serialized.contains("command: bash"));
+    }
+
+    #[test]
+    fn parse_preserves_an_explicit_bash_path() {
+        let config =
+            Config::parse("shell:\n  command: /bin/bash\n").expect("parse explicit config");
+
+        assert_eq!(config.shell.configured_command(), Some("/bin/bash"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_shell_resolves_the_current_accounts_login_shell() {
+        let login_shell =
+            login_shell_from_passwd_db().expect("current account must have a login shell");
+        assert_eq!(ShellSection::default().resolved_command(), login_shell);
     }
 
     /// `repos.<owner/name>.{env,mounts}` should round-trip cleanly

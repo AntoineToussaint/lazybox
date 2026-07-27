@@ -13432,6 +13432,26 @@ mod settings_window_tests {
             "theme row must show the active theme"
         );
     }
+
+    #[test]
+    fn shell_row_uses_the_daemons_resolved_command() {
+        let mut m = build_model_with_setup();
+        m.handle_daemon_event(lazybox_ipc::Event::ShellCommandConfig {
+            command: "/remote/bin/fish".into(),
+            configured: true,
+        });
+        m.open_settings();
+        assert!(
+            m.setup.settings_actions.iter().any(|action| matches!(
+                action,
+                SettingsAction::ShellCommand {
+                    command,
+                    configured: true,
+                } if command == "/remote/bin/fish"
+            )),
+            "shell row must show the command reported by the PTY-owning daemon"
+        );
+    }
 }
 
 #[cfg(test)]

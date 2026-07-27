@@ -33,8 +33,8 @@ pub struct WorkspaceRowCtx<'a> {
     pub is_cursor: bool,
     /// This workspace is in the broadcast multi-select set (`v`).
     /// Renders a `✓` in the shared selection gutter; on the cursor row
-    /// the caret keeps the slot but goes accent so the row still reads
-    /// as selected.
+    /// the cursor marker keeps the slot but stays accent so the row
+    /// still reads as selected.
     pub is_selected: bool,
     /// Widest `#NNN` across all visible workspace rows in this
     /// render pass. Every row's pr-number cell pads to this width
@@ -150,9 +150,9 @@ impl<'a> WorkspaceRowCtx<'a> {
 ///
 /// Order (left → right):
 ///
-/// 0. Prefix — `▸` (cursor) / ` ` (no cursor). A single shared
-///    selection gutter: the caret occupies one column reused across
-///    every row type, instead of a 2-col `▸ ` re-added at each depth
+/// 0. Prefix — `▶` (cursor) / ` ` (no cursor). A single shared
+///    selection gutter: the marker occupies one column reused across
+///    every row type, instead of a 2-col marker re-added at each depth
 ///    (issue #231). Rows sit one column in from the repo header's
 ///    disclosure arrow, so the tree nesting still reads.
 /// 1. Type glyph — `⇄` / `○` / `◆` (or ASCII `p`/`i`/`l`) / blank,
@@ -300,13 +300,13 @@ pub fn build_row(ctx: &WorkspaceRowCtx<'_>) -> Row {
 
 fn cell_prefix(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     let s = if ctx.is_cursor {
-        "▸"
+        "▶"
     } else if ctx.is_selected {
         "✓"
     } else {
         " "
     };
-    let style = if ctx.is_selected {
+    let style = if ctx.is_cursor || ctx.is_selected {
         ctx.row_style()
             .fg(ctx.theme.accent)
             .add_modifier(Modifier::BOLD)
@@ -947,7 +947,7 @@ mod tests {
     }
 
     /// Regression for issue #231: the row prefix is a single shared
-    /// 1-cell selection gutter (`▸` / ` `), not a 2-cell `▸ ` re-added
+    /// 1-cell selection gutter (`▶` / ` `), not a 2-cell marker re-added
     /// at every depth. Reclaims one column of title room on every
     /// workspace row (and #121's earlier 4→2 cut goes the rest of the
     /// way to 1).
@@ -966,7 +966,7 @@ mod tests {
         ctx.is_cursor = true;
         let cell = cell_prefix(&ctx);
         assert_eq!(cell.width(), 1);
-        assert_eq!(cell_text(&cell), "▸");
+        assert_eq!(cell_text(&cell), "▶");
 
         // The fixed prefix column matches the cell width so the table
         // doesn't pad the inset back out.
@@ -992,12 +992,38 @@ mod tests {
         assert_eq!(cell_text(&cell), "✓");
         assert_eq!(cell.spans[0].style.fg, Some(theme.accent));
 
-        // Cursor + selected: caret wins the glyph, accent keeps the
+        // Cursor + selected: the cursor marker wins the glyph, accent keeps the
         // selected signal.
         ctx.is_cursor = true;
         let cell = cell_prefix(&ctx);
-        assert_eq!(cell_text(&cell), "▸");
+        assert_eq!(cell_text(&cell), "▶");
         assert_eq!(cell.spans[0].style.fg, Some(theme.accent));
+    }
+
+    #[test]
+    fn cursor_prefix_is_bold_accent_across_built_in_themes() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+
+        for theme in crate::theme::BUILT_IN_THEMES {
+            let mut ctx = ctx_for(&ws, &task, theme);
+            ctx.is_cursor = true;
+            let cell = cell_prefix(&ctx);
+
+            assert_eq!(cell.width(), 1, "theme: {}", theme.name);
+            assert_eq!(cell_text(&cell), "▶", "theme: {}", theme.name);
+            assert_eq!(
+                cell.spans[0].style.fg,
+                Some(theme.accent),
+                "theme: {}",
+                theme.name
+            );
+            assert!(
+                cell.spans[0].style.add_modifier.contains(Modifier::BOLD),
+                "theme: {}",
+                theme.name
+            );
+        }
     }
 
     #[test]

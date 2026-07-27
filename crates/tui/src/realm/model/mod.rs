@@ -843,6 +843,12 @@ struct TerminalDrag {
     dragged: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShellCommandConfig {
+    command: String,
+    configured: bool,
+}
+
 /// Top-level application state.
 pub struct Model<T: TerminalAdapter> {
     pub app: Application<Id, Msg, UserEvent>,
@@ -1097,6 +1103,10 @@ pub struct Model<T: TerminalAdapter> {
     /// globally disabled, matching what would actually fire. Defaults to
     /// off (auto-fix is opt-in) until config is applied.
     auto_fix_enabled: bool,
+    /// Effective plain-shell command reported by the daemon that owns
+    /// terminal spawning. `None` until the post-subscribe config event
+    /// arrives.
+    shell_command_config: Option<ShellCommandConfig>,
     /// Workspace keys for which we've already fired
     /// `Command::FetchPrDetails` this session — the lazy-fetch path
     /// that back-fills review-thread activity. Used to dedupe the
@@ -1500,6 +1510,7 @@ impl<T: TerminalAdapter> Model<T> {
             ui_defaults: lazybox_config::UiDefaults::default(),
             auto_fix_opt_out_labels: lazybox_core::AutoFixSettings::default().opt_out_labels,
             auto_fix_enabled: lazybox_core::AutoFixSettings::default().enabled,
+            shell_command_config: None,
             pr_details_fetched: std::collections::HashSet::new(),
             merge_confirmed: std::collections::HashSet::new(),
             outdated_scroll_terminals: std::collections::HashSet::new(),
@@ -3397,10 +3408,12 @@ impl<T: TerminalAdapter> Model<T> {
         actions.push(SettingsAction::EditLlmGateway {
             set: cfg.agent.gateway_url().is_some(),
         });
-        actions.push(SettingsAction::ShellCommand {
-            command: cfg.shell.resolved_command(),
-            configured: !cfg.shell.command.trim().is_empty(),
-        });
+        if let Some(shell) = &self.shell_command_config {
+            actions.push(SettingsAction::ShellCommand {
+                command: shell.command.clone(),
+                configured: shell.configured,
+            });
+        }
         actions.push(SettingsAction::CheckAgentUpdates);
         actions.push(SettingsAction::UpdateAgentClis);
         actions.push(SettingsAction::InspectWorktrees);

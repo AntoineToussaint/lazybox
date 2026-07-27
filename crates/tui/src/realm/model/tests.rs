@@ -13434,17 +13434,22 @@ mod settings_window_tests {
     }
 
     #[test]
-    fn shell_row_names_the_resolved_command() {
+    fn shell_row_uses_the_daemons_resolved_command() {
         let mut m = build_model_with_setup();
+        m.handle_daemon_event(lazybox_ipc::Event::ShellCommandConfig {
+            command: "/remote/bin/fish".into(),
+            configured: true,
+        });
         m.open_settings();
-        let cfg = lazybox_config::Config::load().unwrap_or_default();
-        let expected = cfg.shell.resolved_command();
         assert!(
             m.setup.settings_actions.iter().any(|action| matches!(
                 action,
-                SettingsAction::ShellCommand { command, .. } if command == &expected
+                SettingsAction::ShellCommand {
+                    command,
+                    configured: true,
+                } if command == "/remote/bin/fish"
             )),
-            "shell row must show the command new shells will use"
+            "shell row must show the command reported by the PTY-owning daemon"
         );
     }
 }

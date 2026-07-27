@@ -925,26 +925,40 @@ impl AgentSection {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct ShellSection {
-    /// Shell executable for new plain-shell sessions. Empty means the
+    /// Shell executable for new plain-shell sessions. Unset means the
     /// account's login shell, then `$SHELL`, then `/bin/sh`.
-    pub command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 impl ShellSection {
+    /// Return the explicitly configured shell command, if any.
+    pub fn configured_command(&self) -> Option<&str> {
+        self.command
+            .as_deref()
+            .map(str::trim)
+            .filter(|command| !command.is_empty())
+    }
+
     /// Resolve the executable used for a newly spawned plain shell.
     pub fn resolved_command(&self) -> String {
-        let login_shell = login_shell_from_passwd_db();
-        let env_shell = std::env::var("SHELL").ok();
-        resolve_shell_command(&self.command, login_shell.as_deref(), env_shell.as_deref())
+        self.resolve_command_with(login_shell_from_passwd_db, || std::env::var("SHELL").ok())
+    }
+
+    fn resolve_command_with(
+        &self,
+        login_shell: impl FnOnce() -> Option<String>,
+        env_shell: impl FnOnce() -> Option<String>,
+    ) -> String {
+        if let Some(command) = self.configured_command() {
+            return command.to_string();
+        }
+        resolve_shell_command(login_shell().as_deref(), env_shell().as_deref())
     }
 }
 
-fn resolve_shell_command(
-    configured: &str,
-    login_shell: Option<&str>,
-    env_shell: Option<&str>,
-) -> String {
-    [Some(configured), login_shell, env_shell]
+fn resolve_shell_command(login_shell: Option<&str>, env_shell: Option<&str>) -> String {
+    [login_shell, env_shell]
         .into_iter()
         .flatten()
         .map(str::trim)
@@ -1035,6 +1049,23 @@ impl Default for TerminalSection {
 }
 
 impl Config {
+    /// Parse config YAML, including migrations from older serialized defaults.
+    pub fn parse(contents: &str) -> Result<Self, ConfigError> {
+        let mut config: Self = serde_yaml::from_str(contents)?;
+        config.migrate_legacy_shell_default();
+        Ok(config)
+    }
+
+    fn migrate_legacy_shell_default(&mut self) {
+        // Older lazybox versions serialized their Rust default (`bash`) into
+        // every wizard-generated config. Treat that exact legacy value as
+        // automatic; an intentional bash selection can be written as an
+        // explicit path such as `/bin/bash`.
+        if self.shell.configured_command() == Some("bash") {
+            self.shell.command = None;
+        }
+    }
+
     /// Resolve the UI defaults, folding in cross-section knobs the
     /// `ui` block alone can't see — currently the terminal escape /
     /// `]]` leader window, which lives under `terminal`.
@@ -1110,7 +1141,7 @@ impl Config {
     /// Load from a specific path.
     pub fn load_from(path: &Path) -> Result<Self, ConfigError> {
         let contents = std::fs::read_to_string(path)?;
-        let config: Config = serde_yaml::from_str(&contents)?;
+        let config = Self::parse(&contents)?;
         tracing::info!("Loaded config from {}", path.display());
         // The file can hold Slack tokens — tighten pre-existing
         // group/other-readable configs to owner-only. Best-effort:
@@ -1694,32 +1725,45 @@ mod tests {
     }
 
     #[test]
-    fn shell_command_prefers_config_then_login_shell_then_environment() {
+    fn shell_command_prefers_login_shell_then_environment() {
         assert_eq!(
-            resolve_shell_command(
-                "/opt/homebrew/bin/fish",
-                Some("/bin/zsh"),
-                Some("/bin/bash")
-            ),
-            "/opt/homebrew/bin/fish"
-        );
-        assert_eq!(
-            resolve_shell_command("", Some("/bin/zsh"), Some("/bin/bash")),
+            resolve_shell_command(Some("/bin/zsh"), Some("/bin/bash")),
             "/bin/zsh"
         );
-        assert_eq!(
-            resolve_shell_command("", None, Some("/bin/bash")),
-            "/bin/bash"
-        );
-        assert_eq!(resolve_shell_command("", None, None), "/bin/sh");
+        assert_eq!(resolve_shell_command(None, Some("/bin/bash")), "/bin/bash");
+        assert_eq!(resolve_shell_command(None, None), "/bin/sh");
     }
 
     #[test]
-    fn shell_section_resolves_an_explicit_command() {
+    fn explicit_shell_command_skips_automatic_discovery() {
         let shell = ShellSection {
-            command: "  /bin/zsh  ".into(),
+            command: Some("  /bin/zsh  ".into()),
         };
-        assert_eq!(shell.resolved_command(), "/bin/zsh");
+        assert_eq!(shell.configured_command(), Some("/bin/zsh"));
+        assert_eq!(
+            shell.resolve_command_with(
+                || panic!("login shell lookup must not run"),
+                || panic!("environment lookup must not run")
+            ),
+            "/bin/zsh"
+        );
+    }
+
+    #[test]
+    fn parse_migrates_the_serialized_legacy_bash_default() {
+        let config = Config::parse("shell:\n  command: bash\n").expect("parse legacy config");
+
+        assert_eq!(config.shell.configured_command(), None);
+        let serialized = serde_yaml::to_string(&config).expect("serialize migrated config");
+        assert!(!serialized.contains("command: bash"));
+    }
+
+    #[test]
+    fn parse_preserves_an_explicit_bash_path() {
+        let config =
+            Config::parse("shell:\n  command: /bin/bash\n").expect("parse explicit config");
+
+        assert_eq!(config.shell.configured_command(), Some("/bin/bash"));
     }
 
     #[cfg(unix)]

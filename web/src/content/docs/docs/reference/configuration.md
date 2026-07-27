@@ -511,4 +511,6 @@ Opt-in — it pushes commits to your PRs with no manual nudge.
 The Settings window shows the effective command and whether it is automatic or
 configured. Changes apply to newly opened shells; an existing tmux-backed shell
 keeps running its current process, so close that terminal and open a fresh one
-to pick up the new command.
+to pick up the new command. Older generated configs may contain
+`command: bash`; lazybox treats that former default as automatic. Use an
+explicit path such as `/bin/bash` to select Bash intentionally.

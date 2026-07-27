@@ -113,6 +113,52 @@ fn homepage_never_advertises_the_removed_single_w_action() {
 }
 
 #[test]
+fn issue_to_pr_handoff_is_prominent_across_discovery_surfaces() {
+    let homepage = read("web/src/pages/index.astro");
+    assert!(homepage.contains(r#"<section id="handoff""#));
+    assert!(
+        homepage.contains("Start work from the issue and keep your session when it becomes a PR.")
+    );
+    for stage in ["issue", "pull-request", "continue"] {
+        assert!(
+            homepage.contains(&format!(r#"data-stage="{stage}""#)),
+            "homepage handoff sequence missing {stage:?}"
+        );
+    }
+    assert!(homepage.contains("/docs/how-to/keep-session-from-issue-to-pr/"));
+
+    let guide = read("web/src/content/docs/docs/how-to/keep-session-from-issue-to-pr.md");
+    for expected in [
+        "Closes #42.",
+        "no live terminal",
+        "x j",
+        "same live terminal",
+        "worktree and local edits",
+        "scrollback",
+        "prompt history",
+        "activity and read/unread state",
+        "without showing the automatic confirmation again",
+    ] {
+        assert!(
+            guide.contains(expected),
+            "issue-to-PR workflow guide missing {expected:?}"
+        );
+    }
+
+    for landing in [
+        "web/src/content/docs/docs/index.md",
+        "web/src/content/docs/docs/how-to/index.md",
+        "web/src/content/docs/docs/tutorials/quickstart.md",
+        "web/astro.config.mjs",
+    ] {
+        assert!(
+            read(landing).contains("keep-session-from-issue-to-pr"),
+            "{landing} does not surface the issue-to-PR guide"
+        );
+    }
+}
+
+#[test]
 fn launch_surfaces_use_current_support_and_provider_contracts() {
     for relative in [
         "README.md",

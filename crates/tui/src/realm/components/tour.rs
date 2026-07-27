@@ -108,7 +108,24 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "4 · Juggle many sessions",
+        title: "4 · Keep your session when an issue becomes a PR",
+        body: &[
+            "Start work from the issue and keep your session when it",
+            "becomes a PR:",
+            "",
+            "  issue #42  →  PR #108 opens  →  same live agent",
+            "",
+            "When lazybox sees that the PR closes the issue, it carries",
+            "the running terminal and worktree into the PR workspace.",
+            "Your agent, edits, scrollback and activity stay with you —",
+            "no duplicate terminal, lost context or manual handoff.",
+            "",
+            "With a live terminal, lazybox asks before joining. Press",
+            "Enter to continue. To do it later, select the issue: x j.",
+        ],
+    },
+    TourStep {
+        title: "5 · Juggle many sessions",
         body: &[
             "Every task is its own worktree-backed session, so you can",
             "run several at once without minding the git plumbing.",
@@ -123,7 +140,7 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "5 · Ship it & make it yours",
+        title: "6 · Ship it & make it yours",
         body: &[
             "When a PR is ready, press g — a which-key menu pops up",
             "showing everything you can do to this PR:",
@@ -470,6 +487,34 @@ mod tests {
     }
 
     #[test]
+    fn issue_to_pr_handoff_has_a_dedicated_step() {
+        let matching: Vec<_> = STEPS
+            .iter()
+            .filter(|step| step.title.contains("issue becomes a PR"))
+            .collect();
+        assert_eq!(matching.len(), 1, "handoff must have exactly one full step");
+
+        let rendered = render_step(
+            STEPS
+                .iter()
+                .position(|step| step.title.contains("issue becomes a PR"))
+                .expect("handoff step"),
+        );
+        for expected in [
+            "Start work from the issue and keep your session",
+            "same live agent",
+            "running terminal and worktree",
+            "no duplicate terminal, lost context or manual handoff",
+            "select the issue: x j",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "handoff step missing {expected:?}"
+            );
+        }
+    }
+
+    #[test]
     fn snippets_step_is_gone() {
         // Snippets are a power-user feature; onboarding shouldn't carry
         // them. Guard against the step creeping back in.
@@ -490,6 +535,7 @@ mod tests {
             (ActionKind::NewProject, "x p"),
             (ActionKind::NewWorkspace, "x n"),
             (ActionKind::AdoptSessions, "x a"),
+            (ActionKind::CollapseIntoPr, "x j"),
             (ActionKind::Work, "w w"),
             (ActionKind::JumpToWorkspace, "`"),
             (ActionKind::JumpToAsking, "!"),

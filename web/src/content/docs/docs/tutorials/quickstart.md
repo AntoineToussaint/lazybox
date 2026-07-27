@@ -120,3 +120,6 @@ You opened a seeded or existing workspace — now wire up a real repository:
 
 - **[Add a repo](/docs/how-to/add-a-repo/)** so your own pull requests flow into
   the inbox.
+- **[Start from an issue and keep your session in the
+  PR](/docs/how-to/keep-session-from-issue-to-pr/)** to carry a running agent
+  forward when its implementation pull request appears.

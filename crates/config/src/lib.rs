@@ -922,18 +922,74 @@ impl AgentSection {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct ShellSection {
+    /// Shell executable for new plain-shell sessions. Empty means the
+    /// account's login shell, then `$SHELL`, then `/bin/sh`.
     pub command: String,
 }
 
-impl Default for ShellSection {
-    fn default() -> Self {
-        Self {
-            command: "bash".into(),
-        }
+impl ShellSection {
+    /// Resolve the executable used for a newly spawned plain shell.
+    pub fn resolved_command(&self) -> String {
+        let login_shell = login_shell_from_passwd_db();
+        let env_shell = std::env::var("SHELL").ok();
+        resolve_shell_command(&self.command, login_shell.as_deref(), env_shell.as_deref())
     }
+}
+
+fn resolve_shell_command(
+    configured: &str,
+    login_shell: Option<&str>,
+    env_shell: Option<&str>,
+) -> String {
+    [Some(configured), login_shell, env_shell]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|shell| !shell.is_empty())
+        .unwrap_or("/bin/sh")
+        .to_string()
+}
+
+#[cfg(unix)]
+fn login_shell_from_passwd_db() -> Option<String> {
+    let mut passwd = unsafe { std::mem::zeroed::<libc::passwd>() };
+    let mut result = std::ptr::null_mut();
+    let mut buffer = vec![0_u8; 1024];
+
+    loop {
+        // SAFETY: `passwd`, `result`, and `buffer` remain valid for the
+        // call, and any returned string is copied before `buffer` is dropped.
+        let status = unsafe {
+            libc::getpwuid_r(
+                libc::getuid(),
+                &mut passwd,
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+        if status == libc::ERANGE {
+            buffer.resize(buffer.len() * 2, 0);
+            continue;
+        }
+        if status != 0 || result.is_null() || passwd.pw_shell.is_null() {
+            return None;
+        }
+        // SAFETY: a successful `getpwuid_r` points `pw_shell` at a
+        // NUL-terminated string inside `buffer`, which is still alive.
+        return unsafe { std::ffi::CStr::from_ptr(passwd.pw_shell) }
+            .to_str()
+            .ok()
+            .map(str::to_string);
+    }
+}
+
+#[cfg(not(unix))]
+fn login_shell_from_passwd_db() -> Option<String> {
+    None
 }
 
 /// How the user opens lazybox's command menu from an embedded terminal.
@@ -1635,6 +1691,43 @@ mod tests {
         let cfg: Config = serde_yaml::from_str("ui:\n  keep_awake: true\n").expect("parse");
         assert!(cfg.ui.keep_awake);
         assert!(cfg.ui.resolved().keep_awake);
+    }
+
+    #[test]
+    fn shell_command_prefers_config_then_login_shell_then_environment() {
+        assert_eq!(
+            resolve_shell_command(
+                "/opt/homebrew/bin/fish",
+                Some("/bin/zsh"),
+                Some("/bin/bash")
+            ),
+            "/opt/homebrew/bin/fish"
+        );
+        assert_eq!(
+            resolve_shell_command("", Some("/bin/zsh"), Some("/bin/bash")),
+            "/bin/zsh"
+        );
+        assert_eq!(
+            resolve_shell_command("", None, Some("/bin/bash")),
+            "/bin/bash"
+        );
+        assert_eq!(resolve_shell_command("", None, None), "/bin/sh");
+    }
+
+    #[test]
+    fn shell_section_resolves_an_explicit_command() {
+        let shell = ShellSection {
+            command: "  /bin/zsh  ".into(),
+        };
+        assert_eq!(shell.resolved_command(), "/bin/zsh");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_shell_resolves_the_current_accounts_login_shell() {
+        let login_shell =
+            login_shell_from_passwd_db().expect("current account must have a login shell");
+        assert_eq!(ShellSection::default().resolved_command(), login_shell);
     }
 
     /// `repos.<owner/name>.{env,mounts}` should round-trip cleanly

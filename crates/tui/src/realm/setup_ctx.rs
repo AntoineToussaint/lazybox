@@ -129,6 +129,9 @@ pub enum SettingsAction {
     /// Opens a single URL input; persists to `~/.lazybox/config.yaml`.
     /// `set` is whether a URL is currently configured, for the label.
     EditLlmGateway { set: bool },
+    /// Show the effective command for new plain-shell sessions and
+    /// whether it came from `shell.command` or automatic resolution.
+    ShellCommand { command: String, configured: bool },
     /// Bail out and run the full splash → providers → agents → … wizard.
     FullSetup,
     /// Admin: wipe every worktree whose session has no live
@@ -176,6 +179,17 @@ impl SettingsAction {
                 "Configure LLM gateway · {}",
                 if *set { "on" } else { "off" }
             ),
+            Self::ShellCommand {
+                command,
+                configured,
+            } => format!(
+                "Shell · {command} · {}",
+                if *configured {
+                    "configured"
+                } else {
+                    "automatic"
+                }
+            ),
             Self::FullSetup => "Run the full setup wizard".into(),
             Self::CleanWorktrees => "Clean worktrees (free disk, keep inbox)".into(),
             Self::InspectWorktrees => "Inspect worktrees…".into(),
@@ -196,7 +210,8 @@ impl SettingsAction {
             | Self::EditDefaultAgent { .. }
             | Self::EditDefaultModel { .. }
             | Self::ToggleSkipPermissions { .. }
-            | Self::EditLlmGateway { .. } => SettingsSection::Agents,
+            | Self::EditLlmGateway { .. }
+            | Self::ShellCommand { .. } => SettingsSection::Agents,
             Self::EditTheme { .. } | Self::EditSnippets => SettingsSection::Appearance,
             Self::FullSetup
             | Self::CleanWorktrees
@@ -349,6 +364,26 @@ mod tests {
     }
 
     #[test]
+    fn shell_label_names_the_command_and_source() {
+        assert_eq!(
+            SettingsAction::ShellCommand {
+                command: "/bin/zsh".into(),
+                configured: false,
+            }
+            .label(),
+            "Shell · /bin/zsh · automatic"
+        );
+        assert_eq!(
+            SettingsAction::ShellCommand {
+                command: "/opt/homebrew/bin/fish".into(),
+                configured: true,
+            }
+            .label(),
+            "Shell · /opt/homebrew/bin/fish · configured"
+        );
+    }
+
+    #[test]
     fn sections_group_by_concern_with_maintenance_last() {
         use super::SettingsSection;
         assert_eq!(
@@ -365,6 +400,14 @@ mod tests {
         );
         assert_eq!(
             SettingsAction::EditLlmGateway { set: false }.section(),
+            SettingsSection::Agents
+        );
+        assert_eq!(
+            SettingsAction::ShellCommand {
+                command: "/bin/zsh".into(),
+                configured: false,
+            }
+            .section(),
             SettingsSection::Agents
         );
         assert_eq!(

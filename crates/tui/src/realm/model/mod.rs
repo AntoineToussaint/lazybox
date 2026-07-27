@@ -3397,6 +3397,10 @@ impl<T: TerminalAdapter> Model<T> {
         actions.push(SettingsAction::EditLlmGateway {
             set: cfg.agent.gateway_url().is_some(),
         });
+        actions.push(SettingsAction::ShellCommand {
+            command: cfg.shell.resolved_command(),
+            configured: !cfg.shell.command.trim().is_empty(),
+        });
         actions.push(SettingsAction::CheckAgentUpdates);
         actions.push(SettingsAction::UpdateAgentClis);
         actions.push(SettingsAction::InspectWorktrees);
@@ -3440,6 +3444,21 @@ impl<T: TerminalAdapter> Model<T> {
         // to YAML — no wizard runner, no cached detection inputs.
         if matches!(action, SettingsAction::EditLlmGateway { .. }) {
             self.mount_gateway_url_input();
+            return;
+        }
+        if let SettingsAction::ShellCommand {
+            command,
+            configured,
+        } = action
+        {
+            let source = if configured {
+                "shell.command"
+            } else {
+                "automatic shell resolution"
+            };
+            self.flash_info(format!(
+                "new shells use {command} from {source}; existing shell sessions keep their current process"
+            ));
             return;
         }
         // Default-agent picker is a single Choice that writes straight
@@ -3497,6 +3516,7 @@ impl<T: TerminalAdapter> Model<T> {
             SettingsAction::EditSnippets => return,
             SettingsAction::EditTheme { .. } => return,
             SettingsAction::EditLlmGateway { .. } => return,
+            SettingsAction::ShellCommand { .. } => return,
             SettingsAction::EditDefaultAgent { .. } => return,
             SettingsAction::EditDefaultModel { .. } => return,
         };

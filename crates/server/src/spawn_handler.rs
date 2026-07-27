@@ -862,11 +862,12 @@ pub async fn handle_spawn(
             .as_deref()
             .zip(config.agents.get(id))
             .is_some_and(|(cmd, agent)| !agent.hook_command_args(cmd).is_empty()));
+    let shell_command = cfg.shell.resolved_command();
     let argv = match argv_for(
         config,
         &kind,
         &cwd_path,
-        &cfg.shell.command,
+        &shell_command,
         skip_permissions,
         hook_settings.clone(),
         argv_hook_command.as_deref(),

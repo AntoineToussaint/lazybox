@@ -13432,6 +13432,21 @@ mod settings_window_tests {
             "theme row must show the active theme"
         );
     }
+
+    #[test]
+    fn shell_row_names_the_resolved_command() {
+        let mut m = build_model_with_setup();
+        m.open_settings();
+        let cfg = lazybox_config::Config::load().unwrap_or_default();
+        let expected = cfg.shell.resolved_command();
+        assert!(
+            m.setup.settings_actions.iter().any(|action| matches!(
+                action,
+                SettingsAction::ShellCommand { command, .. } if command == &expected
+            )),
+            "shell row must show the command new shells will use"
+        );
+    }
 }
 
 #[cfg(test)]

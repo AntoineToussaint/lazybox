@@ -187,8 +187,10 @@ palette entries. Output persists to `config.yaml` (`PersistedSetup`).
 **Key bindings:** `Shift-T`
 
 ### What it does
-A guided walkthrough of lazybox's main features (inbox, work, snippets,
-navigation, config), shown once on first run and re-openable on demand.
+A guided walkthrough of lazybox's main workflows, shown once on first run and
+re-openable on demand. Snippets get two dedicated cards: send a built-in
+workflow with the `]]s<key>` fast path, then repeat it through persisted Recent
+memory and read the per-workspace `]N` progress cue.
 
 ### How to use it
 Press `Shift-T` to launch it; it also auto-runs the first time (`ui.tour_seen`
@@ -198,6 +200,8 @@ gates the auto-launch).
 - [ ] `Shift-T` opens the tour.
 - [ ] The tour auto-runs on a fresh profile and sets `ui.tour_seen`.
 - [ ] It doesn't auto-run again after being seen.
+- [ ] Separate snippet cards cover fast send/preview and Recent/`]N` memory.
+- [ ] The memory card demonstrates Ask Lazybox hot reload and `Shift-B`.
 
 ### Known sharp edges
 - Newer surface; content may lag behind feature changes.

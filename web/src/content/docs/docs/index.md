@@ -11,6 +11,11 @@ the way an email client surfaces mail. Each task becomes a *workspace*: a git
 worktree plus an embedded terminal running Claude Code, Codex, Cursor, or a
 plain shell.
 
+Inside those sessions, [snippet workflows](/docs/how-to/use-snippets/) turn the
+agent instructions you repeat every day into one fast action. Recent remembers
+what you reuse, and each workspace's `]N` badge shows how many distinct
+workflows it has already received.
+
 lazybox is source-agnostic. GitHub and Linear today, with an optional Slack
 mirror — all in the same inbox, with the same keys.
 
@@ -35,9 +40,10 @@ The documentation is split into four sections, following the
 - **[Tutorials](/docs/tutorials/)** — learning-oriented. Start here if you are
   new. The [Quickstart](/docs/tutorials/quickstart/) gets you from clone to a
   live terminal session in about five minutes.
-- **[How-to guides](/docs/how-to/)** — task-oriented recipes: add a repo, run
-  an agent per workspace, orchestrate a fleet of agents, configure per-repo env
-  and mounts, drive a remote daemon over SSH, mirror to Slack.
+- **[How-to guides](/docs/how-to/)** — task-oriented recipes: use and create
+  snippet workflows, add a repo, run an agent per workspace, orchestrate a
+  fleet of agents, configure per-repo env and mounts, drive a remote daemon
+  over SSH, mirror to Slack.
 - **[Reference](/docs/reference/)** — exhaustive, dry facts: the
   [CLI](/docs/reference/cli/), every [keybinding](/docs/reference/keybindings/),
   and the full [configuration schema](/docs/reference/configuration/).
@@ -54,4 +60,5 @@ lazybox
 ```
 
 Then follow the [Quickstart](/docs/tutorials/quickstart/) for what you see on
-first launch — it also covers the `curl | sh` and build-from-source paths.
+first launch — including sending and repeating a built-in workflow. It also
+covers the `curl | sh` and build-from-source paths.

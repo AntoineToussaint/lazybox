@@ -1,68 +1,128 @@
 ---
-title: Use snippets
-description: Put repeated, multi-sentence agent prompts a few keystrokes away — create, browse, and auto-submit snippets from any agent terminal.
+title: Use snippet workflows
+description: Turn recurring agent instructions into fast, reusable workflows with recent-first and per-workspace memory.
 ---
 
-Snippets are short keys that expand into a pre-written prompt and **auto-submit**
-it to the focused agent. They turn a paragraph of carefully-tuned instruction
-("review the diff", "open a PR with a summary and test plan") into a chord like
-`]]srev`. lazybox ships a broad categorized built-in library (~41 prompts), so
-the picker is useful before you write a single one of your own.
+Snippets are **repeatable agent workflows with memory**. Turn “review this
+change,” “fix CI,” “integrate feedback,” or “run the final checks” into one
+visible action; lazybox remembers what you used recently and which workflows
+each workspace has already received.
 
-## Send a built-in snippet
+lazybox ships 41 categorized workflows, so start by using one before you create
+anything.
 
-From a focused agent terminal, type `]]s` to open the snippet picker, then start
-typing a key. As soon as what you type **uniquely matches** a key, the body is
-sent and submitted immediately — no `Enter`. The whole chord reads `]]srev`.
+## Send and repeat a built-in workflow
 
-In the picker: keep typing to filter (it matches key, description, and
-category), `↑`/`↓` to move, `Enter` to send the highlighted row, `Esc` to
-cancel. Snippets you've sent float into a **Recent** group at the top, so
-repeating one is `]]s` then `Enter`.
+1. Focus an agent terminal and type `]]s`.
+2. Move through the categorized list with `↑`/`↓` and inspect the full body in
+   the live preview.
+3. Type `rev`. Because that key is a unique match, lazybox sends and submits the
+   built-in review workflow immediately. The fast path is `]]srev`; there is no
+   extra `Enter`.
+4. Return later and type `]]s` again. The last workflow is selected in the
+   **Recent** group, so press `Enter` to repeat it.
 
-## Browse what's available
+Typing in the picker filters case-insensitively across key, description, and
+category. `Enter` sends the highlighted row; `Esc` or `Ctrl-C` cancels. Exact
+keys auto-submit only when they are unambiguous.
 
-Press `]` from the sidebar or activity pane (or **Browse snippets** in the `,`
-settings palette) for a read-only catalog of every snippet — key, origin,
-description, and full body. Press `e` there to open the YAML file. Unlike the
-`]]s` picker, the browser needs no focused terminal.
+## Find the right workflow before sending
 
-## Write your own
+The terminal picker groups workflows by category and shows a live preview with
+the selected workflow’s complete body and origin: `built-in`, `global`, or
+`repo`.
 
-Snippets are plain YAML you own — there's no in-app editor by design. Add an
-entry under `snippets:` in `~/.lazybox/snippets.yaml`:
+To browse the whole catalog without a focused terminal, press `]` from the
+sidebar or activity pane. You can also choose **Browse snippets** from the `,`
+Settings palette. The read-only browser lists every merged key, origin,
+description, and body; press `e` there to open the global YAML file.
+
+## Read the workflow memory
+
+Two persisted cues answer different questions:
+
+- **What do I reuse most?** The five most recently sent keys float to the top of
+  every picker, newest first, with the last one selected. Recent is
+  de-duplicated and stored in `~/.lazybox/v2/state.db`, so `]]s` then `Enter`
+  still repeats your last workflow after a restart.
+- **What has this workspace already received?** Each workspace remembers its
+  distinct sent snippet keys. The sidebar renders their count as `]N`: `]2`
+  means two different workflows have already been sent to that workspace.
+  Repeating one does not increase the count.
+
+Only a workflow that was actually delivered enters either history. Opening or
+cancelling the picker records nothing.
+
+## Create or improve one with Ask Lazybox
+
+Press `?` and ask in plain language:
+
+> Add a snippet called `feedback` that integrates review feedback, runs the
+> relevant tests, and commits the result.
+
+Ask Lazybox proposes the key, category, description, body, and destination in a
+confirm-with-preview. If the key already exists, the preview explicitly says it
+will replace the workflow. Accepting validates and writes the global
+`~/.lazybox/snippets.yaml`, then **hot-reloads** the catalog. Use
+`]]sfeedback` immediately; no restart is needed. Declining writes nothing.
+
+This flow can also improve a built-in or global workflow by replacing its key
+in the global layer. Repo-specific workflows remain file-owned: edit
+`<repo>/.lazybox/snippets.yaml` directly when a change belongs to one project.
+
+## Define global and repo workflows in YAML
+
+For direct control, add an entry under `snippets:`:
 
 ```yaml
 snippets:
-  pr:
-    description: Open a PR with summary + test plan
-    category: Git & PR
+  feedback:
+    description: Integrate review feedback and verify it
+    category: Review
     body: |
-      Open a PR for the current branch with a concise title. The body must
-      have a Summary section (1-3 bullets) and a Test plan checklist.
+      Read the unresolved review comments, implement each requested
+      change that is still applicable, run the relevant tests, and
+      commit the result. Report any comment you did not address and why.
 ```
 
-The outer key (`pr`) is what you type after `]]s`. `description` and `category`
-are optional (category adds a group header and colored tag). Files are read
-**once at startup** — restart lazybox after editing.
+The outer key (`feedback`) is what you type after `]]s`. A useful description
+and category make large libraries searchable; the body is the complete
+instruction sent to the agent.
 
-## Layer global and per-repo libraries
+The catalog merges from least to most specific:
 
-Two files stack on top of the built-in set, merged lowest-to-highest —
-**built-in → global → repo** — so the most specific definition of a key wins:
+| Scope | Path | Best for |
+| --- | --- | --- |
+| Built-in | Shipped with lazybox | 41 daily engineering workflows |
+| Global | `~/.lazybox/snippets.yaml` | Personal habits across every repository |
+| Repo | `<repo>/.lazybox/snippets.yaml` | Project commands and team conventions |
 
-| Scope | Path |
-| --- | --- |
-| Global | `~/.lazybox/snippets.yaml` |
-| Repo-local | `<repo>/.lazybox/snippets.yaml` |
+Precedence is **built-in → global → repo**, so a project can redefine `test`
+with its actual test command or tighten `rev` around local conventions without
+changing the workflow elsewhere. The picker’s origin label shows which
+definition won.
 
-That lets a project redefine a shared key (say a project-specific `rev`) without
-touching your personal library, and either file can override a built-in.
+Hand-edited files load at startup. Restart lazybox after creating, updating, or
+removing a YAML entry. Removing an override reveals the less-specific
+definition beneath it.
+
+## Broadcast a workflow across workspaces
+
+To seed the same process across several agents:
+
+1. In the sidebar, press `v` on each target workspace.
+2. Press `Shift-B` and choose a snippet. Press `Ctrl-F` instead if you want only
+   free text.
+3. Review or extend the pre-filled body in the compose textarea, then submit.
+
+Running agents receive the instruction, plain shells receive a direct write,
+and workspaces without a session are skipped and named in the summary. The
+snippet enters Recent once and is recorded on every workspace that actually
+received it, so their `]N` badges show where the workflow has begun.
 
 ## See also
 
-The [full snippets reference](https://github.com/AntoineToussaint/lazybox/blob/main/docs/snippets.md)
-covers the complete lifecycle (create / browse / edit / delete), the file
-format, house style for writing effective bodies, and submission behavior for
-agents versus shells. Broadcasting a snippet to many workspaces at once is
-covered in [Orchestrate multiple agents](/docs/how-to/orchestrate-multiple-agents/).
+The [full snippets reference on GitHub](https://github.com/AntoineToussaint/lazybox/blob/main/docs/snippets.md)
+covers the complete key protocol, body-writing style, file format, and delivery
+behavior. See [Orchestrate multiple agents](/docs/how-to/orchestrate-multiple-agents/)
+for the rest of the multi-select and broadcast workflow.

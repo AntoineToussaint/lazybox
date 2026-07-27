@@ -7,6 +7,9 @@ Task-oriented recipes. Each guide assumes you already have lazybox running (see
 the [Quickstart](/docs/tutorials/quickstart/)) and walks one real goal to
 completion. Pick the one that matches what you need to do.
 
+- **[Use snippet workflows](/docs/how-to/use-snippets/)** — turn recurring
+  agent instructions into fast, reusable workflows with recent-first and
+  per-workspace memory.
 - **[Add a repo](/docs/how-to/add-a-repo/)** — bring a repository's PRs and
   issues into the inbox, and filter by your role.
 - **[Run an agent per workspace](/docs/how-to/run-an-agent-per-workspace/)** —
@@ -15,8 +18,6 @@ completion. Pick the one that matches what you need to do.
 - **[Orchestrate multiple agents](/docs/how-to/orchestrate-multiple-agents/)** —
   multi-select, broadcast one instruction to many workspaces, bulk-update
   branches, and hand work from one agent to another.
-- **[Use snippets](/docs/how-to/use-snippets/)** — put repeated multi-sentence
-  agent prompts a few keystrokes away, with auto-submit.
 - **[Manage automation policies](/docs/how-to/manage-automation-policies/)** —
   inspect and toggle merge-on-green and per-workspace auto-fix behavior from
   the unified `g p` menu.

@@ -40,6 +40,7 @@ workspace — built for developers juggling many PRs and AI coding agents at onc
 - **📨 Reactive inbox** — new comments, CI failures, and review requests surface automatically, with per-row read/unread tracking. No refreshing.
 - **🌳 A worktree per task** — every row opens an isolated git worktree, so PRs never step on each other's working trees.
 - **🤖 Agents built in** — spawn Claude Code, Codex, or Cursor in a row's worktree from a fast which-key menu; `w w` picks the right prompt for the row's state (fix CI / address comments / implement issue).
+- **⚡ Repeatable workflows with memory** — `]]srev` sends a complete review workflow in one action; Recent remembers what you reuse, and each workspace's `]N` badge shows how many distinct snippet workflows it has received.
 - **🖥️ Embedded terminals** — a live PTY per workspace (split & tile them), powered by a vendored ghostty VT parser.
 - **🔌 Source-agnostic** — GitHub and Linear today, surfacing in one inbox behind the same interface, with an optional Slack mirror.
 - **🛰️ Remote-friendly** — a client/daemon split runs over an SSH-forwarded socket for working against a remote box.
@@ -118,6 +119,7 @@ You land on the inbox. Then:
 ↑ / ↓     move between workspaces   (j / k also works)
 Enter     open the selected workspace
 w w       put your default agent to work in its worktree   (s for a plain shell)
+]]srev    send the built-in review workflow   (agent terminal)
 ]]q       leave the terminal, back to the inbox
 ```
 
@@ -126,8 +128,15 @@ w w       put your default agent to work in its worktree   (s for a plain shell)
 agent explicitly, `a` opens the agent menu (`a c` Claude · `a x` Codex ·
 `a u` Cursor).
 
+If you started an agent (rather than a plain shell), `]]s` opens the categorized
+snippet picker with a live body preview. A unique key like `rev` submits
+immediately; open `]]s` later and the last workflow is selected in **Recent**,
+ready to repeat with `Enter`. The workspace's `]1` sidebar badge records that
+one distinct workflow has already been sent.
+
 That's the whole model in one screen: the workspace got an **isolated git
-worktree** and a **live embedded terminal**, and you never left the inbox.
+worktree**, a **live embedded terminal**, and a repeatable workflow with memory,
+and you never left the inbox.
 Run `lazybox` (no `--test`) to do the same against your real PRs — the first
 launch walks you through a short setup wizard. Run `lazybox --help` any time for
 an orientation of every command.
@@ -137,7 +146,7 @@ an orientation of every command.
 📖 **[lazybox.ai/docs](https://lazybox.ai/docs/)** — organized by what you're trying to do:
 
 - **[Quickstart](https://lazybox.ai/docs/tutorials/quickstart/)** — install → run → your first win, in ~5 minutes.
-- **[How-to guides](https://lazybox.ai/docs/how-to/)** — add a repo, run an agent per workspace, per-repo env/mounts, remote over SSH, mirror to Slack.
+- **[How-to guides](https://lazybox.ai/docs/how-to/)** — use snippet workflows, add a repo, run an agent per workspace, per-repo env/mounts, remote over SSH, mirror to Slack.
 - **[Reference](https://lazybox.ai/docs/reference/)** — every [CLI command](https://lazybox.ai/docs/reference/cli/), the full [keybindings](https://lazybox.ai/docs/reference/keybindings/), and the [`~/.lazybox/config.yaml`](https://lazybox.ai/docs/reference/configuration/) schema.
 - **[Explanation](https://lazybox.ai/docs/explanation/)** — the [mental model](https://lazybox.ai/docs/explanation/mental-model/) (worktree- and agent-per-workspace) and the [architecture](https://lazybox.ai/docs/explanation/architecture/).
 
@@ -174,7 +183,7 @@ Power moves, once the basics feel natural:
 - **On main** — `b` leader (`b c` / `b s`, confirmed first) runs an agent or shell on the repo's shared main checkout instead of a worktree; the tab carries a `⎇ main` badge.
 - **Jump anywhere** — `` ` `` opens a fuzzy workspace picker across all repos (from a terminal: `]]` then `` ` ``); `!` jumps to an agent waiting on input, `Shift-F` to failing CI.
 - **Themes & messages** — `t` opens a live-preview theme picker; `Shift-M` shows the log of recent footer notices.
-- **Snippets** — reusable prompts in `~/.lazybox/snippets.yaml` (plus repo-local `.lazybox/snippets.yaml`), sent via `]]s`; see [`docs/snippets.md`](docs/snippets.md).
+- **Snippet workflows** — `]]s<key>` sends a built-in, global, or repo-specific workflow; Recent persists what you reuse, `]N` tracks distinct workflows per workspace, and `Shift-B` broadcasts one across selected agents. See [`docs/snippets.md`](docs/snippets.md).
 
 The [full keybinding reference](https://lazybox.ai/docs/reference/keybindings/) covers every pane.
 

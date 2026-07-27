@@ -325,7 +325,7 @@ with no inferable provider (`GenericCli`), or when no gateway URL is set.
 
 ---
 
-## Snippets
+## Snippet workflows
 
 **Status:** stable
 **Crate(s):** `config` (`src/snippets.rs`), `tui` (picker)
@@ -333,11 +333,19 @@ with no inferable provider (`GenericCli`), or when no gateway URL is set.
 **Key bindings:** `]]s`, then the snippet key (configurable escape char)
 
 ### What it does
-Configurable text shortcuts that expand and auto-send to the focused terminal /
-agent — e.g. a canned "review this diff" prompt bound to a key.
+Turns recurring agent instructions into reusable workflows that expand and
+auto-submit to the focused terminal. The picker remembers recently used
+workflows globally, while each workspace persists the distinct snippet keys it
+has received and renders their count as a `]N` sidebar badge.
 
 ### How to use it
-Define snippets in YAML:
+Open the categorized picker with `]]s`, inspect the live body + origin preview,
+then select a row or type a uniquely matching key such as `rev` for the
+`]]srev` fast path. Open `]]s` later and the last workflow is selected in
+**Recent**, ready to repeat with `Enter`.
+
+lazybox ships a built-in library. Add global or repo-specific workflows in
+YAML:
 
 ```yaml
 snippets:
@@ -347,19 +355,27 @@ snippets:
 ```
 
 In a terminal, press `]]s` then start typing the snippet key; the picker
-fuzzy-filters and auto-submits the body (with a trailing carriage return) when
-the filter uniquely matches. See [`docs/snippets.md`](../snippets.md).
+filters by key, description, and category, and auto-submits when an exact key is
+the unique key-prefix match. Ask Lazybox (`?`) can propose a global add/update,
+confirm it with a body preview, and hot-reload it immediately. `Shift-B`
+broadcasts a chosen workflow across selected workspaces. See
+[`docs/snippets.md`](../snippets.md).
 
 ### How it works (brief)
-`Snippets::load_merged` (`crates/config/src/snippets.rs`) merges global +
-repo-local files (repo wins on key collision). The terminal's doubled escape
-leader (`]]`) followed by `s` mounts the snippet picker
-(`crates/tui/.../keys.rs`).
+`Snippets::load_merged` (`crates/config/src/snippets.rs`) merges built-in,
+global, and repo-local layers (most specific wins). The terminal's doubled
+escape leader (`]]`) followed by `s` mounts the snippet picker
+(`crates/tui/.../keys.rs`). The daemon persists the global Recent MRU in client
+KV and per-workspace keys in the workspace record.
 
 ### Test checklist
 - [ ] A global snippet expands and submits in a terminal via `]]s<key>`.
 - [ ] A repo-local snippet overrides a global one with the same key.
-- [ ] The picker fuzzy-filters as you type and auto-submits on a unique match.
+- [ ] The picker filters as you type and auto-submits an exact, unique key.
+- [ ] Recent survives a restart and selects the most recently sent workflow.
+- [ ] Sending distinct keys updates the target workspace's `]N` badge.
+- [ ] Ask Lazybox confirms, writes, and hot-reloads a global snippet.
+- [ ] A snippet-seeded broadcast records the key only on delivered targets.
 - [ ] `Esc` dismisses the picker without sending.
 
 ### Known sharp edges

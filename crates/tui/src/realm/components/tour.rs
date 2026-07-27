@@ -3,9 +3,10 @@
 //! A skippable, stepped overlay card built around the workflows a
 //! first-time user actually runs: starting a worktree-backed session
 //! from scratch, triaging the inbox, putting an agent on a task,
-//! juggling several sessions, and shipping. Each card is a short
-//! user story rather than a feature dump, and the flow works even
-//! from an empty inbox (a fresh user has no row to act on yet).
+//! reusing snippet workflows, juggling several sessions, and shipping.
+//! Each card is a short user story rather than a feature dump, and the
+//! flow works even from an empty inbox (a fresh user has no row to act
+//! on yet).
 //!
 //! Launched automatically the first time lazybox boots into the panes
 //! (tracked by `~/.lazybox/config.yaml::ui.tour_seen`) and re-invocable
@@ -108,7 +109,42 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "4 · Juggle many sessions",
+        title: "4 · Send a snippet workflow",
+        body: &[
+            "Inside an agent terminal, snippets turn instructions you",
+            "use every day into one fast, visible action.",
+            "",
+            "  ]]s       open the categorized picker + live preview",
+            "  ]]srev    send the built-in review workflow immediately",
+            "",
+            "Try it after the tour: type ]]srev in the terminal.",
+            "The full instruction is sent and submitted to the agent;",
+            "the unique key needs no extra Enter.",
+            "",
+            "Press ] outside a terminal to browse every built-in,",
+            "global, and repo workflow before you send it.",
+        ],
+    },
+    TourStep {
+        title: "5 · Snippets remember",
+        body: &[
+            "Open ]]s again: the last workflow is selected in Recent,",
+            "so repeating it is ]]s then Enter. Recent persists across",
+            "restarts.",
+            "",
+            "Every workspace remembers the distinct workflows sent to",
+            "it. Back in the inbox, ]N is the count: ]2 means two",
+            "different workflows have already started there.",
+            "",
+            "Need your own? Return with ]]q, then Ask Lazybox (?) to add",
+            "or improve a snippet. Confirm; it hot-reloads immediately.",
+            "",
+            "Select rows with v, then Shift-B to seed the same workflow",
+            "across several agents.",
+        ],
+    },
+    TourStep {
+        title: "6 · Juggle many sessions",
         body: &[
             "Every task is its own worktree-backed session, so you can",
             "run several at once without minding the git plumbing.",
@@ -123,7 +159,7 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "5 · Ship it & make it yours",
+        title: "7 · Ship it & make it yours",
         body: &[
             "When a PR is ready, press g — a which-key menu pops up",
             "showing everything you can do to this PR:",
@@ -470,14 +506,32 @@ mod tests {
     }
 
     #[test]
-    fn snippets_step_is_gone() {
-        // Snippets are a power-user feature; onboarding shouldn't carry
-        // them. Guard against the step creeping back in.
-        let all = render_all().to_lowercase();
-        assert!(
-            !all.contains("snippet"),
-            "snippets leaked back into the tour"
+    fn snippets_get_daily_use_and_memory_steps() {
+        let snippet_steps: Vec<&TourStep> = STEPS
+            .iter()
+            .filter(|step| step.title.to_lowercase().contains("snippet"))
+            .collect();
+        assert_eq!(
+            snippet_steps.len(),
+            2,
+            "the daily fast path and memory each need a tour card"
         );
+        let daily = snippet_steps[0].body.join("\n");
+        for needle in ["]]srev", "live preview", "built-in", "global", "repo"] {
+            assert!(daily.contains(needle), "daily-use step missing {needle:?}");
+        }
+        let memory = snippet_steps[1].body.join("\n");
+        for needle in [
+            "Recent",
+            "persists across",
+            "]N",
+            "distinct",
+            "Ask Lazybox",
+            "hot-reloads",
+            "Shift-B",
+        ] {
+            assert!(memory.contains(needle), "memory step missing {needle:?}");
+        }
     }
 
     #[test]
@@ -503,6 +557,8 @@ mod tests {
             (ActionKind::CycleMailbox, "Shift-S"),
             (ActionKind::OpenHelp, "?"),
             (ActionKind::OpenSettings, ","),
+            (ActionKind::OpenSnippets, "]"),
+            (ActionKind::BroadcastToSelected, "Shift-B"),
         ] {
             assert_eq!(
                 ActionDef::for_kind(kind).default_keys,

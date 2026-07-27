@@ -1,11 +1,11 @@
 ---
 title: Quickstart
-description: Install lazybox and open your first workspace with a live terminal in about five minutes.
+description: Install lazybox, open your first workspace, and send a reusable agent workflow in about five minutes.
 ---
 
-In a few minutes you will install lazybox, launch it, and open a workspace with
-a live embedded terminal. That is the whole goal of this tutorial — one visible
-win. Everything else can wait.
+In a few minutes you will install lazybox, open a workspace with a live embedded
+terminal, and send a built-in workflow to its agent. Those are the two wins for
+this tutorial. Everything else can wait.
 
 For a real GitHub inbox you need the **GitHub CLI**, logged in. Run
 `gh auth login` once — lazybox reads your token from `gh auth token`. The
@@ -114,9 +114,34 @@ An empty sidebar right after setup is normal, not a bug:
   workspace and open a session in it.
 :::
 
+## 4. Your daily fast path: send a reusable workflow
+
+If you started an agent above, keep its terminal focused:
+
+1. Type `]]s` to open the categorized snippet picker. Move with `↑`/`↓`; the
+   right pane previews the complete instruction and shows whether it is
+   built-in, global, or repo-specific.
+2. Type `rev`. The built-in review workflow is a unique key, so lazybox sends
+   and submits it immediately. The whole action is `]]srev`; there is no extra
+   `Enter`.
+3. After the agent finishes, open `]]s` again. `rev` is selected in the
+   **Recent** group, so the workflow is now one `Enter` away. Recent persists
+   across lazybox restarts.
+
+Back in the inbox, the workspace now carries a `]1` badge: one distinct snippet
+workflow has been sent there. That count is persisted per workspace, so it
+remains a quick progress cue while you juggle several agents.
+
+:::note[Started a plain shell?]
+Snippet bodies are submitted to the focused terminal. Start an agent with
+`w w` or the `a` menu before trying the built-in `rev` workflow.
+:::
+
 ## What next
 
 You opened a seeded or existing workspace — now wire up a real repository:
 
 - **[Add a repo](/docs/how-to/add-a-repo/)** so your own pull requests flow into
   the inbox.
+- **[Use snippet workflows](/docs/how-to/use-snippets/)** to create, scope, and
+  broadcast the repeatable instructions your agents use every day.

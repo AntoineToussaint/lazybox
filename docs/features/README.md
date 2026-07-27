@@ -104,7 +104,7 @@ Status is best-effort as of this catalog's first pass; correct it as you audit.
 | [Agent state detection](terminals-and-agents.md#agent-state-detection) | beta | `agents` |
 | [Structured agent runtime](terminals-and-agents.md#structured-agent-runtime) | experimental | `server`, `ipc` |
 | [LLM gateway](terminals-and-agents.md#llm-gateway) | shipped | `server`, `agents`, `config` |
-| [Snippets](terminals-and-agents.md#snippets) | stable | `config`, `tui` |
+| [Snippet workflows](terminals-and-agents.md#snippet-workflows) | stable | `config`, `tui` |
 | [Agent-to-agent handoff](terminals-and-agents.md#agent-to-agent-handoff-x-s-send-to-session) | stable | `tui-core`, `tui`, `server` |
 | [Terminal interaction model](terminals-and-agents.md#terminal-interaction-model) | stable | `tui` |
 

@@ -25,8 +25,8 @@ shows how many rows are marked.
 With rows selected, `Shift-B` sends **one instruction to every selected
 workspace** at once:
 
-1. A snippet picker opens — pick a reusable prompt (see
-   [Use snippets](/docs/how-to/use-snippets/)), or press `Ctrl-F` to skip
+1. A snippet picker opens — pick a reusable workflow (see
+   [Use snippet workflows](/docs/how-to/use-snippets/)), or press `Ctrl-F` to skip
    straight to free text. (With no snippets configured, it jumps straight to the
    compose step.)
 2. A compose textarea opens, pre-filled with the snippet body. Edit it into the
@@ -73,6 +73,6 @@ stays legible.
 
 - [Run an agent per workspace](/docs/how-to/run-an-agent-per-workspace/) — spawn
   the agents you'll be orchestrating.
-- [Use snippets](/docs/how-to/use-snippets/) — the reusable prompts a broadcast
-  draws from.
+- [Use snippet workflows](/docs/how-to/use-snippets/) — the repeatable
+  instructions with memory that a broadcast draws from.
 - [Keybindings reference](/docs/reference/keybindings/) — every chord, by pane.

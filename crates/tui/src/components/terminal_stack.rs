@@ -3526,6 +3526,22 @@ impl TerminalStack {
         self.persist_layout(cmds);
     }
 
+    /// Focus the tile containing `target` and persist the updated split
+    /// layout. Returns `false` when the terminal is not visible.
+    pub fn focus_tile(&mut self, target: TerminalId, cmds: &mut Vec<Command>) -> bool {
+        let lazybox_core::SessionLayout::Splits { tree, focused } = &mut self.layout else {
+            return self.focus_terminal(target);
+        };
+        let Some(path) = tree.path_to(target.0) else {
+            return false;
+        };
+        if *focused != path {
+            *focused = path;
+            self.persist_layout(cmds);
+        }
+        true
+    }
+
     /// Remove a terminal slot from the map and the tile tree,
     /// collapsing splits and re-clamping the tab strip. Shared by the
     /// exit teardown, the restart path (#356), and the

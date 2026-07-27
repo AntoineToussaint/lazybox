@@ -1298,6 +1298,16 @@ impl<T: TerminalAdapter> Model<T> {
                     self.set_focus(focus);
                     self.redraw = true;
                 }
+                if matches!(button, crossterm::event::MouseButton::Left)
+                    && target == Some(PaneFocus::Terminals)
+                    && let Some(terminal_id) = self.terminals.terminal_at(m.column, m.row)
+                {
+                    let mut cmds = Vec::new();
+                    if self.terminals.focus_tile(terminal_id, &mut cmds) {
+                        self.dispatch_cmds(cmds);
+                        self.redraw = true;
+                    }
+                }
 
                 // A click landing in the terminal pane (or nowhere)
                 // breaks any pending sidebar / activity double-click

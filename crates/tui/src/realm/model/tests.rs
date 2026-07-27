@@ -6563,6 +6563,73 @@ mod leader_tile_tests {
         assert!(saw_persist, "tile-focus moves persist the layout");
     }
 
+    #[test]
+    fn clicking_a_terminal_tile_focuses_it_and_routes_input_to_it() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use tuirealm::ratatui::{Terminal, backend::TestBackend};
+
+        let (mut m, mut server) = build_model_with_terminals(2);
+        m.layout.last_area = Rect::new(0, 0, 120, 40);
+        m.terminals.set_layout(lazybox_core::SessionLayout::Splits {
+            tree: lazybox_core::TileTree::HSplit {
+                left: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 1 }),
+                right: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 2 }),
+                ratio: 50,
+            },
+            focused: vec![1],
+        });
+
+        let area = m.layout.last_area;
+        let (_, _, bottom) = m.effective_pane_rects(area);
+        let mut term = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        term.draw(|f| m.terminals.view_in(bottom, f)).unwrap();
+        let col = bottom.x + 4;
+        let row = bottom.y + 6;
+        assert_eq!(m.terminals.terminal_at(col, row), Some(TerminalId(1)));
+        while server.rx.try_recv().is_ok() {}
+
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            m.handle_mouse(MouseEvent {
+                kind,
+                column: col,
+                row,
+                modifiers: KeyModifiers::empty(),
+            });
+        }
+
+        assert_eq!(m.focus(), PaneFocus::Terminals);
+        assert_eq!(
+            m.terminals.focused_terminal_id(),
+            Some(TerminalId(1)),
+            "the clicked left tile becomes visibly focused",
+        );
+
+        m.dispatch_key(RealmKey::new(Key::Char('a'), RealmMods::NONE));
+
+        let mut persisted_focus = None;
+        let mut write = None;
+        while let Ok(cmd) = server.rx.try_recv() {
+            match cmd {
+                IpcCommand::SetSessionLayout { layout_json, .. } => {
+                    let layout: lazybox_core::SessionLayout =
+                        serde_json::from_str(&layout_json).expect("valid persisted layout");
+                    if let lazybox_core::SessionLayout::Splits { focused, .. } = layout {
+                        persisted_focus = Some(focused);
+                    }
+                }
+                IpcCommand::Write { terminal_id, bytes } => {
+                    write = Some((terminal_id, bytes));
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(persisted_focus, Some(vec![0]));
+        assert_eq!(write, Some((TerminalId(1), b"a".to_vec())));
+    }
+
     /// #362: a wheel event over the LEFT tile scrolls the left
     /// terminal's scrollback, not the focused RIGHT one. Before the fix
     /// the handler always scrolled the focused terminal, so hovering the

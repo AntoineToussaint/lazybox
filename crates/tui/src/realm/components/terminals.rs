@@ -184,6 +184,11 @@ impl Terminals {
         self.inner.move_tile_focus(dir, cmds);
     }
 
+    /// Focus a terminal tile directly and persist the split layout.
+    pub fn focus_tile(&mut self, target: TerminalId, cmds: &mut Vec<IpcCommand>) -> bool {
+        self.inner.focus_tile(target, cmds)
+    }
+
     /// `]]x` — close the focused terminal (tile or active tab) and
     /// its PTY.
     pub fn close_focused_tile(&mut self, cmds: &mut Vec<IpcCommand>) {

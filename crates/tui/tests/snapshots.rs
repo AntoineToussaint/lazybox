@@ -206,8 +206,8 @@ fn sidebar_golden_render_recent_pr_and_issue_mixed() {
 
 /// Regression for issue #231: at a small terminal size the row's
 /// horizontal budget goes to content, not to empty gutters. The
-/// selection caret is a single shared column (lpad + `▸`), so the
-/// type glyph starts at column 2 — not pushed in by a 2-col caret —
+/// selection marker is a single shared column (lpad + `▶`), so the
+/// type glyph starts at column 2 — not pushed in by a 2-col marker —
 /// and a long title fills the row right up to the lone scrollbar
 /// gutter instead of leaving dead margin on either side.
 #[test]
@@ -226,16 +226,16 @@ fn sidebar_tight_gutters_leave_room_for_content_at_small_width() {
     let rendered = render_to_string(&mut s, w, 10, true);
     let row = rendered
         .lines()
-        .find(|l| l.trim_start().starts_with('▸'))
+        .find(|l| l.trim_start().starts_with('▶'))
         .expect("a cursor workspace row");
     let chars: Vec<char> = row.chars().collect();
-    // Left gutter: lpad(1) + 1-col caret, then the type glyph — no
-    // 2-col-per-depth caret padding ahead of it.
+    // Left gutter: lpad(1) + 1-col marker, then the type glyph — no
+    // 2-col-per-depth marker padding ahead of it.
     assert_eq!(chars[0], ' ', "row: {row:?}");
-    assert_eq!(chars[1], '▸', "row: {row:?}");
+    assert_eq!(chars[1], '▶', "row: {row:?}");
     assert_ne!(
         chars[2], ' ',
-        "type glyph should sit right after the single caret: {row:?}"
+        "type glyph should sit right after the single marker: {row:?}"
     );
     // Right side: only the scrollbar column is reserved, so a long
     // title fills the row to within a column of the edge rather than

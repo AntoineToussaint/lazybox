@@ -1300,7 +1300,7 @@ impl<T: TerminalAdapter> Model<T> {
                 }
                 if matches!(button, crossterm::event::MouseButton::Left)
                     && target == Some(PaneFocus::Terminals)
-                    && let Some(terminal_id) = self.terminals.terminal_at(m.column, m.row)
+                    && let Some(terminal_id) = self.terminals.tile_at(m.column, m.row)
                 {
                     let mut cmds = Vec::new();
                     if self.terminals.focus_tile(terminal_id, &mut cmds) {
@@ -1600,7 +1600,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // divider, the tab strip) so the wheel is never a no-op.
                 let Some(target) = self
                     .terminals
-                    .terminal_at(m.column, m.row)
+                    .scroll_terminal_at(m.column, m.row)
                     .or_else(|| self.terminals.focused_terminal_id())
                 else {
                     return;

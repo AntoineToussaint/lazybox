@@ -6578,6 +6578,7 @@ mod leader_tile_tests {
             },
             focused: vec![1],
         });
+        m.terminals.set_active_tab(1);
 
         let area = m.layout.last_area;
         let (_, _, bottom) = m.effective_pane_rects(area);
@@ -6585,7 +6586,10 @@ mod leader_tile_tests {
         term.draw(|f| m.terminals.view_in(bottom, f)).unwrap();
         let col = bottom.x + 4;
         let row = bottom.y + 6;
-        assert_eq!(m.terminals.terminal_at(col, row), Some(TerminalId(1)));
+        assert_eq!(
+            m.terminals.scroll_terminal_at(col, row),
+            Some(TerminalId(1))
+        );
         while server.rx.try_recv().is_ok() {}
 
         for kind in [
@@ -6607,7 +6611,76 @@ mod leader_tile_tests {
             "the clicked left tile becomes visibly focused",
         );
 
+        m.handle_paste("paste");
         m.dispatch_key(RealmKey::new(Key::Char('a'), RealmMods::NONE));
+
+        let mut persisted_focus = None;
+        let mut writes = Vec::new();
+        while let Ok(cmd) = server.rx.try_recv() {
+            match cmd {
+                IpcCommand::SetSessionLayout { layout_json, .. } => {
+                    let layout: lazybox_core::SessionLayout =
+                        serde_json::from_str(&layout_json).expect("valid persisted layout");
+                    if let lazybox_core::SessionLayout::Splits { focused, .. } = layout {
+                        persisted_focus = Some(focused);
+                    }
+                }
+                IpcCommand::Write { terminal_id, bytes } => {
+                    writes.push((terminal_id, bytes));
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(persisted_focus, Some(vec![0]));
+        assert_eq!(
+            writes,
+            vec![
+                (TerminalId(1), b"\x1b[200~paste\x1b[201~".to_vec()),
+                (TerminalId(1), b"a".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn clicking_a_terminal_focus_bar_routes_input_to_that_tile() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use tuirealm::ratatui::{Terminal, backend::TestBackend};
+
+        let (mut m, mut server) = build_model_with_terminals(2);
+        m.layout.last_area = Rect::new(0, 0, 120, 40);
+        m.terminals.set_layout(lazybox_core::SessionLayout::Splits {
+            tree: lazybox_core::TileTree::HSplit {
+                left: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 1 }),
+                right: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 2 }),
+                ratio: 50,
+            },
+            focused: vec![1],
+        });
+        m.terminals.set_active_tab(1);
+
+        let area = m.layout.last_area;
+        let (_, _, bottom) = m.effective_pane_rects(area);
+        let mut term = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        term.draw(|f| m.terminals.view_in(bottom, f)).unwrap();
+        let col = bottom.x + 4;
+        let row = bottom.y + 3;
+        assert_eq!(m.terminals.scroll_terminal_at(col, row), None);
+        assert_eq!(m.terminals.tile_at(col, row), Some(TerminalId(1)));
+        while server.rx.try_recv().is_ok() {}
+
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            m.handle_mouse(MouseEvent {
+                kind,
+                column: col,
+                row,
+                modifiers: KeyModifiers::empty(),
+            });
+        }
+
+        m.dispatch_key(RealmKey::new(Key::Char('b'), RealmMods::NONE));
 
         let mut persisted_focus = None;
         let mut write = None;
@@ -6627,7 +6700,7 @@ mod leader_tile_tests {
             }
         }
         assert_eq!(persisted_focus, Some(vec![0]));
-        assert_eq!(write, Some((TerminalId(1), b"a".to_vec())));
+        assert_eq!(write, Some((TerminalId(1), b"b".to_vec())));
     }
 
     /// #362: a wheel event over the LEFT tile scrolls the left
@@ -6755,7 +6828,7 @@ mod leader_tile_tests {
         let col = bottom.x + bottom.width * 3 / 4;
         let row = bottom.y + 6;
         assert_eq!(
-            m.terminals.terminal_at(col, row),
+            m.terminals.scroll_terminal_at(col, row),
             Some(TerminalId(2)),
             "the point is over the right tile",
         );

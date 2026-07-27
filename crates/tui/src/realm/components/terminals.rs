@@ -220,7 +220,7 @@ impl Terminals {
 
     /// Scroll a specific terminal's viewport — the tile under the mouse
     /// cursor (#362). The wheel handler resolves the hovered tile via
-    /// [`Self::terminal_at`] and routes the scroll here so focus never
+    /// [`Self::scroll_terminal_at`] and routes the scroll here so focus never
     /// has to move for the wheel to hit the right pane.
     pub fn scroll_terminal(
         &mut self,
@@ -232,8 +232,14 @@ impl Terminals {
 
     /// Terminal whose tile the point `(col, row)` lands in. Drives
     /// hover-to-scroll in the wheel handler. `None` over pane chrome.
-    pub fn terminal_at(&self, col: u16, row: u16) -> Option<TerminalId> {
-        self.inner.terminal_at(col, row)
+    pub fn scroll_terminal_at(&self, col: u16, row: u16) -> Option<TerminalId> {
+        self.inner.scroll_terminal_at(col, row)
+    }
+
+    /// Terminal whose full tile contains `(col, row)`, including its
+    /// focus bar. Drives click-to-focus without widening wheel targets.
+    pub fn tile_at(&self, col: u16, row: u16) -> Option<TerminalId> {
+        self.inner.tile_at(col, row)
     }
 
     /// Take the deep-scrollback fetch an upward scroll armed, if any.

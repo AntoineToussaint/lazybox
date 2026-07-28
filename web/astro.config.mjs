@@ -65,6 +65,10 @@ export default defineConfig({
               slug: 'docs/how-to/run-an-agent-per-workspace',
             },
             {
+              label: 'Keep your issue session in its PR',
+              slug: 'docs/how-to/keep-session-from-issue-to-pr',
+            },
+            {
               label: 'Orchestrate multiple agents',
               slug: 'docs/how-to/orchestrate-multiple-agents',
             },

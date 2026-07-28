@@ -2014,8 +2014,20 @@ snippets:
         Model<tuirealm::terminal::TestTerminalAdapter>,
         Vec<SessionKey>,
     ) {
+        model_with_broadcast_targets_and_snippets(kinds, lazybox_config::Snippets::default())
+    }
+
+    fn model_with_broadcast_targets_and_snippets(
+        kinds: &[Option<lazybox_ipc::TerminalKind>],
+        snippets: lazybox_config::Snippets,
+    ) -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        Vec<SessionKey>,
+    ) {
         use lazybox_ipc::{Event as IpcEvent, TerminalId};
-        let mut m = build_model();
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test_with_snippets(client, Size::new(120, 40), snippets)
+            .expect("model init");
         let keys: Vec<SessionKey> = (1..=kinds.len())
             .map(|i| SessionKey::from(format!("github:o/r#{i}").as_str()))
             .collect();
@@ -2048,6 +2060,35 @@ snippets:
             }
         }
         (m, keys)
+    }
+
+    #[test]
+    fn configured_model_broadcast_can_pick_the_builtin_audit_snippet() {
+        let (mut m, keys) = model_with_broadcast_targets_and_snippets(
+            &[Some(lazybox_ipc::TerminalKind::Agent("claude".into()))],
+            lazybox_config::Snippets::builtin(),
+        );
+        assert!(m.sidebar.focus_workspace_key(&keys[0]));
+        assert_eq!(m.sidebar.toggle_broadcast_select(), Some(true));
+
+        m.mount_broadcast_picker();
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::BroadcastSnippet),
+            "a configured model must offer the snippet picker"
+        );
+
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Text("audit".into())]);
+        assert!(cmds.is_empty(), "picking only advances the flow");
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::BroadcastText),
+            "the built-in audit snippet advances to editable composition"
+        );
+        let Some(super::super::ModalFlow::Broadcast { draft }) = &m.modal_flow else {
+            panic!("broadcast draft survives into composition");
+        };
+        assert_eq!(draft.snippet_key.as_deref(), Some("audit"));
     }
 
     /// Broadcast compose submit with two agent targets and one
@@ -5148,6 +5189,53 @@ mod merge_focus_follow_tests {
         );
     }
 
+    #[test]
+    fn contextual_work_tier_reaches_the_daemon_inject_fallback() {
+        use lazybox_ipc::{Client, Command, EVENT_CHANNEL_CAPACITY, TerminalId, TerminalKind};
+        use lazybox_tui_core::action::Action;
+        use tokio::sync::mpsc;
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let (_evt_tx, evt_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let client = Client::from_channels(cmd_tx, evt_rx);
+        let mut m = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+
+        let issue = workspace("owner/repo#1", false, Duration::hours(1));
+        let issue_sk: SessionKey = (&issue.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(issue)));
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(3),
+            session_key: issue_sk.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        assert!(m.sidebar.focus_workspace_key(&issue_sk));
+        while cmd_rx.try_recv().is_ok() {}
+
+        let cmds = m.dispatch_action(&Action::WorkTier("M".into()));
+        m.flush_dispatched_cmds(cmds);
+
+        let alias =
+            std::iter::from_fn(|| cmd_rx.try_recv().ok()).find_map(|command| match command {
+                Command::InjectPrompt {
+                    fallback_spawn: Some(fallback),
+                    ..
+                } => Some(fallback.model_alias),
+                _ => None,
+            });
+        assert_eq!(
+            alias,
+            Some(Some("M".to_string())),
+            "the daemon-visible fallback spawn keeps the explicit tier",
+        );
+    }
+
     /// Issue #557: `w` on an empty/scratch workspace (no PR, issue, or
     /// selected comments) used to be a silent no-op. It now spawns the
     /// default agent (bare) and arms the follow target, so a blank
@@ -5207,16 +5295,13 @@ mod merge_focus_follow_tests {
         assert!(m.sidebar.focus_workspace_key(&sk));
 
         let cmds = m.dispatch_action(&Action::Work);
-        let agent = cmds.iter().find_map(|c| match c {
-            Command::Spawn {
-                kind: TerminalKind::Agent(id),
-                ..
-            } => Some(id.clone()),
+        let terminal_id = cmds.iter().find_map(|command| match command {
+            Command::InjectPrompt { terminal_id, .. } => Some(*terminal_id),
             _ => None,
         });
         assert_eq!(
-            agent.as_deref(),
-            Some("codex"),
+            terminal_id,
+            Some(TerminalId(3)),
             "`w w` targets the running Codex, not the default Claude",
         );
     }
@@ -5258,8 +5343,12 @@ mod merge_focus_follow_tests {
             Some(&Id::WorkAgentPicker),
             "the multi-agent chooser is up",
         );
-        let agents = match &m.modal_flow {
-            Some(super::super::ModalFlow::WorkPicker { picker }) => picker.agents.clone(),
+        let agents: Vec<String> = match &m.modal_flow {
+            Some(super::super::ModalFlow::WorkPicker { picker }) => picker
+                .targets
+                .iter()
+                .map(|target| target.agent_id.clone())
+                .collect(),
             _ => panic!("picker stash armed"),
         };
         assert_eq!(
@@ -5268,18 +5357,13 @@ mod merge_focus_follow_tests {
             "rows list every running agent, sorted",
         );
 
-        // Pick Codex (row 1) → the same work spawn `w` would have
-        // queued, targeted at Codex, prompt included.
+        // Pick Codex (row 1) → target that exact terminal.
         let cmds = m.handle_choice_picked(vec![ChoicePayload::Index(1)]);
         match cmds.as_slice() {
-            [
-                Command::Spawn {
-                    kind: TerminalKind::Agent(id),
-                    initial_prompt: Some(_),
-                    ..
-                },
-            ] => assert_eq!(id, "codex"),
-            other => panic!("expected one Spawn(Agent(codex), prompt), got {other:?}"),
+            [Command::InjectPrompt { terminal_id, .. }] => {
+                assert_eq!(*terminal_id, TerminalId(3))
+            }
+            other => panic!("expected one InjectPrompt for Codex, got {other:?}"),
         }
         assert!(m.modal_flow.is_none(), "stash consumed");
     }
@@ -5335,6 +5419,60 @@ mod merge_focus_follow_tests {
         );
     }
 
+    #[test]
+    fn work_chooser_disambiguates_two_sessions_of_the_same_agent() {
+        use lazybox_ipc::{Client, Command, EVENT_CHANNEL_CAPACITY, TerminalId, TerminalKind};
+        use lazybox_tui_core::action::Action;
+        use tokio::sync::mpsc;
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let (_evt_tx, evt_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let client = Client::from_channels(cmd_tx, evt_rx);
+        let mut m = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+
+        let pr = workspace("owner/repo#1", true, Duration::hours(1));
+        let sk: SessionKey = (&pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        for terminal_id in [TerminalId(3), TerminalId(4)] {
+            m.handle_daemon_event(IpcEvent::TerminalSpawned {
+                model_label: None,
+                terminal_id,
+                session_key: sk.clone(),
+                kind: TerminalKind::Agent("codex".into()),
+                no_permission: false,
+                on_main: false,
+            });
+        }
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        assert!(m.sidebar.focus_workspace_key(&sk));
+
+        assert!(m.dispatch_action(&Action::Work).is_empty());
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::WorkAgentPicker),
+            "two live conversations must be disambiguated before injection",
+        );
+        while cmd_rx.try_recv().is_ok() {}
+
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Index(1)]);
+        m.flush_dispatched_cmds(cmds);
+        let target =
+            std::iter::from_fn(|| cmd_rx.try_recv().ok()).find_map(|command| match command {
+                Command::InjectPrompt { terminal_id, .. } => Some(terminal_id),
+                _ => None,
+            });
+        assert_eq!(
+            target,
+            Some(TerminalId(4)),
+            "the selected conversation receives the contextual prompt",
+        );
+    }
+
     /// Issue #418: Esc on the multi-agent chooser cancels cleanly —
     /// stash dropped, nothing spawned.
     #[test]
@@ -5371,8 +5509,8 @@ mod merge_focus_follow_tests {
     }
 
     /// Issue #418: a `w S` tier chord that lands on several running
-    /// agents routes through the same chooser, and the picked spawn
-    /// still carries the tier alias.
+    /// agents routes through the same chooser, and a stale-terminal
+    /// fallback still carries the tier alias.
     #[test]
     fn work_tier_chooser_carries_model_alias_through_the_pick() {
         use lazybox_ipc::{Command, TerminalId, TerminalKind};
@@ -5402,20 +5540,24 @@ mod merge_focus_follow_tests {
         let cmds = m.handle_choice_picked(vec![ChoicePayload::Index(1)]);
         match cmds.as_slice() {
             [
-                Command::Spawn {
-                    kind: TerminalKind::Agent(id),
-                    model_alias,
+                Command::InjectPrompt {
+                    terminal_id,
+                    fallback_spawn: Some(fallback),
                     ..
                 },
             ] => {
-                assert_eq!(id, "codex");
+                assert_eq!(*terminal_id, TerminalId(3));
+                assert!(matches!(
+                    &fallback.kind,
+                    TerminalKind::Agent(id) if id == "codex"
+                ));
                 assert_eq!(
-                    model_alias.as_deref(),
+                    fallback.model_alias.as_deref(),
                     Some("M"),
                     "tier alias survives the pick"
                 );
             }
-            other => panic!("expected one tiered Spawn, got {other:?}"),
+            other => panic!("expected one tiered InjectPrompt, got {other:?}"),
         }
     }
 
@@ -6598,6 +6740,146 @@ mod leader_tile_tests {
         assert!(saw_persist, "tile-focus moves persist the layout");
     }
 
+    #[test]
+    fn clicking_a_terminal_tile_focuses_it_and_routes_input_to_it() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use tuirealm::ratatui::{Terminal, backend::TestBackend};
+
+        let (mut m, mut server) = build_model_with_terminals(2);
+        m.layout.last_area = Rect::new(0, 0, 120, 40);
+        m.terminals.set_layout(lazybox_core::SessionLayout::Splits {
+            tree: lazybox_core::TileTree::HSplit {
+                left: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 1 }),
+                right: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 2 }),
+                ratio: 50,
+            },
+            focused: vec![1],
+        });
+        m.terminals.set_active_tab(1);
+
+        let area = m.layout.last_area;
+        let (_, _, bottom) = m.effective_pane_rects(area);
+        let mut term = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        term.draw(|f| m.terminals.view_in(bottom, f)).unwrap();
+        let col = bottom.x + 4;
+        let row = bottom.y + 6;
+        assert_eq!(
+            m.terminals.scroll_terminal_at(col, row),
+            Some(TerminalId(1))
+        );
+        while server.rx.try_recv().is_ok() {}
+
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            m.handle_mouse(MouseEvent {
+                kind,
+                column: col,
+                row,
+                modifiers: KeyModifiers::empty(),
+            });
+        }
+
+        assert_eq!(m.focus(), PaneFocus::Terminals);
+        assert_eq!(
+            m.terminals.focused_terminal_id(),
+            Some(TerminalId(1)),
+            "the clicked left tile becomes visibly focused",
+        );
+
+        m.handle_paste("paste");
+        m.dispatch_key(RealmKey::new(Key::Char('a'), RealmMods::NONE));
+
+        let mut persisted_focus = None;
+        let mut writes = Vec::new();
+        while let Ok(cmd) = server.rx.try_recv() {
+            match cmd {
+                IpcCommand::SetSessionLayout { layout_json, .. } => {
+                    let layout: lazybox_core::SessionLayout =
+                        serde_json::from_str(&layout_json).expect("valid persisted layout");
+                    if let lazybox_core::SessionLayout::Splits { focused, .. } = layout {
+                        persisted_focus = Some(focused);
+                    }
+                }
+                IpcCommand::Write { terminal_id, bytes } => {
+                    writes.push((terminal_id, bytes));
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(persisted_focus, Some(vec![0]));
+        assert_eq!(
+            writes,
+            vec![
+                (TerminalId(1), b"\x1b[200~paste\x1b[201~".to_vec()),
+                (TerminalId(1), b"a".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn clicking_a_terminal_focus_bar_routes_input_to_that_tile() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use tuirealm::ratatui::{Terminal, backend::TestBackend};
+
+        let (mut m, mut server) = build_model_with_terminals(2);
+        m.layout.last_area = Rect::new(0, 0, 120, 40);
+        m.terminals.set_layout(lazybox_core::SessionLayout::Splits {
+            tree: lazybox_core::TileTree::HSplit {
+                left: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 1 }),
+                right: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 2 }),
+                ratio: 50,
+            },
+            focused: vec![1],
+        });
+        m.terminals.set_active_tab(1);
+
+        let area = m.layout.last_area;
+        let (_, _, bottom) = m.effective_pane_rects(area);
+        let mut term = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        term.draw(|f| m.terminals.view_in(bottom, f)).unwrap();
+        let col = bottom.x + 4;
+        let row = bottom.y + 3;
+        assert_eq!(m.terminals.scroll_terminal_at(col, row), None);
+        assert_eq!(m.terminals.tile_at(col, row), Some(TerminalId(1)));
+        while server.rx.try_recv().is_ok() {}
+
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            m.handle_mouse(MouseEvent {
+                kind,
+                column: col,
+                row,
+                modifiers: KeyModifiers::empty(),
+            });
+        }
+
+        m.dispatch_key(RealmKey::new(Key::Char('b'), RealmMods::NONE));
+
+        let mut persisted_focus = None;
+        let mut write = None;
+        while let Ok(cmd) = server.rx.try_recv() {
+            match cmd {
+                IpcCommand::SetSessionLayout { layout_json, .. } => {
+                    let layout: lazybox_core::SessionLayout =
+                        serde_json::from_str(&layout_json).expect("valid persisted layout");
+                    if let lazybox_core::SessionLayout::Splits { focused, .. } = layout {
+                        persisted_focus = Some(focused);
+                    }
+                }
+                IpcCommand::Write { terminal_id, bytes } => {
+                    write = Some((terminal_id, bytes));
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(persisted_focus, Some(vec![0]));
+        assert_eq!(write, Some((TerminalId(1), b"b".to_vec())));
+    }
+
     /// #362: a wheel event over the LEFT tile scrolls the left
     /// terminal's scrollback, not the focused RIGHT one. Before the fix
     /// the handler always scrolled the focused terminal, so hovering the
@@ -6723,7 +7005,7 @@ mod leader_tile_tests {
         let col = bottom.x + bottom.width * 3 / 4;
         let row = bottom.y + 6;
         assert_eq!(
-            m.terminals.terminal_at(col, row),
+            m.terminals.scroll_terminal_at(col, row),
             Some(TerminalId(2)),
             "the point is over the right tile",
         );
@@ -13456,6 +13738,26 @@ mod settings_window_tests {
                 .iter()
                 .any(|a| a.label() == format!("Change theme (live preview) · {current}")),
             "theme row must show the active theme"
+        );
+    }
+
+    #[test]
+    fn shell_row_uses_the_daemons_resolved_command() {
+        let mut m = build_model_with_setup();
+        m.handle_daemon_event(lazybox_ipc::Event::ShellCommandConfig {
+            command: "/remote/bin/fish".into(),
+            configured: true,
+        });
+        m.open_settings();
+        assert!(
+            m.setup.settings_actions.iter().any(|action| matches!(
+                action,
+                SettingsAction::ShellCommand {
+                    command,
+                    configured: true,
+                } if command == "/remote/bin/fish"
+            )),
+            "shell row must show the command reported by the PTY-owning daemon"
         );
     }
 }

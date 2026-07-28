@@ -13,8 +13,11 @@ completion. Pick the one that matches what you need to do.
 - **[Add a repo](/docs/how-to/add-a-repo/)** — bring a repository's PRs and
   issues into the inbox, and filter by your role.
 - **[Run an agent per workspace](/docs/how-to/run-an-agent-per-workspace/)** —
-  spawn Claude Code, Codex, or Cursor scoped to one task, including autonomous
-  runs.
+  use `w w` and GitHub priorities to route task context, the target agent,
+  model, and reasoning effort into one isolated worktree.
+- **[Keep your issue session in its PR](/docs/how-to/keep-session-from-issue-to-pr/)** —
+  start an agent before the PR exists, then carry its live terminal, worktree,
+  and context into the closing PR.
 - **[Orchestrate multiple agents](/docs/how-to/orchestrate-multiple-agents/)** —
   multi-select, broadcast one instruction to many workspaces, bulk-update
   branches, and hand work from one agent to another.
@@ -22,7 +25,7 @@ completion. Pick the one that matches what you need to do.
   inspect and toggle merge-on-green and per-workspace auto-fix behavior from
   the unified `g p` menu.
 - **[Trigger agents with @lazybox mentions](/docs/how-to/lazybox-mentions/)** —
-  let a GitHub comment auto-spawn the default agent on that workspace.
+  choose priority and start an agent entirely from a GitHub issue.
 - **[Get desktop notifications](/docs/how-to/desktop-notifications/)** — fire an
   OS banner when an agent needs input, including over SSH.
 - **[Change the theme](/docs/how-to/themes/)** — live-preview and persist a

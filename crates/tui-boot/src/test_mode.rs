@@ -32,6 +32,8 @@ pub struct TestFixture {
     pub repo: TempDir,
     /// In-memory store the daemon should use.
     pub store: Arc<dyn Store>,
+    /// Deterministic client-side catalog available in the throwaway TUI.
+    pub snippets: lazybox_config::Snippets,
 }
 
 impl TestFixture {
@@ -64,7 +66,11 @@ impl TestFixture {
         if seed_session {
             seed_one_session(&*store, repo.path())?;
         }
-        Ok(Self { repo, store })
+        Ok(Self {
+            repo,
+            store,
+            snippets: lazybox_config::Snippets::builtin(),
+        })
     }
 }
 
@@ -252,6 +258,15 @@ mod tests {
         assert!(
             workspace.name.contains("Test"),
             "workspace name is recognizable"
+        );
+    }
+
+    #[test]
+    fn fixture_includes_the_builtin_audit_snippet() {
+        let fx = TestFixture::new_with_seeded_session().unwrap();
+        assert!(
+            fx.snippets.get("audit").is_some(),
+            "--test users can follow the broadcast quickstart"
         );
     }
 }

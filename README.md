@@ -39,7 +39,8 @@ workspace — built for developers juggling many PRs and AI coding agents at onc
 
 - **📨 Reactive inbox** — new comments, CI failures, and review requests surface automatically, with per-row read/unread tracking. No refreshing.
 - **🌳 A worktree per task** — every row opens an isolated git worktree, so PRs never step on each other's working trees.
-- **🤖 Agents built in** — spawn Claude Code, Codex, or Cursor in a row's worktree from a fast which-key menu; `w w` picks the right prompt for the row's state (fix CI / address comments / implement issue).
+- **🤖 Point at the work and press `w w`** — lazybox turns the focused issue, CI failure, conflict, or selected review comments into the right brief, then reuses the running agent or starts your default in the task worktree.
+- **🎚️ GitHub-controlled compute** — a `high` / `medium` / `low` label or `@high` / `@medium` / `@low` task-body marker maps through the target agent's model tiers, so GitHub can choose model and reasoning effort before work starts.
 - **⚡ Repeatable workflows with memory** — `]]srev` sends a complete review workflow in one action; Recent remembers what you reuse, and each workspace's `]N` badge tracks up to 12 recently distinct snippet workflows.
 - **🖥️ Embedded terminals** — a live PTY per workspace (split & tile them), powered by a vendored ghostty VT parser.
 - **🔌 Source-agnostic** — GitHub and Linear today, surfacing in one inbox behind the same interface, with an optional Slack mirror.
@@ -118,16 +119,17 @@ You land on the inbox. Then:
 ```
 ↑ / ↓     move between workspaces   (j / k also works)
 Enter     open the selected workspace
-w w       put your default agent to work in its worktree   (s for a plain shell)
+w w       route this task to its running/default agent     (s for a plain shell)
           wait for that contextual task to finish
-]]srev    review the result with the built-in workflow   (agent terminal)
+]]srev    review the result with the built-in workflow     (agent terminal)
 ]]q       leave the terminal, back to the inbox
 ```
 
-`w` opens the work menu; `w w` picks the right prompt for the row's state and needs the agent's CLI
-(e.g. `claude`) on your `PATH`; `s` (a plain shell) always works. To pick an
-agent explicitly, `a` opens the agent menu (`a c` Claude · `a x` Codex ·
-`a u` Cursor).
+`w` opens the work menu; `w w` builds the right prompt for the row's state,
+sends it to the relevant running agent when there is one, or starts your
+default agent in the task worktree. It needs that agent's CLI (e.g. `claude`)
+on your `PATH`; `s` (a plain shell) always works. To pick an agent explicitly,
+`a` opens the agent menu (`a c` Claude · `a x` Codex · `a u` Cursor).
 
 After the contextual task finishes, keep its agent terminal focused. `]]s`
 opens the categorized snippet picker with a live body preview. A unique key
@@ -147,7 +149,7 @@ an orientation of every command.
 📖 **[lazybox.ai/docs](https://lazybox.ai/docs/)** — organized by what you're trying to do:
 
 - **[Quickstart](https://lazybox.ai/docs/tutorials/quickstart/)** — install → run → your first win, in ~5 minutes.
-- **[How-to guides](https://lazybox.ai/docs/how-to/)** — use snippet workflows, add a repo, run an agent per workspace, per-repo env/mounts, remote over SSH, mirror to Slack.
+- **[How-to guides](https://lazybox.ai/docs/how-to/)** — add a repo, run an agent per workspace, per-repo env/mounts, remote over SSH, mirror to Slack.
 - **[Reference](https://lazybox.ai/docs/reference/)** — every [CLI command](https://lazybox.ai/docs/reference/cli/), the full [keybindings](https://lazybox.ai/docs/reference/keybindings/), and the [`~/.lazybox/config.yaml`](https://lazybox.ai/docs/reference/configuration/) schema.
 - **[Explanation](https://lazybox.ai/docs/explanation/)** — the [mental model](https://lazybox.ai/docs/explanation/mental-model/) (worktree- and agent-per-workspace) and the [architecture](https://lazybox.ai/docs/explanation/architecture/).
 
@@ -178,8 +180,8 @@ to focus it, drag the splitters to resize, wheel-scroll, and right-click links
 
 Power moves, once the basics feel natural:
 
-- **Model tiers** — `w S` / `w M` / `w L` (and `a S` / `a M` / `a L`) run the agent at a small / medium / large model; Claude ships a Haiku/Sonnet/Opus menu, others configure theirs under `agents.<id>.models`. The picked tier rides a `◆ Opus` tab badge.
-- **Multi-select + broadcast** — `v` marks sidebar rows, `Shift-B` sends one instruction (snippet or free text) to every selected workspace at once.
+- **Model tiers** — a GitHub `high` / `medium` / `low` label (or `@high` / `@medium` / `@low` task-body marker) automatically chooses the target agent's configured model and reasoning-effort arguments at spawn. `w S` / `w M` / `w L` is the direct in-TUI override; Claude ships a Haiku/Sonnet/Opus menu and other agents configure theirs under `agents.<id>.models`. The picked tier rides a `◆ Opus` tab badge.
+- **Multi-agent orchestration** — `v` selects workspaces across repos, then `Shift-B` lets you review one snippet-seeded or free-text instruction and safely fan it out; follow the [broadcast guide](https://lazybox.ai/docs/how-to/orchestrate-multiple-agents/).
 - **Focus mode** — `.` (or `]]f` from a terminal) near-fullscreens the agent terminal; `]]<digit>` jumps straight to the Nth agent workspace.
 - **On main** — `b` leader (`b c` / `b s`, confirmed first) runs an agent or shell on the repo's shared main checkout instead of a worktree; the tab carries a `⎇ main` badge.
 - **Jump anywhere** — `` ` `` opens a fuzzy workspace picker across all repos (from a terminal: `]]` then `` ` ``); `!` jumps to an agent waiting on input, `Shift-F` to failing CI.

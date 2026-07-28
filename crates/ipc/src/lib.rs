@@ -1274,6 +1274,13 @@ pub enum Event {
         enabled: bool,
         opt_out_labels: Vec<String>,
     },
+    /// The daemon's effective command for newly spawned plain shells.
+    /// Emitted once per subscribe so a remote client reports the shell
+    /// selected by the host that owns the PTYs and reads the config.
+    ShellCommandConfig {
+        command: String,
+        configured: bool,
+    },
     /// A workspace was created or updated.
     /// Boxed because Workspace is several KB once activity is
     /// populated; keeping the `Event` enum slim avoids worst-case

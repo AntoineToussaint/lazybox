@@ -79,7 +79,7 @@ Manage the sidebar list itself — only while the sidebar has focus.
 | `Shift-B` | broadcast | Send one instruction — a snippet, free text, or both — to every multi-selected workspace at once. |
 | `Shift-U` | update branches | Update the branch of every multi-selected PR that's behind its base, in one shot — the bulk "Update branch". |
 
-`j` / `k` (or arrows) move the cursor; `Esc` clears a `v` multi-selection.
+`j` / `k` (or arrows) move the cursor; `Esc` clears a `v` multi-selection. See [Orchestrate multiple agents](/docs/how-to/orchestrate-multiple-agents/) for the complete broadcast workflow: cross-repo selection, target recap, snippet and free-text compose, delivery, skips, and history.
 
 ## Activity
 

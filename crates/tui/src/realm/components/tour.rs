@@ -3,10 +3,9 @@
 //! A skippable, stepped overlay card built around the workflows a
 //! first-time user actually runs: starting a worktree-backed session
 //! from scratch, triaging the inbox, putting an agent on a task,
-//! reusing snippet workflows, juggling several sessions, and shipping.
-//! Each card is a short user story rather than a feature dump, and the
-//! flow works even from an empty inbox (a fresh user has no row to act
-//! on yet).
+//! juggling several sessions, and shipping. Each card is a short
+//! user story rather than a feature dump, and the flow works even
+//! from an empty inbox (a fresh user has no row to act on yet).
 //!
 //! Launched automatically the first time lazybox boots into the panes
 //! (tracked by `~/.lazybox/config.yaml::ui.tour_seen`) and re-invocable
@@ -16,8 +15,10 @@
 //! the last step OR pressing Esc/q — returns [`Msg::TourFinished`],
 //! which marks the tour seen and pops it.
 
+use crate::components::comment_render::wrap_one;
 use crate::realm::Msg;
 use crate::realm::UserEvent;
+use lazybox_tui_core::action::{ActionKind, CatalogEntry, Chord, Param};
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
 use tuirealm::event::{
@@ -30,161 +31,348 @@ use tuirealm::ratatui::prelude::*;
 use tuirealm::ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use tuirealm::state::State;
 
-/// One tour card: a heading plus the body lines under it. Body keeps
-/// inline key hints (`w w`, `Tab`, `x p`) as plain text — the
-/// default bindings are stable and a card reads cleaner than a table.
-/// Keys mirror the action catalog (`lazybox_tui_core::action`); when a
-/// binding moves there, update the matching hint here.
+#[derive(Debug, Clone, Copy)]
+enum TourSegment {
+    Text(&'static str),
+    Hint(ActionKind),
+    AgentHints,
+    TierHints(ActionKind),
+    Leader(TourGroup),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TourGroup {
+    Github,
+}
+
+type TourLine = &'static [TourSegment];
+
+macro_rules! line {
+    ($text:literal) => {
+        &[TourSegment::Text($text)]
+    };
+    ($($segment:expr),+ $(,)?) => {
+        &[$($segment),+]
+    };
+}
+
 struct TourStep {
     title: &'static str,
-    body: &'static [&'static str],
+    body: &'static [TourLine],
+}
+
+impl TourGroup {
+    fn kinds(self) -> &'static [ActionKind] {
+        match self {
+            Self::Github => &[
+                ActionKind::MergePr,
+                ActionKind::RequestReviewers,
+                ActionKind::AddAssignees,
+                ActionKind::ManageLabels,
+                ActionKind::OpenInBrowser,
+            ],
+        }
+    }
 }
 
 const STEPS: &[TourStep] = &[
     TourStep {
         title: "Welcome to lazybox",
         body: &[
-            "lazybox turns work into sessions: every task gets its own",
-            "git worktree with an agent (Claude Code) or a shell running",
-            "in it — and lazybox hides the worktree juggling for you.",
-            "",
-            "Track GitHub repos and their PRs/issues flow into your",
-            "inbox, but you don't need any of that to start — a",
-            "worktree-backed session works from an empty inbox too.",
-            "",
-            "Keyboard or mouse — lazybox drives fully with either.",
-            "Step with → / Enter (or click below); ← goes back,",
-            "Esc skips. Re-open this tour any time with Shift-T.",
+            line!("lazybox turns work into sessions: every task gets its own"),
+            line!("git worktree with an agent (Claude Code) or a shell running"),
+            line!("in it — and lazybox hides the worktree juggling for you."),
+            line!(""),
+            line!("Track GitHub repos and their PRs/issues flow into your"),
+            line!("inbox, but you don't need any of that to start — a"),
+            line!("worktree-backed session works from an empty inbox too."),
+            line!(""),
+            line!("Keyboard or mouse — lazybox drives fully with either."),
+            line!("Step with → / Enter (or click below); ← goes back,"),
+            line!(
+                TourSegment::Text("Esc skips. Re-open this tour any time with "),
+                TourSegment::Hint(ActionKind::OpenTour),
+                TourSegment::Text("."),
+            ),
         ],
     },
     TourStep {
         title: "1 · Start from scratch",
         body: &[
-            "Empty inbox? Here's a first move that needs no PRs:",
-            "",
-            "  x p       new project (register a repo or local space)",
-            "  x n       new workspace inside it",
-            "  a c / s   start Claude Code, or a plain shell in it",
-            "",
-            "You land in a fresh git worktree + session, zero setup.",
-            "",
-            "In a hurry? Shift-W does project → workspace → agent in",
-            "one step, from any pane.",
+            line!("Empty inbox? Here's a first move that needs no PRs:"),
+            line!(""),
+            line!(
+                TourSegment::Text("  "),
+                TourSegment::Hint(ActionKind::NewProject),
+                TourSegment::Text("       new project (register a repo or local space)"),
+            ),
+            line!(
+                TourSegment::Text("  "),
+                TourSegment::Hint(ActionKind::NewWorkspace),
+                TourSegment::Text("       new workspace inside it"),
+            ),
+            line!(TourSegment::Text("  agents: "), TourSegment::AgentHints,),
+            line!(
+                TourSegment::Text("  "),
+                TourSegment::Hint(ActionKind::SpawnShell),
+                TourSegment::Text("         start a plain shell in it"),
+            ),
+            line!(""),
+            line!("You land in a fresh git worktree + session, zero setup."),
+            line!(""),
+            line!(
+                TourSegment::Text("In a hurry? "),
+                TourSegment::Hint(ActionKind::StartAgent),
+                TourSegment::Text(" does project → workspace → agent in"),
+            ),
+            line!("one step, from any pane."),
         ],
     },
     TourStep {
         title: "2 · Your inbox",
         body: &[
-            "Once you track GitHub repos, PRs and issues flow in,",
-            "grouped by repo and sorted by what needs you.",
-            "",
-            "Rows carry attention signals so you triage at a glance:",
-            "  • CI failing            • review pending",
-            "  • agent asking          • unread activity",
-            "",
-            "↑ / ↓ move    Enter opens    / searches",
-            "Shift-S cycles mailboxes: Inbox → Inactive → Snoozed.",
-            "",
-            "Prefer the mouse? lazybox is fully clickable:",
-            "  • click a pane to focus it, a row to select it",
-            "  • drag the splitters to resize, wheel scrolls back",
-            "  • right-click a link in a terminal to open it",
+            line!("Once you track GitHub repos, PRs and issues flow in,"),
+            line!("grouped by repo and sorted by what needs you."),
+            line!(""),
+            line!("Rows carry attention signals so you triage at a glance:"),
+            line!("  • CI failing            • review pending"),
+            line!("  • agent asking          • unread activity"),
+            line!(""),
+            line!(
+                TourSegment::Text("↑ / ↓ move    "),
+                TourSegment::Hint(ActionKind::OpenWorkspace),
+                TourSegment::Text(" opens    "),
+                TourSegment::Hint(ActionKind::OpenSearch),
+                TourSegment::Text(" searches"),
+            ),
+            line!(
+                TourSegment::Hint(ActionKind::CycleMailbox),
+                TourSegment::Text(" cycles mailboxes: Inbox → Inactive → Snoozed."),
+            ),
+            line!(""),
+            line!("Prefer the mouse? lazybox is fully clickable:"),
+            line!("  • click a pane to focus it, a row to select it"),
+            line!("  • drag the splitters to resize, wheel scrolls back"),
+            line!("  • right-click a link in a terminal to open it"),
         ],
     },
     TourStep {
-        title: "3 · Put an agent on it",
+        title: "3 · Point at the work",
         body: &[
-            "Press w w on any row and lazybox opens a worktree, then",
-            "launches Claude Code with a prompt fit to the task. A few",
-            "ways that plays out:",
-            "",
-            "  • A PR you review has failing CI → Shift-F jumps to it,",
-            "    then w w lets the agent fix the build.",
-            "  • An open issue → w w starts an agent to implement it.",
-            "  • A scratch idea on a repo → x n, a c, done.",
-            "",
-            "a opens the agent menu: a c / a x / a u pick Claude /",
-            "Codex / Cursor; s is a plain shell; e opens the worktree",
-            "in your editor.",
+            line!(
+                TourSegment::Text("Press "),
+                TourSegment::Hint(ActionKind::Work),
+                TourSegment::Text(": lazybox reads the focused task and briefs the"),
+            ),
+            line!("agent. The same action changes with the state:"),
+            line!(""),
+            line!("  • Open issue → implement it."),
+            line!("  • PR with failing CI → diagnose and repair CI."),
+            line!(
+                TourSegment::Text("  • Select review rows: "),
+                TourSegment::Hint(ActionKind::SelectRow),
+                TourSegment::Text(" → address only those comments."),
+            ),
+            line!(""),
+            line!("One running agent gets the brief. With none, lazybox starts"),
+            line!("your default agent in the task worktree; with several, it"),
+            line!("asks which agent should take it."),
+            line!(""),
+            line!("A GitHub high / medium / low priority picks its model tier;"),
+            line!(
+                TourSegment::TierHints(ActionKind::WorkWith),
+                TourSegment::Text(" overrides that choice in the TUI."),
+            ),
+            line!(""),
+            line!(
+                TourSegment::AgentHints,
+                TourSegment::Text(" picks a configured agent directly;"),
+            ),
+            line!(
+                TourSegment::Hint(ActionKind::SpawnShell),
+                TourSegment::Text(" is a plain shell and "),
+                TourSegment::Hint(ActionKind::OpenEditor),
+                TourSegment::Text(" opens the worktree in your editor."),
+            ),
         ],
     },
     TourStep {
         title: "4 · Send a snippet workflow",
         body: &[
-            "Inside an agent terminal, snippets turn instructions you",
-            "use every day into one fast, visible action.",
-            "",
-            "  ]]s       open the categorized picker + live preview",
-            "  ]]srev    send the built-in review workflow immediately",
-            "",
-            "With an agent terminal open, press Enter here to open the",
-            "real picker. Type rev: the full instruction is sent and",
-            "submitted, and the unique key needs no extra Enter.",
-            "",
-            "No agent yet? Press → to skip this exercise. Re-open the",
-            "tour from an agent later with Shift-T to try it for real.",
-            "",
-            "Outside a terminal, ] browses built-in, global, and",
-            "launch-directory workflows before you send them.",
+            line!("Inside an agent terminal, snippets turn instructions you"),
+            line!("use every day into one fast, visible action."),
+            line!(""),
+            line!("  ]]s       open the categorized picker + live preview"),
+            line!("  ]]srev    send the built-in review workflow immediately"),
+            line!(""),
+            line!("With an agent terminal open, press Enter here to open the"),
+            line!("real picker. Type rev: the full instruction is sent and"),
+            line!("submitted, and the unique key needs no extra Enter."),
+            line!(""),
+            line!("No agent yet? Press → to skip this exercise. Re-open the"),
+            line!(
+                TourSegment::Text("tour from an agent later with "),
+                TourSegment::Hint(ActionKind::OpenTour),
+                TourSegment::Text(" to try it for real."),
+            ),
+            line!(""),
+            line!(
+                TourSegment::Hint(ActionKind::OpenSnippets),
+                TourSegment::Text(" outside a terminal browses built-in, global, and"),
+            ),
+            line!("launch-directory workflows before you send them."),
         ],
     },
     TourStep {
         title: "5 · Snippets remember",
         body: &[
-            "Press Enter here to open the real picker again. The last",
-            "workflow is selected in Recent, so one more Enter repeats",
-            "it. Recent persists across restarts.",
-            "",
-            "Every workspace remembers its 12 most recently distinct",
-            "workflows. Back in the inbox, ]N is that bounded count:",
-            "]2 means two different workflows recently started there.",
-            "",
-            "Need your own? Return with ]]q, then Ask Lazybox (?) to add",
-            "or improve a snippet. Confirm; it hot-reloads immediately.",
-            "",
-            "Select rows with v, then Shift-B to seed the same workflow",
-            "across several agents.",
+            line!("Press Enter here to open the real picker again. The last"),
+            line!("workflow is selected in Recent, so one more Enter repeats"),
+            line!("it. Recent persists across restarts."),
+            line!(""),
+            line!("Every workspace remembers its 12 most recently distinct"),
+            line!("workflows. Back in the inbox, ]N is that bounded count:"),
+            line!("]2 means two different workflows recently started there."),
+            line!(""),
+            line!(
+                TourSegment::Text("Need your own? Return with ]]q, then Ask Lazybox ("),
+                TourSegment::Hint(ActionKind::OpenHelp),
+                TourSegment::Text(") to"),
+            ),
+            line!("add or improve a snippet. Confirm; it hot-reloads immediately."),
+            line!(""),
+            line!(
+                TourSegment::Text("Select rows with v, then "),
+                TourSegment::Hint(ActionKind::BroadcastToSelected),
+                TourSegment::Text(" to seed the same"),
+            ),
+            line!("workflow across several agents."),
         ],
     },
     TourStep {
-        title: "6 · Juggle many sessions",
+        title: "6 · Keep your session when an issue becomes a PR",
         body: &[
-            "Every task is its own worktree-backed session, so you can",
-            "run several at once without minding the git plumbing.",
-            "",
-            "  `          jump to any workspace (fuzzy picker, all repos)",
-            "  !          jump to the next agent waiting on your input",
-            "  Shift-F    jump to the next PR with failing CI",
-            "  x a        adopt worktrees/agents started elsewhere",
-            "  Tab        cycle the sidebar, activity and terminal panes",
-            "",
-            "Jump works from anywhere — inside an agent, press ]] then `.",
+            line!("Start work from the issue and keep your session when it"),
+            line!("becomes a PR:"),
+            line!(""),
+            line!("  issue #42  →  PR #108 opens  →  same live agent"),
+            line!(""),
+            line!("When lazybox sees that the PR closes the issue, it carries"),
+            line!("the running terminal and worktree into the PR workspace."),
+            line!("Your agent, edits, scrollback and activity stay with you —"),
+            line!("no duplicate terminal, lost context or manual handoff."),
+            line!(""),
+            line!("With a live terminal, lazybox asks before joining. Press"),
+            line!(
+                TourSegment::Text("Enter to continue. To do it later, select the issue: "),
+                TourSegment::Hint(ActionKind::CollapseIntoPr),
+                TourSegment::Text("."),
+            ),
         ],
     },
     TourStep {
-        title: "7 · Ship it & make it yours",
+        title: "7 · Juggle many sessions",
         body: &[
-            "When a PR is ready, press g — a which-key menu pops up",
-            "showing everything you can do to this PR:",
-            "",
-            "  g m  merge PR    g r  reviewers   g a  assignees",
-            "  g l  labels      g o  open in browser",
-            "",
-            "g shows the menu; the second key picks. Grouped actions",
-            "live behind their leader only — re-add direct aliases via",
-            "ui.action_keys if you miss them.",
-            "",
-            "? opens Ask Lazybox (press ? again for all keys); , opens",
-            "Settings, t themes, q q quits. In a terminal, press ]]q",
-            "to return first—the embedded program owns other keys.",
-            "",
-            "t opens the theme picker: light + dark, live preview,",
-            "and your pick persists across restarts.",
-            "",
-            "It's all plain YAML in ~/.lazybox/config.yaml: scopes,",
-            "agents, keybindings, theme.",
-            "",
-            "That's the tour — Enter to finish, Shift-T to re-open it.",
+            line!("Every task is its own worktree-backed session, so you can"),
+            line!("run several at once without minding the git plumbing."),
+            line!(""),
+            line!(
+                TourSegment::Text("  "),
+                TourSegment::Hint(ActionKind::JumpToWorkspace),
+                TourSegment::Text("          jump to any workspace (fuzzy picker, all repos)"),
+            ),
+            line!(
+                TourSegment::Text("  "),
+                TourSegment::Hint(ActionKind::JumpToAsking),
+                TourSegment::Text("          jump to the next agent waiting on your input"),
+            ),
+            line!(
+                TourSegment::Text("  "),
+                TourSegment::Hint(ActionKind::JumpToFailingCi),
+                TourSegment::Text("    jump to the next PR with failing CI"),
+            ),
+            line!(
+                TourSegment::Text("  "),
+                TourSegment::Hint(ActionKind::AdoptSessions),
+                TourSegment::Text("        adopt worktrees/agents started elsewhere"),
+            ),
+            line!(
+                TourSegment::Text("  "),
+                TourSegment::Hint(ActionKind::CyclePane),
+                TourSegment::Text("        cycle the sidebar, activity and terminal panes"),
+            ),
+            line!(""),
+            line!(
+                TourSegment::Text("Jump works from anywhere — inside an agent, press ]] then "),
+                TourSegment::Hint(ActionKind::JumpToWorkspace),
+                TourSegment::Text("."),
+            ),
+        ],
+    },
+    TourStep {
+        title: "8 · Ship it",
+        body: &[
+            line!("When a PR is ready, these shortcuts act on it:"),
+            line!(""),
+            line!(
+                TourSegment::Text("  "),
+                TourSegment::Hint(ActionKind::MergePr),
+                TourSegment::Text("  merge PR    "),
+                TourSegment::Hint(ActionKind::RequestReviewers),
+                TourSegment::Text("  reviewers   "),
+                TourSegment::Hint(ActionKind::AddAssignees),
+                TourSegment::Text("  assignees"),
+            ),
+            line!(
+                TourSegment::Text("  "),
+                TourSegment::Hint(ActionKind::ManageLabels),
+                TourSegment::Text("  labels      "),
+                TourSegment::Hint(ActionKind::OpenInBrowser),
+                TourSegment::Text("  open in browser"),
+            ),
+            line!(""),
+            line!(
+                TourSegment::Leader(TourGroup::Github),
+                TourSegment::Text(" shows the menu; the second key picks. Grouped actions"),
+            ),
+            line!("live behind their leader only — re-add direct aliases via"),
+            line!("ui.action_keys if you miss them."),
+        ],
+    },
+    TourStep {
+        title: "9 · Make it yours",
+        body: &[
+            line!(
+                TourSegment::Hint(ActionKind::OpenHelp),
+                TourSegment::Text(" opens Ask Lazybox (press "),
+                TourSegment::Hint(ActionKind::OpenHelp),
+                TourSegment::Text(" again for all keys); "),
+                TourSegment::Hint(ActionKind::OpenSettings),
+                TourSegment::Text(" opens"),
+            ),
+            line!(
+                TourSegment::Text("Settings, "),
+                TourSegment::Hint(ActionKind::OpenThemePicker),
+                TourSegment::Text(" themes, "),
+                TourSegment::Hint(ActionKind::Quit),
+                TourSegment::Text(" quits. In a terminal, press ]]q"),
+            ),
+            line!("to return first—the embedded program owns other keys."),
+            line!(""),
+            line!(
+                TourSegment::Hint(ActionKind::OpenThemePicker),
+                TourSegment::Text(" opens the theme picker: light + dark, live preview,"),
+            ),
+            line!("and your pick persists across restarts."),
+            line!(""),
+            line!("It's all plain YAML in ~/.lazybox/config.yaml: scopes,"),
+            line!("agents, keybindings, theme."),
+            line!(""),
+            line!(
+                TourSegment::Text("That's the tour — Enter to finish, "),
+                TourSegment::Hint(ActionKind::OpenTour),
+                TourSegment::Text(" to re-open it."),
+            ),
         ],
     },
 ];
@@ -195,6 +383,7 @@ pub(crate) const REPEAT_SNIPPET_STEP: usize = 5;
 pub struct Tour {
     /// Index into [`STEPS`]. Always in range — navigation clamps.
     cursor: usize,
+    catalog: Vec<CatalogEntry>,
     /// Footer hit-boxes recorded by `view`, consumed by `on_mouse` so
     /// an all-mouse user can click through the tour. `None` until the
     /// first render.
@@ -204,17 +393,97 @@ pub struct Tour {
 }
 
 impl Tour {
-    pub fn new() -> Self {
-        Self::at_step(0)
+    pub fn new(catalog: Vec<CatalogEntry>) -> Self {
+        Self::at_step(0, catalog)
     }
 
-    pub(crate) fn at_step(cursor: usize) -> Self {
+    pub(crate) fn at_step(cursor: usize, catalog: Vec<CatalogEntry>) -> Self {
         Self {
             cursor: cursor.min(STEPS.len().saturating_sub(1)),
+            catalog,
             back_btn: None,
             next_btn: None,
             skip_btn: None,
         }
+    }
+
+    fn action_entry(&self, kind: ActionKind) -> Option<&CatalogEntry> {
+        self.catalog
+            .iter()
+            .find(|entry| entry.kind == kind && entry.param.is_none())
+    }
+
+    fn agent_hints(&self) -> Option<String> {
+        let hints = self
+            .catalog
+            .iter()
+            .filter_map(|entry| match &entry.param {
+                Some(Param::Agent(_))
+                    if entry.kind == ActionKind::SpawnAgent && !entry.keys_display.is_empty() =>
+                {
+                    Some(entry.keys_display.as_ref())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        (!hints.is_empty()).then(|| hints.join(" / "))
+    }
+
+    fn tier_hints(&self, kind: ActionKind) -> Option<String> {
+        let hints = self
+            .catalog
+            .iter()
+            .filter_map(|entry| match &entry.param {
+                Some(Param::Tier(_)) if entry.kind == kind && !entry.keys_display.is_empty() => {
+                    Some(entry.keys_display.as_ref())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        (!hints.is_empty()).then(|| hints.join(" / "))
+    }
+
+    fn group_leader(&self, group: TourGroup) -> Option<String> {
+        let kinds = group.kinds();
+        let first = self.action_entry(*kinds.first()?)?;
+        first
+            .chords
+            .iter()
+            .filter_map(|chord| match chord {
+                Chord::Seq(strokes) if strokes.len() == 2 => strokes.first(),
+                Chord::Seq(_) => None,
+                Chord::Key(_) => None,
+            })
+            .find(|candidate| {
+                kinds[1..].iter().all(|kind| {
+                    self.action_entry(*kind).is_some_and(|entry| {
+                        entry.chords.iter().any(|chord| match chord {
+                            Chord::Seq(strokes) if strokes.len() == 2 => {
+                                strokes.first() == Some(*candidate)
+                            }
+                            Chord::Seq(_) => false,
+                            Chord::Key(_) => false,
+                        })
+                    })
+                })
+            })
+            .map(|leader| leader.display())
+    }
+
+    fn render_line(&self, line: TourLine) -> Option<String> {
+        let mut rendered = String::new();
+        for segment in line {
+            match segment {
+                TourSegment::Text(text) => rendered.push_str(text),
+                TourSegment::Hint(kind) => {
+                    rendered.push_str(&self.action_entry(*kind)?.keys_display);
+                }
+                TourSegment::AgentHints => rendered.push_str(&self.agent_hints()?),
+                TourSegment::TierHints(kind) => rendered.push_str(&self.tier_hints(*kind)?),
+                TourSegment::Leader(group) => rendered.push_str(&self.group_leader(*group)?),
+            }
+        }
+        Some(rendered)
     }
 
     fn is_last(&self) -> bool {
@@ -290,19 +559,44 @@ impl Tour {
     }
 }
 
-impl Default for Tour {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Component for Tour {
     fn view(&mut self, frame: &mut Frame, area: Rect) {
         let theme = crate::theme::current();
         let step = &STEPS[self.cursor];
 
         let modal_w = 68u16.min(area.width.saturating_sub(4));
-        let modal_h = 22u16.min(area.height.saturating_sub(2));
+        let content_width = modal_w.saturating_sub(4);
+        let mut lines: Vec<Line> = vec![Line::raw("")];
+        {
+            let mut push_wrapped = |text: &str, style: Style| {
+                for line in wrap_one(
+                    Line::from(Span::styled(text.to_string(), style)),
+                    content_width,
+                ) {
+                    let mut spans = vec![Span::raw("  ")];
+                    spans.extend(line.spans);
+                    lines.push(Line::from(spans));
+                }
+            };
+            push_wrapped(
+                step.title,
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            );
+            push_wrapped("", Style::default());
+            for &line in step.body {
+                if let Some(rendered) = self.render_line(line) {
+                    push_wrapped(&rendered, Style::default().fg(theme.text_strong));
+                }
+            }
+        }
+        let body_lines = lines.len() as u16;
+        let body = Paragraph::new(lines);
+        let modal_h = body_lines
+            .saturating_add(3)
+            .max(22)
+            .min(area.height.saturating_sub(2));
         let x = area.x + area.width.saturating_sub(modal_w) / 2;
         let y = area.y + area.height.saturating_sub(modal_h) / 2;
         let modal = Rect::new(x, y, modal_w, modal_h);
@@ -332,23 +626,7 @@ impl Component for Tour {
             height: 1,
         };
 
-        let mut lines: Vec<Line> = vec![
-            Line::raw(""),
-            Line::from(Span::styled(
-                format!("  {}", step.title),
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::raw(""),
-        ];
-        for &l in step.body {
-            lines.push(Line::from(Span::styled(
-                format!("  {l}"),
-                Style::default().fg(theme.text_strong),
-            )));
-        }
-        frame.render_widget(Paragraph::new(lines), body_rect);
+        frame.render_widget(body, body_rect);
 
         // Footer buttons. Each is rendered AND recorded as a hit-box so
         // `on_mouse` can route clicks — the tour is fully mouse-drivable.
@@ -423,6 +701,36 @@ impl AppComponent<Msg, UserEvent> for Tour {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lazybox_tui_core::action::ActionDef;
+    use std::collections::BTreeMap;
+
+    fn catalog(
+        agents: &[&str],
+        overrides: &[(&str, &str)],
+    ) -> Vec<lazybox_tui_core::action::CatalogEntry> {
+        catalog_with_tiers(agents, overrides, &[])
+    }
+
+    fn catalog_with_tiers(
+        agents: &[&str],
+        overrides: &[(&str, &str)],
+        tiers: &[lazybox_core::ModelTier],
+    ) -> Vec<lazybox_tui_core::action::CatalogEntry> {
+        let agents = agents
+            .iter()
+            .map(|agent| (*agent).to_string())
+            .collect::<Vec<_>>();
+        let overrides = overrides
+            .iter()
+            .map(|(action, keys)| ((*action).to_string(), (*keys).to_string()))
+            .collect::<BTreeMap<_, _>>();
+        ActionDef::catalog_with_tiers(&agents, &overrides, tiers)
+    }
+
+    fn default_catalog() -> Vec<lazybox_tui_core::action::CatalogEntry> {
+        let tiers = lazybox_core::AgentModels::builtin("claude").unwrap().tiers;
+        catalog_with_tiers(&["claude", "codex", "cursor"], &[], &tiers)
+    }
 
     fn ke(code: Key) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -442,7 +750,7 @@ mod tests {
     fn rendered_tour(cursor: usize) -> Tour {
         use tuirealm::ratatui::Terminal;
         use tuirealm::ratatui::backend::TestBackend;
-        let mut t = Tour::new();
+        let mut t = Tour::new(default_catalog());
         t.cursor = cursor;
         let (w, h) = (90u16, 30u16);
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -456,12 +764,16 @@ mod tests {
 
     /// Render the card at `cursor` into a throwaway backend and return
     /// the visible text — the snapshot surface for the step content.
-    fn render_step(cursor: usize) -> String {
+    fn render_step_with_catalog_at(
+        cursor: usize,
+        catalog: Vec<lazybox_tui_core::action::CatalogEntry>,
+        w: u16,
+        h: u16,
+    ) -> String {
         use tuirealm::ratatui::Terminal;
         use tuirealm::ratatui::backend::TestBackend;
-        let mut t = Tour::new();
+        let mut t = Tour::new(catalog);
         t.cursor = cursor;
-        let (w, h) = (90u16, 30u16);
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
         term.draw(|f| t.view(f, Rect::new(0, 0, w, h))).unwrap();
         let buf = term.backend().buffer();
@@ -477,13 +789,32 @@ mod tests {
             .join("\n")
     }
 
+    fn render_step_with_catalog(
+        cursor: usize,
+        catalog: Vec<lazybox_tui_core::action::CatalogEntry>,
+    ) -> String {
+        render_step_with_catalog_at(cursor, catalog, 90, 30)
+    }
+
+    fn render_step_at(cursor: usize, w: u16, h: u16) -> String {
+        render_step_with_catalog_at(cursor, default_catalog(), w, h)
+    }
+
+    fn render_step(cursor: usize) -> String {
+        render_step_at(cursor, 90, 30)
+    }
+
     /// The whole tour rendered top to bottom — one string to scan for
     /// content invariants that span steps.
-    fn render_all() -> String {
+    fn render_all_with_catalog(catalog: &[lazybox_tui_core::action::CatalogEntry]) -> String {
         (0..STEPS.len())
-            .map(render_step)
+            .map(|cursor| render_step_with_catalog(cursor, catalog.to_vec()))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn render_all() -> String {
+        render_all_with_catalog(&default_catalog())
     }
 
     #[test]
@@ -499,16 +830,46 @@ mod tests {
     fn body_lines_fit_the_modal_width() {
         // The card is 68 cols wide with a 2-space gutter, so a body
         // line over ~62 chars would clip. Guard the new copy.
+        let tour = Tour::new(default_catalog());
         for s in STEPS {
-            for l in s.body {
-                assert!(
-                    l.chars().count() <= 62,
-                    "step {:?} line too wide ({}): {l:?}",
-                    s.title,
-                    l.chars().count(),
-                );
+            for &line in s.body {
+                if let Some(rendered) = tour.render_line(line) {
+                    assert!(
+                        rendered.chars().count() <= 62,
+                        "step {:?} line too wide ({}): {rendered:?}",
+                        s.title,
+                        rendered.chars().count(),
+                    );
+                }
             }
         }
+    }
+
+    #[test]
+    fn every_step_fits_the_modal_height() {
+        const STEP_HEADER_ROWS: usize = 3;
+        const MODAL_BODY_ROWS: usize = 19;
+
+        let tour = Tour::new(default_catalog());
+        for step in STEPS {
+            let body_rows = step
+                .body
+                .iter()
+                .filter(|line| tour.render_line(line).is_some())
+                .count();
+            let rendered_rows = STEP_HEADER_ROWS + body_rows;
+            assert!(
+                rendered_rows <= MODAL_BODY_ROWS,
+                "step {:?} needs {rendered_rows} rows, but the modal has {MODAL_BODY_ROWS}",
+                step.title,
+            );
+        }
+    }
+
+    #[test]
+    fn last_step_tail_is_visible() {
+        let last = render_step_with_catalog(STEPS.len() - 1, default_catalog());
+        assert!(last.contains("That's the tour — Enter to finish, Shift-T to re-open it."));
     }
 
     #[test]
@@ -530,6 +891,84 @@ mod tests {
     }
 
     #[test]
+    fn issue_to_pr_handoff_has_a_dedicated_step() {
+        let matching: Vec<_> = STEPS
+            .iter()
+            .filter(|step| step.title.contains("issue becomes a PR"))
+            .collect();
+        assert_eq!(matching.len(), 1, "handoff must have exactly one full step");
+
+        let rendered = render_step(
+            STEPS
+                .iter()
+                .position(|step| step.title.contains("issue becomes a PR"))
+                .expect("handoff step"),
+        );
+        for expected in [
+            "Start work from the issue and keep your session",
+            "same live agent",
+            "running terminal and worktree",
+            "no duplicate terminal, lost context or manual handoff",
+            "select the issue: x j",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "handoff step missing {expected:?}"
+            );
+        }
+
+        let narrow = render_step_at(
+            STEPS
+                .iter()
+                .position(|step| step.title.contains("issue becomes a PR"))
+                .expect("handoff step"),
+            60,
+            30,
+        );
+        let narrow = narrow
+            .replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            narrow.contains("select the issue: x j"),
+            "narrow terminals must keep the manual join instruction visible:\n{narrow}"
+        );
+    }
+
+    #[test]
+    fn issue_to_pr_handoff_hint_follows_the_runtime_catalog() {
+        let cursor = STEPS
+            .iter()
+            .position(|step| step.title.contains("issue becomes a PR"))
+            .expect("handoff step");
+        let rendered =
+            render_step_with_catalog(cursor, catalog(&[], &[("collapse_into_pr", "Ctrl-j")]));
+
+        assert!(rendered.contains("select the issue: Ctrl-j"));
+        assert!(!rendered.contains("select the issue: x j"));
+    }
+
+    #[test]
+    fn showcases_contextual_work_and_tier_routing() {
+        let all = render_all();
+        for behavior in [
+            "Open issue → implement it",
+            "PR with failing CI → diagnose and repair CI",
+            "address only those comments",
+            "One running agent gets the brief",
+            "default agent in the task worktree",
+            "high / medium / low priority picks its model tier",
+            "w S / w M / w L overrides",
+        ] {
+            assert!(
+                all.contains(behavior),
+                "tour no longer demonstrates {behavior:?}"
+            );
+        }
+    }
+
+    #[test]
     fn snippets_get_daily_use_and_memory_steps() {
         let snippet_steps: Vec<&TourStep> = STEPS
             .iter()
@@ -540,7 +979,7 @@ mod tests {
             2,
             "the daily fast path and memory each need a tour card"
         );
-        let daily = snippet_steps[0].body.join("\n");
+        let daily = render_step(SEND_SNIPPET_STEP);
         for needle in [
             "]]srev",
             "live preview",
@@ -550,7 +989,7 @@ mod tests {
         ] {
             assert!(daily.contains(needle), "daily-use step missing {needle:?}");
         }
-        let memory = snippet_steps[1].body.join("\n");
+        let memory = render_step(REPEAT_SNIPPET_STEP);
         for needle in [
             "Recent",
             "persists across",
@@ -566,7 +1005,7 @@ mod tests {
 
     #[test]
     fn snippet_steps_open_real_exercises_and_right_arrow_skips() {
-        let mut send = Tour::at_step(SEND_SNIPPET_STEP);
+        let mut send = Tour::at_step(SEND_SNIPPET_STEP, default_catalog());
         assert_eq!(send.on_key(&ke(Key::Enter)), Some(Msg::TourTrySnippet));
         assert_eq!(send.cursor, SEND_SNIPPET_STEP);
         assert_eq!(send.on_key(&ke(Key::Right)), None);
@@ -579,76 +1018,49 @@ mod tests {
     }
 
     #[test]
-    fn key_hints_match_the_action_catalog() {
-        use lazybox_tui_core::action::{ActionDef, ActionKind};
-        // Each hint shown in the tour must be the catalog's current
-        // default for that action — the catalog is the source of truth.
-        let all = render_all();
-        for (kind, hint) in [
-            (ActionKind::NewProject, "x p"),
-            (ActionKind::NewWorkspace, "x n"),
-            (ActionKind::AdoptSessions, "x a"),
-            (ActionKind::Work, "w w"),
-            (ActionKind::JumpToWorkspace, "`"),
-            (ActionKind::JumpToAsking, "!"),
-            (ActionKind::JumpToFailingCi, "Shift-F"),
-            (ActionKind::StartAgent, "Shift-W"),
-            (ActionKind::CyclePane, "Tab"),
-            // Previously unchecked hints (#188): a rename/remap of any
-            // of these would silently desync the onboarding copy.
-            (ActionKind::SpawnShell, "s"),
-            (ActionKind::OpenEditor, "e"),
-            (ActionKind::CycleMailbox, "Shift-S"),
-            (ActionKind::OpenHelp, "?"),
-            (ActionKind::OpenSettings, ","),
-            (ActionKind::OpenSnippets, "]"),
-            (ActionKind::BroadcastToSelected, "Shift-B"),
-        ] {
-            assert_eq!(
-                ActionDef::for_kind(kind).default_keys,
-                hint,
-                "catalog default for {kind:?} drifted from the tour hint",
-            );
-            assert!(all.contains(hint), "tour no longer shows {hint}");
+    fn key_hints_reference_the_action_catalog() {
+        let tour = Tour::new(default_catalog());
+        let mut hint_count = 0;
+        for step in STEPS {
+            for line in step.body {
+                for segment in *line {
+                    match segment {
+                        TourSegment::Hint(kind) => {
+                            assert!(tour.action_entry(*kind).is_some());
+                            hint_count += 1;
+                        }
+                        TourSegment::AgentHints => {
+                            assert!(tour.agent_hints().is_some());
+                            hint_count += 1;
+                        }
+                        TourSegment::TierHints(kind) => {
+                            assert!(tour.tier_hints(*kind).is_some());
+                            hint_count += 1;
+                        }
+                        TourSegment::Leader(group) => {
+                            assert!(tour.group_leader(*group).is_some());
+                            hint_count += 1;
+                        }
+                        TourSegment::Text(_) => {}
+                    }
+                }
+            }
         }
-        // The agent-pick hints (`a c` / `a x` / `a u`) are per-agent
-        // SpawnAgent chords, not a single `ActionDef::default_keys` —
-        // they come from the agent-id → key convention under the `a`
-        // leader (#304). Pin them against that source.
-        for (agent, chord) in [("claude", "a c"), ("codex", "a x"), ("cursor", "a u")] {
-            let display = ActionDef::catalog(&[agent.to_string()], &Default::default())
-                .into_iter()
-                .find(|e| e.label == format!("spawn {agent}"))
-                .map(|e| e.keys_display.to_string())
-                .unwrap_or_else(|| panic!("no spawn row for {agent}"));
-            assert_eq!(display, chord, "spawn {agent} default chord drifted");
-            assert!(
-                all.contains(chord),
-                "tour no longer shows {chord} for {agent}"
-            );
-        }
-        // The `q q` quit chord and the `]]` return-to-sidebar hint round
-        // out the ship-it card.
-        assert_eq!(ActionDef::for_kind(ActionKind::Quit).default_keys, "q q");
-        assert!(all.contains("q q"), "tour no longer shows the quit chord");
+        assert!(hint_count > 0);
+
         // `]]` is `terminal.escape_char` (default `]`) doubled, owned
-        // by the terminal latch rather than the catalog (#188); the tour
-        // documents the default form.
-        assert!(
-            all.contains("]]"),
-            "tour no longer shows the `]]` return hint",
-        );
+        // by the terminal latch rather than the catalog.
+        assert!(render_all().contains("]]"));
     }
 
     #[test]
     fn github_leader_demo_matches_the_catalog() {
-        use lazybox_tui_core::action::{ActionDef, ActionKind};
         // The ship-it step demonstrates the g leader as a menu, and its
         // chords + labels must be the catalog's — so the demo can't
         // drift from the live keymap (issue #145, #114).
         let all = render_all();
         assert!(
-            all.contains("press g"),
+            all.contains("g shows the menu"),
             "tour no longer frames g as a which-key menu"
         );
         // The github actions carry their `g <key>` leader as a catalog
@@ -682,8 +1094,112 @@ mod tests {
     }
 
     #[test]
+    fn agent_hints_follow_the_enabled_agents_and_their_remaps() {
+        let catalog = catalog(&["codex"], &[("spawn_agent.codex", "Ctrl-k")]);
+        let all = render_all_with_catalog(&catalog);
+
+        assert!(all.contains("Ctrl-k picks a configured agent"));
+        for unavailable in [
+            "agents: a c",
+            "agents: a x",
+            "agents: a u",
+            "a c / a x / a u",
+        ] {
+            assert!(
+                !all.contains(unavailable),
+                "tour advertised unavailable shortcut {unavailable:?}"
+            );
+        }
+        assert!(all.contains("s is a plain shell"));
+    }
+
+    #[test]
+    fn unbound_custom_agents_do_not_leave_dangling_copy() {
+        let catalog = catalog(&["custom"], &[]);
+        let all = render_all_with_catalog(&catalog);
+
+        assert!(!all.contains("agents:"));
+        assert!(!all.contains("picks a configured agent directly"));
+        assert!(all.contains("s is a plain shell"));
+    }
+
+    #[test]
+    fn tier_hints_follow_the_runtime_catalog_and_remaps() {
+        let tiers = lazybox_core::AgentModels::builtin("claude").unwrap().tiers;
+        let catalog = catalog_with_tiers(
+            &["claude"],
+            &[
+                ("work_tier.S", "Ctrl-1"),
+                ("work_tier.M", "Ctrl-2"),
+                ("work_tier.L", "Ctrl-3"),
+            ],
+            &tiers,
+        );
+        let all = render_all_with_catalog(&catalog);
+
+        assert!(all.contains("Ctrl-1 / Ctrl-2 / Ctrl-3 overrides"));
+        assert!(!all.contains("w S / w M / w L overrides"));
+    }
+
+    #[test]
+    fn a_referenced_hint_renders_its_effective_binding_without_a_pin() {
+        let tour = Tour::new(catalog(&[], &[("refresh", "F5")]));
+        let line = line!(
+            TourSegment::Text("Refresh with "),
+            TourSegment::Hint(ActionKind::Refresh),
+            TourSegment::Text("."),
+        );
+
+        assert_eq!(tour.render_line(line).as_deref(), Some("Refresh with F5."));
+    }
+
+    #[test]
+    fn group_leader_comes_from_typed_sequences_not_display_order() {
+        let catalog = catalog(
+            &[],
+            &[
+                ("merge_pr", "Ctrl-m | h m"),
+                ("request_reviewers", "Ctrl-r | h r"),
+                ("add_assignees", "Ctrl-a | h a"),
+                ("manage_labels", "Ctrl-l | h l"),
+                ("open_in_browser", "Ctrl-o | h o"),
+            ],
+        );
+        let all = render_all_with_catalog(&catalog);
+
+        assert!(all.contains("h shows the menu"));
+        assert!(!all.contains("Ctrl-m shows the menu"));
+    }
+
+    #[test]
+    fn group_menu_copy_is_hidden_without_a_common_sequence_leader() {
+        let catalog = catalog(&[], &[("merge_pr", "Ctrl-m")]);
+        let all = render_all_with_catalog(&catalog);
+
+        assert!(all.contains("Ctrl-m"));
+        assert!(!all.contains("shows the menu; the second key picks"));
+    }
+
+    #[test]
+    fn group_menu_copy_is_hidden_for_longer_sequences() {
+        let catalog = catalog(
+            &[],
+            &[
+                ("merge_pr", "h p m"),
+                ("request_reviewers", "h p r"),
+                ("add_assignees", "h p a"),
+                ("manage_labels", "h p l"),
+                ("open_in_browser", "h p o"),
+            ],
+        );
+        let all = render_all_with_catalog(&catalog);
+
+        assert!(!all.contains("shows the menu; the second key picks"));
+    }
+
+    #[test]
     fn advances_then_finishes_on_last_step() {
-        let mut t = Tour::new();
+        let mut t = Tour::new(default_catalog());
         // Walk forward through every step but the last — no Msg.
         for _ in 0..STEPS.len() - 1 {
             assert_eq!(t.on_key(&ke(Key::Right)), None);
@@ -695,7 +1211,7 @@ mod tests {
 
     #[test]
     fn back_clamps_at_first_step() {
-        let mut t = Tour::new();
+        let mut t = Tour::new(default_catalog());
         assert_eq!(t.on_key(&ke(Key::Left)), None);
         assert_eq!(t.cursor, 0);
         let _ = t.on_key(&ke(Key::Right));
@@ -706,15 +1222,15 @@ mod tests {
 
     #[test]
     fn esc_and_q_finish_immediately() {
-        let mut t = Tour::new();
+        let mut t = Tour::new(default_catalog());
         assert_eq!(t.on_key(&ke(Key::Esc)), Some(Msg::TourFinished));
-        let mut t = Tour::new();
+        let mut t = Tour::new(default_catalog());
         assert_eq!(t.on_key(&ke(Key::Char('q'))), Some(Msg::TourFinished));
     }
 
     #[test]
     fn ctrl_c_finishes() {
-        let mut t = Tour::new();
+        let mut t = Tour::new(default_catalog());
         let ev = KeyEvent::new(Key::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(t.on_key(&ev), Some(Msg::TourFinished));
     }

@@ -8,7 +8,7 @@ interface Props {
 
 const {
   title = 'lazybox — run a fleet of coding agents from your terminal',
-  description = 'Run coding agents in isolated workspaces, reuse daily instructions as snippet workflows with memory, and get pinged the moment an agent needs you.',
+  description = 'Start an agent from a GitHub issue, keep its session when the PR appears, and reuse daily instructions as snippet workflows with memory across your terminal inbox.',
 } = Astro.props;
 
 // Canonical URL: derived from `site` in astro.config.mjs at build time,
@@ -17,7 +17,7 @@ const {
 const canonical = new URL(Astro.url.pathname, Astro.site ?? 'https://lazybox.ai').href;
 const ogImage = new URL('/og.png', Astro.site ?? 'https://lazybox.ai').href;
 const ogImageAlt =
-  'lazybox — a terminal inbox for coding agents, isolated workspaces, and reusable snippet workflows.';
+  'lazybox — a terminal inbox for coding-agent fleets, continuous issue-to-PR sessions, and reusable snippet workflows.';
 ---
 
 <!doctype html>

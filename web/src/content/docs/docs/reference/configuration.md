@@ -131,6 +131,11 @@ terminal:
   escape_window_ms: 600      # window between the two presses
   agent_dead_on_arrival_ms: 10000 # preserve fast/failed exits for inspection
 
+# ── shell ────────────────────────────────────────────────────────────
+shell:
+  # Unset/empty → OS login shell, then $SHELL, then /bin/sh.
+  command: /bin/zsh
+
 # ── ui ───────────────────────────────────────────────────────────────
 ui:
   keymap_preset: default     # base keymap layer: default | vim
@@ -503,4 +508,11 @@ Opt-in — it pushes commits to your PRs with no manual nudge.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `command` | string | `bash` | Shell launched by the `s` spawn |
+| `command` | string | OS login shell | Shell launched by the `s` spawn. When unset or empty, lazybox reads the account's login shell from the OS passwd database, then falls back to `$SHELL` and `/bin/sh`. |
+
+The Settings window shows the effective command and whether it is automatic or
+configured. Changes apply to newly opened shells; an existing tmux-backed shell
+keeps running its current process, so close that terminal and open a fresh one
+to pick up the new command. Older generated configs may contain
+`command: bash`; lazybox treats that former default as automatic. Use an
+explicit path such as `/bin/bash` to select Bash intentionally.

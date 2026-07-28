@@ -157,6 +157,11 @@ are skipped and named in the summary. A snippet-seeded broadcast records
 the snippet once in Recent and on every workspace that actually received
 it, so the `]N` badges reflect the rollout.
 
+The
+[multi-agent orchestration guide](https://lazybox.ai/docs/how-to/orchestrate-multiple-agents/)
+covers free-text mode, mixed agent/shell delivery, skips, retries, and
+per-workspace history.
+
 ## Update or remove a workflow
 
 Ask Lazybox can replace a global key with a confirmed, hot-reloaded

@@ -6,12 +6,14 @@
 
 - [Home](https://lazybox.ai/docs/): What lazybox is, who it's for, and a map of the documentation.
 - [Tutorials](https://lazybox.ai/docs/tutorials/): Learning-oriented lessons for newcomers.
-- [Quickstart](https://lazybox.ai/docs/tutorials/quickstart/): Install, open your first workspace, and send a reusable workflow to its agent in ~5 minutes.
+- [Quickstart](https://lazybox.ai/docs/tutorials/quickstart/): Install, open your first workspace, send a reusable workflow, and coordinate two sessions.
 - [How-to guides](https://lazybox.ai/docs/how-to/): Task-oriented recipes.
-- [Use snippet workflows](https://lazybox.ai/docs/how-to/use-snippets/): Send, repeat, create, scope, and broadcast agent workflows with recent-first and per-workspace memory.
 - [Add a repo](https://lazybox.ai/docs/how-to/add-a-repo/): Bring a repository's PRs and issues into the inbox and filter by role.
-- [Run an agent per workspace](https://lazybox.ai/docs/how-to/run-an-agent-per-workspace/): Spawn Claude Code, Codex, or Cursor scoped to one worktree.
-- [Orchestrate multiple agents](https://lazybox.ai/docs/how-to/orchestrate-multiple-agents/): Broadcast one snippet workflow across selected workspaces and manage agent handoffs.
+- [Run an agent per workspace](https://lazybox.ai/docs/how-to/run-an-agent-per-workspace/): Route task context, a running/default agent, model, and reasoning effort with `w w` or GitHub priority.
+- [Trigger agents with @lazybox mentions](https://lazybox.ai/docs/how-to/lazybox-mentions/): Choose priority and start an agent entirely from a GitHub issue.
+- [Keep an issue session when its PR appears](https://lazybox.ai/docs/how-to/keep-session-from-issue-to-pr/): Carry the live terminal, worktree, edits, and activity into the closing PR workspace.
+- [Orchestrate multiple agents](https://lazybox.ai/docs/how-to/orchestrate-multiple-agents/): Select workspaces across repos, compose once, and safely inject the instruction into every live agent or shell.
+- [Use snippet workflows](https://lazybox.ai/docs/how-to/use-snippets/): Send, repeat, create, scope, and broadcast workflows with recent-first and per-workspace memory.
 - [Per-repo env and mounts](https://lazybox.ai/docs/how-to/per-repo-env-and-mounts/): Inject env vars, symlink shared dirs, materialize scripts.
 - [Remote over SSH](https://lazybox.ai/docs/how-to/remote-over-ssh/): Run the daemon remotely and the TUI locally over a forwarded socket.
 - [Mirror to Slack](https://lazybox.ai/docs/how-to/mirror-to-slack/): Reflect the inbox into Slack channels.

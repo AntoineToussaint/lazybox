@@ -332,12 +332,10 @@ pub enum Id {
     /// Esc / No drops the stash and changes nothing.
     HelpActionConfirm,
     /// Single-pick `Choice` mounted when `w` ("work on this") lands on
-    /// a workspace with SEVERAL distinct running agents (#418) —
-    /// injecting must not silently guess between them. The listed
-    /// agent ids + the spawn params to replay live in
-    /// `ModalFlow::WorkPicker`; `Msg::ChoicePicked` resolves the index
-    /// and fires the same work spawn `w` would have, targeted at the
-    /// chosen agent.
+    /// a workspace with several running agent conversations (#418) —
+    /// injecting must not silently guess between them, even when they
+    /// use the same agent id. The exact terminals + fallback spawn
+    /// params live in `ModalFlow::WorkPicker`.
     WorkAgentPicker,
     /// Scrollable full-description reader (#448). Renders a PR/issue
     /// (or any long) body as real markdown — headings, lists, code,
@@ -600,11 +598,7 @@ pub enum Msg {
     /// The feature tour was dismissed or finished — mark it seen so
     /// it doesn't re-launch, and pop the modal.
     TourFinished,
-    /// Run the tour's first snippet exercise against the focused agent
-    /// using the production picker and delivery path.
     TourTrySnippet,
-    /// Re-open the production picker with Recent selected so the tour
-    /// exercises the one-Enter repeat path.
     TourRepeatSnippet,
     AppClose,
     Confirmed(bool),
@@ -855,6 +849,12 @@ struct TerminalDrag {
     /// Set once the pointer left the mouse-down cell: distinguishes a
     /// real selection from a plain click.
     dragged: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShellCommandConfig {
+    command: String,
+    configured: bool,
 }
 
 /// Top-level application state.
@@ -1111,6 +1111,10 @@ pub struct Model<T: TerminalAdapter> {
     /// globally disabled, matching what would actually fire. Defaults to
     /// off (auto-fix is opt-in) until config is applied.
     auto_fix_enabled: bool,
+    /// Effective plain-shell command reported by the daemon that owns
+    /// terminal spawning. `None` until the post-subscribe config event
+    /// arrives.
+    shell_command_config: Option<ShellCommandConfig>,
     /// Workspace keys for which we've already fired
     /// `Command::FetchPrDetails` this session — the lazy-fetch path
     /// that back-fills review-thread activity. Used to dedupe the
@@ -1237,8 +1241,8 @@ pub struct Model<T: TerminalAdapter> {
     deferred_focus_terminal: Option<lazybox_ipc::TerminalId>,
     /// One client-wide snippet catalog: built-ins +
     /// `<lazybox_home>/snippets.yaml` +
-    /// `<launch-dir>/.lazybox/snippets.yaml`. Loaded once at startup; it
-    /// does not follow workspace selection.
+    /// `<launch-dir>/.lazybox/snippets.yaml`. Production constructors
+    /// require it up front; it does not follow workspace selection.
     pub(crate) snippets: lazybox_config::Snippets,
     /// Snippet keys sent, most-recent first (capped at
     /// `RECENT_SNIPPETS_MAX`). Passed to each picker as its "Recent"
@@ -1513,6 +1517,7 @@ impl<T: TerminalAdapter> Model<T> {
             ui_defaults: lazybox_config::UiDefaults::default(),
             auto_fix_opt_out_labels: lazybox_core::AutoFixSettings::default().opt_out_labels,
             auto_fix_enabled: lazybox_core::AutoFixSettings::default().enabled,
+            shell_command_config: None,
             pr_details_fetched: std::collections::HashSet::new(),
             merge_confirmed: std::collections::HashSet::new(),
             outdated_scroll_terminals: std::collections::HashSet::new(),
@@ -1601,7 +1606,7 @@ fn install_panic_hook() {
 }
 
 impl Model<CrosstermTerminalAdapter> {
-    pub fn new(client: Client) -> anyhow::Result<Self> {
+    pub fn new(client: Client, snippets: lazybox_config::Snippets) -> anyhow::Result<Self> {
         install_panic_hook();
         let terminal = CrosstermTerminalAdapter::new()?;
         // Enable raw mode, the alt screen, mouse capture, bracketed
@@ -1614,6 +1619,7 @@ impl Model<CrosstermTerminalAdapter> {
         // Splash is mounted lazily by `start_setup_wizard`. Returning
         // users (with a persisted setup) boot straight to the panes.
         let mut model = Self::build(terminal, client);
+        model.apply_snippets(snippets);
         model.term_guard = Some(term_guard);
         // Subscribe up-front for both first-run and returning users.
         // First-run gets an empty snapshot before the wizard finishes
@@ -1637,6 +1643,17 @@ impl Model<tuirealm::terminal::TestTerminalAdapter> {
         let terminal = tuirealm::terminal::TestTerminalAdapter::new(size)
             .map_err(|e| anyhow::anyhow!("test adapter init: {e:?}"))?;
         Ok(Self::build(terminal, client))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test_with_snippets(
+        client: Client,
+        size: tuirealm::ratatui::layout::Size,
+        snippets: lazybox_config::Snippets,
+    ) -> anyhow::Result<Self> {
+        let mut model = Self::new_for_test(client, size)?;
+        model.apply_snippets(snippets);
+        Ok(model)
     }
 }
 
@@ -1739,10 +1756,9 @@ impl<T: TerminalAdapter> Model<T> {
         self.terminals.apply_ui_defaults(ui);
     }
 
-    /// Install the loaded snippet collection. Called from the
-    /// startup path in `main.rs` after `Snippets::load_for_launch_dir`. The
-    /// terminal-pane `]]s<key>` flow reads from `self.snippets`
-    /// directly, so this is the only handoff needed.
+    /// Replace the loaded client-wide snippet collection after an in-app
+    /// edit. The terminal-pane `]]s<key>` flow reads from `self.snippets`
+    /// directly, so this is the only reload handoff needed.
     pub fn apply_snippets(&mut self, snippets: lazybox_config::Snippets) {
         self.snippets = snippets;
     }
@@ -1787,7 +1803,7 @@ impl<T: TerminalAdapter> Model<T> {
         if matches!(self.modal_stack.last(), Some(Id::Tour)) {
             return;
         }
-        self.mount_modal(Id::Tour, Tour::at_step(step));
+        self.mount_modal(Id::Tour, Tour::at_step(step, self.catalog.clone()));
     }
 
     fn start_tour_snippet_exercise(&mut self, return_step: usize, success_step: usize) {
@@ -1993,10 +2009,8 @@ impl<T: TerminalAdapter> Model<T> {
         format!("Broadcast to {}: {}", names.len(), names.join(", "))
     }
 
-    /// Record a snippet key as just-used: move it to the front of the
-    /// MRU list (`recent_snippets`), de-duplicating and capping the list.
-    /// Called only for the daemon's confirmed-delivery event; durable state
-    /// is already committed by that point.
+    /// Apply a daemon-confirmed snippet use to the local MRU view. Durable
+    /// state is already committed before the success event arrives.
     pub(crate) fn apply_recent_snippet(&mut self, key: String) {
         self.recent_snippets.retain(|k| k != &key);
         self.recent_snippets.insert(0, key);
@@ -3434,6 +3448,12 @@ impl<T: TerminalAdapter> Model<T> {
         actions.push(SettingsAction::EditLlmGateway {
             set: cfg.agent.gateway_url().is_some(),
         });
+        if let Some(shell) = &self.shell_command_config {
+            actions.push(SettingsAction::ShellCommand {
+                command: shell.command.clone(),
+                configured: shell.configured,
+            });
+        }
         actions.push(SettingsAction::CheckAgentUpdates);
         actions.push(SettingsAction::UpdateAgentClis);
         actions.push(SettingsAction::InspectWorktrees);
@@ -3477,6 +3497,21 @@ impl<T: TerminalAdapter> Model<T> {
         // to YAML — no wizard runner, no cached detection inputs.
         if matches!(action, SettingsAction::EditLlmGateway { .. }) {
             self.mount_gateway_url_input();
+            return;
+        }
+        if let SettingsAction::ShellCommand {
+            command,
+            configured,
+        } = action
+        {
+            let source = if configured {
+                "shell.command"
+            } else {
+                "automatic shell resolution"
+            };
+            self.flash_info(format!(
+                "new shells use {command} from {source}; existing shell sessions keep their current process"
+            ));
             return;
         }
         // Default-agent picker is a single Choice that writes straight
@@ -3534,6 +3569,7 @@ impl<T: TerminalAdapter> Model<T> {
             SettingsAction::EditSnippets => return,
             SettingsAction::EditTheme { .. } => return,
             SettingsAction::EditLlmGateway { .. } => return,
+            SettingsAction::ShellCommand { .. } => return,
             SettingsAction::EditDefaultAgent { .. } => return,
             SettingsAction::EditDefaultModel { .. } => return,
         };

@@ -1,11 +1,12 @@
 ---
 title: Quickstart
-description: Install lazybox, open your first workspace, and send a reusable agent workflow in about five minutes.
+description: Open your first live workspace, send a reusable workflow, then coordinate two sessions.
 ---
 
-In a few minutes you will install lazybox, open a workspace with a live embedded
-terminal, and send a built-in workflow to its agent. Those are the two wins for
-this tutorial. Everything else can wait.
+In a few minutes you will install lazybox, launch it, open a workspace with a
+live embedded terminal, and send one reviewed instruction to two sessions.
+Those wins cover the core loop: start work in isolation, reuse a reviewed
+workflow, then coordinate a small fleet from the inbox.
 
 For a real GitHub inbox you need the **GitHub CLI**, logged in. Run
 `gh auth login` once — lazybox reads your token from `gh auth token`. The
@@ -129,20 +130,54 @@ the terminal focused:
    **Recent** group, so the workflow is now one `Enter` away. Recent persists
    across lazybox restarts.
 
-Back in the inbox, the workspace now carries a `]1` badge: one distinct snippet
-workflow has been sent there. That count is persisted per workspace, so it
-remains a quick progress cue while you juggle several agents.
+Back in the inbox, the workspace now carries a `]1` badge: one recently
+distinct snippet workflow has been sent there. That bounded history is
+persisted per workspace, so it remains a quick progress cue while you juggle
+several agents.
 
 :::note[Started a plain shell?]
 Snippet bodies are submitted to the focused terminal. Start an agent with
 `w w` or the `a` menu before trying the built-in `rev` workflow.
 :::
 
+## 5. Coordinate two workspaces at once
+
+Now experience the fleet workflow instead of visiting each terminal:
+
+1. Make sure the sidebar has at least two workspaces. In `--test` mode, press
+   `x n` to create a second workspace under the seeded project. In a real
+   inbox, choose rows from two different repo groups.
+2. Start a coding agent in each workspace with `w w`, returning to the sidebar
+   with `]]q` after each spawn.
+3. Focus the first row and press `v`, navigate to the other row, and press `v`
+   again. The marks survive navigation and the selected count becomes `2`.
+4. Press `Shift-B`. Confirm both workspace names in the target recap, choose the
+   built-in `audit` snippet, and edit its pre-filled body into the exact
+   instruction both agents should receive. To try the free-text path instead,
+   press `Ctrl-F` in the snippet picker.
+5. Submit once. The footer reports which live sessions were queued, and each
+   confirmed delivery updates Recent and that workspace's `]N` history.
+
+No agent CLI available? Start a plain shell in each workspace with `s`, choose
+the `Ctrl-F` free-text path, and broadcast a safe shell command such as:
+
+```sh
+printf 'broadcast reached %s\n' "$PWD"
+```
+
+That exercises the same multi-workspace flow through direct shell delivery.
+The full [multi-agent orchestration guide](/docs/how-to/orchestrate-multiple-agents/)
+covers mixed agent/shell selections, skipped session-less targets, retry
+semantics, and per-workspace history.
+
 ## What next
 
-You opened a seeded or existing workspace — now wire up a real repository:
+You opened live sessions and coordinated them — now wire up a real repository:
 
 - **[Add a repo](/docs/how-to/add-a-repo/)** so your own pull requests flow into
   the inbox.
+- **[Start from an issue and keep your session in the
+  PR](/docs/how-to/keep-session-from-issue-to-pr/)** to carry a running agent
+  forward when its implementation pull request appears.
 - **[Use snippet workflows](/docs/how-to/use-snippets/)** to create, scope, and
   broadcast the repeatable instructions your agents use every day.

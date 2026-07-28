@@ -186,7 +186,8 @@ impl<'a> WorkspaceRowCtx<'a> {
 /// 6. Unread pill — ` ●N `, right-aligned. Max so the column collapses
 ///    when no row has unread, and lines up at a consistent x when any
 ///    row does.
-/// 7. Badge: agent slot — ` C ` / ` C×2 ` / blank. Same Max semantics.
+/// 7. Badge: agent slot — ` C ` / ` C×2 ` / ` CX ` / blank. Same
+///    Max semantics.
 /// 8. Badge: shell slot — ` S ` / blank. Cell carries a leading space
 ///    so the two badges visually separate when both present.
 /// 9–14. Passive badge slots — one Max-collapsing, center-aligned
@@ -604,37 +605,54 @@ fn cell_unread(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     Cell::from_span(Span::styled(text, style))
 }
 
-/// Agent-letter pill — pulled from `ctx.badges` (the first
-/// non-`S` entry). Blank when no agent running; multi-instance
-/// (` C×2 `) widens by 2 cells. When the row carries a jump number
-/// (`agent_number`), a dim ` N` prefix rides ahead of the pill —
-/// ` 2 C ` — so the user can see which `]]<digit>` lands here.
+/// Agent-letter badges — one for every non-`S` entry in `ctx.badges`.
+/// A single agent keeps its padded pill; multiple agents share one
+/// compact group (` C×2X `) so the complete set remains visible in a
+/// narrow sidebar. A dim jump number prefixes the group when present.
 fn cell_badge_agent(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    let agent = ctx.badges.iter().find(|(c, _)| *c != 'S').copied();
-    match (agent, ctx.agent_number) {
-        (Some((letter, n)), Some(num)) => {
-            let count = if n > 1 {
-                format!("×{n}")
-            } else {
-                String::new()
-            };
-            let num_style = if ctx.is_cursor {
-                ctx.row_style()
-            } else {
-                Style::default()
-                    .fg(ctx.theme.text_dim)
-                    .add_modifier(Modifier::BOLD)
-            };
-            Cell::new(vec![
-                Span::styled(format!(" {num}"), num_style),
-                Span::styled(
-                    format!(" {letter}{count} "),
-                    badge_pill_style(ctx.theme, letter),
-                ),
-            ])
-        }
-        _ => badge_slot_cell(ctx, agent),
+    let agent_count = ctx
+        .badges
+        .iter()
+        .filter(|(letter, _)| *letter != 'S')
+        .count();
+    if agent_count == 0 {
+        return Cell::empty();
     }
+
+    let mut spans = Vec::with_capacity(agent_count + usize::from(ctx.agent_number.is_some()));
+    if let Some(num) = ctx.agent_number {
+        let num_style = if ctx.is_cursor {
+            ctx.row_style()
+        } else {
+            Style::default()
+                .fg(ctx.theme.text_dim)
+                .add_modifier(Modifier::BOLD)
+        };
+        spans.push(Span::styled(format!(" {num}"), num_style));
+    }
+    spans.extend(
+        ctx.badges
+            .iter()
+            .filter(|(letter, _)| *letter != 'S')
+            .enumerate()
+            .map(|(index, &(letter, n))| {
+                let leading_space = agent_count == 1 || (ctx.agent_number.is_none() && index == 0);
+                let trailing_space =
+                    agent_count == 1 || (ctx.agent_number.is_none() && index + 1 == agent_count);
+                let count = if n > 1 {
+                    format!("×{n}")
+                } else {
+                    String::new()
+                };
+                let label = format!(
+                    "{}{letter}{count}{}",
+                    if leading_space { " " } else { "" },
+                    if trailing_space { " " } else { "" },
+                );
+                Span::styled(label, badge_pill_style(ctx.theme, letter))
+            }),
+    );
+    Cell::new(spans)
 }
 
 fn cell_badge_shell(ctx: &WorkspaceRowCtx<'_>) -> Cell {
@@ -1382,6 +1400,27 @@ mod tests {
         assert_eq!(cell_badge_shell(&ctx).width(), 3);
     }
 
+    /// Distinct agents share a compact group while shells stay in the
+    /// separate shell slot.
+    #[test]
+    fn cell_badge_agent_renders_every_distinct_agent() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.badges = vec![('C', 1), ('X', 1), ('S', 1)];
+
+        let cell = cell_badge_agent(&ctx);
+        let text: String = cell.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(cell.width(), 4);
+        assert_eq!(text, " CX ");
+        assert!(
+            !text.contains('S'),
+            "shell leaked into agent slot: {text:?}"
+        );
+        assert_eq!(cell_badge_shell(&ctx).width(), 3);
+    }
+
     /// Multi-instance agent widens the slot to 5 cells (` C×2 `).
     #[test]
     fn cell_badge_agent_widens_for_multi_instance() {
@@ -1391,6 +1430,22 @@ mod tests {
         let mut ctx = ctx_for(&ws, &task, &theme);
         ctx.badges = vec![('C', 2)];
         assert_eq!(cell_badge_agent(&ctx).width(), 5);
+    }
+
+    /// Counts stay attached to their agent without hiding the other
+    /// distinct agent badges.
+    #[test]
+    fn cell_badge_agent_renders_mixed_counts() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.badges = vec![('C', 2), ('X', 1)];
+
+        let cell = cell_badge_agent(&ctx);
+        let text: String = cell.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(cell.width(), 6);
+        assert_eq!(text, " C×2X ");
     }
 
     /// A jump number prefixes the agent pill (` 2 C `, 5 cells) so the
@@ -2246,6 +2301,31 @@ mod tests {
         assert!(
             line.contains(" C×2 "),
             "multi-instance badge was truncated: {line:?}",
+        );
+    }
+
+    /// A persisted multi-agent workspace keeps its complete badge set
+    /// and jump number at the default 40-column sidebar width (38 cells
+    /// inside the border).
+    #[test]
+    fn mixed_agent_badges_are_not_truncated_under_width_pressure() {
+        let task = make_task("owner/repo#1", "Readable workspace title");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.badges = vec![('C', 2), ('X', 1)];
+        ctx.agent_number = Some(1);
+        let columns = build_columns(4);
+        let rows = vec![build_row(&ctx)];
+        let lines = crate::components::table::render_table(&rows, &columns, 38);
+        let line: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            line.contains(" 1C×2X"),
+            "mixed agent badges or jump number were truncated: {line:?}",
+        );
+        assert!(
+            line.contains("Readable workspace"),
+            "agent width made the title unreadable: {line:?}",
         );
     }
 

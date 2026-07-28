@@ -449,6 +449,13 @@ pub enum ClickTarget {
     Issue { repo: Option<String>, number: u64 },
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TerminalHit {
+    terminal_id: TerminalId,
+    tile: Rect,
+    body: Rect,
+}
+
 pub struct TerminalStack {
     id: PaneId,
     terminals: HashMap<TerminalId, TerminalSlot>,
@@ -503,11 +510,11 @@ pub struct TerminalStack {
     /// Cleared at the start of every render so removed terminals
     /// don't leave stale hit targets.
     tab_strip_hits: Vec<(usize, std::ops::Range<u16>, u16)>,
-    /// Per-tile hover targets, populated each render — one entry per
-    /// visible terminal. Lets the wheel handler scroll the tile *under
-    /// the cursor* rather than the focused one. Cleared at the start of
-    /// every render so a closed tile leaves no stale target.
-    tile_hits: Vec<(TerminalId, Rect)>,
+    /// Per-tile mouse targets, populated each render — one entry per
+    /// visible terminal. The full tile drives click-to-focus while its
+    /// body preserves the narrower hover-to-scroll target. Cleared at
+    /// the start of every render so a closed tile leaves no stale target.
+    tile_hits: Vec<TerminalHit>,
     /// Last-focused terminal per session. Recorded when we leave a
     /// session so returning restores the pane the user was last on
     /// instead of snapping back to the first. Keyed by terminal id
@@ -1469,22 +1476,34 @@ impl TerminalStack {
             .map(|(id, _)| *id)
     }
 
-    /// Switch the active tab to the given terminal (must belong to
-    /// the active session, otherwise no-op). Used by the singleton
-    /// toggle-or-focus path: the user pressed `c`, we already have
-    /// a Claude in this session, just bring it forward.
-    pub fn focus_terminal(&mut self, target: TerminalId) -> bool {
+    fn set_terminal_focus(&mut self, target: TerminalId) -> Option<bool> {
         let visible = self.visible_terminals();
-        if let Some(idx) = visible.iter().position(|id| *id == target) {
-            self.active_tab_idx = idx;
-            // Expanding the section is part of "focus": collapsed
-            // body would otherwise hide the tab the user just asked
-            // for.
-            self.set_collapsed(false);
-            true
-        } else {
-            false
-        }
+        let idx = visible.iter().position(|id| *id == target)?;
+        let layout_changed = match &mut self.layout {
+            lazybox_core::SessionLayout::Tabs { active } => {
+                let changed = *active != idx;
+                *active = idx;
+                changed
+            }
+            lazybox_core::SessionLayout::Splits { tree, focused } => {
+                let path = tree.path_to(target.0)?;
+                let changed = *focused != path;
+                *focused = path;
+                changed
+            }
+        };
+        self.active_tab_idx = idx;
+        // Expanding the section is part of "focus": collapsed
+        // body would otherwise hide the terminal the user just asked
+        // for.
+        self.set_collapsed(false);
+        Some(layout_changed)
+    }
+
+    /// Focus the given terminal in the active tab or split layout.
+    /// Returns `false` when the target is not visible.
+    pub fn focus_terminal(&mut self, target: TerminalId) -> bool {
+        self.set_terminal_focus(target).is_some()
     }
 
     pub fn active_tab_idx(&self) -> usize {
@@ -1662,11 +1681,21 @@ impl TerminalStack {
     /// strip, a divider) or outside every tile — including the 1-cell
     /// accent bar / split seams between tiles, where the wheel falls
     /// back to scrolling the focused tile.
-    pub fn terminal_at(&self, col: u16, row: u16) -> Option<TerminalId> {
+    pub fn scroll_terminal_at(&self, col: u16, row: u16) -> Option<TerminalId> {
         self.tile_hits
             .iter()
-            .find(|(_, tile)| Self::rect_contains(*tile, col, row))
-            .map(|(id, _)| *id)
+            .find(|hit| Self::rect_contains(hit.body, col, row))
+            .map(|hit| hit.terminal_id)
+    }
+
+    /// Terminal whose full tile contains `(col, row)`. Unlike
+    /// [`Self::scroll_terminal_at`], this includes tile chrome
+    /// such as the focus bar while still excluding split seams.
+    pub fn tile_at(&self, col: u16, row: u16) -> Option<TerminalId> {
+        self.tile_hits
+            .iter()
+            .find(|hit| Self::rect_contains(hit.tile, col, row))
+            .map(|hit| hit.terminal_id)
     }
 
     fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
@@ -3380,7 +3409,7 @@ impl TerminalStack {
             lazybox_core::SessionLayout::Tabs { .. } => {
                 // Render the active tab full-pane (existing behavior).
                 if let Some(id) = self.active_terminal_id() {
-                    self.render_one_terminal(id, body, frame, focused);
+                    self.render_one_terminal(id, body, body, frame, focused);
                 }
             }
             lazybox_core::SessionLayout::Splits {
@@ -3538,6 +3567,18 @@ impl TerminalStack {
             }
         }
         self.persist_layout(cmds);
+    }
+
+    /// Focus the tile containing `target` and persist the updated split
+    /// layout. Returns `false` when the terminal is not visible.
+    pub fn focus_tile(&mut self, target: TerminalId, cmds: &mut Vec<Command>) -> bool {
+        let Some(layout_changed) = self.set_terminal_focus(target) else {
+            return false;
+        };
+        if layout_changed {
+            self.persist_layout(cmds);
+        }
+        true
     }
 
     /// Remove a terminal slot from the map and the tile tree,
@@ -3751,6 +3792,7 @@ impl TerminalStack {
         &mut self,
         id: TerminalId,
         rect: Rect,
+        tile: Rect,
         frame: &mut Frame,
         focused: bool,
     ) {
@@ -3810,11 +3852,11 @@ impl TerminalStack {
             } else {
                 (body, None)
             };
-            // Record this tile's on-screen geometry so the wheel handler
-            // can route a scroll to the pane under the cursor. `rect` is
-            // the full tile (hover hit-test); `grid` is the cell grid
-            // (event → cell coordinates for a mouse-tracking program).
-            self.tile_hits.push((id, rect));
+            self.tile_hits.push(TerminalHit {
+                terminal_id: id,
+                tile,
+                body: rect,
+            });
             slot.vt.ensure_size(grid.width, grid.height);
             // Backend PTY also needs to know the new size — otherwise
             // the shell process keeps writing at its spawn dimensions
@@ -3987,7 +4029,13 @@ impl TerminalStack {
                 } else {
                     rect
                 };
-                self.render_one_terminal(TerminalId(*terminal_id), body, frame, is_focused_leaf);
+                self.render_one_terminal(
+                    TerminalId(*terminal_id),
+                    body,
+                    rect,
+                    frame,
+                    is_focused_leaf,
+                );
             }
             lazybox_core::TileTree::HSplit { left, right, ratio } => {
                 let split_at = (rect.width as u32 * (*ratio).min(100) as u32 / 100) as u16;
@@ -7221,7 +7269,7 @@ mod hover_scroll_tests {
         // border + top chrome) hit-tests to the left tile.
         let (col, row) = (5, 6);
         assert_eq!(
-            stack.terminal_at(col, row),
+            stack.scroll_terminal_at(col, row),
             Some(TerminalId(1)),
             "coordinates in the left tile resolve to the left terminal",
         );
@@ -7231,7 +7279,7 @@ mod hover_scroll_tests {
 
         // Route the wheel exactly as the handler does: resolve the tile
         // under the cursor, then scroll it.
-        let target = stack.terminal_at(col, row).unwrap();
+        let target = stack.scroll_terminal_at(col, row).unwrap();
         let _outcome = stack.scroll_terminal(target, -3);
 
         assert_eq!(
@@ -7268,11 +7316,11 @@ mod hover_scroll_tests {
         assert_eq!(stack.focused_terminal_id(), Some(TerminalId(1)));
 
         let (col, row) = (W - 6, 6);
-        assert_eq!(stack.terminal_at(col, row), Some(TerminalId(2)));
+        assert_eq!(stack.scroll_terminal_at(col, row), Some(TerminalId(2)));
 
         let left_before = offset(&stack, TerminalId(1));
         let right_before = offset(&stack, TerminalId(2));
-        let target = stack.terminal_at(col, row).unwrap();
+        let target = stack.scroll_terminal_at(col, row).unwrap();
         let _outcome = stack.scroll_terminal(target, -3);
 
         assert_eq!(offset(&stack, TerminalId(2)), right_before - 3);

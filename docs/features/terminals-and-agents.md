@@ -359,7 +359,8 @@ filters by key, description, and category, and auto-submits when an exact key is
 the unique key-prefix match. Ask Lazybox (`?`) can propose a global add/update,
 confirm it with a body preview, and hot-reload it immediately. `Shift-B`
 broadcasts a chosen workflow across selected workspaces. See
-[`docs/snippets.md`](../snippets.md).
+[`docs/snippets.md`](../snippets.md) and the
+[multi-agent orchestration guide](https://lazybox.ai/docs/how-to/orchestrate-multiple-agents/).
 
 ### How it works (brief)
 `Snippets::load_for_launch_dir` (`crates/config/src/snippets.rs`) merges

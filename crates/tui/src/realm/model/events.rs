@@ -10,7 +10,7 @@
 //! mouse-capture toggle and pane-focus sync helpers round out
 //! the "things the run loop calls between keystrokes" surface.
 
-use super::{Id, ModalFlow, Model, Msg, PaneFocus};
+use super::{Id, ModalFlow, Model, Msg, PaneFocus, ShellCommandConfig};
 use lazybox_ipc::{Command as IpcCommand, Event as IpcEvent};
 use tuirealm::terminal::TerminalAdapter;
 
@@ -414,6 +414,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // needing the merge latch?) before this compiles.
                 IpcEvent::ViewerIdentities { .. }
                 | IpcEvent::AutoFixPolicyConfig { .. }
+                | IpcEvent::ShellCommandConfig { .. }
                 | IpcEvent::WorkspaceRemoved(_)
                 | IpcEvent::ProjectUpserted(_)
                 | IpcEvent::ProjectRemoved(_)
@@ -526,6 +527,18 @@ impl<T: TerminalAdapter> Model<T> {
         } = &event
         {
             self.apply_auto_fix_config(*enabled, opt_out_labels.clone());
+            self.redraw = true;
+            return;
+        }
+        if let IpcEvent::ShellCommandConfig {
+            command,
+            configured,
+        } = &event
+        {
+            self.shell_command_config = Some(ShellCommandConfig {
+                command: command.clone(),
+                configured: *configured,
+            });
             self.redraw = true;
             return;
         }
@@ -1030,6 +1043,7 @@ impl<T: TerminalAdapter> Model<T> {
             IpcEvent::Snapshot { .. }
             | IpcEvent::ViewerIdentities { .. }
             | IpcEvent::AutoFixPolicyConfig { .. }
+            | IpcEvent::ShellCommandConfig { .. }
             | IpcEvent::WorkspaceUpserted(_)
             | IpcEvent::WorkspaceRemoved(_)
             | IpcEvent::ProjectUpserted(_)
@@ -1243,6 +1257,7 @@ impl<T: TerminalAdapter> Model<T> {
                 IpcEvent::Snapshot { .. }
                 | IpcEvent::ViewerIdentities { .. }
                 | IpcEvent::AutoFixPolicyConfig { .. }
+                | IpcEvent::ShellCommandConfig { .. }
                 | IpcEvent::WorkspaceUpserted(_)
                 | IpcEvent::WorkspaceRemoved(_)
                 | IpcEvent::ProjectUpserted(_)

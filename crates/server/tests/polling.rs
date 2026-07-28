@@ -144,7 +144,9 @@ async fn recv_workspace_upsert(client: &mut lazybox_ipc::Client) -> Event {
         // upsert they're waiting for.
         if !matches!(
             evt,
-            Event::ProjectUpserted(_) | Event::AutoFixPolicyConfig { .. }
+            Event::ProjectUpserted(_)
+                | Event::AutoFixPolicyConfig { .. }
+                | Event::ShellCommandConfig { .. }
         ) {
             return evt;
         }

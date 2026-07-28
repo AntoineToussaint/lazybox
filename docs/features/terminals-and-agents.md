@@ -58,7 +58,7 @@ streams live `TerminalOutput` bytes. The default session backend is tmux
 
 **Status:** stable
 **Crate(s):** `agents` (`src/agent.rs`), `server` (`spawn_handler.rs`)
-**Config / flags:** `setup.agents` (enabled), `setup.default_agent`, `ui.action_keys` `spawn_agent.<id>` entries (remap agent chords)
+**Config / flags:** `setup.agents` (enabled), `setup.default_agent`, `shell.command`, `ui.action_keys` `spawn_agent.<id>` entries (remap agent chords)
 **Key bindings:** `s` shell; `a` agent leader — `a c` Claude, `a x` Codex, `a u` Cursor (agents without a built-in key convention are remappable via `spawn_agent.<id>`)
 
 ### What it does
@@ -89,6 +89,8 @@ builtins; the server's `spawn_handler` builds the worktree, env, and
 
 ### Known sharp edges
 - Agent availability is PATH-detected; an agent installed mid-session isn't picked up without a re-detect.
+- `shell.command` changes apply to new shells. A tmux-backed shell already
+  running keeps its current process; close its terminal and open a new one.
 
 ---
 

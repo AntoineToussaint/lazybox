@@ -93,10 +93,17 @@ async fn subscribed(config: ServerConfig) -> lazybox_ipc::Client {
     client
 }
 
-/// Drain the trailing `AutoFixPolicyConfig` push (last of the
-/// post-subscribe events, tracker #512). Tests that assert the stream
-/// is otherwise quiet call this after `subscribed`.
+/// Drain the daemon-owned config pushes. Tests that assert the stream is
+/// otherwise quiet call this after `subscribed`.
 async fn drain_auto_fix_config(client: &mut lazybox_ipc::Client) {
+    let shell = timeout(Duration::from_secs(1), client.recv())
+        .await
+        .expect("shell config deadline")
+        .expect("shell config event");
+    assert!(
+        matches!(shell, Event::ShellCommandConfig { .. }),
+        "expected ShellCommandConfig, got {shell:?}"
+    );
     let cfg = timeout(Duration::from_secs(1), client.recv())
         .await
         .expect("auto-fix policy config deadline")

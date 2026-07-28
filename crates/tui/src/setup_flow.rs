@@ -105,7 +105,7 @@ pub fn config_yaml_path() -> std::path::PathBuf {
 
 pub fn load_from_yaml(path: &std::path::Path) -> Option<PersistedSetup> {
     let raw = std::fs::read_to_string(path).ok()?;
-    let cfg: lazybox_config::Config = match serde_yaml::from_str(&raw) {
+    let cfg = match lazybox_config::Config::parse(&raw) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("config.yaml parse failed: {e}");
@@ -168,7 +168,7 @@ pub fn save_persisted_yaml(
 
     let mut backed_up: Option<std::path::PathBuf> = None;
     let mut cfg: lazybox_config::Config = match std::fs::read_to_string(path) {
-        Ok(raw) => match serde_yaml::from_str(&raw) {
+        Ok(raw) => match lazybox_config::Config::parse(&raw) {
             Ok(cfg) => cfg,
             Err(parse_err) => {
                 // The file exists but is malformed. Move it aside
@@ -1282,6 +1282,28 @@ mod tests {
         let cfg = lazybox_config::Config::default();
         cfg.save_to(&path).unwrap();
         assert!(load_from_yaml(&path).is_none());
+    }
+
+    #[test]
+    fn setup_save_removes_the_legacy_serialized_bash_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(
+            &path,
+            "setup:\n  wizard_completed: true\nshell:\n  command: bash\n",
+        )
+        .unwrap();
+
+        let persisted = PersistedSetup::default();
+        save_persisted_yaml(&persisted, &path).expect("save setup");
+
+        let config = lazybox_config::Config::load_from(&path).expect("load migrated config");
+        assert_eq!(config.shell.configured_command(), None);
+        assert!(
+            !std::fs::read_to_string(path)
+                .expect("read migrated config")
+                .contains("command: bash")
+        );
     }
 
     #[test]

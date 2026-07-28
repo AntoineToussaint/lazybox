@@ -130,9 +130,16 @@ async fn subscribe_is_admitted_only_once_per_connection() {
 
     client.send(Command::Subscribe).expect("first subscribe");
     assert!(matches!(client.recv().await, Some(Event::Snapshot { .. })));
-    // The first subscribe also pushes the auto-fix policy config right
-    // after the snapshot (tracker #512); drain it so the next event is
-    // the duplicate-subscribe rejection.
+    assert!(matches!(
+        client.recv().await,
+        Some(Event::ShellCommandConfig {
+            command,
+            configured: _,
+        }) if !command.is_empty()
+    ));
+    // The first subscribe also pushes the auto-fix policy config after
+    // the shell config; drain it so the next event is the
+    // duplicate-subscribe rejection.
     assert!(matches!(
         client.recv().await,
         Some(Event::AutoFixPolicyConfig { .. })

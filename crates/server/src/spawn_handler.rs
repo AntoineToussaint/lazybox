@@ -164,7 +164,7 @@ fn argv_for(
     config: &ServerConfig,
     kind: &TerminalKind,
     cwd: &Option<PathBuf>,
-    shell_command: &str,
+    resolve_shell: impl FnOnce() -> String,
     skip_permissions: bool,
     hook_settings_path: Option<PathBuf>,
     hook_command: Option<&str>,
@@ -208,7 +208,7 @@ fn argv_for(
             argv.extend(model_args.iter().cloned());
             Some(argv)
         }
-        TerminalKind::Shell => Some(vec![shell_command.to_string()]),
+        TerminalKind::Shell => Some(vec![resolve_shell()]),
         TerminalKind::LogTail { path } => Some(vec!["tail".into(), "-F".into(), path.clone()]),
     }
 }
@@ -866,7 +866,7 @@ pub async fn handle_spawn(
         config,
         &kind,
         &cwd_path,
-        &cfg.shell.command,
+        || cfg.shell.resolved_command(),
         skip_permissions,
         hook_settings.clone(),
         argv_hook_command.as_deref(),
@@ -8294,8 +8294,18 @@ mod tests {
         let kind = TerminalKind::Agent("claude".into());
         let cwd = Some(std::path::PathBuf::from("/tmp/wt"));
 
-        let with_skip = argv_for(&config, &kind, &cwd, "bash", true, None, None, &[], false)
-            .expect("claude registered");
+        let with_skip = argv_for(
+            &config,
+            &kind,
+            &cwd,
+            || "bash".into(),
+            true,
+            None,
+            None,
+            &[],
+            false,
+        )
+        .expect("claude registered");
         assert_eq!(
             with_skip,
             vec![
@@ -8305,8 +8315,18 @@ mod tests {
             ]
         );
 
-        let without_skip = argv_for(&config, &kind, &cwd, "bash", false, None, None, &[], false)
-            .expect("claude registered");
+        let without_skip = argv_for(
+            &config,
+            &kind,
+            &cwd,
+            || "bash".into(),
+            false,
+            None,
+            None,
+            &[],
+            false,
+        )
+        .expect("claude registered");
         assert_eq!(without_skip, vec!["claude".to_string()]);
 
         // With a generated hook settings file, `--settings <path>` is
@@ -8315,7 +8335,7 @@ mod tests {
             &config,
             &kind,
             &cwd,
-            "bash",
+            || "bash".into(),
             false,
             Some(std::path::PathBuf::from("/run/hooks/settings-1.json")),
             None,
@@ -8341,8 +8361,18 @@ mod tests {
         let cwd = Some(std::path::PathBuf::from("/tmp/wt"));
 
         // No hook command → PTY-only, argv untouched beyond the bare spawn.
-        let bare = argv_for(&config, &kind, &cwd, "bash", false, None, None, &[], false)
-            .expect("codex registered");
+        let bare = argv_for(
+            &config,
+            &kind,
+            &cwd,
+            || "bash".into(),
+            false,
+            None,
+            None,
+            &[],
+            false,
+        )
+        .expect("codex registered");
         assert_eq!(bare, vec!["codex".to_string()]);
 
         // With a hook command, Codex's argv gains the trust-bypass flag and
@@ -8353,7 +8383,7 @@ mod tests {
             &config,
             &kind,
             &cwd,
-            "bash",
+            || "bash".into(),
             false,
             None,
             Some(cmd),
@@ -8385,7 +8415,7 @@ mod tests {
             &config,
             &kind,
             &cwd,
-            "bash",
+            || "bash".into(),
             false,
             None,
             None,
@@ -8415,7 +8445,7 @@ mod tests {
             &config,
             &TerminalKind::Agent("claude".into()),
             &cwd,
-            "bash",
+            || "bash".into(),
             false,
             None,
             None,
@@ -8429,7 +8459,7 @@ mod tests {
             &config,
             &TerminalKind::Agent("codex".into()),
             &cwd,
-            "bash",
+            || "bash".into(),
             false,
             None,
             None,
@@ -8456,7 +8486,7 @@ mod tests {
             &config,
             &TerminalKind::Shell,
             &None,
-            "fish",
+            || "fish".into(),
             false,
             None,
             None,
@@ -8466,6 +8496,49 @@ mod tests {
         .expect("shell argv");
 
         assert_eq!(argv, vec!["fish".to_string()]);
+    }
+
+    #[test]
+    fn non_shell_argv_does_not_resolve_a_shell() {
+        let config =
+            ServerConfig::with_store(std::sync::Arc::new(lazybox_store::MemoryStore::new()));
+
+        let agent = argv_for(
+            &config,
+            &TerminalKind::Agent("codex".into()),
+            &None,
+            || panic!("agent launch must not resolve a shell"),
+            false,
+            None,
+            None,
+            &[],
+            false,
+        )
+        .expect("codex registered");
+        assert_eq!(agent, vec!["codex".to_string()]);
+
+        let log = argv_for(
+            &config,
+            &TerminalKind::LogTail {
+                path: "/tmp/lazybox.log".into(),
+            },
+            &None,
+            || panic!("log tail launch must not resolve a shell"),
+            false,
+            None,
+            None,
+            &[],
+            false,
+        )
+        .expect("log tail argv");
+        assert_eq!(
+            log,
+            vec![
+                "tail".to_string(),
+                "-F".to_string(),
+                "/tmp/lazybox.log".to_string(),
+            ]
+        );
     }
 
     /// Persist a workspace built from `task` so `priority_alias_for`

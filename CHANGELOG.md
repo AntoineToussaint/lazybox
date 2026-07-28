@@ -6,6 +6,12 @@ contain explicitly documented compatibility changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- Plain shells default to the account's OS login shell instead of a hard-coded
+  `bash`; `shell.command` remains the explicit override and Settings shows the
+  effective command (#598).
+
 ## [0.1.8] - 2026-07-26
 
 This release makes lazybox a steadier control surface for long-running agent

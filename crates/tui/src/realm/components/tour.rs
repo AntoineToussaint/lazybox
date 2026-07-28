@@ -531,6 +531,27 @@ mod tests {
     }
 
     #[test]
+    fn every_step_fits_the_modal_height() {
+        const STEP_HEADER_ROWS: usize = 3;
+        const MODAL_BODY_ROWS: usize = 19;
+
+        for step in STEPS {
+            let rendered_rows = STEP_HEADER_ROWS + step.body.len();
+            assert!(
+                rendered_rows <= MODAL_BODY_ROWS,
+                "step {:?} needs {rendered_rows} rows, but the modal has {MODAL_BODY_ROWS}",
+                step.title,
+            );
+        }
+    }
+
+    #[test]
+    fn last_step_tail_visible() {
+        let last = render_step(STEPS.len() - 1);
+        assert!(last.contains(", opens Settings; q q quits. Shift-T reopens this tour."));
+    }
+
+    #[test]
     fn covers_from_scratch_entry_points() {
         // A fresh user with an empty inbox must see a first move that
         // needs no pre-existing row: new project / new workspace.

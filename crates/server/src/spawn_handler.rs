@@ -1905,8 +1905,8 @@ async fn await_pending_ready(
 /// - `Some(session_id)` → look it up in the workspace, error if it's
 ///   gone (rare race where the user removed the session between
 ///   selecting it and pressing the spawn key).
-/// - `None` → use `Workspace::default_session`, or auto-create one
-///   when the workspace is empty. Auto-creation emits
+/// - `None` → use `Workspace::default_session`, or adopt/create one
+///   when the workspace is empty. Adoption and creation emit
 ///   `Event::SessionCreated` so the sidebar's expansion-on-multi-
 ///   session UI reacts.
 async fn resolve_or_create_session(
@@ -2030,6 +2030,17 @@ async fn resolve_or_create_session(
     // only the path is human-friendly.
     let kind_for_session = session_kind_from_terminal(kind);
     let path = worktree_path_for_session(&workspace, 0);
+    if let Some((adopted_path, session_id)) = adopt_untracked_pr_worktree(
+        config,
+        &workspace_key,
+        &kind_for_session,
+        &path,
+        session_key,
+    )
+    .await?
+    {
+        return Ok((adopted_path, session_id, false));
+    }
 
     let prov_start = std::time::Instant::now();
     let provisioned = provision_worktree(config, &workspace, &path, session_key, false).await;
@@ -2093,6 +2104,148 @@ async fn resolve_or_create_session(
     persist_and_broadcast(config, &workspace).await?;
     let _ = config.bus.send(Event::SessionCreated(Box::new(session)));
     Ok((path, new_session_id, false))
+}
+
+async fn adopt_untracked_pr_worktree(
+    config: &ServerConfig,
+    workspace_key: &WorkspaceKey,
+    kind: &SessionKind,
+    intended_path: &Path,
+    session_key: &SessionKey,
+) -> Result<Option<(PathBuf, SessionId)>, crate::ServerError> {
+    let _ownership_guard = config.worktree_ownership_lock.lock().await;
+    let _workspace_guard = config.lock_workspace(workspace_key.as_str()).await;
+    let mut workspace = load_workspace(config, workspace_key)?;
+    if let Some(session) = workspace.default_session() {
+        return Ok(Some((session.worktree_path.clone(), session.id)));
+    }
+
+    let Some(task) = workspace.primary_task().filter(|task| task.is_pr()) else {
+        return Ok(None);
+    };
+    let (Some(repo), Some(branch)) = (task.repo.clone(), task.branch.clone()) else {
+        return Ok(None);
+    };
+    let Some((owner, name)) = repo.split_once('/') else {
+        return Ok(None);
+    };
+
+    let candidates = match config
+        .worktree_manager()
+        .managed_worktrees_for_branch(owner, name, &branch)
+        .await
+    {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            tracing::warn!(
+                workspace = workspace_key.as_str(),
+                repo,
+                branch,
+                "could not inspect managed worktrees before provisioning: {error}"
+            );
+            return Ok(None);
+        }
+    };
+    let [candidate] = candidates.as_slice() else {
+        return Ok(None);
+    };
+    if paths_match(candidate, intended_path)
+        || managed_worktree_has_session_owner(config, candidate)
+    {
+        return Ok(None);
+    }
+
+    let worktree = lazybox_git_ops::Worktree {
+        name: branch.clone(),
+        path: candidate.clone(),
+        branch: branch.clone(),
+    };
+    apply_worktree_setup(
+        config,
+        &config.worktree_manager(),
+        &worktree,
+        Some(&repo),
+        session_key,
+    )
+    .await;
+
+    let session = Session::new(
+        workspace_key.clone(),
+        kind.clone(),
+        candidate.clone(),
+        Utc::now(),
+    );
+    let session_id = session.id;
+    workspace.add_session(session.clone());
+    persist_and_broadcast(config, &workspace).await?;
+    let _ = config.bus.send(Event::SessionCreated(Box::new(session)));
+    tracing::info!(
+        workspace = workspace_key.as_str(),
+        repo,
+        branch,
+        worktree = %candidate.display(),
+        "adopted untracked managed worktree for PR"
+    );
+    Ok(Some((candidate.clone(), session_id)))
+}
+
+pub(crate) fn managed_worktree_has_session_owner(config: &ServerConfig, candidate: &Path) -> bool {
+    managed_worktree_has_matching_or_unknown_owner(config, candidate, |_| true)
+}
+
+pub(crate) fn managed_worktree_has_live_session_owner(
+    config: &ServerConfig,
+    candidate: &Path,
+) -> bool {
+    managed_worktree_has_matching_or_unknown_owner(config, candidate, |session| {
+        !matches!(session.state, lazybox_core::SessionRunState::Stopped)
+    })
+}
+
+fn managed_worktree_has_matching_or_unknown_owner(
+    config: &ServerConfig,
+    candidate: &Path,
+    blocks: impl Fn(&Session) -> bool,
+) -> bool {
+    let records = match config.store.list_workspaces() {
+        Ok(records) => records,
+        Err(error) => {
+            tracing::warn!(
+                worktree = %candidate.display(),
+                "could not verify worktree ownership before adoption: {error}"
+            );
+            return true;
+        }
+    };
+    for record in records {
+        let Some(json) = record.workspace_json else {
+            return true;
+        };
+        let workspace = match Workspace::decode_persisted(&json) {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                tracing::warn!(
+                    workspace = record.key,
+                    "could not verify worktree ownership from stored workspace: {error}"
+                );
+                return true;
+            }
+        };
+        if workspace
+            .sessions
+            .iter()
+            .any(|session| paths_match(&session.worktree_path, candidate) && blocks(session))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn paths_match(left: &Path, right: &Path) -> bool {
+    let canonical =
+        |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    canonical(left) == canonical(right)
 }
 
 /// Build a deterministic branch name for a task that has no upstream
@@ -2424,6 +2577,17 @@ async fn provision_worktree(
             (worktree, None)
         }
     };
+    apply_worktree_setup(config, &mgr, &worktree, repo_key.as_deref(), session_key).await;
+    Ok(())
+}
+
+async fn apply_worktree_setup(
+    config: &ServerConfig,
+    mgr: &lazybox_git_ops::WorktreeManager,
+    worktree: &lazybox_git_ops::Worktree,
+    repo_key: Option<&str>,
+    session_key: &SessionKey,
+) {
     emit_worktree_progress(
         config,
         session_key,
@@ -2431,16 +2595,6 @@ async fn provision_worktree(
         WorktreeStepStatus::Started,
     );
 
-    // Apply mounts: global `worktree.mounts` + per-repo
-    // `repos.<owner/name>.mounts` from YAML. Best-effort — a mount
-    // failure logs a warning but doesn't fail the spawn. Both are
-    // idempotent so re-running this on an already-mounted worktree
-    // is a no-op.
-    // YAML load failures used to be `.unwrap_or_default()` — silently
-    // disabling every configured mount on a typo. Surface the parse
-    // error so a broken `~/.lazybox/config.yaml` shows up loudly in
-    // `/tmp/lazybox.log` instead of users wondering why their mounts
-    // stopped working after an edit.
     let cfg = match lazybox_config::Config::load() {
         Ok(c) => c,
         Err(e) => {
@@ -2452,14 +2606,14 @@ async fn provision_worktree(
         }
     };
     let mut mounts = config_mounts_to_git(&cfg.worktree.mounts);
-    if let Some(repo_key) = &repo_key
+    if let Some(repo_key) = repo_key
         && let Some(repo_cfg) = cfg.repos.get(repo_key)
     {
         mounts.extend(config_mounts_to_git(&repo_cfg.mounts));
     }
-    let mount_label = repo_key.as_deref().unwrap_or("standalone");
+    let mount_label = repo_key.unwrap_or("standalone");
     if !mounts.is_empty()
-        && let Err(e) = mgr.apply_mounts(&worktree, &mounts).await
+        && let Err(e) = mgr.apply_mounts(worktree, &mounts).await
     {
         tracing::warn!("apply_mounts for {mount_label} failed: {e}");
     }
@@ -2470,26 +2624,22 @@ async fn provision_worktree(
     // The script that DID validate gets materialized; the one that
     // failed surfaces in /tmp/lazybox.log.
     let mut scripts = config_scripts_to_git(&cfg.worktree.scripts);
-    if let Some(repo_key) = &repo_key
+    if let Some(repo_key) = repo_key
         && let Some(repo_cfg) = cfg.repos.get(repo_key)
     {
         scripts.extend(config_scripts_to_git(&repo_cfg.scripts));
     }
     if !scripts.is_empty()
-        && let Err(e) = mgr.apply_scripts(&worktree, &scripts).await
+        && let Err(e) = mgr.apply_scripts(worktree, &scripts).await
     {
         tracing::warn!("apply_scripts for {mount_label} failed: {e}");
     }
-    let _ = worktree; // silence dead-binding warning from the
-    // signature change; the worktree value is what
-    // apply_mounts mutated and we're done with it.
     emit_worktree_progress(
         config,
         session_key,
         WorktreeStep::Setup,
         WorktreeStepStatus::Done,
     );
-    Ok(())
 }
 
 /// Convert per-config `MountSpec` → git-ops `Mount`, expanding a

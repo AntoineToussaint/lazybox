@@ -552,6 +552,10 @@ pub struct ServerConfig {
     /// bounded by the number of distinct workspace keys seen in this
     /// process (inbox-sized), and a `Mutex<()>` is a few dozen bytes.
     pub workspace_locks: Arc<parking_lot::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// Serializes ownership changes for managed worktrees. Claims and
+    /// orphan deletion both hold this across discovery, validation, and
+    /// persistence/removal so neither can act on the other's stale view.
+    pub(crate) worktree_ownership_lock: Arc<Mutex<()>>,
 }
 
 impl ServerConfig {
@@ -674,6 +678,7 @@ impl ServerConfig {
             input_needed_shapes: Arc::new(Mutex::new(HashMap::new())),
             event_metrics: Arc::new(metrics::EventMetrics::default()),
             workspace_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            worktree_ownership_lock: Arc::new(Mutex::new(())),
         }
     }
 

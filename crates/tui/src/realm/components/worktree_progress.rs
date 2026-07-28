@@ -340,9 +340,9 @@ pub struct WorktreeProgress {
     clone_progress: Option<String>,
     error: Option<String>,
     recovery: Option<WorktreeRecovery>,
-    /// True once a step has failed — gates the `r` retry key so it only
-    /// intercepts on the failure screen (mid-provision `r` is ignored).
-    failed: bool,
+    /// Whether the failed operation can be retried without first leaving
+    /// the modal to resolve a conflict or invalid input.
+    retryable: bool,
     warning: Option<String>,
     spinner_idx: usize,
 }
@@ -354,7 +354,7 @@ impl WorktreeProgress {
             clone_progress: state.clone_progress.clone(),
             error: state.error.clone(),
             recovery: state.recovery,
-            failed: state.failed(),
+            retryable: state.recovery.is_some_and(|recovery| recovery.retryable()),
             warning: state.warning.clone(),
             spinner_idx: 0,
         }
@@ -407,18 +407,19 @@ impl Component for WorktreeProgress {
                 format!("  {err}"),
                 Style::default().fg(theme.error),
             )));
-            // Per-class recovery guidance (issue #557): every failure now
-            // names a concrete next step and offers a retry, instead of
-            // dead-ending to a bare "Esc dismiss".
+            // Per-class recovery guidance (issue #557): every failure
+            // names a concrete next step.
             let recovery = self.recovery.unwrap_or(WorktreeRecovery::Unknown);
             lines.push(Line::from(Span::styled(
                 format!("  {}", recovery.hint()),
                 Style::default().fg(theme.warn),
             )));
-            lines.push(Line::from(Span::styled(
-                "  r retry · Esc dismiss",
-                theme.hint(),
-            )));
+            let affordance = if self.retryable {
+                "  r retry · Esc dismiss"
+            } else {
+                "  Esc dismiss"
+            };
+            lines.push(Line::from(Span::styled(affordance, theme.hint())));
         } else if let Some(warn) = &self.warning {
             // Provisioning succeeded but degraded: show the stale-base
             // note in amber and hold for acknowledgement (Esc), so the
@@ -479,13 +480,13 @@ impl AppComponent<Msg, UserEvent> for WorktreeProgress {
                 modifiers,
                 ..
             }) if modifiers.contains(KeyModifiers::CONTROL) => Some(Msg::ModalDismissed),
-            // On the failure screen, `r` retries the provision by
-            // re-issuing the spawn that failed (issue #557). Only bound
-            // once failed so it never shadows a key mid-provision.
+            // On a retryable failure, `r` re-issues the spawn that
+            // failed. Failures requiring an out-of-band action leave it
+            // unbound so the UI never advertises a retry that must fail.
             Event::Keyboard(KeyEvent {
                 code: Key::Char('r'),
                 ..
-            }) if self.failed => Some(Msg::WorktreeRetry),
+            }) if self.retryable => Some(Msg::WorktreeRetry),
             // Advance the spinner and ask the run loop to repaint — the
             // checkout phase emits no events for seconds, so without a
             // per-tick redraw the spinner would look frozen.
@@ -823,11 +824,11 @@ mod tests {
         );
     }
 
-    /// Issue #557 acceptance #1: every failure offers an actionable
-    /// recovery. The modal renders the class-specific hint AND a retry
-    /// affordance — never a bare "Esc dismiss" dead-end.
+    /// A live branch holder needs a user decision before provisioning
+    /// can succeed, so the modal points at the adoption flow without
+    /// advertising or binding an impossible retry.
     #[test]
-    fn failed_modal_offers_a_recovery_hint_and_retry() {
+    fn branch_holder_modal_offers_adoption_instead_of_retry() {
         let mut st = state();
         st.apply(WorktreeStep::WorktreeAdd, WorktreeStepStatus::Started);
         st.apply(
@@ -839,17 +840,22 @@ mod tests {
             ),
         );
         assert_eq!(st.recovery(), Some(WorktreeRecovery::BranchHeldLive));
-        let out = render(&mut WorktreeProgress::from_state(&st), 70, 16);
+        let out = render(&mut WorktreeProgress::from_state(&st), 70, 20);
         assert!(out.contains('✗'), "{out}");
-        // The per-class guidance …
-        assert!(out.contains("another workspace"), "recovery hint: {out}");
-        // … and both affordances, retry first.
-        assert!(out.contains("r retry"), "retry affordance: {out}");
+        assert!(out.contains("x a"), "adoption guidance: {out}");
+        assert!(!out.contains("r retry"), "invalid retry affordance: {out}");
         assert!(out.contains("Esc dismiss"), "{out}");
+        let mut failed = WorktreeProgress::from_state(&st);
+        assert!(
+            failed
+                .on(&Event::Keyboard(KeyEvent::from(Key::Char('r'))))
+                .is_none(),
+            "r must not retry while another live checkout holds the branch"
+        );
     }
 
-    /// The `r` key only fires a retry once a step has failed — a stray
-    /// `r` mid-provision must not intercept.
+    /// The `r` key only fires for a retryable failure — a stray `r`
+    /// mid-provision must not intercept.
     #[test]
     fn retry_key_only_binds_on_the_failure_screen() {
         use tuirealm::event::{Key, KeyEvent};

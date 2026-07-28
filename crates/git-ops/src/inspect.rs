@@ -156,6 +156,43 @@ struct PorcelainEntry {
 }
 
 impl WorktreeManager {
+    /// Return live worktrees for `branch` that belong to this manager's
+    /// bare clone and sit under its managed `worktrees/` root.
+    ///
+    /// This is narrower than [`Self::inspect_worktrees`]: callers that
+    /// need to claim an existing checkout can inspect one repo/branch
+    /// without walking every cached repository or probing worktree
+    /// cleanliness. Paths outside the managed root are deliberately
+    /// excluded even when they are registered against the same bare clone.
+    pub async fn managed_worktrees_for_branch(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+    ) -> Result<Vec<PathBuf>, GitError> {
+        let bare = self.bare_path(owner, repo);
+        if !bare.exists() {
+            return Ok(Vec::new());
+        }
+
+        let lock = crate::repo_lock(&bare);
+        let _guard = lock.lock().await;
+        let managed_root = canonical_or_self(&self.base_dir().join("worktrees"));
+        let mut paths = Vec::new();
+        for entry in list_porcelain(&bare).await? {
+            if entry.prunable || entry.branch.as_deref() != Some(branch) {
+                continue;
+            }
+            let path = canonical_or_self(&entry.path);
+            if path.starts_with(&managed_root) && crate::worktree_dir_ready(&entry.path).await {
+                paths.push(entry.path);
+            }
+        }
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+
     /// Scan the worktrees directory + every bare clone under
     /// `base/repos/**/*.git` and report each worktree's health.
     ///

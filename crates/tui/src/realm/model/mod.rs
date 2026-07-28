@@ -1779,7 +1779,7 @@ impl<T: TerminalAdapter> Model<T> {
         if matches!(self.modal_stack.last(), Some(Id::Tour)) {
             return;
         }
-        self.mount_modal(Id::Tour, Tour::new());
+        self.mount_modal(Id::Tour, Tour::new(self.catalog.clone()));
     }
 
     /// Persist `ui.tour_seen = true` so the tour stops auto-launching.

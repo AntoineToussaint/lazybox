@@ -492,6 +492,15 @@ struct TerminalHit {
     body: Rect,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RenderedClickTarget {
+    pub(crate) terminal_id: TerminalId,
+    pub(crate) tile: Rect,
+    pub(crate) body: Rect,
+    pub(crate) cell: Option<(u32, u32)>,
+    pub(crate) target: Option<ClickTarget>,
+}
+
 pub struct TerminalStack {
     id: PaneId,
     terminals: HashMap<TerminalId, TerminalSlot>,
@@ -1568,6 +1577,11 @@ impl TerminalStack {
         let Some(id) = self.focused_terminal_id() else {
             return false;
         };
+        self.terminal_tracks_mouse(id)
+    }
+
+    /// True when `id`'s inner program has enabled terminal mouse tracking.
+    pub fn terminal_tracks_mouse(&self, id: TerminalId) -> bool {
         self.terminals
             .get(&id)
             .and_then(|s| s.vt.terminal.is_mouse_tracking().ok())
@@ -1732,6 +1746,30 @@ impl TerminalStack {
             .iter()
             .find(|hit| Self::rect_contains(hit.tile, col, row))
             .map(|hit| hit.terminal_id)
+    }
+
+    pub(crate) fn rendered_target_at(&mut self, col: u16, row: u16) -> Option<RenderedClickTarget> {
+        let hit = self
+            .tile_hits
+            .iter()
+            .find(|hit| Self::rect_contains(hit.tile, col, row))
+            .copied()?;
+        let cell = self
+            .terminals
+            .get(&hit.terminal_id)
+            .and_then(|slot| Self::cell_in_body(slot, hit.body, col, row));
+        let target = if cell.is_some() {
+            self.target_in_body(hit.terminal_id, hit.body, col, row)
+        } else {
+            None
+        };
+        Some(RenderedClickTarget {
+            terminal_id: hit.terminal_id,
+            tile: hit.tile,
+            body: hit.body,
+            cell,
+            target,
+        })
     }
 
     fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
@@ -1988,22 +2026,27 @@ impl TerminalStack {
         row: u16,
     ) -> Option<ClickTarget> {
         let id = self.focused_terminal_id()?;
+        let body = Rect {
+            x: rect.x.saturating_add(1),
+            y: rect.y.saturating_add(3),
+            width: rect.width.saturating_sub(2),
+            height: rect.height.saturating_sub(4),
+        };
+        self.target_in_body(id, body, col, row)
+    }
+
+    fn target_in_body(
+        &mut self,
+        id: TerminalId,
+        body: Rect,
+        col: u16,
+        row: u16,
+    ) -> Option<ClickTarget> {
         let slot = self.terminals.get_mut(&id)?;
-        let inner_x = rect.x.saturating_add(1);
-        // Use the SAME body height the renderer feeds `recap_rows` — the
-        // pane minus 3 top-chrome rows AND the 1 held-back bottom margin
-        // (`render()` insets to `area.height - 4` before calling
-        // `render_one_terminal`). Using `- 3` here diverged from the
-        // renderer at exactly height 6, where `recap_rows` flips.
-        let body_height = rect.height.saturating_sub(4);
-        let recap = Self::recap_rows(slot, body_height);
-        let inner_y = rect.y.saturating_add(3).saturating_add(recap);
-        if col < inner_x || row < inner_y {
-            return None;
-        }
-        let cell_col = col - inner_x;
-        let target_row = (row - inner_y) as usize;
-        let hyperlink = hyperlink_uri_at(&slot.vt.terminal, cell_col, row - inner_y);
+        let (cell_col, cell_row) = Self::cell_in_body(slot, body, col, row)?;
+        let cell_col = cell_col as u16;
+        let target_row = cell_row as usize;
+        let hyperlink = hyperlink_uri_at(&slot.vt.terminal, cell_col, cell_row as u16);
         let snapshot = slot.vt.render_state.update(&slot.vt.terminal).ok()?;
         let mut row_iter = slot.vt.row_iter.update(&snapshot).ok()?;
         // Collect every visible row's text, its column→byte map, and
@@ -2045,6 +2088,25 @@ impl TerminalStack {
         }
         let byte_pos = target_offset + *rows[target_row].1.get(cell_col as usize)?;
         detect_target(&joined, byte_pos, hyperlink.as_deref())
+    }
+
+    fn cell_in_body(slot: &TerminalSlot, body: Rect, col: u16, row: u16) -> Option<(u32, u32)> {
+        let recap = Self::recap_rows(slot, body.height);
+        let grid_y = body.y.saturating_add(recap);
+        let grid_height = body.height.saturating_sub(recap);
+        let grid_width = if body.width > 1 {
+            body.width - 1
+        } else {
+            body.width
+        };
+        if col < body.x
+            || col >= body.x.saturating_add(grid_width)
+            || row < grid_y
+            || row >= grid_y.saturating_add(grid_height)
+        {
+            return None;
+        }
+        Some(((col - body.x) as u32, (row - grid_y) as u32))
     }
 
     /// Every `http(s)://…` URL visible in the focused terminal's grid,

@@ -61,17 +61,21 @@ impl<T: TerminalAdapter> Model<T> {
         let (msg, _) = if self.mouse_capture_on {
             let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture,);
             (
-                "mouse: lazybox (clicks → splitter/focus, wheel → scroll)",
+                "mouse: lazybox — right-click links enabled; F8 or Alt-s for host selection",
                 (),
             )
         } else {
             let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture,);
             (
-                "mouse: host (native selection ON — Ctrl-Shift-S to flip back)",
+                "mouse: host selection — right-click links are off; press F8 or Alt-s to enable",
                 (),
             )
         };
-        self.flash_hint(msg);
+        tracing::info!(
+            mouse_capture_on = self.mouse_capture_on,
+            "mouse capture toggled"
+        );
+        self.flash_info(msg);
     }
 
     /// The single owned mutator for `focus`. Assigns the focused pane AND

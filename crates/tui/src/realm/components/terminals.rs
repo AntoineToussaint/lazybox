@@ -310,18 +310,14 @@ impl Terminals {
         self.inner.agent_terminal_for(session_key)
     }
 
-    /// Classify whatever the focused terminal's grid shows at the
-    /// frame-space cell `(col, row)` — a URL, file path, or issue
-    /// reference. Used by the right-click handler to detect "the user
-    /// clicked on something openable" and route it before falling
-    /// through to PTY mouse forwarding.
-    pub fn target_at(
+    /// Resolve frame coordinates against the tile rectangles recorded
+    /// by the last render, then classify the clicked terminal's cell.
+    pub(crate) fn rendered_target_at(
         &mut self,
-        rect: tuirealm::ratatui::layout::Rect,
         col: u16,
         row: u16,
-    ) -> Option<crate::components::terminal_stack::ClickTarget> {
-        self.inner.target_at(rect, col, row)
+    ) -> Option<crate::components::terminal_stack::RenderedClickTarget> {
+        self.inner.rendered_target_at(col, row)
     }
 
     /// Screen `(col, row)` → 0-based grid cell coords inside the focused
@@ -389,6 +385,10 @@ impl Terminals {
     /// Used to forward clicks; wheels stay in lazybox scrollback.
     pub fn focused_terminal_tracks_mouse(&self) -> bool {
         self.inner.focused_terminal_tracks_mouse()
+    }
+
+    pub fn terminal_tracks_mouse(&self, terminal_id: lazybox_ipc::TerminalId) -> bool {
+        self.inner.terminal_tracks_mouse(terminal_id)
     }
 
     /// Wire id of the currently focused terminal, if any.
@@ -462,6 +462,18 @@ impl Terminals {
     ) -> Option<(lazybox_ipc::TerminalId, Vec<u8>)> {
         self.inner
             .encode_mouse_for_focused(action, button, cell_col, cell_row)
+    }
+
+    pub fn encode_mouse_for(
+        &mut self,
+        terminal_id: lazybox_ipc::TerminalId,
+        action: libghostty_vt::mouse::Action,
+        button: Option<libghostty_vt::mouse::Button>,
+        cell_col: u32,
+        cell_row: u32,
+    ) -> Option<(lazybox_ipc::TerminalId, Vec<u8>)> {
+        self.inner
+            .encode_mouse_for(terminal_id, action, button, cell_col, cell_row)
     }
 }
 

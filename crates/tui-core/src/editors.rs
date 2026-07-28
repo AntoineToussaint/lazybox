@@ -209,28 +209,46 @@ pub fn open_url(url: &str, browser: Option<&str>) -> std::io::Result<()> {
         ));
     }
     let (program, args) = browser_argv(url, browser);
-    let mut child = std::process::Command::new(&program)
+    let child = std::process::Command::new(&program)
         .args(&args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()?;
+    let url = url.to_string();
     // Reap off-thread so the child never zombifies and a failed
     // launcher still leaves a breadcrumb — without ever blocking the
     // caller. Detached thread: it exits with the child (or with the
     // process, whichever comes first).
-    std::thread::Builder::new()
-        .name("lazybox-open-url".into())
-        .spawn(move || match child.wait() {
-            Ok(status) if !status.success() => {
-                tracing::warn!(%program, %status, "browser launcher exited non-zero");
-            }
-            Ok(_) => {}
-            Err(e) => tracing::warn!(%program, "browser launcher wait failed: {e}"),
-        })
+    spawn_url_reaper(child, program, url)
         .map(|_| ())
         .unwrap_or_else(|e| tracing::warn!("open_url reaper thread spawn failed: {e}"));
     Ok(())
+}
+
+fn spawn_url_reaper(
+    mut child: std::process::Child,
+    program: String,
+    url: String,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
+    let span = tracing::Span::current();
+    std::thread::Builder::new()
+        .name("lazybox-open-url".into())
+        .spawn(move || {
+            tracing::dispatcher::with_default(&dispatch, || {
+                let _guard = span.enter();
+                match child.wait() {
+                    Ok(status) if !status.success() => {
+                        tracing::warn!(%program, %status, %url, "browser launcher exited non-zero");
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(%program, %url, "browser launcher wait failed: {e}");
+                    }
+                }
+            });
+        })
 }
 
 /// Build the argv (everything after the command) for opening `file`
@@ -339,6 +357,35 @@ pub fn launch(template: &EditorTemplate, worktree: &Path) -> std::io::Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone, Default)]
+    struct SharedLog(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedLog {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let mut log = self
+                .0
+                .lock()
+                .map_err(|_| std::io::Error::other("trace log lock poisoned"))?;
+            log.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for SharedLog {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
 
     #[test]
     fn user_entry_overrides_builtin_command() {
@@ -441,6 +488,51 @@ mod tests {
         // Returns before spawning anything, so this is safe to run in CI.
         let err = open_url("file:///etc/passwd", None).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn launcher_exit_log_retains_the_originating_click_span() {
+        let log = SharedLog::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_target(false)
+            .with_writer(log.clone())
+            .finish();
+        let reaper = tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("terminal_right_click", column = 17, row = 9);
+            let _guard = span.enter();
+            let mut command = if cfg!(windows) {
+                let mut command = std::process::Command::new("cmd");
+                command.args(["/c", "exit", "7"]);
+                command
+            } else {
+                let mut command = std::process::Command::new("sh");
+                command.args(["-c", "exit 7"]);
+                command
+            };
+            let child = command
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn failing launcher");
+            spawn_url_reaper(
+                child,
+                "test-browser".into(),
+                "https://trace.example.test".into(),
+            )
+            .expect("spawn URL reaper")
+        });
+        reaper.join().expect("URL reaper joins");
+
+        let output = String::from_utf8(log.0.lock().expect("trace log lock").clone())
+            .expect("trace output is UTF-8");
+        assert!(output.contains("browser launcher exited non-zero"));
+        assert!(output.contains("terminal_right_click"));
+        assert!(output.contains("column=17"));
+        assert!(output.contains("row=9"));
+        assert!(output.contains("https://trace.example.test"));
     }
 
     /// On Linux a configured browser is exec'd directly, so a missing

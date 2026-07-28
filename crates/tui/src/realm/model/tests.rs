@@ -7385,6 +7385,353 @@ mod leader_tile_tests {
 }
 
 #[cfg(test)]
+mod terminal_url_mouse_tests {
+    use super::super::*;
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use lazybox_ipc::{Event as IpcEvent, TerminalId, TerminalKind, channel};
+    use std::sync::{Arc, Mutex};
+    use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
+    use tuirealm::ratatui::layout::Size;
+    use tuirealm::ratatui::{Terminal, backend::TestBackend};
+    use tuirealm::terminal::TerminalAdapter;
+
+    type TestModel = Model<tuirealm::terminal::TestTerminalAdapter>;
+
+    fn build_model(count: u64) -> (TestModel, lazybox_ipc::Connection, Arc<Mutex<Vec<String>>>) {
+        let (client, server) = channel::pair();
+        let mut model = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        model.layout.last_area = Rect::new(0, 0, 120, 40);
+        let session = lazybox_core::SessionKey::from("github:o/r#1");
+        model.terminals.set_active_session(Some(session.clone()));
+        for id in 1..=count {
+            model.terminals.on_daemon_event(&IpcEvent::TerminalSpawned {
+                model_label: None,
+                terminal_id: TerminalId(id),
+                session_key: session.clone(),
+                kind: TerminalKind::Shell,
+                no_permission: false,
+                on_main: false,
+            });
+        }
+        model.set_focus(PaneFocus::Terminals);
+        let opened = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&opened);
+        model.url_opener = Box::new(move |url, _browser| {
+            captured
+                .lock()
+                .expect("opened URL mutex")
+                .push(url.to_string());
+            Ok(())
+        });
+        (model, server, opened)
+    }
+
+    fn render(model: &mut TestModel) -> Rect {
+        let area = model.layout.last_area;
+        let (_, _, bottom) = model.effective_pane_rects(area);
+        let mut terminal =
+            Terminal::new(TestBackend::new(area.width, area.height)).expect("test terminal");
+        terminal
+            .draw(|frame| model.terminals.view_in(bottom, frame))
+            .expect("terminal render");
+        bottom
+    }
+
+    fn feed(model: &mut TestModel, terminal_id: u64, bytes: Vec<u8>) {
+        model.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
+            terminal_id: TerminalId(terminal_id),
+            bytes,
+            first_seq: 1,
+            seq: 1,
+        });
+    }
+
+    fn body_origin(model: &TestModel, pane: Rect, terminal_id: u64) -> (u16, u16) {
+        for row in pane.y..pane.y.saturating_add(pane.height) {
+            for col in pane.x..pane.x.saturating_add(pane.width) {
+                if model.terminals.scroll_terminal_at(col, row) == Some(TerminalId(terminal_id)) {
+                    return (col, row);
+                }
+            }
+        }
+        panic!("terminal {terminal_id} has no rendered body");
+    }
+
+    fn right_click(model: &mut TestModel, col: u16, row: u16) {
+        model.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: col,
+            row,
+            modifiers: KeyModifiers::empty(),
+        });
+    }
+
+    fn opened_urls(opened: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+        opened.lock().expect("opened URL mutex").clone()
+    }
+
+    fn rendered_model(model: &mut TestModel) -> String {
+        model.view();
+        let buffer = model.terminal.raw().backend().buffer();
+        (0..buffer.area.height)
+            .map(|row| {
+                (0..buffer.area.width)
+                    .map(|col| buffer[(col, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn right_click_opens_plain_url_through_model_launcher() {
+        let (mut model, _server, opened) = build_model(1);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut model);
+        let url = "https://plain.example.com/path";
+        feed(&mut model, 1, format!("see {url}\r\n").into_bytes());
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+
+        right_click(&mut model, x + 4, y);
+
+        assert_eq!(opened_urls(&opened), vec![url]);
+    }
+
+    #[test]
+    fn right_click_opens_soft_wrapped_continuation_through_model_launcher() {
+        let (mut model, _server, opened) = build_model(1);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut model);
+        let url = format!("https://wrapped.example.com/{}", "a".repeat(160));
+        feed(&mut model, 1, format!("{url}\r\n").into_bytes());
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+
+        right_click(&mut model, x + 2, y + 1);
+
+        assert_eq!(opened_urls(&opened), vec![url]);
+    }
+
+    #[test]
+    fn right_click_opens_osc8_visible_label_through_model_launcher() {
+        let (mut model, _server, opened) = build_model(1);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut model);
+        let url = "https://osc8.example.com/docs";
+        feed(
+            &mut model,
+            1,
+            format!("\x1b]8;;{url}\x1b\\documentation\x1b]8;;\x1b\\\r\n").into_bytes(),
+        );
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+
+        right_click(&mut model, x + 2, y);
+
+        assert_eq!(opened_urls(&opened), vec![url]);
+    }
+
+    fn assert_split_opens_each_unfocused_tile(vertical: bool) {
+        let (mut model, _server, opened) = build_model(2);
+        let tree = if vertical {
+            lazybox_core::TileTree::VSplit {
+                top: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 1 }),
+                bottom: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 2 }),
+                ratio: 50,
+            }
+        } else {
+            lazybox_core::TileTree::HSplit {
+                left: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 1 }),
+                right: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 2 }),
+                ratio: 50,
+            }
+        };
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Splits {
+                tree: tree.clone(),
+                focused: vec![1],
+            });
+        render(&mut model);
+        let urls = [
+            "https://first-tile.example.com",
+            "https://second-tile.example.com",
+        ];
+        feed(&mut model, 1, format!("{}\r\n", urls[0]).into_bytes());
+        feed(&mut model, 2, format!("{}\r\n", urls[1]).into_bytes());
+        let pane = render(&mut model);
+        let (first_x, first_y) = body_origin(&model, pane, 1);
+
+        right_click(&mut model, first_x + 8, first_y);
+
+        assert_eq!(opened_urls(&opened), vec![urls[0]]);
+        assert_eq!(
+            model.terminals.focused_terminal_id(),
+            Some(TerminalId(2)),
+            "URL inspection must not move keyboard focus"
+        );
+
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Splits {
+                tree,
+                focused: vec![0],
+            });
+        let pane = render(&mut model);
+        let (second_x, second_y) = body_origin(&model, pane, 2);
+
+        right_click(&mut model, second_x + 8, second_y);
+
+        assert_eq!(opened_urls(&opened), urls);
+        assert_eq!(
+            model.terminals.focused_terminal_id(),
+            Some(TerminalId(1)),
+            "URL inspection must not move keyboard focus"
+        );
+    }
+
+    #[test]
+    fn right_click_opens_each_unfocused_horizontal_split_tile() {
+        assert_split_opens_each_unfocused_tile(false);
+    }
+
+    #[test]
+    fn right_click_opens_each_unfocused_vertical_split_tile() {
+        assert_split_opens_each_unfocused_tile(true);
+    }
+
+    #[test]
+    fn right_click_miss_is_forwarded_to_the_clicked_unfocused_split_tile() {
+        let (mut model, mut server, opened) = build_model(2);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Splits {
+                tree: lazybox_core::TileTree::HSplit {
+                    left: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 1 }),
+                    right: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 2 }),
+                    ratio: 50,
+                },
+                focused: vec![1],
+            });
+        for terminal_id in 1..=2 {
+            feed(&mut model, terminal_id, b"\x1b[?1002h\x1b[?1006h".to_vec());
+        }
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+        while server.rx.try_recv().is_ok() {}
+
+        right_click(&mut model, x + 2, y);
+
+        assert!(opened_urls(&opened).is_empty());
+        let writes: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok())
+            .filter_map(|command| match command {
+                IpcCommand::Write { terminal_id, .. } => Some(terminal_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(writes, vec![TerminalId(1)]);
+        assert_eq!(
+            model.terminals.focused_terminal_id(),
+            Some(TerminalId(2)),
+            "right-click forwarding must not move keyboard focus",
+        );
+    }
+
+    #[test]
+    fn right_click_only_hits_the_visible_tab() {
+        let (mut model, _server, opened) = build_model(2);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut model);
+        let urls = [
+            "https://visible-first.example.com",
+            "https://hidden-second.example.com",
+        ];
+        feed(&mut model, 1, format!("{}\r\n", urls[0]).into_bytes());
+        feed(&mut model, 2, format!("{}\r\n", urls[1]).into_bytes());
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+        assert_eq!(
+            model.terminals.scroll_terminal_at(x, y),
+            Some(TerminalId(1))
+        );
+
+        right_click(&mut model, x + 8, y);
+
+        assert_eq!(opened_urls(&opened), vec![urls[0]]);
+
+        model.terminals.set_active_tab(1);
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 2);
+        assert_eq!(
+            model.terminals.scroll_terminal_at(x, y),
+            Some(TerminalId(2))
+        );
+
+        right_click(&mut model, x + 8, y);
+
+        assert_eq!(opened_urls(&opened), urls);
+    }
+
+    #[test]
+    fn host_native_mouse_mode_reports_how_to_enable_url_clicks() {
+        let (mut model, _server, opened) = build_model(1);
+        model.dispatch_key(RealmKey::new(Key::Function(8), RealmMods::NONE));
+        assert!(!model.mouse_capture_on);
+        render(&mut model);
+        let url = "https://host-mode.example.com";
+        feed(&mut model, 1, format!("{url}\r\n").into_bytes());
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+
+        right_click(&mut model, x, y);
+
+        assert!(opened_urls(&opened).is_empty());
+        let notice = model.status.notice.as_ref().expect("mouse-mode notice");
+        assert!(notice.message.contains("right-click links are off"));
+        assert!(notice.message.contains("F8"));
+    }
+
+    #[test]
+    fn mouse_mode_guidance_persists_without_receiving_a_mouse_event() {
+        let (mut model, _server, _opened) = build_model(1);
+        model.mouse_capture_on = false;
+        model.status.notice = None;
+
+        let host_mode = rendered_model(&mut model);
+        assert!(host_mode.contains("F8"));
+        assert!(host_mode.contains("links off"));
+
+        model.mouse_capture_on = true;
+        let capture_mode = rendered_model(&mut model);
+        assert!(capture_mode.contains("mouse on"));
+        assert!(capture_mode.contains("]]u"));
+    }
+
+    #[test]
+    fn keyboard_url_picker_still_opens_when_mouse_capture_is_off() {
+        let (mut model, _server, opened) = build_model(1);
+        model.mouse_capture_on = false;
+        let url = "https://keyboard-fallback.example.com";
+        feed(&mut model, 1, format!("{url}\r\n").into_bytes());
+
+        model.dispatch_key(RealmKey::new(Key::Char(']'), RealmMods::NONE));
+        model.dispatch_key(RealmKey::new(Key::Char(']'), RealmMods::NONE));
+        model.dispatch_key(RealmKey::new(Key::Char('u'), RealmMods::NONE));
+
+        assert_eq!(opened_urls(&opened), vec![url]);
+    }
+}
+
+#[cfg(test)]
 mod destructive_confirm_tests {
     //! Regression coverage for the destructive-action confirm path:
     //!

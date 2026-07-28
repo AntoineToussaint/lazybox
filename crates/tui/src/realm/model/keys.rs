@@ -1210,6 +1210,37 @@ impl<T: TerminalAdapter> Model<T> {
 
         match m.kind {
             MouseEventKind::Down(button) => {
+                let right_click_span =
+                    matches!(button, crossterm::event::MouseButton::Right).then(|| {
+                        tracing::info_span!("terminal_right_click", column = m.column, row = m.row)
+                    });
+                let _right_click_guard = right_click_span.as_ref().map(|span| span.enter());
+                if right_click_span.is_some() {
+                    let pane = if rect_contains(sidebar_rect, m.column, m.row) {
+                        "sidebar"
+                    } else if rect_contains(right_top_rect, m.column, m.row) {
+                        "activity"
+                    } else if rect_contains(right_bottom_rect, m.column, m.row) {
+                        "terminals"
+                    } else {
+                        "outside"
+                    };
+                    tracing::info!(
+                        pane,
+                        mouse_capture_on = self.mouse_capture_on,
+                        "right-button event received"
+                    );
+                    if !self.mouse_capture_on {
+                        tracing::info!(
+                            reason = "host_native_mouse_mode",
+                            "terminal right-click missed"
+                        );
+                        self.flash_info(
+                            "mouse: host selection — right-click links are off; press F8 or Alt-s to enable",
+                        );
+                        return;
+                    }
+                }
                 self.q_latch.disarm();
                 self.cancel_leader_chords();
                 // Tab-strip click on the terminal pane top row →
@@ -1273,7 +1304,8 @@ impl<T: TerminalAdapter> Model<T> {
                 let horizontal_splitter = self.activity_pane_visible();
                 if matches!(button, crossterm::event::MouseButton::Right)
                     && rect_contains(right_bottom_rect, m.column, m.row)
-                    && self
+                {
+                    if self
                         .layout
                         .hit_test_splitter(
                             m.column,
@@ -1282,12 +1314,68 @@ impl<T: TerminalAdapter> Model<T> {
                             right_top_rect,
                             horizontal_splitter,
                         )
-                        .is_none()
-                    && let Some(target) =
-                        self.terminals.target_at(right_bottom_rect, m.column, m.row)
-                {
-                    self.open_click_target(target);
-                    return;
+                        .is_some()
+                    {
+                        tracing::info!(reason = "pane_splitter", "terminal right-click missed");
+                    } else {
+                        match self.terminals.rendered_target_at(m.column, m.row) {
+                            Some(resolved) => {
+                                tracing::info!(
+                                    terminal_id = ?resolved.terminal_id,
+                                    tile = ?resolved.tile,
+                                    body = ?resolved.body,
+                                    "terminal tile resolved"
+                                );
+                                if let Some(target) = resolved.target {
+                                    tracing::info!(
+                                        terminal_id = ?resolved.terminal_id,
+                                        target = ?target,
+                                        "terminal click target resolved"
+                                    );
+                                    self.open_click_target(target);
+                                    return;
+                                }
+                                let reason = if resolved.cell.is_some() {
+                                    "no_openable_target"
+                                } else {
+                                    "tile_chrome"
+                                };
+                                tracing::info!(reason, "terminal right-click missed");
+                                if self.focus != PaneFocus::Terminals {
+                                    self.set_focus(PaneFocus::Terminals);
+                                    self.redraw = true;
+                                }
+                                self.last_click = None;
+                                if let Some((cell_col, cell_row)) = resolved.cell
+                                    && self.terminals.terminal_tracks_mouse(resolved.terminal_id)
+                                    && let Some((terminal_id, bytes)) =
+                                        self.terminals.encode_mouse_for(
+                                            resolved.terminal_id,
+                                            libghostty_vt::mouse::Action::Press,
+                                            Some(libghostty_vt::mouse::Button::Right),
+                                            cell_col,
+                                            cell_row,
+                                        )
+                                {
+                                    self.send_cmd(IpcCommand::Write { terminal_id, bytes });
+                                    self.redraw = true;
+                                }
+                                return;
+                            }
+                            None => {
+                                tracing::info!(
+                                    reason = "no_rendered_tile_at_coordinates",
+                                    "terminal right-click missed"
+                                );
+                                if self.focus != PaneFocus::Terminals {
+                                    self.set_focus(PaneFocus::Terminals);
+                                    self.redraw = true;
+                                }
+                                self.last_click = None;
+                                return;
+                            }
+                        }
+                    }
                 }
                 // Splitter drag wins over both focus changes and
                 // terminal interaction — clicking a splitter resizes,

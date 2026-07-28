@@ -1,11 +1,12 @@
 ---
 title: Quickstart
-description: Install lazybox and open your first workspace with a live terminal in about five minutes.
+description: Open your first live workspace, then coordinate the same next step across two sessions.
 ---
 
-In a few minutes you will install lazybox, launch it, and open a workspace with
-a live embedded terminal. That is the whole goal of this tutorial — one visible
-win. Everything else can wait.
+In a few minutes you will install lazybox, launch it, open a workspace with a
+live embedded terminal, and send one reviewed instruction to two sessions.
+Those two wins cover the core loop: start work in isolation, then coordinate a
+small fleet from the inbox.
 
 For a real GitHub inbox you need the **GitHub CLI**, logged in. Run
 `gh auth login` once — lazybox reads your token from `gh auth token`. The
@@ -114,9 +115,41 @@ An empty sidebar right after setup is normal, not a bug:
   workspace and open a session in it.
 :::
 
+## 4. Coordinate two workspaces at once
+
+Now experience the fleet workflow instead of visiting each terminal:
+
+1. Make sure the sidebar has at least two workspaces. In `--test` mode, press
+   `x n` to create a second workspace under the seeded project. In a real
+   inbox, choose rows from two different repo groups.
+2. Start a coding agent in each workspace with `w w`, returning to the sidebar
+   with `]]q` after each spawn.
+3. Focus the first row and press `v`, navigate to the other row, and press `v`
+   again. The marks survive navigation and the selected count becomes `2`.
+4. Press `Shift-B`. Confirm both workspace names in the target recap, choose the
+   built-in `audit` snippet, and edit its pre-filled body into the exact
+   instruction both agents should receive. To try the free-text path instead,
+   press `Ctrl-F` in the snippet picker.
+5. Submit once. Both live agents receive the instruction; the footer reports
+   the delivery. Back in the sidebar, the delivered rows' `]N` cues reflect
+   `audit` in their per-workspace snippet history, and reopening the picker
+   shows it in **Recent**.
+
+No agent CLI available? Start a plain shell in each workspace with `s`, choose
+the `Ctrl-F` free-text path, and broadcast a safe shell command such as:
+
+```sh
+printf 'broadcast reached %s\n' "$PWD"
+```
+
+That exercises the same multi-workspace flow through direct shell delivery.
+The full [multi-agent orchestration guide](/docs/how-to/orchestrate-multiple-agents/)
+covers mixed agent/shell selections, skipped session-less targets, retry
+semantics, and per-workspace history.
+
 ## What next
 
-You opened a seeded or existing workspace. Continue with the
+You opened live sessions and coordinated them. Continue with the
 **[Core workflows](/docs/tutorials/core-workflows/)** to see how lazybox keeps
 the correct task folder, agent session, Git changes, and GitHub state together
 all the way through a real workflow.
@@ -125,3 +158,6 @@ Then wire up a real repository:
 
 - **[Add a repo](/docs/how-to/add-a-repo/)** so your own pull requests flow into
   the inbox.
+- **[Start from an issue and keep your session in the
+  PR](/docs/how-to/keep-session-from-issue-to-pr/)** to carry a running agent
+  forward when its implementation pull request appears.

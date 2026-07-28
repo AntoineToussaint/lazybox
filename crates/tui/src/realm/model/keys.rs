@@ -569,6 +569,22 @@ impl<T: TerminalAdapter> Model<T> {
                 self.status
                     .note_spawning(label, session_key.clone(), kind.clone(), baseline);
             }
+            if let IpcCommand::InjectPrompt {
+                prompt,
+                fallback_spawn: Some(fallback),
+                ..
+            } = cmd
+            {
+                self.last_spawn = Some(IpcCommand::Spawn {
+                    model_alias: fallback.model_alias.clone(),
+                    session_key: fallback.session_key.clone(),
+                    session_id: fallback.session_id,
+                    kind: fallback.kind.clone(),
+                    cwd: fallback.cwd.clone(),
+                    initial_prompt: Some(prompt.clone()),
+                    on_main: false,
+                });
+            }
         }
         for cmd in cmds {
             let rewritten = self.rewrite_spawn_to_inject(cmd);
@@ -844,50 +860,60 @@ impl<T: TerminalAdapter> Model<T> {
     /// dispatch path so `w` and per-pane shortcuts agree on
     /// "continue the existing conversation" semantics.
     fn rewrite_spawn_to_inject(&mut self, cmd: IpcCommand) -> IpcCommand {
+        let terminal_id = match &cmd {
+            IpcCommand::Spawn {
+                session_key,
+                kind: lazybox_ipc::TerminalKind::Agent(agent_id),
+                initial_prompt: Some(_),
+                ..
+            } => self.sidebar.find_agent_terminal(session_key, agent_id),
+            _ => None,
+        };
+        match terminal_id {
+            Some(terminal_id) => self.rewrite_spawn_to_terminal(cmd, terminal_id),
+            None => cmd,
+        }
+    }
+
+    /// Rewrite a contextual work spawn to an exact running terminal.
+    /// The caller has already resolved the terminal choice, so this
+    /// method never performs another agent-id lookup.
+    pub(super) fn rewrite_spawn_to_terminal(
+        &mut self,
+        cmd: IpcCommand,
+        terminal_id: lazybox_ipc::TerminalId,
+    ) -> IpcCommand {
         match cmd {
             IpcCommand::Spawn {
-                model_alias: _,
+                model_alias,
                 session_key,
                 session_id,
                 kind: lazybox_ipc::TerminalKind::Agent(agent_id),
                 cwd,
                 initial_prompt: Some(prompt),
-                on_main,
+                on_main: _,
             } => {
-                if let Some(terminal_id) = self.sidebar.find_agent_terminal(&session_key, &agent_id)
-                {
-                    self.flash_hint(format!("→ injecting into existing {agent_id}"));
-                    // Always carry the Spawn parameters so a stale
-                    // terminal id (agent died between this lookup and
-                    // the command arriving at the daemon) falls back
-                    // to Spawn instead of silently dropping the
-                    // user's prompt. The TUI's view of
-                    // `running_terminals` is updated from a broadcast
-                    // channel, so there's always a small window where
-                    // `find_agent_terminal` returns a dead id.
-                    let fallback_spawn = Some(lazybox_ipc::SpawnFallback {
-                        model_alias: None,
-                        session_key: session_key.clone(),
-                        session_id,
-                        kind: lazybox_ipc::TerminalKind::Agent(agent_id.clone()),
-                        cwd: cwd.clone(),
-                    });
-                    IpcCommand::InjectPrompt {
-                        terminal_id,
-                        prompt,
-                        fallback_spawn,
-                        submit: true,
-                    }
-                } else {
-                    IpcCommand::Spawn {
-                        model_alias: None,
-                        session_key,
-                        session_id,
-                        kind: lazybox_ipc::TerminalKind::Agent(agent_id),
-                        cwd,
-                        initial_prompt: Some(prompt),
-                        on_main,
-                    }
+                self.flash_hint(format!("→ injecting into existing {agent_id}"));
+                // Always carry the Spawn parameters so a stale
+                // terminal id (agent died between this lookup and
+                // the command arriving at the daemon) falls back
+                // to Spawn instead of silently dropping the
+                // user's prompt. The TUI's view of
+                // `running_terminals` is updated from a broadcast
+                // channel, so there's always a small window where
+                // the chosen terminal is already dead.
+                let fallback_spawn = Some(lazybox_ipc::SpawnFallback {
+                    model_alias,
+                    session_key,
+                    session_id,
+                    kind: lazybox_ipc::TerminalKind::Agent(agent_id),
+                    cwd,
+                });
+                IpcCommand::InjectPrompt {
+                    terminal_id,
+                    prompt,
+                    fallback_spawn,
+                    submit: true,
                 }
             }
             other => other,

@@ -4127,11 +4127,12 @@ async fn adopt_sessions_rewrites_terminal_meta() {
     );
 }
 #[tokio::test]
-async fn confirm_merge_reject_pins_against_re_prompting() {
+async fn confirm_merge_reject_pins_until_restart_after_terminal_exits() {
     // User says "no": both workspaces survive, and a subsequent
     // poll of the same PR must NOT re-emit WorkspaceMergePending
     // — otherwise the modal would haunt them every 60 seconds.
     use lazybox_core::WorkspaceKey;
+    use lazybox_ipc::TerminalId;
 
     let config = ServerConfig::in_memory();
     let (issue_key, _) = seed_issue_with_session(&config, "o/r#71").await;
@@ -4161,6 +4162,25 @@ async fn confirm_merge_reject_pins_against_re_prompting() {
     assert!(
         config.store.get_workspace(&issue_key).unwrap().is_some(),
         "rejecting must keep the issue workspace intact",
+    );
+
+    config.terminal_meta.lock().await.remove(&TerminalId(71));
+    config.terminals.lock().await.remove(&TerminalId(71));
+    polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
+
+    let mut saw_merged = false;
+    while let Ok(evt) = bus.try_recv() {
+        if matches!(evt, Event::WorkspaceMerged { .. }) {
+            saw_merged = true;
+        }
+    }
+    assert!(
+        !saw_merged,
+        "a rejected merge must stay pinned after its live terminal exits",
+    );
+    assert!(
+        config.store.get_workspace(&issue_key).unwrap().is_some(),
+        "rejecting must keep the issue workspace intact until restart",
     );
 }
 

@@ -422,8 +422,9 @@ async fn run_test(preselect: Option<lazybox_tui::realm::model::Preselect>) -> an
 
     // No drain handle: --test state is a throwaway tempdir.
     spawn_terminal_restore_on_signal(None);
+    let snippets = fixture.snippets.clone();
     tokio::task::spawn_blocking(move || {
-        let mut model = lazybox_tui::realm::Model::new(client)?;
+        let mut model = lazybox_tui::realm::Model::new(client, snippets)?;
         if let Some(p) = preselect {
             model = model.with_preselect(p);
         }
@@ -593,16 +594,10 @@ async fn run_remote(
         None
     });
     tokio::task::spawn_blocking(move || {
-        let mut model = lazybox_tui::realm::Model::new(client)?;
+        let snippets =
+            lazybox_config::Snippets::load_merged(std::env::current_dir().ok().as_deref());
+        let mut model = lazybox_tui::realm::Model::new(client, snippets)?;
         model.note_daemon_build(&daemon.build);
-        // Snippets are a client-side concern (the picker + the injected
-        // body live here, not in the daemon), so load the catalog on the
-        // `--connect` path too. Without it the picker is empty and the
-        // daemon-owned "Recent" MRU (#548) has no catalog to render or
-        // prune against.
-        model.apply_snippets(lazybox_config::Snippets::load_merged(
-            std::env::current_dir().ok().as_deref(),
-        ));
         if let Some(update) = available_update {
             model.show_update_if_new(update);
         }
@@ -790,7 +785,9 @@ async fn run_embedded_realm(
     }));
     let store_for_save = config.store.clone();
     let realm_result = tokio::task::spawn_blocking(move || {
-        let mut model = lazybox_tui::realm::Model::new(client)?;
+        let snippets =
+            lazybox_config::Snippets::load_merged(std::env::current_dir().ok().as_deref());
+        let mut model = lazybox_tui::realm::Model::new(client, snippets)?;
         // Returning user with persisted setup → mount the polling
         // modal up front so the first poll cycle has UI feedback.
         if !returning_sources.is_empty() {
@@ -927,18 +924,6 @@ async fn run_embedded_realm(
         // Seed progressive feature tips (#115): the opt-out flag plus
         // the ids already shown so they never repeat.
         model.set_tips(user_config.ui.show_tips, user_config.ui.tips_seen.clone());
-        // Snippets — global (`<lazybox_home>/snippets.yaml`) merged
-        // with the cwd's `.lazybox/snippets.yaml` (repo wins on key
-        // conflict). Cwd is "wherever the user launched lazybox from",
-        // which is the natural repo root for a single-repo workflow.
-        let snippets =
-            lazybox_config::Snippets::load_merged(std::env::current_dir().ok().as_deref());
-        // Install the catalog. The snippet-picker "Recent" MRU is owned by
-        // the daemon (#548) and seeded from the first `Event::Snapshot`,
-        // which prunes it against this catalog — so the catalog must be in
-        // place first, and it is (Subscribe's snapshot arrives inside the
-        // loop below).
-        model.apply_snippets(snippets);
         model = model.with_splits(user_config.ui.sidebar_pct, user_config.ui.right_top_pct);
         if let Some((report, sources)) = wizard_seed {
             model.start_setup_wizard(report, sources);

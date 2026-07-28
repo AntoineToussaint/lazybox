@@ -455,7 +455,8 @@ fn placeholder(f: &mut Frame, area: Rect) {
 /// before calling this so the daemon is already serving when the UI
 /// boots.
 pub fn run_with_client(client: Client) -> anyhow::Result<()> {
-    let mut model = Model::new(client)?;
+    let snippets = lazybox_config::Snippets::load_merged(std::env::current_dir().ok().as_deref());
+    let mut model = Model::new(client, snippets)?;
     let result = run_loop(&mut model);
     model.shutdown();
     result

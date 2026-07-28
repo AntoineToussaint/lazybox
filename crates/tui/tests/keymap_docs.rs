@@ -185,7 +185,11 @@ fn generate(frontmatter: &str) -> String {
         }
         if section == Section::Sidebar {
             out.push_str(
-                "\n`j` / `k` (or arrows) move the cursor; `Esc` clears a `v` multi-selection.\n",
+                "\n`j` / `k` (or arrows) move the cursor; `Esc` clears a `v` \
+                 multi-selection. See [Orchestrate multiple \
+                 agents](/docs/how-to/orchestrate-multiple-agents/) for the complete broadcast \
+                 workflow: cross-repo selection, target recap, snippet and free-text compose, \
+                 delivery, skips, and history.\n",
             );
         }
         if section == Section::Activity {
@@ -354,6 +358,7 @@ fn generated_page_reflects_the_leaders_only_default_keymap() {
         "]]x",
         "Shift-Home",
         "new project",
+        "orchestrate-multiple-agents",
     ] {
         assert!(page.contains(expected), "page missing {expected:?}");
     }

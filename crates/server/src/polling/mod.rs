@@ -3087,7 +3087,7 @@ pub struct MergePromptMemory {
     pub(crate) prompted: std::collections::HashMap<String, std::time::Instant>,
     /// Issue workspace keys for which the user replied "no" to the
     /// merge prompt. We don't re-prompt this session — the user can
-    /// always merge by hand via the future adopt-sessions flow.
+    /// still merge explicitly with `Command::CollapseIntoPr`.
     pub(crate) rejected: std::collections::HashSet<String>,
 }
 
@@ -5848,24 +5848,23 @@ async fn merge_closing_issue_workspaces(
             continue;
         }
 
-        // Live-terminal safety net: stall and prompt rather than
-        // silently absorbing the user's running work. The gate is
-        // LIVE terminals (`terminal_meta`), not session records: a
-        // session whose PTY died long ago is just metadata, and
-        // prompting on it would park the auto-transfer behind a modal
-        // forever (re-fired every 5 min, never completing unattended).
-        // Dead session records move over silently with the merge.
-        // `merge_prompts` dedupes so a user staring at the modal
-        // doesn't see fresh copies every 60s; its `rejected` set is
-        // the "no, leave them separate" pin until lazybox restarts.
+        // An explicit "no" pins the rows apart until restart, even if
+        // the protected terminal exits later. Without this gate ahead
+        // of the silent path, the next poll absorbed a rejected issue
+        // as soon as its live-terminal count reached zero.
         let live_terminals = handlers::count_live_terminals(config, &issue_key).await;
-        if live_terminals > 0 {
-            let issue_key_str = issue_key.as_str().to_string();
-            let should_prompt = {
-                let mut prompts = config.merge_prompts.lock().await;
-                if prompts.rejected.contains(&issue_key_str) {
-                    false
-                } else {
+        let issue_key_str = issue_key.as_str().to_string();
+        let should_prompt = {
+            let mut prompts = config.merge_prompts.lock().await;
+            if prompts.rejected.contains(&issue_key_str) {
+                None
+            } else if live_terminals == 0 {
+                Some(false)
+            } else {
+                // Live-terminal safety net: stall and prompt rather
+                // than silently absorbing the user's running work.
+                // Dead session records move over silently.
+                Some({
                     let now = std::time::Instant::now();
                     let stale = prompts
                         .prompted
@@ -5878,8 +5877,13 @@ async fn merge_closing_issue_workspaces(
                     } else {
                         false
                     }
-                }
-            };
+                })
+            }
+        };
+        let Some(should_prompt) = should_prompt else {
+            continue;
+        };
+        if live_terminals > 0 {
             if should_prompt {
                 let _ = config.bus.send(Event::WorkspaceMergePending {
                     issue_workspace_key: issue_key.clone(),

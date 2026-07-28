@@ -341,6 +341,10 @@ are skipped and named in the summary notice. `Shift-U` instead issues one
 `UpdateBranch` per selected PR behind `main`; up-to-date and non-PR selections
 are skipped and counted.
 
+See the user-facing
+[multi-agent orchestration guide](https://lazybox.ai/docs/how-to/orchestrate-multiple-agents/)
+for the full target-recap, retry, Recent, and per-workspace history workflow.
+
 ### How it works (brief)
 `BroadcastToSelected` / `UpdateBranchSelected`
 (`crates/tui-core/src/action.rs`) fan the sidebar's multi-select set out into

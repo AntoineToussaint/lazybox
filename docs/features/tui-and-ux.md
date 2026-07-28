@@ -68,6 +68,10 @@ Override any binding via `ui.action_keys` in config; agent spawn chords are
 remapped there too, keyed `spawn_agent.<id>` (e.g. `spawn_agent.claude: "c"`
 restores a top-level key).
 
+The sidebar's `v` and `Shift-B` bindings form a complete one-to-many workflow,
+not just a shortcut pair; see the
+[multi-agent orchestration guide](https://lazybox.ai/docs/how-to/orchestrate-multiple-agents/).
+
 ### How it works (brief)
 `Action` + `ActionDef::for_kind` (`crates/tui-core/src/action.rs`) is the
 catalog; leader groups are multi-stroke `Chord::Seq` rows in it (the which-key
@@ -187,8 +191,11 @@ palette entries. Output persists to `config.yaml` (`PersistedSetup`).
 **Key bindings:** `Shift-T`
 
 ### What it does
-A guided walkthrough of lazybox's main features (inbox, work, snippets,
-navigation, config), shown once on first run and re-openable on demand.
+A guided walkthrough of lazybox's main features (inbox, contextual work
+routing, navigation, config), shown once on first run and re-openable on
+demand. Its work card demonstrates how the same `w w` action becomes issue
+implementation, CI repair, or selected-review-comment work, then explains
+running/default-agent and model-tier routing.
 
 ### How to use it
 Press `Shift-T` to launch it; it also auto-runs the first time (`ui.tour_seen`
@@ -198,6 +205,8 @@ gates the auto-launch).
 - [ ] `Shift-T` opens the tour.
 - [ ] The tour auto-runs on a fresh profile and sets `ui.tour_seen`.
 - [ ] It doesn't auto-run again after being seen.
+- [ ] The work card demonstrates issue, failing-CI, and selected-comment prompts.
+- [ ] The work card explains live/default-agent routing and priority/explicit tiers.
 
 ### Known sharp edges
 - Newer surface; content may lag behind feature changes.

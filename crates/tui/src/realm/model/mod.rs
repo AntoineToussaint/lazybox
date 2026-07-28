@@ -332,12 +332,10 @@ pub enum Id {
     /// Esc / No drops the stash and changes nothing.
     HelpActionConfirm,
     /// Single-pick `Choice` mounted when `w` ("work on this") lands on
-    /// a workspace with SEVERAL distinct running agents (#418) —
-    /// injecting must not silently guess between them. The listed
-    /// agent ids + the spawn params to replay live in
-    /// `ModalFlow::WorkPicker`; `Msg::ChoicePicked` resolves the index
-    /// and fires the same work spawn `w` would have, targeted at the
-    /// chosen agent.
+    /// a workspace with several running agent conversations (#418) —
+    /// injecting must not silently guess between them, even when they
+    /// use the same agent id. The exact terminals + fallback spawn
+    /// params live in `ModalFlow::WorkPicker`.
     WorkAgentPicker,
     /// Scrollable full-description reader (#448). Renders a PR/issue
     /// (or any long) body as real markdown — headings, lists, code,
@@ -1231,11 +1229,10 @@ pub struct Model<T: TerminalAdapter> {
     /// workspace last had focused. An event-to-event handoff, not a
     /// mounted-modal continuation, so it stays out of [`ModalFlow`].
     deferred_focus_terminal: Option<lazybox_ipc::TerminalId>,
-    /// Loaded + merged snippet collection (`<lazybox_home>/snippets.yaml`
-    /// + `<cwd>/.lazybox/snippets.yaml`). Populated at startup by
-    /// `apply_snippets`; the terminal-pane `]` latch reads this to
-    /// decide whether to mount the picker. Empty when neither file
-    /// exists (the typical first-run state).
+    /// Loaded + merged snippet collection (built-ins plus
+    /// `<lazybox_home>/snippets.yaml` + `<cwd>/.lazybox/snippets.yaml`).
+    /// Production constructors require this catalog up front; runtime
+    /// snippet edits replace it through `apply_snippets`.
     pub(crate) snippets: lazybox_config::Snippets,
     /// Snippet keys sent, most-recent first (capped at
     /// `RECENT_SNIPPETS_MAX`). Passed to each picker as its "Recent"
@@ -1599,7 +1596,7 @@ fn install_panic_hook() {
 }
 
 impl Model<CrosstermTerminalAdapter> {
-    pub fn new(client: Client) -> anyhow::Result<Self> {
+    pub fn new(client: Client, snippets: lazybox_config::Snippets) -> anyhow::Result<Self> {
         install_panic_hook();
         let terminal = CrosstermTerminalAdapter::new()?;
         // Enable raw mode, the alt screen, mouse capture, bracketed
@@ -1612,6 +1609,7 @@ impl Model<CrosstermTerminalAdapter> {
         // Splash is mounted lazily by `start_setup_wizard`. Returning
         // users (with a persisted setup) boot straight to the panes.
         let mut model = Self::build(terminal, client);
+        model.apply_snippets(snippets);
         model.term_guard = Some(term_guard);
         // Subscribe up-front for both first-run and returning users.
         // First-run gets an empty snapshot before the wizard finishes
@@ -1635,6 +1633,17 @@ impl Model<tuirealm::terminal::TestTerminalAdapter> {
         let terminal = tuirealm::terminal::TestTerminalAdapter::new(size)
             .map_err(|e| anyhow::anyhow!("test adapter init: {e:?}"))?;
         Ok(Self::build(terminal, client))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test_with_snippets(
+        client: Client,
+        size: tuirealm::ratatui::layout::Size,
+        snippets: lazybox_config::Snippets,
+    ) -> anyhow::Result<Self> {
+        let mut model = Self::new_for_test(client, size)?;
+        model.apply_snippets(snippets);
+        Ok(model)
     }
 }
 
@@ -1737,10 +1746,9 @@ impl<T: TerminalAdapter> Model<T> {
         self.terminals.apply_ui_defaults(ui);
     }
 
-    /// Install the loaded snippet collection. Called from the
-    /// startup path in `main.rs` after `Snippets::load_merged`. The
-    /// terminal-pane `]]s<key>` flow reads from `self.snippets`
-    /// directly, so this is the only handoff needed.
+    /// Replace the loaded snippet collection after an in-app edit. The
+    /// terminal-pane `]]s<key>` flow reads from `self.snippets` directly,
+    /// so this is the only reload handoff needed.
     pub fn apply_snippets(&mut self, snippets: lazybox_config::Snippets) {
         self.snippets = snippets;
     }
@@ -1781,7 +1789,7 @@ impl<T: TerminalAdapter> Model<T> {
         if matches!(self.modal_stack.last(), Some(Id::Tour)) {
             return;
         }
-        self.mount_modal(Id::Tour, Tour::new());
+        self.mount_modal(Id::Tour, Tour::new(self.catalog.clone()));
     }
 
     /// Persist `ui.tour_seen = true` so the tour stops auto-launching.

@@ -161,6 +161,20 @@ is the *only* snippet key that starts with it and equals it exactly,
 the body auto-submits immediately, regardless of any description-only
 matches.
 
+### Broadcast a snippet to a fleet
+
+From the sidebar, `v` marks workspaces across repo groups and `Shift-B`
+opens the broadcast flow. Pick a snippet, edit its body once while the
+target recap stays visible, and submit it to every selected live session.
+The broadcast moves the snippet into Recent once and records it on each
+workspace that actually received it; session-less rows are skipped and
+named without changing their `]N` cue.
+
+The task-oriented
+[multi-agent orchestration guide](https://lazybox.ai/docs/how-to/orchestrate-multiple-agents/)
+covers free-text mode, mixed agent/shell delivery, skips and retries,
+and per-workspace history.
+
 ### Edit
 
 Edit the entry in the YAML file and restart lazybox, or ask Ask Lazybox

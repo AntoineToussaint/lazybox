@@ -409,8 +409,8 @@ fn prompt_protocol_neutralizes_escape_bytes_once_for_every_agent() {
 #[test]
 fn line_protocol_distinguishes_submit_from_compose_only_recall() {
     let generic = GenericCli {
-        id: "custom",
-        display_name: "Custom",
+        id: "custom".into(),
+        display_name: "Custom".into(),
         spawn_cmd: vec!["custom-bin".into()],
         resume_cmd: None,
         asking_patterns: vec![],
@@ -812,8 +812,8 @@ fn claude_inject_requires_ready() {
 fn detectorless_agents_do_not_require_ready() {
     assert!(!Cursor.pty_protocol().requires_ready());
     let generic = GenericCli {
-        id: "custom",
-        display_name: "Custom",
+        id: "custom".into(),
+        display_name: "Custom".into(),
         spawn_cmd: vec!["custom-bin".into()],
         resume_cmd: None,
         asking_patterns: vec![],
@@ -874,8 +874,8 @@ fn claude_detects_choice_arrow_ascii_fallback() {
 #[test]
 fn generic_cli_spawn_and_resume() {
     let agent = GenericCli {
-        id: "custom",
-        display_name: "Custom",
+        id: "custom".into(),
+        display_name: "Custom".into(),
         spawn_cmd: vec!["custom-bin".into(), "--start".into()],
         resume_cmd: Some(vec!["custom-bin".into(), "--resume".into()]),
         asking_patterns: vec![],
@@ -888,8 +888,8 @@ fn generic_cli_spawn_and_resume() {
 #[test]
 fn generic_cli_resume_defaults_to_spawn() {
     let agent = GenericCli {
-        id: "custom",
-        display_name: "Custom",
+        id: "custom".into(),
+        display_name: "Custom".into(),
         spawn_cmd: vec!["custom".into()],
         resume_cmd: None,
         asking_patterns: vec![],
@@ -901,8 +901,8 @@ fn generic_cli_resume_defaults_to_spawn() {
 #[test]
 fn generic_cli_asking_pattern_matching() {
     let agent = GenericCli {
-        id: "custom",
-        display_name: "Custom",
+        id: "custom".into(),
+        display_name: "Custom".into(),
         spawn_cmd: vec!["custom".into()],
         resume_cmd: None,
         asking_patterns: vec!["Press Enter to continue".into(), "[y/N]".into()],
@@ -940,8 +940,8 @@ fn simple_pattern_agents_ignore_prompts_that_scrolled_past_the_tail() {
     assert_eq!(Codex.detect_state(&buf), Some(AgentState::Idle));
     assert_eq!(Cursor.detect_state(&buf), Some(AgentState::Idle));
     let generic = GenericCli {
-        id: "custom",
-        display_name: "Custom",
+        id: "custom".into(),
+        display_name: "Custom".into(),
         spawn_cmd: vec!["custom".into()],
         resume_cmd: None,
         asking_patterns: vec!["[y/n]".into()],
@@ -958,8 +958,8 @@ fn simple_pattern_agents_ignore_prompts_that_scrolled_past_the_tail() {
 fn generic_cli_empty_patterns_returns_none() {
     // Empty patterns = "no opinion"; must return None (not Asking!)
     let agent = GenericCli {
-        id: "x",
-        display_name: "x",
+        id: "x".into(),
+        display_name: "x".into(),
         spawn_cmd: vec!["x".into()],
         resume_cmd: None,
         asking_patterns: vec![],

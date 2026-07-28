@@ -269,6 +269,12 @@ img, video { max-width: 100%; display: block; }
 .install .copy:hover { color: var(--fg); background: var(--panel-2); }
 .install .copy svg { width: 1rem; height: 1rem; }
 .install .copy.copied { color: var(--accent-2); }
+.install-caption {
+  margin: 0.55rem 0 0;
+  color: var(--fg-dim);
+  font-size: 0.78rem;
+}
+.install-caption a { color: var(--accent); }
 
 /* ── terminal / demo frame ───────────────────────────────── */
 .term {

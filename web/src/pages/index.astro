@@ -5,7 +5,7 @@ const repo = 'https://github.com/AntoineToussaint/lazybox';
 const docs = '/docs/';
 const workflows = '/docs/tutorials/core-workflows/';
 const installCmd =
-  'brew tap AntoineToussaint/lazybox && brew trust AntoineToussaint/lazybox && brew install lazybox';
+  'cargo install --git https://github.com/AntoineToussaint/lazybox --locked lazybox-tui-boot';
 
 const fleet = [
   { repo: 'lazybox', sessions: 3, item: '#609 docs showcase', state: 'working', tone: 'blue' },
@@ -74,6 +74,10 @@ const fleet = [
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true" data-icon="check" style="display:none"><path d="M3.5 8.5l3 3 6-6"></path></svg>
           </button>
         </div>
+        <p class="install-caption">
+          Installs the current source build shown here. Prefer a published release?
+          <a href="/docs/tutorials/quickstart/#1-install">Use the stable install guide.</a>
+        </p>
 
         <div class="term" data-reveal aria-label="lazybox managing several agents in a terminal">
           <div class="bar">
@@ -365,6 +369,10 @@ const fleet = [
                 category, description, and full body in a confirm-with-preview.
               </p>
               <p>
+                Conversation and actions use an enabled Claude Code or Codex integration; live
+                effective-key search remains available with any agent setup.
+              </p>
+              <p>
                 Actions are allowlisted and validated. You confirm every change, and lazybox—not
                 the agent—owns the filesystem write. The catalog hot-reloads, so the new snippet
                 is available immediately and then joins Recent and the workspace’s <code>]N</code>
@@ -392,7 +400,7 @@ const fleet = [
               <h3>Use any coding agent—and keep a one-action default</h3>
               <p>
                 Claude Code, Codex, and Cursor have first-class support. Add arbitrary agent CLIs
-                through YAML without recompiling, then choose a preferred default so
+                through YAML without recompiling, assign their leader chords, then choose a preferred default so
                 <kbd>w w</kbd> remains the immediate everyday path.
               </p>
               <p>
@@ -412,7 +420,7 @@ const fleet = [
                 <div><kbd>a c</kbd><strong>Claude Code</strong><small>built in · default</small></div>
                 <div class="active"><kbd>a x</kbd><strong>Codex</strong><small>override this task</small></div>
                 <div><kbd>a u</kbd><strong>Cursor</strong><small>built in</small></div>
-                <div><kbd>a z</kbd><strong>my-agent</strong><small>generic YAML CLI</small></div>
+                <div><kbd>a z</kbd><strong>my-agent</strong><small>YAML · remapped in action_keys</small></div>
               </div>
               <div class="agent-shared"><span>same workspace</span><b>worktree · status · tmux · snippets · GitHub</b></div>
             </div>

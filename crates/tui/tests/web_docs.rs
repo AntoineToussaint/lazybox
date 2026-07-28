@@ -59,8 +59,31 @@ fn website_covers_v017_public_contracts() {
             "configuration reference missing {expected:?}"
         );
     }
+    for expected in [
+        "spawn_agent.aider: \"a z\"",
+        "command: aider",
+        "resume_args: [--resume]",
+        "custom agents\nhave no implicit chord",
+    ] {
+        assert!(
+            config.contains(expected),
+            "custom-agent configuration is incomplete: missing {expected:?}"
+        );
+    }
 
     let agent_guide = read("web/src/content/docs/docs/how-to/run-an-agent-per-workspace.md");
+    for expected in [
+        "Add another agent CLI",
+        "aider --model sonnet",
+        "setup.default_agent",
+        "without a shell",
+    ] {
+        assert!(
+            agent_guide.contains(expected),
+            "custom-agent workflow missing {expected:?}"
+        );
+    }
+
     for expected in ["]]r", "]]t", "exit code", "failed-to-start"] {
         assert!(
             agent_guide.contains(expected),
@@ -111,6 +134,25 @@ fn homepage_never_advertises_the_removed_single_w_action() {
 }
 
 #[test]
+fn homepage_install_delivers_the_showcased_source_build() {
+    let page = read("web/src/pages/index.astro");
+    assert!(
+        page.contains(
+            "cargo install --git https://github.com/AntoineToussaint/lazybox --locked lazybox-tui-boot"
+        ),
+        "homepage install must build the source version whose workflows it showcases"
+    );
+    assert!(
+        page.contains("Prefer a published release?"),
+        "stable and current-source install paths are not distinguished"
+    );
+    assert!(
+        !page.contains("const installCmd =\n  'brew "),
+        "homepage still sends the flagship CTA to an older tap release"
+    );
+}
+
+#[test]
 fn flagship_workflows_are_prominent_across_public_discovery_surfaces() {
     let homepage = read("web/src/pages/index.astro");
     assert_eq!(
@@ -131,6 +173,8 @@ fn flagship_workflows_are_prominent_across_public_discovery_surfaces() {
         "Ask Lazybox",
         "Claude Code, Codex, and Cursor",
         "non-racing which-key popup",
+        "enabled Claude Code or Codex",
+        "effective-key search remains available",
     ] {
         assert!(
             homepage.contains(expected),
@@ -151,6 +195,8 @@ fn flagship_workflows_are_prominent_across_public_discovery_surfaces() {
         "allowlisted",
         "Claude Code, Codex, and Cursor",
         "Learn shortcuts as you use them",
+        "Claude Code or Codex",
+        "keybinding search remains available",
     ] {
         assert!(
             core.contains(expected),
@@ -176,6 +222,8 @@ fn flagship_workflows_are_prominent_across_public_discovery_surfaces() {
         "confirm-with-preview",
         "hot-reloads",
         "lazybox—not the agent—owns the filesystem write",
+        "Claude Code or Codex",
+        "still searches your effective keybindings",
     ] {
         assert!(
             snippets.contains(expected),

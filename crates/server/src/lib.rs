@@ -48,6 +48,7 @@ mod terminal_io;
 
 use crate::backend::{RawPtyBackend, SessionBackend, TmuxBackend};
 use lazybox_agents::Registry;
+use lazybox_agents::agent::builtins::GenericCli;
 use lazybox_ipc::{AgentRunId, Connection, Event, TerminalId};
 use lazybox_store::{MemoryStore, SqliteStore, Store};
 use std::collections::{HashMap, HashSet};
@@ -163,6 +164,9 @@ pub enum ServerError {
     /// the human message survives.
     #[error("store: {0}")]
     Store(String),
+    /// User configuration could not be loaded.
+    #[error("config: {0}")]
+    Config(String),
     /// Workspace not found, malformed, or missing a required field
     /// (primary task, repo, branch). Surfaces from the spawn/upsert
     /// paths when the requested workspace can't be resolved into a
@@ -573,6 +577,8 @@ impl ServerConfig {
     /// when the user's persisted state is temporarily unavailable.
     pub fn from_user_config() -> Result<Self, ServerError> {
         let store = open_store()?;
+        let user_config = lazybox_config::Config::load()
+            .map_err(|error| ServerError::Config(error.to_string()))?;
 
         // Pick the strongest available backend. tmux means sessions
         // survive lazybox-server restart and can be attached externally
@@ -588,11 +594,13 @@ impl ServerConfig {
                 Arc::new(RawPtyBackend::new())
             }
         };
-        Ok(Self::with_store_backend_and_root(
+        let mut config = Self::with_store_backend_and_root(
             store,
             backend,
             WorktreeRoot::persistent(lazybox_core::paths::state_root()),
-        ))
+        );
+        config.agents = registry_from_config(&user_config);
+        Ok(config)
     }
 
     /// Build a config with an explicit store and the deterministic
@@ -856,6 +864,86 @@ impl ServerConfig {
     /// keep the old `Arc`, re-check liveness, and reject stale work.
     pub(crate) fn forget_terminal_io_lock(&self, backend_key: &str) {
         self.terminal_io_locks.lock().remove(backend_key);
+    }
+}
+
+fn registry_from_config(config: &lazybox_config::Config) -> Registry {
+    let mut registry = Registry::default_builtins();
+    for (id, entry) in &config.agents {
+        let Some(spawn_cmd) = entry.spawn_argv() else {
+            continue;
+        };
+        registry.register(Arc::new(GenericCli {
+            id: id.clone(),
+            display_name: entry.name.clone().unwrap_or_else(|| id.clone()),
+            spawn_cmd,
+            resume_cmd: entry.resume_args.as_ref().and_then(|_| entry.resume_argv()),
+            asking_patterns: entry.asking_patterns.clone(),
+        }));
+    }
+    registry
+}
+
+#[cfg(test)]
+mod configured_agent_registry_tests {
+    use super::*;
+
+    #[test]
+    fn yaml_generic_agent_launches_with_its_configured_commands() {
+        let config = lazybox_config::Config::parse(
+            r#"
+agents:
+  aider:
+    name: Aider
+    command: aider
+    args: [--model, sonnet]
+    resume_args: [--resume]
+    asking_patterns: ["Proceed?"]
+"#,
+        )
+        .expect("parse custom agent");
+
+        let registry = registry_from_config(&config);
+        let agent = registry.get("aider").expect("custom agent registered");
+        let ctx = lazybox_agents::SpawnCtx::default();
+
+        assert_eq!(agent.display_name(), "Aider");
+        assert_eq!(
+            agent.spawn(&ctx),
+            vec!["aider", "--model", "sonnet"]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            agent.resume(&ctx),
+            vec!["aider".to_string(), "--resume".to_string()]
+        );
+        assert_eq!(
+            agent.detect_state(b"Proceed?"),
+            Some(lazybox_ipc::AgentState::InputNeeded)
+        );
+    }
+
+    #[test]
+    fn model_only_entry_keeps_the_builtin_agent() {
+        let config = lazybox_config::Config::parse(
+            r#"
+agents:
+  claude:
+    models:
+      default: L
+"#,
+        )
+        .expect("parse built-in override");
+
+        let agent = registry_from_config(&config)
+            .get("claude")
+            .expect("built-in remains registered");
+        assert_eq!(
+            agent.spawn(&lazybox_agents::SpawnCtx::default()),
+            vec!["claude"]
+        );
     }
 }
 
@@ -1600,6 +1688,7 @@ pub async fn dispatch_command(
             mode,
             cwd,
             initial_input,
+            access,
         } => {
             agent_runs::handle_start_agent_run(
                 config,
@@ -1609,6 +1698,7 @@ pub async fn dispatch_command(
                 mode,
                 cwd,
                 initial_input,
+                access,
             )
             .await;
         }

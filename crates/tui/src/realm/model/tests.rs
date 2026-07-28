@@ -10840,7 +10840,9 @@ mod help_ask_tests {
     use super::super::*;
     use lazybox_core::SessionKey;
     use lazybox_ipc::Event as IpcEvent;
-    use lazybox_ipc::{AgentRunId, AgentRuntimeMode, Command as IpcCommand, channel};
+    use lazybox_ipc::{
+        AgentRunAccess, AgentRunId, AgentRuntimeMode, Command as IpcCommand, channel,
+    };
     use lazybox_tui_core::help::{HELP_AGENT_PREFERENCE, HELP_SESSION_KEY};
     use tuirealm::ratatui::layout::Size;
 
@@ -10874,11 +10876,13 @@ mod help_ask_tests {
                 mode,
                 cwd,
                 initial_input,
+                access,
                 ..
             } => {
                 assert_eq!(session_key.as_str(), HELP_SESSION_KEY);
                 assert_eq!(agent, HELP_AGENT_PREFERENCE[0]);
                 assert_eq!(*mode, AgentRuntimeMode::StreamJson);
+                assert_eq!(*access, AgentRunAccess::ReadOnly);
                 assert!(
                     cwd.is_none(),
                     "cwd is daemon policy — a client path may not exist on the daemon host",

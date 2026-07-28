@@ -58,7 +58,24 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "1 · Always open in the right folder",
+        title: "1 · Learn only the next key you need",
+        body: &[
+            "Context keeps primary actions small. Related actions live",
+            "behind leaders: a for agents, g for GitHub, x for workspace.",
+            "",
+            "Press a leader and a non-racing which-key popup shows every",
+            "valid continuation. From a terminal, ]] opens lazybox",
+            "commands while ordinary keys still reach the agent or shell.",
+            "",
+            "Footer hints, context menus, Ask Lazybox, and ? help all use",
+            "your effective action catalog. Switch a preset or remap an",
+            "action with alternatives; the generated guidance follows.",
+            "",
+            ", opens Settings; q q quits.",
+        ],
+    },
+    TourStep {
+        title: "2 · Always open in the right folder",
         body: &[
             "Select a task in any repo. lazybox creates, locates, and",
             "later cleans up its isolated checkout automatically.",
@@ -75,7 +92,7 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "2 · Use your agent, with a fast default",
+        title: "3 · Use your agent, with a fast default",
         body: &[
             "Claude Code, Codex, and Cursor are built in. Generic YAML",
             "agent entries add any other CLI without recompiling.",
@@ -86,12 +103,14 @@ const STEPS: &[TourStep] = &[
             "Need a different tool here? Press a for its which-key menu:",
             "  a c  Claude      a x  Codex      a u  Cursor",
             "",
-            "w S / w M / w L pick a model tier. Default means speed,",
-            "not lock-in; every agent gets the same lazybox workflow.",
+            "Configured model tiers appear as w S / w M / w L.",
+            "Claude includes tiers; other agents can add them in YAML.",
+            "Default means speed, not lock-in; every agent gets the same",
+            "lazybox workflow.",
         ],
     },
     TourStep {
-        title: "3 · Stay Git-native from task to result",
+        title: "4 · Stay Git-native from task to result",
         body: &[
             "An agent edits, tests, commits, pushes, and opens a PR with",
             "the normal git and gh tools inside the isolated checkout.",
@@ -105,7 +124,7 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "4 · Trust what needs attention",
+        title: "5 · Trust what needs attention",
         body: &[
             "Working, Input Needed, and Done are stable, accurate agent",
             "states — not guesses that make you poll every terminal.",
@@ -123,7 +142,7 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "5 · Keep 10 repos and 15 sessions calm",
+        title: "6 · Keep 10 repos and 15 sessions calm",
         body: &[
             "A real workload can span 10 repositories and 15 live",
             "sessions without becoming 15 terminals to babysit.",
@@ -140,7 +159,7 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "6 · Snippets remember your progress",
+        title: "7 · Snippets remember your progress",
         body: &[
             "Send a review prompt with ]]srev. Sent snippets move into",
             "Recent and persist across lazybox restarts.",
@@ -154,7 +173,7 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "7 · Start on an issue, continue on its PR",
+        title: "8 · Start on an issue, continue on its PR",
         body: &[
             "Put an agent on an issue before a pull request exists.",
             "When its implementation PR appears, lazybox carries the",
@@ -169,7 +188,7 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "8 · Restart without stopping the work",
+        title: "9 · Restart without stopping the work",
         body: &[
             "With tmux 3.3 or newer installed, agents and shells outlive",
             "the lazybox UI and server process.",
@@ -183,7 +202,7 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "9 · Finish GitHub work without bouncing out",
+        title: "10 · Finish GitHub work without bouncing out",
         body: &[
             "Read full issue or PR descriptions and comments, reply,",
             "inspect CI and reviews, and keep the activity in one place.",
@@ -197,7 +216,7 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "10 · Ask Lazybox — and let it act safely",
+        title: "11 · Ask Lazybox — and let it act safely",
         body: &[
             "Press ? to search your live keys or ask a workflow question",
             "in plain language.",
@@ -208,23 +227,11 @@ const STEPS: &[TourStep] = &[
             "Nothing changes until you confirm. Actions are allowlisted",
             "and validated; lazybox, not the agent, writes the file.",
             "The snippet hot-reloads and works through ]]s immediately.",
-        ],
-    },
-    TourStep {
-        title: "11 · Learn only the next key you need",
-        body: &[
-            "Context keeps primary actions small. Related actions live",
-            "behind leaders: a for agents, g for GitHub, x for workspace.",
             "",
-            "Press a leader and a non-racing which-key popup shows every",
-            "valid continuation. From a terminal, ]] opens lazybox",
-            "commands while ordinary keys still reach the agent or shell.",
+            "Conversation needs enabled Claude or Codex; key search stays",
+            "available with any agent setup.",
             "",
-            "Footer hints, context menus, Ask Lazybox, and ? help all use",
-            "your effective action catalog. Switch a preset or remap an",
-            "action with alternatives; the generated guidance follows.",
-            "",
-            ", opens Settings; q q quits. Shift-T reopens this tour.",
+            "That's the tour — Enter finishes; Shift-T reopens it.",
         ],
     },
 ];
@@ -548,7 +555,7 @@ mod tests {
     #[test]
     fn last_step_tail_visible() {
         let last = render_step(STEPS.len() - 1);
-        assert!(last.contains(", opens Settings; q q quits. Shift-T reopens this tour."));
+        assert!(last.contains("That's the tour — Enter finishes; Shift-T reopens it."));
     }
 
     #[test]
@@ -584,6 +591,7 @@ mod tests {
             "Ask Lazybox — and let it act safely",
             "Use your agent, with a fast default",
             "Learn only the next key you need",
+            "Conversation needs enabled Claude or Codex",
         ] {
             assert!(all.contains(expected), "tour missing {expected:?}");
         }
@@ -593,6 +601,33 @@ mod tests {
                 "snippet workflow missing {expected:?}"
             );
         }
+    }
+
+    #[test]
+    fn model_tier_guidance_states_its_configuration_boundary() {
+        let all = render_all();
+        assert!(all.contains("Configured model tiers appear"));
+        assert!(all.contains("other agents can add them in YAML"));
+    }
+
+    #[test]
+    fn leader_mental_model_precedes_workflow_chords() {
+        let leader_step = STEPS
+            .iter()
+            .position(|step| step.title.contains("Learn only the next key"))
+            .expect("leader step");
+        let first_workflow_step = STEPS
+            .iter()
+            .position(|step| step.title.contains("Always open in the right folder"))
+            .expect("first workflow step");
+
+        assert!(
+            leader_step < first_workflow_step,
+            "the tour must teach leaders before demonstrating workflow chords"
+        );
+        let leader_copy = STEPS[leader_step].body.join("\n");
+        assert!(leader_copy.contains("non-racing which-key popup"));
+        assert!(leader_copy.contains("From a terminal, ]]"));
     }
 
     #[test]

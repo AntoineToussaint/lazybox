@@ -6472,8 +6472,8 @@ mod tests {
 
         // A GenericCli agent has no inferable provider → no injection.
         let generic = lazybox_agents::agent::builtins::GenericCli {
-            id: "custom",
-            display_name: "Custom",
+            id: "custom".into(),
+            display_name: "Custom".into(),
             spawn_cmd: vec!["custom".into()],
             resume_cmd: None,
             asking_patterns: vec![],
@@ -10008,8 +10008,8 @@ mod tests {
         // screen (no asking patterns, no status line).
         let agent: std::sync::Arc<dyn lazybox_agents::Agent> =
             std::sync::Arc::new(lazybox_agents::agent::builtins::GenericCli {
-                id: "custom",
-                display_name: "Custom",
+                id: "custom".into(),
+                display_name: "Custom".into(),
                 spawn_cmd: vec!["custom".into()],
                 resume_cmd: None,
                 asking_patterns: vec![],

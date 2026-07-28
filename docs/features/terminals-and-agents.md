@@ -76,9 +76,9 @@ from your enabled agents; `setup.default_agent` is what
 The `Agent` trait (`crates/agents/src/agent.rs`) defines `spawn`/`resume` argv,
 `detect_state`, `detect_ready_for_prompt`, and prompt injection. Built-ins:
 Claude (`claude`, hooks-based state), Codex (`codex`), Cursor (`cursor-agent`),
-GenericCli (user YAML). `registry()` (`crates/agents/src/lib.rs`) registers the
-builtins; the server's `spawn_handler` builds the worktree, env, and
-`SpawnCtx`, then launches through the tmux wrapper.
+GenericCli (user YAML). The server registers built-ins plus every
+`agents.<id>` entry with a `command` at startup; `spawn_handler` builds the
+worktree, env, and `SpawnCtx`, then launches through the tmux wrapper.
 
 ### Test checklist
 - [ ] `s` opens a shell in the correct worktree dir.

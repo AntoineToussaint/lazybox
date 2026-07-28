@@ -64,6 +64,9 @@ are read at startup, so restart lazybox after changing YAML by hand.
 ## Create or improve a snippet with Ask Lazybox
 
 Ask Lazybox closes the loop from product guidance to a reusable instruction:
+Enable Claude Code or Codex for the conversational assistant and action
+proposals. The same `?` surface still searches your effective keybindings when
+neither structured agent is enabled.
 
 1. Press `?` and ask how to run the workflow you have in mind.
 2. Ask it to create a new snippet or improve an existing key.

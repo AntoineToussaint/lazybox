@@ -178,6 +178,9 @@ covers broadcast, bulk branch updates, and agent-to-agent handoff.
 ## Turn Ask Lazybox guidance into a snippet
 
 Ask Lazybox is both live help and a small, deliberately bounded action surface:
+Conversational answers and proposed actions require Claude Code or Codex to be
+enabled; live effective-keybinding search remains available with any agent
+setup.
 
 1. Press `?` and ask, “How should I review an API change?”
 2. Follow up with, “Create that as a snippet named `review-api`.”

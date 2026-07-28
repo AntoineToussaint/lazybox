@@ -13,8 +13,8 @@ use crate::agent_stream::{
 };
 use lazybox_agents::{SpawnCtx, StructuredAgentProtocol};
 use lazybox_ipc::{
-    AgentApprovalDecision, AgentInputMessage, AgentQuestionAnswer, AgentRunId, AgentRuntimeMode,
-    AgentUsage, Event,
+    AgentApprovalDecision, AgentInputMessage, AgentQuestionAnswer, AgentRunAccess, AgentRunId,
+    AgentRuntimeMode, AgentUsage, Event,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -44,6 +44,7 @@ pub async fn handle_start_agent_run(
     mode: AgentRuntimeMode,
     cwd: Option<String>,
     initial_input: Option<AgentInputMessage>,
+    access: AgentRunAccess,
 ) {
     if mode != AgentRuntimeMode::StreamJson {
         let _ = config.bus.send(Event::provider_error_permanent(
@@ -104,6 +105,7 @@ pub async fn handle_start_agent_run(
     stream_config.cwd = cwd_path;
     stream_config.extra_args = extra_args.to_vec();
     stream_config.env = env;
+    stream_config.access = access;
 
     let io = match config
         .agent_stream_spawner

@@ -1472,9 +1472,9 @@ fn server_config_from_user() -> anyhow::Result<ServerConfig> {
         Ok(config) => Ok(config),
         Err(error) => {
             println!(
-                "✗ lazybox cannot open its persistent state: {error}\n\
-                 Refusing to continue with an empty in-memory database.\n\
-                 Check the path and its permissions, then retry."
+                "✗ lazybox cannot load its user configuration or persistent state: {error}\n\
+                 Refusing to start with invalid or unavailable user state.\n\
+                 Check the config syntax, paths, and permissions, then retry."
             );
             Err(error.into())
         }

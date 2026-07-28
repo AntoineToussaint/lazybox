@@ -387,6 +387,10 @@ impl Terminals {
         self.inner.focused_terminal_tracks_mouse()
     }
 
+    pub fn terminal_tracks_mouse(&self, terminal_id: lazybox_ipc::TerminalId) -> bool {
+        self.inner.terminal_tracks_mouse(terminal_id)
+    }
+
     /// Wire id of the currently focused terminal, if any.
     pub fn focused_terminal_id(&self) -> Option<lazybox_ipc::TerminalId> {
         self.inner.focused_terminal_id()
@@ -458,6 +462,18 @@ impl Terminals {
     ) -> Option<(lazybox_ipc::TerminalId, Vec<u8>)> {
         self.inner
             .encode_mouse_for_focused(action, button, cell_col, cell_row)
+    }
+
+    pub fn encode_mouse_for(
+        &mut self,
+        terminal_id: lazybox_ipc::TerminalId,
+        action: libghostty_vt::mouse::Action,
+        button: Option<libghostty_vt::mouse::Button>,
+        cell_col: u32,
+        cell_row: u32,
+    ) -> Option<(lazybox_ipc::TerminalId, Vec<u8>)> {
+        self.inner
+            .encode_mouse_for(terminal_id, action, button, cell_col, cell_row)
     }
 }
 

@@ -7393,6 +7393,7 @@ mod terminal_url_mouse_tests {
     use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
     use tuirealm::ratatui::layout::Size;
     use tuirealm::ratatui::{Terminal, backend::TestBackend};
+    use tuirealm::terminal::TerminalAdapter;
 
     type TestModel = Model<tuirealm::terminal::TestTerminalAdapter>;
 
@@ -7467,6 +7468,19 @@ mod terminal_url_mouse_tests {
 
     fn opened_urls(opened: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
         opened.lock().expect("opened URL mutex").clone()
+    }
+
+    fn rendered_model(model: &mut TestModel) -> String {
+        model.view();
+        let buffer = model.terminal.raw().backend().buffer();
+        (0..buffer.area.height)
+            .map(|row| {
+                (0..buffer.area.width)
+                    .map(|col| buffer[(col, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]
@@ -7594,6 +7608,43 @@ mod terminal_url_mouse_tests {
     }
 
     #[test]
+    fn right_click_miss_is_forwarded_to_the_clicked_unfocused_split_tile() {
+        let (mut model, mut server, opened) = build_model(2);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Splits {
+                tree: lazybox_core::TileTree::HSplit {
+                    left: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 1 }),
+                    right: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 2 }),
+                    ratio: 50,
+                },
+                focused: vec![1],
+            });
+        for terminal_id in 1..=2 {
+            feed(&mut model, terminal_id, b"\x1b[?1002h\x1b[?1006h".to_vec());
+        }
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+        while server.rx.try_recv().is_ok() {}
+
+        right_click(&mut model, x + 2, y);
+
+        assert!(opened_urls(&opened).is_empty());
+        let writes: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok())
+            .filter_map(|command| match command {
+                IpcCommand::Write { terminal_id, .. } => Some(terminal_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(writes, vec![TerminalId(1)]);
+        assert_eq!(
+            model.terminals.focused_terminal_id(),
+            Some(TerminalId(2)),
+            "right-click forwarding must not move keyboard focus",
+        );
+    }
+
+    #[test]
     fn right_click_only_hits_the_visible_tab() {
         let (mut model, _server, opened) = build_model(2);
         model
@@ -7647,6 +7698,22 @@ mod terminal_url_mouse_tests {
         let notice = model.status.notice.as_ref().expect("mouse-mode notice");
         assert!(notice.message.contains("right-click links are off"));
         assert!(notice.message.contains("F8"));
+    }
+
+    #[test]
+    fn mouse_mode_guidance_persists_without_receiving_a_mouse_event() {
+        let (mut model, _server, _opened) = build_model(1);
+        model.mouse_capture_on = false;
+        model.status.notice = None;
+
+        let host_mode = rendered_model(&mut model);
+        assert!(host_mode.contains("F8"));
+        assert!(host_mode.contains("links off"));
+
+        model.mouse_capture_on = true;
+        let capture_mode = rendered_model(&mut model);
+        assert!(capture_mode.contains("mouse on"));
+        assert!(capture_mode.contains("]]u"));
     }
 
     #[test]

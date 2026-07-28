@@ -1872,6 +1872,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "unicode-segmentation",
  "unicode-width",
  "which",

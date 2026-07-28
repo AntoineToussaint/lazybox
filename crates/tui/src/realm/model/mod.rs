@@ -3786,6 +3786,23 @@ impl<T: TerminalAdapter> Model<T> {
         // widths while the error's own actions still out-rank the
         // tour/help hints.
         let mut globals = globals;
+        if self.focus == PaneFocus::Terminals {
+            use lazybox_tui_core::action::{ActionDef, ActionKind};
+            let toggle = ActionDef::for_kind(ActionKind::ToggleMouseCapture);
+            let label = if self.mouse_capture_on {
+                let esc = self.ui_defaults.terminal_escape_char;
+                std::borrow::Cow::Owned(format!("mouse on · {esc}{esc}u if links fail"))
+            } else {
+                std::borrow::Cow::Borrowed("links off · enable")
+            };
+            globals.insert(
+                0,
+                crate::pane::Binding {
+                    keys: toggle.effective_keys_display(&self.action_key_overrides),
+                    label,
+                },
+            );
+        }
         let notice_hints = self.notice_action_hints();
         if !notice_hints.is_empty() {
             let pos = globals.len().saturating_sub(1);

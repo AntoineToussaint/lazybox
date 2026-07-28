@@ -1335,18 +1335,44 @@ impl<T: TerminalAdapter> Model<T> {
                                     self.open_click_target(target);
                                     return;
                                 }
-                                let reason = if rect_contains(resolved.body, m.column, m.row) {
+                                let reason = if resolved.cell.is_some() {
                                     "no_openable_target"
                                 } else {
                                     "tile_chrome"
                                 };
                                 tracing::info!(reason, "terminal right-click missed");
+                                if self.focus != PaneFocus::Terminals {
+                                    self.set_focus(PaneFocus::Terminals);
+                                    self.redraw = true;
+                                }
+                                self.last_click = None;
+                                if let Some((cell_col, cell_row)) = resolved.cell
+                                    && self.terminals.terminal_tracks_mouse(resolved.terminal_id)
+                                    && let Some((terminal_id, bytes)) =
+                                        self.terminals.encode_mouse_for(
+                                            resolved.terminal_id,
+                                            libghostty_vt::mouse::Action::Press,
+                                            Some(libghostty_vt::mouse::Button::Right),
+                                            cell_col,
+                                            cell_row,
+                                        )
+                                {
+                                    self.send_cmd(IpcCommand::Write { terminal_id, bytes });
+                                    self.redraw = true;
+                                }
+                                return;
                             }
                             None => {
                                 tracing::info!(
                                     reason = "no_rendered_tile_at_coordinates",
                                     "terminal right-click missed"
                                 );
+                                if self.focus != PaneFocus::Terminals {
+                                    self.set_focus(PaneFocus::Terminals);
+                                    self.redraw = true;
+                                }
+                                self.last_click = None;
+                                return;
                             }
                         }
                     }

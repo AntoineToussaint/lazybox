@@ -113,6 +113,32 @@ fn homepage_never_advertises_the_removed_single_w_action() {
 }
 
 #[test]
+fn homepage_workspace_selection_matches_the_tui_and_is_accessible() {
+    let page = read("web/src/pages/index.astro");
+    assert!(
+        page.contains("item.selected ? '✓' : '·'"),
+        "selected workspace rows must use the TUI's checkmark"
+    );
+    assert!(
+        !page.contains("item.selected ? '◆' : '·'"),
+        "the diamond is not the selection marker rendered by the TUI"
+    );
+    assert!(
+        page.contains("<ul class=\"repo-fleet\">")
+            && page.contains("<li class={item.selected ? 'repo-row selected' : 'repo-row'}>"),
+        "the workspace fleet must render as a semantic list"
+    );
+    assert!(
+        page.contains("{item.selected && <span class=\"sr-only\">Selected workspace.</span>}"),
+        "each selected row needs a non-visual selection announcement"
+    );
+    assert!(
+        read("web/src/styles/global.css").contains(".sr-only"),
+        "the selected-workspace announcement must be visually hidden"
+    );
+}
+
+#[test]
 fn launch_surfaces_use_current_support_and_provider_contracts() {
     for relative in [
         "README.md",

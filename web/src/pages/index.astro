@@ -210,10 +210,11 @@ const steps = [
                   <p><kbd>v</kbd> marks arbitrary rows and keeps the set while you navigate.</p>
                 </div>
               </div>
-              <div class="repo-fleet">
+              <ul class="repo-fleet">
                 {fleetRepos.map((item) => (
-                  <div class={item.selected ? 'repo-row selected' : 'repo-row'}>
-                    <span class="select-mark" aria-hidden="true">{item.selected ? '◆' : '·'}</span>
+                  <li class={item.selected ? 'repo-row selected' : 'repo-row'}>
+                    {item.selected && <span class="sr-only">Selected workspace.</span>}
+                    <span class="select-mark" aria-hidden="true">{item.selected ? '✓' : '·'}</span>
                     <span class="repo-name">{item.name}</span>
                     <span class="live-count">{item.live} live</span>
                     {item.target && (
@@ -221,9 +222,9 @@ const steps = [
                         {item.target} · {item.runtime}
                       </span>
                     )}
-                  </div>
+                  </li>
                 ))}
-              </div>
+              </ul>
             </li>
 
             <li class="orchestration-stage compose-stage">

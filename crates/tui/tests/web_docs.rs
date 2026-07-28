@@ -233,6 +233,61 @@ fn flagship_workflows_are_prominent_across_public_discovery_surfaces() {
 }
 
 #[test]
+fn quickstart_finishes_contextual_work_before_sending_review_workflow() {
+    let page = read("web/src/content/docs/docs/tutorials/quickstart.md");
+    let daily = page
+        .split_once("## 4. Your daily fast path")
+        .map(|(_, section)| section)
+        .expect("quickstart daily-workflow section");
+    let wait = daily
+        .find("wait for its contextual task to finish")
+        .expect("quickstart must wait for the `w w` task");
+    let send = daily
+        .find("]]srev")
+        .expect("quickstart must send the review workflow");
+    assert!(
+        wait < send,
+        "quickstart sends `rev` before the contextual `w w` task finishes"
+    );
+}
+
+#[test]
+fn snippet_guide_describes_the_client_wide_launch_directory_layer() {
+    let page = read("web/src/content/docs/docs/how-to/use-snippets.md");
+    let normalized = page.split_whitespace().collect::<Vec<_>>().join(" ");
+    for expected in [
+        "resolved once when the client starts",
+        "shared by all of its workspaces",
+        "does not load another workspace",
+    ] {
+        assert!(
+            normalized.contains(expected),
+            "snippet scope contract missing {expected:?}"
+        );
+    }
+    assert!(
+        !page.contains("without changing the workflow elsewhere"),
+        "guide still implies the directory override follows workspace scope"
+    );
+}
+
+#[test]
+fn snippet_surfaces_describe_the_workspace_history_as_bounded() {
+    for relative in [
+        "README.md",
+        "docs/snippets.md",
+        "web/src/pages/index.astro",
+        "web/src/content/docs/docs/how-to/use-snippets.md",
+    ] {
+        let page = read(relative);
+        assert!(
+            page.contains("12") && page.contains("recent"),
+            "{relative} must describe the ]N badge as a 12-entry recent history"
+        );
+    }
+}
+
+#[test]
 fn homepage_workspace_selection_matches_the_tui_and_is_accessible() {
     let page = read("web/src/pages/index.astro");
     assert!(

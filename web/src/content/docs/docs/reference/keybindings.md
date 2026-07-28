@@ -32,9 +32,9 @@ Work from any non-terminal pane. A focused terminal forwards keys to the PTY; pr
 | `Ctrl-l` | redraw | Clear the terminal and repaint the whole UI from scratch. |
 | `,` | settings | Open the Settings palette. |
 | `t` | theme | Open the theme picker — arrow through the built-in palettes with a live preview, Enter to keep one. |
-| `]` | snippets | Browse the snippet library — every `]]s<key>` shortcut with its description and body, so you can see what's available without already knowing the key. |
+| `]` | snippets | Browse the snippet workflow library — every `]]s<key>` shortcut with its description and body, so you can see what's available without already knowing the key. |
 | `?` | ask lazybox | Search the live keymap or ask how to use lazybox in plain language. |
-| `Shift-T` | tour | Launch the guided onboarding walkthrough (start from scratch, inbox, putting an agent on a task, juggling sessions, config). |
+| `Shift-T` | tour | Launch the guided onboarding walkthrough (start from scratch, inbox, agents, snippet workflows + memory, juggling sessions, config). |
 | `Shift-D` | sync diagnostics | Show recent provider-sync outcomes, last poll times, and errors. |
 | `Shift-M` | messages | Open the messages log — a scrollable, clearable history of recent footer notices, so an error that flashed and faded is still readable. |
 | `Esc` | dismiss | Clear the current footer notice, whatever its severity — retryable, info, permanent, or auth. |

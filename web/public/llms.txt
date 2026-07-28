@@ -6,13 +6,14 @@
 
 - [Home](https://lazybox.ai/docs/): What lazybox is, who it's for, and a map of the documentation.
 - [Tutorials](https://lazybox.ai/docs/tutorials/): Learning-oriented lessons for newcomers.
-- [Quickstart](https://lazybox.ai/docs/tutorials/quickstart/): Install via Homebrew (or curl|sh / from source) and open your first workspace with a live terminal in ~5 minutes.
+- [Quickstart](https://lazybox.ai/docs/tutorials/quickstart/): Install, open your first workspace, send a reusable workflow, and coordinate two sessions.
 - [How-to guides](https://lazybox.ai/docs/how-to/): Task-oriented recipes.
 - [Add a repo](https://lazybox.ai/docs/how-to/add-a-repo/): Bring a repository's PRs and issues into the inbox and filter by role.
 - [Run an agent per workspace](https://lazybox.ai/docs/how-to/run-an-agent-per-workspace/): Route task context, a running/default agent, model, and reasoning effort with `w w` or GitHub priority.
 - [Trigger agents with @lazybox mentions](https://lazybox.ai/docs/how-to/lazybox-mentions/): Choose priority and start an agent entirely from a GitHub issue.
+- [Keep an issue session when its PR appears](https://lazybox.ai/docs/how-to/keep-session-from-issue-to-pr/): Carry the live terminal, worktree, edits, and activity into the closing PR workspace.
 - [Orchestrate multiple agents](https://lazybox.ai/docs/how-to/orchestrate-multiple-agents/): Select workspaces across repos, compose once, and safely inject the instruction into every live agent or shell.
-- [Use snippets](https://lazybox.ai/docs/how-to/use-snippets/): Reuse reviewed prompts in one session or as the seed for a multi-workspace broadcast.
+- [Use snippet workflows](https://lazybox.ai/docs/how-to/use-snippets/): Send, repeat, create, scope, and broadcast workflows with recent-first and per-workspace memory.
 - [Per-repo env and mounts](https://lazybox.ai/docs/how-to/per-repo-env-and-mounts/): Inject env vars, symlink shared dirs, materialize scripts.
 - [Remote over SSH](https://lazybox.ai/docs/how-to/remote-over-ssh/): Run the daemon remotely and the TUI locally over a forwarded socket.
 - [Mirror to Slack](https://lazybox.ai/docs/how-to/mirror-to-slack/): Reflect the inbox into Slack channels.

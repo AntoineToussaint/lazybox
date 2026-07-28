@@ -751,7 +751,7 @@ impl ActionDef {
                 kind: ActionKind::OpenTour,
                 default_keys: "Shift-T",
                 label: "tour",
-                describe: "Launch the guided onboarding walkthrough (start from scratch, inbox, putting an agent on a task, juggling sessions, config).",
+                describe: "Launch the guided onboarding walkthrough (start from scratch, inbox, agents, snippet workflows + memory, juggling sessions, config).",
                 section: Section::Global,
             },
             ActionKind::OpenSyncStatus => &Self {
@@ -800,7 +800,7 @@ impl ActionDef {
                 kind: ActionKind::OpenSnippets,
                 default_keys: "]",
                 label: "snippets",
-                describe: "Browse the snippet library — every `]]s<key>` shortcut with its description and body, so you can see what's available without already knowing the key. Press `e` to edit the YAML file; restart to reload.",
+                describe: "Browse the snippet workflow library — every `]]s<key>` shortcut with its description and body, so you can see what's available without already knowing the key. Press `e` to edit the YAML file; restart to reload.",
                 section: Section::Global,
             },
             ActionKind::JumpToWorkspace => &Self {

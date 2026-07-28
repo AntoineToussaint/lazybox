@@ -191,11 +191,13 @@ palette entries. Output persists to `config.yaml` (`PersistedSetup`).
 **Key bindings:** `Shift-T`
 
 ### What it does
-A guided walkthrough of lazybox's main features (inbox, contextual work
-routing, navigation, config), shown once on first run and re-openable on
-demand. Its work card demonstrates how the same `w w` action becomes issue
-implementation, CI repair, or selected-review-comment work, then explains
-running/default-agent and model-tier routing.
+A guided walkthrough of lazybox's main workflows, shown once on first run and
+re-openable on demand. Its work card demonstrates how the same `w w` action
+becomes issue implementation, CI repair, or selected-review-comment work, then
+explains running/default-agent and model-tier routing. Snippets get two
+dedicated cards: send a built-in workflow through the real picker, then repeat
+it through persisted Recent memory and read the per-workspace `]N` progress
+cue.
 
 ### How to use it
 Press `Shift-T` to launch it; it also auto-runs the first time (`ui.tour_seen`
@@ -207,6 +209,8 @@ gates the auto-launch).
 - [ ] It doesn't auto-run again after being seen.
 - [ ] The work card demonstrates issue, failing-CI, and selected-comment prompts.
 - [ ] The work card explains live/default-agent routing and priority/explicit tiers.
+- [ ] Separate snippet cards exercise fast send/preview and Recent/`]N` memory.
+- [ ] The memory card demonstrates Ask Lazybox hot reload and `Shift-B`.
 
 ### Known sharp edges
 - Newer surface; content may lag behind feature changes.

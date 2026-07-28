@@ -472,6 +472,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::CommandRejected { .. }
                 | IpcEvent::AgentCliUpdatesChecked { .. }
                 | IpcEvent::AgentCliUpdateFinished { .. }
+                | IpcEvent::SnippetDelivered { .. }
                 | IpcEvent::RecoveredTerminalsRequireRestart { .. } => {}
             }
         }
@@ -1099,6 +1100,7 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::CommandRejected { .. }
             | IpcEvent::AgentCliUpdatesChecked { .. }
             | IpcEvent::AgentCliUpdateFinished { .. }
+            | IpcEvent::SnippetDelivered { .. }
             | IpcEvent::RecoveredTerminalsRequireRestart { .. } => {}
         }
         // Background-poll indicator. Lights up whenever the daemon
@@ -1311,6 +1313,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::CommandRejected { .. }
                 | IpcEvent::AgentCliUpdatesChecked { .. }
                 | IpcEvent::AgentCliUpdateFinished { .. }
+                | IpcEvent::SnippetDelivered { .. }
                 | IpcEvent::RecoveredTerminalsRequireRestart { .. } => {}
             }
         }
@@ -1330,10 +1333,53 @@ impl<T: TerminalAdapter> Model<T> {
         if let IpcEvent::Notification { body, .. } = &event {
             self.flash_hint(body.clone());
         }
+        if let IpcEvent::SnippetDelivered {
+            terminal_id,
+            snippet_key,
+            prompt,
+            ..
+        } = &event
+        {
+            self.apply_recent_snippet(snippet_key.clone());
+            if let Some(prompt) = prompt {
+                self.terminals
+                    .apply_delivered_prompt(*terminal_id, prompt.clone());
+            }
+            let tour_step = match &self.modal_flow {
+                Some(ModalFlow::TourSnippet {
+                    terminal,
+                    success_step,
+                    ..
+                }) if terminal == terminal_id => Some(*success_step),
+                _ => None,
+            };
+            if let Some(step) = tour_step {
+                self.modal_flow = None;
+                self.mount_tour_at(step);
+            }
+            self.flash_info(format!("sent snippet ]{snippet_key}"));
+            self.redraw = true;
+        }
         // Terminal delivery failures are retryable user-input errors, not
         // provider polling failures. Keep them out of the sync log/modal and
         // surface the exact recovery action in the footer/messages history.
-        if let IpcEvent::TerminalInputRejected { message, .. } = &event {
+        if let IpcEvent::TerminalInputRejected {
+            terminal_id,
+            message,
+        } = &event
+        {
+            let tour_step = match &self.modal_flow {
+                Some(ModalFlow::TourSnippet {
+                    terminal,
+                    return_step,
+                    ..
+                }) if terminal == terminal_id => Some(*return_step),
+                _ => None,
+            };
+            if let Some(step) = tour_step {
+                self.modal_flow = None;
+                self.mount_tour_at(step);
+            }
             self.flash(
                 format!("⚠ terminal input not delivered — {message}"),
                 crate::realm::components::footer::NoticeSeverity::Retryable,

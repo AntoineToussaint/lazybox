@@ -230,9 +230,10 @@ pub enum PromptSource {
 pub struct UserPrompt {
     /// The submitted prompt text (already trimmed, newlines preserved).
     pub text: String,
-    /// Unix-epoch milliseconds when the client submitted it. Generated
-    /// once client-side and stored verbatim so a single timestamp
-    /// follows the entry through persistence and replay.
+    /// Unix-epoch milliseconds when lazybox accepted the submission.
+    /// Generated once by the component that confirms delivery and stored
+    /// verbatim so a single timestamp follows the entry through
+    /// persistence and replay.
     pub timestamp_ms: u64,
     /// Whether this prompt was typed or expanded from a snippet.
     #[serde(default)]
@@ -1133,29 +1134,19 @@ pub enum Command {
     UpdateBranch {
         workspace_key: lazybox_core::WorkspaceKey,
     },
-    /// Record a snippet shortcut key as sent to a workspace's agent
-    /// (issue #463). The daemon prepends it to the workspace's MRU
-    /// `sent_snippets` (like `SetNotes`) and re-broadcasts
-    /// `WorkspaceUpserted`, giving every TUI a per-session record of
-    /// "what I've already told this agent" and its sidebar indicator.
-    /// Local-only — never synced to any provider. Appended last (bincode
-    /// is ordinal-sensitive).
-    RecordSentSnippet {
-        session_key: SessionKey,
+    /// Deliver a snippet to a live terminal and record its histories only
+    /// after the backend accepts the write (and, for an agent composer,
+    /// submission is confirmed). The daemon derives the workspace from
+    /// `terminal_id`, preventing a client from attributing a delivery to a
+    /// different workspace. Success is reported through
+    /// [`Event::SnippetDelivered`]; failure through
+    /// [`Event::TerminalInputRejected`]. Appended last (bincode is
+    /// ordinal-sensitive).
+    DeliverSnippet {
+        terminal_id: TerminalId,
         snippet_key: String,
-    },
-    /// Record a snippet key as freshly used, updating the daemon-owned
-    /// most-recently-used list (`recent_snippets`) that floats a
-    /// "Recent" group to the top of every snippet picker (#311). The
-    /// daemon de-duplicates, prepends, and caps the list, then replays
-    /// the new order to every client via `Event::Snapshot`'s
-    /// `recent_snippets`. Fire-and-forget, keyed to no session — the MRU
-    /// is global. Routing it through the daemon (issue #548) is what
-    /// lets a `--connect` client share the same MRU as the in-process
-    /// TUI instead of forking a client-local copy. Appended last
-    /// (bincode is ordinal-sensitive).
-    RecordRecentSnippet {
-        key: String,
+        category: String,
+        body: String,
     },
     /// Mark an update target as dismissed so the startup update modal
     /// stops re-appearing for it (issue #548). `target` is the opaque
@@ -1851,6 +1842,16 @@ pub enum Event {
         workspace_key: lazybox_core::WorkspaceKey,
         pr_label: String,
         reason: String,
+    },
+    /// A [`Command::DeliverSnippet`] reached the terminal and its durable
+    /// histories were updated. `prompt` is present for agent terminals,
+    /// whose recap/history display submitted prompts; shell deliveries
+    /// have no prompt history. Appended last.
+    SnippetDelivered {
+        terminal_id: TerminalId,
+        session_key: SessionKey,
+        snippet_key: String,
+        prompt: Option<UserPrompt>,
     },
 }
 

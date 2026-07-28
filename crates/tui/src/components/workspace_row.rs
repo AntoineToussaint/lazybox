@@ -100,10 +100,9 @@ pub struct WorkspaceRowCtx<'a> {
     /// (`Workspace::has_notes` — issue #458). Renders a small ` ✎ ` pill
     /// so the user can see, at a glance, which rows have a scratchpad.
     pub has_notes: bool,
-    /// Count of distinct snippets sent to this workspace's agent
-    /// (`Workspace::sent_snippets` — issue #463). Renders a dim ` ]N `
-    /// pill so the user can see, at a glance, how much they've already
-    /// directed each agent. `0` renders nothing.
+    /// Count of recently distinct snippets sent to this workspace's agent
+    /// (`Workspace::sent_snippets` — issue #463), bounded by
+    /// `SENT_SNIPPETS_MAX`. Renders a dim ` ]N ` pill; `0` renders nothing.
     pub sent_snippet_count: usize,
 }
 
@@ -710,8 +709,8 @@ fn cell_notes(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     Cell::from_span(Span::styled(" ✎ ", style))
 }
 
-/// The `]N` sent-snippet badge (issue #463) — a dim count of how many
-/// snippets this agent's been sent. Its own center-aligned,
+/// The `]N` sent-snippet badge (issue #463) — a dim count of the
+/// workspace's bounded recent-distinct history. Its own center-aligned,
 /// Max-collapsing column (#524), so a lone `]2` centers under a wider
 /// `]12` from another row instead of clinging to an edge.
 fn cell_snippet(ctx: &WorkspaceRowCtx<'_>) -> Cell {
@@ -1636,7 +1635,7 @@ mod tests {
     /// (#524).
     #[test]
     fn cell_snippet_shows_badge() {
-        let ws = Workspace::empty(
+        let mut ws = Workspace::empty(
             lazybox_core::WorkspaceKey("scratch".into()),
             "main",
             fixed_time(),
@@ -1649,6 +1648,17 @@ mod tests {
         ctx.sent_snippet_count = 3;
         let cell = cell_snippet(&ctx);
         assert_eq!(cell.spans[0].content.as_ref(), " ]3 ");
+
+        for index in 0..=lazybox_core::SENT_SNIPPETS_MAX {
+            ws.record_sent_snippet(format!("workflow-{index}"));
+        }
+        let mut capped = ctx_for(&ws, &placeholder, &theme);
+        capped.sent_snippet_count = ws.sent_snippets.len();
+        assert_eq!(
+            cell_snippet(&capped).spans[0].content.as_ref(),
+            " ]12 ",
+            "the rendered badge is the bounded recent-distinct count",
+        );
     }
 
     /// The ARM badge rides in its own column ahead of the live CI pill

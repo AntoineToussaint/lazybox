@@ -1,211 +1,177 @@
-# Snippets
+# Snippets: reusable workflows with memory
 
-Snippets are short keystroke shortcuts that expand into pre-defined
-prompts and **auto-submit** to the active agent. The point is to put
-repeated, multi-sentence prompts ("review the diff", "open a PR",
-"run the pre-deploy checks") a few keystrokes away — without the
-classic snippet-system flaw of "expand, then wait for me to press
-Enter."
+Turn the instructions you use every day — review this change, fix CI,
+integrate feedback, run the final checks — into one fast action.
+lazybox remembers what you used recently and which workflows each
+workspace has already received.
 
-Snippets are **plain YAML files** you own and keep in version control
-or your dotfiles. You can edit those files directly, or ask **Ask
-Lazybox** to create or improve a snippet through a validated
-confirm-with-preview. Discovery lives in the app too: a read-only
-**snippets browser** (press `]`
-from the sidebar / activity panes, or pick **Browse snippets** from the
-`,` Settings palette) lists every snippet — key, origin, description,
-and body — so you can see what's available without already knowing a
-key. Press `e` in the browser to jump to the YAML file.
-This page documents that full lifecycle — create, browse, list/use,
-edit, delete — plus the file format and the picker reference.
+A snippet is a short key backed by a complete agent instruction. It is
+sent and **submitted** to the focused agent in one action, not merely
+pasted for you to finish. lazybox ships 41 categorized workflows, so
+the system is useful before you create anything: review (`rev`,
+`deepreview`, `audit`), Git and PR (`pr`, `rebase`, `push`), testing
+(`test`, `tdd`, `repro`), debugging (`bug`, `bisect`, `trace`),
+security (`sec`, `deps`, `leaks`), and more.
 
-lazybox ships a **broad, categorized built-in library** (~41 prompts)
-so a fresh install has plenty to expand out of the box — review
-(`rev`, `deepreview`, `nit`, plus the dedicated suite `audit` for a
-full pre-ship pass, `arch` for a staff-engineer design review, and
-`hotpath` for a performance review), git & PR (`pr`, `ready`, `commit`,
-`rebase`, `sync`, `resume`, `push`, `squash`), testing (`test`, `tdd`, `repro`), debugging
-(`bug`, `bisect`, `trace`), refactor (`refac`, `rename`, `extract`),
-performance (`perf`, `bench`), security (`sec`, `deps`, `leaks`),
-docs (`doc`, `readme`, `adr`), and chores (`lint`, `ci`, `clean`).
-Anything you define with the same key transparently overrides the
-built-in; you never have to start from an empty library.
+## Send and repeat a workflow
 
-## Quick start
+1. Focus an agent terminal and type `]]s`. The categorized picker opens
+   with a live preview of the selected workflow.
+2. Type `rev`. Because that key is a unique match, lazybox immediately
+   sends and submits the built-in review workflow. The full fast path is
+   `]]srev`; it needs no extra `Enter`.
+3. Return later and open `]]s` again. The workflow you just used is
+   selected in the **Recent** group, so repeating it is `]]s` then
+   `Enter`.
 
-1. Create `~/.lazybox/snippets.yaml` (or run **Settings → Edit snippets**,
-   which seeds a starter file):
+The picker stays open until you send or cancel; there is no timer.
+`↑`/`↓` moves the selection, `Enter` sends the highlighted workflow,
+and `Esc` or `Ctrl-C` cancels. Typing filters case-insensitively across
+the key, description, and category. An exact key auto-submits only when
+it is the sole key with that prefix, so ambiguous shortcuts remain in
+the picker for you to resolve.
 
-   ```yaml
-   snippets:
-     rev:
-       description: Review current diff
-       body: |
-         Please review the current diff for correctness bugs and
-         obvious cleanups. Focus on the changes only, not the
-         surrounding code.
-   ```
+The `]]` terminal leader also holds `]]q` (return to the sidebar),
+`]]f` (focus mode), `]]<digit>` (jump to an agent workspace), and
+`` ]]` `` (workspace switcher). It is non-timed: after `]]`, lazybox
+waits for a command instead of racing your next key. A lone `]` followed
+by any non-`]` key is sent to the terminal verbatim. You can change the
+prefix with `terminal.escape_char`.
 
-2. (Re)start lazybox after a manual YAML edit. Ask Lazybox additions
-   hot-reload without a restart.
-3. Open a session, focus its terminal, and type `]]s` to open the
-   snippet picker, then `rev`. As soon as the typed text uniquely
-   matches the key, the body is sent to the agent and submitted
-   immediately — the whole chord reads `]]srev`.
+## Discover and preview workflows
 
-## The lifecycle
+The picker is organized for a catalog larger than a handful of keys:
 
-### Create
+- Category headers group Review, Git & PR, Testing, Debugging, and other
+  workflows.
+- Live filtering matches the key, description, and category.
+- The right pane previews the full wrapped body, category, and origin
+  (`built-in`, `global`, or `repo`) before you send it. `repo` means the
+  launch-directory layer described below; it does not follow workspace
+  selection.
+- A visible/total count and scrolling list keep filtered results
+  legible.
 
-Add an entry under the `snippets:` map in either file (see
-[File locations](#file-locations--precedence)):
+To browse without a focused terminal, press `]` from the sidebar or
+activity pane, or choose **Browse snippets** from the `,` Settings
+palette. This read-only catalog shows every merged workflow with its
+key, origin, description, and full body. `↑`/`↓` scrolls and `e` opens
+the global YAML file in your editor.
+
+## Understand Recent and the `]N` workspace badge
+
+lazybox keeps two complementary memories:
+
+- **Recent is your global fast lane.** The five most recently sent
+  snippet keys float to the top of every picker, newest first, with the
+  latest selected. The MRU is de-duplicated and persisted in
+  `~/.lazybox/v2/state.db`, so `]]s` then `Enter` still repeats the last
+  workflow after a restart. Start typing to leave Recent and search the
+  full catalog.
+- **`]N` is per-workspace progress.** Each workspace persists an MRU of
+  the 12 most recently distinct snippet keys delivered to its agents.
+  The sidebar badge is that bounded count: `]2` means two different
+  workflows are in recent history there, while `]12` means the history
+  is full and older keys have fallen out. Re-sending one moves it to the
+  front without increasing the count. This is a quick cue that review,
+  testing, or another repeatable process has recently started.
+
+Only successfully delivered snippets enter either history; opening or
+cancelling the picker records nothing.
+
+## Create or improve a workflow with Ask Lazybox
+
+Press `?` and ask in plain language:
+
+> Add a snippet called `feedback` that integrates review feedback,
+> runs the relevant tests, and commits the result.
+
+Ask Lazybox proposes a global snippet as a **confirm-with-preview**,
+including its key, category, description, body, and destination file.
+If the key already exists, the preview says it will replace the
+workflow and defaults to the safer decline choice. Accepting makes
+lazybox validate and write `~/.lazybox/snippets.yaml`, then hot-reload
+the merged catalog. The new or improved workflow is available through
+`]]s<key>` immediately, with no restart. Declining writes nothing.
+
+This is an allowlisted action: lazybox owns and validates the write.
+Ask Lazybox creates and updates the **global** layer; edit the
+launch-directory file directly when that client should use an override. See
+[TUI & UX → Ask Lazybox](features/tui-and-ux.md#ask-lazybox--shortcut-index).
+
+## Create a workflow in YAML
+
+Add an entry under `snippets:` in the global or launch-directory file:
 
 ```yaml
 snippets:
-  pr:
-    description: Open a PR with summary + test plan
+  feedback:
+    description: Integrate review feedback and verify it
+    category: Review
     body: |
-      Please open a PR for the current branch. Use a concise title.
-      The body should include a Summary section (1-3 bullets) and a
-      Test plan section as a checklist.
+      Read the unresolved review comments, implement each requested
+      change that is still applicable, run the relevant tests, and
+      commit the result. Report any comment you did not address and why.
 ```
 
-The outer key (`pr`) is the shortcut you type after the `]]` leader.
-The `description` is an optional one-line label shown in the picker;
-`body` is the text sent to the agent.
+The outer key (`feedback`) is what you type after `]]s`.
+`description` and `category` make the workflow easier to discover;
+`body` is the complete instruction sent to the agent. Hand-edited files
+are loaded at startup, so restart lazybox after changing them.
 
-Snippets edited by hand are loaded at startup, so **restart lazybox**
-(or relaunch it) to pick up a manual file change. Ask Lazybox additions
-take the validated native write path and hot-reload immediately.
+## Choose the right scope
 
-#### Let Ask Lazybox add it for you
+The three layers merge from least to most specific:
 
-You don't have to hand-edit the file. Ask the built-in help assistant
-(`?`) to add a snippet — "add a snippet that integrates review feedback
-and commits" — and it proposes the entry as a **confirm-with-preview**.
-Accept it and lazybox writes it to your global `snippets.yaml` and
-reloads the catalog **live**, so `]]s<key>` works right away with no
-restart. Decline and nothing changes.
+| Scope          | Path                          | Use it for                                      |
+| -------------- | ----------------------------- | ----------------------------------------------- |
+| **Built-in**   | _(shipped with lazybox)_       | 41 categorized daily engineering workflows.    |
+| **Global**     | `~/.lazybox/snippets.yaml`     | Personal habits reused across every repository. |
+| **Launch directory** | `<launch-dir>/.lazybox/snippets.yaml` | Overrides for this lazybox client catalog. |
 
-Adding a snippet is one of a small, fixed allowlist of actions the help
-assistant can perform — `add_snippet` and `edit_config` (setting an
-allowlisted config key like `ui.theme`, `setup.default_agent`, or
-`ui.keymap_preset`). Every action goes through the same
-confirm-with-preview, lazybox validates it and rejects anything off the
-allowlist, and lazybox — not the agent — owns every write. See
-[TUI & UX → Ask Lazybox](features/tui-and-ux.md#ask-lazybox--shortcut-index).
+Precedence is **built-in → global → launch directory**, so the last
+definition of a key wins. Launching lazybox from a project can redefine
+`test` with that checkout's command or tighten `rev` around its conventions.
+Origin labels in the picker show `repo` for this winning directory layer.
 
-### Browse
+The directory layer is resolved once, relative to where lazybox was launched,
+and the merged catalog is shared by every workspace in that client. Selecting
+another workspace does not load that workspace's `.lazybox/snippets.yaml`;
+restart lazybox from a different directory to select a different directory
+layer. Both user-owned files are optional and work well in dotfiles or version
+control.
 
-The **snippets browser** is the answer to "what's even available?" —
-a read-only modal listing every merged snippet with its key, origin
-tag, description, and full body. Open it with `]` from the sidebar or
-activity pane, or via **Settings → Browse snippets**; it's also in the
-`?` shortcut index under Ask Lazybox. `↑`/`↓` scroll, `e` opens the
-global YAML file in your editor, and any other key closes it. Unlike
-the terminal `]]` leader it needs no focused session and you don't
-have to know a key first.
+## Broadcast one workflow to several workspaces
 
-### List & use
+Use snippets to keep a fleet of agents on the same process:
 
-Snippets live under the **`]]` leader** — the double-bracket chord that
-opens a small command menu from a focused terminal (a which-key popup
-lists it). The commands:
+1. In the sidebar, press `v` on each target workspace.
+2. Press `Shift-B` and choose a snippet. `Ctrl-F` skips directly to
+   free text when you do not want one.
+3. Review or extend the pre-filled body in the compose textarea, then
+   submit.
 
-- **`]]s`** — opens the **snippet picker**, a real, dwellable modal: it
-  stays open until you send or cancel — no timer, PTY output, or focus
-  change closes it. Keep typing to filter, use `↑`/`↓` to move, and
-  press `Enter` to send the highlighted row. `Esc` (or `Ctrl-C`)
-  cancels without sending.
-- **`]]srev`** — the fast path: when what you type in the picker exactly
-  equals a snippet key (here `rev`) and it's the only snippet whose key
-  starts with that text, the body is **sent and submitted immediately,
-  no `Enter`** — and no second look. If you author a snippet whose body
-  drives something irreversible, keep that in mind: the exact-key path
-  skips the preview dwell (it only fires on a unique, unambiguous key).
-- **Recent first.** Snippets you've sent float into a
-  **Recent** group at the top of the picker, most-recent first, with the
-  cursor on the last one — so repeating a snippet is `]]s` then `Enter`.
-  Start typing and the Recent group steps aside (a filter means "find",
-  not "repeat"). The list persists across restarts (stored in the state
-  DB, not `snippets.yaml`).
-- **`]]q`** — exits the terminal pane back to the sidebar. **`]]f`**
-  toggles focus mode, **`]]<digit>`** jumps to the Nth agent workspace,
-  and **`` ]]` ``** opens the fuzzy workspace switcher.
-- The leader is *non-timed* (#252): after `]]` it waits for the command
-  key rather than leaving on an idle timer, so pausing to read the popup
-  never drops you to the sidebar mid-decision. `Esc` or any unbound key
-  cancels back to the terminal.
-- **A lone `]`** — a single `]` followed by any non-`]` key is sent to
-  the agent verbatim, so `]` is typeable in code, arrays, and
-  markdown. Only the doubled `]]` is intercepted. To type a literal
-  `]]` into an agent (nested arrays, some markdown), remap the prefix
-  with `terminal.escape_char` to a character you don't type, e.g. `}`.
+Running agents receive the instruction through the normal agent inject
+path; plain shells receive a direct write. Workspaces without a session
+are skipped and named in the summary. A snippet-seeded broadcast records
+the snippet once in Recent and on every workspace that actually received
+it, so the `]N` badges reflect the rollout.
 
-The picker is a small overlay; the terminal stays focused underneath.
-Rows are **grouped under category headers** (Review, Git & PR,
-Testing, …), each row showing a category-colored tag, the snippet key,
-and its description; the header line shows the visible/total count. A
-**live preview pane** on the right renders the highlighted snippet's
-full (wrapped) body, its category, and its `origin`
-(`built-in` / `global` / `repo` — see
-[precedence](#file-locations--precedence)) so you see exactly what
-will be sent before it auto-submits. The list **scrolls** to keep the
-cursor in view as you move.
-
-Filtering is case-insensitive and matches the snippet **key**, its
-**description**, and its **category** — so you can find a snippet by
-what it *does*, not only by a key you already know. The `]]srev`
-exact-key fast path is preserved: when what you type in the picker
-is the *only* snippet key that starts with it and equals it exactly,
-the body auto-submits immediately, regardless of any description-only
-matches.
-
-### Broadcast a snippet to a fleet
-
-From the sidebar, `v` marks workspaces across repo groups and `Shift-B`
-opens the broadcast flow. Pick a snippet, edit its body once while the
-target recap stays visible, and submit it to every selected live session.
-The broadcast moves the snippet into Recent once and records it on each
-workspace that actually received it; session-less rows are skipped and
-named without changing their `]N` cue.
-
-The task-oriented
+The
 [multi-agent orchestration guide](https://lazybox.ai/docs/how-to/orchestrate-multiple-agents/)
-covers free-text mode, mixed agent/shell delivery, skips and retries,
-and per-workspace history.
+covers free-text mode, mixed agent/shell delivery, skips, retries, and
+per-workspace history.
 
-### Edit
+## Update or remove a workflow
 
-Edit the entry in the YAML file and restart lazybox, or ask Ask Lazybox
-to improve the existing key and approve its preview for an immediate
-hot reload. Because repo-local snippets override global ones on key
-conflict, you can also "edit" a shared global snippet for one project
-by redefining the same key in that repo's `.lazybox/snippets.yaml`.
+Ask Lazybox can replace a global key with a confirmed, hot-reloaded
+version. For direct edits, change the YAML entry and restart lazybox.
+Redefining a global key in the launch-directory file updates that workflow for
+the whole client started from that directory.
 
-### Delete
-
-Remove the entry from the YAML file (or delete the file to clear all
-of its snippets) and restart lazybox. Deleting a repo-local entry that
-shadowed a global one re-exposes the global snippet under that key.
-
-## File locations & precedence
-
-Two files contribute, layered on top of the built-in set. Both files
-are optional; a missing file simply contributes nothing.
-
-| Scope          | Path                          | Use it for                                        |
-| -------------- | ----------------------------- | ------------------------------------------------- |
-| **Built-in**   | _(shipped with lazybox)_        | A broad, categorized starter library (~41 prompts). |
-| **Global**     | `~/.lazybox/snippets.yaml`      | Your personal library, shared across all repos.   |
-| **Repo-local** | `<repo>/.lazybox/snippets.yaml` | Project-specific prompts, checked into the repo.   |
-
-The repo-local file is resolved relative to the directory lazybox was
-launched from. The sets are **merged** with precedence, lowest to
-highest, **built-in → global → repo** — so a key conflict resolves to
-the most specific definition. A project can override a shared shortcut
-(e.g. a project-specific `rev`) without touching your personal
-library, and either file can override a built-in.
+To remove a workflow, delete its YAML entry and restart. Removing a
+launch-directory override reveals the global or built-in definition beneath
+it; removing a global override does the same for the built-in.
 
 ## House style for bodies
 

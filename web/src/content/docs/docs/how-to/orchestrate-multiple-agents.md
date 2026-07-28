@@ -49,7 +49,7 @@ with a one-off request before submitting.
 
 This keeps the repeatable part reviewed and reusable without making the final
 message rigid. See [Use snippets](/docs/how-to/use-snippets/) for the built-in,
-global, and repo-local libraries.
+global, and client-wide launch-directory libraries.
 
 ### Go straight to free text
 
@@ -73,13 +73,13 @@ The agent path is the same path used for a normal single-session prompt. It
 avoids treating a pasted multiline body and its submit key as one burst, which
 some agent composers interpret as a soft newline instead of a send.
 
-A mixed result is explicit:
+A mixed queue result is explicit:
 
 ```text
-sent to 3 workspaces (1 skipped: no session — docs #622)
+queued for 3 workspaces (1 skipped: no session — docs #622)
 ```
 
-- If at least one target received the instruction, lazybox clears the selection.
+- If at least one target was queued, lazybox clears the selection.
   Start a session and reselect any skipped rows if they still need the message.
 - If every target was skipped, the selection stays marked so you can start the
   missing sessions and retry.
@@ -87,11 +87,11 @@ sent to 3 workspaces (1 skipped: no session — docs #622)
 
 ## 5. Confirm Recent and per-workspace history
 
-For a snippet-seeded broadcast, lazybox records the snippet in **Recent once**
-for the broadcast, not once per target. It also records the snippet key on every
-workspace that actually received it, so each delivered row's `]N` cue continues
-to show the correct number of distinct saved workflows used there. Skipped rows
-remain unchanged.
+For a snippet-seeded broadcast, confirmed deliveries de-duplicate the snippet
+in **Recent**. lazybox also records the key on every workspace that actually
+received it, so each delivered row's `]N` cue continues to show the bounded
+recent-distinct workflow history there. Failed and skipped rows remain
+unchanged.
 
 Free-text broadcasts do not alter snippet Recent or `]N` cues. Agent deliveries
 still appear in that session's prompt history (`]]h`) like a normal prompt.

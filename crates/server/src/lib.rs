@@ -1154,8 +1154,7 @@ impl Server {
                         lazybox_ipc::Command::CheckAgentCliUpdates => "CheckAgentCliUpdates",
                         lazybox_ipc::Command::UpdateAgentClis => "UpdateAgentClis",
                         lazybox_ipc::Command::SetNotes { .. } => "SetNotes",
-                        lazybox_ipc::Command::RecordSentSnippet { .. } => "RecordSentSnippet",
-                        lazybox_ipc::Command::RecordRecentSnippet { .. } => "RecordRecentSnippet",
+                        lazybox_ipc::Command::DeliverSnippet { .. } => "DeliverSnippet",
                         lazybox_ipc::Command::SetUpdateDismissal { .. } => "SetUpdateDismissal",
                         lazybox_ipc::Command::Shutdown => "Shutdown",
                     };
@@ -1412,7 +1411,8 @@ fn command_lane(cmd: &lazybox_ipc::Command) -> CommandLane {
         Command::Write { .. }
         | Command::Resize { .. }
         | Command::Close { .. }
-        | Command::InjectPrompt { .. } => CommandLane::TerminalIo,
+        | Command::InjectPrompt { .. }
+        | Command::DeliverSnippet { .. } => CommandLane::TerminalIo,
         Command::RecordUserMessage { .. } | Command::RecordComposingBuffer { .. } => {
             CommandLane::TerminalPersistence
         }
@@ -1653,6 +1653,15 @@ pub async fn dispatch_command(
             )
             .await;
         }
+        lazybox_ipc::Command::DeliverSnippet {
+            terminal_id,
+            snippet_key,
+            category,
+            body,
+        } => {
+            spawn_handler::handle_deliver_snippet(config, terminal_id, snippet_key, category, body)
+                .await;
+        }
         lazybox_ipc::Command::RecordComposingBuffer {
             terminal_id,
             buffer,
@@ -1809,16 +1818,6 @@ pub async fn dispatch_command(
         lazybox_ipc::Command::SetNotes { session_key, notes } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
             polling::set_notes(config, &key, notes).await;
-        }
-        lazybox_ipc::Command::RecordSentSnippet {
-            session_key,
-            snippet_key,
-        } => {
-            let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
-            polling::record_sent_snippet(config, &key, snippet_key).await;
-        }
-        lazybox_ipc::Command::RecordRecentSnippet { key } => {
-            client_kv::record_recent_snippet(config, key).await;
         }
         lazybox_ipc::Command::SetUpdateDismissal { target } => {
             client_kv::set_update_dismissal(config, target).await;

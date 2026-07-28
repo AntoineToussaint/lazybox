@@ -1,12 +1,12 @@
 ---
 title: Quickstart
-description: Open your first live workspace, then coordinate the same next step across two sessions.
+description: Open your first live workspace, send a reusable workflow, then coordinate two sessions.
 ---
 
 In a few minutes you will install lazybox, launch it, open a workspace with a
 live embedded terminal, and send one reviewed instruction to two sessions.
-Those two wins cover the core loop: start work in isolation, then coordinate a
-small fleet from the inbox.
+Those wins cover the core loop: start work in isolation, reuse a reviewed
+workflow, then coordinate a small fleet from the inbox.
 
 For a real GitHub inbox you need the **GitHub CLI**, logged in. Run
 `gh auth login` once — lazybox reads your token from `gh auth token`. The
@@ -115,7 +115,32 @@ An empty sidebar right after setup is normal, not a bug:
   workspace and open a session in it.
 :::
 
-## 4. Coordinate two workspaces at once
+## 4. Your daily fast path: send a reusable workflow
+
+If you started an agent above, wait for its contextual task to finish, then keep
+the terminal focused:
+
+1. Type `]]s` to open the categorized snippet picker. Move with `↑`/`↓`; the
+   right pane previews the complete instruction and shows whether it is
+   built-in, global, or from the directory where lazybox was launched.
+2. Type `rev`. The built-in review workflow is a unique key, so lazybox sends
+   and submits it immediately. The whole action is `]]srev`; there is no extra
+   `Enter`.
+3. After the agent finishes, open `]]s` again. `rev` is selected in the
+   **Recent** group, so the workflow is now one `Enter` away. Recent persists
+   across lazybox restarts.
+
+Back in the inbox, the workspace now carries a `]1` badge: one recently
+distinct snippet workflow has been sent there. That bounded history is
+persisted per workspace, so it remains a quick progress cue while you juggle
+several agents.
+
+:::note[Started a plain shell?]
+Snippet bodies are submitted to the focused terminal. Start an agent with
+`w w` or the `a` menu before trying the built-in `rev` workflow.
+:::
+
+## 5. Coordinate two workspaces at once
 
 Now experience the fleet workflow instead of visiting each terminal:
 
@@ -130,10 +155,8 @@ Now experience the fleet workflow instead of visiting each terminal:
    built-in `audit` snippet, and edit its pre-filled body into the exact
    instruction both agents should receive. To try the free-text path instead,
    press `Ctrl-F` in the snippet picker.
-5. Submit once. Both live agents receive the instruction; the footer reports
-   the delivery. Back in the sidebar, the delivered rows' `]N` cues reflect
-   `audit` in their per-workspace snippet history, and reopening the picker
-   shows it in **Recent**.
+5. Submit once. The footer reports which live sessions were queued, and each
+   confirmed delivery updates Recent and that workspace's `]N` history.
 
 No agent CLI available? Start a plain shell in each workspace with `s`, choose
 the `Ctrl-F` free-text path, and broadcast a safe shell command such as:
@@ -161,3 +184,5 @@ Then wire up a real repository:
 - **[Start from an issue and keep your session in the
   PR](/docs/how-to/keep-session-from-issue-to-pr/)** to carry a running agent
   forward when its implementation pull request appears.
+- **[Use snippet workflows](/docs/how-to/use-snippets/)** to create, scope, and
+  broadcast the repeatable instructions your agents use every day.

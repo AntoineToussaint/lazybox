@@ -126,6 +126,7 @@ const steps = [
         </a>
         <div class="links">
           <a href="#workflows" class="hide-sm">Workflows</a>
+          <a href="#snippets" class="hide-sm">Snippets</a>
           <a href="#orchestration" class="hide-sm">Orchestration</a>
           <a href="#handoff" class="hide-sm">Issue → PR</a>
           <a href="#features" class="hide-sm">Features</a>
@@ -196,9 +197,172 @@ const steps = [
           <span><b class="mk">⑂</b> Transparent task worktrees</span>
           <span><b class="mk">◉</b> Stable, accurate agent status</span>
           <span><b class="mk">↻</b> Restart-safe tmux sessions</span>
+          <span><b class="mk">]N</b> Workflow memory</span>
         </div>
       </div>
     </div>
+
+    <section id="snippets" class="snippets-section">
+      <div class="container">
+        <div class="snippet-showcase">
+          <div class="snippet-copy" data-reveal>
+            <p class="kicker">Repeatable workflows with memory</p>
+            <h2>The instructions you use every day, one action away.</h2>
+            <p class="snippet-lead">
+              Turn “review this change,” “fix CI,” “integrate feedback,” or “run the
+              final checks” into a fast, visible workflow. lazybox remembers what you
+              used recently and what each workspace has already received.
+            </p>
+            <div class="snippet-points">
+              <div class="snippet-point">
+                <code>]]srev</code>
+                <span>A unique key sends and submits the full review workflow immediately.</span>
+              </div>
+              <div class="snippet-point">
+                <strong>Recent</strong>
+                <span>Your last workflows float to the top and persist across restarts.</span>
+              </div>
+              <div class="snippet-point">
+                <code>]N</code>
+                <span>Every workspace tracks up to 12 recently distinct workflows.</span>
+              </div>
+            </div>
+            <p class="snippet-broadcast">
+              Select several workspaces and <kbd>Shift-B</kbd> broadcasts the same
+              workflow across every running agent.
+            </p>
+            <a class="snippet-link" href="/docs/how-to/use-snippets/">Explore snippet workflows →</a>
+          </div>
+
+          <div class="snippet-window" data-reveal>
+            <div class="snippet-window-bar">
+              <div class="window-dots" aria-hidden="true">
+                <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+              </div>
+              <span>lazybox — snippet workflow</span>
+            </div>
+            <div
+              class="snippet-scenes"
+              role="img"
+              aria-label="Animated lazybox sequence: filter and preview the review snippet, send it to an agent, repeat it from Recent, then see per-workspace snippet counts in the inbox"
+            >
+              <div class="snippet-scene scene-picker">
+                <span class="scene-label">01 · Pick + preview</span>
+                <div class="picker-title">
+                  <span>Snippets · 9/41</span>
+                  <span class="filter">filter: <b>review</b><i>▌</i></span>
+                </div>
+                <div class="picker-layout">
+                  <div class="picker-list">
+                    <span class="group">Review · 7</span>
+                    <span><b>arch</b> Design &amp; architecture review</span>
+                    <span><b>audit</b> Full pre-ship review</span>
+                    <span><b>deepreview</b> Deep design review</span>
+                    <span><b>hotpath</b> Performance review of the diff</span>
+                    <span><b>nit</b> Nitpick pass</span>
+                    <span class="selected"><b>rev</b> Review the current diff</span>
+                    <span><b>selfrev</b> Self-review before pushing</span>
+                  </div>
+                  <div class="picker-preview">
+                    <span class="preview-key">rev</span>
+                    <span class="preview-meta">Review · built-in</span>
+                    <p>
+                      Review the current diff against the base branch for correctness
+                      bugs. Report findings ranked by severity with file:line anchors…
+                    </p>
+                  </div>
+                </div>
+                <div class="scene-help">↑↓ move&nbsp;&nbsp; Enter send&nbsp;&nbsp; Esc cancel</div>
+              </div>
+
+              <div class="snippet-scene scene-send">
+                <span class="scene-label">02 · Send in one action</span>
+                <div class="agent-terminal">
+                  <p><span>›</span> Review the current diff against the base branch for correctness bugs…</p>
+                  <p class="agent-status"><span>●</span> Reviewing 6 changed files</p>
+                  <p class="agent-line">Read src/realm/model/inputs.rs</p>
+                  <p class="agent-line">Read crates/config/src/snippets.rs</p>
+                  <p class="agent-working">Working…</p>
+                </div>
+                <div class="sent-toast">✓ sent snippet ]rev</div>
+                <div class="command-chord"><span>]]s</span><b>rev</b><em>submitted</em></div>
+              </div>
+
+              <div class="snippet-scene scene-recent">
+                <span class="scene-label">03 · Repeat from Recent</span>
+                <div class="picker-title">
+                  <span>Snippets · 41/41</span>
+                  <span class="memory-note">persisted across restarts</span>
+                </div>
+                <div class="recent-list">
+                  <span class="group">Recent · 3</span>
+                  <span class="selected"><b>rev</b> Review the current diff <i>last used</i></span>
+                  <span><b>test</b> Run tests and fix failures</span>
+                  <span><b>pr</b> Open a PR with summary + test plan</span>
+                  <span class="group">Review · 7</span>
+                  <span><b>audit</b> Full pre-ship review</span>
+                </div>
+                <div class="repeat-chord"><code>]]s</code><span>then</span><kbd>Enter</kbd></div>
+              </div>
+
+              <div class="snippet-scene scene-memory">
+                <span class="scene-label">04 · See progress in the inbox</span>
+                <div class="memory-inbox">
+                  <div class="inbox-head"><span>lazybox</span><span>3 agents working</span></div>
+                  <div class="repo-label">AntoineToussaint / lazybox</div>
+                  <div class="workspace active">
+                    <span class="state">●</span>
+                    <span class="issue">#611</span>
+                    <span class="workspace-title">Headline snippet workflows</span>
+                    <b class="snippet-badge">]2</b>
+                  </div>
+                  <div class="workspace">
+                    <span class="state">○</span>
+                    <span class="issue">#610</span>
+                    <span class="workspace-title">Strengthen workspace marker</span>
+                    <b class="snippet-badge">]1</b>
+                  </div>
+                  <div class="workspace">
+                    <span class="state">●</span>
+                    <span class="issue">#609</span>
+                    <span class="workspace-title">Flagship product story</span>
+                    <b class="snippet-badge">]3</b>
+                  </div>
+                </div>
+                <p class="memory-caption">
+                  Recently distinct workflows per workspace — progress at a glance.
+                </p>
+              </div>
+            </div>
+            <div class="snippet-beats" aria-hidden="true">
+              <span>Pick + preview</span>
+              <span>Send</span>
+              <span>Recent</span>
+              <span>]N memory</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="snippet-create" data-reveal>
+          <div>
+            <p class="kicker">Create without leaving lazybox</p>
+            <h3>Describe the workflow. Confirm it. Use it now.</h3>
+            <p>
+              Ask Lazybox to add or improve a global snippet. It shows the key and full
+              body before anything changes, validates the write, then hot-reloads the
+              catalog for immediate use.
+            </p>
+          </div>
+          <div class="create-flow" aria-label="Ask Lazybox snippet creation flow">
+            <span><b>?</b> “Improve my review workflow”</span>
+            <i>→</i>
+            <span><b>Confirm</b> key + body preview</span>
+            <i>→</i>
+            <span><b>Live</b> <code>]]srev</code></span>
+          </div>
+        </div>
+      </div>
+    </section>
 
     <section id="orchestration" class="orchestration">
       <div class="container">
@@ -299,10 +463,10 @@ const steps = [
                 </div>
               </div>
               <div class="result-notice">
-                sent to 4 workspaces (1 skipped: no session — site #622)
+                queued for 4 workspaces (1 skipped: no session — site #622)
               </div>
               <div class="history-row">
-                <span><b>Recent</b> <code>audit</code> recorded once</span>
+                <span><b>Recent</b> <code>audit</code> after confirmed delivery</span>
                 <span><b>Delivered histories</b> api <code>]3</code> · web <code>]2</code> · mobile <code>]4</code> · rust <code>]1</code></span>
                 <span class="unchanged">site remains <code>]1</code></span>
               </div>

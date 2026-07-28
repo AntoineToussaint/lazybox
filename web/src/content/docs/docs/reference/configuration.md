@@ -37,10 +37,12 @@ which is the canonical source of truth for defaults and field names.
 | [`auto_fix`](#auto_fix) | Auto-fix PRs on CI failure / conflict |
 | [`shell`](#shell) | Shell command for the `s` spawn |
 
-Snippets are **not** part of `config.yaml` — they live in their own files:
-`~/.lazybox/snippets.yaml` (global) and `<repo>/.lazybox/snippets.yaml`
-(repo-local, wins on key conflict). See the
-[snippets guide](https://github.com/AntoineToussaint/lazybox/blob/main/docs/snippets.md).
+Snippet workflows are **not** part of `config.yaml` — they live in their own
+files: `~/.lazybox/snippets.yaml` (global) and
+`<launch-dir>/.lazybox/snippets.yaml` (loaded once for that client and wins on
+key conflict). See
+[Use snippet workflows](/docs/how-to/use-snippets/) for fast submission,
+Recent/`]N` memory, Ask Lazybox hot reload, and broadcast.
 
 ## Annotated example
 

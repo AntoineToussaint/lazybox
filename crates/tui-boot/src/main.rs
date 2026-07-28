@@ -595,7 +595,7 @@ async fn run_remote(
     });
     tokio::task::spawn_blocking(move || {
         let snippets =
-            lazybox_config::Snippets::load_merged(std::env::current_dir().ok().as_deref());
+            lazybox_config::Snippets::load_for_launch_dir(std::env::current_dir().ok().as_deref());
         let mut model = lazybox_tui::realm::Model::new(client, snippets)?;
         model.note_daemon_build(&daemon.build);
         if let Some(update) = available_update {
@@ -786,7 +786,7 @@ async fn run_embedded_realm(
     let store_for_save = config.store.clone();
     let realm_result = tokio::task::spawn_blocking(move || {
         let snippets =
-            lazybox_config::Snippets::load_merged(std::env::current_dir().ok().as_deref());
+            lazybox_config::Snippets::load_for_launch_dir(std::env::current_dir().ok().as_deref());
         let mut model = lazybox_tui::realm::Model::new(client, snippets)?;
         // Returning user with persisted setup → mount the polling
         // modal up front so the first poll cycle has UI feedback.

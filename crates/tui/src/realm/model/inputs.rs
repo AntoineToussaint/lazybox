@@ -104,8 +104,8 @@ impl<T: TerminalAdapter> Model<T> {
     /// batches the burst as a paste and swallows the `\r` as a soft
     /// newline, so the prompt expands but never submits (#246). A plain
     /// shell has no paste debounce, so the encoded direct write submits
-    /// cleanly. Shared by the snippet, broadcast, and handoff paths so
-    /// the #246 invariant lives in one place.
+    /// cleanly. Shared by free-text broadcast and handoff paths so the
+    /// #246 invariant lives in one place.
     fn deliver_prompt(
         &mut self,
         terminal_id: TerminalId,
@@ -140,27 +140,11 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
-    /// Resolve a snippet key to a `Snippet` prompt source, looking up its
-    /// category so the history can name which snippet an entry came from
-    /// (issue #523). The category is empty when the snippet declares none.
-    fn snippet_source(&self, key: &str) -> lazybox_ipc::PromptSource {
-        lazybox_ipc::PromptSource::Snippet {
-            key: key.to_string(),
-            category: self
-                .snippets
-                .get(key)
-                .map(|s| s.category.clone())
-                .unwrap_or_default(),
-        }
-    }
-
-    /// Fan the composed broadcast body out to every stashed target:
-    /// a running agent terminal gets the settle-gated `InjectPrompt`
-    /// (+ a `RecordUserMessage` so its recap line updates, #246-safe);
-    /// a plain shell gets the encoded direct write; a workspace with
-    /// no running session is skipped and named in the summary notice.
-    /// The snippet MRU counts the bulk send once, and the sidebar
-    /// selection clears only after something was actually delivered.
+    /// Fan the composed broadcast body out to every stashed target. A
+    /// snippet-seeded body uses `DeliverSnippet`, leaving terminal-kind
+    /// handling and histories behind daemon confirmation; free text uses
+    /// the existing agent/shell paths. A workspace with no running session
+    /// is skipped and named in the summary notice.
     fn dispatch_broadcast(&mut self, body: &str) -> Vec<IpcCommand> {
         let Some(ModalFlow::Broadcast { draft }) = self.modal_flow.take() else {
             return Vec::new();
@@ -172,24 +156,35 @@ impl<T: TerminalAdapter> Model<T> {
         if body.is_empty() {
             return Vec::new();
         }
-        // A snippet-seeded broadcast tags every delivery as `Snippet`
-        // even after the user edits the compose buffer — it's still the
-        // snippet they picked; free-text broadcasts are `Typed`.
-        let source = draft
-            .snippet_key
+        let snippet_key = draft.snippet_key.clone();
+        let snippet_category = snippet_key
             .as_deref()
-            .map(|k| self.snippet_source(k))
-            .unwrap_or(lazybox_ipc::PromptSource::Typed);
+            .and_then(|key| self.snippets.get(key))
+            .map(|snippet| snippet.category.clone())
+            .unwrap_or_default();
         let mut cmds = Vec::new();
         let mut sent = 0usize;
         let mut skipped: Vec<String> = Vec::new();
-        let mut delivered: Vec<lazybox_core::SessionKey> = Vec::new();
         for key in &draft.targets {
             match self.sidebar.broadcast_terminal(key) {
                 Some((terminal_id, is_agent)) => {
-                    self.deliver_prompt(terminal_id, is_agent, body, source.clone(), &mut cmds);
+                    if let Some(snippet_key) = &snippet_key {
+                        cmds.push(IpcCommand::DeliverSnippet {
+                            terminal_id,
+                            snippet_key: snippet_key.clone(),
+                            category: snippet_category.clone(),
+                            body: body.to_string(),
+                        });
+                    } else {
+                        self.deliver_prompt(
+                            terminal_id,
+                            is_agent,
+                            body,
+                            lazybox_ipc::PromptSource::Typed,
+                            &mut cmds,
+                        );
+                    }
                     sent += 1;
-                    delivered.push(key.clone());
                 }
                 None => skipped.push(
                     self.sidebar
@@ -200,26 +195,13 @@ impl<T: TerminalAdapter> Model<T> {
             }
         }
         if sent > 0 {
-            if let Some(snippet_key) = draft.snippet_key {
-                self.record_recent_snippet(snippet_key.clone());
-                // Pin the snippet onto every workspace it actually
-                // reached, so each agent's sidebar history records it
-                // (#463). Free-text broadcasts carry no key, so nothing
-                // to record there.
-                for session_key in delivered {
-                    cmds.push(IpcCommand::RecordSentSnippet {
-                        session_key,
-                        snippet_key: snippet_key.clone(),
-                    });
-                }
-            }
             self.sidebar.clear_broadcast_selection();
         }
         let summary = match (sent, skipped.len()) {
-            (0, _) => "broadcast sent to nobody — no target has a running session".to_string(),
-            (n, 0) => format!("sent to {n} workspace{}", if n == 1 { "" } else { "s" }),
+            (0, _) => "broadcast queued for nobody — no target has a running session".to_string(),
+            (n, 0) => format!("queued for {n} workspace{}", if n == 1 { "" } else { "s" }),
             (n, _) => format!(
-                "sent to {n} workspace{} ({} skipped: no session — {})",
+                "queued for {n} workspace{} ({} skipped: no session — {})",
                 if n == 1 { "" } else { "s" },
                 skipped.len(),
                 skipped.join(", "),
@@ -591,28 +573,15 @@ showing keybinding search only",
                 self.flash_info("no active terminal — open a session first");
                 return cmds;
             };
-            let is_agent = self.terminals.terminal_is_agent(terminal_id);
             // Clone the body + category out so the `self.snippets` borrow
-            // ends before the `&mut self` delivery call.
+            // ends before appending the command.
             let body = snippet.body.clone();
-            let source = lazybox_ipc::PromptSource::Snippet {
-                key: key.clone(),
+            cmds.push(IpcCommand::DeliverSnippet {
+                terminal_id,
+                snippet_key: key,
                 category: snippet.category.clone(),
-            };
-            self.deliver_prompt(terminal_id, is_agent, &body, source, &mut cmds);
-            // Only reached once the snippet has actually been dispatched
-            // — so the MRU tracks sent snippets, not abandoned ones.
-            self.record_recent_snippet(key.clone());
-            // Also pin it onto the target workspace's per-session history
-            // (#463) so the sidebar shows what this agent's been told.
-            // The focused terminal's session key is the workspace key.
-            if let Some(session_key) = self.terminals.active_session().cloned() {
-                cmds.push(IpcCommand::RecordSentSnippet {
-                    session_key,
-                    snippet_key: key.clone(),
-                });
-            }
-            self.flash_info(format!("sent snippet ]{key}"));
+                body,
+            });
             return cmds;
         }
         // Prompt-history picker (Id::PromptHistoryPicker, #523) — pick →
@@ -1309,6 +1278,12 @@ showing keybinding search only",
         // route the "no" decision correctly.
         let top = self.modal_stack.last().cloned();
         self.pop_modal();
+        if top == Some(Id::SnippetPicker)
+            && let Some(ModalFlow::TourSnippet { return_step, .. }) = self.modal_flow.take()
+        {
+            self.mount_tour_at(return_step);
+            return Vec::new();
+        }
         // Cancelling any modal drops its [`ModalFlow`] continuation.
         // This one line replaces the ~two-dozen per-variant clears that
         // used to be here (each `pending_* = None`) — a missed one was
@@ -1532,7 +1507,7 @@ showing keybinding search only",
                 };
                 match lazybox_config::Snippets::upsert_global_snippet(&key, &snippet) {
                     Ok(_) => {
-                        self.apply_snippets(lazybox_config::Snippets::load_merged(
+                        self.apply_snippets(lazybox_config::Snippets::load_for_launch_dir(
                             std::env::current_dir().ok().as_deref(),
                         ));
                         self.flash_info(format!("snippet saved — send it with ]]s{key}"));
@@ -1793,11 +1768,10 @@ showing keybinding search only",
 /// the body makes it one paste, so the `\r` after `ESC[201~` reads as a
 /// clean submit.
 ///
-/// Agent terminals (Claude / Codex / Cursor) do NOT use this — they go
-/// through `Command::InjectPrompt`, where the daemon sends the paste
-/// and the submit `\r` as separate writes gated on the paste's repaint
-/// settling, the only way to make the submit reliable across agents
-/// whose input areas debounce pasted bursts (#246).
+/// Agent terminals (Claude / Codex / Cursor) do NOT use this. For
+/// free-text delivery they use `Command::InjectPrompt`; snippets use
+/// `Command::DeliverSnippet`, whose daemon-side agent branch applies the
+/// same gated paste + submit protocol (#246).
 pub(super) fn encode_snippet_for_pty(body: &str) -> Vec<u8> {
     let body = lazybox_tui_core::agents::trim_leading_blank_lines(body);
     if !body.contains('\n') {

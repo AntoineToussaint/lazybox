@@ -59,6 +59,10 @@ export default defineConfig({
           label: 'How-to guides',
           items: [
             { label: 'Overview', slug: 'docs/how-to' },
+            {
+              label: 'Use snippet workflows',
+              slug: 'docs/how-to/use-snippets',
+            },
             { label: 'Add a repo', slug: 'docs/how-to/add-a-repo' },
             {
               label: 'Run an agent per workspace',
@@ -72,7 +76,6 @@ export default defineConfig({
               label: 'Orchestrate multiple agents',
               slug: 'docs/how-to/orchestrate-multiple-agents',
             },
-            { label: 'Use snippets', slug: 'docs/how-to/use-snippets' },
             {
               label: 'Manage automation policies',
               slug: 'docs/how-to/manage-automation-policies',

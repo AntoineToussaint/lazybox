@@ -186,7 +186,7 @@ The command computes a plan, prints it, and prompts before archiving anything.
 | `~/.lazybox/v2/state.db` | Persistent state (read/unread, snooze, sessions) |
 | `~/.lazybox/config.yaml` | Configuration (see [Configuration](/docs/reference/configuration/)) |
 | `~/.lazybox/run/daemon.sock` | Daemon Unix socket (`lazybox server start` / `--connect`) |
-| `~/.lazybox/snippets.yaml` | Global snippet library (repo-local: `<repo>/.lazybox/snippets.yaml`) |
+| `~/.lazybox/snippets.yaml` | Global snippet library (client-wide launch-directory override: `<launch-dir>/.lazybox/snippets.yaml`) |
 | `/tmp/lazybox.log` | Logs (override with `ui.log_path`) |
 | `~/.cache/lazybox/zig/` | Pinned Zig toolchain from `make setup` |
 | `~/.cache/lazybox/ghostty/` | Pinned Ghostty source and Zig package cache used by offline builds |

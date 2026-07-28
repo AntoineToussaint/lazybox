@@ -58,7 +58,7 @@ streams live `TerminalOutput` bytes. The default session backend is tmux
 
 **Status:** stable
 **Crate(s):** `agents` (`src/agent.rs`), `server` (`spawn_handler.rs`)
-**Config / flags:** `setup.agents` (enabled), `setup.default_agent`, `shell.command`, `ui.action_keys` `spawn_agent.<id>` entries (remap agent chords)
+**Config / flags:** `setup.agents` (enabled), `setup.default_agent`, `ui.action_keys` `spawn_agent.<id>` entries (remap agent chords)
 **Key bindings:** `s` shell; `a` agent leader — `a c` Claude, `a x` Codex, `a u` Cursor (agents without a built-in key convention are remappable via `spawn_agent.<id>`)
 
 ### What it does
@@ -89,8 +89,6 @@ worktree, env, and `SpawnCtx`, then launches through the tmux wrapper.
 
 ### Known sharp edges
 - Agent availability is PATH-detected; an agent installed mid-session isn't picked up without a re-detect.
-- `shell.command` changes apply to new shells. A tmux-backed shell already
-  running keeps its current process; close its terminal and open a new one.
 
 ---
 
@@ -98,55 +96,36 @@ worktree, env, and `SpawnCtx`, then launches through the tmux wrapper.
 
 **Status:** stable
 **Crate(s):** `tui-core` (`src/prompts.rs`, `src/intent.rs`), `core` (`src/prompts.rs`, `prompts/agent-work.md`)
-**Config / flags:** `setup.default_agent`, `agents.<id>.models`
-**Key bindings:** `w` menu (`w w` contextual, `w c`/`w x`/`w u` explicit agent, `w S`/`w M`/`w L` explicit tier)
+**Config / flags:** uses `setup.default_agent`
+**Key bindings:** `w` menu (`w w` default, `w c`/`w x`/`w u` explicit)
 
 ### What it does
-Turns the focused workspace state into a **contextual work brief**, then routes
-it to the relevant running agent or starts the configured default agent in the
-task's worktree.
+Spawns the default agent with a **state-aware prompt** chosen from the
+workspace's situation: fix a merge conflict, fix failing CI, address selected
+review comments, or implement an issue.
 
 ### How to use it
-Press `w w` on a workspace. With Activity rows multi-selected (`v`), `w w`
-targets exactly those comments, even when the PR also has a conflict or failing
-CI. Otherwise the prompt precedence is: terminal task → conflict → CI failure →
-healthy assigned review → unread feedback on your PR → issue implementation →
-general PR work → bare scratch-workspace spawn.
-
-One running agent receives the prompt through injection. With no running agent,
-lazybox starts `setup.default_agent` in the workspace worktree. With several
-running conversations, including two sessions of the same agent, it asks which
-exact terminal should take the work.
-
-A GitHub `high` / `medium` / `low` label or `@high` / `@medium` / `@low` task
-body marker is resolved at spawn time through the target agent's
-`models.priority` map. The chosen tier's arbitrary `args` can select both a
-concrete model and reasoning effort. `w S` / `w M` / `w L` keeps the same
-context and agent routing but explicitly overrides the task priority for a new
-spawn.
+Press `w w` on a workspace. With Activity rows multi-selected (`v`), `w w` targets
+those comments ("address these comments"). Otherwise it picks the prompt by
+priority: conflict → CI failure → issue-implementation / review.
 
 ### How it works (brief)
-`classify_work` / `resolve_work` in `crates/tui-core/src/intent.rs` own the
-priority chain and call the conflict, CI, issue, review, and comment prompt
-builders. All prompts include `AGENT_WORK_PREAMBLE` from
+Priority chain in `crates/tui-core/src/prompts.rs`: `build_fix_conflict_prompt`
+→ `build_fix_ci_prompt` → `build_implement_issue_prompt`
+(`crates/core/src/prompts.rs`) / `build_address_comments_prompt`
+(`crates/tui-core/src/intent.rs`). All include `AGENT_WORK_PREAMBLE` from
 `crates/core/prompts/agent-work.md` (the no-destructive-shortcuts /
-root-cause-over-masking principles). `Model::dispatch_work` picks the live or
-default agent; the server's `priority_alias_for` maps task priority to the
-agent-specific tier before building the spawn argv.
+root-cause-over-masking principles).
 
 ### Test checklist
 - [ ] On a PR with a conflict, `w w` produces the rebase/resolve/force-push prompt.
 - [ ] On a PR with failing CI (no conflict), `w w` produces the fix-CI prompt.
 - [ ] On an issue workspace with no PR, `w w` produces the implement-issue prompt.
 - [ ] With comments selected (`v`), `w w` produces the address-comments prompt scoped to the selection.
-- [ ] One running agent receives the brief; no running agent starts the default in the worktree.
-- [ ] `high` / `medium` / `low` labels and `@` markers resolve through the target agent's tier map.
-- [ ] `w S` / `w M` / `w L` overrides the task priority on a new spawn.
 - [ ] Every prompt carries the work preamble.
 
 ### Known sharp edges
-- Priority is spawn-time routing; injecting into an already-running agent does not change that session's model.
-- A task label wins over a body marker. Within the same source, the strongest declared priority wins.
+- Priority order means a PR with *both* a conflict and CI failure gets the conflict prompt first.
 
 ---
 
@@ -218,9 +197,7 @@ and settle invariants cover the remaining paths.
 
 ### How to use it
 Watch the sidebar agent-state chips. Press `!` to move the cursor to the next
-workspace whose agent is waiting on input. To coordinate a shared next step
-across several of those live sessions, use the
-[multi-agent orchestration guide](https://lazybox.ai/docs/how-to/orchestrate-multiple-agents/).
+workspace whose agent is waiting on input.
 
 ### How it works (brief)
 Pure detectors in `crates/agents/src/detect.rs`. Claude's detector
@@ -351,19 +328,27 @@ with no inferable provider (`GenericCli`), or when no gateway URL is set.
 
 ---
 
-## Snippets
+## Snippet workflows
 
 **Status:** stable
 **Crate(s):** `config` (`src/snippets.rs`), `tui` (picker)
-**Config / flags:** `~/.lazybox/snippets.yaml` (global) + `<repo>/.lazybox/snippets.yaml` (repo-local)
+**Config / flags:** `~/.lazybox/snippets.yaml` (global) + `<launch-dir>/.lazybox/snippets.yaml` (client-wide directory override)
 **Key bindings:** `]]s`, then the snippet key (configurable escape char)
 
 ### What it does
-Configurable text shortcuts that expand and auto-send to the focused terminal /
-agent — e.g. a canned "review this diff" prompt bound to a key.
+Turns recurring agent instructions into reusable workflows that expand and
+auto-submit to the focused terminal. The picker remembers recently used
+workflows globally, while each workspace persists its 12 most recently
+distinct snippet keys and renders that bounded count as a `]N` sidebar badge.
 
 ### How to use it
-Define snippets in YAML:
+Open the categorized picker with `]]s`, inspect the live body + origin preview,
+then select a row or type a uniquely matching key such as `rev` for the
+`]]srev` fast path. Open `]]s` later and the last workflow is selected in
+**Recent**, ready to repeat with `Enter`.
+
+lazybox ships a built-in library. Add global or launch-directory workflows in
+YAML:
 
 ```yaml
 snippets:
@@ -373,25 +358,34 @@ snippets:
 ```
 
 In a terminal, press `]]s` then start typing the snippet key; the picker
-fuzzy-filters and auto-submits the body (with a trailing carriage return) when
-the filter uniquely matches. See [`docs/snippets.md`](../snippets.md). To seed
-one reviewed instruction for several selected sessions, follow the
+filters by key, description, and category, and auto-submits when an exact key is
+the unique key-prefix match. Ask Lazybox (`?`) can propose a global add/update,
+confirm it with a body preview, and hot-reload it immediately. `Shift-B`
+broadcasts a chosen workflow across selected workspaces. See
+[`docs/snippets.md`](../snippets.md) and the
 [multi-agent orchestration guide](https://lazybox.ai/docs/how-to/orchestrate-multiple-agents/).
 
 ### How it works (brief)
-`Snippets::load_merged` (`crates/config/src/snippets.rs`) merges global +
-repo-local files (repo wins on key collision). The terminal's doubled escape
-leader (`]]`) followed by `s` mounts the snippet picker
-(`crates/tui/.../keys.rs`).
+`Snippets::load_for_launch_dir` (`crates/config/src/snippets.rs`) merges
+built-in, global, and launch-directory layers into one client-wide catalog.
+The terminal's doubled
+escape leader (`]]`) followed by `s` mounts the snippet picker
+(`crates/tui/.../keys.rs`). The daemon persists the global Recent MRU in client
+KV and per-workspace keys in the workspace record.
 
 ### Test checklist
 - [ ] A global snippet expands and submits in a terminal via `]]s<key>`.
-- [ ] A repo-local snippet overrides a global one with the same key.
-- [ ] The picker fuzzy-filters as you type and auto-submits on a unique match.
+- [ ] A launch-directory snippet overrides a global one for the whole client.
+- [ ] The picker filters as you type and auto-submits an exact, unique key.
+- [ ] Recent survives a restart and selects the most recently sent workflow.
+- [ ] Sending distinct keys updates the target workspace's `]N` badge up to its 12-key cap.
+- [ ] Ask Lazybox confirms, writes, and hot-reloads a global snippet.
+- [ ] A snippet-seeded broadcast records the key only on delivered targets.
 - [ ] `Esc` dismisses the picker without sending.
 
 ### Known sharp edges
 - The trigger reuses the terminal escape char; if you remap `terminal.escape_char`, the snippet trigger moves with it.
+- The directory layer is chosen from the client's startup directory and does not change with sidebar workspace selection.
 
 ---
 

@@ -1,15 +1,15 @@
 //! Snippet system: short keystroke shortcuts that expand into
 //! pre-defined prompts and are auto-submitted to the active agent.
 //!
-//! Two files contribute, merged with the repo-local one winning on
+//! Two files contribute, merged with the launch-directory one winning on
 //! key conflict:
 //!
 //! - **Global** — `<lazybox_home>/snippets.yaml` (defaults to
 //!   `~/.lazybox/snippets.yaml`). Lives at the profile root so a
 //!   schema bump in `v2/` doesn't orphan the user's library.
-//! - **Repo-local** — `.lazybox/snippets.yaml` at the repository root.
-//!   Checked into source control so a project can ship its own
-//!   review prompts, deploy checks, etc.
+//! - **Launch-directory** — `.lazybox/snippets.yaml` below the directory
+//!   where this lazybox client was started. The resulting catalog is
+//!   client-wide; it does not change with the selected workspace.
 //!
 //! Both files have the same shape:
 //!
@@ -174,7 +174,8 @@ impl Snippets {
     }
 
     /// Snippets shipped with lazybox. Merged *beneath* the user's
-    /// global + repo files (see [`Snippets::load_merged`]), so any
+    /// global + launch-directory files (see
+    /// [`Snippets::load_for_launch_dir`]), so any
     /// user entry with the same key transparently overrides one of
     /// these — they're a starting library, not a locked-in set.
     pub fn builtin() -> Self {
@@ -871,13 +872,13 @@ impl Snippets {
         Self { by_key }
     }
 
-    /// Load both global + repo files and merge them over the
-    /// built-in set. Precedence, lowest to highest: built-in →
-    /// global → repo. This is the one-shot entry point most callers
-    /// want.
-    pub fn load_merged(repo_root: Option<&Path>) -> Self {
+    /// Build the client-wide catalog from the built-in and global layers,
+    /// plus `.lazybox/snippets.yaml` below `launch_dir` when present.
+    /// Precedence, lowest to highest: built-in → global → launch directory.
+    /// Changing workspace does not select a different directory layer.
+    pub fn load_for_launch_dir(launch_dir: Option<&Path>) -> Self {
         let global = Self::load_global();
-        let repo = repo_root.map(Self::load_repo).unwrap_or_default();
+        let repo = launch_dir.map(Self::load_repo).unwrap_or_default();
         Self::merged(Self::merged(Self::builtin(), global), repo)
     }
 
@@ -1224,7 +1225,7 @@ snippets: {}
     }
 
     /// A global entry with a built-in key wins; built-ins fill the
-    /// gaps. Mirrors how `load_merged` layers built-in < global.
+    /// gaps. Mirrors how `load_for_launch_dir` layers built-in < global.
     #[test]
     fn user_entry_overrides_builtin_on_key_conflict() {
         let user = Snippets::load_from(
@@ -1246,6 +1247,26 @@ snippets:
         assert_eq!(rev.origin, SnippetOrigin::Global);
         // Untouched built-ins remain.
         assert_eq!(merged.get("ready").unwrap().origin, SnippetOrigin::BuiltIn);
+    }
+
+    #[test]
+    fn load_for_launch_dir_builds_one_catalog_from_that_directory() {
+        let launch_dir =
+            std::env::temp_dir().join(format!("lazybox-snippets-launch-{}", std::process::id()));
+        let snippets_dir = launch_dir.join(".lazybox");
+        std::fs::create_dir_all(&snippets_dir).unwrap();
+        std::fs::write(
+            snippets_dir.join("snippets.yaml"),
+            "snippets:\n  launch-contract:\n    body: from launch directory\n",
+        )
+        .unwrap();
+
+        let catalog = Snippets::load_for_launch_dir(Some(&launch_dir));
+        let snippet = catalog
+            .get("launch-contract")
+            .expect("launch-directory entry");
+        assert_eq!(snippet.body, "from launch directory");
+        assert_eq!(snippet.origin, SnippetOrigin::Repo);
     }
 
     /// The starter template parses as a valid snippets file.

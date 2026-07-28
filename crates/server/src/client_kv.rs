@@ -7,11 +7,12 @@
 //! so the MRU and dismissals silently diverged from the in-process TUI.
 //!
 //! Routing both through the daemon — the owner of state — heals the fork:
-//! the client sends [`lazybox_ipc::Command::RecordRecentSnippet`] /
-//! [`lazybox_ipc::Command::SetUpdateDismissal`] and reads the current values back from
-//! every [`lazybox_ipc::Event::Snapshot`]. This mirrors the per-terminal draft/history
-//! precedent (#373 / #523), which already behaves identically over both
-//! transports.
+//! a confirmed [`lazybox_ipc::Command::DeliverSnippet`] updates the MRU,
+//! dismissals arrive through [`lazybox_ipc::Command::SetUpdateDismissal`],
+//! and clients read both current values from every
+//! [`lazybox_ipc::Event::Snapshot`]. This mirrors the per-terminal
+//! draft/history precedent (#373 / #523), which already behaves identically
+//! over both transports.
 
 use crate::ServerConfig;
 

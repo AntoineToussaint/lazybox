@@ -241,26 +241,60 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "6 · Snippets remember your progress",
+        title: "6 · Send a snippet workflow",
         body: &[
+            line!("Inside an agent terminal, snippets turn instructions you"),
+            line!("use every day into one fast, visible action."),
+            line!(""),
+            line!("  ]]s       open the categorized picker + live preview"),
+            line!("  ]]srev    send the built-in review workflow immediately"),
+            line!(""),
+            line!("With an agent terminal open, press Enter here to open the"),
+            line!("real picker. Type rev: the full instruction is sent and"),
+            line!("submitted, and the unique key needs no extra Enter."),
+            line!(""),
+            line!("No agent yet? Press → to skip this exercise. Re-open the"),
+            line!(
+                TourSegment::Text("tour from an agent later with "),
+                TourSegment::Hint(ActionKind::OpenTour),
+                TourSegment::Text(" to try it for real."),
+            ),
+            line!(""),
             line!(
                 TourSegment::Hint(ActionKind::OpenSnippets),
-                TourSegment::Text(" opens the picker; from a terminal use ]]s."),
+                TourSegment::Text(" outside a terminal browses built-in, global, and"),
             ),
-            line!("Send a review snippet, switch workspaces, and return later:"),
-            line!("each workspace remembers the distinct snippets it received."),
-            line!(""),
-            line!("Recently sent snippets float into Recent and persist across"),
-            line!("restarts. Open the picker and press Enter to repeat the"),
-            line!("most recent instruction immediately."),
-            line!(""),
-            line!("The sidebar's ]N badge counts distinct snippet keys already"),
-            line!("applied here, so review, testing, and release work have a"),
-            line!("visible progress cue instead of relying on memory."),
+            line!("launch-directory workflows before you send them."),
         ],
     },
     TourStep {
-        title: "7 · Return to the same live session",
+        title: "7 · Snippets remember your progress",
+        body: &[
+            line!("Press Enter here to open the real picker again. The last"),
+            line!("workflow is selected in Recent, so one more Enter repeats"),
+            line!("it. Recent persists across restarts."),
+            line!(""),
+            line!("Every workspace remembers its 12 most recently distinct"),
+            line!("workflows. Back in the inbox, ]N is that bounded count:"),
+            line!("]2 means two different workflows recently started there."),
+            line!(""),
+            line!(
+                TourSegment::Text("Need your own? Return with ]]q, then Ask Lazybox ("),
+                TourSegment::Hint(ActionKind::OpenHelp),
+                TourSegment::Text(") to"),
+            ),
+            line!("add or improve a snippet. Confirm; it hot-reloads immediately."),
+            line!(""),
+            line!(
+                TourSegment::Text("Select rows with v, then "),
+                TourSegment::Hint(ActionKind::BroadcastToSelected),
+                TourSegment::Text(" to seed the same"),
+            ),
+            line!("workflow across several agents."),
+        ],
+    },
+    TourStep {
+        title: "8 · Return to the same live session",
         body: &[
             line!("With supported tmux 3.3 or newer, agent and shell sessions"),
             line!("outlive the lazybox UI and server process."),
@@ -275,7 +309,7 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "8 · Keep your session when an issue becomes a PR",
+        title: "9 · Keep your session when an issue becomes a PR",
         body: &[
             line!("Start work from the issue and keep your session when it"),
             line!("becomes a PR:"),
@@ -296,7 +330,7 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "9 · Control many repositories at once",
+        title: "10 · Control many repositories at once",
         body: &[
             line!("A real 10-repository, 15-live-session workload stays"),
             line!("controlled because every task keeps its own workspace."),
@@ -335,7 +369,7 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "10 · Complete GitHub work here",
+        title: "11 · Complete GitHub work here",
         body: &[
             line!("Read issue/PR descriptions, comments, checks, reviews, and"),
             line!("conflicts, then act without rebuilding context in a browser."),
@@ -374,7 +408,7 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "11 · Ask Lazybox, then reuse the answer",
+        title: "12 · Ask Lazybox, then reuse the answer",
         body: &[
             line!(
                 TourSegment::Hint(ActionKind::OpenHelp),
@@ -394,7 +428,7 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "12 · Make it yours",
+        title: "13 · Make it yours",
         body: &[
             line!(
                 TourSegment::Hint(ActionKind::OpenHelp),
@@ -431,6 +465,9 @@ const STEPS: &[TourStep] = &[
     },
 ];
 
+pub(crate) const SEND_SNIPPET_STEP: usize = 6;
+pub(crate) const REPEAT_SNIPPET_STEP: usize = 7;
+
 pub struct Tour {
     /// Index into [`STEPS`]. Always in range — navigation clamps.
     cursor: usize,
@@ -445,8 +482,12 @@ pub struct Tour {
 
 impl Tour {
     pub fn new(catalog: Vec<CatalogEntry>) -> Self {
+        Self::at_step(0, catalog)
+    }
+
+    pub(crate) fn at_step(cursor: usize, catalog: Vec<CatalogEntry>) -> Self {
         Self {
-            cursor: 0,
+            cursor: cursor.min(STEPS.len().saturating_sub(1)),
             catalog,
             back_btn: None,
             next_btn: None,
@@ -547,6 +588,14 @@ impl Tour {
         }
     }
 
+    fn primary_action(&mut self) -> Option<Msg> {
+        match self.cursor {
+            SEND_SNIPPET_STEP => Some(Msg::TourTrySnippet),
+            REPEAT_SNIPPET_STEP => Some(Msg::TourRepeatSnippet),
+            _ => self.advance(),
+        }
+    }
+
     /// Pure key handler — kept a method so tests can drive it without
     /// a tuirealm `Application`.
     pub fn on_key(&mut self, key: &KeyEvent) -> Option<Msg> {
@@ -555,8 +604,10 @@ impl Tour {
             return Some(Msg::TourFinished);
         }
         match key.code {
-            // Arrow keys lead; j/k-style aliases stay for muscle memory.
-            Key::Right | Key::Enter | Key::Char(' ' | 'n' | 'l') => self.advance(),
+            // Right always advances, including past an exercise when no
+            // agent terminal is available. Enter/click runs the exercise.
+            Key::Right | Key::Char('l') => self.advance(),
+            Key::Enter | Key::Char(' ' | 'n') => self.primary_action(),
             Key::Left | Key::Backspace | Key::Char('p' | 'h') => {
                 self.cursor = self.cursor.saturating_sub(1);
                 None
@@ -588,6 +639,9 @@ impl Tour {
         if hit(self.back_btn) {
             self.cursor = self.cursor.saturating_sub(1);
             return None;
+        }
+        if hit(self.next_btn) {
+            return self.primary_action();
         }
         self.advance()
     }
@@ -687,10 +741,11 @@ impl Component for Tour {
             Style::default().fg(theme.accent).bold(),
         ));
         push(&mut spans, &mut x, "  ".to_string(), Style::default());
-        let next_label = if self.is_last() {
-            " Finish "
-        } else {
-            " Next → "
+        let next_label = match self.cursor {
+            SEND_SNIPPET_STEP => " Try now → ",
+            REPEAT_SNIPPET_STEP => " Repeat → ",
+            _ if self.is_last() => " Finish ",
+            _ => " Next → ",
         };
         self.next_btn = Some(push(
             &mut spans,
@@ -1002,14 +1057,63 @@ mod tests {
     }
 
     #[test]
+    fn snippets_get_daily_use_and_memory_steps() {
+        let snippet_steps: Vec<&TourStep> = STEPS
+            .iter()
+            .filter(|step| step.title.to_lowercase().contains("snippet"))
+            .collect();
+        assert_eq!(
+            snippet_steps.len(),
+            2,
+            "the daily fast path and memory each need a tour card"
+        );
+        let daily = render_step(SEND_SNIPPET_STEP);
+        for needle in [
+            "]]srev",
+            "live preview",
+            "built-in",
+            "global",
+            "launch-directory",
+        ] {
+            assert!(daily.contains(needle), "daily-use step missing {needle:?}");
+        }
+        let memory = render_step(REPEAT_SNIPPET_STEP);
+        for needle in [
+            "Recent",
+            "persists across",
+            "]N",
+            "distinct",
+            "Ask Lazybox",
+            "hot-reloads",
+            "Shift-B",
+        ] {
+            assert!(memory.contains(needle), "memory step missing {needle:?}");
+        }
+    }
+
+    #[test]
+    fn snippet_steps_open_real_exercises_and_right_arrow_skips() {
+        let mut send = Tour::at_step(SEND_SNIPPET_STEP, default_catalog());
+        assert_eq!(send.on_key(&ke(Key::Enter)), Some(Msg::TourTrySnippet));
+        assert_eq!(send.cursor, SEND_SNIPPET_STEP);
+        assert_eq!(send.on_key(&ke(Key::Right)), None);
+        assert_eq!(send.cursor, REPEAT_SNIPPET_STEP);
+        assert_eq!(send.on_key(&ke(Key::Enter)), Some(Msg::TourRepeatSnippet));
+
+        let mut clickable = rendered_tour(SEND_SNIPPET_STEP);
+        let (x, y) = center(clickable.next_btn.expect("practice button"));
+        assert_eq!(clickable.on_mouse(&click(x, y)), Some(Msg::TourTrySnippet));
+    }
+
+    #[test]
     fn covers_the_flagship_workflows() {
         let all = render_all();
         for expected in [
             "Always open in the right folder",
             "Working, Input Needed, and Done are stable, accurate",
             "Snippets remember your progress",
-            "Recent and persist across",
-            "sidebar's ]N badge",
+            "selected in Recent",
+            "12 most recently distinct",
             "same running tmux session",
             "issue becomes a PR",
             "Complete GitHub work here",

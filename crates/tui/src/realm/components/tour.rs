@@ -91,20 +91,24 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "3 · Put an agent on it",
+        title: "3 · Point at the work",
         body: &[
-            "Press w w on any row and lazybox opens a worktree, then",
-            "launches Claude Code with a prompt fit to the task. A few",
-            "ways that plays out:",
+            "Press w w: lazybox reads the focused task and briefs the",
+            "agent. The same action changes with the state:",
             "",
-            "  • A PR you review has failing CI → Shift-F jumps to it,",
-            "    then w w lets the agent fix the build.",
-            "  • An open issue → w w starts an agent to implement it.",
-            "  • A scratch idea on a repo → x n, a c, done.",
+            "  • Open issue → implement it.",
+            "  • PR with failing CI → diagnose and repair CI.",
+            "  • Select review rows with v → address only those comments.",
             "",
-            "a opens the agent menu: a c / a x / a u pick Claude /",
-            "Codex / Cursor; s is a plain shell; e opens the worktree",
-            "in your editor.",
+            "One running agent gets the brief. With none, lazybox starts",
+            "your default agent in the task worktree; with several, it",
+            "asks which agent should take it.",
+            "",
+            "A GitHub high / medium / low priority picks its model tier;",
+            "w S / w M / w L overrides that choice in the TUI.",
+            "",
+            "a c / a x / a u picks Claude / Codex / Cursor directly;",
+            "s is a plain shell and e opens the worktree in your editor.",
         ],
     },
     TourStep {
@@ -492,6 +496,25 @@ mod tests {
     #[test]
     fn mentions_adopt_sessions() {
         assert!(render_all().contains("x a"), "adopt-sessions key missing");
+    }
+
+    #[test]
+    fn showcases_contextual_work_and_tier_routing() {
+        let all = render_all();
+        for behavior in [
+            "Open issue → implement it",
+            "PR with failing CI → diagnose and repair CI",
+            "address only those comments",
+            "One running agent gets the brief",
+            "default agent in the task worktree",
+            "high / medium / low priority picks its model tier",
+            "w S / w M / w L overrides",
+        ] {
+            assert!(
+                all.contains(behavior),
+                "tour no longer demonstrates {behavior:?}"
+            );
+        }
     }
 
     #[test]

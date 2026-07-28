@@ -113,6 +113,29 @@ fn homepage_never_advertises_the_removed_single_w_action() {
 }
 
 #[test]
+fn mention_guides_describe_the_full_sweep_cadence() {
+    for relative in [
+        "web/src/content/docs/docs/how-to/lazybox-mentions.md",
+        "web/src/content/docs/docs/how-to/run-an-agent-per-workspace.md",
+    ] {
+        let page = read(relative);
+        let prose = page.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            prose.contains("full GitHub sweep"),
+            "{relative} must name the polling path that scans mentions",
+        );
+        assert!(
+            prose.contains("ten minutes"),
+            "{relative} must set the default trigger cadence",
+        );
+        assert!(
+            !prose.contains("next poll"),
+            "{relative} must not imply incremental polls scan mentions",
+        );
+    }
+}
+
+#[test]
 fn launch_surfaces_use_current_support_and_provider_contracts() {
     for relative in [
         "README.md",

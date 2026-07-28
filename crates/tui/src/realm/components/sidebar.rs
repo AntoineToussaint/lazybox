@@ -201,9 +201,9 @@ impl Sidebar {
         self.inner.set_default_agent(agent);
     }
 
-    /// Agent `w` should target on `workspace_key`: an agent already
-    /// running there (so `w` injects into it) wins over `default_agent`;
-    /// several running agents ask the user which one (#418).
+    /// Conversation `w` should target on `workspace_key`: one running
+    /// conversation wins over `default_agent`; several ask the user
+    /// which exact terminal should receive the prompt (#418).
     /// See [`crate::components::sidebar::Sidebar::work_target`].
     pub fn work_target(
         &self,
@@ -211,6 +211,16 @@ impl Sidebar {
         default_agent: &str,
     ) -> crate::components::sidebar::WorkTarget {
         self.inner.work_target(workspace_key, default_agent)
+    }
+
+    /// Scoped `w <agent>` target resolution. Multiple terminals using
+    /// the requested agent still require a chooser.
+    pub fn work_target_for_agent(
+        &self,
+        workspace_key: &lazybox_core::SessionKey,
+        agent_id: &str,
+    ) -> crate::components::sidebar::WorkTarget {
+        self.inner.work_target_for_agent(workspace_key, agent_id)
     }
 
     /// Selected session id, if the cursor is on a session sub-row of

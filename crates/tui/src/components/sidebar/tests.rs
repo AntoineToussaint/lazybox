@@ -2148,8 +2148,11 @@ mod rebadge_attention_tests {
     //! the daemon never re-broadcasts) keeps its `?` pill pinned to the
     //! deleted issue key and the PR row shows no badge, reading as lost.
     use super::super::*;
+    use super::status_pill_tests::base_task;
     use lazybox_core::WorkspaceKey;
     use lazybox_ipc::{AgentState, Event, TerminalId};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     #[test]
     fn rebadge_repoints_the_runner_badge_onto_the_pr() {
@@ -2211,8 +2214,15 @@ mod rebadge_attention_tests {
         // #440 / #404: an issue→PR transfer must carry EVERY agent kind,
         // codex included, onto the PR row — not just Claude.
         let issue: SessionKey = (&WorkspaceKey::new("github:o/r#91")).into();
-        let pr: SessionKey = (&WorkspaceKey::new("github:o/r#92")).into();
         let mut sb = Sidebar::new(PaneId::new(1));
+        let mut task = base_task();
+        task.id.key = "o/r#92".into();
+        task.title = "Transferred PR workspace".into();
+        task.url = "https://github.com/o/r/pull/92".into();
+        let workspace = Workspace::from_task(task, chrono::Utc::now());
+        let pr = SessionKey::from(&workspace.key);
+        sb.workspaces.insert(pr.clone(), workspace);
+        sb.recompute_visible();
         sb.running_terminals.insert(
             TerminalId(1),
             (issue.clone(), TerminalKind::Agent("claude".to_string())),
@@ -2232,6 +2242,25 @@ mod rebadge_attention_tests {
             sb.runner_badges(&pr),
             vec![('C', 1), ('X', 1)],
             "the PR row inherits BOTH the Claude and Codex badges",
+        );
+
+        let backend = TestBackend::new(80, 10);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| sb.render(frame.area(), frame, true))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let row = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .find(|line| line.contains("Transferred PR workspace"))
+            .expect("transferred PR row");
+        assert!(
+            row.contains(" C  X "),
+            "transferred PR row must visibly render both agents: {row:?}",
         );
     }
 

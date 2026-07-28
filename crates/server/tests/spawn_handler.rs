@@ -9,6 +9,7 @@ use lazybox_server::backend::{MockBackend, SessionBackend};
 use lazybox_server::{Server, ServerConfig};
 use lazybox_store::{MemoryStore, Store};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -2719,50 +2720,61 @@ async fn detectorless_spawn_prompt_pastes_blindly_at_the_hard_deadline() {
     .expect("deadline");
 }
 
-/// The Working watchdog (#398) must not be starved by churn-only output
-/// arriving just under the quiet window. Chunks every 4.9s re-arm the
-/// 5s quiet timer forever, so `classify_quiet_screen` never runs on its
-/// own; the watchdog instead anchors on the last content-fingerprint
-/// CHANGE — identical repaints don't move it — and must still fire 15s
-/// after the frame froze, forcing the pinned `Working` turn closed.
-// Paused time makes the 4.9s cadence vs the 5s/15s windows exact.
+async fn spawn_idle_codex(
+    client: &mut lazybox_ipc::Client,
+    mock: &MockBackend,
+) -> (lazybox_ipc::TerminalId, String) {
+    let terminal_id = spawn_and_wait(client, TerminalKind::Agent("codex".into())).await;
+    let key = mock.list().await.unwrap().into_iter().next().unwrap();
+    mock.emit(
+        &key,
+        include_bytes!("../../agents/tests/fixtures/codex_real_idle.bin"),
+    )
+    .await;
+    assert!(
+        wait_for(
+            client,
+            |event| matches!(
+                event,
+                Event::AgentState {
+                    state: lazybox_ipc::AgentState::Idle,
+                    ..
+                }
+            ),
+            Duration::from_secs(10),
+        )
+        .await
+        .is_some(),
+        "Codex must boot to Idle before the turn starts",
+    );
+    (terminal_id, key)
+}
+
+async fn wait_for_output_count(emitted: &AtomicUsize, minimum: usize) {
+    for _ in 0..5_000 {
+        if emitted.load(Ordering::Relaxed) >= minimum {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!(
+        "continuously-ready producer emitted only {} of {minimum} chunks",
+        emitted.load(Ordering::Relaxed),
+    );
+}
+
+/// Identical Codex repaints re-arm byte silence but cannot starve the
+/// content-stability watchdog when the PTY receiver stays continuously ready.
 #[tokio::test(start_paused = true)]
-async fn sub_quiet_churn_does_not_starve_the_working_watchdog() {
+async fn continuously_ready_codex_repaints_do_not_starve_the_working_watchdog() {
     timeout(Duration::from_secs(120), async {
-        // The 5s quiet / 15s watchdog defaults are config-driven; pin
-        // them to an empty config so a dev-machine override can't skew
-        // the cadence math.
         let _home = IsolatedConfigHome::new();
         let (config, mock) = ServerConfig::in_memory_with_mock();
-        let mut client = subscribed(config).await;
-        let _ = spawn_and_wait(&mut client, TerminalKind::Agent("claude".into())).await;
-        let key = mock.list().await.unwrap().into_iter().next().unwrap();
+        let mut client = subscribed(config.clone()).await;
+        let (terminal_id, key) = spawn_idle_codex(&mut client, &mock).await;
 
-        // Boot to Idle at the composer first (see the quiet-window test
-        // above for why byte flow reads as boot chrome until then).
-        let idle_composer = include_bytes!("../../agents/tests/fixtures/idle_composer.bin");
-        mock.emit(&key, idle_composer).await;
-        tokio::time::sleep(Duration::from_secs(6)).await; // past the quiet window
-        assert!(
-            wait_for(
-                &mut client,
-                |e| matches!(
-                    e,
-                    Event::AgentState {
-                        state: lazybox_ipc::AgentState::Idle,
-                        ..
-                    }
-                ),
-                Duration::from_secs(2),
-            )
-            .await
-            .is_some(),
-            "the booted agent settles to Idle at its composer",
-        );
-
-        // The turn starts: one real content change anchors the watchdog.
-        let spinner = "✻ Cogitating… (8s · ↑ 412 tokens · esc to interrupt)";
-        mock.emit(&key, spinner).await;
+        const FROZEN_FRAME: &str = "• Working alpha (1s · esc to interrupt)";
+        mock.emit(&key, FROZEN_FRAME).await;
         assert!(
             wait_for(
                 &mut client,
@@ -2777,53 +2789,163 @@ async fn sub_quiet_churn_does_not_starve_the_working_watchdog() {
             )
             .await
             .is_some(),
-            "byte flow past boot must read as Working",
+            "the Codex turn must enter Working",
         );
 
-        // The frame freezes: identical repaints every 4.9s. Each chunk
-        // re-arms the quiet timer (never fires) but, being churn (same
-        // content fingerprint), never moves the watchdog anchor.
-        for _ in 0..3 {
-            tokio::time::sleep(Duration::from_millis(4_900)).await;
-            mock.emit(&key, spinner).await;
-        }
-        // ~14.7s of churn: neither timer may have classified anything.
-        let early = wait_for(
-            &mut client,
-            |e| matches!(e, Event::AgentState { .. }),
-            Duration::from_millis(100),
+        while client.rx.try_recv().is_ok() {}
+        let working_started = tokio::time::Instant::now();
+        let emitted = Arc::new(AtomicUsize::new(0));
+        let producer = {
+            let mock = mock.clone();
+            let key = key.clone();
+            let emitted = emitted.clone();
+            tokio::spawn(async move {
+                loop {
+                    mock.emit_backpressured(&key, FROZEN_FRAME).await;
+                    emitted.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+        };
+        wait_for_output_count(
+            &emitted,
+            lazybox_server::backend::SUBSCRIPTION_CHANNEL_CAPACITY * 2,
         )
         .await;
-        assert!(
-            early.is_none(),
-            "no classification may fire while churn re-arms the quiet timer, got {early:?}"
+
+        tokio::time::advance(Duration::from_secs(14)).await;
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            config.agent_state_for(terminal_id).await,
+            Some(lazybox_ipc::AgentState::Working),
+            "the watchdog fired before its configured 15-second bound",
         );
 
-        // Keep the churn flowing across the 15s watchdog boundary — the
-        // watchdog must observe the frozen content and force the turn
-        // closed even though bytes never stop.
-        for _ in 0..2 {
-            tokio::time::sleep(Duration::from_millis(4_900)).await;
-            mock.emit(&key, spinner).await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        for _ in 0..128 {
+            if config.agent_state_for(terminal_id).await == Some(lazybox_ipc::AgentState::Done) {
+                break;
+            }
+            tokio::task::yield_now().await;
         }
-        let done = wait_for(
-            &mut client,
-            |e| {
-                matches!(
-                    e,
+        let state_at_deadline = config.agent_state_for(terminal_id).await;
+        let elapsed_at_transition = working_started.elapsed();
+        producer.abort();
+        let _ = producer.await;
+        assert!(
+            elapsed_at_transition <= Duration::from_secs(15),
+            "the watchdog exceeded its configured bound: {:?}",
+            elapsed_at_transition,
+        );
+        assert_eq!(
+            state_at_deadline,
+            Some(lazybox_ipc::AgentState::Done),
+            "continuous repaint traffic starved the watchdog",
+        );
+
+        assert!(
+            wait_for(
+                &mut client,
+                |event| matches!(
+                    event,
                     Event::AgentState {
+                        terminal_id: id,
                         state: lazybox_ipc::AgentState::Done,
                         ..
+                    } if *id == terminal_id
+                ),
+                Duration::from_secs(2),
+            )
+            .await
+            .is_some(),
+            "the pty-watchdog-force transition was not broadcast",
+        );
+        assert!(
+            wait_for(
+                &mut client,
+                |event| matches!(
+                    event,
+                    Event::AgentState {
+                        terminal_id: id,
+                        state: lazybox_ipc::AgentState::Done,
+                        ..
+                    } if *id == terminal_id
+                ),
+                Duration::from_millis(100),
+            )
+            .await
+            .is_none(),
+            "the pty-watchdog-force path emitted Done more than once",
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
+/// Meaningful chunks are the control case: keeping the receiver ready is not
+/// itself grounds to settle. Each changed fingerprint must advance the
+/// watchdog anchor and keep Codex Working across multiple watchdog windows.
+#[tokio::test(start_paused = true)]
+async fn continuously_ready_meaningful_codex_output_advances_the_watchdog_anchor() {
+    timeout(Duration::from_secs(120), async {
+        let _home = IsolatedConfigHome::new();
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config.clone()).await;
+        let (terminal_id, key) = spawn_idle_codex(&mut client, &mock).await;
+
+        const FRAME_A: &str = "• Working alpha (1s · esc to interrupt)";
+        const FRAME_B: &str = "• Working beta (2s · esc to interrupt)";
+        mock.emit(&key, FRAME_A).await;
+        assert!(
+            wait_for(
+                &mut client,
+                |e| matches!(
+                    e,
+                    Event::AgentState {
+                        state: lazybox_ipc::AgentState::Working,
+                        ..
                     }
-                )
-            },
-            Duration::from_secs(5),
+                ),
+                Duration::from_secs(2),
+            )
+            .await
+            .is_some(),
+        );
+
+        let emitted = Arc::new(AtomicUsize::new(0));
+        let producer = {
+            let mock = mock.clone();
+            let key = key.clone();
+            let emitted = emitted.clone();
+            tokio::spawn(async move {
+                let mut frame = FRAME_B;
+                loop {
+                    mock.emit_backpressured(&key, frame).await;
+                    emitted.fetch_add(1, Ordering::Relaxed);
+                    frame = if frame == FRAME_A { FRAME_B } else { FRAME_A };
+                }
+            })
+        };
+        wait_for_output_count(
+            &emitted,
+            lazybox_server::backend::SUBSCRIPTION_CHANNEL_CAPACITY * 2,
         )
         .await;
-        assert!(
-            done.is_some(),
-            "the watchdog starved: churn-only output pinned Working past its window"
-        );
+
+        for _ in 0..3 {
+            let before = emitted.load(Ordering::Relaxed);
+            tokio::time::advance(Duration::from_secs(14)).await;
+            wait_for_output_count(&emitted, before + 1).await;
+            assert_eq!(
+                config.agent_state_for(terminal_id).await,
+                Some(lazybox_ipc::AgentState::Working),
+                "changed content failed to advance the watchdog anchor",
+            );
+        }
+
+        producer.abort();
+        let _ = producer.await;
     })
     .await
     .expect("deadline");

@@ -1308,15 +1308,19 @@ pub async fn handle_spawn(
             let mut last_seq = sub.last_seq;
             let mut resync_unavailable_announced = false;
             loop {
+                let watchdog_due = agent_for_pump.is_some()
+                    && watchdog_after.is_some_and(|after| {
+                        tokio::time::Instant::now() >= watchdog_anchor + after
+                    });
                 tokio::select! {
-                    // Biased, chunk arm first: pending output is always
-                    // drained before the quiet timer may classify, so an
-                    // expired deadline racing an arriving chunk can't
-                    // read a screen that's about to change. A busy stream
-                    // starving the timer is exactly the intended
-                    // semantics — chunks flowing means no classification.
+                    // Pending output is drained before the quiet timer may
+                    // classify, so a racing chunk cannot leave the classifier
+                    // one frame behind. Once the content-stability watchdog is
+                    // due, both earlier arms are disabled for one iteration:
+                    // repaint traffic may defer byte-silence classification,
+                    // but it cannot starve the watchdog.
                     biased;
-                    chunk = sub.live.recv() => {
+                    chunk = sub.live.recv(), if !watchdog_due => {
                 let Some(chunk) = chunk else {
                     break;
                 };
@@ -1479,7 +1483,7 @@ pub async fn handle_spawn(
                     // precondition is false, it just never polls it.
                     _ = tokio::time::sleep_until(
                         quiet_deadline.unwrap_or_else(tokio::time::Instant::now)
-                    ), if quiet_deadline.is_some() => {
+                    ), if quiet_deadline.is_some() && !watchdog_due => {
                         quiet_deadline = None;
                         // #538 status telemetry: the stream went byte-silent.
                         // `elapsed_since_output_ms` is ~the quiet window by
@@ -1524,6 +1528,9 @@ pub async fn handle_spawn(
                     _ = tokio::time::sleep_until(
                         watchdog_anchor + watchdog_after.unwrap_or_default()
                     ), if agent_for_pump.is_some() && watchdog_after.is_some() => {
+                        let watchdog_window = watchdog_after.unwrap_or_default();
+                        let elapsed_since_output = last_output_at.elapsed();
+                        let content_stable = watchdog_anchor.elapsed();
                         watchdog_anchor = tokio::time::Instant::now();
                         // #538 status telemetry. Only meaningful while the
                         // turn is actually `Working`: the watchdog arm re-arms
@@ -1540,12 +1547,24 @@ pub async fn handle_spawn(
                         if agent_states_map.lock().await.get(&id_for_pump).copied()
                             == Some(lazybox_ipc::AgentState::Working)
                         {
+                            if content_stable >= watchdog_window.saturating_mul(2) {
+                                tracing::warn!(
+                                    target: "lazybox::agent_status_telemetry",
+                                    terminal_id = ?id_for_pump,
+                                    reason = "pty-watchdog-force",
+                                    elapsed_since_output_ms = elapsed_since_output.as_millis(),
+                                    content_stable_ms = content_stable.as_millis(),
+                                    watchdog_ms = watchdog_window.as_millis(),
+                                    "working terminal exceeded twice the content-stability watchdog",
+                                );
+                            }
                             tracing::debug!(
                                 target: "lazybox::agent_status_telemetry",
                                 terminal_id = ?id_for_pump,
                                 trigger = "working-watchdog",
-                                elapsed_since_output_ms = last_output_at.elapsed().as_millis(),
-                                content_stable_ms = watchdog_after.unwrap_or_default().as_millis(),
+                                reason = "pty-watchdog-force",
+                                elapsed_since_output_ms = elapsed_since_output.as_millis(),
+                                content_stable_ms = content_stable.as_millis(),
                                 "working watchdog firing",
                             );
                         }

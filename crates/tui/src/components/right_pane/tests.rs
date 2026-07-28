@@ -702,6 +702,7 @@ mod teaser_tests {
         let teaser = teaser_text("界界界", 4);
         assert_eq!(teaser, "界…");
         assert!(crate::util::visual_width(&teaser) <= 4);
+        assert_eq!(teaser_text("👩‍💻abc", 4), "👩‍💻a…");
         assert_eq!(teaser_text("visible", 0), "");
     }
 }

@@ -375,6 +375,22 @@ pub fn channel_name_for_workspace(workspace_key: &str, prefix: &str) -> String {
     sluggify(&format!("{prefix}{workspace_key}"))
 }
 
+const MAX_CHANNEL_NAME_LEN: usize = 80;
+const MAX_TERMINAL_PREFIX_LEN: usize = 20;
+const MAX_TERMINAL_AGENT_LEN: usize = 24;
+const TERMINAL_SESSION_LEN: usize = 8;
+const TERMINAL_SEPARATORS_LEN: usize = 2;
+
+pub fn workspace_slug_for_terminal(workspace_key: &str, prefix: &str) -> String {
+    let prefix = terminal_channel_prefix(prefix);
+    let workspace_limit = MAX_CHANNEL_NAME_LEN
+        - prefix.len()
+        - TERMINAL_SESSION_LEN
+        - TERMINAL_SEPARATORS_LEN
+        - MAX_TERMINAL_AGENT_LEN;
+    sluggify_with_limit(workspace_key, workspace_limit)
+}
+
 /// Channel name for a specific (session, agent) pair. Format:
 /// `<prefix><workspace>-<session8>-<agent>`. Each per-(session, agent)
 /// channel is its own conversation so a workspace running Claude in
@@ -393,21 +409,17 @@ pub fn channel_name_for_terminal(
     agent_id: &str,
     prefix: &str,
 ) -> String {
+    let prefix = terminal_channel_prefix(prefix);
     let short = session_id
         .chars()
         .filter(|c| c.is_ascii_hexdigit())
-        .take(8)
+        .map(|c| c.to_ascii_lowercase())
+        .take(TERMINAL_SESSION_LEN)
         .collect::<String>();
-    const MAX_NAME_LEN: usize = 80;
-    const MIN_WORKSPACE_LEN: usize = 10;
-    let agent_limit = MAX_NAME_LEN - MIN_WORKSPACE_LEN - short.len() - 2;
-    let agent = sluggify_with_limit(agent_id, agent_limit);
+    let agent = encode_terminal_agent_segment(agent_id, MAX_TERMINAL_AGENT_LEN);
     let suffix = format!("-{short}-{agent}");
-    let workspace = sluggify_with_limit(
-        &format!("{prefix}{workspace_key}"),
-        MAX_NAME_LEN - suffix.len(),
-    );
-    format!("{workspace}{suffix}")
+    let workspace = workspace_slug_for_terminal(workspace_key, &prefix);
+    format!("{prefix}{workspace}{suffix}")
 }
 
 /// Slug a string into a valid Slack channel name: lowercase letters,
@@ -429,6 +441,10 @@ pub fn sluggify(input: &str) -> String {
 
 fn sluggify_with_limit(input: &str, limit: usize) -> String {
     debug_assert!(limit >= 9);
+    sluggify_fragment_with_limit(input, limit, true)
+}
+
+fn sluggify_fragment_with_limit(input: &str, limit: usize, trim_trailing: bool) -> String {
     let mut s = String::with_capacity(input.len());
     for c in input.chars() {
         if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
@@ -440,15 +456,85 @@ fn sluggify_with_limit(input: &str, limit: usize) -> String {
     if s.chars().count() > limit {
         let digest = fnv1a_64(s.as_bytes());
         let mut head: String = s.chars().take(limit - 9).collect();
-        while matches!(head.chars().last(), Some('-' | '.' | '_')) {
-            head.pop();
+        if trim_trailing {
+            while matches!(head.chars().last(), Some('-' | '.' | '_')) {
+                head.pop();
+            }
         }
         s = format!("{head}-{:08x}", digest as u32);
     }
-    while matches!(s.chars().last(), Some('-' | '.' | '_')) {
-        s.pop();
+    if trim_trailing {
+        while matches!(s.chars().last(), Some('-' | '.' | '_')) {
+            s.pop();
+        }
     }
     s
+}
+
+pub(crate) fn terminal_channel_prefix(prefix: &str) -> String {
+    sluggify_fragment_with_limit(prefix, MAX_TERMINAL_PREFIX_LEN, false)
+}
+
+fn encode_terminal_agent_segment(agent_id: &str, limit: usize) -> String {
+    let slug = sluggify_fragment_with_limit(agent_id, usize::MAX, true);
+    let mut tokens: Vec<String> = slug
+        .chars()
+        .map(|ch| match ch {
+            '-' => "_h".to_string(),
+            '_' => "_u".to_string(),
+            '.' => "_d".to_string(),
+            _ => ch.to_string(),
+        })
+        .collect();
+    if !slug.is_empty() && slug.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        tokens.insert(0, "_n".to_string());
+    }
+    let encoded = tokens.concat();
+    if encoded.len() <= limit {
+        return encoded;
+    }
+    let suffix = format!("_x{:08x}", fnv1a_64(encoded.as_bytes()) as u32);
+    let head_limit = limit - suffix.len();
+    let mut head = String::new();
+    for token in tokens {
+        if head.len() + token.len() > head_limit {
+            break;
+        }
+        head.push_str(&token);
+    }
+    format!("{head}{suffix}")
+}
+
+pub(crate) fn decode_terminal_agent_segment(encoded: &str) -> Option<String> {
+    if let Some(hex) = encoded.strip_prefix("_n")
+        && !hex.is_empty()
+        && hex.chars().all(|ch| ch.is_ascii_hexdigit())
+    {
+        return Some(hex.to_string());
+    }
+    let mut decoded = String::new();
+    let mut chars = encoded.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '_' {
+            decoded.push(ch);
+            continue;
+        }
+        match chars.next()? {
+            'h' => decoded.push('-'),
+            'u' => decoded.push('_'),
+            'd' => decoded.push('.'),
+            'x' => {
+                let hash = chars.collect::<String>();
+                if hash.len() != 8 || !hash.chars().all(|ch| ch.is_ascii_hexdigit()) {
+                    return None;
+                }
+                decoded.push('…');
+                return Some(decoded);
+            }
+            _ => return None,
+        }
+    }
+    Some(decoded)
 }
 
 /// FNV-1a 64-bit. Stable across processes and Rust releases (unlike
@@ -585,6 +671,21 @@ mod tests {
     }
 
     #[test]
+    fn channel_name_for_terminal_escapes_agent_delimiters() {
+        let n = channel_name_for_terminal(
+            "github-acme-widget-186",
+            "a3f1c277-9abc",
+            "cursor-agent",
+            "",
+        );
+        assert_eq!(n, "github-acme-widget-186-a3f1c277-cursor_hagent");
+        assert_eq!(
+            decode_terminal_agent_segment("cursor_hagent").as_deref(),
+            Some("cursor-agent")
+        );
+    }
+
+    #[test]
     fn channel_name_for_terminal_caps_at_eighty_chars() {
         let long = format!("github-{}", "a".repeat(100));
         let n = channel_name_for_terminal(&long, "deadbeef", "claude", "");
@@ -716,5 +817,11 @@ mod tests {
         let n =
             channel_name_for_terminal("ws", "a3f1c277-9abc-4d51-8f01-deadbeef0001", "claude", "");
         assert!(n.contains("a3f1c277"));
+    }
+
+    #[test]
+    fn terminal_session_suffix_is_canonical_lowercase() {
+        let n = channel_name_for_terminal("ws", "A3F1C277-9ABC", "claude", "");
+        assert_eq!(n, "ws-a3f1c277-claude");
     }
 }

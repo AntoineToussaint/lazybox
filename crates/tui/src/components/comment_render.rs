@@ -500,16 +500,28 @@ pub(crate) fn wrap_one(line: Line<'static>, width: u16) -> Vec<Line<'static>> {
         if w > width {
             let mut chunk = String::new();
             let mut chunk_w = 0;
-            for ch in word.chars() {
-                let ch_w = crate::util::char_visual_width(ch);
-                if chunk_w + ch_w > width.saturating_sub(*current_w) && !chunk.is_empty() {
+            for grapheme in crate::util::graphemes(&word) {
+                let grapheme_w = crate::util::visual_width(grapheme);
+                if grapheme_w > width {
+                    if !chunk.is_empty() {
+                        current.push(Span::styled(std::mem::take(&mut chunk), style));
+                        out.push(Line::from(std::mem::take(current)));
+                        *current_w = 0;
+                        chunk_w = 0;
+                    }
+                    current.push(Span::styled("…".to_string(), style));
+                    out.push(Line::from(std::mem::take(current)));
+                    *current_w = 0;
+                    continue;
+                }
+                if chunk_w + grapheme_w > width.saturating_sub(*current_w) && !chunk.is_empty() {
                     current.push(Span::styled(std::mem::take(&mut chunk), style));
                     out.push(Line::from(std::mem::take(current)));
                     *current_w = 0;
                     chunk_w = 0;
                 }
-                chunk.push(ch);
-                chunk_w += ch_w;
+                chunk.push_str(grapheme);
+                chunk_w += grapheme_w;
             }
             if !chunk.is_empty() {
                 current.push(Span::styled(chunk, style));
@@ -852,6 +864,33 @@ mod tests {
                 "wrapped line exceeds its cell budget: {text:?}"
             );
         }
+    }
+
+    #[test]
+    fn wrap_one_preserves_emoji_grapheme_clusters() {
+        let lines = wrap_one(Line::from("👩‍💻👩‍💻"), 3);
+        assert_eq!(lines.len(), 2);
+        for line in lines {
+            let text: String = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            assert_eq!(text, "👩‍💻");
+            assert!(crate::util::visual_width(&text) <= 3);
+        }
+    }
+
+    #[test]
+    fn wrap_one_replaces_unrenderable_wide_grapheme_at_tiny_width() {
+        let lines = wrap_one(Line::from("界"), 1);
+        let text: String = lines[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(text, "…");
+        assert_eq!(crate::util::visual_width(&text), 1);
     }
 
     #[test]

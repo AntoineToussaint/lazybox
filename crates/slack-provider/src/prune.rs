@@ -64,9 +64,10 @@ pub struct Filter {
     pub older_than_secs: Option<i64>,
     /// Slugged workspace key (lowercase, hyphenated). If set, only
     /// channels whose parsed workspace portion contains this string
-    /// are pruned. Pass through [`crate::api::sluggify`] before
-    /// constructing so user-typed keys like `acme/widget#186` match
-    /// channels named `acme-widget-186-...`.
+    /// are pruned. Pass through
+    /// [`crate::api::workspace_slug_for_terminal`] before constructing
+    /// so filtering uses the same stable length/hash budget as channel
+    /// generation.
     pub workspace_slug: Option<String>,
 }
 
@@ -99,7 +100,8 @@ pub struct ChannelParts {
 /// agent ids are `claude` / `codex` / `cursor` / `shell` etc, all
 /// containing at least one alpha char outside `[a-f]`.
 pub fn parse_channel_name(name: &str, prefix: &str) -> Option<ChannelParts> {
-    let body = name.strip_prefix(prefix)?;
+    let prefix = crate::api::terminal_channel_prefix(prefix);
+    let body = name.strip_prefix(&prefix)?;
     let segments: Vec<&str> = body.split('-').collect();
     if segments.len() < 3 {
         return None;
@@ -114,6 +116,7 @@ pub fn parse_channel_name(name: &str, prefix: &str) -> Option<ChannelParts> {
         // above.
         return None;
     }
+    let agent = crate::api::decode_terminal_agent_segment(agent)?;
     let workspace = segments[..segments.len() - 2].join("-");
     if workspace.is_empty() {
         return None;
@@ -121,7 +124,7 @@ pub fn parse_channel_name(name: &str, prefix: &str) -> Option<ChannelParts> {
     Some(ChannelParts {
         workspace_slug: workspace,
         session8: session8.to_string(),
-        agent: agent.to_string(),
+        agent,
     })
 }
 
@@ -255,7 +258,7 @@ pub fn parse_duration(input: &str) -> Result<i64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::{channel_name_for_terminal, sluggify};
+    use crate::api::{channel_name_for_terminal, sluggify, workspace_slug_for_terminal};
 
     fn info(name: &str, created: i64) -> ChannelInfo {
         ChannelInfo {
@@ -358,6 +361,21 @@ mod tests {
         assert!(parts.workspace_slug.len() < workspace.len());
     }
 
+    #[test]
+    fn parse_round_trips_hyphenated_agent_ids() {
+        let name = channel_name_for_terminal(
+            "github-acme-widget-186",
+            "a3f1c277-9abc",
+            "cursor-agent",
+            "pr-",
+        );
+        let parts = parse_channel_name(&name, "pr-")
+            .expect("generated channels must remain structurally parseable");
+        assert_eq!(parts.workspace_slug, "github-acme-widget-186");
+        assert_eq!(parts.session8, "a3f1c277");
+        assert_eq!(parts.agent, "cursor-agent");
+    }
+
     // ── classify ────────────────────────────────────────────────
 
     fn empty_live() -> HashSet<String> {
@@ -442,6 +460,27 @@ mod tests {
         };
         let out = classify(&c, "", &empty_live(), &filter, 1_000_000);
         assert_eq!(out.disposition, Disposition::FilteredOut);
+    }
+
+    #[test]
+    fn classify_matches_long_workspace_with_generator_slug() {
+        let workspace = format!("github-{}", "a".repeat(100));
+        let prefix = "pr-";
+        let channel_name = channel_name_for_terminal(&workspace, "deadbeef-1234", "claude", prefix);
+        let filter = Filter {
+            older_than_secs: None,
+            workspace_slug: Some(workspace_slug_for_terminal(&workspace, prefix)),
+        };
+
+        let out = classify(
+            &info(&channel_name, 0),
+            prefix,
+            &empty_live(),
+            &filter,
+            1_000_000,
+        );
+
+        assert_eq!(out.disposition, Disposition::Prune);
     }
 
     // ── plan ────────────────────────────────────────────────────

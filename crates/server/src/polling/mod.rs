@@ -932,6 +932,50 @@ pub fn gh_polled_scope(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FullSweepCommit {
+    pr_window: bool,
+    sweep_timer: bool,
+}
+
+fn full_sweep_commit(
+    global_pr_sweep: bool,
+    pr_complete: bool,
+    sweep_complete: bool,
+) -> FullSweepCommit {
+    FullSweepCommit {
+        pr_window: global_pr_sweep && pr_complete,
+        sweep_timer: sweep_complete,
+    }
+}
+
+#[cfg(test)]
+mod full_sweep_commit_tests {
+    use super::*;
+
+    #[test]
+    fn degraded_pr_fetch_does_not_advance_pr_window_or_sweep_timer() {
+        assert_eq!(
+            full_sweep_commit(true, false, false),
+            FullSweepCommit {
+                pr_window: false,
+                sweep_timer: false,
+            }
+        );
+    }
+
+    #[test]
+    fn complete_global_fetch_commits_both_progress_markers() {
+        assert_eq!(
+            full_sweep_commit(true, true, true),
+            FullSweepCommit {
+                pr_window: true,
+                sweep_timer: true,
+            }
+        );
+    }
+}
+
 /// `GhClient` adapter. The filter narrows the upstream result by
 /// role and item type before they reach the daemon's upsert path —
 /// disabled roles / types never become Workspaces. `scopes` further
@@ -1372,7 +1416,7 @@ impl GhSource {
             self.emit_progress(format!("Issue query: {}", self.client.issue_search_query()));
         }
 
-        let (raw, partial_warning, mentions) = self
+        let outcome = self
             .client
             .fetch_round_robin_with_status_and_mentions(
                 want_prs,
@@ -1384,6 +1428,11 @@ impl GhSource {
             )
             .await
             .map_err(lazybox_core::ProviderError::from)?;
+        let pr_complete = outcome.coverage.pr_complete();
+        let sweep_complete = outcome.coverage.sweep_complete();
+        let raw = outcome.tasks;
+        let partial_warning = outcome.partial_failure;
+        let mentions = outcome.mentions;
         // Record whether this sweep was partial so `polled_scope`
         // downgrades from `Exhaustive` to "no authoritative coverage"
         // — otherwise rescope would delete the half of the inbox the
@@ -1590,18 +1639,21 @@ impl GhSource {
         self.emit_progress(format!("{} tasks kept after filter", kept.len()));
 
         // Advance the `updated:>=` floor (issue #14) only when this
-        // tick actually ran the global `involves:` search — a
-        // round-robin per-repo sweep didn't look at the whole involved
-        // set, so moving the floor past PRs it never fetched would drop
-        // them from the next window. `pr_since.is_none()` here means a
-        // reconcile sweep, which re-arms the reconcile timer.
-        if global_pr_sweep {
+        // tick completed the global `involves:` search. A failed PR side
+        // may still return issue rows as a degraded success, but moving
+        // the floor then would skip the PR interval it never fetched.
+        // `pr_since.is_none()` means a reconcile sweep, which re-arms the
+        // reconcile timer.
+        let commit = full_sweep_commit(global_pr_sweep, pr_complete, sweep_complete);
+        if commit.pr_window {
             self.client
                 .record_pr_sweep_window(sweep_started, pr_since.is_none());
         }
-        // Mark sweep complete BEFORE returning so the next tick's
-        // `should_full_sweep` check sees fresh data.
-        self.client.mark_full_sweep_done();
+        // A degraded result stays due so the next tick retries the
+        // incomplete side instead of waiting for the normal cadence.
+        if commit.sweep_timer {
+            self.client.mark_full_sweep_done();
+        }
         Ok(kept)
     }
 

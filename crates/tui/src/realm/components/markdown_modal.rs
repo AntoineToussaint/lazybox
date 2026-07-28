@@ -340,6 +340,7 @@ mod tests {
         let title = trim_title("界界界", 4);
         assert_eq!(title, "界…");
         assert!(crate::util::visual_width(&title) <= 4);
+        assert_eq!(trim_title("👩‍💻abc", 4), "👩‍💻a…");
         assert_eq!(trim_title("title", 0), "");
     }
 

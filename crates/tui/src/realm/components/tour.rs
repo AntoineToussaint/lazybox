@@ -35,6 +35,7 @@ enum TourSegment {
     Text(&'static str),
     Hint(ActionKind),
     AgentHints,
+    TierHints(ActionKind),
     Leader(TourGroup),
 }
 
@@ -155,51 +156,43 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "3 · Put an agent on it",
+        title: "3 · Point at the work",
         body: &[
             line!(
                 TourSegment::Text("Press "),
                 TourSegment::Hint(ActionKind::Work),
-                TourSegment::Text(" on any row and lazybox opens a worktree, then"),
+                TourSegment::Text(": lazybox reads the focused task and briefs the"),
             ),
-            line!("launches your default agent with a task-aware prompt. A few"),
-            line!("ways that plays out:"),
+            line!("agent. The same action changes with the state:"),
             line!(""),
+            line!("  • Open issue → implement it."),
+            line!("  • PR with failing CI → diagnose and repair CI."),
             line!(
-                TourSegment::Text("  • A PR you review has failing CI → "),
-                TourSegment::Hint(ActionKind::JumpToFailingCi),
-                TourSegment::Text(" jumps to it,"),
+                TourSegment::Text("  • Select review rows: "),
+                TourSegment::Hint(ActionKind::SelectRow),
+                TourSegment::Text(" → address only those comments."),
             ),
+            line!(""),
+            line!("One running agent gets the brief. With none, lazybox starts"),
+            line!("your default agent in the task worktree; with several, it"),
+            line!("asks which agent should take it."),
+            line!(""),
+            line!("A GitHub high / medium / low priority picks its model tier;"),
             line!(
-                TourSegment::Text("    then "),
-                TourSegment::Hint(ActionKind::Work),
-                TourSegment::Text(" lets the agent fix the build."),
-            ),
-            line!(
-                TourSegment::Text("  • An open issue → "),
-                TourSegment::Hint(ActionKind::Work),
-                TourSegment::Text(" starts an agent to implement it."),
-            ),
-            line!(
-                TourSegment::Text("  • A scratch idea on a repo → "),
-                TourSegment::Hint(ActionKind::NewWorkspace),
-                TourSegment::Text(", "),
-                TourSegment::Hint(ActionKind::Work),
-                TourSegment::Text(", done."),
+                TourSegment::TierHints(ActionKind::WorkWith),
+                TourSegment::Text(" overrides that choice in the TUI."),
             ),
             line!(""),
             line!(
-                TourSegment::Text("Agent shortcuts: "),
                 TourSegment::AgentHints,
+                TourSegment::Text(" picks a configured agent directly;"),
             ),
             line!(
-                TourSegment::Text("For a plain shell use "),
                 TourSegment::Hint(ActionKind::SpawnShell),
-                TourSegment::Text("; "),
+                TourSegment::Text(" is a plain shell and "),
                 TourSegment::Hint(ActionKind::OpenEditor),
-                TourSegment::Text(" opens the worktree"),
+                TourSegment::Text(" opens the worktree in your editor."),
             ),
-            line!("in your editor."),
         ],
     },
     TourStep {
@@ -343,10 +336,24 @@ impl Tour {
             .catalog
             .iter()
             .filter_map(|entry| match &entry.param {
-                Some(Param::Agent(agent))
+                Some(Param::Agent(_))
                     if entry.kind == ActionKind::SpawnAgent && !entry.keys_display.is_empty() =>
                 {
-                    Some(format!("{} {agent}", entry.keys_display))
+                    Some(entry.keys_display.as_ref())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        (!hints.is_empty()).then(|| hints.join(" / "))
+    }
+
+    fn tier_hints(&self, kind: ActionKind) -> Option<String> {
+        let hints = self
+            .catalog
+            .iter()
+            .filter_map(|entry| match &entry.param {
+                Some(Param::Tier(_)) if entry.kind == kind && !entry.keys_display.is_empty() => {
+                    Some(entry.keys_display.as_ref())
                 }
                 _ => None,
             })
@@ -390,6 +397,7 @@ impl Tour {
                     rendered.push_str(&self.action_entry(*kind)?.keys_display);
                 }
                 TourSegment::AgentHints => rendered.push_str(&self.agent_hints()?),
+                TourSegment::TierHints(kind) => rendered.push_str(&self.tier_hints(*kind)?),
                 TourSegment::Leader(group) => rendered.push_str(&self.group_leader(*group)?),
             }
         }
@@ -591,6 +599,14 @@ mod tests {
         agents: &[&str],
         overrides: &[(&str, &str)],
     ) -> Vec<lazybox_tui_core::action::CatalogEntry> {
+        catalog_with_tiers(agents, overrides, &[])
+    }
+
+    fn catalog_with_tiers(
+        agents: &[&str],
+        overrides: &[(&str, &str)],
+        tiers: &[lazybox_core::ModelTier],
+    ) -> Vec<lazybox_tui_core::action::CatalogEntry> {
         let agents = agents
             .iter()
             .map(|agent| (*agent).to_string())
@@ -599,11 +615,12 @@ mod tests {
             .iter()
             .map(|(action, keys)| ((*action).to_string(), (*keys).to_string()))
             .collect::<BTreeMap<_, _>>();
-        ActionDef::catalog(&agents, &overrides)
+        ActionDef::catalog_with_tiers(&agents, &overrides, tiers)
     }
 
     fn default_catalog() -> Vec<lazybox_tui_core::action::CatalogEntry> {
-        catalog(&["claude", "codex", "cursor"], &[])
+        let tiers = lazybox_core::AgentModels::builtin("claude").unwrap().tiers;
+        catalog_with_tiers(&["claude", "codex", "cursor"], &[], &tiers)
     }
 
     fn ke(code: Key) -> KeyEvent {
@@ -749,6 +766,25 @@ mod tests {
     }
 
     #[test]
+    fn showcases_contextual_work_and_tier_routing() {
+        let all = render_all();
+        for behavior in [
+            "Open issue → implement it",
+            "PR with failing CI → diagnose and repair CI",
+            "address only those comments",
+            "One running agent gets the brief",
+            "default agent in the task worktree",
+            "high / medium / low priority picks its model tier",
+            "w S / w M / w L overrides",
+        ] {
+            assert!(
+                all.contains(behavior),
+                "tour no longer demonstrates {behavior:?}"
+            );
+        }
+    }
+
+    #[test]
     fn snippets_step_is_gone() {
         // Snippets are a power-user feature; onboarding shouldn't carry
         // them. Guard against the step creeping back in.
@@ -773,6 +809,10 @@ mod tests {
                         }
                         TourSegment::AgentHints => {
                             assert!(tour.agent_hints().is_some());
+                            hint_count += 1;
+                        }
+                        TourSegment::TierHints(kind) => {
+                            assert!(tour.tier_hints(*kind).is_some());
                             hint_count += 1;
                         }
                         TourSegment::Leader(group) => {
@@ -836,14 +876,19 @@ mod tests {
         let catalog = catalog(&["codex"], &[("spawn_agent.codex", "Ctrl-k")]);
         let all = render_all_with_catalog(&catalog);
 
-        assert!(all.contains("Ctrl-k codex"));
-        for unavailable in ["a c claude", "a x codex", "a u cursor"] {
+        assert!(all.contains("Ctrl-k picks a configured agent"));
+        for unavailable in [
+            "agents: a c",
+            "agents: a x",
+            "agents: a u",
+            "a c / a x / a u",
+        ] {
             assert!(
                 !all.contains(unavailable),
                 "tour advertised unavailable shortcut {unavailable:?}"
             );
         }
-        assert!(all.contains("start a plain shell"));
+        assert!(all.contains("s is a plain shell"));
     }
 
     #[test]
@@ -852,8 +897,26 @@ mod tests {
         let all = render_all_with_catalog(&catalog);
 
         assert!(!all.contains("agents:"));
-        assert!(!all.contains("Agent shortcuts:"));
-        assert!(all.contains("start a plain shell"));
+        assert!(!all.contains("picks a configured agent directly"));
+        assert!(all.contains("s is a plain shell"));
+    }
+
+    #[test]
+    fn tier_hints_follow_the_runtime_catalog_and_remaps() {
+        let tiers = lazybox_core::AgentModels::builtin("claude").unwrap().tiers;
+        let catalog = catalog_with_tiers(
+            &["claude"],
+            &[
+                ("work_tier.S", "Ctrl-1"),
+                ("work_tier.M", "Ctrl-2"),
+                ("work_tier.L", "Ctrl-3"),
+            ],
+            &tiers,
+        );
+        let all = render_all_with_catalog(&catalog);
+
+        assert!(all.contains("Ctrl-1 / Ctrl-2 / Ctrl-3 overrides"));
+        assert!(!all.contains("w S / w M / w L overrides"));
     }
 
     #[test]

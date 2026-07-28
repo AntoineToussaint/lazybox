@@ -113,7 +113,8 @@ general PR work → bare scratch-workspace spawn.
 
 One running agent receives the prompt through injection. With no running agent,
 lazybox starts `setup.default_agent` in the workspace worktree. With several
-different agents, it asks which one should take the work.
+running conversations, including two sessions of the same agent, it asks which
+exact terminal should take the work.
 
 A GitHub `high` / `medium` / `low` label or `@high` / `@medium` / `@low` task
 body marker is resolved at spawn time through the target agent's

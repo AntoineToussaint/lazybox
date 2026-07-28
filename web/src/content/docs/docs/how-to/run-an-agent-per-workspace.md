@@ -59,7 +59,8 @@ The action also chooses where the brief goes:
 - one agent already running on the workspace → inject the brief into it;
 - no running agent → launch `setup.default_agent` (Claude Code when unset) in
   that task's worktree;
-- several different agents running → ask which one should take the work.
+- several agent conversations running (including two sessions of the same
+  agent) → ask which exact conversation should take the work.
 
 The focused workspace remains the reference frame even while you select rows
 in the Activity pane, so you do not need to find a task folder, prompt
@@ -132,10 +133,12 @@ Put the priority marker and trigger in the issue body:
 @lazybox codex
 ```
 
-On the next GitHub poll, lazybox authenticates the trigger, opens the issue's
-workspace, chooses Codex's configured `high` tier, and starts the agent with
-the issue-implementation brief. The issue chooses the work, agent, model, and
-reasoning effort without opening the TUI. A `high` label plus a bare
+When the next full GitHub sweep finds the trigger, lazybox authenticates it,
+opens the issue's workspace, chooses Codex's configured `high` tier, and starts
+the agent with the issue-implementation brief. Under normal polling, full sweeps
+run at daemon startup and roughly every ten minutes by default, so a new trigger
+can wait about ten minutes before it starts. The issue chooses the work, agent,
+model, and reasoning effort without opening the TUI. A `high` label plus a bare
 `@lazybox` trigger does the same with Claude.
 
 See [Trigger agents with @lazybox mentions](/docs/how-to/lazybox-mentions/)

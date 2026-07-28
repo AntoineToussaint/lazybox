@@ -2402,15 +2402,22 @@ mod work_target_tests {
         );
     }
 
+    fn running(tid: u64, agent: &str) -> RunningWorkTarget {
+        RunningWorkTarget {
+            terminal_id: TerminalId(tid),
+            agent_id: agent.to_string(),
+        }
+    }
+
     #[test]
     fn no_running_agent_falls_back_to_default() {
         let sb = Sidebar::new(PaneId::new(1));
         let ws = ws_key("github:o/r#1");
         assert_eq!(
             sb.work_target(&ws, "claude"),
-            WorkTarget::Agent("claude".into())
+            WorkTarget::Spawn("claude".into())
         );
-        assert!(sb.running_agent_ids(&ws).is_empty());
+        assert!(sb.running_work_targets(&ws).is_empty());
     }
 
     #[test]
@@ -2424,9 +2431,9 @@ mod work_target_tests {
         spawn_agent(&mut sb, 1, &ws, "codex");
         assert_eq!(
             sb.work_target(&ws, "claude"),
-            WorkTarget::Agent("codex".into())
+            WorkTarget::Running(running(1, "codex"))
         );
-        assert_eq!(sb.running_agent_ids(&ws), vec!["codex".to_string()]);
+        assert_eq!(sb.running_work_targets(&ws), vec![running(1, "codex")]);
     }
 
     #[test]
@@ -2440,7 +2447,7 @@ mod work_target_tests {
         spawn_agent(&mut sb, 2, &ws, "claude");
         assert_eq!(
             sb.work_target(&ws, "claude"),
-            WorkTarget::Choose(vec!["claude".into(), "codex".into()])
+            WorkTarget::Choose(vec![running(2, "claude"), running(1, "codex")])
         );
     }
 
@@ -2452,7 +2459,7 @@ mod work_target_tests {
         spawn_agent(&mut sb, 2, &ws, "codex");
         assert_eq!(
             sb.work_target(&ws, "claude"),
-            WorkTarget::Choose(vec!["codex".into(), "cursor".into()])
+            WorkTarget::Choose(vec![running(2, "codex"), running(1, "cursor")])
         );
     }
 
@@ -2464,9 +2471,9 @@ mod work_target_tests {
         spawn_agent(&mut sb, 1, &other, "codex");
         assert_eq!(
             sb.work_target(&ws, "claude"),
-            WorkTarget::Agent("claude".into())
+            WorkTarget::Spawn("claude".into())
         );
-        assert!(sb.running_agent_ids(&ws).is_empty());
+        assert!(sb.running_work_targets(&ws).is_empty());
     }
 
     #[test]
@@ -2477,23 +2484,24 @@ mod work_target_tests {
             .insert(TerminalId(1), (ws.clone(), TerminalKind::Shell));
         assert_eq!(
             sb.work_target(&ws, "claude"),
-            WorkTarget::Agent("claude".into())
+            WorkTarget::Spawn("claude".into())
         );
-        assert!(sb.running_agent_ids(&ws).is_empty());
+        assert!(sb.running_work_targets(&ws).is_empty());
     }
 
     #[test]
-    fn duplicate_agent_terminals_dedupe_to_one_id() {
-        // Two terminals of the SAME agent are one target — the inject
-        // keys off the agent id, so no chooser is needed.
+    fn duplicate_agent_terminals_remain_distinct_targets() {
         let mut sb = Sidebar::new(PaneId::new(1));
         let ws = ws_key("github:o/r#1");
         spawn_agent(&mut sb, 1, &ws, "codex");
         spawn_agent(&mut sb, 2, &ws, "codex");
-        assert_eq!(sb.running_agent_ids(&ws), vec!["codex".to_string()]);
         assert_eq!(
             sb.work_target(&ws, "claude"),
-            WorkTarget::Agent("codex".into())
+            WorkTarget::Choose(vec![running(1, "codex"), running(2, "codex")])
+        );
+        assert_eq!(
+            sb.work_target_for_agent(&ws, "codex"),
+            WorkTarget::Choose(vec![running(1, "codex"), running(2, "codex")])
         );
     }
 }

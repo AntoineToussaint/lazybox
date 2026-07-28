@@ -10,12 +10,12 @@ touching the TUI.
 
 ## How it works
 
-When the GitHub provider polls and finds `@lazybox` in an **issue body or an
-issue comment** (pull requests are not scanned), lazybox opens that issue's
-workspace worktree and spawns an agent with a prompt to implement the issue. By
-default, **only mentions written by the authenticated viewer** (you) trigger a
-spawn — so a stranger commenting `@lazybox` on your public issue can't start an
-agent on your machine.
+When the full GitHub sweep finds `@lazybox` in an **issue body or an issue
+comment** (pull requests are not scanned), lazybox opens that issue's workspace
+worktree and spawns an agent with a prompt to implement the issue. By default,
+**only mentions written by the authenticated viewer** (you) trigger a spawn —
+so a stranger commenting `@lazybox` on your public issue can't start an agent
+on your machine.
 
 A bare `@lazybox` starts Claude Code. To choose a registered agent and an
 optional model-tier alias, put them after the mention on the same line:
@@ -40,11 +40,12 @@ matching `@high`, `@medium`, or `@low` marker in the **issue body**:
 @lazybox codex
 ```
 
-On the next poll, lazybox opens the issue workspace and maps `high` through
-Codex's configured `agents.codex.models.priority` table. The selected tier's
-arguments can set both the concrete model and its reasoning effort. This is an
-end-to-end GitHub handoff: the issue declares the task and compute profile, and
-the mention starts it without opening the TUI.
+When the next full GitHub sweep finds the trigger, lazybox opens the issue
+workspace and maps `high` through Codex's configured
+`agents.codex.models.priority` table. The selected tier's arguments can set
+both the concrete model and its reasoning effort. This is an end-to-end GitHub
+handoff: the issue declares the task and compute profile, and the mention
+starts it without opening the TUI.
 
 An explicit model alias in the directive, such as `@lazybox codex S`, overrides
 the issue priority. Priority labels take precedence over body markers; when
@@ -90,9 +91,10 @@ The list is authoritative:
 
 ## Notes
 
-- This reacts to GitHub activity on the normal poll cycle (see
-  `providers.github.poll_interval`), so there's a short delay between the
-  mention or label landing and the agent starting.
+- Mention and label triggers are scanned by the full GitHub sweep, not by the
+  hot or notifications-driven incremental polls. Under normal polling, the full
+  sweep runs at daemon startup and roughly every ten minutes by default, so a
+  new trigger can wait about ten minutes before it starts.
 - The spawned agent runs with the same tools and repository access as any other
   lazybox agent — see the [security boundaries](https://github.com/AntoineToussaint/lazybox/blob/main/SECURITY.md).
   Only add logins you trust to run an agent against your checkout.

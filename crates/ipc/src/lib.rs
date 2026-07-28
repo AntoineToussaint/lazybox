@@ -2068,8 +2068,7 @@ impl WorktreeRecovery {
     /// Whether re-pressing (`r` in the modal / a fresh `w`) can succeed
     /// *without* the user first doing something out-of-band. `false` for
     /// the classes that need a manual fix (free the holder, move a dir,
-    /// re-sync the branch, fix the repo string) — the modal still offers
-    /// retry there, but frames it as "after you fix it".
+    /// re-sync the branch, fix the repo string).
     pub fn retryable(&self) -> bool {
         matches!(
             self,
@@ -2082,21 +2081,21 @@ impl WorktreeRecovery {
     }
 
     /// One-line, imperative recovery guidance shown under the error in
-    /// the modal. Always names a concrete next step; the modal appends
-    /// the `r retry · Esc dismiss` affordance separately.
+    /// the modal. Always names a concrete next step; the modal separately
+    /// renders only the affordances valid for this class.
     pub fn hint(&self) -> &'static str {
         match self {
             Self::Transient => "Looks transient — press r to retry.",
             Self::BranchHeldLive => {
-                "That branch is open in another workspace. Join or adopt it here, \
-                 then press r."
+                "Press Esc; use x a in the holding workspace to adopt it, or free \
+                 an external checkout."
             }
             Self::DirtyLeftover => {
-                "A leftover folder holds uncommitted work. Move it aside, then press r."
+                "A leftover folder holds uncommitted work. Move it aside, then start again."
             }
             Self::BranchMissing => {
                 "The branch isn't on origin (fork or deleted head). Re-sync the PR \
-                 (g s), then press r."
+                 (g s), then start again."
             }
             Self::Offline => "Can't download files while offline. Reconnect, then press r.",
             Self::DefaultBranchUnresolved => {

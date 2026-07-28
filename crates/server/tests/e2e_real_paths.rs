@@ -25,7 +25,7 @@ use lazybox_server::backend::tmux::modern_tmux_version;
 use lazybox_server::{Server, ServerConfig};
 use lazybox_store::MemoryStore;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -52,19 +52,33 @@ fn skip_or_fail(what: &str) {
 
 /// `LAZYBOX_HOME` isolation, same contract as the spawn_handler tests:
 /// an empty home resolves every config reader to defaults (what CI sees).
+static CONFIG_HOME_LOCK: Mutex<()> = Mutex::new(());
+
 struct IsolatedConfigHome {
+    _guard: MutexGuard<'static, ()>,
     _tmp: tempfile::TempDir,
     prev: Option<std::ffi::OsString>,
 }
 
 impl IsolatedConfigHome {
     fn new() -> Self {
+        let guard = CONFIG_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let tmp = tempfile::TempDir::new().unwrap();
         let prev = std::env::var_os("LAZYBOX_HOME");
-        // SAFETY: process-global, but nextest runs one test per process
-        // and an empty dir resolves readers to CI defaults either way.
+        // SAFETY: the process-global mutation is serialized for every
+        // test in this executable by `CONFIG_HOME_LOCK`.
         unsafe { std::env::set_var("LAZYBOX_HOME", tmp.path()) };
-        Self { _tmp: tmp, prev }
+        Self {
+            _guard: guard,
+            _tmp: tmp,
+            prev,
+        }
+    }
+
+    fn path(&self) -> &Path {
+        self._tmp.path()
     }
 }
 
@@ -440,7 +454,18 @@ async fn e2e_spawn_provisions_a_real_worktree_and_collapse_carries_it_to_the_pr(
 
 #[tokio::test]
 async fn e2e_cross_repo_pr_adopts_its_untracked_managed_worktree() {
-    let _home = IsolatedConfigHome::new();
+    let home = IsolatedConfigHome::new();
+    std::fs::write(
+        home.path().join("config.yaml"),
+        r#"
+repos:
+  acme/core:
+    scripts:
+      - name: companion-setup
+        content: echo adopted companion
+"#,
+    )
+    .unwrap();
     timeout(TEST_DEADLINE, async {
         let root = tempfile::TempDir::new().unwrap();
         let _upstream_a = seed_local_upstream(root.path(), "acme", "app");
@@ -578,6 +603,14 @@ async fn e2e_cross_repo_pr_adopts_its_untracked_managed_worktree() {
             "agents, shells, and the editor's persisted session lookup must share the adopted path",
         );
         assert_eq!(std::fs::read(companion_path.join("WIP.bin")).unwrap(), wip);
+        let setup_script = std::fs::read_to_string(
+            companion_path
+                .join("_lazybox")
+                .join("scripts")
+                .join("companion-setup"),
+        )
+        .expect("repo setup scripts must be applied to an adopted checkout");
+        assert!(setup_script.contains("echo adopted companion"));
         assert!(
             !derived_pr_path.exists(),
             "adoption must not materialize a second PR-derived checkout"
@@ -591,6 +624,35 @@ async fn e2e_cross_repo_pr_adopts_its_untracked_managed_worktree() {
                 .count(),
             1,
             "the companion branch must still have exactly one checkout"
+        );
+
+        client
+            .send(Command::DeleteOrphanedWorktree {
+                path: companion_path.clone(),
+                force: true,
+            })
+            .unwrap();
+        let stale_delete = wait_for(
+            &mut client,
+            |event| matches!(event, Event::OrphanedWorktreeDeleted { .. }),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("stale orphan deletion result");
+        let Event::OrphanedWorktreeDeleted { ok, error, .. } = stale_delete else {
+            unreachable!()
+        };
+        assert!(!ok, "an adopted worktree is no longer an orphan");
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|message| message.contains("no longer orphaned")),
+            "unexpected stale-delete result: {error:?}"
+        );
+        assert_eq!(
+            std::fs::read(companion_path.join("WIP.bin")).unwrap(),
+            wip,
+            "a stale confirmed deletion must not remove newly adopted WIP"
         );
 
         drop(client);
@@ -616,6 +678,107 @@ async fn e2e_cross_repo_pr_adopts_its_untracked_managed_worktree() {
             Some(companion_path.as_path()),
             "the adopted association must survive a daemon restart"
         );
+    })
+    .await
+    .expect("deadline");
+}
+
+#[tokio::test]
+async fn e2e_future_workspace_schema_blocks_automatic_worktree_adoption() {
+    let _home = IsolatedConfigHome::new();
+    timeout(TEST_DEADLINE, async {
+        let root = tempfile::TempDir::new().unwrap();
+        let upstream = seed_local_upstream(root.path(), "acme", "core");
+        let manager = lazybox_git_ops::WorktreeManager::new(root.path().to_path_buf());
+        let bare = manager.bare_path("acme", "core");
+        let branch = "future-owned";
+        publish_branch(upstream.path(), &bare, branch);
+
+        let candidate = root
+            .path()
+            .join("worktrees/github-acme-core")
+            .join("future-owned");
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-B",
+                branch,
+                &candidate.to_string_lossy(),
+                &format!("refs/heads/{branch}"),
+            ],
+        );
+        let candidate = std::fs::canonicalize(candidate).unwrap();
+        let marker = b"future owner WIP\n";
+        std::fs::write(candidate.join("WIP.txt"), marker).unwrap();
+
+        let store = Arc::new(MemoryStore::new());
+        let mock = lazybox_server::backend::MockBackend::new();
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            store,
+            Arc::new(mock.clone()),
+            root.path().to_path_buf(),
+        );
+
+        let future = lazybox_core::Workspace::from_task(
+            task(
+                "acme/core#12",
+                "https://github.com/acme/core/issues/12",
+                None,
+                vec![],
+            ),
+            chrono::Utc::now(),
+        );
+        let mut future_json = serde_json::to_value(&future).unwrap();
+        future_json["schema"] = serde_json::json!(lazybox_core::WORKSPACE_SCHEMA_VERSION + 1);
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: future.key.as_str().to_string(),
+                created_at: future.created_at,
+                workspace_json: Some(serde_json::to_string(&future_json).unwrap()),
+            })
+            .unwrap();
+
+        let pr = lazybox_core::Workspace::from_task(
+            task(
+                "acme/core#98",
+                "https://github.com/acme/core/pull/98",
+                Some(branch),
+                vec![],
+            ),
+            chrono::Utc::now(),
+        );
+        let pr_key = pr.key.clone();
+        save_workspace(&config, &pr);
+
+        let (mut client, _daemon) = subscribed(config.clone()).await;
+        send_spawn(&mut client, &pr_key, TerminalKind::Shell, None);
+        let failure = wait_for(
+            &mut client,
+            |event| {
+                matches!(
+                    event,
+                    Event::WorktreeProgress {
+                        status: lazybox_ipc::WorktreeStepStatus::Failed(message),
+                        ..
+                    } if lazybox_ipc::WorktreeRecovery::classify(message)
+                        == lazybox_ipc::WorktreeRecovery::BranchHeldLive
+                )
+            },
+            Duration::from_secs(30),
+        )
+        .await;
+        assert!(
+            failure.is_some(),
+            "unknown future ownership must keep the explicit conflict flow"
+        );
+        assert!(mock.list().await.unwrap().is_empty());
+        assert!(load_workspace(&config, &pr_key).sessions.is_empty());
+        assert_eq!(std::fs::read(candidate.join("WIP.txt")).unwrap(), marker);
     })
     .await
     .expect("deadline");

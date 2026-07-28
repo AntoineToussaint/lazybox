@@ -127,6 +127,24 @@ fn issue_to_pr_handoff_is_prominent_across_discovery_surfaces() {
     }
     assert!(homepage.contains("/docs/how-to/keep-session-from-issue-to-pr/"));
 
+    let css = read("web/src/styles/global.css");
+    let compact_handoff = css
+        .split_once("@media (max-width: 760px)")
+        .map(|(_, rules)| rules)
+        .and_then(|rules| rules.split_once("@media (max-width: 560px)"))
+        .map(|(rules, _)| rules)
+        .expect("handoff needs its own content-width responsive breakpoint");
+    for expected in [
+        ".handoff-flow { grid-template-columns: 1fr;",
+        ".handoff-stage + .handoff-stage::before",
+        "content: \"↓\";",
+    ] {
+        assert!(
+            compact_handoff.contains(expected),
+            "compact handoff layout missing {expected:?}"
+        );
+    }
+
     let guide = read("web/src/content/docs/docs/how-to/keep-session-from-issue-to-pr.md");
     for expected in [
         "Closes #42.",

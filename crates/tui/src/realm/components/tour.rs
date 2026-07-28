@@ -15,6 +15,7 @@
 //! the last step OR pressing Esc/q — returns [`Msg::TourFinished`],
 //! which marks the tour seen and pops it.
 
+use crate::components::comment_render::wrap_one;
 use crate::realm::Msg;
 use crate::realm::UserEvent;
 use tuirealm::command::{Cmd, CmdResult};
@@ -260,7 +261,36 @@ impl Component for Tour {
         let step = &STEPS[self.cursor];
 
         let modal_w = 68u16.min(area.width.saturating_sub(4));
-        let modal_h = 22u16.min(area.height.saturating_sub(2));
+        let content_width = modal_w.saturating_sub(4);
+        let mut lines: Vec<Line> = vec![Line::raw("")];
+        {
+            let mut push_wrapped = |text: &str, style: Style| {
+                for line in wrap_one(
+                    Line::from(Span::styled(text.to_string(), style)),
+                    content_width,
+                ) {
+                    let mut spans = vec![Span::raw("  ")];
+                    spans.extend(line.spans);
+                    lines.push(Line::from(spans));
+                }
+            };
+            push_wrapped(
+                step.title,
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            );
+            push_wrapped("", Style::default());
+            for &line in step.body {
+                push_wrapped(line, Style::default().fg(theme.text_strong));
+            }
+        }
+        let body_lines = lines.len() as u16;
+        let body = Paragraph::new(lines);
+        let modal_h = body_lines
+            .saturating_add(3)
+            .max(22)
+            .min(area.height.saturating_sub(2));
         let x = area.x + area.width.saturating_sub(modal_w) / 2;
         let y = area.y + area.height.saturating_sub(modal_h) / 2;
         let modal = Rect::new(x, y, modal_w, modal_h);
@@ -290,23 +320,7 @@ impl Component for Tour {
             height: 1,
         };
 
-        let mut lines: Vec<Line> = vec![
-            Line::raw(""),
-            Line::from(Span::styled(
-                format!("  {}", step.title),
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::raw(""),
-        ];
-        for &l in step.body {
-            lines.push(Line::from(Span::styled(
-                format!("  {l}"),
-                Style::default().fg(theme.text_strong),
-            )));
-        }
-        frame.render_widget(Paragraph::new(lines), body_rect);
+        frame.render_widget(body, body_rect);
 
         // Footer buttons. Each is rendered AND recorded as a hit-box so
         // `on_mouse` can route clicks — the tour is fully mouse-drivable.
@@ -413,12 +427,11 @@ mod tests {
 
     /// Render the card at `cursor` into a throwaway backend and return
     /// the visible text — the snapshot surface for the step content.
-    fn render_step(cursor: usize) -> String {
+    fn render_step_at(cursor: usize, w: u16, h: u16) -> String {
         use tuirealm::ratatui::Terminal;
         use tuirealm::ratatui::backend::TestBackend;
         let mut t = Tour::new();
         t.cursor = cursor;
-        let (w, h) = (90u16, 30u16);
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
         term.draw(|f| t.view(f, Rect::new(0, 0, w, h))).unwrap();
         let buf = term.backend().buffer();
@@ -432,6 +445,10 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn render_step(cursor: usize) -> String {
+        render_step_at(cursor, 90, 30)
     }
 
     /// The whole tour rendered top to bottom — one string to scan for
@@ -512,6 +529,24 @@ mod tests {
                 "handoff step missing {expected:?}"
             );
         }
+
+        let narrow = render_step_at(
+            STEPS
+                .iter()
+                .position(|step| step.title.contains("issue becomes a PR"))
+                .expect("handoff step"),
+            60,
+            30,
+        );
+        let narrow = narrow
+            .replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            narrow.contains("select the issue: x j"),
+            "narrow terminals must keep the manual join instruction visible:\n{narrow}"
+        );
     }
 
     #[test]

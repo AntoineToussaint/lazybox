@@ -3,8 +3,22 @@ import Layout from '../layouts/Layout.astro';
 
 const repo = 'https://github.com/AntoineToussaint/lazybox';
 const docs = '/docs/';
+const orchestrationGuide = '/docs/how-to/orchestrate-multiple-agents/';
 const installCmd =
   'brew tap AntoineToussaint/lazybox && brew trust AntoineToussaint/lazybox && brew install lazybox';
+
+const fleetRepos = [
+  { name: 'commerce/api', live: 2, target: '#842', runtime: 'Claude', selected: true },
+  { name: 'storefront/web', live: 2, target: '#311', runtime: 'Codex', selected: true },
+  { name: 'ios/mobile', live: 1, target: '#907', runtime: 'Claude', selected: true },
+  { name: 'android/mobile', live: 1 },
+  { name: 'sdk/rust', live: 2, target: '#144', runtime: 'shell', selected: true },
+  { name: 'sdk/js', live: 1 },
+  { name: 'docs/site', live: 1, target: '#622', runtime: 'no session', selected: true },
+  { name: 'platform/infra', live: 2 },
+  { name: 'design/system', live: 1 },
+  { name: 'data/pipeline', live: 2 },
+];
 
 const features = [
   {
@@ -94,6 +108,7 @@ const steps = [
           lazybox
         </a>
         <div class="links">
+          <a href="#orchestration" class="hide-sm">Orchestration</a>
           <a href="#features" class="hide-sm">Features</a>
           <a href="#how" class="hide-sm">How it works</a>
           <a href={docs}>Docs</a>
@@ -165,6 +180,121 @@ const steps = [
         </div>
       </div>
     </div>
+
+    <section id="orchestration" class="orchestration">
+      <div class="container">
+        <div class="section-head" data-reveal>
+          <p class="kicker">One instruction · many agents</p>
+          <h2>Coordinate a fleet without visiting every terminal</h2>
+          <p>
+            Select workspaces across repositories, review one shared instruction, and let
+            lazybox fan it out with per-session delivery and an exact result.
+          </p>
+        </div>
+
+        <div class="orchestration-shell" data-reveal>
+          <div class="fleet-bar">
+            <span><span class="c-green">●</span> fleet broadcast</span>
+            <div class="fleet-metrics" aria-label="Example fleet size">
+              <b>10</b> repos <span>·</span> <b>15</b> live sessions <span>·</span>
+              <b class="c-accent">5</b> selected
+            </div>
+          </div>
+
+          <ol class="orchestration-sequence">
+            <li class="orchestration-stage select-stage">
+              <div class="stage-head">
+                <span class="stage-num">01</span>
+                <div>
+                  <h3>Select across repositories</h3>
+                  <p><kbd>v</kbd> marks arbitrary rows and keeps the set while you navigate.</p>
+                </div>
+              </div>
+              <div class="repo-fleet">
+                {fleetRepos.map((item) => (
+                  <div class={item.selected ? 'repo-row selected' : 'repo-row'}>
+                    <span class="select-mark" aria-hidden="true">{item.selected ? '◆' : '·'}</span>
+                    <span class="repo-name">{item.name}</span>
+                    <span class="live-count">{item.live} live</span>
+                    {item.target && (
+                      <span class={item.runtime === 'no session' ? 'target no-session' : 'target'}>
+                        {item.target} · {item.runtime}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </li>
+
+            <li class="orchestration-stage compose-stage">
+              <div class="stage-head">
+                <span class="stage-num">02</span>
+                <div>
+                  <h3>Compose and review once</h3>
+                  <p><kbd>Shift-B</kbd> freezes and names the five targets before sending.</p>
+                </div>
+              </div>
+              <div class="target-recap">
+                Broadcast to 5: api #842, web #311, mobile #907, rust #144, site #622
+              </div>
+              <div class="snippet-pick">
+                <span class="recent-tag">Recent</span>
+                <b>audit</b>
+                <span>Full pre-ship review</span>
+              </div>
+              <div class="compose-box">
+                Run the full pre-ship review. Fix any blocking findings, then run this
+                repository's checks and report what changed.
+                <span class="cursor" aria-hidden="true"></span>
+              </div>
+              <p class="fast-path">
+                Edit the snippet for this run, or press <kbd>Ctrl-F</kbd> in the picker for
+                free text.
+              </p>
+            </li>
+
+            <li class="orchestration-stage delivery-stage">
+              <div class="stage-head">
+                <span class="stage-num">03</span>
+                <div>
+                  <h3>Inject by target type</h3>
+                  <p>The same reviewed body takes the correct path for every live session.</p>
+                </div>
+              </div>
+              <div class="delivery-list">
+                <div><span class="delivery-ok">✓</span><b>api #842</b><span>agent · settle-gated</span></div>
+                <div><span class="delivery-ok">✓</span><b>web #311</b><span>agent · settle-gated</span></div>
+                <div><span class="delivery-ok">✓</span><b>mobile #907</b><span>agent · settle-gated</span></div>
+                <div><span class="delivery-ok">✓</span><b>rust #144</b><span>shell · direct write</span></div>
+                <div><span class="delivery-skip">↷</span><b>site #622</b><span>skipped · no session</span></div>
+              </div>
+            </li>
+
+            <li class="orchestration-stage result-stage">
+              <div class="stage-head">
+                <span class="stage-num">04</span>
+                <div>
+                  <h3>See delivery and progress</h3>
+                  <p>No silent misses: the summary names every skipped workspace.</p>
+                </div>
+              </div>
+              <div class="result-notice">
+                sent to 4 workspaces (1 skipped: no session — site #622)
+              </div>
+              <div class="history-row">
+                <span><b>Recent</b> <code>audit</code> recorded once</span>
+                <span><b>Delivered histories</b> api <code>]3</code> · web <code>]2</code> · mobile <code>]4</code> · rust <code>]1</code></span>
+                <span class="unchanged">site remains <code>]1</code></span>
+              </div>
+            </li>
+          </ol>
+        </div>
+
+        <p class="orchestration-link" data-reveal>
+          <a href={orchestrationGuide}>Follow the multi-agent broadcast guide →</a>
+        </p>
+      </div>
+    </section>
 
     <section id="features">
       <div class="container">

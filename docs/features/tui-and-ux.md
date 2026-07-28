@@ -68,6 +68,10 @@ Override any binding via `ui.action_keys` in config; agent spawn chords are
 remapped there too, keyed `spawn_agent.<id>` (e.g. `spawn_agent.claude: "c"`
 restores a top-level key).
 
+The sidebar's `v` and `Shift-B` bindings form a complete one-to-many workflow,
+not just a shortcut pair; see the
+[multi-agent orchestration guide](https://lazybox.ai/docs/how-to/orchestrate-multiple-agents/).
+
 ### How it works (brief)
 `Action` + `ActionDef::for_kind` (`crates/tui-core/src/action.rs`) is the
 catalog; leader groups are multi-stroke `Chord::Seq` rows in it (the which-key

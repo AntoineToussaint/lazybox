@@ -10,6 +10,8 @@
 - [How-to guides](https://lazybox.ai/docs/how-to/): Task-oriented recipes.
 - [Add a repo](https://lazybox.ai/docs/how-to/add-a-repo/): Bring a repository's PRs and issues into the inbox and filter by role.
 - [Run an agent per workspace](https://lazybox.ai/docs/how-to/run-an-agent-per-workspace/): Spawn Claude Code, Codex, or Cursor scoped to one worktree.
+- [Orchestrate multiple agents](https://lazybox.ai/docs/how-to/orchestrate-multiple-agents/): Select workspaces across repos, compose once, and safely inject the instruction into every live agent or shell.
+- [Use snippets](https://lazybox.ai/docs/how-to/use-snippets/): Reuse reviewed prompts in one session or as the seed for a multi-workspace broadcast.
 - [Per-repo env and mounts](https://lazybox.ai/docs/how-to/per-repo-env-and-mounts/): Inject env vars, symlink shared dirs, materialize scripts.
 - [Remote over SSH](https://lazybox.ai/docs/how-to/remote-over-ssh/): Run the daemon remotely and the TUI locally over a forwarded socket.
 - [Mirror to Slack](https://lazybox.ai/docs/how-to/mirror-to-slack/): Reflect the inbox into Slack channels.

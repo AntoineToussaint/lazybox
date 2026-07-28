@@ -120,6 +120,9 @@ full schema.
 
 ## Related
 
+- [Orchestrate multiple agents](/docs/how-to/orchestrate-multiple-agents/) to
+  select live sessions across repositories and inject one reviewed instruction
+  into all of them.
 - [Per-repo env and mounts](/docs/how-to/per-repo-env-and-mounts/) to give every
   agent session the environment and shared files it needs.
 - [Manage automation policies](/docs/how-to/manage-automation-policies/) to

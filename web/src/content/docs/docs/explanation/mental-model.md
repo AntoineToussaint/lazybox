@@ -49,7 +49,9 @@ Isolating each task in its own git worktree buys two things:
   checked out for a different review. Each task has clean, independent state.
 - **Real parallelism.** You can have several tasks in flight — each with its own
   branch, its own build artifacts, its own agent — without stashing or switching
-  branches.
+  branches. When those tasks span repositories, you can
+  [select their workspaces and broadcast one reviewed instruction](/docs/how-to/orchestrate-multiple-agents/)
+  without collapsing their isolated session state.
 
 ## Why agent sessions are scoped to a workspace
 

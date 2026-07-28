@@ -59,10 +59,20 @@ Two files stack on top of the built-in set, merged lowest-to-highest —
 That lets a project redefine a shared key (say a project-specific `rev`) without
 touching your personal library, and either file can override a built-in.
 
+## Fan one snippet out to several workspaces
+
+From the sidebar, mark workspace rows with `v` and press `Shift-B` to use a
+snippet as the starting point for one multi-workspace instruction. You can edit
+the pre-filled body before sending; lazybox records the snippet in **Recent
+once** and on every workspace that actually received it.
+
+See [Orchestrate multiple agents](/docs/how-to/orchestrate-multiple-agents/) for
+target recap, free-text mode, agent versus shell delivery, skipped targets, and
+the per-workspace `]N` history cues.
+
 ## See also
 
 The [full snippets reference](https://github.com/AntoineToussaint/lazybox/blob/main/docs/snippets.md)
 covers the complete lifecycle (create / browse / edit / delete), the file
-format, house style for writing effective bodies, and submission behavior for
-agents versus shells. Broadcasting a snippet to many workspaces at once is
-covered in [Orchestrate multiple agents](/docs/how-to/orchestrate-multiple-agents/).
+format, house style for writing effective bodies, and single-session submission
+behavior.

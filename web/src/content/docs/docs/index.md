@@ -34,7 +34,7 @@ The documentation is split into four sections, following the
 
 - **[Tutorials](/docs/tutorials/)** — learning-oriented. Start here if you are
   new. The [Quickstart](/docs/tutorials/quickstart/) gets you from clone to a
-  live terminal session in about five minutes.
+  live terminal session, then walks through a two-workspace broadcast.
 - **[How-to guides](/docs/how-to/)** — task-oriented recipes: add a repo, run
   an agent per workspace, orchestrate a fleet of agents, configure per-repo env
   and mounts, drive a remote daemon over SSH, mirror to Slack.

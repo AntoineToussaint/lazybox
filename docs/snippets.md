@@ -46,7 +46,9 @@ The picker is organized for a catalog larger than a handful of keys:
   workflows.
 - Live filtering matches the key, description, and category.
 - The right pane previews the full wrapped body, category, and origin
-  (`built-in`, `global`, or `repo`) before you send it.
+  (`built-in`, `global`, or `repo`) before you send it. `repo` means the
+  launch-directory layer described below; it does not follow workspace
+  selection.
 - A visible/total count and scrolling list keep filtered results
   legible.
 
@@ -66,12 +68,13 @@ lazybox keeps two complementary memories:
   `~/.lazybox/v2/state.db`, so `]]s` then `Enter` still repeats the last
   workflow after a restart. Start typing to leave Recent and search the
   full catalog.
-- **`]N` is per-workspace progress.** Each workspace persists the
-  distinct snippet keys delivered to its agents. The sidebar badge is
-  the count: `]2` means two different workflows have already been sent
-  there. Re-sending one moves it to the front of the workspace history
-  without increasing the count. This is a quick cue that review,
-  testing, or another repeatable process has already started.
+- **`]N` is per-workspace progress.** Each workspace persists an MRU of
+  the 12 most recently distinct snippet keys delivered to its agents.
+  The sidebar badge is that bounded count: `]2` means two different
+  workflows are in recent history there, while `]12` means the history
+  is full and older keys have fallen out. Re-sending one moves it to the
+  front without increasing the count. This is a quick cue that review,
+  testing, or another repeatable process has recently started.
 
 Only successfully delivered snippets enter either history; opening or
 cancelling the picker records nothing.
@@ -92,13 +95,13 @@ the merged catalog. The new or improved workflow is available through
 `]]s<key>` immediately, with no restart. Declining writes nothing.
 
 This is an allowlisted action: lazybox owns and validates the write.
-Ask Lazybox creates and updates the **global** layer; edit a repo-local
-file directly when the workflow belongs to one project. See
+Ask Lazybox creates and updates the **global** layer; edit the
+launch-directory file directly when that client should use an override. See
 [TUI & UX → Ask Lazybox](features/tui-and-ux.md#ask-lazybox--shortcut-index).
 
 ## Create a workflow in YAML
 
-Add an entry under `snippets:` in a global or repo-local file:
+Add an entry under `snippets:` in the global or launch-directory file:
 
 ```yaml
 snippets:
@@ -124,17 +127,19 @@ The three layers merge from least to most specific:
 | -------------- | ----------------------------- | ----------------------------------------------- |
 | **Built-in**   | _(shipped with lazybox)_       | 41 categorized daily engineering workflows.    |
 | **Global**     | `~/.lazybox/snippets.yaml`     | Personal habits reused across every repository. |
-| **Repo-local** | `<repo>/.lazybox/snippets.yaml` | Project commands and team conventions.          |
+| **Launch directory** | `<launch-dir>/.lazybox/snippets.yaml` | Overrides for this lazybox client catalog. |
 
-Precedence is **built-in → global → repo**, so the most specific
-definition of a key wins. A repo can redefine `test` with its actual
-test command or tighten `rev` around local conventions without changing
-your personal workflow elsewhere. Origin labels in the picker make the
-winning layer visible.
+Precedence is **built-in → global → launch directory**, so the last
+definition of a key wins. Launching lazybox from a project can redefine
+`test` with that checkout's command or tighten `rev` around its conventions.
+Origin labels in the picker show `repo` for this winning directory layer.
 
-The repo-local file is resolved relative to the directory where
-lazybox was launched. Both user-owned files are optional and work well
-in dotfiles or version control.
+The directory layer is resolved once, relative to where lazybox was launched,
+and the merged catalog is shared by every workspace in that client. Selecting
+another workspace does not load that workspace's `.lazybox/snippets.yaml`;
+restart lazybox from a different directory to select a different directory
+layer. Both user-owned files are optional and work well in dotfiles or version
+control.
 
 ## Broadcast one workflow to several workspaces
 
@@ -156,11 +161,11 @@ it, so the `]N` badges reflect the rollout.
 
 Ask Lazybox can replace a global key with a confirmed, hot-reloaded
 version. For direct edits, change the YAML entry and restart lazybox.
-Redefining a global key in a repo-local file updates that workflow for
-one project only.
+Redefining a global key in the launch-directory file updates that workflow for
+the whole client started from that directory.
 
 To remove a workflow, delete its YAML entry and restart. Removing a
-repo-local override reveals the global or built-in definition beneath
+launch-directory override reveals the global or built-in definition beneath
 it; removing a global override does the same for the built-in.
 
 ## House style for bodies

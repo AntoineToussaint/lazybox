@@ -329,14 +329,14 @@ with no inferable provider (`GenericCli`), or when no gateway URL is set.
 
 **Status:** stable
 **Crate(s):** `config` (`src/snippets.rs`), `tui` (picker)
-**Config / flags:** `~/.lazybox/snippets.yaml` (global) + `<repo>/.lazybox/snippets.yaml` (repo-local)
+**Config / flags:** `~/.lazybox/snippets.yaml` (global) + `<launch-dir>/.lazybox/snippets.yaml` (client-wide directory override)
 **Key bindings:** `]]s`, then the snippet key (configurable escape char)
 
 ### What it does
 Turns recurring agent instructions into reusable workflows that expand and
 auto-submit to the focused terminal. The picker remembers recently used
-workflows globally, while each workspace persists the distinct snippet keys it
-has received and renders their count as a `]N` sidebar badge.
+workflows globally, while each workspace persists its 12 most recently
+distinct snippet keys and renders that bounded count as a `]N` sidebar badge.
 
 ### How to use it
 Open the categorized picker with `]]s`, inspect the live body + origin preview,
@@ -344,7 +344,7 @@ then select a row or type a uniquely matching key such as `rev` for the
 `]]srev` fast path. Open `]]s` later and the last workflow is selected in
 **Recent**, ready to repeat with `Enter`.
 
-lazybox ships a built-in library. Add global or repo-specific workflows in
+lazybox ships a built-in library. Add global or launch-directory workflows in
 YAML:
 
 ```yaml
@@ -362,24 +362,26 @@ broadcasts a chosen workflow across selected workspaces. See
 [`docs/snippets.md`](../snippets.md).
 
 ### How it works (brief)
-`Snippets::load_merged` (`crates/config/src/snippets.rs`) merges built-in,
-global, and repo-local layers (most specific wins). The terminal's doubled
+`Snippets::load_for_launch_dir` (`crates/config/src/snippets.rs`) merges
+built-in, global, and launch-directory layers into one client-wide catalog.
+The terminal's doubled
 escape leader (`]]`) followed by `s` mounts the snippet picker
 (`crates/tui/.../keys.rs`). The daemon persists the global Recent MRU in client
 KV and per-workspace keys in the workspace record.
 
 ### Test checklist
 - [ ] A global snippet expands and submits in a terminal via `]]s<key>`.
-- [ ] A repo-local snippet overrides a global one with the same key.
+- [ ] A launch-directory snippet overrides a global one for the whole client.
 - [ ] The picker filters as you type and auto-submits an exact, unique key.
 - [ ] Recent survives a restart and selects the most recently sent workflow.
-- [ ] Sending distinct keys updates the target workspace's `]N` badge.
+- [ ] Sending distinct keys updates the target workspace's `]N` badge up to its 12-key cap.
 - [ ] Ask Lazybox confirms, writes, and hot-reloads a global snippet.
 - [ ] A snippet-seeded broadcast records the key only on delivered targets.
 - [ ] `Esc` dismisses the picker without sending.
 
 ### Known sharp edges
 - The trigger reuses the terminal escape char; if you remap `terminal.escape_char`, the snippet trigger moves with it.
+- The directory layer is chosen from the client's startup directory and does not change with sidebar workspace selection.
 
 ---
 

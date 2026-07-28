@@ -583,6 +583,14 @@ pub(crate) enum ModalFlow {
     Handoff { draft: HandoffDraft },
     /// Prompt-history picker (#523) → resend into this terminal.
     PromptHistory { terminal: lazybox_ipc::TerminalId },
+    /// The tour handed control to the real snippet picker. A confirmed
+    /// delivery resumes at `success_step`; cancelling or rejecting the
+    /// delivery returns to `return_step`.
+    TourSnippet {
+        terminal: lazybox_ipc::TerminalId,
+        return_step: usize,
+        success_step: usize,
+    },
 }
 
 /// App-level message vocabulary for modals + globals.
@@ -592,6 +600,12 @@ pub enum Msg {
     /// The feature tour was dismissed or finished — mark it seen so
     /// it doesn't re-launch, and pop the modal.
     TourFinished,
+    /// Run the tour's first snippet exercise against the focused agent
+    /// using the production picker and delivery path.
+    TourTrySnippet,
+    /// Re-open the production picker with Recent selected so the tour
+    /// exercises the one-Enter repeat path.
+    TourRepeatSnippet,
     AppClose,
     Confirmed(bool),
     InputSubmitted(String),
@@ -1221,18 +1235,17 @@ pub struct Model<T: TerminalAdapter> {
     /// workspace last had focused. An event-to-event handoff, not a
     /// mounted-modal continuation, so it stays out of [`ModalFlow`].
     deferred_focus_terminal: Option<lazybox_ipc::TerminalId>,
-    /// Loaded + merged snippet collection (`<lazybox_home>/snippets.yaml`
-    /// + `<cwd>/.lazybox/snippets.yaml`). Populated at startup by
-    /// `apply_snippets`; the terminal-pane `]` latch reads this to
-    /// decide whether to mount the picker. Empty when neither file
-    /// exists (the typical first-run state).
+    /// One client-wide snippet catalog: built-ins +
+    /// `<lazybox_home>/snippets.yaml` +
+    /// `<launch-dir>/.lazybox/snippets.yaml`. Loaded once at startup; it
+    /// does not follow workspace selection.
     pub(crate) snippets: lazybox_config::Snippets,
     /// Snippet keys sent, most-recent first (capped at
     /// `RECENT_SNIPPETS_MAX`). Passed to each picker as its "Recent"
     /// group so a repeated snippet is one `]]s` + `Enter` away (#252).
-    /// The daemon owns the durable MRU (#548): every use is reported via
-    /// `Command::RecordRecentSnippet` and the persisted order is replayed
-    /// in `Event::Snapshot`, so the Recent group survives a restart (#311)
+    /// The daemon owns the durable MRU (#548): a confirmed snippet
+    /// delivery updates it and the persisted order is replayed in
+    /// `Event::Snapshot`, so the Recent group survives a restart (#311)
     /// AND is shared across in-process and `--connect` clients. This local
     /// copy is the pruned-against-catalog view the pickers render.
     pub(crate) recent_snippets: Vec<String>,
@@ -1727,7 +1740,7 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     /// Install the loaded snippet collection. Called from the
-    /// startup path in `main.rs` after `Snippets::load_merged`. The
+    /// startup path in `main.rs` after `Snippets::load_for_launch_dir`. The
     /// terminal-pane `]]s<key>` flow reads from `self.snippets`
     /// directly, so this is the only handoff needed.
     pub fn apply_snippets(&mut self, snippets: lazybox_config::Snippets) {
@@ -1765,12 +1778,40 @@ impl<T: TerminalAdapter> Model<T> {
     /// (always) and by `maybe_mount_tour` (when armed). Clears the
     /// auto-launch flag so it can't re-fire.
     pub(crate) fn mount_tour(&mut self) {
+        self.mount_tour_at(0);
+    }
+
+    pub(crate) fn mount_tour_at(&mut self, step: usize) {
         use crate::realm::components::tour::Tour;
         self.auto_tour_pending = false;
         if matches!(self.modal_stack.last(), Some(Id::Tour)) {
             return;
         }
-        self.mount_modal(Id::Tour, Tour::new());
+        self.mount_modal(Id::Tour, Tour::at_step(step));
+    }
+
+    fn start_tour_snippet_exercise(&mut self, return_step: usize, success_step: usize) {
+        let Some(terminal) = self.terminals.active_terminal_id() else {
+            self.flash_info("open an agent terminal to try this — or press → to skip");
+            return;
+        };
+        if !self.terminals.terminal_is_agent(terminal) {
+            self.flash_info("the tour exercise needs an agent terminal — or press → to skip");
+            return;
+        }
+        if return_step == crate::realm::components::tour::REPEAT_SNIPPET_STEP
+            && self.recent_snippets.is_empty()
+        {
+            self.flash_info("send a snippet first — or press → to skip this exercise");
+            return;
+        }
+        self.pop_modal();
+        self.set_modal_flow(ModalFlow::TourSnippet {
+            terminal,
+            return_step,
+            success_step,
+        });
+        self.mount_snippet_picker(String::new());
     }
 
     /// Persist `ui.tour_seen = true` so the tour stops auto-launching.
@@ -1953,17 +1994,13 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     /// Record a snippet key as just-used: move it to the front of the
-    /// MRU list (`recent_snippets`), de-duplicating and capping the
-    /// list, then persist it. Drives the picker's "Recent" group (#252)
-    /// and keeps it across restarts (#311).
-    pub(crate) fn record_recent_snippet(&mut self, key: String) {
+    /// MRU list (`recent_snippets`), de-duplicating and capping the list.
+    /// Called only for the daemon's confirmed-delivery event; durable state
+    /// is already committed by that point.
+    pub(crate) fn apply_recent_snippet(&mut self, key: String) {
         self.recent_snippets.retain(|k| k != &key);
-        self.recent_snippets.insert(0, key.clone());
+        self.recent_snippets.insert(0, key);
         self.recent_snippets.truncate(RECENT_SNIPPETS_MAX);
-        // The daemon owns the durable MRU (#548): report the use and let
-        // the next `Event::Snapshot` reconcile the persisted order. The
-        // local update above keeps the picker's Recent group instant.
-        self.send_cmd(IpcCommand::RecordRecentSnippet { key });
     }
 
     /// Seed `recent_snippets` from the daemon's persisted MRU, delivered
@@ -3928,6 +3965,18 @@ impl<T: TerminalAdapter> Model<T> {
             Msg::TourFinished => {
                 self.mark_tour_seen();
                 self.pop_modal();
+            }
+            Msg::TourTrySnippet => {
+                self.start_tour_snippet_exercise(
+                    crate::realm::components::tour::SEND_SNIPPET_STEP,
+                    crate::realm::components::tour::REPEAT_SNIPPET_STEP,
+                );
+            }
+            Msg::TourRepeatSnippet => {
+                self.start_tour_snippet_exercise(
+                    crate::realm::components::tour::REPEAT_SNIPPET_STEP,
+                    crate::realm::components::tour::REPEAT_SNIPPET_STEP + 1,
+                );
             }
             Msg::AppClose => {
                 self.quit = true;

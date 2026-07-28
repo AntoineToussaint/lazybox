@@ -64,18 +64,84 @@ async fn subscribe_yields_snapshot() {
 /// in-process TUI and a `--connect` client.
 #[tokio::test]
 async fn client_kv_recorded_by_one_connection_replays_to_another() {
-    let config = ServerConfig::in_memory();
+    let (config, mock) = ServerConfig::in_memory_with_mock();
+    let workspace = lazybox_core::Workspace::empty(
+        lazybox_core::WorkspaceKey::new("github:o/r#611"),
+        "main",
+        chrono::Utc::now(),
+    );
+    config
+        .store
+        .save_workspace(&lazybox_store::WorkspaceRecord {
+            key: workspace.key.as_str().to_string(),
+            created_at: workspace.created_at,
+            workspace_json: Some(serde_json::to_string(&workspace).unwrap()),
+        })
+        .expect("save workspace");
+    let backend_key = mock
+        .spawn(&[], None, &[], "confirmed-snippet")
+        .await
+        .expect("spawn shell");
+    let terminal_id = TerminalId(611);
+    config
+        .terminals
+        .lock()
+        .await
+        .insert(terminal_id, backend_key.clone());
+    config.terminal_meta.lock().await.insert(
+        terminal_id,
+        (
+            lazybox_core::SessionKey::new("github:o/r#611"),
+            TerminalKind::Shell,
+        ),
+    );
     let server_config = config.clone();
-    let (server_client, server_conn) = channel::pair();
+    let (mut server_client, server_conn) = channel::pair();
     tokio::spawn(async move {
         Server::new(server_config).serve(server_conn).await.unwrap();
     });
 
-    // Connection A (stands in for the in-process TUI) records a snippet
-    // use and an update dismissal.
+    server_client.send(Command::Subscribe).unwrap();
+    assert!(matches!(
+        server_client.recv().await,
+        Some(Event::Snapshot { .. })
+    ));
+
+    // Connection A asks the daemon to deliver a real shell snippet. The
+    // accepted backend write, not the request itself, records the MRU.
     server_client
-        .send(Command::RecordRecentSnippet { key: "rev".into() })
+        .send(Command::DeliverSnippet {
+            terminal_id,
+            snippet_key: "rev".into(),
+            category: "Review".into(),
+            body: "review the diff".into(),
+        })
         .unwrap();
+    loop {
+        if matches!(
+            server_client.recv().await,
+            Some(Event::SnippetDelivered {
+                terminal_id: id,
+                ref snippet_key,
+                ..
+            }) if id == terminal_id && snippet_key == "rev"
+        ) {
+            break;
+        }
+    }
+    assert_eq!(
+        mock.writes_for(&backend_key).await,
+        vec![b"review the diff\r".to_vec()],
+        "the success event follows an accepted terminal write",
+    );
+    let record = config
+        .store
+        .get_workspace(&workspace.key)
+        .expect("load workspace")
+        .expect("workspace exists");
+    let recorded_workspace: lazybox_core::Workspace =
+        serde_json::from_str(record.workspace_json.as_deref().expect("workspace json")).unwrap();
+    assert_eq!(recorded_workspace.sent_snippets, vec!["rev"]);
     server_client
         .send(Command::SetUpdateDismissal {
             target: "release:v0.2.0".into(),
@@ -115,6 +181,55 @@ async fn client_kv_recorded_by_one_connection_replays_to_another() {
             panic!("expected Snapshot, got {evt:?}");
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn rejected_snippet_delivery_does_not_update_recent_history() {
+    let config = ServerConfig::in_memory();
+    let server_config = config.clone();
+    let (mut client, connection) = channel::pair();
+    tokio::spawn(async move {
+        Server::new(server_config).serve(connection).await.unwrap();
+    });
+    client.send(Command::Subscribe).unwrap();
+    assert!(matches!(client.recv().await, Some(Event::Snapshot { .. })));
+
+    let missing = TerminalId(999_611);
+    client
+        .send(Command::DeliverSnippet {
+            terminal_id: missing,
+            snippet_key: "rev".into(),
+            category: "Review".into(),
+            body: "review the diff".into(),
+        })
+        .unwrap();
+    loop {
+        if matches!(
+            client.recv().await,
+            Some(Event::TerminalInputRejected { terminal_id, .. }) if terminal_id == missing
+        ) {
+            break;
+        }
+    }
+
+    let (mut observer, observer_connection) = channel::pair();
+    let observer_config = config.clone();
+    tokio::spawn(async move {
+        Server::new(observer_config)
+            .serve(observer_connection)
+            .await
+            .unwrap();
+    });
+    observer.send(Command::Subscribe).unwrap();
+    match observer.recv().await.expect("snapshot") {
+        Event::Snapshot {
+            recent_snippets, ..
+        } => assert!(
+            recent_snippets.is_empty(),
+            "failed delivery must not enter Recent"
+        ),
+        other => panic!("expected Snapshot, got {other:?}"),
     }
 }
 

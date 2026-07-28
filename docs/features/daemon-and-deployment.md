@@ -287,7 +287,8 @@ Top-level keys (`crates/config/src/lib.rs`):
 ### How it works (brief)
 `Config::load()` reads `~/.lazybox/config.yaml` and fills missing fields from
 `UiDefaults`/section defaults. Snippets are a separate file
-(`~/.lazybox/snippets.yaml` + repo-local) loaded by `Snippets::load_merged`.
+(`~/.lazybox/snippets.yaml` + launch-directory layer) loaded by
+`Snippets::load_for_launch_dir`.
 
 ### Test checklist
 - [ ] An empty `config.yaml` loads with all defaults (zero-config first run).

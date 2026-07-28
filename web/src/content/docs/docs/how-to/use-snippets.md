@@ -45,10 +45,11 @@ Two persisted cues answer different questions:
   every picker, newest first, with the last one selected. Recent is
   de-duplicated and stored in `~/.lazybox/v2/state.db`, so `]]s` then `Enter`
   still repeats your last workflow after a restart.
-- **What has this workspace already received?** Each workspace remembers its
-  distinct sent snippet keys. The sidebar renders their count as `]N`: `]2`
-  means two different workflows have already been sent to that workspace.
-  Repeating one does not increase the count.
+- **What has this workspace recently received?** Each workspace remembers an
+  MRU of its 12 most recently distinct sent snippet keys. The sidebar renders
+  that bounded count as `]N`: `]2` means two different workflows are in
+  recent history; `]12` means older keys have fallen out. Repeating one moves
+  it to the front without increasing the count.
 
 Only a workflow that was actually delivered enters either history. Opening or
 cancelling the picker records nothing.
@@ -67,10 +68,11 @@ will replace the workflow. Accepting validates and writes the global
 `]]sfeedback` immediately; no restart is needed. Declining writes nothing.
 
 This flow can also improve a built-in or global workflow by replacing its key
-in the global layer. Repo-specific workflows remain file-owned: edit
-`<repo>/.lazybox/snippets.yaml` directly when a change belongs to one project.
+in the global layer. Launch-directory workflows remain file-owned: edit
+`<launch-dir>/.lazybox/snippets.yaml` directly when this client needs an
+override.
 
-## Define global and repo workflows in YAML
+## Define global and launch-directory workflows in YAML
 
 For direct control, add an entry under `snippets:`:
 
@@ -95,12 +97,17 @@ The catalog merges from least to most specific:
 | --- | --- | --- |
 | Built-in | Shipped with lazybox | 41 daily engineering workflows |
 | Global | `~/.lazybox/snippets.yaml` | Personal habits across every repository |
-| Repo | `<repo>/.lazybox/snippets.yaml` | Project commands and team conventions |
+| Launch directory | `<launch-dir>/.lazybox/snippets.yaml` | Overrides for this client catalog |
 
-Precedence is **built-in → global → repo**, so a project can redefine `test`
-with its actual test command or tighten `rev` around local conventions without
-changing the workflow elsewhere. The picker’s origin label shows which
-definition won.
+Precedence is **built-in → global → launch directory**, so starting lazybox
+from a project can redefine `test` with that checkout's command or tighten
+`rev` around local conventions. The picker labels this winning directory
+layer as `repo`.
+
+The directory layer is resolved once when the client starts and is shared by
+all of its workspaces. Moving the sidebar selection does not load another
+workspace's `.lazybox/snippets.yaml`; restart lazybox from a different
+directory to select a different directory layer.
 
 Hand-edited files load at startup. Restart lazybox after creating, updating, or
 removing a YAML entry. Removing an override reveals the less-specific

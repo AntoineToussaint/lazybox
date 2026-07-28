@@ -117,24 +117,27 @@ const STEPS: &[TourStep] = &[
             "  ]]s       open the categorized picker + live preview",
             "  ]]srev    send the built-in review workflow immediately",
             "",
-            "Try it after the tour: type ]]srev in the terminal.",
-            "The full instruction is sent and submitted to the agent;",
-            "the unique key needs no extra Enter.",
+            "With an agent terminal open, press Enter here to open the",
+            "real picker. Type rev: the full instruction is sent and",
+            "submitted, and the unique key needs no extra Enter.",
             "",
-            "Press ] outside a terminal to browse every built-in,",
-            "global, and repo workflow before you send it.",
+            "No agent yet? Press → to skip this exercise. Re-open the",
+            "tour from an agent later with Shift-T to try it for real.",
+            "",
+            "Outside a terminal, ] browses built-in, global, and",
+            "launch-directory workflows before you send them.",
         ],
     },
     TourStep {
         title: "5 · Snippets remember",
         body: &[
-            "Open ]]s again: the last workflow is selected in Recent,",
-            "so repeating it is ]]s then Enter. Recent persists across",
-            "restarts.",
+            "Press Enter here to open the real picker again. The last",
+            "workflow is selected in Recent, so one more Enter repeats",
+            "it. Recent persists across restarts.",
             "",
-            "Every workspace remembers the distinct workflows sent to",
-            "it. Back in the inbox, ]N is the count: ]2 means two",
-            "different workflows have already started there.",
+            "Every workspace remembers its 12 most recently distinct",
+            "workflows. Back in the inbox, ]N is that bounded count:",
+            "]2 means two different workflows recently started there.",
             "",
             "Need your own? Return with ]]q, then Ask Lazybox (?) to add",
             "or improve a snippet. Confirm; it hot-reloads immediately.",
@@ -186,6 +189,9 @@ const STEPS: &[TourStep] = &[
     },
 ];
 
+pub(crate) const SEND_SNIPPET_STEP: usize = 4;
+pub(crate) const REPEAT_SNIPPET_STEP: usize = 5;
+
 pub struct Tour {
     /// Index into [`STEPS`]. Always in range — navigation clamps.
     cursor: usize,
@@ -199,8 +205,12 @@ pub struct Tour {
 
 impl Tour {
     pub fn new() -> Self {
+        Self::at_step(0)
+    }
+
+    pub(crate) fn at_step(cursor: usize) -> Self {
         Self {
-            cursor: 0,
+            cursor: cursor.min(STEPS.len().saturating_sub(1)),
             back_btn: None,
             next_btn: None,
             skip_btn: None,
@@ -221,6 +231,14 @@ impl Tour {
         }
     }
 
+    fn primary_action(&mut self) -> Option<Msg> {
+        match self.cursor {
+            SEND_SNIPPET_STEP => Some(Msg::TourTrySnippet),
+            REPEAT_SNIPPET_STEP => Some(Msg::TourRepeatSnippet),
+            _ => self.advance(),
+        }
+    }
+
     /// Pure key handler — kept a method so tests can drive it without
     /// a tuirealm `Application`.
     pub fn on_key(&mut self, key: &KeyEvent) -> Option<Msg> {
@@ -229,8 +247,10 @@ impl Tour {
             return Some(Msg::TourFinished);
         }
         match key.code {
-            // Arrow keys lead; j/k-style aliases stay for muscle memory.
-            Key::Right | Key::Enter | Key::Char(' ' | 'n' | 'l') => self.advance(),
+            // Right always advances, including past an exercise when no
+            // agent terminal is available. Enter/click runs the exercise.
+            Key::Right | Key::Char('l') => self.advance(),
+            Key::Enter | Key::Char(' ' | 'n') => self.primary_action(),
             Key::Left | Key::Backspace | Key::Char('p' | 'h') => {
                 self.cursor = self.cursor.saturating_sub(1);
                 None
@@ -262,6 +282,9 @@ impl Tour {
         if hit(self.back_btn) {
             self.cursor = self.cursor.saturating_sub(1);
             return None;
+        }
+        if hit(self.next_btn) {
+            return self.primary_action();
         }
         self.advance()
     }
@@ -352,10 +375,11 @@ impl Component for Tour {
             Style::default().fg(theme.accent).bold(),
         ));
         push(&mut spans, &mut x, "  ".to_string(), Style::default());
-        let next_label = if self.is_last() {
-            " Finish "
-        } else {
-            " Next → "
+        let next_label = match self.cursor {
+            SEND_SNIPPET_STEP => " Try now → ",
+            REPEAT_SNIPPET_STEP => " Repeat → ",
+            _ if self.is_last() => " Finish ",
+            _ => " Next → ",
         };
         self.next_btn = Some(push(
             &mut spans,
@@ -517,7 +541,13 @@ mod tests {
             "the daily fast path and memory each need a tour card"
         );
         let daily = snippet_steps[0].body.join("\n");
-        for needle in ["]]srev", "live preview", "built-in", "global", "repo"] {
+        for needle in [
+            "]]srev",
+            "live preview",
+            "built-in",
+            "global",
+            "launch-directory",
+        ] {
             assert!(daily.contains(needle), "daily-use step missing {needle:?}");
         }
         let memory = snippet_steps[1].body.join("\n");
@@ -532,6 +562,20 @@ mod tests {
         ] {
             assert!(memory.contains(needle), "memory step missing {needle:?}");
         }
+    }
+
+    #[test]
+    fn snippet_steps_open_real_exercises_and_right_arrow_skips() {
+        let mut send = Tour::at_step(SEND_SNIPPET_STEP);
+        assert_eq!(send.on_key(&ke(Key::Enter)), Some(Msg::TourTrySnippet));
+        assert_eq!(send.cursor, SEND_SNIPPET_STEP);
+        assert_eq!(send.on_key(&ke(Key::Right)), None);
+        assert_eq!(send.cursor, REPEAT_SNIPPET_STEP);
+        assert_eq!(send.on_key(&ke(Key::Enter)), Some(Msg::TourRepeatSnippet));
+
+        let mut clickable = rendered_tour(SEND_SNIPPET_STEP);
+        let (x, y) = center(clickable.next_btn.expect("practice button"));
+        assert_eq!(clickable.on_mouse(&click(x, y)), Some(Msg::TourTrySnippet));
     }
 
     #[test]

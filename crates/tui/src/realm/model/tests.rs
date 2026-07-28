@@ -1766,13 +1766,11 @@ snippets:
         m
     }
 
-    /// Picking a snippet while an AGENT terminal is on screen routes
-    /// through `InjectPrompt` — the daemon's settle-gated paste+submit
-    /// path — carrying the body verbatim, NOT a raw `Write` with a
-    /// crammed trailing `\r`. That split is what makes the submit land
-    /// reliably across agents that debounce a pasted burst (#246).
+    /// Picking a snippet routes through one semantic delivery command. The
+    /// daemon selects the agent's settle-gated paste+submit path and owns
+    /// history updates after confirmation.
     #[test]
-    fn snippet_into_agent_terminal_routes_through_inject_prompt() {
+    fn snippet_into_agent_terminal_routes_through_confirmed_delivery() {
         let mut m = model_with_active_terminal_and_snippet(
             "agent-single",
             r#"
@@ -1784,37 +1782,25 @@ snippets:
             lazybox_ipc::TerminalKind::Agent("claude".into()),
         );
         let cmds = m.handle_choice_picked(vec![ChoicePayload::Text("rev".into())]);
-        match cmds
-            .iter()
-            .find(|c| matches!(c, IpcCommand::InjectPrompt { .. }))
-        {
-            Some(IpcCommand::InjectPrompt {
-                terminal_id,
-                prompt,
-                fallback_spawn,
-                submit: _,
-            }) => {
-                assert_eq!(prompt, "review the diff", "body injected verbatim");
+        match cmds.as_slice() {
+            [
+                IpcCommand::DeliverSnippet {
+                    terminal_id,
+                    snippet_key,
+                    category,
+                    body,
+                },
+            ] => {
+                assert_eq!(body, "review the diff", "body delivered verbatim");
                 assert_eq!(*terminal_id, lazybox_ipc::TerminalId(1));
-                assert!(
-                    fallback_spawn.is_none(),
-                    "the terminal is live — no spawn fallback needed",
-                );
+                assert_eq!(snippet_key, "rev");
+                assert!(category.is_empty());
             }
-            _ => panic!("agent snippet must inject, got {cmds:?}"),
+            _ => panic!("agent snippet must use DeliverSnippet, got {cmds:?}"),
         }
         assert!(
-            !cmds.iter().any(|c| matches!(c, IpcCommand::Write { .. })),
-            "the agent path must not ALSO raw-write the body",
-        );
-        // The recap tracker still pins the snippet as the latest
-        // "you ▸ …" message even though the daemon does the PTY write.
-        assert!(
-            cmds.iter().any(|c| matches!(
-                c,
-                IpcCommand::RecordUserMessage { prompt, .. } if prompt.text == "review the diff"
-            )),
-            "snippet must be recorded as the latest user message, got {cmds:?}",
+            m.recent_snippets.is_empty(),
+            "the client must wait for confirmed delivery",
         );
     }
 
@@ -1832,13 +1818,13 @@ snippets:
         let cmds = m.handle_choice_picked(vec![ChoicePayload::Text("pr".into())]);
         match cmds
             .iter()
-            .find(|c| matches!(c, IpcCommand::InjectPrompt { .. }))
+            .find(|c| matches!(c, IpcCommand::DeliverSnippet { .. }))
         {
-            Some(IpcCommand::InjectPrompt { prompt, .. }) => {
+            Some(IpcCommand::DeliverSnippet { body, .. }) => {
                 // The `|` block scalar keeps its trailing newline — the
                 // body reaches the agent exactly as authored.
                 assert_eq!(
-                    prompt, "first line\nsecond line\n",
+                    body, "first line\nsecond line\n",
                     "multi-line body verbatim"
                 );
             }
@@ -1846,12 +1832,10 @@ snippets:
         }
     }
 
-    /// Picking a snippet while a plain SHELL is on screen writes the
-    /// `encode_snippet_for_pty` bytes directly — a shell has no paste
-    /// debounce, so `body + \r` submits cleanly and the inject path
-    /// (which no-ops on non-agent terminals) is skipped.
+    /// The client sends the same delivery command for every terminal kind;
+    /// the daemon owns kind-specific encoding and confirmation.
     #[test]
-    fn snippet_into_shell_terminal_writes_encoded_bytes() {
+    fn snippet_into_shell_terminal_uses_confirmed_delivery_command() {
         let mut m = model_with_active_terminal_and_snippet(
             "shell",
             r#"
@@ -1863,73 +1847,116 @@ snippets:
             lazybox_ipc::TerminalKind::Shell,
         );
         let cmds = m.handle_choice_picked(vec![ChoicePayload::Text("ls".into())]);
-        let bytes = cmds
-            .iter()
-            .find_map(|c| match c {
-                IpcCommand::Write { bytes, .. } => Some(bytes.clone()),
-                _ => None,
-            })
-            .expect("shell snippet must raw-write the encoded body");
-        assert_eq!(
-            bytes,
-            super::super::inputs::encode_snippet_for_pty("ls -la")
-        );
-        assert!(bytes.ends_with(b"\r"), "shell write ends in a submit CR");
-        assert!(
-            !cmds
-                .iter()
-                .any(|c| matches!(c, IpcCommand::InjectPrompt { .. })),
-            "the shell path must not use the agent inject path",
-        );
+        assert!(matches!(
+            cmds.as_slice(),
+            [IpcCommand::DeliverSnippet {
+                snippet_key,
+                body,
+                ..
+            }] if snippet_key == "ls" && body == "ls -la"
+        ));
     }
 
     /// Sending a snippet records it in the session MRU so the picker's
     /// "Recent" group can float it to the top next time (#252). A shell
     /// terminal keeps the setup simple.
     #[test]
-    fn sending_a_snippet_records_it_in_recent() {
+    fn sending_a_snippet_waits_for_delivery_before_recording_recent() {
         let mut m = model_with_active_terminal_and_snippet(
             "recent",
             "\nsnippets:\n  ls:\n    description: List\n    body: ls -la\n",
             lazybox_ipc::TerminalKind::Shell,
         );
         assert!(m.recent_snippets.is_empty(), "nothing sent yet");
-        let _ = m.handle_choice_picked(vec![ChoicePayload::Text("ls".into())]);
-        assert_eq!(
-            m.recent_snippets,
-            vec!["ls".to_string()],
-            "MRU records the send"
-        );
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Text("ls".into())]);
+        assert!(matches!(
+            cmds.as_slice(),
+            [IpcCommand::DeliverSnippet { .. }]
+        ));
+        assert!(m.recent_snippets.is_empty(), "queued is not delivered");
+        m.handle_daemon_event(lazybox_ipc::Event::SnippetDelivered {
+            terminal_id: lazybox_ipc::TerminalId(1),
+            session_key: "github:o/r#1".into(),
+            snippet_key: "ls".into(),
+            prompt: None,
+        });
+        assert_eq!(m.recent_snippets, vec!["ls"]);
     }
 
-    /// Sending a snippet also emits `RecordSentSnippet` for the focused
-    /// terminal's workspace, so the daemon can persist a per-session
-    /// record of "what I've told this agent" (#463).
     #[test]
-    fn sending_a_snippet_records_it_on_the_workspace() {
+    fn tour_sends_and_repeats_through_the_real_picker() {
+        use crate::realm::components::tour::SEND_SNIPPET_STEP;
+
+        let mut m = model_with_active_terminal_and_snippet(
+            "tour",
+            "\nsnippets:\n  rev:\n    description: Review\n    body: review the diff\n",
+            lazybox_ipc::TerminalKind::Agent("claude".into()),
+        );
+        m.modal_stack.clear();
+        m.mount_tour_at(SEND_SNIPPET_STEP);
+        m.update(Msg::TourTrySnippet);
+        assert_eq!(m.top_modal(), Some(&Id::SnippetPicker));
+
+        let first = m.handle_choice_picked(vec![ChoicePayload::Text("rev".into())]);
+        assert!(matches!(
+            first.as_slice(),
+            [IpcCommand::DeliverSnippet { .. }]
+        ));
+        assert!(m.recent_snippets.is_empty());
+        m.handle_daemon_event(lazybox_ipc::Event::SnippetDelivered {
+            terminal_id: lazybox_ipc::TerminalId(1),
+            session_key: "github:o/r#1".into(),
+            snippet_key: "rev".into(),
+            prompt: Some(lazybox_ipc::UserPrompt {
+                text: "review the diff".into(),
+                timestamp_ms: 611,
+                source: lazybox_ipc::PromptSource::Snippet {
+                    key: "rev".into(),
+                    category: String::new(),
+                },
+            }),
+        });
+        assert_eq!(m.top_modal(), Some(&Id::Tour));
+        assert_eq!(m.recent_snippets, vec!["rev"]);
+
+        m.update(Msg::TourRepeatSnippet);
+        assert_eq!(m.top_modal(), Some(&Id::SnippetPicker));
+        let repeat = m.handle_choice_picked(vec![ChoicePayload::Text("rev".into())]);
+        assert!(matches!(
+            repeat.as_slice(),
+            [IpcCommand::DeliverSnippet {
+                snippet_key,
+                ..
+            }] if snippet_key == "rev"
+        ));
+        m.handle_daemon_event(lazybox_ipc::Event::SnippetDelivered {
+            terminal_id: lazybox_ipc::TerminalId(1),
+            session_key: "github:o/r#1".into(),
+            snippet_key: "rev".into(),
+            prompt: None,
+        });
+        assert_eq!(m.top_modal(), Some(&Id::Tour));
+        assert!(m.modal_flow.is_none());
+    }
+
+    /// Workspace attribution is not part of the client command: the daemon
+    /// derives it from the live terminal, so a client cannot credit a
+    /// different workspace before delivery succeeds.
+    #[test]
+    fn sending_a_snippet_does_not_claim_a_workspace() {
         let mut m = model_with_active_terminal_and_snippet(
             "sent-history",
             "\nsnippets:\n  ls:\n    description: List\n    body: ls -la\n",
             lazybox_ipc::TerminalKind::Shell,
         );
         let cmds = m.handle_choice_picked(vec![ChoicePayload::Text("ls".into())]);
-        match cmds
-            .iter()
-            .find(|c| matches!(c, IpcCommand::RecordSentSnippet { .. }))
-        {
-            Some(IpcCommand::RecordSentSnippet {
-                session_key,
+        assert!(matches!(
+            cmds.as_slice(),
+            [IpcCommand::DeliverSnippet {
                 snippet_key,
-            }) => {
-                assert_eq!(
-                    session_key.as_str(),
-                    "github:o/r#1",
-                    "the focused workspace"
-                );
-                assert_eq!(snippet_key, "ls", "the snippet just sent");
-            }
-            _ => panic!("a snippet send must record it on the workspace, got {cmds:?}"),
-        }
+                ..
+            }] if snippet_key == "ls"
+        ));
     }
 
     /// The session MRU is most-recent-first, de-duplicated, and capped.
@@ -1937,15 +1964,15 @@ snippets:
     fn recent_snippets_mru_dedups_and_caps() {
         let mut m = build_model();
         for k in ["a", "b", "c"] {
-            m.record_recent_snippet(k.to_string());
+            m.apply_recent_snippet(k.to_string());
         }
         assert_eq!(m.recent_snippets, vec!["c", "b", "a"], "most-recent first");
         // Re-using an entry moves it to the front without duplicating.
-        m.record_recent_snippet("a".to_string());
+        m.apply_recent_snippet("a".to_string());
         assert_eq!(m.recent_snippets, vec!["a", "c", "b"]);
         // The list is capped — oldest entries fall off the end.
         for k in ["d", "e", "f", "g"] {
-            m.record_recent_snippet(k.to_string());
+            m.apply_recent_snippet(k.to_string());
         }
         assert_eq!(m.recent_snippets.len(), 5, "capped at RECENT_SNIPPETS_MAX");
         assert_eq!(m.recent_snippets[0], "g", "newest at the front");
@@ -2075,8 +2102,8 @@ snippets:
         assert!(m.modal_flow.is_none(), "draft consumed");
         let notice = m.status.notice.as_ref().expect("summary notice");
         assert!(
-            notice.message.contains("sent to 2 workspaces"),
-            "summary counts deliveries: {}",
+            notice.message.contains("queued for 2 workspaces"),
+            "summary counts queued deliveries: {}",
             notice.message,
         );
         assert!(
@@ -2086,11 +2113,11 @@ snippets:
         );
     }
 
-    /// A broadcast carrying a snippet key pins it onto every workspace
-    /// it actually reached — one `RecordSentSnippet` per delivered
-    /// target, none for the session-less skip (#463).
+    /// A snippet broadcast queues one daemon-owned confirmed delivery per
+    /// live target. No workspace history claim is emitted for the skipped
+    /// target.
     #[test]
-    fn broadcast_with_a_snippet_records_it_on_each_delivered_target() {
+    fn broadcast_with_a_snippet_queues_confirmed_delivery_per_live_target() {
         let (mut m, keys) = model_with_broadcast_targets(&[
             Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
             Some(lazybox_ipc::TerminalKind::Shell),
@@ -2105,23 +2132,26 @@ snippets:
         m.modal_stack.push(Id::BroadcastText);
         let cmds = m.handle_textarea_submitted("review the diff".into());
 
-        let recorded: Vec<&str> = cmds
+        let delivered: Vec<u64> = cmds
             .iter()
             .filter_map(|c| match c {
-                IpcCommand::RecordSentSnippet {
-                    session_key,
+                IpcCommand::DeliverSnippet {
+                    terminal_id,
                     snippet_key,
+                    body,
+                    ..
                 } => {
                     assert_eq!(snippet_key, "rev");
-                    Some(session_key.as_str())
+                    assert_eq!(body, "review the diff");
+                    Some(terminal_id.0)
                 }
                 _ => None,
             })
             .collect();
         assert_eq!(
-            recorded,
-            vec![keys[0].as_str(), keys[1].as_str()],
-            "the two delivered targets are recorded, the skipped one is not",
+            delivered,
+            vec![1, 2],
+            "the two live targets are queued, the skipped one is not",
         );
     }
 
@@ -2193,7 +2223,7 @@ snippets:
     /// what every target receives, and the MRU counts the bulk send
     /// once, not once per target.
     #[test]
-    fn broadcast_snippet_pick_composes_with_custom_text_and_counts_mru_once() {
+    fn broadcast_snippet_pick_records_mru_only_after_confirmed_deliveries() {
         let (mut m, keys) = model_with_broadcast_targets(&[
             Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
             Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
@@ -2204,7 +2234,7 @@ snippets:
         );
         m.modal_flow = Some(super::super::ModalFlow::Broadcast {
             draft: BroadcastDraft {
-                targets: keys,
+                targets: keys.clone(),
                 snippet_key: None,
             },
         });
@@ -2234,7 +2264,7 @@ snippets:
         let prompts: Vec<&str> = cmds
             .iter()
             .filter_map(|c| match c {
-                IpcCommand::InjectPrompt { prompt, .. } => Some(prompt.as_str()),
+                IpcCommand::DeliverSnippet { body, .. } => Some(body.as_str()),
                 _ => None,
             })
             .collect();
@@ -2246,11 +2276,16 @@ snippets:
             ],
             "snippet + custom text compose into one body per target",
         );
-        assert_eq!(
-            m.recent_snippets,
-            vec!["rev".to_string()],
-            "bulk send counts once in the MRU",
-        );
+        assert!(m.recent_snippets.is_empty(), "queued is not delivered");
+        for (index, session_key) in keys.into_iter().enumerate() {
+            m.handle_daemon_event(lazybox_ipc::Event::SnippetDelivered {
+                terminal_id: lazybox_ipc::TerminalId(index as u64 + 1),
+                session_key,
+                snippet_key: "rev".into(),
+                prompt: None,
+            });
+        }
+        assert_eq!(m.recent_snippets, vec!["rev"], "bulk send de-duplicates");
     }
 
     /// `Ctrl-F` in the broadcast picker arrives as an empty pick: no
@@ -11523,12 +11558,10 @@ mod dismiss_and_messages_tests {
 #[cfg(test)]
 mod recent_snippets_tests {
     //! The snippet-picker "Recent" MRU is owned by the daemon (#548):
-    //! `record_recent_snippet` reports each use via
-    //! `Command::RecordRecentSnippet` and the persisted order arrives in
-    //! `Event::Snapshot`, which `seed_recent_snippets_from_snapshot` prunes
-    //! against the loaded catalog. This behaves identically over the
-    //! in-process and `--connect` transports because both funnel through
-    //! the same command + snapshot.
+    //! confirmed `Event::SnippetDelivered` events update the immediate
+    //! client view and the persisted order arrives in `Event::Snapshot`,
+    //! which `seed_recent_snippets_from_snapshot` prunes against the loaded
+    //! catalog.
     use super::super::*;
     use lazybox_ipc::Event;
     use lazybox_ipc::channel;
@@ -11579,29 +11612,22 @@ mod recent_snippets_tests {
     }
 
     #[test]
-    fn record_updates_local_mru_and_reports_to_daemon() {
+    fn confirmed_delivery_updates_local_mru_without_a_second_command() {
         let (mut m, mut server) = build_model();
         while server.rx.try_recv().is_ok() {} // drain Subscribe
 
-        m.record_recent_snippet("rev".into());
+        m.apply_recent_snippet("rev".into());
         assert_eq!(m.recent_snippets, vec!["rev".to_string()]);
-
-        let mut reported = None;
-        while let Ok(cmd) = server.rx.try_recv() {
-            if let IpcCommand::RecordRecentSnippet { key } = cmd {
-                reported = Some(key);
-            }
-        }
-        assert_eq!(reported.as_deref(), Some("rev"), "the use is reported");
+        assert!(server.rx.try_recv().is_err(), "success is not re-reported");
     }
 
     #[test]
     fn record_dedups_and_caps_local_mru() {
         let (mut m, _server) = build_model();
         for k in ["a", "b", "c", "d", "e", "f"] {
-            m.record_recent_snippet(k.to_string());
+            m.apply_recent_snippet(k.to_string());
         }
-        m.record_recent_snippet("a".into());
+        m.apply_recent_snippet("a".into());
         assert_eq!(m.recent_snippets, vec!["a", "f", "e", "d", "c"]);
     }
 

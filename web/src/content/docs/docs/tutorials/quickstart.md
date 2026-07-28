@@ -116,11 +116,12 @@ An empty sidebar right after setup is normal, not a bug:
 
 ## 4. Your daily fast path: send a reusable workflow
 
-If you started an agent above, keep its terminal focused:
+If you started an agent above, wait for its contextual task to finish, then keep
+the terminal focused:
 
 1. Type `]]s` to open the categorized snippet picker. Move with `↑`/`↓`; the
    right pane previews the complete instruction and shows whether it is
-   built-in, global, or repo-specific.
+   built-in, global, or from the directory where lazybox was launched.
 2. Type `rev`. The built-in review workflow is a unique key, so lazybox sends
    and submits it immediately. The whole action is `]]srev`; there is no extra
    `Enter`.

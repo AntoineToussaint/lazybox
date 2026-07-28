@@ -13,8 +13,8 @@ plain shell.
 
 Inside those sessions, [snippet workflows](/docs/how-to/use-snippets/) turn the
 agent instructions you repeat every day into one fast action. Recent remembers
-what you reuse, and each workspace's `]N` badge shows how many distinct
-workflows it has already received.
+what you reuse, and each workspace's `]N` badge tracks up to 12 recently
+distinct workflows.
 
 lazybox is source-agnostic. GitHub and Linear today, with an optional Slack
 mirror — all in the same inbox, with the same keys.

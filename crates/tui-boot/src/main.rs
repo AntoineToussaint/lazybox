@@ -600,7 +600,7 @@ async fn run_remote(
         // `--connect` path too. Without it the picker is empty and the
         // daemon-owned "Recent" MRU (#548) has no catalog to render or
         // prune against.
-        model.apply_snippets(lazybox_config::Snippets::load_merged(
+        model.apply_snippets(lazybox_config::Snippets::load_for_launch_dir(
             std::env::current_dir().ok().as_deref(),
         ));
         if let Some(update) = available_update {
@@ -927,12 +927,11 @@ async fn run_embedded_realm(
         // Seed progressive feature tips (#115): the opt-out flag plus
         // the ids already shown so they never repeat.
         model.set_tips(user_config.ui.show_tips, user_config.ui.tips_seen.clone());
-        // Snippets — global (`<lazybox_home>/snippets.yaml`) merged
-        // with the cwd's `.lazybox/snippets.yaml` (repo wins on key
-        // conflict). Cwd is "wherever the user launched lazybox from",
-        // which is the natural repo root for a single-repo workflow.
+        // Snippets — one client-wide catalog: global
+        // (`<lazybox_home>/snippets.yaml`) merged with the launch
+        // directory's `.lazybox/snippets.yaml` (the latter wins).
         let snippets =
-            lazybox_config::Snippets::load_merged(std::env::current_dir().ok().as_deref());
+            lazybox_config::Snippets::load_for_launch_dir(std::env::current_dir().ok().as_deref());
         // Install the catalog. The snippet-picker "Recent" MRU is owned by
         // the daemon (#548) and seeded from the first `Event::Snapshot`,
         // which prunes it against this catalog — so the catalog must be in

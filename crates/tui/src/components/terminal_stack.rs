@@ -2546,6 +2546,20 @@ impl TerminalStack {
         Some(prompt)
     }
 
+    /// Apply an agent prompt the daemon confirmed as delivered. The daemon
+    /// supplies the authoritative entry so the recap cannot get ahead of
+    /// terminal delivery.
+    pub fn apply_delivered_prompt(&mut self, id: TerminalId, prompt: lazybox_ipc::UserPrompt) {
+        let Some(slot) = self.terminals.get_mut(&id) else {
+            return;
+        };
+        if !matches!(slot.kind, TerminalKind::Agent(_)) {
+            return;
+        }
+        slot.composing.clear();
+        slot.push_prompt(prompt);
+    }
+
     fn tab_label(kind: &TerminalKind) -> String {
         match kind {
             TerminalKind::Agent(name) => name.clone(),

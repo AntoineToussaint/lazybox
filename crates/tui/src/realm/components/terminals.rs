@@ -421,6 +421,14 @@ impl Terminals {
         self.inner.record_pty_write(id, bytes, source)
     }
 
+    pub fn apply_delivered_prompt(
+        &mut self,
+        id: lazybox_ipc::TerminalId,
+        prompt: lazybox_ipc::UserPrompt,
+    ) {
+        self.inner.apply_delivered_prompt(id, prompt);
+    }
+
     /// The focused agent terminal's prompt history, newest-first, for the
     /// `]]h` history picker (issue #523). See
     /// [`crate::components::terminal_stack::TerminalStack::focused_prompt_history`].

@@ -6,7 +6,8 @@
 //! command order, so bytes and draft revisions could be silently reordered.
 //!
 //! Two routers solve both constraints:
-//! - I/O (`Write` / `Resize` / `Close` / `InjectPrompt`) gets one FIFO worker
+//! - I/O (`Write` / `Resize` / `Close` / `InjectPrompt` / `DeliverSnippet`)
+//!   gets one FIFO worker
 //!   per terminal. Adjacent writes are concatenated and resize storms collapse
 //!   to the latest size. Injection registers its readiness waiter only after
 //!   earlier input has completed, then releases the lane so prompt answers can
@@ -61,20 +62,21 @@ pub(crate) async fn run_io_router(
             Command::Write { terminal_id, .. }
             | Command::Resize { terminal_id, .. }
             | Command::Close { terminal_id }
-            | Command::InjectPrompt { terminal_id, .. } => *terminal_id,
+            | Command::InjectPrompt { terminal_id, .. }
+            | Command::DeliverSnippet { terminal_id, .. } => *terminal_id,
             other => {
                 tracing::error!(?other, "non-I/O command reached terminal I/O router");
                 continue;
             }
         };
-        let fallback_can_recover = matches!(
+        let handle_missing_terminal = matches!(
             &command,
             Command::InjectPrompt {
                 fallback_spawn: Some(_),
                 ..
             }
-        );
-        if !fallback_can_recover && config.backend_key_for(terminal_id).await.is_none() {
+        ) || matches!(&command, Command::DeliverSnippet { .. });
+        if !handle_missing_terminal && config.backend_key_for(terminal_id).await.is_none() {
             // Never allocate a 60-second worker for arbitrary stale/hostile
             // terminal ids. Prompt injection with a fallback is the one
             // exception: its documented contract can legitimately spawn a
@@ -218,6 +220,21 @@ async fn run_io_lane(
                     &prompt,
                     fallback_spawn,
                     submit,
+                )
+                .await;
+            }
+            Command::DeliverSnippet {
+                snippet_key,
+                category,
+                body,
+                ..
+            } => {
+                spawn_handler::handle_deliver_snippet(
+                    &config,
+                    terminal_id,
+                    snippet_key,
+                    category,
+                    body,
                 )
                 .await;
             }
@@ -373,6 +390,7 @@ pub(crate) fn reject_command(event_tx: &EventSender, command: &Command, reason: 
         Command::Resize { .. } => "Resize",
         Command::Close { .. } => "Close",
         Command::InjectPrompt { .. } => "InjectPrompt",
+        Command::DeliverSnippet { .. } => "DeliverSnippet",
         Command::RecordUserMessage { .. } => "RecordUserMessage",
         Command::RecordComposingBuffer { .. } => "RecordComposingBuffer",
         _ => "TerminalCommand",

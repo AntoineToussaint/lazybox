@@ -24,7 +24,7 @@
 //!    `Event::TerminalExited`, drop the map entry.
 //! 5. Broadcast `Event::TerminalSpawned` to every subscriber.
 
-use crate::{ServerConfig, terminal_io};
+use crate::{ServerConfig, client_kv, polling, terminal_io};
 use chrono::Utc;
 use futures::{StreamExt, stream};
 use lazybox_agents::SpawnCtx;
@@ -1723,7 +1723,7 @@ pub async fn handle_spawn(
             )
             .await
             {
-                Ok(()) => {}
+                Ok(_) => {}
                 Err(PromptWriteError::Initial(e)) => {
                     tracing::warn!(terminal_id = ?id, "initial_prompt: initial write failed: {e}");
                     let _ = config_for_inject.bus.send(Event::TerminalInputRejected {
@@ -4338,8 +4338,8 @@ pub async fn handle_fetch_scrollback(
     }
 }
 
-pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes: &[u8]) {
-    handle_write_batch(config, terminal_id, &[bytes.to_vec()]).await;
+pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes: &[u8]) -> bool {
+    handle_write_batch(config, terminal_id, &[bytes.to_vec()]).await
 }
 
 /// Deliver adjacent client writes in one backend call while retaining their
@@ -4349,7 +4349,7 @@ pub(crate) async fn handle_write_batch(
     config: &ServerConfig,
     terminal_id: TerminalId,
     writes: &[Vec<u8>],
-) {
+) -> bool {
     let total: usize = writes.iter().map(Vec::len).sum();
     let mut joined = Vec::with_capacity(total);
     for bytes in writes {
@@ -4357,11 +4357,11 @@ pub(crate) async fn handle_write_batch(
     }
     let Some(key) = config.backend_key_for(terminal_id).await else {
         tracing::trace!("write to unknown terminal {terminal_id:?}");
-        return;
+        return false;
     };
     match terminal_io::write_live(config, terminal_id, &key, &joined).await {
         Ok(true) => {}
-        Ok(false) => return,
+        Ok(false) => return false,
         Err(error) => {
             tracing::warn!(?terminal_id, %key, %error, "terminal input was not delivered");
             let _ = config.bus.send(Event::TerminalInputRejected {
@@ -4370,7 +4370,7 @@ pub(crate) async fn handle_write_batch(
                     "input was not delivered ({error}); retry after checking the session"
                 ),
             });
-            return;
+            return false;
         }
     }
     // If the user just answered a prompt on an agent terminal that's
@@ -4397,7 +4397,7 @@ pub(crate) async fn handle_write_batch(
         .iter()
         .any(|bytes| bytes.len() == 1 && matches!(bytes[0], b'1'..=b'9' | b'y' | b'n' | 0x1b));
     if !pressed_enter && !answered_chooser {
-        return;
+        return true;
     }
     // Flip a terminal that's either parked on a prompt (answering a live
     // `?`) or finished (`Done`) and just handed a fresh prompt via Enter —
@@ -4416,7 +4416,7 @@ pub(crate) async fn handle_write_batch(
         _ => false,
     };
     if !flippable(config.agent_state_for(terminal_id).await) {
-        return;
+        return true;
     }
     // A bare chooser keystroke only ANSWERS chooser/permission-shaped
     // prompts. For a free-text elicitation, a lone digit / y / n is
@@ -4440,7 +4440,7 @@ pub(crate) async fn handle_write_batch(
                 ?shape,
                 "bare chooser keystroke on a non-chooser prompt — keeping InputNeeded",
             );
-            return;
+            return true;
         }
     }
     let session_key = config
@@ -4450,7 +4450,7 @@ pub(crate) async fn handle_write_batch(
         .get(&terminal_id)
         .map(|(sk, _)| sk.clone());
     let Some(session_key) = session_key else {
-        return;
+        return true;
     };
     // Atomic compare-and-set under the state lock: flip ONLY if the
     // terminal is still in a flippable state (parked on a prompt, or a
@@ -4470,7 +4470,7 @@ pub(crate) async fn handle_write_batch(
     )
     .await;
     if !transition.committed {
-        return;
+        return true;
     }
     // Tell the output pump to drop its detection buffer on the next
     // chunk. Without this the just-answered prompt's markers linger in
@@ -4480,6 +4480,7 @@ pub(crate) async fn handle_write_batch(
     // prompt. (The regression behind issue #101: "the ? won't go away
     // after I answer.")
     config.agent_detect_resets.lock().await.insert(terminal_id);
+    true
 }
 
 /// How long the inject path waits for an active permission gate /
@@ -4540,7 +4541,7 @@ async fn write_prompt_sequence(
     backend_key: &str,
     encoded: lazybox_agents::EncodedPrompt,
     interaction: tokio::sync::OwnedMutexGuard<()>,
-) -> Result<(), PromptWriteError> {
+) -> Result<bool, PromptWriteError> {
     let echo_probes = encoded.echo_probes().to_vec();
     let (initial_write, submit_write) = encoded.into_writes();
     // Subscribe BEFORE the first write so its repaint chunks cannot race the
@@ -4571,16 +4572,16 @@ async fn write_prompt_sequence(
             .await
             .map_err(PromptWriteError::Submit)?;
         drop(interaction);
-        confirm_prompt_submission(
+        return Ok(confirm_prompt_submission(
             confirm,
             config,
             backend_key,
             &submit_bytes,
             SUBMIT_CONFIRM_DEADLINE,
         )
-        .await;
+        .await);
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Wait plumbing for [`confirm_prompt_submission`], registered BEFORE
@@ -4651,7 +4652,7 @@ async fn confirm_prompt_submission(
     backend_key: &str,
     submit_bytes: &[u8],
     deadline: Duration,
-) {
+) -> bool {
     let mut resends = 0u32;
     let mut blocked_on_input = false;
     let confirmed = loop {
@@ -4691,7 +4692,7 @@ async fn confirm_prompt_submission(
         match terminal_io::write_live(config, confirm.terminal_id, backend_key, submit_bytes).await
         {
             Ok(true) => {}
-            Ok(false) => break true,
+            Ok(false) => break false,
             Err(e) => {
                 // The live mapping survived but the retry itself was
                 // rejected. Keep that visible even though this confirmation
@@ -4706,7 +4707,7 @@ async fn confirm_prompt_submission(
                         "the injected prompt's submit retry failed ({e}) — open the terminal and press Enter"
                     ),
                 });
-                break true;
+                break false;
             }
         }
     };
@@ -4725,7 +4726,7 @@ async fn confirm_prompt_submission(
         }
     }
     if confirmed {
-        return;
+        return true;
     }
     if blocked_on_input {
         tracing::warn!(
@@ -4741,7 +4742,7 @@ async fn confirm_prompt_submission(
                       answer the agent's prompt, then re-send the work if it didn't start"
                 .into(),
         });
-        return;
+        return false;
     }
     tracing::warn!(
         terminal_id = ?confirm.terminal_id,
@@ -4754,6 +4755,7 @@ async fn confirm_prompt_submission(
                   open the terminal and press Enter to start it"
             .into(),
     });
+    false
 }
 
 /// Which evidence released the paste-settle gate — logged so a slow
@@ -4974,6 +4976,25 @@ pub async fn handle_inject_prompt(
     fallback_spawn: Option<lazybox_ipc::SpawnFallback>,
     submit: bool,
 ) {
+    handle_inject_prompt_inner(config, terminal_id, prompt, fallback_spawn, submit, None).await;
+}
+
+#[derive(Clone)]
+struct SnippetDelivery {
+    session_key: SessionKey,
+    snippet_key: String,
+    category: String,
+    body: String,
+}
+
+async fn handle_inject_prompt_inner(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    prompt: &str,
+    fallback_spawn: Option<lazybox_ipc::SpawnFallback>,
+    submit: bool,
+    snippet: Option<SnippetDelivery>,
+) {
     // Look up — and drop the guard — before any further await so
     // a nested handle_spawn (in the fallback path) can re-acquire
     // the same lock without deadlocking. Without the explicit
@@ -5084,6 +5105,7 @@ pub async fn handle_inject_prompt(
     let bus = config.bus.clone();
     let id = terminal_id;
     let config_for_confirm = config.clone();
+    let snippet_for_confirm = snippet;
     // The per-terminal command lane may advance only after this task has
     // established its ordering position. An immediately-ready injection
     // acknowledges after taking the global interaction lock, so a following
@@ -5154,7 +5176,27 @@ pub async fn handle_inject_prompt(
         )
         .await
         {
-            Ok(()) => {}
+            Ok(true) => {
+                if let Some(snippet) = snippet_for_confirm {
+                    let prompt = UserPrompt {
+                        text: snippet.body.clone(),
+                        timestamp_ms: Utc::now().timestamp_millis().max(0) as u64,
+                        source: PromptSource::Snippet {
+                            key: snippet.snippet_key.clone(),
+                            category: snippet.category,
+                        },
+                    };
+                    record_confirmed_snippet(
+                        &config_for_confirm,
+                        id,
+                        snippet.session_key,
+                        snippet.snippet_key,
+                        Some(prompt),
+                    )
+                    .await;
+                }
+            }
+            Ok(false) => {}
             Err(PromptWriteError::Initial(e)) => {
                 tracing::warn!("inject_prompt: initial write failed: {e}");
                 let _ = bus.send(Event::TerminalInputRejected {
@@ -5178,6 +5220,90 @@ pub async fn handle_inject_prompt(
     // A dropped sender means the task ended before it could establish either
     // position; there is no ordering work left for the lane to wait on.
     let _ = registered_rx.await;
+}
+
+/// Deliver a snippet through the terminal-kind-specific path and commit its
+/// histories only after that path reports success. The workspace identity is
+/// derived from daemon-owned terminal metadata rather than accepted from the
+/// client.
+pub async fn handle_deliver_snippet(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    snippet_key: String,
+    category: String,
+    body: String,
+) {
+    let Some((session_key, kind)) = config.terminal_meta_for(terminal_id).await else {
+        let _ = config.bus.send(Event::TerminalInputRejected {
+            terminal_id,
+            message: "snippet was not delivered because the terminal is no longer running".into(),
+        });
+        return;
+    };
+    match kind {
+        TerminalKind::Agent(_) => {
+            let delivery = SnippetDelivery {
+                session_key,
+                snippet_key,
+                category,
+                body: body.clone(),
+            };
+            handle_inject_prompt_inner(config, terminal_id, &body, None, true, Some(delivery))
+                .await;
+        }
+        TerminalKind::Shell => {
+            if handle_write(config, terminal_id, &encode_shell_snippet(&body)).await {
+                record_confirmed_snippet(config, terminal_id, session_key, snippet_key, None).await;
+            }
+        }
+        TerminalKind::LogTail { .. } => {
+            let _ = config.bus.send(Event::TerminalInputRejected {
+                terminal_id,
+                message: "snippets cannot be sent to a read-only log terminal".into(),
+            });
+        }
+    }
+}
+
+async fn record_confirmed_snippet(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    session_key: SessionKey,
+    snippet_key: String,
+    prompt: Option<UserPrompt>,
+) {
+    if let Some(prompt) = &prompt {
+        handle_record_user_message(config, terminal_id, prompt).await;
+    }
+    client_kv::record_recent_snippet(config, snippet_key.clone()).await;
+    let workspace_key = WorkspaceKey::new(session_key.as_str().to_string());
+    polling::record_sent_snippet(config, &workspace_key, snippet_key.clone()).await;
+    let _ = config.bus.send(Event::SnippetDelivered {
+        terminal_id,
+        session_key,
+        snippet_key,
+        prompt,
+    });
+}
+
+fn encode_shell_snippet(body: &str) -> Vec<u8> {
+    let body = lazybox_agents::trim_leading_blank_lines(body);
+    if !body.contains('\n') {
+        let mut bytes = Vec::with_capacity(body.len() + 1);
+        bytes.extend_from_slice(body.as_bytes());
+        bytes.push(b'\r');
+        return bytes;
+    }
+    let mut bytes = Vec::with_capacity(body.len() + 16);
+    bytes.extend_from_slice(b"\x1b[200~");
+    for (index, line) in body.split('\n').enumerate() {
+        if index > 0 {
+            bytes.push(b'\r');
+        }
+        bytes.extend_from_slice(line.as_bytes());
+    }
+    bytes.extend_from_slice(b"\x1b[201~\r");
+    bytes
 }
 
 pub async fn handle_resize(config: &ServerConfig, terminal_id: TerminalId, cols: u16, rows: u16) {
@@ -7807,8 +7933,14 @@ mod tests {
 
         let confirm = prepare_submit_confirmation(&config, id).await;
         let mut bus_rx = config.bus.subscribe();
-        confirm_prompt_submission(confirm, &config, &key, b"\r", Duration::from_millis(10)).await;
+        let confirmed =
+            confirm_prompt_submission(confirm, &config, &key, b"\r", Duration::from_millis(10))
+                .await;
 
+        assert!(
+            !confirmed,
+            "an exhausted retry loop is not a confirmed submit"
+        );
         assert_eq!(
             mock.writes_for(&key).await,
             vec![b"\r".to_vec(); SUBMIT_RESEND_LIMIT as usize],
@@ -7839,8 +7971,14 @@ mod tests {
         let confirm = prepare_submit_confirmation(&config, id).await;
         let mut events = config.bus.subscribe();
 
-        confirm_prompt_submission(confirm, &config, &key, b"\r", Duration::from_millis(1)).await;
+        let confirmed =
+            confirm_prompt_submission(confirm, &config, &key, b"\r", Duration::from_millis(1))
+                .await;
 
+        assert!(
+            !confirmed,
+            "a rejected retry must not report the prompt as delivered"
+        );
         assert!(matches!(
             events.try_recv().expect("typed terminal failure"),
             Event::TerminalInputRejected {

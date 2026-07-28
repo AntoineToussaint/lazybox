@@ -113,6 +113,70 @@ fn homepage_never_advertises_the_removed_single_w_action() {
 }
 
 #[test]
+fn issue_to_pr_handoff_is_prominent_across_discovery_surfaces() {
+    let homepage = read("web/src/pages/index.astro");
+    assert!(homepage.contains(r#"<section id="handoff""#));
+    assert!(
+        homepage.contains("Start work from the issue and keep your session when it becomes a PR.")
+    );
+    for stage in ["issue", "pull-request", "continue"] {
+        assert!(
+            homepage.contains(&format!(r#"data-stage="{stage}""#)),
+            "homepage handoff sequence missing {stage:?}"
+        );
+    }
+    assert!(homepage.contains("/docs/how-to/keep-session-from-issue-to-pr/"));
+
+    let css = read("web/src/styles/global.css");
+    let compact_handoff = css
+        .split_once("@media (max-width: 760px)")
+        .map(|(_, rules)| rules)
+        .and_then(|rules| rules.split_once("@media (max-width: 560px)"))
+        .map(|(rules, _)| rules)
+        .expect("handoff needs its own content-width responsive breakpoint");
+    for expected in [
+        ".handoff-flow { grid-template-columns: 1fr;",
+        ".handoff-stage + .handoff-stage::before",
+        "content: \"↓\";",
+    ] {
+        assert!(
+            compact_handoff.contains(expected),
+            "compact handoff layout missing {expected:?}"
+        );
+    }
+
+    let guide = read("web/src/content/docs/docs/how-to/keep-session-from-issue-to-pr.md");
+    for expected in [
+        "Closes #42.",
+        "no live terminal",
+        "x j",
+        "same live terminal",
+        "worktree and local edits",
+        "scrollback",
+        "prompt history",
+        "activity and read/unread state",
+        "without showing the automatic confirmation again",
+    ] {
+        assert!(
+            guide.contains(expected),
+            "issue-to-PR workflow guide missing {expected:?}"
+        );
+    }
+
+    for landing in [
+        "web/src/content/docs/docs/index.md",
+        "web/src/content/docs/docs/how-to/index.md",
+        "web/src/content/docs/docs/tutorials/quickstart.md",
+        "web/astro.config.mjs",
+    ] {
+        assert!(
+            read(landing).contains("keep-session-from-issue-to-pr"),
+            "{landing} does not surface the issue-to-PR guide"
+        );
+    }
+}
+
+#[test]
 fn mention_guides_describe_the_full_sweep_cadence() {
     for relative in [
         "web/src/content/docs/docs/how-to/lazybox-mentions.md",

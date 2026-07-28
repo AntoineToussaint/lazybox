@@ -14,6 +14,13 @@ plain shell.
 lazybox is source-agnostic. GitHub and Linear today, with an optional Slack
 mirror — all in the same inbox, with the same keys.
 
+:::tip[Start from the issue. Keep your session in the PR.]
+Put an agent to work before a pull request exists. When the closing PR arrives,
+lazybox carries the live terminal, worktree, edits, and activity into the PR
+workspace — no restart or manual handoff. Follow the
+[issue-to-PR workflow](/docs/how-to/keep-session-from-issue-to-pr/).
+:::
+
 :::caution[Pre-1.0, early-adopter dev mode]
 lazybox is daily-driven on macOS; Linux runs the same code paths but is less
 tested. Prebuilt binaries ship via a Homebrew tap and a `curl | sh` installer
@@ -36,8 +43,10 @@ The documentation is split into four sections, following the
   new. The [Quickstart](/docs/tutorials/quickstart/) gets you from clone to a
   live terminal session in about five minutes.
 - **[How-to guides](/docs/how-to/)** — task-oriented recipes: add a repo, run
-  an agent per workspace, orchestrate a fleet of agents, configure per-repo env
-  and mounts, drive a remote daemon over SSH, mirror to Slack.
+  an agent per workspace, [keep that session when its issue becomes a
+  PR](/docs/how-to/keep-session-from-issue-to-pr/), orchestrate a fleet of
+  agents, configure per-repo env and mounts, drive a remote daemon over SSH,
+  mirror to Slack.
 - **[Reference](/docs/reference/)** — exhaustive, dry facts: the
   [CLI](/docs/reference/cli/), every [keybinding](/docs/reference/keybindings/),
   and the full [configuration schema](/docs/reference/configuration/).

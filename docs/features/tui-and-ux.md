@@ -324,6 +324,7 @@ wheel scroll with inertia damping, and the capture toggle. The context menu is a
 - [ ] Mouse wheel scrolls the focused list/terminal.
 - [ ] `F8` flips capture; host-native selection works when off, lazybox selection when on.
 - [ ] Right-click on a sidebar row opens the context menu.
+- [ ] In Ghostty with its default mouse-reporting configuration and `ui.browser: null`, right-click plain, soft-wrapped, and OSC 8 terminal links in the active tab and in each non-focused horizontal/vertical split tile; each exact URL opens, while `/tmp/lazybox.log` records the received coordinates, resolved tile/terminal, target or miss reason, and browser-launch outcome.
 - [ ] Drag-select in a terminal copies via OSC 52 (footer confirms).
 
 ### Known sharp edges

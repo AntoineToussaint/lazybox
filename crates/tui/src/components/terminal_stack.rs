@@ -492,6 +492,14 @@ struct TerminalHit {
     body: Rect,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RenderedClickTarget {
+    pub(crate) terminal_id: TerminalId,
+    pub(crate) tile: Rect,
+    pub(crate) body: Rect,
+    pub(crate) target: Option<ClickTarget>,
+}
+
 pub struct TerminalStack {
     id: PaneId,
     terminals: HashMap<TerminalId, TerminalSlot>,
@@ -1734,6 +1742,25 @@ impl TerminalStack {
             .map(|hit| hit.terminal_id)
     }
 
+    pub(crate) fn rendered_target_at(&mut self, col: u16, row: u16) -> Option<RenderedClickTarget> {
+        let hit = self
+            .tile_hits
+            .iter()
+            .find(|hit| Self::rect_contains(hit.tile, col, row))
+            .copied()?;
+        let target = if Self::rect_contains(hit.body, col, row) {
+            self.target_in_body(hit.terminal_id, hit.body, col, row)
+        } else {
+            None
+        };
+        Some(RenderedClickTarget {
+            terminal_id: hit.terminal_id,
+            tile: hit.tile,
+            body: hit.body,
+            target,
+        })
+    }
+
     fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
         col >= rect.x
             && col < rect.x.saturating_add(rect.width)
@@ -1988,16 +2015,26 @@ impl TerminalStack {
         row: u16,
     ) -> Option<ClickTarget> {
         let id = self.focused_terminal_id()?;
+        let body = Rect {
+            x: rect.x.saturating_add(1),
+            y: rect.y.saturating_add(3),
+            width: rect.width.saturating_sub(2),
+            height: rect.height.saturating_sub(4),
+        };
+        self.target_in_body(id, body, col, row)
+    }
+
+    fn target_in_body(
+        &mut self,
+        id: TerminalId,
+        body: Rect,
+        col: u16,
+        row: u16,
+    ) -> Option<ClickTarget> {
         let slot = self.terminals.get_mut(&id)?;
-        let inner_x = rect.x.saturating_add(1);
-        // Use the SAME body height the renderer feeds `recap_rows` — the
-        // pane minus 3 top-chrome rows AND the 1 held-back bottom margin
-        // (`render()` insets to `area.height - 4` before calling
-        // `render_one_terminal`). Using `- 3` here diverged from the
-        // renderer at exactly height 6, where `recap_rows` flips.
-        let body_height = rect.height.saturating_sub(4);
-        let recap = Self::recap_rows(slot, body_height);
-        let inner_y = rect.y.saturating_add(3).saturating_add(recap);
+        let inner_x = body.x;
+        let recap = Self::recap_rows(slot, body.height);
+        let inner_y = body.y.saturating_add(recap);
         if col < inner_x || row < inner_y {
             return None;
         }

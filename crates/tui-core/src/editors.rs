@@ -215,6 +215,7 @@ pub fn open_url(url: &str, browser: Option<&str>) -> std::io::Result<()> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()?;
+    let url = url.to_string();
     // Reap off-thread so the child never zombifies and a failed
     // launcher still leaves a breadcrumb — without ever blocking the
     // caller. Detached thread: it exits with the child (or with the
@@ -223,10 +224,10 @@ pub fn open_url(url: &str, browser: Option<&str>) -> std::io::Result<()> {
         .name("lazybox-open-url".into())
         .spawn(move || match child.wait() {
             Ok(status) if !status.success() => {
-                tracing::warn!(%program, %status, "browser launcher exited non-zero");
+                tracing::warn!(%program, %status, %url, "browser launcher exited non-zero");
             }
             Ok(_) => {}
-            Err(e) => tracing::warn!(%program, "browser launcher wait failed: {e}"),
+            Err(e) => tracing::warn!(%program, %url, "browser launcher wait failed: {e}"),
         })
         .map(|_| ())
         .unwrap_or_else(|e| tracing::warn!("open_url reaper thread spawn failed: {e}"));

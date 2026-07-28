@@ -73,6 +73,8 @@ const SIDEBAR_PID: PaneId = PaneId::new(1);
 const RIGHT_PID: PaneId = PaneId::new(2);
 const TERMINALS_PID: PaneId = PaneId::new(3);
 
+type UrlOpener = dyn Fn(&str, Option<&str>) -> std::io::Result<()> + Send + Sync;
+
 /// Component IDs for modal-side mounts only. Pane access is via
 /// typed fields, so panes don't appear here.
 #[derive(Debug, Eq, PartialEq, Clone, Hash)]
@@ -996,6 +998,7 @@ pub struct Model<T: TerminalAdapter> {
     /// inside the terminal pane do lazybox-side text selection.
     #[allow(dead_code)] // accessed indirectly via the toggle handler
     mouse_capture_on: bool,
+    url_opener: Box<UrlOpener>,
     /// Active lazybox-side drag-selection in the terminal pane. Set on
     /// mouse Down inside the terminal rect and extended on Drag; while a
     /// drag is parked against the top/bottom edge the idle tick
@@ -1502,6 +1505,7 @@ impl<T: TerminalAdapter> Model<T> {
             cmd_send_overloaded: std::cell::Cell::new(false),
             daemon_disconnect_notified: false,
             mouse_capture_on: true,
+            url_opener: Box::new(crate::editors::open_url),
             terminal_drag: None,
             preselect: None,
             layout: LayoutCtx::new(),
@@ -3159,14 +3163,15 @@ impl<T: TerminalAdapter> Model<T> {
     /// Hand `url` to the platform browser launcher and surface the
     /// outcome in the footer.
     fn open_external_url(&mut self, url: &str) {
-        match crate::editors::open_url(url, self.ui_defaults.browser.as_deref()) {
+        tracing::info!(%url, browser = ?self.ui_defaults.browser, "browser launcher invoked");
+        match (self.url_opener)(url, self.ui_defaults.browser.as_deref()) {
             Ok(()) => {
                 // open_url is fire-and-forget — phrase as in-progress.
-                tracing::info!(%url, "opening url from terminal");
+                tracing::info!(%url, "browser launcher accepted URL");
                 self.flash_hint(format!("opening {url}…"));
             }
             Err(e) => {
-                tracing::warn!(%url, "open_url failed: {e}");
+                tracing::warn!(%url, "browser launcher failed: {e}");
                 self.flash_error(format!("open failed: {e}"));
             }
         }

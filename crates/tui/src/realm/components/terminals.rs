@@ -310,18 +310,14 @@ impl Terminals {
         self.inner.agent_terminal_for(session_key)
     }
 
-    /// Classify whatever the focused terminal's grid shows at the
-    /// frame-space cell `(col, row)` — a URL, file path, or issue
-    /// reference. Used by the right-click handler to detect "the user
-    /// clicked on something openable" and route it before falling
-    /// through to PTY mouse forwarding.
-    pub fn target_at(
+    /// Resolve frame coordinates against the tile rectangles recorded
+    /// by the last render, then classify the clicked terminal's cell.
+    pub(crate) fn rendered_target_at(
         &mut self,
-        rect: tuirealm::ratatui::layout::Rect,
         col: u16,
         row: u16,
-    ) -> Option<crate::components::terminal_stack::ClickTarget> {
-        self.inner.target_at(rect, col, row)
+    ) -> Option<crate::components::terminal_stack::RenderedClickTarget> {
+        self.inner.rendered_target_at(col, row)
     }
 
     /// Screen `(col, row)` → 0-based grid cell coords inside the focused

@@ -1135,10 +1135,40 @@ pub async fn handle_spawn(
     if uses_argv_hooks {
         write_hook_backend_key(terminal_id, &backend_key);
     }
-    let agent_state_generation = agent_for_env.as_ref().map(|_| terminal_id.0);
-    if let Some(generation) = agent_state_generation {
-        initialize_agent_state_generation(config, &backend_key, generation).await;
-    }
+    let state_durability = if agent_for_env.is_some() {
+        match initialize_agent_state_generation(config, &backend_key, terminal_id.0).await {
+            Ok(durability) => Some(durability),
+            Err(error) => {
+                tracing::error!(
+                    %backend_key,
+                    ?terminal_id,
+                    %error,
+                    "agent spawn rolled back because lifecycle generation was not durable"
+                );
+                if let Err(kill_error) = config.backend.kill(&backend_key).await {
+                    tracing::error!(
+                        %backend_key,
+                        %kill_error,
+                        "failed to roll back agent backend after lifecycle persistence failure"
+                    );
+                }
+                if let Some(path) = hook_settings {
+                    let _ = std::fs::remove_file(path);
+                }
+                let _ = std::fs::remove_file(hook_backend_key_path(terminal_id));
+                let _ = config.bus.send(Event::provider_error_permanent(
+                    "spawn",
+                    format!("agent lifecycle persistence failed: {error}"),
+                ));
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    let agent_state_generation = state_durability
+        .as_ref()
+        .map(|durability| durability.generation);
 
     // `terminal_id` was allocated above (before argv) so the hook settings
     // file could embed it. Populate auxiliary maps before publishing the
@@ -1208,11 +1238,7 @@ pub async fn handle_spawn(
     let hook_driven_map = config.hook_driven_terminals.clone();
     let input_shapes_map = config.input_needed_shapes.clone();
     let terminal_meta_map = config.terminal_meta.clone();
-    let state_durability_for_pump = agent_state_generation.map(|generation| AgentStateDurability {
-        store: config.store.clone(),
-        backend_key: backend_key.clone(),
-        generation,
-    });
+    let state_durability_for_pump = state_durability;
     // Whole-config clone for the shared exit teardown
     // (`teardown_exited_terminal`) — it sweeps every per-terminal map
     // and the persisted kv rows, so it takes the config rather than a
@@ -5943,7 +5969,7 @@ async fn pump_recovered_session(
     restored_state: Option<lazybox_ipc::AgentState>,
     durability: Option<&AgentStateDurability>,
     mut sub: crate::backend::Subscription,
-) -> Option<i32> {
+) {
     let cfg = lazybox_config::Config::load().unwrap_or_default();
     let quiet_after = pty_quiet_classify_after(&cfg);
     let mut state_machine = restored_state.map_or_else(
@@ -5958,30 +5984,9 @@ async fn pump_recovered_session(
     let mut last_chunk_len = 0;
 
     if !sub.replay.is_empty() {
-        let progress = agent.is_some() && watchdog_notes_progress(&mut watchdog_fp, &sub.replay);
-        note_pty_activity(
-            agent.as_ref(),
-            &mut state_buf,
-            &sub.replay,
-            progress,
-            &config.agent_states,
-            &config.bus,
-            durability,
-            terminal_id,
-            session_key,
-            &config.terminal_meta,
-            &mut state_machine,
-            &config.hook_driven_terminals,
-            &config.input_needed_shapes,
-        )
-        .await;
-        last_chunk_len = sub.replay.len();
+        replace_detection_history(&mut state_buf, &mut watchdog_fp, &sub.replay);
         if agent.is_some() {
-            let now = tokio::time::Instant::now();
-            quiet_deadline = Some(now + quiet_after);
-            if progress {
-                working_watchdog.note_progress(now);
-            }
+            quiet_deadline = Some(tokio::time::Instant::now() + quiet_after);
         }
         let _ = config.bus.send(Event::TerminalOutput {
             terminal_id,
@@ -6020,32 +6025,14 @@ async fn pump_recovered_session(
                         continue;
                     };
                     resync_unavailable_announced = false;
-                    state_buf.clear();
-                    let progress = agent.is_some()
-                        && watchdog_notes_progress(&mut watchdog_fp, &snapshot.replay);
-                    note_pty_activity(
-                        agent.as_ref(),
+                    replace_detection_history(
                         &mut state_buf,
+                        &mut watchdog_fp,
                         &snapshot.replay,
-                        progress,
-                        &config.agent_states,
-                        &config.bus,
-                        durability,
-                        terminal_id,
-                        session_key,
-                        &config.terminal_meta,
-                        &mut state_machine,
-                        &config.hook_driven_terminals,
-                        &config.input_needed_shapes,
-                    )
-                    .await;
-                    last_chunk_len = snapshot.replay.len();
+                    );
+                    last_chunk_len = 0;
                     if agent.is_some() {
-                        let now = tokio::time::Instant::now();
-                        quiet_deadline = Some(now + quiet_after);
-                        if progress {
-                            working_watchdog.note_progress(now);
-                        }
+                        quiet_deadline = Some(tokio::time::Instant::now() + quiet_after);
                     }
                     let _ = config.bus.send(Event::TerminalResync {
                         terminal_id,
@@ -6141,7 +6128,19 @@ async fn pump_recovered_session(
             }
         }
     }
-    config.backend.wait_exit(backend_key).await
+}
+
+fn replace_detection_history(
+    state_buf: &mut Vec<u8>,
+    watchdog_fp: &mut Option<u64>,
+    replay: &[u8],
+) {
+    const STATE_BUF_CAP: usize = 32 * 1024;
+    let start = replay.len().saturating_sub(STATE_BUF_CAP);
+    state_buf.clear();
+    state_buf.extend_from_slice(&replay[start..]);
+    *watchdog_fp = None;
+    let _ = watchdog_notes_progress(watchdog_fp, replay);
 }
 
 /// Bind already-running backend sessions to fresh wire TerminalIds.
@@ -6162,9 +6161,8 @@ pub async fn recover_sessions(config: &ServerConfig) {
             return;
         }
     };
-    if keys.is_empty() {
-        return;
-    }
+    let live_keys: std::collections::HashSet<_> = keys.iter().cloned().collect();
+    reconcile_missing_recovered_sessions(config, &live_keys).await;
     tracing::info!("recovering {} surviving session(s)", keys.len());
     for key in keys {
         let (session_key, kind) = load_terminal_meta(config, &key)
@@ -6261,34 +6259,135 @@ pub async fn recover_sessions(config: &ServerConfig) {
             model_label: None,
         });
         tokio::spawn(async move {
-            let exit_code = match config_for_pump.backend.subscribe(&key_for_pump).await {
-                Ok(sub) => {
-                    pump_recovered_session(
-                        &config_for_pump,
-                        &key_for_pump,
-                        terminal_id,
-                        &session_key_for_pump,
-                        agent_for_pump,
-                        restored_state,
-                        state_durability.as_ref(),
-                        sub,
-                    )
-                    .await
+            loop {
+                match config_for_pump.backend.subscribe(&key_for_pump).await {
+                    Ok(sub) => {
+                        let current_state = config_for_pump
+                            .agent_states
+                            .lock()
+                            .await
+                            .get(&terminal_id)
+                            .copied()
+                            .or(restored_state);
+                        pump_recovered_session(
+                            &config_for_pump,
+                            &key_for_pump,
+                            terminal_id,
+                            &session_key_for_pump,
+                            agent_for_pump.clone(),
+                            current_state,
+                            state_durability.as_ref(),
+                            sub,
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "recover subscribe {key_for_pump}: {e}; checking session liveness"
+                        );
+                    }
                 }
-                // Subscribe failed *after* TerminalSpawned was broadcast.
-                // Fall through to teardown so the phantom entry doesn't
-                // satisfy the singleton guard forever and block respawn.
-                Err(e) => {
-                    tracing::warn!("recover subscribe {key_for_pump}: {e}");
-                    None
+
+                match config_for_pump.backend.is_alive(&key_for_pump).await {
+                    Ok(false) => {
+                        let exit_code = config_for_pump.backend.wait_exit(&key_for_pump).await;
+                        teardown_exited_terminal(
+                            &config_for_pump,
+                            terminal_id,
+                            &key_for_pump,
+                            exit_code,
+                        )
+                        .await;
+                        break;
+                    }
+                    Ok(true) => {
+                        tracing::warn!(
+                            backend_key = %key_for_pump,
+                            ?terminal_id,
+                            "recovered terminal output conduit ended while session remained alive; reattaching"
+                        );
+                        config_for_pump.backend.release(&key_for_pump).await;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            backend_key = %key_for_pump,
+                            ?terminal_id,
+                            %error,
+                            "could not prove recovered session exited; preserving lifecycle state"
+                        );
+                    }
                 }
-            };
-            // Identical teardown to the main pump (shared helper): the
-            // old hand-rolled subset leaked hook-era map entries and
-            // never deleted the persisted kv rows for recovered
-            // sessions.
-            teardown_exited_terminal(&config_for_pump, terminal_id, &key_for_pump, exit_code).await;
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
         });
+    }
+}
+
+async fn reconcile_missing_recovered_sessions(
+    config: &ServerConfig,
+    live_keys: &std::collections::HashSet<String>,
+) {
+    let store = config.store.clone();
+    let rows = match tokio::task::spawn_blocking(move || store.list_kv_prefix("terminal:")).await {
+        Ok(Ok(rows)) => rows,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "could not enumerate persisted terminals for recovery");
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(%error, "persisted terminal enumeration task failed");
+            return;
+        }
+    };
+
+    for (key, raw) in rows {
+        let Some(backend_key) = key.strip_prefix("terminal:") else {
+            continue;
+        };
+        if live_keys.contains(backend_key) {
+            continue;
+        }
+        let parsed: (String, TerminalKind) = match serde_json::from_str(&raw) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                tracing::error!(
+                    %backend_key,
+                    %error,
+                    "persisted terminal metadata is invalid; cannot reconcile missing session"
+                );
+                continue;
+            }
+        };
+        let session_key = SessionKey::from(parsed.0.as_str());
+        let kind = parsed.1;
+        let terminal_id = alloc_terminal_id(&*config.store);
+        let recovered_agent = if matches!(kind, TerminalKind::Agent(_)) {
+            match load_recovered_agent_state(config, backend_key, terminal_id.0).await {
+                Ok(restored) => Some(restored),
+                Err(()) => continue,
+            }
+        } else {
+            None
+        };
+        {
+            let mut terminals = config.terminals.lock().await;
+            let mut terminal_meta = config.terminal_meta.lock().await;
+            let mut generations = config.agent_state_generations.lock().await;
+            let mut states = config.agent_states.lock().await;
+            terminals.insert(terminal_id, backend_key.to_string());
+            terminal_meta.insert(terminal_id, (session_key, kind));
+            if let Some((durability, state)) = &recovered_agent {
+                generations.insert(terminal_id, durability.generation);
+                states.insert(terminal_id, *state);
+            }
+        }
+        tracing::warn!(
+            %backend_key,
+            ?terminal_id,
+            "persisted terminal is absent from backend inventory; committing Exited"
+        );
+        let exit_code = config.backend.wait_exit(backend_key).await;
+        finish_terminal(config, terminal_id, backend_key, exit_code, false).await;
     }
 }
 
@@ -6414,12 +6513,12 @@ async fn initialize_agent_state_generation(
     config: &ServerConfig,
     backend_key: &str,
     generation: u64,
-) {
+) -> Result<AgentStateDurability, String> {
     let store = config.store.clone();
     let generation_key = TerminalPersistedField::AgentStateGeneration.key(backend_key);
     let backend_key_owned = backend_key.to_string();
     let value = generation.to_string();
-    let result = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         let previous = store
             .get_kv(&generation_key)?
             .and_then(|raw| raw.parse::<u64>().ok());
@@ -6437,22 +6536,14 @@ async fn initialize_agent_state_generation(
         });
         store.apply_batch(&mutations)
     })
-    .await;
-    match result {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => tracing::error!(
-            %backend_key,
-            generation,
-            %error,
-            "agent state generation persistence failed"
-        ),
-        Err(error) => tracing::error!(
-            %backend_key,
-            generation,
-            %error,
-            "agent state generation persistence task failed"
-        ),
-    }
+    .await
+    .map_err(|error| format!("persistence task failed: {error}"))?
+    .map_err(|error| error.to_string())?;
+    Ok(AgentStateDurability {
+        store: config.store.clone(),
+        backend_key: backend_key.to_string(),
+        generation,
+    })
 }
 
 async fn load_recovered_agent_state(
@@ -6506,16 +6597,16 @@ async fn load_recovered_agent_state(
         Some((generation, None)) => {
             tracing::error!(
                 %backend_key,
-                "agent state invariant: recovered terminal had no committed lifecycle state; seeding Idle"
+                "agent state invariant: recovered terminal had no committed lifecycle state; seeding conservative Working"
             );
-            (generation, lazybox_ipc::AgentState::Idle)
+            (generation, lazybox_ipc::AgentState::Working)
         }
         None => {
             tracing::error!(
                 %backend_key,
-                "agent state invariant: recovered terminal had no lifecycle generation; seeding Idle"
+                "agent state invariant: recovered terminal had no lifecycle generation; seeding conservative Working"
             );
-            (fallback_generation, lazybox_ipc::AgentState::Idle)
+            (fallback_generation, lazybox_ipc::AgentState::Working)
         }
     };
     let durability = AgentStateDurability {
@@ -7068,6 +7159,41 @@ mod tests {
     use super::*;
     use crate::backend::SessionBackend;
 
+    struct RejectingBatchStore {
+        inner: lazybox_store::MemoryStore,
+    }
+
+    impl RejectingBatchStore {
+        fn new() -> Self {
+            Self {
+                inner: lazybox_store::MemoryStore::new(),
+            }
+        }
+    }
+
+    impl lazybox_store::Store for RejectingBatchStore {
+        fn apply_batch(
+            &self,
+            _mutations: &[lazybox_store::StoreMutation],
+        ) -> Result<(), lazybox_store::StoreError> {
+            Err(lazybox_store::StoreError::Backend(
+                "injected batch failure".into(),
+            ))
+        }
+
+        fn get_kv(&self, key: &str) -> Result<Option<String>, lazybox_store::StoreError> {
+            self.inner.get_kv(key)
+        }
+
+        fn set_kv(&self, key: &str, value: &str) -> Result<(), lazybox_store::StoreError> {
+            self.inner.set_kv(key, value)
+        }
+
+        fn delete_kv(&self, key: &str) -> Result<(), lazybox_store::StoreError> {
+            self.inner.delete_kv(key)
+        }
+    }
+
     fn test_agent_state_durability(id: TerminalId) -> AgentStateDurability {
         AgentStateDurability {
             store: std::sync::Arc::new(lazybox_store::MemoryStore::new()),
@@ -7094,7 +7220,9 @@ mod tests {
             )
             .expect("seed state");
 
-        initialize_agent_state_generation(&config, backend_key, 8).await;
+        initialize_agent_state_generation(&config, backend_key, 8)
+            .await
+            .expect("initialize next generation");
 
         assert_eq!(
             config
@@ -7114,6 +7242,57 @@ mod tests {
                 .expect("load new state"),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn agent_spawn_is_rolled_back_when_generation_is_not_durable() {
+        let mock = crate::backend::MockBackend::new();
+        let config = ServerConfig::with_store_and_backend(
+            std::sync::Arc::new(RejectingBatchStore::new()),
+            mock.as_backend(),
+        );
+        let mut events = config.bus.subscribe();
+
+        handle_spawn(
+            &config,
+            SessionKey::from("test:failed-generation"),
+            None,
+            TerminalKind::Agent("codex".into()),
+            Some(
+                std::env::current_dir()
+                    .expect("current directory")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            None,
+            false,
+            false,
+            None,
+            false,
+        )
+        .await;
+
+        assert!(
+            snapshot_terminals(&config).await.is_empty(),
+            "an agent without a durable lifecycle generation must never be published"
+        );
+        assert!(
+            mock.list().await.expect("list mock sessions").is_empty(),
+            "the provisioned backend process must be rolled back"
+        );
+        let provider_error = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Event::ProviderError { message, .. } =
+                    events.recv().await.expect("spawn event")
+                    && message.contains("lifecycle persistence")
+                {
+                    break message;
+                }
+            }
+        })
+        .await
+        .expect("spawn failure event deadline");
+        assert!(provider_error.contains("lifecycle persistence"));
     }
 
     #[tokio::test]

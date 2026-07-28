@@ -96,6 +96,23 @@ fn kv_contract(store: &dyn Store) {
     assert_eq!(store.get_kv("conf:a").unwrap(), None);
     store.delete_kv("conf:a").unwrap();
     store.delete_kv("conf:never-existed").unwrap();
+
+    store.set_kv("prefix:a", "one").unwrap();
+    store.set_kv("prefix:b", "two").unwrap();
+    store.set_kv("prefix_%", "literal").unwrap();
+    store.set_kv("other:a", "noise").unwrap();
+    assert_eq!(
+        store.list_kv_prefix("prefix:").unwrap(),
+        vec![
+            ("prefix:a".to_string(), "one".to_string()),
+            ("prefix:b".to_string(), "two".to_string()),
+        ]
+    );
+    assert_eq!(
+        store.list_kv_prefix("prefix_%").unwrap(),
+        vec![("prefix_%".to_string(), "literal".to_string())],
+        "prefix scans must not interpret SQL wildcard characters"
+    );
 }
 
 // ── workspaces ──────────────────────────────────────────────────────

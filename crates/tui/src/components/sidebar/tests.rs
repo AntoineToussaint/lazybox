@@ -30,6 +30,125 @@ mod truncate_tests {
 }
 
 #[cfg(test)]
+mod multi_agent_state_tests {
+    use super::super::*;
+    use lazybox_ipc::{AgentState, Event, TerminalSnapshot};
+
+    fn snapshot_terminal(
+        terminal_id: u64,
+        session_key: &SessionKey,
+        state: AgentState,
+    ) -> TerminalSnapshot {
+        TerminalSnapshot {
+            terminal_id: TerminalId(terminal_id),
+            session_key: session_key.clone(),
+            kind: TerminalKind::Agent("codex".into()),
+            replay: Vec::new(),
+            last_seq: 0,
+            replay_available: true,
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+            prompt_history: Vec::new(),
+            composing_buffer: None,
+            agent_state: Some(state),
+        }
+    }
+
+    #[test]
+    fn snapshot_aggregation_preserves_input_needed_in_any_terminal_order() {
+        let session_key = SessionKey::from("test:multi-agent");
+        for terminals in [
+            vec![
+                snapshot_terminal(1, &session_key, AgentState::InputNeeded),
+                snapshot_terminal(2, &session_key, AgentState::Working),
+            ],
+            vec![
+                snapshot_terminal(2, &session_key, AgentState::Working),
+                snapshot_terminal(1, &session_key, AgentState::InputNeeded),
+            ],
+        ] {
+            let mut sidebar = Sidebar::new(PaneId::new(1));
+            sidebar.on_event(&Event::Snapshot {
+                workspaces: Vec::new(),
+                terminals,
+                projects: Vec::new(),
+                recent_snippets: Vec::new(),
+                dismissed_updates: Vec::new(),
+            });
+            assert_eq!(
+                sidebar.agent_state(&session_key),
+                Some(AgentState::InputNeeded),
+                "a working sibling must not hide an agent waiting for input"
+            );
+        }
+    }
+
+    #[test]
+    fn live_terminal_exit_reveals_the_remaining_agent_state() {
+        let session_key = SessionKey::from("test:multi-agent-live");
+        let mut sidebar = Sidebar::new(PaneId::new(1));
+        sidebar.on_event(&Event::TerminalSpawned {
+            terminal_id: TerminalId(1),
+            session_key: session_key.clone(),
+            kind: TerminalKind::Agent("codex".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+        });
+        sidebar.on_event(&Event::TerminalSpawned {
+            terminal_id: TerminalId(2),
+            session_key: session_key.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+        });
+        sidebar.on_event(&Event::AgentState {
+            session_key: session_key.clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::InputNeeded,
+        });
+        sidebar.on_event(&Event::AgentState {
+            session_key: session_key.clone(),
+            terminal_id: TerminalId(2),
+            state: AgentState::Working,
+        });
+        assert_eq!(
+            sidebar.agent_state(&session_key),
+            Some(AgentState::InputNeeded)
+        );
+
+        sidebar.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(1),
+            exit_code: Some(0),
+            last_output: None,
+        });
+        assert_eq!(
+            sidebar.agent_state(&session_key),
+            Some(AgentState::Working),
+            "removing one terminal must recompute from the surviving terminal"
+        );
+
+        sidebar.on_event(&Event::AgentState {
+            session_key: session_key.clone(),
+            terminal_id: TerminalId(2),
+            state: AgentState::Exited { code: Some(1) },
+        });
+        sidebar.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(2),
+            exit_code: Some(1),
+            last_output: None,
+        });
+        assert_eq!(
+            sidebar.agent_state(&session_key),
+            Some(AgentState::Exited { code: Some(1) }),
+            "the lifecycle tombstone remains visible after its terminal closes"
+        );
+    }
+}
+
+#[cfg(test)]
 mod status_pill_tests {
     use super::super::status_pill;
     use lazybox_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState};

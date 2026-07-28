@@ -41,6 +41,8 @@ struct MockInner {
     /// an error. Lets retry-contract tests fail once without sleeping
     /// through the timeout path.
     snapshot_failures: Mutex<HashMap<String, usize>>,
+    /// Per-key count of upcoming `subscribe()` calls that should fail.
+    subscribe_failures: Mutex<HashMap<String, usize>>,
     /// Keys whose `snapshot()` should report `complete: false` — a ring
     /// that has wrapped past its capacity. Lets tests exercise the resync
     /// path against a genuinely incomplete (but line-boundary-clean)
@@ -270,6 +272,34 @@ impl MockBackend {
             .insert(key.into(), count);
     }
 
+    /// Fail the next `count` output subscriptions without ending the
+    /// underlying session.
+    pub async fn fail_next_subscriptions(&self, key: &str, count: usize) {
+        self.inner
+            .subscribe_failures
+            .lock()
+            .await
+            .insert(key.into(), count);
+    }
+
+    /// Close every current output conduit while leaving the session alive.
+    pub async fn disconnect_subscribers(&self, key: &str) {
+        if let Some(session) = self.inner.sessions.lock().await.get_mut(key) {
+            session.subscribers.clear();
+        }
+    }
+
+    /// Number of currently attached output subscribers.
+    pub async fn subscriber_count(&self, key: &str) -> usize {
+        self.inner
+            .sessions
+            .lock()
+            .await
+            .get(key)
+            .map(|session| session.subscribers.len())
+            .unwrap_or(0)
+    }
+
     /// Make every `snapshot()` for `key` report `complete: false` — the
     /// shape a wrapped ring (output past `REPLAY_RING_BYTES`) has. The
     /// replay bytes are unchanged; only the completeness flag flips.
@@ -474,7 +504,26 @@ impl SessionBackend for MockBackend {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, BackendError>> + Send + 'a>> {
         Box::pin(async move {
             let map = self.inner.sessions.lock().await;
-            Ok(map.keys().cloned().collect())
+            Ok(map
+                .iter()
+                .filter(|(_, session)| session.exit_code.is_none())
+                .map(|(key, _)| key.clone())
+                .collect())
+        })
+    }
+
+    fn is_alive<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            Ok(self
+                .inner
+                .sessions
+                .lock()
+                .await
+                .get(key)
+                .is_some_and(|session| session.exit_code.is_none()))
         })
     }
 
@@ -483,6 +532,15 @@ impl SessionBackend for MockBackend {
         key: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<Subscription, BackendError>> + Send + 'a>> {
         Box::pin(async move {
+            {
+                let mut failures = self.inner.subscribe_failures.lock().await;
+                if let Some(remaining) = failures.get_mut(key)
+                    && *remaining > 0
+                {
+                    *remaining -= 1;
+                    return Err(BackendError::Other("injected subscription failure".into()));
+                }
+            }
             let mut map = self.inner.sessions.lock().await;
             let session = map
                 .get_mut(key)
@@ -629,6 +687,12 @@ mod tests {
             let mut want = vec![a, z];
             want.sort();
             assert_eq!(got, want);
+            b.finish(&want[0], 0).await;
+            assert_eq!(
+                b.list().await.unwrap(),
+                vec![want[1].clone()],
+                "exited sessions are not recoverable"
+            );
         })
         .await;
     }

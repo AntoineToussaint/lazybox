@@ -207,14 +207,17 @@ impl Sidebar {
                     self.workspaces.insert(key, w.clone());
                 }
                 self.agents.clear();
+                self.agent_terminal_states.clear();
                 self.running_terminals.clear();
                 for t in terminals {
                     self.running_terminals
                         .insert(t.terminal_id, (t.session_key.clone(), t.kind.clone()));
                     if let Some(state) = t.agent_state {
-                        self.agents.insert(t.session_key.clone(), state);
+                        self.agent_terminal_states
+                            .insert(t.terminal_id, (t.session_key.clone(), state));
                     }
                 }
+                self.rebuild_agent_aggregates();
                 self.broadcast_selected
                     .retain(|k| self.workspaces.contains_key(k));
                 self.reset_cursor_and_recompute();
@@ -229,7 +232,26 @@ impl Sidebar {
                     .insert(*terminal_id, (session_key.clone(), kind.clone()));
             }
             Event::TerminalExited { terminal_id, .. } => {
-                self.running_terminals.remove(terminal_id);
+                let session_key = self
+                    .running_terminals
+                    .remove(terminal_id)
+                    .map(|(session_key, _)| session_key)
+                    .or_else(|| {
+                        self.agent_terminal_states
+                            .get(terminal_id)
+                            .map(|(session_key, _)| session_key.clone())
+                    });
+                if !matches!(
+                    self.agent_terminal_states.get(terminal_id),
+                    Some((_, lazybox_ipc::AgentState::Exited { .. }))
+                ) {
+                    self.agent_terminal_states.remove(terminal_id);
+                }
+                if let Some(session_key) = session_key
+                    && self.refresh_agent_aggregate(&session_key).asking_changed
+                {
+                    self.recompute_visible();
+                }
             }
             Event::WorkspaceUpserted(workspace) => {
                 let key: SessionKey = (&workspace.key).into();
@@ -268,6 +290,8 @@ impl Sidebar {
                 self.workspaces.remove(&session_key);
                 self.broadcast_selected.remove(&session_key);
                 self.agents.remove(&session_key);
+                self.agent_terminal_states
+                    .retain(|_, (key, _)| key != &session_key);
                 self.recompute_visible();
             }
             Event::SessionCreated(session) => {
@@ -292,7 +316,9 @@ impl Sidebar {
                 }
             }
             Event::AgentState {
-                session_key, state, ..
+                session_key,
+                terminal_id,
+                state,
             } => {
                 tracing::info!(
                     %session_key,
@@ -312,19 +338,15 @@ impl Sidebar {
                 // Mutating the workspace here would be silently undone
                 // within 60s.
                 //
-                // `apply_agent_state` routes the reading through the
-                // shared transition validator, so the stored value is
-                // always a legal successor — the single UI slot can't
-                // land in a contradictory or blank state (#327). On the
-                // rising edge into `InputNeeded` / `Done` it reports the
-                // alert so the outer wrapper can enqueue a desktop
-                // notification (drained + fired there so library tests
-                // never trigger a real `osascript` / `notify-send`).
-                let change = crate::agent_attention::apply_agent_state(
-                    &mut self.agents,
-                    session_key,
-                    *state,
-                );
+                // Recompute the workspace projection from every terminal,
+                // then report aggregate rising edges into
+                // `InputNeeded` / `Done` so the outer wrapper can enqueue
+                // a desktop notification (drained + fired there so
+                // library tests never trigger a real
+                // `osascript` / `notify-send`).
+                self.agent_terminal_states
+                    .insert(*terminal_id, (session_key.clone(), *state));
+                let change = self.refresh_agent_aggregate(session_key);
                 if change.now_asking {
                     if let Some(workspace) = self.workspaces.get(session_key) {
                         // OS-level banner, gated by the config toggle.
@@ -404,17 +426,62 @@ impl Sidebar {
                         *sk = to.clone();
                     }
                 }
-                let moved = crate::agent_attention::rebadge_attention(&mut self.agents, from, to);
-                if moved == Some(lazybox_ipc::AgentState::InputNeeded) {
-                    // Only asking-ness feeds the visible row list
-                    // (per-repo attention counter); the other states read
-                    // fresh at render time.
-                    self.recompute_visible();
+                for (session_key, _) in self.agent_terminal_states.values_mut() {
+                    if session_key == from {
+                        *session_key = to.clone();
+                    }
                 }
+                self.rebuild_agent_aggregates();
+                self.recompute_visible();
             }
             _ => {}
         }
     }
+
+    fn refresh_agent_aggregate(
+        &mut self,
+        session_key: &SessionKey,
+    ) -> crate::agent_attention::StateChange {
+        let previous = self.agents.get(session_key).copied();
+        let incoming = aggregate_agent_state(
+            self.agent_terminal_states
+                .values()
+                .filter_map(|(key, state)| (key == session_key).then_some(*state)),
+        );
+        match incoming {
+            Some(state) => {
+                self.agents.insert(session_key.clone(), state);
+            }
+            None => {
+                self.agents.remove(session_key);
+            }
+        }
+        crate::agent_attention::state_change(previous, incoming)
+    }
+
+    fn rebuild_agent_aggregates(&mut self) {
+        self.agents.clear();
+        let session_keys: std::collections::HashSet<_> = self
+            .agent_terminal_states
+            .values()
+            .map(|(session_key, _)| session_key.clone())
+            .collect();
+        for session_key in session_keys {
+            let _ = self.refresh_agent_aggregate(&session_key);
+        }
+    }
+}
+
+fn aggregate_agent_state(
+    states: impl Iterator<Item = lazybox_ipc::AgentState>,
+) -> Option<lazybox_ipc::AgentState> {
+    states.max_by_key(|state| match state {
+        lazybox_ipc::AgentState::InputNeeded => 5,
+        lazybox_ipc::AgentState::Working => 4,
+        lazybox_ipc::AgentState::Done => 3,
+        lazybox_ipc::AgentState::Exited { .. } => 2,
+        lazybox_ipc::AgentState::Idle => 1,
+    })
 }
 
 /// Build the desktop notification for a newly-risen attention signal,

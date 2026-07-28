@@ -89,6 +89,17 @@ impl Store for MemoryStore {
         Ok(())
     }
 
+    fn list_kv_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>, StoreError> {
+        let mut rows: Vec<_> = self
+            .kv_lock()
+            .iter()
+            .filter(|(key, _)| key.starts_with(prefix))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(rows)
+    }
+
     /// In-memory prefix scan over the kv table. Mirrors what
     /// `SqliteStore::list_workspaces` does so tests using
     /// `MemoryStore` see the same behavior — including recovering the

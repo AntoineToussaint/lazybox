@@ -95,6 +95,19 @@ async fn seed_persisted_state(
     (backend_key, session_key)
 }
 
+async fn wait_for_subscribers(backend: &MockBackend, backend_key: &str, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if backend.subscriber_count(backend_key).await == expected {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("subscriber count deadline");
+}
+
 #[tokio::test]
 async fn sqlite_restart_hydrates_working_done_and_input_needed_before_snapshot() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -196,6 +209,122 @@ async fn sqlite_restart_hydrates_working_done_and_input_needed_before_snapshot()
             ));
         }
     }
+}
+
+#[tokio::test]
+async fn recovered_agent_without_complete_lifecycle_history_starts_working() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    for (ordinal, persist_generation) in [(20, false), (21, true)] {
+        let backend = MockBackend::new();
+        let backend_key = backend
+            .spawn(&["codex".into()], None, &[], &format!("unknown-{ordinal}"))
+            .await
+            .expect("spawn surviving backend session");
+        let session_key = SessionKey::from(format!("test:unknown-{ordinal}").as_str());
+        let db = temp.path().join(format!("unknown-{ordinal}.db"));
+        let store = Arc::new(SqliteStore::open(&db).expect("open sqlite store"));
+        let metadata =
+            serde_json::to_string(&(session_key.as_str(), TerminalKind::Agent("codex".into())))
+                .expect("serialize terminal metadata");
+        store
+            .set_kv(&format!("terminal:{backend_key}"), &metadata)
+            .expect("persist terminal metadata");
+        if persist_generation {
+            store
+                .set_kv(
+                    &format!("terminal-agent-state-generation:{backend_key}"),
+                    "42",
+                )
+                .expect("persist generation without state");
+        }
+
+        let restarted = ServerConfig::with_store_and_backend(store, backend.as_backend());
+        recover_sessions(&restarted).await;
+        let snapshot = snapshot_terminals(&restarted)
+            .await
+            .into_iter()
+            .next()
+            .expect("recovered terminal");
+        assert_eq!(snapshot.session_key, session_key);
+        assert_eq!(
+            snapshot.agent_state,
+            Some(AgentState::Working),
+            "a known recovered agent cannot be initialized as fresh Idle"
+        );
+    }
+}
+
+#[tokio::test]
+async fn historical_replay_cannot_replace_restored_state_before_snapshot() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let db = temp.path().join("historical-replay.db");
+    let backend = MockBackend::new();
+    let (backend_key, _) = seed_persisted_state(&db, &backend, AgentState::Working, 30).await;
+    backend
+        .emit(
+            &backend_key,
+            b"Would you like to run this command?\r\nold prompt from scrollback\r\n",
+        )
+        .await;
+
+    let restarted = ServerConfig::with_store_and_backend(
+        Arc::new(SqliteStore::open(&db).expect("reopen sqlite store")),
+        backend.as_backend(),
+    );
+    let mut events = restarted.bus.subscribe();
+    recover_sessions(&restarted).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if matches!(
+                events.recv().await.expect("recovery event bus"),
+                Event::TerminalOutput { .. }
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("replay output deadline");
+
+    let snapshot = snapshot_terminals(&restarted)
+        .await
+        .into_iter()
+        .next()
+        .expect("recovered terminal");
+    assert_eq!(
+        snapshot.agent_state,
+        Some(AgentState::Working),
+        "scrollback prompt text is history, not a new lifecycle transition"
+    );
+}
+
+#[tokio::test]
+async fn recovered_session_reattaches_after_subscription_failure_or_eof() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let db = temp.path().join("reattach.db");
+    let backend = MockBackend::new();
+    let (backend_key, _) = seed_persisted_state(&db, &backend, AgentState::Working, 40).await;
+    backend.fail_next_subscriptions(&backend_key, 1).await;
+
+    let restarted = ServerConfig::with_store_and_backend(
+        Arc::new(SqliteStore::open(&db).expect("reopen sqlite store")),
+        backend.as_backend(),
+    );
+    recover_sessions(&restarted).await;
+    wait_for_subscribers(&backend, &backend_key, 1).await;
+    assert_eq!(
+        snapshot_terminals(&restarted).await[0].agent_state,
+        Some(AgentState::Working)
+    );
+
+    backend.disconnect_subscribers(&backend_key).await;
+    wait_for_subscribers(&backend, &backend_key, 0).await;
+    wait_for_subscribers(&backend, &backend_key, 1).await;
+    assert_eq!(
+        snapshot_terminals(&restarted).await[0].agent_state,
+        Some(AgentState::Working),
+        "attachment EOF must not be published as underlying session exit"
+    );
 }
 
 #[tokio::test]

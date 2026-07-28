@@ -158,6 +158,23 @@ impl Store for SqliteStore {
         Ok(())
     }
 
+    fn list_kv_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>, StoreError> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT key, value
+                 FROM kv
+                 WHERE substr(key, 1, length(?1)) = ?1
+                 ORDER BY key",
+            )
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        let rows = stmt
+            .query_map([prefix], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
     /// SQLite-native scan: prefix-match on the kv table. The default
     /// trait impl returns empty; we override so the snapshot path can
     /// replay every workspace at startup.

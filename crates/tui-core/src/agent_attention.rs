@@ -1,14 +1,13 @@
 //! The per-session agent status the sidebar tracks, and the pure
 //! projections that turn it into UI signals.
 //!
-//! ## One state per session, not three parallel sets
+//! ## One projected state per session, not three parallel sets
 //!
-//! An agent is in exactly one [`AgentState`] at a time (`Working` /
-//! `InputNeeded` / `Idle` / `Done`), so its status lives here as a
-//! single `HashMap<SessionKey, AgentState>` — one value per workspace.
-//! The four states share one per-session UI slot (working spinner vs
-//! `?` pill vs `✓` done mark), and a single value makes the illegal
-//! combinations the earlier three-`HashSet` design allowed —
+//! Each terminal is in exactly one [`AgentState`] at a time. The sidebar
+//! aggregates those terminal-scoped readings into one projected value per
+//! workspace for its shared UI slot (working spinner vs `?` pill vs `✓`
+//! done mark). A single projected value makes the illegal combinations
+//! the earlier three-`HashSet` design allowed —
 //! "all-empty = no status", "the same key in two sets at once",
 //! "any ordering, including `Done → Idle`, passes" — simply
 //! unrepresentable (issue #327).
@@ -21,11 +20,9 @@
 //! [`apply_agent_state`] — it does NOT re-run the transition rules. A
 //! second copy of the machine here would be a second cached state that
 //! can desync from the daemon's on a dropped broadcast (the bus is
-//! lossy — a lagging receiver skips ahead, and agent state isn't in the
-//! reconnect `Snapshot`); mirroring verbatim stays self-healing, folding
-//! straight to whatever the daemon most recently reported. The single
-//! value is what makes the illegal combinations unrepresentable; the
-//! daemon is what makes each value legal.
+//! lossy and a lagging receiver skips ahead); mirroring verbatim stays
+//! self-healing, folding straight to the authoritative state carried by
+//! terminal snapshots and subsequent deltas.
 //!
 //! ## Why this state lives in the sidebar, not on `Workspace`
 //!
@@ -37,10 +34,9 @@
 //! the `?` indicator would flash on for ~1 second after Claude
 //! prompted and then disappear at the next minute boundary.
 //!
-//! Fix: keep agent state in this sidebar-local map, independent of the
-//! workspace data. Polling broadcasts can't touch it. The map is fully
-//! reconstructed from `Event::AgentState` deltas — the daemon is still
-//! the source of truth.
+//! Fix: keep agent state in sidebar-local terminal and projection maps,
+//! independent of workspace data. Polling broadcasts cannot touch them;
+//! snapshots and `Event::AgentState` deltas both come from the daemon.
 
 use lazybox_core::{SessionKey, Workspace};
 use lazybox_ipc::AgentState;
@@ -66,6 +62,24 @@ pub struct StateChange {
     pub now_done: bool,
 }
 
+/// Derive attention edges from a workspace projection changing.
+///
+/// The projection may disappear when its last terminal exits, so both
+/// sides are optional. Terminal-aware clients use this after aggregating
+/// their per-terminal source state; [`apply_agent_state`] uses it for the
+/// simpler one-reading-per-workspace case.
+pub fn state_change(previous: Option<AgentState>, incoming: Option<AgentState>) -> StateChange {
+    if previous == incoming {
+        return StateChange::default();
+    }
+    StateChange {
+        asking_changed: (previous == Some(AgentState::InputNeeded))
+            != (incoming == Some(AgentState::InputNeeded)),
+        now_asking: incoming == Some(AgentState::InputNeeded),
+        now_done: incoming == Some(AgentState::Done),
+    }
+}
+
 /// Store the daemon's latest `AgentState` reading for `workspace_key`,
 /// returning how the workspace's attention signals changed.
 ///
@@ -81,18 +95,7 @@ pub fn apply_agent_state(
     incoming: AgentState,
 ) -> StateChange {
     let prev = states.insert(workspace_key.clone(), incoming);
-    if prev == Some(incoming) {
-        return StateChange::default();
-    }
-    // Past the repeat guard the state genuinely moved, so an `incoming`
-    // of `InputNeeded` / `Done` is always a rising edge from a different
-    // prior state.
-    let was_asking = prev == Some(AgentState::InputNeeded);
-    StateChange {
-        asking_changed: was_asking != (incoming == AgentState::InputNeeded),
-        now_asking: incoming == AgentState::InputNeeded,
-        now_done: incoming == AgentState::Done,
-    }
+    state_change(prev, Some(incoming))
 }
 
 /// Re-point a session's state entry when the daemon rebadges a terminal

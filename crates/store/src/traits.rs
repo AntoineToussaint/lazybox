@@ -146,6 +146,17 @@ pub trait Store: Send + Sync {
         Ok(())
     }
 
+    /// List every key/value pair whose key begins with `prefix`.
+    ///
+    /// Recovery code uses this to reconcile durable records with an
+    /// external backend's live-session inventory. Backends must either
+    /// provide an exact literal-prefix scan or report unsupported; an
+    /// empty default would make "cannot enumerate" indistinguishable
+    /// from "there are no records".
+    fn list_kv_prefix(&self, _prefix: &str) -> Result<Vec<(String, String)>, StoreError> {
+        Err(StoreError::Unsupported("kv prefix listing"))
+    }
+
     // ── Workspaces ──────────────────────────────────────────────────
     //
     // Defaults piggy-back on the kv table (`workspace:<key>` → JSON).

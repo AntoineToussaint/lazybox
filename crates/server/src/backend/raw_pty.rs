@@ -293,6 +293,16 @@ impl SessionBackend for RawPtyBackend {
         })
     }
 
+    fn is_alive<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            let map = self.sessions.lock().await;
+            Ok(map.get(key).is_some_and(|slot| !slot.pty.is_finished()))
+        })
+    }
+
     fn snapshot<'a>(
         &'a self,
         key: &'a str,

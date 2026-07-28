@@ -171,7 +171,7 @@ to focus it, drag the splitters to resize, wheel-scroll, and right-click links
 Power moves, once the basics feel natural:
 
 - **Model tiers** — a GitHub `high` / `medium` / `low` label (or `@high` / `@medium` / `@low` task-body marker) automatically chooses the target agent's configured model and reasoning-effort arguments at spawn. `w S` / `w M` / `w L` is the direct in-TUI override; Claude ships a Haiku/Sonnet/Opus menu and other agents configure theirs under `agents.<id>.models`. The picked tier rides a `◆ Opus` tab badge.
-- **Multi-select + broadcast** — `v` marks sidebar rows, `Shift-B` sends one instruction (snippet or free text) to every selected workspace at once.
+- **Multi-agent orchestration** — `v` selects workspaces across repos, then `Shift-B` lets you review one snippet-seeded or free-text instruction and safely fan it out; follow the [broadcast guide](https://lazybox.ai/docs/how-to/orchestrate-multiple-agents/).
 - **Focus mode** — `.` (or `]]f` from a terminal) near-fullscreens the agent terminal; `]]<digit>` jumps straight to the Nth agent workspace.
 - **On main** — `b` leader (`b c` / `b s`, confirmed first) runs an agent or shell on the repo's shared main checkout instead of a worktree; the tab carries a `⎇ main` badge.
 - **Jump anywhere** — `` ` `` opens a fuzzy workspace picker across all repos (from a terminal: `]]` then `` ` ``); `!` jumps to an agent waiting on input, `Shift-F` to failing CI.

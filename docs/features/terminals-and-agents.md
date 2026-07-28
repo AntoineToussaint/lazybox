@@ -216,7 +216,9 @@ Infers whether an agent is **Working**, needs input (**InputNeeded**), or is
 
 ### How to use it
 Watch the sidebar agent-state chips. Press `!` to move the cursor to the next
-workspace whose agent is waiting on input.
+workspace whose agent is waiting on input. To coordinate a shared next step
+across several of those live sessions, use the
+[multi-agent orchestration guide](https://lazybox.ai/docs/how-to/orchestrate-multiple-agents/).
 
 ### How it works (brief)
 Pure detectors in `crates/agents/src/detect.rs`. Claude's detector
@@ -369,7 +371,9 @@ snippets:
 
 In a terminal, press `]]s` then start typing the snippet key; the picker
 fuzzy-filters and auto-submits the body (with a trailing carriage return) when
-the filter uniquely matches. See [`docs/snippets.md`](../snippets.md).
+the filter uniquely matches. See [`docs/snippets.md`](../snippets.md). To seed
+one reviewed instruction for several selected sessions, follow the
+[multi-agent orchestration guide](https://lazybox.ai/docs/how-to/orchestrate-multiple-agents/).
 
 ### How it works (brief)
 `Snippets::load_merged` (`crates/config/src/snippets.rs`) merges global +

@@ -41,7 +41,7 @@ The documentation is split into four sections, following the
 
 - **[Tutorials](/docs/tutorials/)** — learning-oriented. Start here if you are
   new. The [Quickstart](/docs/tutorials/quickstart/) gets you from clone to a
-  live terminal session in about five minutes.
+  live terminal session, then walks through a two-workspace broadcast.
 - **[How-to guides](/docs/how-to/)** — task-oriented recipes: add a repo, run
   an agent per workspace, [keep that session when its issue becomes a
   PR](/docs/how-to/keep-session-from-issue-to-pr/), orchestrate a fleet of

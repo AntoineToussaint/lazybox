@@ -1987,8 +1987,20 @@ snippets:
         Model<tuirealm::terminal::TestTerminalAdapter>,
         Vec<SessionKey>,
     ) {
+        model_with_broadcast_targets_and_snippets(kinds, lazybox_config::Snippets::default())
+    }
+
+    fn model_with_broadcast_targets_and_snippets(
+        kinds: &[Option<lazybox_ipc::TerminalKind>],
+        snippets: lazybox_config::Snippets,
+    ) -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        Vec<SessionKey>,
+    ) {
         use lazybox_ipc::{Event as IpcEvent, TerminalId};
-        let mut m = build_model();
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test_with_snippets(client, Size::new(120, 40), snippets)
+            .expect("model init");
         let keys: Vec<SessionKey> = (1..=kinds.len())
             .map(|i| SessionKey::from(format!("github:o/r#{i}").as_str()))
             .collect();
@@ -2021,6 +2033,35 @@ snippets:
             }
         }
         (m, keys)
+    }
+
+    #[test]
+    fn configured_model_broadcast_can_pick_the_builtin_audit_snippet() {
+        let (mut m, keys) = model_with_broadcast_targets_and_snippets(
+            &[Some(lazybox_ipc::TerminalKind::Agent("claude".into()))],
+            lazybox_config::Snippets::builtin(),
+        );
+        assert!(m.sidebar.focus_workspace_key(&keys[0]));
+        assert_eq!(m.sidebar.toggle_broadcast_select(), Some(true));
+
+        m.mount_broadcast_picker();
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::BroadcastSnippet),
+            "a configured model must offer the snippet picker"
+        );
+
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Text("audit".into())]);
+        assert!(cmds.is_empty(), "picking only advances the flow");
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::BroadcastText),
+            "the built-in audit snippet advances to editable composition"
+        );
+        let Some(super::super::ModalFlow::Broadcast { draft }) = &m.modal_flow else {
+            panic!("broadcast draft survives into composition");
+        };
+        assert_eq!(draft.snippet_key.as_deref(), Some("audit"));
     }
 
     /// Broadcast compose submit with two agent targets and one

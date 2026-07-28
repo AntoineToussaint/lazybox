@@ -8,5 +8,5 @@ guaranteed win — no branching, no options dumps. Once you have the feel for
 lazybox, move on to the [How-to guides](/docs/how-to/) for specific tasks.
 
 - **[Quickstart](/docs/tutorials/quickstart/)** — install lazybox (Homebrew,
-  the `curl | sh` installer, or from source) and open your first workspace with
-  a live embedded terminal, in about five minutes.
+  the `curl | sh` installer, or from source), open your first live workspace,
+  and broadcast one instruction to two sessions.

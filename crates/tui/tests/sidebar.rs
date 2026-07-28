@@ -21,7 +21,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lazybox_core::{
     CiStatus, ReviewStatus, SessionKey, Task, TaskId, TaskRole, TaskState, Workspace, WorkspaceKey,
 };
-use lazybox_ipc::{Command, Event, TerminalKind};
+use lazybox_ipc::{AgentState, Command, Event, TerminalId, TerminalKind, TerminalSnapshot};
 use lazybox_tui::PaneId;
 use lazybox_tui::components::{Mailbox, Sidebar, sidebar::VisibleRow};
 use ratatui::Terminal;
@@ -114,6 +114,34 @@ fn snapshot_populates_workspaces() {
     });
     assert_eq!(s.workspace_count(), 2);
     assert_eq!(s.selected_session_key(), Some(&ws_key(&w1)));
+}
+
+#[test]
+fn snapshot_hydrates_agent_state() {
+    let mut s = Sidebar::new(PaneId::new(1));
+    let workspace = make_workspace("owner/repo", "o/r#1", Utc::now());
+    let session_key = ws_key(&workspace);
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![workspace],
+        terminals: vec![TerminalSnapshot {
+            terminal_id: TerminalId(1),
+            session_key: session_key.clone(),
+            kind: TerminalKind::Agent("codex".into()),
+            replay: Vec::new(),
+            last_seq: 0,
+            replay_available: true,
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+            prompt_history: Vec::new(),
+            composing_buffer: None,
+            agent_state: Some(AgentState::Working),
+        }],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+    assert!(s.displays_agent_state(&session_key, AgentState::Working));
 }
 
 #[test]

@@ -35,7 +35,7 @@ use lazybox_ipc::{
     Event, PromptSource, TerminalId, TerminalKind, TerminalSnapshot, UserPrompt, WorktreeStep,
     WorktreeStepStatus,
 };
-use lazybox_store::WorkspaceRecord;
+use lazybox_store::{StoreMutation, WorkspaceRecord};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -87,16 +87,18 @@ enum TerminalPersistedField {
     UserMessageHistory,
     Draft,
     PtyLaunchGeneration,
+    AgentStateGeneration,
 }
 
 impl TerminalPersistedField {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Metadata,
         Self::NoPermission,
         Self::UserMessage,
         Self::UserMessageHistory,
         Self::Draft,
         Self::PtyLaunchGeneration,
+        Self::AgentStateGeneration,
     ];
 
     fn key(self, backend_key: &str) -> String {
@@ -107,9 +109,14 @@ impl TerminalPersistedField {
             Self::UserMessageHistory => "terminal-msgs",
             Self::Draft => "terminal-draft",
             Self::PtyLaunchGeneration => "terminal-pty-generation",
+            Self::AgentStateGeneration => "terminal-agent-state-generation",
         };
         format!("{prefix}:{backend_key}")
     }
+}
+
+fn agent_state_key(backend_key: &str, generation: u64) -> String {
+    format!("terminal-agent-state:{backend_key}:{generation}")
 }
 
 /// Serializes the seed → allocate → persist sequence of
@@ -435,14 +442,108 @@ struct DirectStateTransition {
     committed: bool,
 }
 
+#[derive(Clone)]
+struct AgentStateDurability {
+    store: std::sync::Arc<dyn lazybox_store::Store>,
+    backend_key: String,
+    generation: u64,
+}
+
+impl AgentStateDurability {
+    async fn persist(&self, state: lazybox_ipc::AgentState) -> bool {
+        let generation_key = TerminalPersistedField::AgentStateGeneration.key(&self.backend_key);
+        let state_key = agent_state_key(&self.backend_key, self.generation);
+        let generation = self.generation.to_string();
+        let state = match serde_json::to_string(&state) {
+            Ok(state) => state,
+            Err(error) => {
+                tracing::error!(
+                    backend_key = %self.backend_key,
+                    generation = self.generation,
+                    %error,
+                    "agent state persistence: encode failed"
+                );
+                return false;
+            }
+        };
+        let store = self.store.clone();
+        match tokio::task::spawn_blocking(move || {
+            store.apply_batch(&[
+                StoreMutation::SetKv {
+                    key: generation_key,
+                    value: generation,
+                },
+                StoreMutation::SetKv {
+                    key: state_key,
+                    value: state,
+                },
+            ])
+        })
+        .await
+        {
+            Ok(Ok(())) => true,
+            Ok(Err(error)) => {
+                tracing::error!(
+                    backend_key = %self.backend_key,
+                    generation = self.generation,
+                    %error,
+                    "agent state persistence: store write failed"
+                );
+                false
+            }
+            Err(error) => {
+                tracing::error!(
+                    backend_key = %self.backend_key,
+                    generation = self.generation,
+                    %error,
+                    "agent state persistence: store task failed"
+                );
+                false
+            }
+        }
+    }
+}
+
+async fn agent_state_durability(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    backend_key: &str,
+) -> Option<AgentStateDurability> {
+    let generation = config
+        .agent_state_generations
+        .lock()
+        .await
+        .get(&terminal_id)
+        .copied();
+    let Some(generation) = generation else {
+        tracing::error!(
+            ?terminal_id,
+            %backend_key,
+            "agent state invariant: live terminal has no PTY generation"
+        );
+        return None;
+    };
+    Some(AgentStateDurability {
+        store: config.store.clone(),
+        backend_key: backend_key.to_string(),
+        generation,
+    })
+}
+
+struct StateFold<R> {
+    result: R,
+    committed: bool,
+}
+
 /// The single state-ownership boundary for an agent terminal.
 ///
 /// It co-holds `terminal_meta → agent_states` in the documented canonical
-/// order, folds one candidate under the state lock, updates the cache, and
-/// broadcasts before releasing either lock. Cache order and bus order are
-/// therefore identical: a concurrent late hook can never be delivered after
-/// a committed `Exited`, and an issue→PR rebadge cannot race between live-key
-/// resolution and the event send (#161/#167/#357).
+/// order, folds one candidate under the state lock, persists the committed
+/// state, updates the cache, and broadcasts before releasing either lock.
+/// Durable order, cache order, and bus order are therefore identical: a
+/// concurrent late hook can never be delivered after a committed `Exited`,
+/// and an issue→PR rebadge cannot race between live-key resolution and the
+/// event send (#161/#167/#357).
 ///
 /// `fold` returns its caller-specific result and the state to commit. Both
 /// the direct-transition wrapper and PTY-reading path route through here;
@@ -457,6 +558,7 @@ async fn fold_and_broadcast_agent_state<R>(
         tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
     >,
     bus: &tokio::sync::broadcast::Sender<Event>,
+    durability: &AgentStateDurability,
     id: TerminalId,
     captured: &SessionKey,
     source: StateSource,
@@ -467,7 +569,7 @@ async fn fold_and_broadcast_agent_state<R>(
     // `process-exit`). `source` says who; `reason` says why.
     reason: &'static str,
     fold: impl FnOnce(Option<lazybox_ipc::AgentState>, bool) -> (R, Option<lazybox_ipc::AgentState>),
-) -> R {
+) -> StateFold<R> {
     let meta = terminal_meta.lock().await;
     let live_session = meta.get(&id).map(|(sk, _)| sk.clone());
     let session_key = live_session.clone().unwrap_or_else(|| captured.clone());
@@ -476,6 +578,12 @@ async fn fold_and_broadcast_agent_state<R>(
     let previous = states.get(&id).copied();
     let (result, committed) = fold(previous, terminal_live);
     if let Some(state) = committed {
+        if !durability.persist(state).await {
+            return StateFold {
+                result,
+                committed: false,
+            };
+        }
         states.insert(id, state);
         tracing::info!(
             terminal_id = ?id,
@@ -491,8 +599,15 @@ async fn fold_and_broadcast_agent_state<R>(
             terminal_id: id,
             state,
         });
+        return StateFold {
+            result,
+            committed: true,
+        };
     }
-    result
+    StateFold {
+        result,
+        committed: false,
+    }
 }
 
 /// Offer a direct state candidate through the structural transition table,
@@ -510,6 +625,7 @@ async fn transition_and_broadcast_agent_state(
         tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
     >,
     bus: &tokio::sync::broadcast::Sender<Event>,
+    durability: &AgentStateDurability,
     id: TerminalId,
     captured: &SessionKey,
     source: StateSource,
@@ -524,10 +640,11 @@ async fn transition_and_broadcast_agent_state(
         StateSource::Exit => "process-exit",
         StateSource::Pty => "pty",
     };
-    fold_and_broadcast_agent_state(
+    let folded = fold_and_broadcast_agent_state(
         terminal_meta,
         states,
         bus,
+        durability,
         id,
         captured,
         source,
@@ -555,7 +672,21 @@ async fn transition_and_broadcast_agent_state(
             )
         },
     )
-    .await
+    .await;
+    if folded.result.previous == Some(lazybox_ipc::AgentState::Working)
+        && folded.result.candidate == Some(lazybox_ipc::AgentState::Idle)
+        && !folded.committed
+    {
+        tracing::error!(
+            terminal_id = ?id,
+            ?source,
+            "agent state invariant: refused Working → Idle transition"
+        );
+    }
+    DirectStateTransition {
+        committed: folded.committed,
+        ..folded.result
+    }
 }
 
 fn wake_poll_for_terminal_kind(config: &ServerConfig, kind: &TerminalKind) {
@@ -1004,6 +1135,10 @@ pub async fn handle_spawn(
     if uses_argv_hooks {
         write_hook_backend_key(terminal_id, &backend_key);
     }
+    let agent_state_generation = agent_for_env.as_ref().map(|_| terminal_id.0);
+    if let Some(generation) = agent_state_generation {
+        initialize_agent_state_generation(config, &backend_key, generation).await;
+    }
 
     // `terminal_id` was allocated above (before argv) so the hook settings
     // file could embed it. Populate auxiliary maps before publishing the
@@ -1044,8 +1179,12 @@ pub async fn handle_spawn(
     {
         let mut terminals = config.terminals.lock().await;
         let mut terminal_meta = config.terminal_meta.lock().await;
+        let mut agent_state_generations = config.agent_state_generations.lock().await;
         terminal_meta.insert(terminal_id, (session_key.clone(), kind.clone()));
         terminals.insert(terminal_id, backend_key.clone());
+        if let Some(generation) = agent_state_generation {
+            agent_state_generations.insert(terminal_id, generation);
+        }
         persist_terminal_meta(config, &backend_key, &session_key, &kind).await;
         if let Some(agent) = agent_for_env.as_deref() {
             persist_pty_launch_generation(config, &backend_key, agent.pty_launch_generation())
@@ -1069,6 +1208,11 @@ pub async fn handle_spawn(
     let hook_driven_map = config.hook_driven_terminals.clone();
     let input_shapes_map = config.input_needed_shapes.clone();
     let terminal_meta_map = config.terminal_meta.clone();
+    let state_durability_for_pump = agent_state_generation.map(|generation| AgentStateDurability {
+        store: config.store.clone(),
+        backend_key: backend_key.clone(),
+        generation,
+    });
     // Whole-config clone for the shared exit teardown
     // (`teardown_exited_terminal`) — it sweeps every per-terminal map
     // and the persisted kv rows, so it takes the config rather than a
@@ -1250,6 +1394,7 @@ pub async fn handle_spawn(
                     progress,
                     &agent_states_map,
                     &bus,
+                    state_durability_for_pump.as_ref(),
                     id_for_pump,
                     &session_key_for_pump,
                     &terminal_meta_map,
@@ -1369,6 +1514,7 @@ pub async fn handle_spawn(
                         progress,
                         &agent_states_map,
                         &bus,
+                        state_durability_for_pump.as_ref(),
                         id_for_pump,
                         &session_key_for_pump,
                         &terminal_meta_map,
@@ -1436,6 +1582,7 @@ pub async fn handle_spawn(
                     progress,
                     &agent_states_map,
                     &bus,
+                    state_durability_for_pump.as_ref(),
                     id_for_pump,
                     &session_key_for_pump,
                     &terminal_meta_map,
@@ -1509,6 +1656,7 @@ pub async fn handle_spawn(
                             lazybox_agents::Liveness::Silent,
                             &agent_states_map,
                             &bus,
+                            state_durability_for_pump.as_ref(),
                             id_for_pump,
                             &session_key_for_pump,
                             &terminal_meta_map,
@@ -1580,6 +1728,7 @@ pub async fn handle_spawn(
                             last_chunk_len,
                             &agent_states_map,
                             &bus,
+                            state_durability_for_pump.as_ref(),
                             id_for_pump,
                             &session_key_for_pump,
                             &terminal_meta_map,
@@ -3980,11 +4129,14 @@ async fn finish_terminal(
     // broadcasts, so a racing late hook/PTY reading sees the absorbing state
     // and cannot resurrect the process. Only agent terminals carry a state
     // pill; shells don't.
-    if let Some((session_key, TerminalKind::Agent(_))) = meta {
+    if let Some((session_key, TerminalKind::Agent(_))) = meta
+        && let Some(durability) = agent_state_durability(config, terminal_id, backend_key).await
+    {
         transition_and_broadcast_agent_state(
             &config.terminal_meta,
             &config.agent_states,
             &config.bus,
+            &durability,
             terminal_id,
             &session_key,
             StateSource::Exit,
@@ -4023,6 +4175,11 @@ async fn finish_terminal(
     // resurrects the terminal from its first reading.
     config.terminal_meta.lock().await.remove(&terminal_id);
     config.agent_states.lock().await.remove(&terminal_id);
+    let agent_state_generation = config
+        .agent_state_generations
+        .lock()
+        .await
+        .remove(&terminal_id);
     config
         .no_permission_terminals
         .lock()
@@ -4039,6 +4196,12 @@ async fn finish_terminal(
         let key = field.key(backend_key);
         if let Err(error) = config.store.delete_kv(&key) {
             tracing::warn!(?terminal_id, %key, %error, "terminal teardown: kv cleanup failed");
+        }
+    }
+    if let Some(generation) = agent_state_generation {
+        let key = agent_state_key(backend_key, generation);
+        if let Err(error) = config.store.delete_kv(&key) {
+            tracing::warn!(?terminal_id, %key, %error, "terminal teardown: agent state cleanup failed");
         }
     }
     // Release the backend's per-session slot (PTY fds, writer thread,
@@ -4074,7 +4237,7 @@ async fn finish_terminal(
 /// #374). A positive current-chunk modal match is authoritative
 /// (`InputNeeded`, `clear: true`). A genuinely resumed stream commits
 /// `Working` off the next clear quiet-classification, once it comes to rest.
-pub(crate) async fn note_pty_activity(
+async fn note_pty_activity(
     agent: Option<&std::sync::Arc<dyn lazybox_agents::Agent>>,
     buf: &mut Vec<u8>,
     bytes: &[u8],
@@ -4087,6 +4250,7 @@ pub(crate) async fn note_pty_activity(
         tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
     >,
     bus: &tokio::sync::broadcast::Sender<Event>,
+    durability: Option<&AgentStateDurability>,
     id: TerminalId,
     session_key: &SessionKey,
     terminal_meta: &std::sync::Arc<
@@ -4104,6 +4268,13 @@ pub(crate) async fn note_pty_activity(
 ) {
     const STATE_BUF_CAP: usize = 32 * 1024;
     let Some(agent) = agent else {
+        return;
+    };
+    let Some(durability) = durability else {
+        tracing::error!(
+            terminal_id = ?id,
+            "agent state invariant: PTY activity has no durability context"
+        );
         return;
     };
     buf.extend_from_slice(bytes);
@@ -4146,6 +4317,7 @@ pub(crate) async fn note_pty_activity(
         pty,
         states,
         bus,
+        durability,
         id,
         session_key,
         terminal_meta,
@@ -4168,7 +4340,7 @@ pub(crate) async fn note_pty_activity(
 /// (a full-screen repaint delivers a live dialog and the bottom status
 /// bar in ONE chunk, status bar last; position alone would read the
 /// dialog as already answered).
-pub(crate) async fn classify_quiet_screen(
+async fn classify_quiet_screen(
     agent: Option<&std::sync::Arc<dyn lazybox_agents::Agent>>,
     buf: &[u8],
     last_chunk_len: usize,
@@ -4181,6 +4353,7 @@ pub(crate) async fn classify_quiet_screen(
         tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
     >,
     bus: &tokio::sync::broadcast::Sender<Event>,
+    durability: Option<&AgentStateDurability>,
     id: TerminalId,
     session_key: &SessionKey,
     terminal_meta: &std::sync::Arc<
@@ -4198,6 +4371,13 @@ pub(crate) async fn classify_quiet_screen(
     detect_resets: &std::sync::Arc<tokio::sync::Mutex<std::collections::HashSet<TerminalId>>>,
 ) {
     let Some(agent) = agent else {
+        return;
+    };
+    let Some(durability) = durability else {
+        tracing::error!(
+            terminal_id = ?id,
+            "agent state invariant: PTY classification has no durability context"
+        );
         return;
     };
     // A pending answer reset means the buffer's contents predate the
@@ -4233,6 +4413,7 @@ pub(crate) async fn classify_quiet_screen(
             },
             states,
             bus,
+            durability,
             id,
             session_key,
             terminal_meta,
@@ -4309,6 +4490,7 @@ pub(crate) async fn classify_quiet_screen(
         pty,
         states,
         bus,
+        durability,
         id,
         session_key,
         terminal_meta,
@@ -4336,7 +4518,7 @@ pub(crate) async fn classify_quiet_screen(
 /// followed, so the stale-buffer classify (which would re-raise the
 /// just-answered `?`) is skipped and the turn is settled `Done` directly.
 /// See the inline comment for why that can't pin `Working`.
-pub(crate) async fn watchdog_escape_working(
+async fn watchdog_escape_working(
     agent: Option<&std::sync::Arc<dyn lazybox_agents::Agent>>,
     buf: &[u8],
     last_chunk_len: usize,
@@ -4344,6 +4526,7 @@ pub(crate) async fn watchdog_escape_working(
         tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
     >,
     bus: &tokio::sync::broadcast::Sender<Event>,
+    durability: Option<&AgentStateDurability>,
     id: TerminalId,
     session_key: &SessionKey,
     terminal_meta: &std::sync::Arc<
@@ -4361,6 +4544,13 @@ pub(crate) async fn watchdog_escape_working(
     detect_resets: &std::sync::Arc<tokio::sync::Mutex<std::collections::HashSet<TerminalId>>>,
 ) {
     let Some(agent) = agent else {
+        return;
+    };
+    let Some(durability) = durability else {
+        tracing::error!(
+            terminal_id = ?id,
+            "agent state invariant: PTY watchdog has no durability context"
+        );
         return;
     };
     if states.lock().await.get(&id).copied() != Some(lazybox_ipc::AgentState::Working) {
@@ -4391,6 +4581,7 @@ pub(crate) async fn watchdog_escape_working(
             lazybox_agents::Liveness::Watchdog,
             states,
             bus,
+            Some(durability),
             id,
             session_key,
             terminal_meta,
@@ -4421,6 +4612,7 @@ pub(crate) async fn watchdog_escape_working(
         },
         states,
         bus,
+        durability,
         id,
         session_key,
         terminal_meta,
@@ -4445,6 +4637,7 @@ async fn commit_pty_reading(
         tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
     >,
     bus: &tokio::sync::broadcast::Sender<Event>,
+    durability: &AgentStateDurability,
     id: TerminalId,
     // Captured at spawn — used only as a fallback. The live key
     // is re-resolved from `terminal_meta` at emit time so a
@@ -4491,17 +4684,18 @@ async fn commit_pty_reading(
     // A separate cache insert followed by an unlocked broadcast allowed a
     // concurrent hook/exit to commit second but publish first, presenting the
     // client with a state older than the cache.
-    let outcome = fold_and_broadcast_agent_state(
+    let folded = fold_and_broadcast_agent_state(
         terminal_meta,
         states,
         bus,
+        durability,
         id,
         session_key,
         StateSource::Pty,
         reason,
         |current, terminal_live| {
             if !terminal_live {
-                return (lazybox_agents::Outcome::Rejected, None);
+                return ((lazybox_agents::Outcome::Rejected, current), None);
             }
             let outcome = state_machine.on_pty_reading(
                 current,
@@ -4516,10 +4710,27 @@ async fn commit_pty_reading(
                 lazybox_agents::Outcome::Committed(state) => Some(state),
                 _ => None,
             };
-            (outcome, committed)
+            ((outcome, current), committed)
         },
     )
     .await;
+    let (result, previous) = folded.result;
+    let outcome = if folded.committed {
+        result
+    } else if matches!(result, lazybox_agents::Outcome::Committed(_)) {
+        lazybox_agents::Outcome::Rejected
+    } else {
+        result
+    };
+    if previous == Some(lazybox_ipc::AgentState::Working)
+        && pty.state == lazybox_ipc::AgentState::Idle
+        && outcome == lazybox_agents::Outcome::Rejected
+    {
+        tracing::error!(
+            terminal_id = ?id,
+            "agent state invariant: refused Working → Idle PTY classification"
+        );
+    }
     match outcome {
         // Keep flap-damping and hook-gating visible at debug — a stuck /
         // missing `?` pill is bisected from these lines. (Steady-state and
@@ -4688,6 +4899,9 @@ pub(crate) async fn handle_write_batch(
     let Some(session_key) = session_key else {
         return true;
     };
+    let Some(durability) = agent_state_durability(config, terminal_id, &key).await else {
+        return true;
+    };
     // Atomic compare-and-set under the state lock: flip ONLY if the
     // terminal is still in a flippable state (parked on a prompt, or a
     // `Done` agent handed a fresh Enter). If it raced to `Working`/`Idle`
@@ -4699,6 +4913,7 @@ pub(crate) async fn handle_write_batch(
         &config.terminal_meta,
         &config.agent_states,
         &config.bus,
+        &durability,
         terminal_id,
         &session_key,
         StateSource::Flip,
@@ -5599,6 +5814,17 @@ pub async fn handle_ingest_hook(
     backend_key: Option<String>,
     hook: lazybox_ipc::HookEvent,
 ) {
+    let resolved_backend_key = match backend_key.as_deref() {
+        Some(key) => key.to_string(),
+        None => {
+            tracing::debug!(
+                ?terminal_id,
+                kind = ?hook.kind,
+                "legacy terminal-id-only hook (pre-backend-key settings file), dropping"
+            );
+            return;
+        }
+    };
     let terminal_id = match backend_key.as_deref() {
         Some(key) => {
             let resolved = {
@@ -5619,14 +5845,7 @@ pub async fn handle_ingest_hook(
                 }
             }
         }
-        None => {
-            tracing::debug!(
-                ?terminal_id,
-                kind = ?hook.kind,
-                "legacy terminal-id-only hook (pre-backend-key settings file), dropping"
-            );
-            return;
-        }
+        None => unreachable!("backend key was checked above"),
     };
     // Resolve the workspace; a terminal mid-teardown (terminals entry
     // resolved but meta already swept) is dropped without marking
@@ -5671,10 +5890,15 @@ pub async fn handle_ingest_hook(
     // machine's transition table commits it (or rejects it — e.g. a
     // `SessionStart`/`SessionEnd` idle hook must not clear a `Done` the
     // preceding `Stop` just set, #80).
+    let Some(durability) = agent_state_durability(config, terminal_id, &resolved_backend_key).await
+    else {
+        return;
+    };
     let transition = transition_and_broadcast_agent_state(
         &config.terminal_meta,
         &config.agent_states,
         &config.bus,
+        &durability,
         terminal_id,
         &session_key,
         StateSource::Hook,
@@ -5708,6 +5932,216 @@ pub async fn handle_ingest_hook(
         hook = ?hook.kind,
         "hook → AgentState transition",
     );
+}
+
+async fn pump_recovered_session(
+    config: &ServerConfig,
+    backend_key: &str,
+    terminal_id: TerminalId,
+    session_key: &SessionKey,
+    agent: Option<std::sync::Arc<dyn lazybox_agents::Agent>>,
+    restored_state: Option<lazybox_ipc::AgentState>,
+    durability: Option<&AgentStateDurability>,
+    mut sub: crate::backend::Subscription,
+) -> Option<i32> {
+    let cfg = lazybox_config::Config::load().unwrap_or_default();
+    let quiet_after = pty_quiet_classify_after(&cfg);
+    let mut state_machine = restored_state.map_or_else(
+        lazybox_agents::AgentStateMachine::new,
+        lazybox_agents::AgentStateMachine::restored,
+    );
+    let mut state_buf = Vec::with_capacity(32 * 1024);
+    let mut watchdog_fp = None;
+    let mut working_watchdog =
+        WorkingWatchdog::new(agent.as_ref().and(working_watchdog_after(&cfg)));
+    let mut quiet_deadline = None;
+    let mut last_chunk_len = 0;
+
+    if !sub.replay.is_empty() {
+        let progress = agent.is_some() && watchdog_notes_progress(&mut watchdog_fp, &sub.replay);
+        note_pty_activity(
+            agent.as_ref(),
+            &mut state_buf,
+            &sub.replay,
+            progress,
+            &config.agent_states,
+            &config.bus,
+            durability,
+            terminal_id,
+            session_key,
+            &config.terminal_meta,
+            &mut state_machine,
+            &config.hook_driven_terminals,
+            &config.input_needed_shapes,
+        )
+        .await;
+        last_chunk_len = sub.replay.len();
+        if agent.is_some() {
+            let now = tokio::time::Instant::now();
+            quiet_deadline = Some(now + quiet_after);
+            if progress {
+                working_watchdog.note_progress(now);
+            }
+        }
+        let _ = config.bus.send(Event::TerminalOutput {
+            terminal_id,
+            bytes: sub.replay.clone(),
+            first_seq: 1,
+            seq: sub.last_seq,
+        });
+    }
+
+    let mut last_seq = sub.last_seq;
+    let mut resync_unavailable_announced = false;
+    loop {
+        let watchdog_due =
+            working_watchdog.prepare_select(tokio::time::Instant::now(), sub.live.len());
+        tokio::select! {
+            biased;
+            chunk = sub.live.recv(), if working_watchdog.receiver_enabled(watchdog_due) => {
+                let Some(chunk) = chunk else {
+                    break;
+                };
+                working_watchdog.note_received(watchdog_due);
+                if chunk.seq <= last_seq {
+                    continue;
+                }
+                if chunk.seq > last_seq.saturating_add(1) {
+                    let Some(snapshot) =
+                        resync_replay_after_gap(&*config.backend, backend_key, chunk.seq, last_seq)
+                            .await
+                    else {
+                        if !resync_unavailable_announced {
+                            let _ = config.bus.send(Event::TerminalResyncUnavailable {
+                                terminal_id,
+                            });
+                            resync_unavailable_announced = true;
+                        }
+                        continue;
+                    };
+                    resync_unavailable_announced = false;
+                    state_buf.clear();
+                    let progress = agent.is_some()
+                        && watchdog_notes_progress(&mut watchdog_fp, &snapshot.replay);
+                    note_pty_activity(
+                        agent.as_ref(),
+                        &mut state_buf,
+                        &snapshot.replay,
+                        progress,
+                        &config.agent_states,
+                        &config.bus,
+                        durability,
+                        terminal_id,
+                        session_key,
+                        &config.terminal_meta,
+                        &mut state_machine,
+                        &config.hook_driven_terminals,
+                        &config.input_needed_shapes,
+                    )
+                    .await;
+                    last_chunk_len = snapshot.replay.len();
+                    if agent.is_some() {
+                        let now = tokio::time::Instant::now();
+                        quiet_deadline = Some(now + quiet_after);
+                        if progress {
+                            working_watchdog.note_progress(now);
+                        }
+                    }
+                    let _ = config.bus.send(Event::TerminalResync {
+                        terminal_id,
+                        replay: snapshot.replay,
+                        seq: snapshot.last_seq,
+                    });
+                    last_seq = snapshot.last_seq;
+                    continue;
+                }
+                last_seq = chunk.seq;
+                if agent.is_some()
+                    && config.agent_detect_resets.lock().await.remove(&terminal_id)
+                {
+                    state_buf.clear();
+                }
+                let progress =
+                    agent.is_some() && watchdog_notes_progress(&mut watchdog_fp, &chunk.bytes);
+                note_pty_activity(
+                    agent.as_ref(),
+                    &mut state_buf,
+                    &chunk.bytes,
+                    progress,
+                    &config.agent_states,
+                    &config.bus,
+                    durability,
+                    terminal_id,
+                    session_key,
+                    &config.terminal_meta,
+                    &mut state_machine,
+                    &config.hook_driven_terminals,
+                    &config.input_needed_shapes,
+                )
+                .await;
+                last_chunk_len = chunk.bytes.len();
+                if agent.is_some() {
+                    let now = tokio::time::Instant::now();
+                    quiet_deadline = Some(now + quiet_after);
+                    if progress {
+                        working_watchdog.note_progress(now);
+                    }
+                }
+                let _ = config.bus.send(Event::TerminalOutput {
+                    terminal_id,
+                    bytes: chunk.bytes,
+                    first_seq: chunk.seq,
+                    seq: chunk.seq,
+                });
+            }
+            _ = tokio::time::sleep_until(
+                quiet_deadline.unwrap_or_else(tokio::time::Instant::now)
+            ), if quiet_deadline.is_some() && !watchdog_due => {
+                quiet_deadline = None;
+                classify_quiet_screen(
+                    agent.as_ref(),
+                    &state_buf,
+                    last_chunk_len,
+                    lazybox_agents::Liveness::Silent,
+                    &config.agent_states,
+                    &config.bus,
+                    durability,
+                    terminal_id,
+                    session_key,
+                    &config.terminal_meta,
+                    &mut state_machine,
+                    &config.hook_driven_terminals,
+                    &config.input_needed_shapes,
+                    &config.agent_detect_resets,
+                )
+                .await;
+            }
+            _ = tokio::time::sleep_until(
+                working_watchdog.deadline().unwrap_or_else(tokio::time::Instant::now)
+            ), if working_watchdog.deadline().is_some() => {
+                if working_watchdog.fire(tokio::time::Instant::now()).is_none() {
+                    continue;
+                }
+                watchdog_escape_working(
+                    agent.as_ref(),
+                    &state_buf,
+                    last_chunk_len,
+                    &config.agent_states,
+                    &config.bus,
+                    durability,
+                    terminal_id,
+                    session_key,
+                    &config.terminal_meta,
+                    &mut state_machine,
+                    &config.hook_driven_terminals,
+                    &config.input_needed_shapes,
+                    &config.agent_detect_resets,
+                )
+                .await;
+            }
+        }
+    }
+    config.backend.wait_exit(backend_key).await
 }
 
 /// Bind already-running backend sessions to fresh wire TerminalIds.
@@ -5748,6 +6182,14 @@ pub async fn recover_sessions(config: &ServerConfig) {
         let persisted_generation = load_pty_launch_generation(config, &key).await.unwrap_or(0);
         let outdated_launch = required_generation > 0 && persisted_generation < required_generation;
         let terminal_id = alloc_terminal_id(&*config.store);
+        let recovered_agent = if matches!(kind, TerminalKind::Agent(_)) {
+            match load_recovered_agent_state(config, &key, terminal_id.0).await {
+                Ok(restored) => Some(restored),
+                Err(()) => continue,
+            }
+        } else {
+            None
+        };
         // Recover the primary maps as one visible registration, under the
         // same canonical lock pair as a fresh spawn. This prevents snapshot
         // or workspace-rebadge readers from observing a backend id without
@@ -5755,8 +6197,29 @@ pub async fn recover_sessions(config: &ServerConfig) {
         {
             let mut terminals = config.terminals.lock().await;
             let mut terminal_meta = config.terminal_meta.lock().await;
+            let mut agent_state_generations = config.agent_state_generations.lock().await;
+            let mut agent_states = config.agent_states.lock().await;
             terminal_meta.insert(terminal_id, (session_key.clone(), kind.clone()));
             terminals.insert(terminal_id, key.clone());
+            if let Some((durability, state)) = &recovered_agent {
+                agent_state_generations.insert(terminal_id, durability.generation);
+                let previous = agent_states.insert(terminal_id, *state);
+                if previous.is_some() {
+                    tracing::error!(
+                        ?terminal_id,
+                        %key,
+                        ?previous,
+                        "agent state invariant: recovery replaced an existing hydrated state"
+                    );
+                }
+                tracing::info!(
+                    ?terminal_id,
+                    backend_key = %key,
+                    generation = durability.generation,
+                    state = ?state,
+                    "agent state hydrated before terminal replay"
+                );
+            }
         }
         if no_permission {
             config
@@ -5773,10 +6236,15 @@ pub async fn recover_sessions(config: &ServerConfig) {
                 .insert(terminal_id);
         }
 
-        let bus = config.bus.clone();
-        let backend = config.backend.clone();
         let config_for_pump = config.clone();
         let key_for_pump = key.clone();
+        let session_key_for_pump = session_key.clone();
+        let agent_for_pump = match &kind {
+            TerminalKind::Agent(agent_id) => config.agents.get(agent_id),
+            _ => None,
+        };
+        let restored_state = recovered_agent.as_ref().map(|(_, state)| *state);
+        let state_durability = recovered_agent.map(|(durability, _)| durability);
         // Broadcast Spawned before spawning the pump — same race
         // guard as the main spawn path.
         let _ = config.bus.send(Event::TerminalSpawned {
@@ -5793,69 +6261,19 @@ pub async fn recover_sessions(config: &ServerConfig) {
             model_label: None,
         });
         tokio::spawn(async move {
-            let exit_code = match backend.subscribe(&key_for_pump).await {
-                Ok(mut sub) => {
-                    // Seed the recovered terminal from the ring even when it has
-                    // wrapped (`!replay_complete`): the replay is the
-                    // line-boundary-clean `replay_snapshot`, a correct
-                    // shorter-history screen, and `seq = last_seq` marks its
-                    // coverage exactly as a complete ring would. Gating on
-                    // completeness left every >ring-capacity terminal blank on
-                    // recovery until it produced new output.
-                    if !sub.replay.is_empty() {
-                        let _ = bus.send(Event::TerminalOutput {
-                            terminal_id,
-                            bytes: sub.replay.clone(),
-                            first_seq: 1,
-                            seq: sub.last_seq,
-                        });
-                    }
-                    let mut last_seq = sub.last_seq;
-                    let mut resync_unavailable_announced = false;
-                    while let Some(chunk) = sub.live.recv().await {
-                        // Drop live chunks already covered by the replay
-                        // (see `DaemonPty::subscribe`).
-                        if chunk.seq <= last_seq {
-                            continue;
-                        }
-                        if chunk.seq > last_seq.saturating_add(1) {
-                            // Same seq-gap recovery as the main pump: a
-                            // chunk was dropped upstream, so replace the
-                            // torn stream with the ring instead of
-                            // desyncing every client's VT parser.
-                            let Some(snapshot) = resync_replay_after_gap(
-                                &*backend,
-                                &key_for_pump,
-                                chunk.seq,
-                                last_seq,
-                            )
-                            .await
-                            else {
-                                if !resync_unavailable_announced {
-                                    let _ =
-                                        bus.send(Event::TerminalResyncUnavailable { terminal_id });
-                                    resync_unavailable_announced = true;
-                                }
-                                continue;
-                            };
-                            resync_unavailable_announced = false;
-                            let _ = bus.send(Event::TerminalResync {
-                                terminal_id,
-                                replay: snapshot.replay,
-                                seq: snapshot.last_seq,
-                            });
-                            last_seq = snapshot.last_seq;
-                            continue;
-                        }
-                        last_seq = chunk.seq;
-                        let _ = bus.send(Event::TerminalOutput {
-                            terminal_id,
-                            bytes: chunk.bytes,
-                            first_seq: chunk.seq,
-                            seq: chunk.seq,
-                        });
-                    }
-                    backend.wait_exit(&key_for_pump).await
+            let exit_code = match config_for_pump.backend.subscribe(&key_for_pump).await {
+                Ok(sub) => {
+                    pump_recovered_session(
+                        &config_for_pump,
+                        &key_for_pump,
+                        terminal_id,
+                        &session_key_for_pump,
+                        agent_for_pump,
+                        restored_state,
+                        state_durability.as_ref(),
+                        sub,
+                    )
+                    .await
                 }
                 // Subscribe failed *after* TerminalSpawned was broadcast.
                 // Fall through to teardown so the phantom entry doesn't
@@ -5990,6 +6408,125 @@ async fn load_pty_launch_generation(config: &ServerConfig, backend_key: &str) ->
         .ok()??
         .parse()
         .ok()
+}
+
+async fn initialize_agent_state_generation(
+    config: &ServerConfig,
+    backend_key: &str,
+    generation: u64,
+) {
+    let store = config.store.clone();
+    let generation_key = TerminalPersistedField::AgentStateGeneration.key(backend_key);
+    let backend_key_owned = backend_key.to_string();
+    let value = generation.to_string();
+    let result = tokio::task::spawn_blocking(move || {
+        let previous = store
+            .get_kv(&generation_key)?
+            .and_then(|raw| raw.parse::<u64>().ok());
+        let mut mutations = Vec::with_capacity(2);
+        if let Some(previous) = previous
+            && previous != generation
+        {
+            mutations.push(StoreMutation::DeleteKv {
+                key: agent_state_key(&backend_key_owned, previous),
+            });
+        }
+        mutations.push(StoreMutation::SetKv {
+            key: generation_key,
+            value,
+        });
+        store.apply_batch(&mutations)
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::error!(
+            %backend_key,
+            generation,
+            %error,
+            "agent state generation persistence failed"
+        ),
+        Err(error) => tracing::error!(
+            %backend_key,
+            generation,
+            %error,
+            "agent state generation persistence task failed"
+        ),
+    }
+}
+
+async fn load_recovered_agent_state(
+    config: &ServerConfig,
+    backend_key: &str,
+    fallback_generation: u64,
+) -> Result<(AgentStateDurability, lazybox_ipc::AgentState), ()> {
+    let store = config.store.clone();
+    let generation_key = TerminalPersistedField::AgentStateGeneration.key(backend_key);
+    let backend_key_owned = backend_key.to_string();
+    let loaded = match tokio::task::spawn_blocking(move || {
+        let Some(raw_generation) = store.get_kv(&generation_key).map_err(|e| e.to_string())? else {
+            return Ok(None);
+        };
+        let generation = raw_generation
+            .parse::<u64>()
+            .map_err(|e| format!("invalid generation {raw_generation:?}: {e}"))?;
+        let state_key = agent_state_key(&backend_key_owned, generation);
+        let state = match store.get_kv(&state_key).map_err(|e| e.to_string())? {
+            Some(raw_state) => Some(
+                serde_json::from_str(&raw_state)
+                    .map_err(|e| format!("invalid state {raw_state:?}: {e}"))?,
+            ),
+            None => None,
+        };
+        Ok::<_, String>(Some((generation, state)))
+    })
+    .await
+    {
+        Ok(Ok(loaded)) => loaded,
+        Ok(Err(error)) => {
+            tracing::error!(
+                %backend_key,
+                %error,
+                "agent state recovery failed; leaving terminal detached"
+            );
+            return Err(());
+        }
+        Err(error) => {
+            tracing::error!(
+                %backend_key,
+                %error,
+                "agent state recovery task failed; leaving terminal detached"
+            );
+            return Err(());
+        }
+    };
+
+    let (generation, state) = match loaded {
+        Some((generation, Some(state))) => (generation, state),
+        Some((generation, None)) => {
+            tracing::error!(
+                %backend_key,
+                "agent state invariant: recovered terminal had no committed lifecycle state; seeding Idle"
+            );
+            (generation, lazybox_ipc::AgentState::Idle)
+        }
+        None => {
+            tracing::error!(
+                %backend_key,
+                "agent state invariant: recovered terminal had no lifecycle generation; seeding Idle"
+            );
+            (fallback_generation, lazybox_ipc::AgentState::Idle)
+        }
+    };
+    let durability = AgentStateDurability {
+        store: config.store.clone(),
+        backend_key: backend_key.to_string(),
+        generation,
+    };
+    if !matches!(loaded, Some((_, Some(_)))) && !durability.persist(state).await {
+        return Err(());
+    }
+    Ok((durability, state))
 }
 
 /// Append one submitted prompt to an agent terminal's bounded per-session
@@ -6169,9 +6706,16 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
     // its own lock on the backend's session map, and holding the
     // terminals/meta locks across that await would serialize every
     // backend op behind a Subscribe call.
-    let entries: Vec<(TerminalId, String, SessionKey, TerminalKind)> = {
+    let entries: Vec<(
+        TerminalId,
+        String,
+        SessionKey,
+        TerminalKind,
+        Option<lazybox_ipc::AgentState>,
+    )> = {
         let map = config.terminals.lock().await;
         let meta = config.terminal_meta.lock().await;
+        let agent_states = config.agent_states.lock().await;
         map.iter()
             .filter_map(|(id, key)| {
                 // Skip orphaned ids (terminals map says yes,
@@ -6181,7 +6725,9 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
                 // TUI an empty-session-key workspace which the
                 // sidebar would render as `(no repo)`.
                 match meta.get(id).cloned() {
-                    Some((sk, kind)) => Some((*id, key.clone(), sk, kind)),
+                    Some((sk, kind)) => {
+                        Some((*id, key.clone(), sk, kind, agent_states.get(id).copied()))
+                    }
                     None => {
                         tracing::warn!(
                             terminal_id = ?id,
@@ -6206,7 +6752,7 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
     let on_main = &on_main;
     let terminal_models = &terminal_models;
     stream::iter(entries)
-        .map(|(id, key, session_key, kind)| async move {
+        .map(|(id, key, session_key, kind, agent_state)| async move {
             let snapshot_fut =
                 tokio::time::timeout(SNAPSHOT_PER_SESSION_TIMEOUT, config.backend.snapshot(&key));
             let history_fut = load_prompt_history(config, &key);
@@ -6276,6 +6822,7 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
                 replay,
                 last_seq,
                 replay_available,
+                agent_state,
             }
         })
         .buffered(SNAPSHOT_CONCURRENCY)
@@ -6521,6 +7068,54 @@ mod tests {
     use super::*;
     use crate::backend::SessionBackend;
 
+    fn test_agent_state_durability(id: TerminalId) -> AgentStateDurability {
+        AgentStateDurability {
+            store: std::sync::Arc::new(lazybox_store::MemoryStore::new()),
+            backend_key: format!("test-{}", id.0),
+            generation: id.0,
+        }
+    }
+
+    #[tokio::test]
+    async fn new_process_generation_discards_the_previous_agent_state() {
+        let config = ServerConfig::in_memory();
+        let backend_key = "reused-backend-key";
+        let generation_key = TerminalPersistedField::AgentStateGeneration.key(backend_key);
+        let old_state_key = agent_state_key(backend_key, 7);
+        config
+            .store
+            .set_kv(&generation_key, "7")
+            .expect("seed generation");
+        config
+            .store
+            .set_kv(
+                &old_state_key,
+                &serde_json::to_string(&lazybox_ipc::AgentState::Working).expect("serialize state"),
+            )
+            .expect("seed state");
+
+        initialize_agent_state_generation(&config, backend_key, 8).await;
+
+        assert_eq!(
+            config
+                .store
+                .get_kv(&generation_key)
+                .expect("load generation"),
+            Some("8".into())
+        );
+        assert_eq!(
+            config.store.get_kv(&old_state_key).expect("load old state"),
+            None
+        );
+        assert_eq!(
+            config
+                .store
+                .get_kv(&agent_state_key(backend_key, 8))
+                .expect("load new state"),
+            None
+        );
+    }
+
     #[tokio::test]
     async fn agent_registration_wakes_polling_but_shell_registration_does_not() {
         let config = ServerConfig::in_memory();
@@ -6570,6 +7165,11 @@ mod tests {
             .lock()
             .await
             .insert(terminal_id, lazybox_ipc::AgentState::InputNeeded);
+        config
+            .agent_state_generations
+            .lock()
+            .await
+            .insert(terminal_id, terminal_id.0);
         config
             .input_needed_shapes
             .lock()
@@ -6754,6 +7354,7 @@ mod tests {
                 "terminal-msgs:backend".to_string(),
                 "terminal-draft:backend".to_string(),
                 "terminal-pty-generation:backend".to_string(),
+                "terminal-agent-state-generation:backend".to_string(),
             ]
             .into(),
             "every persisted terminal field must live in the teardown inventory",
@@ -6975,6 +7576,7 @@ mod tests {
         let meta = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
         let states = input_resolved_states();
         let (bus, mut rx) = tokio::sync::broadcast::channel(4);
+        let durability = test_agent_state_durability(id);
         meta.lock().await.insert(
             id,
             (
@@ -6987,6 +7589,7 @@ mod tests {
             &meta,
             &states,
             &bus,
+            &durability,
             id,
             &issue_key,
             StateSource::Hook,
@@ -7013,11 +7616,13 @@ mod tests {
         let meta = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
         let states = input_resolved_states();
         let (bus, mut rx) = tokio::sync::broadcast::channel(4);
+        let durability = test_agent_state_durability(id);
 
         transition_and_broadcast_agent_state(
             &meta,
             &states,
             &bus,
+            &durability,
             id,
             &captured,
             StateSource::Exit,
@@ -7040,11 +7645,13 @@ mod tests {
         let meta = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
         let states = input_resolved_states();
         let (bus, mut rx) = tokio::sync::broadcast::channel(4);
+        let durability = test_agent_state_durability(id);
 
         let late = transition_and_broadcast_agent_state(
             &meta,
             &states,
             &bus,
+            &durability,
             id,
             &captured,
             StateSource::Hook,
@@ -7069,6 +7676,7 @@ mod tests {
         let meta = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
         let states = input_resolved_states();
         let (bus, mut rx) = tokio::sync::broadcast::channel(4);
+        let durability = test_agent_state_durability(id);
         meta.lock().await.insert(
             id,
             (
@@ -7082,6 +7690,7 @@ mod tests {
             &meta,
             &states,
             &bus,
+            &durability,
             id,
             &key,
             StateSource::Exit,
@@ -7093,6 +7702,7 @@ mod tests {
             &meta,
             &states,
             &bus,
+            &durability,
             id,
             &key,
             StateSource::Hook,
@@ -9949,6 +10559,7 @@ mod tests {
         states: std::sync::Arc<
             tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
         >,
+        durability: AgentStateDurability,
         bus: tokio::sync::broadcast::Sender<Event>,
         rx: tokio::sync::broadcast::Receiver<Event>,
         id: TerminalId,
@@ -10017,6 +10628,7 @@ mod tests {
                 states: std::sync::Arc::new(tokio::sync::Mutex::new(
                     std::collections::HashMap::new(),
                 )),
+                durability: test_agent_state_durability(id),
                 bus,
                 rx,
                 id,
@@ -10057,6 +10669,7 @@ mod tests {
                 progress,
                 &self.states,
                 &self.bus,
+                Some(&self.durability),
                 self.id,
                 &self.session_key,
                 &self.terminal_meta,
@@ -10080,6 +10693,7 @@ mod tests {
                 lazybox_agents::Liveness::Silent,
                 &self.states,
                 &self.bus,
+                Some(&self.durability),
                 self.id,
                 &self.session_key,
                 &self.terminal_meta,
@@ -10127,6 +10741,7 @@ mod tests {
                 self.last_chunk_len,
                 &self.states,
                 &self.bus,
+                Some(&self.durability),
                 self.id,
                 &self.session_key,
                 &self.terminal_meta,
@@ -11136,6 +11751,10 @@ mod tests {
                 lazybox_ipc::TerminalKind::Agent("claude".into()),
             ),
         );
+        config.agent_state_generations.lock().await.insert(id, id.0);
+        let durability = agent_state_durability(&config, id, &backend_key)
+            .await
+            .expect("state durability");
 
         // (a) PTY transition: the pump captured the issue key at spawn, but
         // the live meta entry now points at the PR.
@@ -11155,6 +11774,7 @@ mod tests {
             false,
             &config.agent_states,
             &config.bus,
+            Some(&durability),
             id,
             &issue_key,
             &config.terminal_meta,

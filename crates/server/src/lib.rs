@@ -257,7 +257,8 @@ const CONNECTION_ROUTER_TASKS: usize = 2;
 /// each hold one lock while waiting for the other; the order below
 /// rules that out by convention.
 ///
-/// **Order:** `terminals → terminal_meta → terminal_sessions → agent_states`.
+/// **Order:** `terminals → terminal_meta → terminal_sessions →
+/// agent_state_generations → agent_states`.
 ///
 /// This is a convention, not a runtime check — Tokio mutexes don't
 /// enforce hierarchies. Sequential acquire-and-drop sites (each
@@ -272,7 +273,7 @@ const CONNECTION_ROUTER_TASKS: usize = 2;
 /// must follow this order; the constant exists as a discoverable name
 /// future callers can grep when they add one.
 pub const TERMINAL_MAP_LOCK_ORDER: &str =
-    "terminals → terminal_meta → terminal_sessions → agent_states";
+    "terminals → terminal_meta → terminal_sessions → agent_state_generations → agent_states";
 
 /// `ServerConfig` is the per-process state shared across all client
 /// connections — the persistent store, the broadcast bus the poller
@@ -313,11 +314,16 @@ pub struct ServerConfig {
     /// terminal is created against a known session; entries are
     /// removed on `TerminalExited`.
     pub terminal_sessions: Arc<Mutex<HashMap<TerminalId, lazybox_core::SessionId>>>,
-    /// Cached `AgentState` per agent terminal. Populated by the
-    /// output pump's state detector; transitions are broadcast as
-    /// `Event::AgentState`. Caching avoids broadcasting on every
-    /// PTY chunk when nothing changed.
+    /// Cached `AgentState` per agent terminal. Hydrated from durable state
+    /// before recovery replay, then updated by the lifecycle owner;
+    /// transitions are broadcast as `Event::AgentState`. Caching avoids
+    /// broadcasting on every PTY chunk when nothing changed.
     pub agent_states: Arc<Mutex<HashMap<TerminalId, lazybox_ipc::AgentState>>>,
+    /// Durable process generation for each agent terminal. Fresh spawns use
+    /// their globally unique first wire id; recovered terminals restore the
+    /// original value so state records cannot bleed into a later process
+    /// that happens to receive the same backend key.
+    pub agent_state_generations: Arc<Mutex<HashMap<TerminalId, u64>>>,
     /// Wire-side metadata per terminal: `(session_key, kind)`. The
     /// `terminals` map only carries the backend key; clients
     /// reconnecting via Subscribe need the full pairing so the
@@ -653,6 +659,7 @@ impl ServerConfig {
             terminals: Arc::new(Mutex::new(HashMap::new())),
             terminal_sessions: Arc::new(Mutex::new(HashMap::new())),
             agent_states: Arc::new(Mutex::new(HashMap::new())),
+            agent_state_generations: Arc::new(Mutex::new(HashMap::new())),
             terminal_meta: Arc::new(Mutex::new(HashMap::new())),
             no_permission_terminals: Arc::new(Mutex::new(HashSet::new())),
             on_main_terminals: Arc::new(Mutex::new(HashSet::new())),
@@ -2246,6 +2253,7 @@ mod snapshot_budget_tests {
             model_label: None,
             prompt_history: Vec::new(),
             composing_buffer: None,
+            agent_state: None,
         }
     }
 

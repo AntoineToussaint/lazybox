@@ -2929,6 +2929,9 @@ impl TerminalStack {
                         slot.model_label = snap.model_label.clone();
                         slot.prompt_history = snap.prompt_history.clone();
                         slot.composing = snap.composing_buffer.clone().unwrap_or_default();
+                        if let Some(state) = snap.agent_state {
+                            slot.agent_state = state;
+                        }
                         slot.desynced = true;
                         slot.resync_request_pending = true;
                         self.pending_resync_requests
@@ -2946,6 +2949,7 @@ impl TerminalStack {
                         snap.prompt_history.clone(),
                         snap.composing_buffer.clone().unwrap_or_default(),
                     );
+                    slot.agent_state = snap.agent_state.unwrap_or(lazybox_ipc::AgentState::Idle);
                     slot.desynced = !snap.replay_available;
                     slot.resync_request_pending = !snap.replay_available;
                     if !snap.replay_available {
@@ -5992,6 +5996,7 @@ mod resync_tests {
                 model_label: None,
                 prompt_history: Vec::new(),
                 composing_buffer: None,
+                agent_state: None,
             }],
             recent_snippets: Vec::new(),
             dismissed_updates: Vec::new(),
@@ -6565,6 +6570,7 @@ mod hidden_feed_tests {
             model_label: None,
             prompt_history: Vec::new(),
             composing_buffer: None,
+            agent_state: None,
         };
         stack.on_event(&Event::Snapshot {
             workspaces: vec![],
@@ -6632,6 +6638,7 @@ mod hidden_feed_tests {
                 model_label: None,
                 prompt_history: Vec::new(),
                 composing_buffer: None,
+                agent_state: None,
             }
         };
         stack.on_event(&Event::Snapshot {
@@ -8073,6 +8080,7 @@ mod terminal_availability_tests {
                 model_label: None,
                 prompt_history: typed_history(Some("last submitted")),
                 composing_buffer: Some(draft.into()),
+                agent_state: None,
             }],
             recent_snippets: Vec::new(),
             dismissed_updates: Vec::new(),

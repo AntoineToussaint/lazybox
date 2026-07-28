@@ -206,10 +206,14 @@ impl Sidebar {
                     let key: SessionKey = (&w.key).into();
                     self.workspaces.insert(key, w.clone());
                 }
+                self.agents.clear();
                 self.running_terminals.clear();
                 for t in terminals {
                     self.running_terminals
                         .insert(t.terminal_id, (t.session_key.clone(), t.kind.clone()));
+                    if let Some(state) = t.agent_state {
+                        self.agents.insert(t.session_key.clone(), state);
+                    }
                 }
                 self.broadcast_selected
                     .retain(|k| self.workspaces.contains_key(k));
@@ -297,16 +301,16 @@ impl Sidebar {
                 );
                 // The daemon-side detector flipped an agent into a new
                 // `AgentState`. Fold it into the sidebar-local `agents`
-                // map — the canonical store for this transient signal.
+                // map — the client projection for this terminal signal.
                 //
                 // Why a sidebar-local map instead of mutating
                 // `workspace.sessions[i].state`: the next poll
                 // cycle's `WorkspaceUpserted` rebuilds the workspace
-                // from the persisted store, which doesn't (and
-                // shouldn't) carry transient agent state. Mutating
-                // it here would be silently undone within 60s. The
-                // map survives poll broadcasts because nothing
-                // touches it except `Event::AgentState`.
+                // from the persisted workspace record, which intentionally
+                // does not carry per-terminal state. That state arrives in
+                // terminal snapshots and live `Event::AgentState` updates.
+                // Mutating the workspace here would be silently undone
+                // within 60s.
                 //
                 // `apply_agent_state` routes the reading through the
                 // shared transition validator, so the stored value is

@@ -413,6 +413,7 @@ fn all_events() -> Vec<Event> {
                     source: lazybox_ipc::PromptSource::Typed,
                 }],
                 composing_buffer: Some("half typed prompt".into()),
+                agent_state: Some(AgentState::InputNeeded),
             }],
             projects: vec![],
             recent_snippets: vec!["rev".into(), "pr".into()],

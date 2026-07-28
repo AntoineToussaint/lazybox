@@ -12,7 +12,8 @@
 
 use chrono::{Duration, TimeZone, Utc};
 use lazybox_core::{
-    CiStatus, ReviewStatus, SessionKey, Task, TaskId, TaskRole, TaskState, Workspace,
+    CiStatus, ReviewStatus, SessionKey, SessionKind, Task, TaskId, TaskRole, TaskState, Workspace,
+    WorkspaceSession,
 };
 use lazybox_ipc::{Event, TerminalId, TerminalKind};
 use lazybox_tui::PaneId;
@@ -20,6 +21,7 @@ use lazybox_tui::components::Sidebar;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::prelude::Rect;
+use std::path::PathBuf;
 
 fn fixed_time() -> chrono::DateTime<Utc> {
     // A stable "now" so snapshots don't drift with wall-clock time.
@@ -124,15 +126,26 @@ fn sidebar_golden_render_multiple_agent_badges() {
     let mut s = sidebar();
     let mut task = make_task("o/r#621", 10);
     task.title = "Multi-agent workspace".into();
-    let workspace = Workspace::from_task(task, fixed_time());
+    let mut workspace = Workspace::from_task(task, fixed_time());
     let key = SessionKey::from(&workspace.key);
     s.on_event(&Event::Snapshot {
-        workspaces: vec![workspace],
+        workspaces: vec![workspace.clone()],
         terminals: vec![],
         projects: vec![],
         recent_snippets: Vec::new(),
         dismissed_updates: Vec::new(),
     });
+    let session = WorkspaceSession::new(
+        workspace.key.clone(),
+        SessionKind::Agent {
+            agent_id: "claude".into(),
+        },
+        PathBuf::from("/tmp/multi-agent"),
+        fixed_time(),
+    );
+    workspace.add_session(session.clone());
+    s.on_event(&Event::WorkspaceUpserted(Box::new(workspace)));
+    s.on_event(&Event::SessionCreated(Box::new(session)));
     for (terminal_id, agent) in [(1, "claude"), (2, "claude"), (3, "codex")] {
         s.on_event(&Event::TerminalSpawned {
             terminal_id: TerminalId(terminal_id),
@@ -144,10 +157,10 @@ fn sidebar_golden_render_multiple_agent_badges() {
         });
     }
 
-    let rendered = render_to_string(&mut s, 48, 8, true);
+    let rendered = render_to_string(&mut s, 40, 8, true);
     assert!(
-        rendered.contains(" C×2  X "),
-        "full sidebar row must show both agent kinds and the Claude count:\n{rendered}",
+        rendered.contains(" 1C×2X"),
+        "default-width sidebar row must show its jump number, both agents, and the Claude count:\n{rendered}",
     );
     insta::assert_snapshot!("sidebar_multiple_agent_badges", rendered);
 }

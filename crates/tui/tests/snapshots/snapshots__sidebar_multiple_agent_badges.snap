@@ -2,11 +2,11 @@
 source: crates/tui/tests/snapshots.rs
 expression: rendered
 ---
- LAZYBOX v0.1.8 (dev)                1 item  7d
+ LAZYBOX v0.1.8 (dev)        1 item  7d
  f [filter]  o [split]
 
- ──────────────────────────────────────────────
+ ──────────────────────────────────────
 
  ▾  owner/repo
   I Issues
- ▶○ 621 A   Multi-agent workspace   C×2  X  10m
+ ▶○ 621 A   Multi-agent workspace 1C×2X

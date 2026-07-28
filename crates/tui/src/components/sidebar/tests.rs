@@ -2149,10 +2149,11 @@ mod rebadge_attention_tests {
     //! deleted issue key and the PR row shows no badge, reading as lost.
     use super::super::*;
     use super::status_pill_tests::base_task;
-    use lazybox_core::WorkspaceKey;
+    use lazybox_core::{SessionKind, WorkspaceKey, WorkspaceSession};
     use lazybox_ipc::{AgentState, Event, TerminalId};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use std::path::PathBuf;
 
     #[test]
     fn rebadge_repoints_the_runner_badge_onto_the_pr() {
@@ -2217,11 +2218,11 @@ mod rebadge_attention_tests {
         let mut sb = Sidebar::new(PaneId::new(1));
         let mut task = base_task();
         task.id.key = "o/r#92".into();
-        task.title = "Transferred PR workspace".into();
+        task.title = "Transferred PR".into();
         task.url = "https://github.com/o/r/pull/92".into();
-        let workspace = Workspace::from_task(task, chrono::Utc::now());
+        let mut workspace = Workspace::from_task(task, chrono::Utc::now());
         let pr = SessionKey::from(&workspace.key);
-        sb.workspaces.insert(pr.clone(), workspace);
+        sb.workspaces.insert(pr.clone(), workspace.clone());
         sb.recompute_visible();
         sb.running_terminals.insert(
             TerminalId(1),
@@ -2244,7 +2245,17 @@ mod rebadge_attention_tests {
             "the PR row inherits BOTH the Claude and Codex badges",
         );
 
-        let backend = TestBackend::new(80, 10);
+        workspace.add_session(WorkspaceSession::new(
+            workspace.key.clone(),
+            SessionKind::Agent {
+                agent_id: "claude".into(),
+            },
+            PathBuf::from("/tmp/transferred-pr"),
+            chrono::Utc::now(),
+        ));
+        sb.on_event(&Event::WorkspaceUpserted(Box::new(workspace)));
+
+        let backend = TestBackend::new(40, 10);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|frame| sb.render(frame.area(), frame, true))
@@ -2256,11 +2267,11 @@ mod rebadge_attention_tests {
                     .map(|x| buffer[(x, y)].symbol())
                     .collect::<String>()
             })
-            .find(|line| line.contains("Transferred PR workspace"))
+            .find(|line| line.contains("Transferred PR"))
             .expect("transferred PR row");
         assert!(
-            row.contains(" C  X "),
-            "transferred PR row must visibly render both agents: {row:?}",
+            row.contains(" 1CX"),
+            "transferred PR row must visibly render its jump number and both agents: {row:?}",
         );
     }
 

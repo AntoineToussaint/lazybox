@@ -546,7 +546,7 @@ fn render_shows_cursor_marker_on_selected_workspace() {
     let rendered = render_to_string(&mut s, 80, 10, true);
     let cursor_line = rendered
         .lines()
-        .find(|l| l.contains('▸'))
+        .find(|l| l.contains('▶'))
         .unwrap_or_else(|| panic!("expected cursor marker; got:\n{rendered}"));
     assert!(cursor_line.contains("o/r#1"));
 }
@@ -589,7 +589,7 @@ fn render_windows_list_to_keep_cursor_visible_with_scrollbar() {
     let bottom = render_to_string(&mut s, 40, 12, true);
     let cursor_line = bottom
         .lines()
-        .find(|l| l.contains('▸'))
+        .find(|l| l.contains('▶'))
         .unwrap_or_else(|| panic!("expected cursor marker; got:\n{bottom}"));
     assert!(
         cursor_line.contains("o/r#20"),
@@ -674,7 +674,7 @@ fn keyboard_nav_reanchors_wheel_scrolled_viewport() {
         "render re-anchored the viewport onto the cursor row"
     );
     assert!(
-        rendered.contains('▸'),
+        rendered.contains('▶'),
         "cursor marker back on screen; got:\n{rendered}"
     );
 }

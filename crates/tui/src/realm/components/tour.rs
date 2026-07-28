@@ -141,7 +141,7 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "6 · Ship it & make it yours",
+        title: "6 · Ship it",
         body: &[
             "When a PR is ready, press g — a which-key menu pops up",
             "showing everything you can do to this PR:",
@@ -152,7 +152,11 @@ const STEPS: &[TourStep] = &[
             "g shows the menu; the second key picks. Grouped actions",
             "live behind their leader only — re-add direct aliases via",
             "ui.action_keys if you miss them.",
-            "",
+        ],
+    },
+    TourStep {
+        title: "7 · Make it yours",
+        body: &[
             "? opens Ask Lazybox (press ? again for all keys); , opens",
             "Settings, t themes, q q quits. In a terminal, press ]]q",
             "to return first—the embedded program owns other keys.",
@@ -483,6 +487,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn every_step_fits_the_modal_height() {
+        const STEP_HEADER_ROWS: usize = 3;
+        const MODAL_BODY_ROWS: usize = 19;
+
+        for step in STEPS {
+            let rendered_rows = STEP_HEADER_ROWS + step.body.len();
+            assert!(
+                rendered_rows <= MODAL_BODY_ROWS,
+                "step {:?} needs {rendered_rows} rows, but the modal has {MODAL_BODY_ROWS}",
+                step.title,
+            );
+        }
+    }
+
+    #[test]
+    fn last_step_tail_visible() {
+        let last = render_step(STEPS.len() - 1);
+        assert!(last.contains("That's the tour — Enter to finish, Shift-T to re-open it."));
     }
 
     #[test]

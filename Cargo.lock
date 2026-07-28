@@ -1657,6 +1657,7 @@ version = "0.1.8"
 dependencies = [
  "humantime-serde",
  "lazybox-core",
+ "libc",
  "serde",
  "serde_yaml",
  "thiserror 2.0.19",

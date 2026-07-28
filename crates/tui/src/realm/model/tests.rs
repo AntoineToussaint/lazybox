@@ -3481,6 +3481,7 @@ mod coalesce_tests {
                 model_label: None,
                 prompt_history: Vec::new(),
                 composing_buffer: None,
+                agent_state: None,
             }],
             recent_snippets: Vec::new(),
             dismissed_updates: Vec::new(),
@@ -7222,6 +7223,7 @@ mod leader_tile_tests {
                 model_label: None,
                 prompt_history: Vec::new(),
                 composing_buffer: Some("\n  recover me".into()),
+                agent_state: None,
             }],
             recent_snippets: Vec::new(),
             dismissed_updates: Vec::new(),
@@ -7301,6 +7303,7 @@ mod leader_tile_tests {
                     },
                 ],
                 composing_buffer: None,
+                agent_state: None,
             }],
             recent_snippets: Vec::new(),
             dismissed_updates: Vec::new(),
@@ -10204,6 +10207,7 @@ mod worktree_progress_recovery_tests {
             on_main: false,
             prompt_history: Vec::new(),
             composing_buffer: None,
+            agent_state: None,
         }
     }
 

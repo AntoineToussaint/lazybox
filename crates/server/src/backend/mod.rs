@@ -195,6 +195,16 @@ pub trait SessionBackend: Send + Sync + 'static {
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, BackendError>> + Send + 'a>>;
 
+    /// Whether the underlying session is still alive.
+    ///
+    /// This is deliberately independent of an output subscription:
+    /// durable backends may use a short-lived attach client as their I/O
+    /// conduit, and that client can fail while the session survives.
+    fn is_alive<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, BackendError>> + Send + 'a>>;
+
     /// Open an output stream + replay for `key`.
     fn subscribe<'a>(
         &'a self,

@@ -776,6 +776,7 @@ mod tests {
                 model_label: None,
                 prompt_history: Vec::new(),
                 composing_buffer: None,
+                agent_state: None,
             }],
             projects: Vec::new(),
             recent_snippets: Vec::new(),

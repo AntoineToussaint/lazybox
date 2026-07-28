@@ -137,6 +137,7 @@ fn reattached_agent() -> TerminalStack {
             model_label: None,
             prompt_history: Vec::new(),
             composing_buffer: None,
+            agent_state: None,
         }],
         recent_snippets: Vec::new(),
         dismissed_updates: Vec::new(),

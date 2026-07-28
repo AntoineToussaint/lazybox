@@ -4,7 +4,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lazybox_core::SessionKey;
 use lazybox_ipc::{
-    Command, Event, PromptSource, TerminalId, TerminalKind, TerminalSnapshot, UserPrompt,
+    AgentState, Command, Event, PromptSource, TerminalId, TerminalKind, TerminalSnapshot,
+    UserPrompt,
 };
 
 /// One-entry `Typed` prompt history from an optional last message, for
@@ -190,7 +191,7 @@ fn snapshot_replaces_all_terminals() {
             model_label: None,
             terminal_id: TerminalId(99),
             session_key: sk("o/r#3"),
-            kind: TerminalKind::Shell,
+            kind: TerminalKind::Agent("codex".into()),
             replay: b"\x1b[0mhi\n".to_vec(),
             last_seq: 42,
             replay_available: true,
@@ -198,6 +199,7 @@ fn snapshot_replaces_all_terminals() {
             on_main: false,
             prompt_history: Vec::new(),
             composing_buffer: None,
+            agent_state: Some(AgentState::Working),
         }],
         projects: vec![],
         recent_snippets: Vec::new(),
@@ -205,6 +207,7 @@ fn snapshot_replaces_all_terminals() {
     });
     assert_eq!(t.terminal_count(), 1);
     t.set_active_session(Some(sk("o/r#3")));
+    assert!(t.displays_agent_state(&sk("o/r#3"), AgentState::Working));
     // The recent buffer is post-feed bytes from the replay payload.
     // Snapshot replay goes into the libghostty parser (not into the
     // recent buffer), so the buffer is empty until live output starts.
@@ -1197,6 +1200,7 @@ fn snapshot_restores_recap_for_agent_terminal() {
             on_main: false,
             prompt_history: hist(Some("rebase onto main")),
             composing_buffer: None,
+            agent_state: None,
         }],
         projects: vec![],
         recent_snippets: Vec::new(),

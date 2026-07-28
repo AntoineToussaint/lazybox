@@ -2027,6 +2027,7 @@ fn snapshot_terminal_backstops_worktree_progress_dismissal() {
             on_main: false,
             prompt_history: Vec::new(),
             composing_buffer: None,
+            agent_state: None,
         }],
         projects: vec![],
         recent_snippets: Vec::new(),

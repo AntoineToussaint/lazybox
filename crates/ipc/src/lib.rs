@@ -2219,6 +2219,11 @@ pub struct TerminalSnapshot {
     /// via `]]r`. `None` for shells and agents with no pending draft.
     #[serde(default)]
     pub composing_buffer: Option<String>,
+    /// Authoritative lifecycle state for an agent terminal at the same
+    /// baseline as this replay. `None` for shells and for a fresh agent that
+    /// has not committed its first state yet.
+    #[serde(default)]
+    pub agent_state: Option<AgentState>,
 }
 
 // ── Transport abstraction ──────────────────────────────────────────────

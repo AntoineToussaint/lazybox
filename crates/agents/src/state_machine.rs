@@ -309,6 +309,15 @@ impl AgentStateMachine {
         }
     }
 
+    /// Restore the detector history for a surviving terminal whose committed
+    /// lifecycle state was loaded from durable storage.
+    pub fn restored(state: AgentState) -> Self {
+        Self {
+            booted: state != AgentState::Idle,
+            done_progress_streak: 0,
+        }
+    }
+
     /// Mark the agent as booted: its input composer has been drawn at
     /// least once, so an ambiguous `Working` reading now reflects real
     /// work rather than boot chrome. Idempotent. The daemon calls this
@@ -745,6 +754,38 @@ mod tests {
         assert_eq!(
             m.on_reading(Some(Idle), ambiguous(Working)),
             Outcome::Committed(Working)
+        );
+    }
+
+    #[test]
+    fn restored_machine_is_already_booted() {
+        let mut m = AgentStateMachine::restored(Done);
+        assert_eq!(
+            m.on_reading(
+                None,
+                Reading {
+                    state: Working,
+                    clear: false,
+                    progress: false,
+                },
+            ),
+            Outcome::Committed(Working),
+        );
+    }
+
+    #[test]
+    fn restored_idle_machine_retains_the_boot_gate() {
+        let mut m = AgentStateMachine::restored(Idle);
+        assert_eq!(
+            m.on_reading(
+                None,
+                Reading {
+                    state: Working,
+                    clear: false,
+                    progress: false,
+                },
+            ),
+            Outcome::Damped,
         );
     }
 

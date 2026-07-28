@@ -401,8 +401,8 @@ impl TmuxBackend {
         format!("lazybox-{safe}-{}-{n}", std::process::id())
     }
 
-    /// Run `tmux -L <socket> -f <config> ...args`. Captures stdout +
-    /// stderr; returns a BackendError on non-zero exit.
+    /// Run `tmux -L <socket> -f <config> ...args`, returning its output
+    /// even when tmux exits non-zero.
     ///
     /// **Async**: `tokio::process::Command` rather than the sync std
     /// version. The backend's trait methods are wrapped in async
@@ -410,7 +410,7 @@ impl TmuxBackend {
     /// tokio runtime for the duration of every tmux invocation —
     /// which can be 100ms+ during server startup. Every other task
     /// (TUI render, IPC pumps, polling) would freeze in lockstep.
-    async fn tmux(&self, args: &[&str]) -> Result<std::process::Output, BackendError> {
+    async fn tmux_output(&self, args: &[&str]) -> Result<std::process::Output, BackendError> {
         // Self-heal the conf file: another lazybox instance running on
         // the same machine could have hit `Drop` and removed it (we
         // share `std::env::temp_dir()/lazybox-tmux/lazybox.conf` across
@@ -441,6 +441,12 @@ impl TmuxBackend {
                 ))
             })?
             .map_err(|e| BackendError::Other(format!("tmux invoke: {e}")))?;
+        Ok(out)
+    }
+
+    /// Run tmux and require a successful exit status.
+    async fn tmux(&self, args: &[&str]) -> Result<std::process::Output, BackendError> {
+        let out = self.tmux_output(args).await?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
             return Err(BackendError::Other(format!(
@@ -492,7 +498,8 @@ impl TmuxBackend {
 
     /// Spawn the tmux-attach DaemonPty for `key`. The attach client
     /// is the I/O conduit; its lifetime is unrelated to the tmux
-    /// session's — `wait_exit` polls tmux directly for that.
+    /// session's — callers must use `is_alive` to distinguish conduit
+    /// failure from session death.
     ///
     /// `seed` hands the DaemonPty reconstructed scrollback (see
     /// `capture_history`), held in its durable seed slot and replayed
@@ -825,12 +832,11 @@ impl SessionBackend for TmuxBackend {
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, BackendError>> + Send + 'a>> {
         Box::pin(async move {
-            // Two sources of truth: the in-memory map (sessions we
-            // spawned) and `tmux list-sessions` (what tmux currently
-            // sees, including any survivors of a prior lazybox run).
-            // We return the union so restart recovery works even
-            // before the server has rebound clients to those keys.
-            let mut keys: Vec<String> = self.sessions.lock().await.keys().cloned().collect();
+            // tmux itself is the lifecycle source of truth. The
+            // in-memory map contains attach-client conduits, which may
+            // remain after their session has died and must not make a
+            // dead process recoverable.
+            let mut keys = Vec::new();
             // `tmux list-sessions -F '#{session_name}'` — prints one
             // name per line. Empty stdout / no-server errors mean
             // "no sessions"; we treat them as Ok([]). Async to avoid
@@ -855,7 +861,7 @@ impl SessionBackend for TmuxBackend {
             if out.status.success() {
                 for line in String::from_utf8_lossy(&out.stdout).lines() {
                     let name = line.trim().to_string();
-                    if !name.is_empty() && !keys.contains(&name) {
+                    if !name.is_empty() {
                         keys.push(name);
                     }
                 }
@@ -1026,6 +1032,29 @@ impl SessionBackend for TmuxBackend {
         })
     }
 
+    fn is_alive<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            let out = self.tmux_output(&["has-session", "-t", key]).await?;
+            if out.status.success() {
+                return Ok(true);
+            }
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if stderr.contains("can't find session")
+                || stderr.contains("no server running")
+                || stderr.contains("no sessions")
+            {
+                return Ok(false);
+            }
+            Err(BackendError::Other(format!(
+                "tmux has-session -t {key}: {}",
+                stderr.trim()
+            )))
+        })
+    }
+
     fn scrollback<'a>(
         &'a self,
         key: &'a str,
@@ -1081,10 +1110,8 @@ impl SessionBackend for TmuxBackend {
         key: &'a str,
     ) -> Pin<Box<dyn Future<Output = Option<i32>> + Send + 'a>> {
         Box::pin(async move {
-            // The attach client exits when its tmux session ends —
-            // either because the inner process exited, or because
-            // someone called `kill_session`. DaemonPty caches the
-            // exit code, so this is safe to call repeatedly.
+            // This is the attach client's cached exit code. Recovery
+            // checks `is_alive` before interpreting it as session death.
             let pty = {
                 let map = self.sessions.lock().await;
                 map.get(key).map(|s| s.client.clone())?

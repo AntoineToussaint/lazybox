@@ -382,14 +382,19 @@ pub struct Sidebar {
     /// ("finished") (#80). Surfaces in lazybox's footer alongside the OS
     /// notification so users with notifications muted still see it.
     pending_asking_notices: Vec<String>,
-    /// The single per-session agent status, keyed by workspace — the
+    /// Per-terminal source states mirrored from daemon snapshots and
+    /// deltas. Keeping the terminal id prevents one of several agents in
+    /// a workspace from overwriting another based on HashMap iteration
+    /// order.
+    agent_terminal_states:
+        std::collections::HashMap<TerminalId, (SessionKey, lazybox_ipc::AgentState)>,
+    /// The derived per-session agent status, keyed by workspace — the
     /// source of truth for the `?` asking pill / `? N input` header
     /// counter / `!` jump, the animated `Working` spinner, and the `✓`
-    /// done mark (#80). One [`lazybox_ipc::AgentState`] per session (the four states
-    /// share one UI slot, so they're mutually exclusive by
-    /// construction; #327). Every reading folds in through
-    /// [`crate::agent_attention::apply_agent_state`], which validates the
-    /// transition. Source: `Event::AgentState` broadcasts from the
+    /// done mark (#80). The terminal states above are aggregated with
+    /// explicit attention precedence into one mutually exclusive UI
+    /// value per session (#327). Source: snapshots and
+    /// `Event::AgentState` broadcasts from the
     /// daemon, sidebar-local — independent of `Workspace.sessions[i].state`
     /// (which gets clobbered every poll cycle when the daemon
     /// re-broadcasts `WorkspaceUpserted`).
@@ -476,6 +481,7 @@ impl Sidebar {
             pending_notifications: Vec::new(),
             pending_asking_notices: Vec::new(),
             agents: std::collections::HashMap::new(),
+            agent_terminal_states: std::collections::HashMap::new(),
             working_spinner_frame: 0,
             spinner_epoch: std::time::Instant::now(),
             filter_chip_rect: None,

@@ -120,6 +120,26 @@ fn now_ms() -> u64 {
     chrono::Utc::now().timestamp_millis().max(0) as u64
 }
 
+#[derive(Clone, Copy)]
+struct ByteFingerprint {
+    len: usize,
+    newlines: usize,
+    hash: u64,
+}
+
+fn byte_fingerprint(bytes: &[u8]) -> ByteFingerprint {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for &byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    ByteFingerprint {
+        len: bytes.len(),
+        newlines: bytes.iter().filter(|&&byte| byte == b'\n').count(),
+        hash,
+    }
+}
+
 /// Build a one-entry `Typed` prompt history from an optional last
 /// message, for tests that used to pass a single `Option<String>` recap.
 #[cfg(test)]
@@ -2295,6 +2315,19 @@ impl TerminalStack {
         let Some(slot) = self.terminals.get_mut(&id) else {
             return;
         };
+        let replay_fingerprint = byte_fingerprint(replay);
+        let composing_fingerprint = byte_fingerprint(slot.composing.as_bytes());
+        tracing::debug!(
+            terminal_id = ?id,
+            seq,
+            replay_len = replay_fingerprint.len,
+            replay_newlines = replay_fingerprint.newlines,
+            replay_hash = replay_fingerprint.hash,
+            draft_len = composing_fingerprint.len,
+            draft_newlines = composing_fingerprint.newlines,
+            draft_hash = composing_fingerprint.hash,
+            "terminal resync received at client reconstruction boundary"
+        );
         if seq < slot.last_seq || (!slot.desynced && seq == slot.last_seq) {
             if slot.desynced {
                 slot.resync_request_pending = false;
@@ -2830,6 +2863,26 @@ impl TerminalStack {
             Event::Snapshot { terminals, .. } => {
                 let mut previous = std::mem::take(&mut self.terminals);
                 for snap in terminals {
+                    let replay_fingerprint = byte_fingerprint(&snap.replay);
+                    let composing_fingerprint = snap
+                        .composing_buffer
+                        .as_deref()
+                        .map(str::as_bytes)
+                        .map(byte_fingerprint);
+                    tracing::debug!(
+                        terminal_id = ?snap.terminal_id,
+                        last_seq = snap.last_seq,
+                        replay_available = snap.replay_available,
+                        replay_len = replay_fingerprint.len,
+                        replay_newlines = replay_fingerprint.newlines,
+                        replay_hash = replay_fingerprint.hash,
+                        draft_present = composing_fingerprint.is_some(),
+                        draft_len = composing_fingerprint.map_or(0, |fingerprint| fingerprint.len),
+                        draft_newlines = composing_fingerprint
+                            .map_or(0, |fingerprint| fingerprint.newlines),
+                        draft_hash = composing_fingerprint.map_or(0, |fingerprint| fingerprint.hash),
+                        "terminal snapshot applied at client reconstruction boundary"
+                    );
                     if !snap.replay_available
                         && let Some(mut slot) = previous.remove(&snap.terminal_id)
                     {
@@ -3130,8 +3183,18 @@ impl TerminalStack {
                 // slots so they follow — and crucially so the
                 // `WorkspaceRemoved(from)` that trails a collapse no
                 // longer matches them and drops the live session.
-                for slot in self.terminals.values_mut() {
+                for (terminal_id, slot) in &mut self.terminals {
                     if &slot.session_key == from {
+                        let composing_fingerprint = byte_fingerprint(slot.composing.as_bytes());
+                        tracing::debug!(
+                            terminal_id = ?terminal_id,
+                            from = %from,
+                            to = %to,
+                            draft_len = composing_fingerprint.len,
+                            draft_newlines = composing_fingerprint.newlines,
+                            draft_hash = composing_fingerprint.hash,
+                            "terminal draft crossing rebadge boundary"
+                        );
                         slot.session_key = to.clone();
                     }
                 }
@@ -7069,6 +7132,28 @@ mod rebadge_tests {
         stack
     }
 
+    fn active_rows(stack: &TerminalStack, id: TerminalId) -> Vec<String> {
+        let slot = stack.terminals.get(&id).expect("terminal slot");
+        let terminal = &slot.vt.terminal;
+        (0..slot.vt.rows)
+            .map(|y| {
+                let mut text = String::new();
+                for x in 0..slot.vt.cols {
+                    let cell = terminal
+                        .grid_ref(vt::terminal::Point::Active(vt::terminal::PointCoordinate {
+                            x,
+                            y: y.into(),
+                        }))
+                        .expect("active cell");
+                    let mut graphemes = ['\0'; 16];
+                    let len = cell.graphemes(&mut graphemes).expect("graphemes");
+                    text.extend(&graphemes[..len]);
+                }
+                text.trim_end().to_string()
+            })
+            .collect()
+    }
+
     #[test]
     fn rebadge_then_remove_keeps_the_moved_terminal() {
         let issue = SessionKey::new("github:o/r#1");
@@ -7164,6 +7249,64 @@ mod rebadge_tests {
             issue.as_str().to_string(),
         )));
         assert!(!stack.terminals.contains_key(&TerminalId(1)));
+    }
+
+    #[test]
+    fn rebadge_matrix_preserves_draft_and_visible_composer_exactly() {
+        for (agent, draft) in [
+            ("claude", "single-line draft"),
+            ("claude", "first line\n  second line"),
+            ("codex", "single-line draft"),
+            ("codex", "first line\n  second line"),
+        ] {
+            let id = TerminalId(1);
+            let mut current = SessionKey::new(format!("test:{agent}-issue"));
+            let mut stack = TerminalStack::new(PaneId::new(0));
+            stack.on_event(&Event::TerminalSpawned {
+                terminal_id: id,
+                session_key: current.clone(),
+                kind: TerminalKind::Agent(agent.into()),
+                no_permission: false,
+                on_main: false,
+                model_label: None,
+            });
+            stack.set_active_session(Some(current.clone()));
+            let rendered = format!(
+                "\x1b[2J\x1b[H{agent}\r\n\r\n> {}",
+                draft.replace('\n', "\r\n")
+            );
+            stack.on_event(&Event::TerminalOutput {
+                terminal_id: id,
+                bytes: rendered.into_bytes(),
+                first_seq: 1,
+                seq: 1,
+            });
+            stack
+                .terminals
+                .get_mut(&id)
+                .expect("terminal slot")
+                .record_pty_bytes(draft.as_bytes());
+            let expected_rows = active_rows(&stack, id);
+
+            for cycle in 0..4 {
+                let next = SessionKey::new(format!("test:{agent}-pr-{cycle}"));
+                stack.on_event(&Event::TerminalsRebadged {
+                    from: current,
+                    to: next.clone(),
+                });
+                assert_eq!(
+                    stack.composing_of(id),
+                    Some(draft),
+                    "{agent} cycle {cycle}: draft bytes changed"
+                );
+                assert_eq!(
+                    active_rows(&stack, id),
+                    expected_rows,
+                    "{agent} cycle {cycle}: visible composer changed"
+                );
+                current = next;
+            }
+        }
     }
 }
 

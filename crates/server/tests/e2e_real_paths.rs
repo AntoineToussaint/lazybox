@@ -420,10 +420,9 @@ async fn e2e_serve_loop_restart_recovers_session_with_deep_scrollback() {
         };
 
         // Fill >6 screens of history, then replace the interactive shell
-        // with `sleep`: the daemon teardown below drops the attach PTY,
-        // whose parting EOT tmux forwards into the pane — an interactive
-        // shell would exit on it and take the session down, which is not
-        // the shape of a real agent surviving a daemon crash.
+        // with `sleep` so the recovered screen stays parked while the test
+        // inspects it. The tmux relay's close path is input-silent; the
+        // prompt-transition matrix in `tmux_restart` pins that contract.
         client
             .send(Command::Write {
                 terminal_id,

@@ -546,6 +546,26 @@ pub(crate) fn trim_trailing_blank_seed(buf: &mut Vec<u8>) {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ByteFingerprint {
+    pub len: usize,
+    pub newlines: usize,
+    pub hash: u64,
+}
+
+pub(crate) fn byte_fingerprint(bytes: &[u8]) -> ByteFingerprint {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for &byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    ByteFingerprint {
+        len: bytes.len(),
+        newlines: bytes.iter().filter(|&&byte| byte == b'\n').count(),
+        hash,
+    }
+}
+
 /// A subscription to a `DaemonPty`'s output. Includes the replay so
 /// the caller can reconstruct the screen, then the live stream for
 /// everything after.
@@ -579,7 +599,22 @@ impl DaemonPty {
         env: Vec<(String, String)>,
         initial: &[u8],
     ) -> Result<Self, PtyError> {
-        Self::spawn_inner(cmd, size, cwd, env, initial, None)
+        Self::spawn_inner(cmd, size, cwd, env, initial, None, false)
+    }
+
+    /// Spawn a relay process whose stdin must close without synthesized
+    /// input. On Unix, portable-pty's writer normally sends `\n` + VEOF
+    /// from `Drop`; that is correct for an owned shell but corrupts an
+    /// application behind a relay such as `tmux attach`, which forwards
+    /// those bytes into the persistent pane.
+    pub fn spawn_relay(
+        cmd: &[String],
+        size: PtySize,
+        cwd: Option<&PathBuf>,
+        env: Vec<(String, String)>,
+        initial: &[u8],
+    ) -> Result<Self, PtyError> {
+        Self::spawn_inner(cmd, size, cwd, env, initial, None, true)
     }
 
     /// Like [`Self::spawn`], but mirrors output to a durable on-disk log
@@ -602,7 +637,7 @@ impl DaemonPty {
         let mut initial = read_scrollback_tail(&persist_path, SCROLLBACK_PERSIST_BYTES);
         trim_trailing_blank_seed(&mut initial);
         let log = ScrollbackLog::open(persist_path);
-        Self::spawn_inner(cmd, size, cwd, env, &initial, log)
+        Self::spawn_inner(cmd, size, cwd, env, &initial, log, false)
     }
 
     fn spawn_inner(
@@ -612,6 +647,7 @@ impl DaemonPty {
         env: Vec<(String, String)>,
         initial: &[u8],
         mut persist: Option<ScrollbackLog>,
+        relay: bool,
     ) -> Result<Self, PtyError> {
         let pty_system = NativePtySystem::default();
         let pair = pty_system
@@ -644,10 +680,32 @@ impl DaemonPty {
         }
         drop(pair.slave);
 
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|e| PtyError::Open(e.to_string()))?;
+        let writer: Box<dyn Write + Send> = if relay {
+            #[cfg(unix)]
+            {
+                use std::os::fd::FromRawFd;
+
+                let fd = pair
+                    .master
+                    .as_raw_fd()
+                    .ok_or_else(|| PtyError::Open("PTY master has no file descriptor".into()))?;
+                let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+                if duplicate == -1 {
+                    return Err(PtyError::Open(std::io::Error::last_os_error().to_string()));
+                }
+                Box::new(unsafe { std::fs::File::from_raw_fd(duplicate) })
+            }
+            #[cfg(not(unix))]
+            {
+                pair.master
+                    .take_writer()
+                    .map_err(|e| PtyError::Open(e.to_string()))?
+            }
+        } else {
+            pair.master
+                .take_writer()
+                .map_err(|e| PtyError::Open(e.to_string()))?
+        };
 
         // Writer thread: drains the bounded queue into the PTY's
         // blocking stdin writer. Dedicated thread (like the reader
@@ -665,6 +723,18 @@ impl DaemonPty {
                     if let Err(e) = writer.write_all(&bytes).and_then(|()| writer.flush()) {
                         tracing::warn!("PTY writer: {e}");
                         break;
+                    }
+                }
+                if relay {
+                    #[cfg(unix)]
+                    if let Some(pid) = child_pid {
+                        tracing::debug!(
+                            child_pid = pid,
+                            "PTY relay closing without synthesized newline or EOF input"
+                        );
+                        unsafe {
+                            libc::kill(pid as i32, SIGTERM_CODE);
+                        }
                     }
                 }
                 // Receiver drops here; pending `send`s fail with
@@ -1650,12 +1720,21 @@ mod persist_tests {
 
 #[cfg(test)]
 mod scrollback_trim_tests {
-    use super::{content_end, is_blank_capture_line, trim_trailing_blank_seed};
+    use super::{byte_fingerprint, content_end, is_blank_capture_line, trim_trailing_blank_seed};
 
     fn trimmed(bytes: &[u8]) -> Vec<u8> {
         let mut buf = bytes.to_vec();
         trim_trailing_blank_seed(&mut buf);
         buf
+    }
+
+    #[test]
+    fn byte_fingerprint_reports_shape_without_content() {
+        let fingerprint = byte_fingerprint(b"one\n two\n");
+        assert_eq!(fingerprint.len, 9);
+        assert_eq!(fingerprint.newlines, 2);
+        assert_eq!(fingerprint, byte_fingerprint(b"one\n two\n"));
+        assert_ne!(fingerprint.hash, byte_fingerprint(b"one\nthree").hash);
     }
 
     /// A row counts as blank only when it holds no printable glyph:

@@ -10,9 +10,16 @@
 //! backend's minimum — the same gate `TmuxBackend::detect()` applies,
 //! so the test only runs where the backend would actually engage.
 
+use lazybox_core::SessionKey;
+use lazybox_ipc::{TerminalId, TerminalKind, TerminalSnapshot};
+use lazybox_server::ServerConfig;
 use lazybox_server::backend::tmux::modern_tmux_version;
 use lazybox_server::backend::{SessionBackend, TmuxBackend};
+use lazybox_server::spawn_handler::{handle_record_composing_buffer, snapshot_terminals};
+use lazybox_store::MemoryStore;
+use libghostty_vt::terminal::{Point, PointCoordinate};
 use libghostty_vt::{Terminal, TerminalOptions, screen::Screen};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -22,6 +29,85 @@ fn kill_test_server(socket: &str) {
     let _ = std::process::Command::new("tmux")
         .args(["-L", socket, "kill-server"])
         .output();
+}
+
+fn active_rows(replay: &[u8], cols: u16, rows: u16) -> Vec<String> {
+    let mut terminal = Terminal::new(TerminalOptions {
+        cols,
+        rows,
+        max_scrollback: 10_000,
+    })
+    .expect("terminal");
+    terminal.vt_write(replay);
+    (0..rows)
+        .map(|y| {
+            let mut text = String::new();
+            for x in 0..cols {
+                let cell = terminal
+                    .grid_ref(Point::Active(PointCoordinate { x, y: y.into() }))
+                    .expect("active cell");
+                let mut graphemes = ['\0'; 16];
+                let len = cell.graphemes(&mut graphemes).expect("graphemes");
+                text.extend(&graphemes[..len]);
+            }
+            text.trim_end().to_string()
+        })
+        .collect()
+}
+
+struct PromptCase {
+    terminal_id: TerminalId,
+    backend_key: String,
+    session_key: SessionKey,
+    agent: String,
+    marker: String,
+    draft: String,
+    expected_rows: Vec<String>,
+}
+
+async fn register_prompt_cases(config: &ServerConfig, cases: &[PromptCase]) {
+    let mut terminals = config.terminals.lock().await;
+    let mut terminal_meta = config.terminal_meta.lock().await;
+    for case in cases {
+        terminals.insert(case.terminal_id, case.backend_key.clone());
+        terminal_meta.insert(
+            case.terminal_id,
+            (
+                case.session_key.clone(),
+                TerminalKind::Agent(case.agent.clone()),
+            ),
+        );
+    }
+}
+
+fn assert_prompt_snapshots(cases: &[PromptCase], snapshots: &[TerminalSnapshot], transition: &str) {
+    assert_eq!(
+        snapshots.len(),
+        cases.len(),
+        "{transition}: every tmux session must have a snapshot"
+    );
+    for case in cases {
+        let snapshot = snapshots
+            .iter()
+            .find(|snapshot| snapshot.terminal_id == case.terminal_id)
+            .expect("case snapshot");
+        assert_eq!(
+            snapshot.composing_buffer.as_deref(),
+            Some(case.draft.as_str()),
+            "{transition}: persisted draft changed for {}",
+            case.marker
+        );
+        let actual_rows = active_rows(&snapshot.replay, 120, 32);
+        assert_eq!(
+            actual_rows,
+            case.expected_rows,
+            "{transition}: reconstructed composer changed for {}; replay tail: {:?}",
+            case.marker,
+            String::from_utf8_lossy(
+                &snapshot.replay[snapshot.replay.len().saturating_sub(1_000)..]
+            ),
+        );
+    }
 }
 
 /// Live-session counterpart of the restart test (#393): the SAME
@@ -177,13 +263,9 @@ async fn restarted_backend_seeds_scrollback_from_tmux_history() {
     let result = timeout(TEST_DEADLINE, async {
         // "First launch": spawn a session that fills >1 screen of output and
         // then parks on `sleep`. The output comes from the command itself
-        // (not a `write` to an interactive shell) because dropping the
-        // backend sends portable-pty's parting `\n`+EOT down the attach
-        // client — tmux forwards the Ctrl-D to the pane, and an
-        // interactive shell would exit on it, taking the session (and the
-        // per-socket test server) with it. `sleep` ignores its stdin, so
-        // the session survives the simulated daemon death below the same
-        // way a real agent session survives a crashed daemon.
+        // so the fixture has no shell-prompt timing in the scrollback
+        // assertion; the prompt-transition matrix below separately pins
+        // that dropping the tmux relay sends no input into the pane.
         let backend = TmuxBackend::with_socket(&socket).expect("conf written");
         let key = backend
             .spawn(
@@ -251,6 +333,154 @@ async fn restarted_backend_seeds_scrollback_from_tmux_history() {
         );
 
         let _ = restarted.kill(&key).await;
+    })
+    .await;
+    kill_test_server(&socket);
+    result.expect("test timed out");
+}
+
+#[tokio::test]
+async fn tmux_prompt_transition_matrix_is_byte_faithful() {
+    if modern_tmux_version().is_none() {
+        eprintln!("tmux missing or too old — skipping prompt transition matrix");
+        return;
+    }
+    let socket = format!("lazybox-test-composer-{}", std::process::id());
+    let result = timeout(TEST_DEADLINE, async {
+        let store = Arc::new(MemoryStore::new());
+        let mut backend = Arc::new(TmuxBackend::with_socket(&socket).expect("conf written"));
+        let cases = [
+            ("claude-single", "CLAUDE", "single-line-draft"),
+            ("claude-multi", "CLAUDE", "first-line\n  second-line"),
+            ("codex-single", "CODEX", "single-line-draft"),
+            ("codex-multi", "CODEX", "first-line\n  second-line"),
+        ];
+        let mut prompt_cases = Vec::new();
+        for (index, (name, agent, draft)) in cases.into_iter().enumerate() {
+            let marker = format!("MARKER-{name}");
+            let rendered_draft = draft.replace('\n', "\\r\\n");
+            let script = format!(
+                "for i in $(seq 1 40); do echo history-$i; done; \
+                 printf '\\033[2J\\033[H{marker}\\r\\n{agent}\\r\\n\\r\\n> {rendered_draft}'; \
+                 exec sleep 300"
+            );
+            let key = backend
+                .spawn(
+                    &["/bin/sh".to_string(), "-c".to_string(), script],
+                    None,
+                    &[],
+                    name,
+                )
+                .await
+                .expect("tmux spawn");
+            let mut before = Vec::new();
+            for _ in 0..100 {
+                before = backend.snapshot(&key).await.expect("snapshot").replay;
+                if String::from_utf8_lossy(&before).contains(&marker) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert!(
+                String::from_utf8_lossy(&before).contains(&marker),
+                "initial composer never rendered"
+            );
+            prompt_cases.push(PromptCase {
+                terminal_id: TerminalId(index as u64 + 1),
+                backend_key: key,
+                session_key: SessionKey::new(format!("test:issue-{index}")),
+                agent: agent.to_ascii_lowercase(),
+                marker,
+                draft: draft.to_string(),
+                expected_rows: active_rows(&before, 120, 32),
+            });
+        }
+
+        let mut config = ServerConfig::with_store_and_backend(store.clone(), backend.clone());
+        register_prompt_cases(&config, &prompt_cases).await;
+        for case in &prompt_cases {
+            handle_record_composing_buffer(&config, case.terminal_id, &case.draft).await;
+        }
+
+        let initial = snapshot_terminals(&config).await;
+        assert_prompt_snapshots(&prompt_cases, &initial, "initial");
+
+        for cycle in 0..4 {
+            let snapshots = snapshot_terminals(&config).await;
+            assert_prompt_snapshots(
+                &prompt_cases,
+                &snapshots,
+                &format!("client reattach cycle {cycle}"),
+            );
+        }
+
+        for cycle in 0..4 {
+            {
+                let mut meta = config.terminal_meta.lock().await;
+                for (index, case) in prompt_cases.iter_mut().enumerate() {
+                    case.session_key = SessionKey::new(format!("test:pr-{index}-{cycle}"));
+                    meta.get_mut(&case.terminal_id)
+                        .expect("terminal metadata")
+                        .0 = case.session_key.clone();
+                }
+            }
+            let snapshots = snapshot_terminals(&config).await;
+            assert_prompt_snapshots(
+                &prompt_cases,
+                &snapshots,
+                &format!("TerminalsRebadged cycle {cycle}"),
+            );
+        }
+
+        for cycle in 0..4 {
+            drop(config);
+            drop(backend);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            backend = Arc::new(TmuxBackend::with_socket(&socket).expect("conf written"));
+            config = ServerConfig::with_store_and_backend(store.clone(), backend.clone());
+            register_prompt_cases(&config, &prompt_cases).await;
+
+            let mut subscriptions = Vec::new();
+            for case in &prompt_cases {
+                subscriptions.push(
+                    backend
+                        .subscribe(&case.backend_key)
+                        .await
+                        .expect("reattach surviving tmux session"),
+                );
+            }
+
+            let mut snapshots = Vec::new();
+            for attempt in 0..100 {
+                snapshots = snapshot_terminals(&config).await;
+                let settled = snapshots.len() == prompt_cases.len()
+                    && snapshots.iter().all(|snapshot| {
+                        snapshot.last_seq > 1
+                            && prompt_cases.iter().any(|case| {
+                                case.terminal_id == snapshot.terminal_id
+                                    && String::from_utf8_lossy(&snapshot.replay)
+                                        .contains(&case.marker)
+                            })
+                    });
+                if settled {
+                    break;
+                }
+                assert!(attempt < 99, "tmux live repaint never settled");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert_prompt_snapshots(
+                &prompt_cases,
+                &snapshots,
+                &format!("daemon restart cycle {cycle}"),
+            );
+            drop(subscriptions);
+            tokio::task::yield_now().await;
+        }
+
+        for case in &prompt_cases {
+            let _ = backend.kill(&case.backend_key).await;
+        }
     })
     .await;
     kill_test_server(&socket);

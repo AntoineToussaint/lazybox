@@ -502,7 +502,7 @@ impl TmuxBackend {
     /// screenful and nothing to scroll back through.
     fn open_client(&self, key: &str, size: PtySize, seed: &[u8]) -> Result<Slot, BackendError> {
         let argv = self.attach_argv(key);
-        let pty = DaemonPty::spawn(&argv, size, None, Vec::new(), seed)
+        let pty = DaemonPty::spawn_relay(&argv, size, None, Vec::new(), seed)
             .map_err(|e| BackendError::Spawn(format!("tmux attach: {e}")))?;
         Ok(Slot {
             client: Arc::new(pty),
@@ -579,7 +579,20 @@ impl TmuxBackend {
                 return Vec::new();
             }
         };
-        normalize_capture(&out)
+        let raw = crate::pty::byte_fingerprint(&out);
+        let seed = normalize_capture(&out);
+        let normalized = crate::pty::byte_fingerprint(&seed);
+        tracing::debug!(
+            key,
+            raw_len = raw.len,
+            raw_newlines = raw.newlines,
+            raw_hash = raw.hash,
+            seed_len = normalized.len,
+            seed_newlines = normalized.newlines,
+            seed_hash = normalized.hash,
+            "tmux capture normalized at reattach boundary"
+        );
+        seed
     }
 }
 
@@ -959,6 +972,7 @@ impl SessionBackend for TmuxBackend {
                 loop {
                     tokio::select! {
                         biased;
+                        _ = tx.closed() => break,
                         chunk = sub.live.recv() => match chunk {
                             Ok(c) => {
                                 match tx.try_send(OutputChunk {

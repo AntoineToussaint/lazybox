@@ -261,16 +261,25 @@ pub struct AttentionSummary {
     pub review_pending: usize,
 }
 
-/// Which agent `w` ("work on this") should act on, resolved from the
+/// One exact running conversation that can receive a contextual work
+/// prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningWorkTarget {
+    pub terminal_id: TerminalId,
+    pub agent_id: String,
+}
+
+/// Where `w` ("work on this") should route its prompt, resolved from the
 /// workspace's live terminals by [`Sidebar::work_target`] (#418).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkTarget {
-    /// Target this agent id: the single running one (whatever it is),
-    /// or the configured default when nothing is running.
-    Agent(String),
-    /// Several distinct agents are running — the model must ask which
-    /// one to inject into. Ids are sorted for a stable picker order.
-    Choose(Vec<String>),
+    /// No matching conversation is running; spawn this agent.
+    Spawn(String),
+    /// Exactly one matching conversation is running; inject into it.
+    Running(RunningWorkTarget),
+    /// Several conversations are running; ask which exact terminal
+    /// should receive the prompt.
+    Choose(Vec<RunningWorkTarget>),
 }
 
 pub struct Sidebar {
@@ -615,41 +624,57 @@ impl Sidebar {
         None
     }
 
-    /// Distinct agent ids with a running terminal in `workspace_key`.
-    /// The order is unspecified (it walks a hash map); the consumer
-    /// ([`Self::work_target`]) sorts before presenting.
-    pub fn running_agent_ids(&self, workspace_key: &SessionKey) -> Vec<String> {
-        let mut ids: Vec<String> = Vec::new();
-        for (sk, kind) in self.running_terminals.values() {
+    /// Exact running agent terminals in `workspace_key`, sorted by agent
+    /// id and then terminal id for stable chooser order.
+    pub fn running_work_targets(&self, workspace_key: &SessionKey) -> Vec<RunningWorkTarget> {
+        let mut targets = Vec::new();
+        for (terminal_id, (sk, kind)) in &self.running_terminals {
             if sk != workspace_key {
                 continue;
             }
-            if let TerminalKind::Agent(id) = kind
-                && !ids.contains(id)
-            {
-                ids.push(id.clone());
+            if let TerminalKind::Agent(agent_id) = kind {
+                targets.push(RunningWorkTarget {
+                    terminal_id: *terminal_id,
+                    agent_id: agent_id.clone(),
+                });
             }
         }
-        ids
+        targets.sort_unstable_by(|left, right| {
+            left.agent_id
+                .cmp(&right.agent_id)
+                .then_with(|| left.terminal_id.0.cmp(&right.terminal_id.0))
+        });
+        targets
     }
 
-    /// Pick the agent `w` ("work on this") should target for a
-    /// workspace (#418). An agent already running here wins over the
-    /// default so `w` continues the existing conversation (e.g. an open
-    /// Codex session) instead of always spawning a fresh default agent —
-    /// `rewrite_spawn_to_inject` then injects into it because the
-    /// resolved agent id matches the running one.
+    /// Pick the conversation `w` ("work on this") should target for a
+    /// workspace (#418). One running conversation wins over the default
+    /// so `w` continues it instead of spawning a fresh agent.
     ///
-    /// When several DIFFERENT agents run at once there is no right
-    /// guess — not even the default, which the user may not be looking
-    /// at — so the caller must ask ([`WorkTarget::Choose`]). The default
-    /// agent is the answer only when nothing is running.
+    /// When several conversations run at once there is no right guess,
+    /// including when they use the same agent id, so the caller must ask.
+    /// The default agent is the answer only when nothing is running.
     pub fn work_target(&self, workspace_key: &SessionKey, default_agent: &str) -> WorkTarget {
-        let mut running = self.running_agent_ids(workspace_key);
-        running.sort_unstable();
+        let running = self.running_work_targets(workspace_key);
         match running.as_slice() {
-            [] => WorkTarget::Agent(default_agent.to_string()),
-            [only] => WorkTarget::Agent(only.clone()),
+            [] => WorkTarget::Spawn(default_agent.to_string()),
+            [only] => WorkTarget::Running(only.clone()),
+            _ => WorkTarget::Choose(running),
+        }
+    }
+
+    /// Resolve a scoped `w <agent>` action. Other agent kinds do not
+    /// participate, but multiple conversations for the requested agent
+    /// still require an exact terminal choice.
+    pub fn work_target_for_agent(&self, workspace_key: &SessionKey, agent_id: &str) -> WorkTarget {
+        let running: Vec<_> = self
+            .running_work_targets(workspace_key)
+            .into_iter()
+            .filter(|target| target.agent_id == agent_id)
+            .collect();
+        match running.as_slice() {
+            [] => WorkTarget::Spawn(agent_id.to_string()),
+            [only] => WorkTarget::Running(only.clone()),
             _ => WorkTarget::Choose(running),
         }
     }

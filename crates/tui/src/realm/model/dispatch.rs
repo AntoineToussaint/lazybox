@@ -462,16 +462,13 @@ impl<T: TerminalAdapter> Model<T> {
                 // this workspace (so it injects into an existing Codex /
                 // Cursor session instead of always spawning the default),
                 // falling back to the default agent when none is running.
-                // Several distinct running agents → ask which one (#418).
+                // Several running conversations → ask which one (#418).
                 // The scoped `w c` / `w x` chords (Action::WorkWith) force
                 // a specific agent.
                 self.dispatch_work(session_id, None, &mut cmds);
             }
             Action::WorkWith(agent_id) => {
-                // Scoped `w <agent>`: same contextual prompt as `w w`,
-                // but forced to the chosen agent. `rewrite_spawn_to_inject`
-                // injects when that agent is already running, else spawns.
-                self.push_work_spawn(agent_id, session_id, None, &mut cmds);
+                self.dispatch_work_with(agent_id, session_id, None, &mut cmds);
             }
             Action::WorkTier(alias) => {
                 // Flat `w S`: work on the same contextual target agent as
@@ -1205,11 +1202,9 @@ impl<T: TerminalAdapter> Model<T> {
     /// workspace (issue #418). Shared by `Work` and `WorkTier` so both
     /// pick the same agent before layering a tier on top:
     ///
-    /// - one live agent → work targets IT (whatever it is — the spawn
-    ///   is rewritten into an inject downstream);
-    /// - several distinct live agents → mount the which-agent picker
-    ///   instead of silently guessing (the pick funnels back through
-    ///   [`Self::push_work_spawn`] in `handle_choice_picked`);
+    /// - one live conversation → work targets its exact terminal;
+    /// - several live conversations → mount the chooser instead of
+    ///   silently guessing, including when several use the same agent;
     /// - none → fresh spawn of the configured default.
     fn dispatch_work(
         &mut self,
@@ -1221,34 +1216,72 @@ impl<T: TerminalAdapter> Model<T> {
         let default_agent = self.sidebar.default_agent().to_string();
         let target = match self.sidebar.selected_workspace_key().cloned() {
             Some(sk) => self.sidebar.work_target(&sk, &default_agent),
-            None => WorkTarget::Agent(default_agent),
+            None => WorkTarget::Spawn(default_agent),
         };
+        self.dispatch_work_target(target, session_id, model_alias, cmds);
+    }
+
+    /// Resolve a scoped `w <agent>` without letting another running
+    /// agent kind participate in the choice.
+    fn dispatch_work_with(
+        &mut self,
+        agent_id: &str,
+        session_id: Option<lazybox_core::SessionId>,
+        model_alias: Option<String>,
+        cmds: &mut Vec<IpcCommand>,
+    ) {
+        use crate::components::sidebar::WorkTarget;
+        let target = match self.sidebar.selected_workspace_key().cloned() {
+            Some(sk) => self.sidebar.work_target_for_agent(&sk, agent_id),
+            None => WorkTarget::Spawn(agent_id.to_string()),
+        };
+        self.dispatch_work_target(target, session_id, model_alias, cmds);
+    }
+
+    fn dispatch_work_target(
+        &mut self,
+        target: crate::components::sidebar::WorkTarget,
+        session_id: Option<lazybox_core::SessionId>,
+        model_alias: Option<String>,
+        cmds: &mut Vec<IpcCommand>,
+    ) {
+        use crate::components::sidebar::WorkTarget;
         match target {
-            WorkTarget::Agent(agent) => {
-                self.push_work_spawn(&agent, session_id, model_alias, cmds);
+            WorkTarget::Spawn(agent_id) => {
+                self.push_work_command(&agent_id, None, session_id, model_alias, cmds);
             }
-            WorkTarget::Choose(agents) => {
-                self.mount_work_agent_picker(agents, session_id, model_alias);
+            WorkTarget::Running(target) => {
+                self.push_work_command(
+                    &target.agent_id,
+                    Some(target.terminal_id),
+                    session_id,
+                    model_alias,
+                    cmds,
+                );
+            }
+            WorkTarget::Choose(targets) => {
+                self.mount_work_agent_picker(targets, session_id, model_alias);
             }
         }
     }
 
-    /// Resolve a "work on this" spawn for `agent_id` and queue it.
+    /// Resolve a "work on this" command for `agent_id` and queue it.
     /// Shared by `w w` ([`lazybox_tui_core::action::Action::Work`]), the scoped `w c` / `w x`
     /// chords ([`lazybox_tui_core::action::Action::WorkWith`]), and the which-agent picker's pick
     /// (`choice_picked_inner`, issue #418): all build the same
     /// contextual prompt via [`crate::intent::resolve_work`] and differ
-    /// only in how the target agent is chosen. The queued `Spawn`
-    /// carries the prompt so `rewrite_spawn_to_inject` can fold it into
-    /// an existing terminal.
+    /// only in how the target conversation is chosen. An exact running
+    /// terminal receives an inject; otherwise the command remains a
+    /// spawn.
     ///
     /// The activity selection lives in the right pane, but `w` must honor
     /// it from any focus — reading it here is sound because `set_workspace`
     /// clears the selection whenever the workspace key changes, so the
     /// right pane's indices always belong to the selected workspace.
-    pub(super) fn push_work_spawn(
+    pub(super) fn push_work_command(
         &mut self,
         agent_id: &str,
+        terminal_id: Option<lazybox_ipc::TerminalId>,
         session_id: Option<lazybox_core::SessionId>,
         model_alias: Option<String>,
         cmds: &mut Vec<IpcCommand>,
@@ -1268,7 +1301,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // before the `TerminalSpawned` arrives (consumed in the
                 // spawn-event handler).
                 self.spawn_follow_to = Some((&workspace_key).into());
-                cmds.push(IpcCommand::Spawn {
+                let spawn = IpcCommand::Spawn {
                     session_key: (&workspace_key).into(),
                     session_id,
                     kind: lazybox_ipc::TerminalKind::Agent(agent_id),
@@ -1276,7 +1309,12 @@ impl<T: TerminalAdapter> Model<T> {
                     initial_prompt: prompt,
                     on_main: false,
                     model_alias,
-                });
+                };
+                let command = match terminal_id {
+                    Some(terminal_id) => self.rewrite_spawn_to_terminal(spawn, terminal_id),
+                    None => spawn,
+                };
+                cmds.push(command);
                 self.right.clear_activity_selection();
             }
             // A merged/closed workspace steers to cleanup: surface the

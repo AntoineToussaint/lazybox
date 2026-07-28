@@ -39,7 +39,8 @@ workspace — built for developers juggling many PRs and AI coding agents at onc
 
 - **📨 Reactive inbox** — new comments, CI failures, and review requests surface automatically, with per-row read/unread tracking. No refreshing.
 - **🌳 A worktree per task** — every row opens an isolated git worktree, so PRs never step on each other's working trees.
-- **🤖 Agents built in** — spawn Claude Code, Codex, or Cursor in a row's worktree from a fast which-key menu; `w w` picks the right prompt for the row's state (fix CI / address comments / implement issue).
+- **🤖 Point at the work and press `w w`** — lazybox turns the focused issue, CI failure, conflict, or selected review comments into the right brief, then reuses the running agent or starts your default in the task worktree.
+- **🎚️ GitHub-controlled compute** — a `high` / `medium` / `low` label or `@high` / `@medium` / `@low` task-body marker maps through the target agent's model tiers, so GitHub can choose model and reasoning effort before work starts.
 - **🖥️ Embedded terminals** — a live PTY per workspace (split & tile them), powered by a vendored ghostty VT parser.
 - **🔌 Source-agnostic** — GitHub and Linear today, surfacing in one inbox behind the same interface, with an optional Slack mirror.
 - **🛰️ Remote-friendly** — a client/daemon split runs over an SSH-forwarded socket for working against a remote box.
@@ -117,14 +118,15 @@ You land on the inbox. Then:
 ```
 ↑ / ↓     move between workspaces   (j / k also works)
 Enter     open the selected workspace
-w w       put your default agent to work in its worktree   (s for a plain shell)
+w w       route this task to its running/default agent     (s for a plain shell)
 ]]q       leave the terminal, back to the inbox
 ```
 
-`w` opens the work menu; `w w` picks the right prompt for the row's state and needs the agent's CLI
-(e.g. `claude`) on your `PATH`; `s` (a plain shell) always works. To pick an
-agent explicitly, `a` opens the agent menu (`a c` Claude · `a x` Codex ·
-`a u` Cursor).
+`w` opens the work menu; `w w` builds the right prompt for the row's state,
+sends it to the relevant running agent when there is one, or starts your
+default agent in the task worktree. It needs that agent's CLI (e.g. `claude`)
+on your `PATH`; `s` (a plain shell) always works. To pick an agent explicitly,
+`a` opens the agent menu (`a c` Claude · `a x` Codex · `a u` Cursor).
 
 That's the whole model in one screen: the workspace got an **isolated git
 worktree** and a **live embedded terminal**, and you never left the inbox.
@@ -168,7 +170,7 @@ to focus it, drag the splitters to resize, wheel-scroll, and right-click links
 
 Power moves, once the basics feel natural:
 
-- **Model tiers** — `w S` / `w M` / `w L` (and `a S` / `a M` / `a L`) run the agent at a small / medium / large model; Claude ships a Haiku/Sonnet/Opus menu, others configure theirs under `agents.<id>.models`. The picked tier rides a `◆ Opus` tab badge.
+- **Model tiers** — a GitHub `high` / `medium` / `low` label (or `@high` / `@medium` / `@low` task-body marker) automatically chooses the target agent's configured model and reasoning-effort arguments at spawn. `w S` / `w M` / `w L` is the direct in-TUI override; Claude ships a Haiku/Sonnet/Opus menu and other agents configure theirs under `agents.<id>.models`. The picked tier rides a `◆ Opus` tab badge.
 - **Multi-select + broadcast** — `v` marks sidebar rows, `Shift-B` sends one instruction (snippet or free text) to every selected workspace at once.
 - **Focus mode** — `.` (or `]]f` from a terminal) near-fullscreens the agent terminal; `]]<digit>` jumps straight to the Nth agent workspace.
 - **On main** — `b` leader (`b c` / `b s`, confirmed first) runs an agent or shell on the repo's shared main checkout instead of a worktree; the tab carries a `⎇ main` badge.

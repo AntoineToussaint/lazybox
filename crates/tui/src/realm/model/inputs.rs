@@ -983,11 +983,9 @@ showing keybinding search only",
             }
             return cmds;
         }
-        // `w` multi-agent chooser (Id::WorkAgentPicker, #418) — pick →
-        // replay the same work spawn `w` would have queued, targeted at
-        // the chosen running agent. The Msg::ChoicePicked flush then
-        // rewrites it to an inject into that agent's terminal. Empty /
-        // Esc pick drops the stash without spawning anything.
+        // `w` multi-conversation chooser (Id::WorkAgentPicker, #418) —
+        // pick → build the same contextual work command, targeted at the
+        // exact running terminal. Empty / Esc drops the stash.
         if matches!(self.modal_stack.last(), Some(Id::WorkAgentPicker)) {
             let stash = match self.modal_flow.take() {
                 Some(ModalFlow::WorkPicker { picker }) => Some(picker),
@@ -996,9 +994,15 @@ showing keybinding search only",
             self.pop_modal();
             let idx = picks.first().and_then(|p| p.as_index());
             if let (Some(picker), Some(idx)) = (stash, idx)
-                && let Some(agent) = picker.agents.get(idx).cloned()
+                && let Some(target) = picker.targets.get(idx).cloned()
             {
-                self.push_work_spawn(&agent, picker.session_id, picker.model_alias, &mut cmds);
+                self.push_work_command(
+                    &target.agent_id,
+                    Some(target.terminal_id),
+                    picker.session_id,
+                    picker.model_alias,
+                    &mut cmds,
+                );
             }
             return cmds;
         }

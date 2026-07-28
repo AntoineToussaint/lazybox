@@ -44,11 +44,12 @@ pub enum PolicyToggle {
 }
 
 /// Stash for the `w` multi-agent chooser (`Id::WorkAgentPicker`,
-/// #418): the running agent ids shown (row order matches the picker),
-/// plus the spawn params the pick replays through `push_work_spawn`.
+/// #418): the exact running terminals shown (row order matches the
+/// picker), plus the spawn params the pick replays through
+/// `push_work_command`.
 #[derive(Debug, Clone)]
 pub(crate) struct PendingWorkPicker {
-    pub agents: Vec<String>,
+    pub targets: Vec<crate::components::sidebar::RunningWorkTarget>,
     pub session_id: Option<lazybox_core::SessionId>,
     pub model_alias: Option<String>,
 }
@@ -562,15 +563,13 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::FilterMenu, modal);
     }
 
-    /// Mount the `w` multi-agent chooser (#418): the selected workspace
-    /// has SEVERAL distinct running agents, so ask which one to inject
-    /// the work prompt into instead of silently guessing (or worse,
-    /// spawning a fresh default next to them). The pick replays
-    /// `push_work_spawn` for the chosen agent; `session_id` /
+    /// Mount the `w` multi-conversation chooser (#418): the selected
+    /// workspace has several running agent terminals, so ask which exact
+    /// one to inject into instead of silently guessing. `session_id` /
     /// `model_alias` carry the original `w` / `w S` parameters through.
     pub(crate) fn mount_work_agent_picker(
         &mut self,
-        agents: Vec<String>,
+        targets: Vec<crate::components::sidebar::RunningWorkTarget>,
         session_id: Option<lazybox_core::SessionId>,
         model_alias: Option<String>,
     ) {
@@ -587,17 +586,30 @@ impl<T: TerminalAdapter> Model<T> {
             self.flash_hint("nothing to work on here");
             return;
         }
-        let labels = agents.clone();
+        let labels: Vec<String> = targets
+            .iter()
+            .map(|target| {
+                let duplicate_count = targets
+                    .iter()
+                    .filter(|other| other.agent_id == target.agent_id)
+                    .count();
+                if duplicate_count > 1 {
+                    format!("{} · terminal {}", target.agent_id, target.terminal_id.0)
+                } else {
+                    target.agent_id.clone()
+                }
+            })
+            .collect();
         self.set_modal_flow(ModalFlow::WorkPicker {
             picker: PendingWorkPicker {
-                agents,
+                targets,
                 session_id,
                 model_alias,
             },
         });
-        let modal = Choice::single("Several agents are running — inject into…", labels)
-            .title("Work with which agent?")
-            .label(|s: &String| s.clone());
+        let modal = Choice::single("Several conversations are running — inject into…", labels)
+            .title("Work with which conversation?")
+            .label(|label: &String| label.clone());
         self.mount_modal(Id::WorkAgentPicker, modal);
     }
 

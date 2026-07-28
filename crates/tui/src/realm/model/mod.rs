@@ -332,12 +332,10 @@ pub enum Id {
     /// Esc / No drops the stash and changes nothing.
     HelpActionConfirm,
     /// Single-pick `Choice` mounted when `w` ("work on this") lands on
-    /// a workspace with SEVERAL distinct running agents (#418) —
-    /// injecting must not silently guess between them. The listed
-    /// agent ids + the spawn params to replay live in
-    /// `ModalFlow::WorkPicker`; `Msg::ChoicePicked` resolves the index
-    /// and fires the same work spawn `w` would have, targeted at the
-    /// chosen agent.
+    /// a workspace with several running agent conversations (#418) —
+    /// injecting must not silently guess between them, even when they
+    /// use the same agent id. The exact terminals + fallback spawn
+    /// params live in `ModalFlow::WorkPicker`.
     WorkAgentPicker,
     /// Scrollable full-description reader (#448). Renders a PR/issue
     /// (or any long) body as real markdown — headings, lists, code,

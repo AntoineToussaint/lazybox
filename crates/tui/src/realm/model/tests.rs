@@ -5154,6 +5154,53 @@ mod merge_focus_follow_tests {
         );
     }
 
+    #[test]
+    fn contextual_work_tier_reaches_the_daemon_inject_fallback() {
+        use lazybox_ipc::{Client, Command, EVENT_CHANNEL_CAPACITY, TerminalId, TerminalKind};
+        use lazybox_tui_core::action::Action;
+        use tokio::sync::mpsc;
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let (_evt_tx, evt_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let client = Client::from_channels(cmd_tx, evt_rx);
+        let mut m = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+
+        let issue = workspace("owner/repo#1", false, Duration::hours(1));
+        let issue_sk: SessionKey = (&issue.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(issue)));
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(3),
+            session_key: issue_sk.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        assert!(m.sidebar.focus_workspace_key(&issue_sk));
+        while cmd_rx.try_recv().is_ok() {}
+
+        let cmds = m.dispatch_action(&Action::WorkTier("M".into()));
+        m.flush_dispatched_cmds(cmds);
+
+        let alias =
+            std::iter::from_fn(|| cmd_rx.try_recv().ok()).find_map(|command| match command {
+                Command::InjectPrompt {
+                    fallback_spawn: Some(fallback),
+                    ..
+                } => Some(fallback.model_alias),
+                _ => None,
+            });
+        assert_eq!(
+            alias,
+            Some(Some("M".to_string())),
+            "the daemon-visible fallback spawn keeps the explicit tier",
+        );
+    }
+
     /// Issue #557: `w` on an empty/scratch workspace (no PR, issue, or
     /// selected comments) used to be a silent no-op. It now spawns the
     /// default agent (bare) and arms the follow target, so a blank
@@ -5213,16 +5260,13 @@ mod merge_focus_follow_tests {
         assert!(m.sidebar.focus_workspace_key(&sk));
 
         let cmds = m.dispatch_action(&Action::Work);
-        let agent = cmds.iter().find_map(|c| match c {
-            Command::Spawn {
-                kind: TerminalKind::Agent(id),
-                ..
-            } => Some(id.clone()),
+        let terminal_id = cmds.iter().find_map(|command| match command {
+            Command::InjectPrompt { terminal_id, .. } => Some(*terminal_id),
             _ => None,
         });
         assert_eq!(
-            agent.as_deref(),
-            Some("codex"),
+            terminal_id,
+            Some(TerminalId(3)),
             "`w w` targets the running Codex, not the default Claude",
         );
     }
@@ -5264,8 +5308,12 @@ mod merge_focus_follow_tests {
             Some(&Id::WorkAgentPicker),
             "the multi-agent chooser is up",
         );
-        let agents = match &m.modal_flow {
-            Some(super::super::ModalFlow::WorkPicker { picker }) => picker.agents.clone(),
+        let agents: Vec<String> = match &m.modal_flow {
+            Some(super::super::ModalFlow::WorkPicker { picker }) => picker
+                .targets
+                .iter()
+                .map(|target| target.agent_id.clone())
+                .collect(),
             _ => panic!("picker stash armed"),
         };
         assert_eq!(
@@ -5274,18 +5322,13 @@ mod merge_focus_follow_tests {
             "rows list every running agent, sorted",
         );
 
-        // Pick Codex (row 1) → the same work spawn `w` would have
-        // queued, targeted at Codex, prompt included.
+        // Pick Codex (row 1) → target that exact terminal.
         let cmds = m.handle_choice_picked(vec![ChoicePayload::Index(1)]);
         match cmds.as_slice() {
-            [
-                Command::Spawn {
-                    kind: TerminalKind::Agent(id),
-                    initial_prompt: Some(_),
-                    ..
-                },
-            ] => assert_eq!(id, "codex"),
-            other => panic!("expected one Spawn(Agent(codex), prompt), got {other:?}"),
+            [Command::InjectPrompt { terminal_id, .. }] => {
+                assert_eq!(*terminal_id, TerminalId(3))
+            }
+            other => panic!("expected one InjectPrompt for Codex, got {other:?}"),
         }
         assert!(m.modal_flow.is_none(), "stash consumed");
     }
@@ -5341,6 +5384,60 @@ mod merge_focus_follow_tests {
         );
     }
 
+    #[test]
+    fn work_chooser_disambiguates_two_sessions_of_the_same_agent() {
+        use lazybox_ipc::{Client, Command, EVENT_CHANNEL_CAPACITY, TerminalId, TerminalKind};
+        use lazybox_tui_core::action::Action;
+        use tokio::sync::mpsc;
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let (_evt_tx, evt_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let client = Client::from_channels(cmd_tx, evt_rx);
+        let mut m = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+
+        let pr = workspace("owner/repo#1", true, Duration::hours(1));
+        let sk: SessionKey = (&pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        for terminal_id in [TerminalId(3), TerminalId(4)] {
+            m.handle_daemon_event(IpcEvent::TerminalSpawned {
+                model_label: None,
+                terminal_id,
+                session_key: sk.clone(),
+                kind: TerminalKind::Agent("codex".into()),
+                no_permission: false,
+                on_main: false,
+            });
+        }
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        assert!(m.sidebar.focus_workspace_key(&sk));
+
+        assert!(m.dispatch_action(&Action::Work).is_empty());
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::WorkAgentPicker),
+            "two live conversations must be disambiguated before injection",
+        );
+        while cmd_rx.try_recv().is_ok() {}
+
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Index(1)]);
+        m.flush_dispatched_cmds(cmds);
+        let target =
+            std::iter::from_fn(|| cmd_rx.try_recv().ok()).find_map(|command| match command {
+                Command::InjectPrompt { terminal_id, .. } => Some(terminal_id),
+                _ => None,
+            });
+        assert_eq!(
+            target,
+            Some(TerminalId(4)),
+            "the selected conversation receives the contextual prompt",
+        );
+    }
+
     /// Issue #418: Esc on the multi-agent chooser cancels cleanly —
     /// stash dropped, nothing spawned.
     #[test]
@@ -5377,8 +5474,8 @@ mod merge_focus_follow_tests {
     }
 
     /// Issue #418: a `w S` tier chord that lands on several running
-    /// agents routes through the same chooser, and the picked spawn
-    /// still carries the tier alias.
+    /// agents routes through the same chooser, and a stale-terminal
+    /// fallback still carries the tier alias.
     #[test]
     fn work_tier_chooser_carries_model_alias_through_the_pick() {
         use lazybox_ipc::{Command, TerminalId, TerminalKind};
@@ -5408,20 +5505,24 @@ mod merge_focus_follow_tests {
         let cmds = m.handle_choice_picked(vec![ChoicePayload::Index(1)]);
         match cmds.as_slice() {
             [
-                Command::Spawn {
-                    kind: TerminalKind::Agent(id),
-                    model_alias,
+                Command::InjectPrompt {
+                    terminal_id,
+                    fallback_spawn: Some(fallback),
                     ..
                 },
             ] => {
-                assert_eq!(id, "codex");
+                assert_eq!(*terminal_id, TerminalId(3));
+                assert!(matches!(
+                    &fallback.kind,
+                    TerminalKind::Agent(id) if id == "codex"
+                ));
                 assert_eq!(
-                    model_alias.as_deref(),
+                    fallback.model_alias.as_deref(),
                     Some("M"),
                     "tier alias survives the pick"
                 );
             }
-            other => panic!("expected one tiered Spawn, got {other:?}"),
+            other => panic!("expected one tiered InjectPrompt, got {other:?}"),
         }
     }
 

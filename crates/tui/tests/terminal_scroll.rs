@@ -283,7 +283,7 @@ fn scrolling_a_non_focused_tile_leaves_the_focused_one_put() {
 
     // A point in the right half resolves to the right tile.
     let right_id = stack
-        .terminal_at((W * 3) / 4, H / 2)
+        .scroll_terminal_at((W * 3) / 4, H / 2)
         .expect("a right-half point lands in a tile");
     assert_eq!(
         right_id,

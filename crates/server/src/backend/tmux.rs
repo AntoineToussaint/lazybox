@@ -579,19 +579,20 @@ impl TmuxBackend {
                 return Vec::new();
             }
         };
-        let raw = crate::pty::byte_fingerprint(&out);
         let seed = normalize_capture(&out);
-        let normalized = crate::pty::byte_fingerprint(&seed);
-        tracing::debug!(
-            key,
-            raw_len = raw.len,
-            raw_newlines = raw.newlines,
-            raw_hash = raw.hash,
-            seed_len = normalized.len,
-            seed_newlines = normalized.newlines,
-            seed_hash = normalized.hash,
-            "tmux capture normalized at reattach boundary"
-        );
+        if let Some(raw) = crate::pty::debug_byte_fingerprint(&out) {
+            let normalized = crate::pty::byte_fingerprint(&seed);
+            tracing::debug!(
+                key,
+                raw_len = raw.len,
+                raw_newlines = raw.newlines,
+                raw_hash = raw.hash,
+                seed_len = normalized.len,
+                seed_newlines = normalized.newlines,
+                seed_hash = normalized.hash,
+                "tmux capture normalized at reattach boundary"
+            );
+        }
         seed
     }
 }

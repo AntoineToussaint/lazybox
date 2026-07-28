@@ -140,6 +140,22 @@ fn byte_fingerprint(bytes: &[u8]) -> ByteFingerprint {
     }
 }
 
+fn debug_byte_fingerprint(bytes: &[u8]) -> Option<ByteFingerprint> {
+    tracing::enabled!(tracing::Level::DEBUG).then(|| byte_fingerprint(bytes))
+}
+
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::debug_byte_fingerprint;
+
+    #[test]
+    fn disabled_debug_logging_skips_fingerprint_work() {
+        tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
+            assert!(debug_byte_fingerprint(b"large replay").is_none());
+        });
+    }
+}
+
 /// Build a one-entry `Typed` prompt history from an optional last
 /// message, for tests that used to pass a single `Option<String>` recap.
 #[cfg(test)]
@@ -2315,19 +2331,20 @@ impl TerminalStack {
         let Some(slot) = self.terminals.get_mut(&id) else {
             return;
         };
-        let replay_fingerprint = byte_fingerprint(replay);
-        let composing_fingerprint = byte_fingerprint(slot.composing.as_bytes());
-        tracing::debug!(
-            terminal_id = ?id,
-            seq,
-            replay_len = replay_fingerprint.len,
-            replay_newlines = replay_fingerprint.newlines,
-            replay_hash = replay_fingerprint.hash,
-            draft_len = composing_fingerprint.len,
-            draft_newlines = composing_fingerprint.newlines,
-            draft_hash = composing_fingerprint.hash,
-            "terminal resync received at client reconstruction boundary"
-        );
+        if let Some(replay_fingerprint) = debug_byte_fingerprint(replay) {
+            let composing_fingerprint = byte_fingerprint(slot.composing.as_bytes());
+            tracing::debug!(
+                terminal_id = ?id,
+                seq,
+                replay_len = replay_fingerprint.len,
+                replay_newlines = replay_fingerprint.newlines,
+                replay_hash = replay_fingerprint.hash,
+                draft_len = composing_fingerprint.len,
+                draft_newlines = composing_fingerprint.newlines,
+                draft_hash = composing_fingerprint.hash,
+                "terminal resync received at client reconstruction boundary"
+            );
+        }
         if seq < slot.last_seq || (!slot.desynced && seq == slot.last_seq) {
             if slot.desynced {
                 slot.resync_request_pending = false;
@@ -2539,12 +2556,11 @@ impl TerminalStack {
         if !matches!(slot.kind, TerminalKind::Agent(_)) {
             return None;
         }
-        let text = if !slot.composing.trim().is_empty() {
+        let text = if !slot.composing.is_empty() {
             slot.composing.clone()
         } else {
             slot.prompt_history.last()?.text.clone()
         };
-        let text = lazybox_tui_core::agents::trim_leading_blank_lines(&text).to_string();
         slot.composing = text.clone();
         Some((id, text))
     }
@@ -2863,26 +2879,28 @@ impl TerminalStack {
             Event::Snapshot { terminals, .. } => {
                 let mut previous = std::mem::take(&mut self.terminals);
                 for snap in terminals {
-                    let replay_fingerprint = byte_fingerprint(&snap.replay);
-                    let composing_fingerprint = snap
-                        .composing_buffer
-                        .as_deref()
-                        .map(str::as_bytes)
-                        .map(byte_fingerprint);
-                    tracing::debug!(
-                        terminal_id = ?snap.terminal_id,
-                        last_seq = snap.last_seq,
-                        replay_available = snap.replay_available,
-                        replay_len = replay_fingerprint.len,
-                        replay_newlines = replay_fingerprint.newlines,
-                        replay_hash = replay_fingerprint.hash,
-                        draft_present = composing_fingerprint.is_some(),
-                        draft_len = composing_fingerprint.map_or(0, |fingerprint| fingerprint.len),
-                        draft_newlines = composing_fingerprint
-                            .map_or(0, |fingerprint| fingerprint.newlines),
-                        draft_hash = composing_fingerprint.map_or(0, |fingerprint| fingerprint.hash),
-                        "terminal snapshot applied at client reconstruction boundary"
-                    );
+                    if let Some(replay_fingerprint) = debug_byte_fingerprint(&snap.replay) {
+                        let composing_fingerprint = snap
+                            .composing_buffer
+                            .as_deref()
+                            .map(str::as_bytes)
+                            .map(byte_fingerprint);
+                        tracing::debug!(
+                            terminal_id = ?snap.terminal_id,
+                            last_seq = snap.last_seq,
+                            replay_available = snap.replay_available,
+                            replay_len = replay_fingerprint.len,
+                            replay_newlines = replay_fingerprint.newlines,
+                            replay_hash = replay_fingerprint.hash,
+                            draft_present = composing_fingerprint.is_some(),
+                            draft_len = composing_fingerprint.map_or(0, |fingerprint| fingerprint.len),
+                            draft_newlines = composing_fingerprint
+                                .map_or(0, |fingerprint| fingerprint.newlines),
+                            draft_hash = composing_fingerprint
+                                .map_or(0, |fingerprint| fingerprint.hash),
+                            "terminal snapshot applied at client reconstruction boundary"
+                        );
+                    }
                     if !snap.replay_available
                         && let Some(mut slot) = previous.remove(&snap.terminal_id)
                     {
@@ -3185,16 +3203,19 @@ impl TerminalStack {
                 // longer matches them and drops the live session.
                 for (terminal_id, slot) in &mut self.terminals {
                     if &slot.session_key == from {
-                        let composing_fingerprint = byte_fingerprint(slot.composing.as_bytes());
-                        tracing::debug!(
-                            terminal_id = ?terminal_id,
-                            from = %from,
-                            to = %to,
-                            draft_len = composing_fingerprint.len,
-                            draft_newlines = composing_fingerprint.newlines,
-                            draft_hash = composing_fingerprint.hash,
-                            "terminal draft crossing rebadge boundary"
-                        );
+                        if let Some(composing_fingerprint) =
+                            debug_byte_fingerprint(slot.composing.as_bytes())
+                        {
+                            tracing::debug!(
+                                terminal_id = ?terminal_id,
+                                from = %from,
+                                to = %to,
+                                draft_len = composing_fingerprint.len,
+                                draft_newlines = composing_fingerprint.newlines,
+                                draft_hash = composing_fingerprint.hash,
+                                "terminal draft crossing rebadge boundary"
+                            );
+                        }
                         slot.session_key = to.clone();
                     }
                 }
@@ -8015,11 +8036,12 @@ mod terminal_availability_tests {
     }
 
     /// A snapshot (client reconnect or fresh-daemon restart) restores
-    /// both the in-flight draft and the last submitted message into the
-    /// slot, so `]]r` recall has something to recover.
+    /// the in-flight draft byte-for-byte, including user-entered leading
+    /// and trailing newlines, while also restoring the submitted history.
     #[test]
-    fn snapshot_restores_draft_and_last_message() {
+    fn snapshot_recall_preserves_exact_draft_and_last_message() {
         let sk = SessionKey::new("github:o/r#1");
+        let draft = "\n\t  half typed\n";
         let mut stack = TerminalStack::new(PaneId::new(0));
         stack.set_active_session(Some(sk.clone()));
         stack.on_event(&Event::Snapshot {
@@ -8036,12 +8058,17 @@ mod terminal_availability_tests {
                 on_main: false,
                 model_label: None,
                 prompt_history: typed_history(Some("last submitted")),
-                composing_buffer: Some("half typed".into()),
+                composing_buffer: Some(draft.into()),
             }],
             recent_snippets: Vec::new(),
             dismissed_updates: Vec::new(),
         });
-        assert_eq!(stack.composing_of(TerminalId(1)), Some("half typed"));
+        assert_eq!(stack.composing_of(TerminalId(1)), Some(draft));
+        assert_eq!(
+            stack.recall_prompt(),
+            Some((TerminalId(1), draft.to_string()))
+        );
+        assert_eq!(stack.composing_of(TerminalId(1)), Some(draft));
         assert_eq!(
             stack.last_user_message_of(TerminalId(1)),
             Some("last submitted"),
@@ -8089,24 +8116,6 @@ mod terminal_availability_tests {
             Some((TerminalId(1), "new draft".into())),
             "an in-flight draft wins over the last message",
         );
-    }
-
-    #[test]
-    fn recall_canonicalizes_a_restored_draft_without_dropping_indentation() {
-        let mut stack = stack_with_agent();
-        stack.terminals.get_mut(&TerminalId(1)).unwrap().composing = "\n\t  restored draft".into();
-        assert_eq!(
-            stack.recall_prompt(),
-            Some((TerminalId(1), "restored draft".into())),
-        );
-        assert_eq!(stack.composing_of(TerminalId(1)), Some("restored draft"));
-
-        stack.terminals.get_mut(&TerminalId(1)).unwrap().composing = "    code block".into();
-        assert_eq!(
-            stack.recall_prompt(),
-            Some((TerminalId(1), "    code block".into())),
-        );
-        assert_eq!(stack.composing_of(TerminalId(1)), Some("    code block"));
     }
 
     /// Recall is agent-only: a shell has no meaningful "last prompt".

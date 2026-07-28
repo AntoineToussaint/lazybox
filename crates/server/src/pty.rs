@@ -15,6 +15,10 @@
 
 use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
 use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -160,6 +164,75 @@ pub struct DaemonPty {
     /// after `child` has been moved into the wait thread. `None` when
     /// portable-pty couldn't read the pid (rare; emits a warn).
     child_pid: Option<u32>,
+    /// Wakes the relay reader during drop so it releases the last cloned
+    /// master fd. Closing every master fd hangs up the attach child
+    /// without writing input or signalling a potentially recycled pid.
+    #[cfg(unix)]
+    relay_shutdown: Option<UnixStream>,
+}
+
+impl Drop for DaemonPty {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(shutdown) = self.relay_shutdown.take() {
+            let _ = shutdown.shutdown(std::net::Shutdown::Both);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn duplicate_master_file(master: &dyn MasterPty) -> Result<std::fs::File, PtyError> {
+    let fd = master
+        .as_raw_fd()
+        .ok_or_else(|| PtyError::Open("PTY master has no file descriptor".into()))?;
+    let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+    if duplicate == -1 {
+        return Err(PtyError::Open(std::io::Error::last_os_error().to_string()));
+    }
+    Ok(unsafe { std::fs::File::from_raw_fd(duplicate) })
+}
+
+#[cfg(unix)]
+struct RelayReader {
+    pty: std::fs::File,
+    shutdown: UnixStream,
+}
+
+#[cfg(unix)]
+impl Read for RelayReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            let mut fds = [
+                libc::pollfd {
+                    fd: self.shutdown.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: self.pty.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+            let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, -1) };
+            if ready == -1 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error);
+            }
+            if fds[0].revents != 0 {
+                return Ok(0);
+            }
+            if fds[1].revents != 0 {
+                return match self.pty.read(buf) {
+                    Err(error) if error.raw_os_error() == Some(libc::EIO) => Ok(0),
+                    result => result,
+                };
+            }
+        }
+    }
 }
 
 /// Fixed-capacity byte ring. Writes overwrite the oldest bytes; reads
@@ -566,6 +639,10 @@ pub(crate) fn byte_fingerprint(bytes: &[u8]) -> ByteFingerprint {
     }
 }
 
+pub(crate) fn debug_byte_fingerprint(bytes: &[u8]) -> Option<ByteFingerprint> {
+    tracing::enabled!(tracing::Level::DEBUG).then(|| byte_fingerprint(bytes))
+}
+
 /// A subscription to a `DaemonPty`'s output. Includes the replay so
 /// the caller can reconstruct the screen, then the live stream for
 /// everything after.
@@ -680,20 +757,18 @@ impl DaemonPty {
         }
         drop(pair.slave);
 
+        #[cfg(unix)]
+        let (relay_shutdown, relay_reader_shutdown) = if relay {
+            let (owner, reader) = UnixStream::pair().map_err(|e| PtyError::Open(e.to_string()))?;
+            (Some(owner), Some(reader))
+        } else {
+            (None, None)
+        };
+
         let writer: Box<dyn Write + Send> = if relay {
             #[cfg(unix)]
             {
-                use std::os::fd::FromRawFd;
-
-                let fd = pair
-                    .master
-                    .as_raw_fd()
-                    .ok_or_else(|| PtyError::Open("PTY master has no file descriptor".into()))?;
-                let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
-                if duplicate == -1 {
-                    return Err(PtyError::Open(std::io::Error::last_os_error().to_string()));
-                }
-                Box::new(unsafe { std::fs::File::from_raw_fd(duplicate) })
+                Box::new(duplicate_master_file(&*pair.master)?)
             }
             #[cfg(not(unix))]
             {
@@ -725,27 +800,30 @@ impl DaemonPty {
                         break;
                     }
                 }
-                if relay {
-                    #[cfg(unix)]
-                    if let Some(pid) = child_pid {
-                        tracing::debug!(
-                            child_pid = pid,
-                            "PTY relay closing without synthesized newline or EOF input"
-                        );
-                        unsafe {
-                            libc::kill(pid as i32, SIGTERM_CODE);
-                        }
-                    }
-                }
                 // Receiver drops here; pending `send`s fail with
                 // Closed, which `write()` maps to PtyError::Closed.
             })
             .map_err(|e| PtyError::Spawn(e.to_string()))?;
 
-        let reader = pair
-            .master
-            .try_clone_reader()
-            .map_err(|e| PtyError::Open(e.to_string()))?;
+        let reader: Box<dyn Read + Send> = if relay {
+            #[cfg(unix)]
+            {
+                Box::new(RelayReader {
+                    pty: duplicate_master_file(&*pair.master)?,
+                    shutdown: relay_reader_shutdown.expect("relay shutdown reader"),
+                })
+            }
+            #[cfg(not(unix))]
+            {
+                pair.master
+                    .try_clone_reader()
+                    .map_err(|e| PtyError::Open(e.to_string()))?
+            }
+        } else {
+            pair.master
+                .try_clone_reader()
+                .map_err(|e| PtyError::Open(e.to_string()))?
+        };
 
         let (output_tx, _) = broadcast::channel::<OutputChunk>(BROADCAST_CAPACITY);
         // The seed still counts as chunk seq 1 — the reader thread's
@@ -856,6 +934,8 @@ impl DaemonPty {
             last_seq,
             seed,
             child_pid,
+            #[cfg(unix)]
+            relay_shutdown,
         })
     }
 
@@ -1358,6 +1438,74 @@ mod seed_tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_relay_hangs_up_child_without_writing_input() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let input_path = dir.path().join("input");
+        let exit_path = dir.path().join("exit");
+        let pty = DaemonPty::spawn_relay(
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "trap 'printf HUP > \"$EXIT_PATH\"; exit 0' HUP; \
+                 trap 'printf TERM > \"$EXIT_PATH\"; exit 0' TERM; \
+                 stty raw -echo; printf READY; \
+                 dd bs=1 count=1 of=\"$INPUT_PATH\" 2>/dev/null; \
+                 printf READ > \"$EXIT_PATH\"; while :; do sleep 1; done"
+                    .to_string(),
+            ],
+            small(),
+            None,
+            vec![
+                (
+                    "INPUT_PATH".to_string(),
+                    input_path.to_string_lossy().into_owned(),
+                ),
+                (
+                    "EXIT_PATH".to_string(),
+                    exit_path.to_string_lossy().into_owned(),
+                ),
+            ],
+            &[],
+        )
+        .expect("spawn relay");
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let replay = pty.snapshot_only().await.replay;
+                if replay
+                    .windows(b"READY".len())
+                    .any(|bytes| bytes == b"READY")
+                    && input_path.exists()
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("relay child ready");
+
+        drop(pty);
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !exit_path.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("relay child observed hangup");
+        assert_eq!(
+            std::fs::read_to_string(exit_path).expect("exit marker"),
+            "HUP"
+        );
+        assert_eq!(
+            std::fs::read(input_path).expect("captured relay input"),
+            Vec::<u8>::new()
+        );
+    }
+
     /// A seeded spawn replays the seed AHEAD of the child's own output:
     /// the seed occupies the front of the ring snapshot, live bytes
     /// follow, and `last_seq` accounts for the seed chunk so the
@@ -1720,7 +1868,10 @@ mod persist_tests {
 
 #[cfg(test)]
 mod scrollback_trim_tests {
-    use super::{byte_fingerprint, content_end, is_blank_capture_line, trim_trailing_blank_seed};
+    use super::{
+        byte_fingerprint, content_end, debug_byte_fingerprint, is_blank_capture_line,
+        trim_trailing_blank_seed,
+    };
 
     fn trimmed(bytes: &[u8]) -> Vec<u8> {
         let mut buf = bytes.to_vec();
@@ -1735,6 +1886,13 @@ mod scrollback_trim_tests {
         assert_eq!(fingerprint.newlines, 2);
         assert_eq!(fingerprint, byte_fingerprint(b"one\n two\n"));
         assert_ne!(fingerprint.hash, byte_fingerprint(b"one\nthree").hash);
+    }
+
+    #[test]
+    fn disabled_debug_logging_skips_server_fingerprint_work() {
+        tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
+            assert!(debug_byte_fingerprint(b"large replay").is_none());
+        });
     }
 
     /// A row counts as blank only when it holds no printable glyph:

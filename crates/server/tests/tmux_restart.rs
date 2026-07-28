@@ -10,15 +10,16 @@
 //! backend's minimum — the same gate `TmuxBackend::detect()` applies,
 //! so the test only runs where the backend would actually engage.
 
-use lazybox_core::SessionKey;
-use lazybox_ipc::{TerminalId, TerminalKind, TerminalSnapshot};
-use lazybox_server::ServerConfig;
+use lazybox_core::{SessionKey, Workspace};
+use lazybox_ipc::{Command, Event, TerminalId, TerminalKind, TerminalSnapshot, channel};
 use lazybox_server::backend::tmux::modern_tmux_version;
 use lazybox_server::backend::{SessionBackend, TmuxBackend};
 use lazybox_server::spawn_handler::{handle_record_composing_buffer, snapshot_terminals};
-use lazybox_store::MemoryStore;
+use lazybox_server::{Server, ServerConfig};
+use lazybox_store::{MemoryStore, WorkspaceRecord};
 use libghostty_vt::terminal::{Point, PointCoordinate};
 use libghostty_vt::{Terminal, TerminalOptions, screen::Screen};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -59,9 +60,12 @@ struct PromptCase {
     terminal_id: TerminalId,
     backend_key: String,
     session_key: SessionKey,
+    pr_session_key: SessionKey,
+    issue_workspace_key: lazybox_core::WorkspaceKey,
     agent: String,
     marker: String,
     draft: String,
+    captured_draft: PathBuf,
     expected_rows: Vec<String>,
 }
 
@@ -80,6 +84,166 @@ async fn register_prompt_cases(config: &ServerConfig, cases: &[PromptCase]) {
     }
 }
 
+fn save_workspace(config: &ServerConfig, workspace: &Workspace) {
+    config
+        .store
+        .save_workspace(&WorkspaceRecord {
+            key: workspace.key.as_str().to_string(),
+            created_at: workspace.created_at,
+            workspace_json: Some(serde_json::to_string(workspace).expect("serialize workspace")),
+        })
+        .expect("save workspace");
+}
+
+fn github_task(
+    number: u64,
+    pull_request: bool,
+    closes_issues: Vec<lazybox_core::TaskId>,
+) -> lazybox_core::Task {
+    lazybox_core::Task {
+        id: lazybox_core::TaskId {
+            source: "github".into(),
+            key: format!("o/r#{number}"),
+        },
+        title: format!("task {number}"),
+        body: None,
+        state: lazybox_core::TaskState::Open,
+        role: lazybox_core::TaskRole::Author,
+        ci: lazybox_core::CiStatus::None,
+        review: lazybox_core::ReviewStatus::None,
+        checks: Vec::new(),
+        unread_count: 0,
+        url: format!(
+            "https://github.com/o/r/{}/{number}",
+            if pull_request { "pull" } else { "issues" }
+        ),
+        repo: Some("o/r".into()),
+        branch: pull_request.then(|| format!("pr-{number}")),
+        base_branch: None,
+        updated_at: chrono::Utc::now(),
+        created_at: None,
+        closed_at: None,
+        labels: Vec::new(),
+        reviewers: Vec::new(),
+        assignees: Vec::new(),
+        auto_merge_enabled: false,
+        is_in_merge_queue: false,
+        mergeable: lazybox_core::Mergeable::Mergeable,
+        is_behind_base: false,
+        node_id: None,
+        needs_reply: false,
+        last_commenter: None,
+        recent_activity: Vec::new(),
+        additions: 0,
+        deletions: 0,
+        kind: None,
+        closes_issues,
+    }
+}
+
+fn composer_fixture(agent: &str) -> &'static str {
+    match agent {
+        "claude" => {
+            r#"stty raw -echo
+: > "$DRAFT_PATH"
+: > "$BYTE_PATH"
+redraw() {
+  printf '\033[?25l\033[?2026h\033[2J\033[H%s\r\nCLAUDE\r\n\r\n> ' "$MARKER"
+  printf '%s' "$RENDERED_DRAFT"
+  printf '\033[K\033[?2026l'
+}
+dd bs=1 count="$DRAFT_LEN" of="$DRAFT_PATH" 2>/dev/null
+redraw
+while :; do
+  : > "$BYTE_PATH"
+  dd bs=1 count=1 of="$BYTE_PATH" 2>/dev/null
+  if test -s "$BYTE_PATH"; then
+    cat "$BYTE_PATH" >> "$DRAFT_PATH"
+    redraw
+  fi
+done"#
+        }
+        "codex" => {
+            r#"stty raw -echo
+: > "$DRAFT_PATH"
+: > "$BYTE_PATH"
+redraw() {
+  printf '\033[?25h\033[2J\033[H%s\r\nCODEX\r\n\r\n\033[1m›\033[22m ' "$MARKER"
+  printf '%s' "$RENDERED_DRAFT"
+  printf '\033[J'
+}
+dd bs=1 count="$DRAFT_LEN" of="$DRAFT_PATH" 2>/dev/null
+redraw
+while :; do
+  : > "$BYTE_PATH"
+  dd bs=1 count=1 of="$BYTE_PATH" 2>/dev/null
+  if test -s "$BYTE_PATH"; then
+    cat "$BYTE_PATH" >> "$DRAFT_PATH"
+    redraw
+  fi
+done"#
+        }
+        other => panic!("unsupported composer fixture {other}"),
+    }
+}
+
+async fn snapshot_and_resync_via_client(
+    config: ServerConfig,
+    transition: &str,
+) -> (Vec<TerminalSnapshot>, Vec<(TerminalId, Vec<u8>)>) {
+    let inspection_config = config.clone();
+    let (mut client, server) = channel::pair();
+    let daemon = tokio::spawn(async move {
+        let _ = Server::new(config).serve(server).await;
+    });
+    client.send(Command::Subscribe).expect("subscribe");
+    let snapshots = loop {
+        match client.recv().await.expect("snapshot event") {
+            Event::Snapshot { terminals, .. } => break terminals,
+            _ => continue,
+        }
+    };
+
+    for snapshot in &snapshots {
+        client
+            .send(Command::RequestTerminalResync {
+                terminal_id: snapshot.terminal_id,
+                required_seq: 0,
+            })
+            .expect("request terminal resync");
+    }
+    let mut resyncs = Vec::new();
+    while resyncs.len() < snapshots.len() {
+        match client.recv().await.expect("resync event") {
+            Event::TerminalResync {
+                terminal_id,
+                replay,
+                ..
+            } => resyncs.push((terminal_id, replay)),
+            Event::TerminalResyncUnavailable { terminal_id } => {
+                let backend_key = inspection_config
+                    .terminals
+                    .lock()
+                    .await
+                    .get(&terminal_id)
+                    .cloned();
+                let direct = match backend_key.as_deref() {
+                    Some(key) => inspection_config.backend.snapshot(key).await,
+                    None => panic!("terminal map missing {terminal_id:?}"),
+                };
+                panic!(
+                    "{transition}: authoritative resync unavailable for {terminal_id:?} \
+                     ({backend_key:?}); direct snapshot: {direct:?}"
+                )
+            }
+            _ => {}
+        }
+    }
+    drop(client);
+    daemon.await.expect("serve task");
+    (snapshots, resyncs)
+}
+
 fn assert_prompt_snapshots(cases: &[PromptCase], snapshots: &[TerminalSnapshot], transition: &str) {
     assert_eq!(
         snapshots.len(),
@@ -89,7 +253,13 @@ fn assert_prompt_snapshots(cases: &[PromptCase], snapshots: &[TerminalSnapshot],
     for case in cases {
         let snapshot = snapshots
             .iter()
-            .find(|snapshot| snapshot.terminal_id == case.terminal_id)
+            .find(|snapshot| {
+                snapshot.session_key == case.session_key
+                    && matches!(
+                        &snapshot.kind,
+                        TerminalKind::Agent(agent) if agent == &case.agent
+                    )
+            })
             .expect("case snapshot");
         assert_eq!(
             snapshot.composing_buffer.as_deref(),
@@ -106,6 +276,44 @@ fn assert_prompt_snapshots(cases: &[PromptCase], snapshots: &[TerminalSnapshot],
             String::from_utf8_lossy(
                 &snapshot.replay[snapshot.replay.len().saturating_sub(1_000)..]
             ),
+        );
+        assert_eq!(
+            std::fs::read(&case.captured_draft).expect("agent-observed draft"),
+            case.draft.as_bytes(),
+            "{transition}: the {} composer received different input bytes",
+            case.marker
+        );
+    }
+}
+
+fn assert_prompt_resyncs(
+    cases: &[PromptCase],
+    snapshots: &[TerminalSnapshot],
+    resyncs: &[(TerminalId, Vec<u8>)],
+    transition: &str,
+) {
+    for case in cases {
+        let snapshot = snapshots
+            .iter()
+            .find(|snapshot| {
+                snapshot.session_key == case.session_key
+                    && matches!(
+                        &snapshot.kind,
+                        TerminalKind::Agent(agent) if agent == &case.agent
+                    )
+            })
+            .expect("case snapshot");
+        let replay = resyncs
+            .iter()
+            .find_map(|(terminal_id, replay)| {
+                (*terminal_id == snapshot.terminal_id).then_some(replay)
+            })
+            .expect("case resync");
+        assert_eq!(
+            active_rows(replay, 120, 32),
+            case.expected_rows,
+            "{transition}: resync reconstructed a different composer for {}",
+            case.marker
         );
     }
 }
@@ -348,35 +556,66 @@ async fn tmux_prompt_transition_matrix_is_byte_faithful() {
     let socket = format!("lazybox-test-composer-{}", std::process::id());
     let result = timeout(TEST_DEADLINE, async {
         let store = Arc::new(MemoryStore::new());
-        let mut backend = Arc::new(TmuxBackend::with_socket(&socket).expect("conf written"));
+        let fixture_dir = tempfile::TempDir::new().expect("fixture dir");
+        let backend = Arc::new(TmuxBackend::with_socket(&socket).expect("conf written"));
         let cases = [
-            ("claude-single", "CLAUDE", "single-line-draft"),
-            ("claude-multi", "CLAUDE", "first-line\n  second-line"),
-            ("codex-single", "CODEX", "single-line-draft"),
-            ("codex-multi", "CODEX", "first-line\n  second-line"),
+            ("claude-single", "claude", "single-line-draft"),
+            ("claude-multi", "claude", "first-line\n  second-line"),
+            ("codex-single", "codex", "single-line-draft"),
+            ("codex-multi", "codex", "first-line\n  second-line"),
         ];
         let mut prompt_cases = Vec::new();
         for (index, (name, agent, draft)) in cases.into_iter().enumerate() {
             let marker = format!("MARKER-{name}");
-            let rendered_draft = draft.replace('\n', "\\r\\n");
-            let script = format!(
-                "for i in $(seq 1 40); do echo history-$i; done; \
-                 printf '\\033[2J\\033[H{marker}\\r\\n{agent}\\r\\n\\r\\n> {rendered_draft}'; \
-                 exec sleep 300"
-            );
+            let captured_draft = fixture_dir.path().join(format!("{name}.draft"));
+            let captured_byte = fixture_dir.path().join(format!("{name}.byte"));
             let key = backend
                 .spawn(
-                    &["/bin/sh".to_string(), "-c".to_string(), script],
+                    &[
+                        "/bin/sh".to_string(),
+                        "-c".to_string(),
+                        composer_fixture(agent).to_string(),
+                    ],
                     None,
-                    &[],
+                    &[
+                        ("MARKER".into(), marker.clone()),
+                        (
+                            "DRAFT_PATH".into(),
+                            captured_draft.to_string_lossy().into_owned(),
+                        ),
+                        ("DRAFT_LEN".into(), draft.len().to_string()),
+                        ("RENDERED_DRAFT".into(), draft.replace('\n', "\r\n")),
+                        (
+                            "BYTE_PATH".into(),
+                            captured_byte.to_string_lossy().into_owned(),
+                        ),
+                    ],
                     name,
                 )
                 .await
                 .expect("tmux spawn");
+
+            for attempt in 0..100 {
+                if captured_draft.exists() {
+                    break;
+                }
+                assert!(attempt < 99, "composer fixture never became ready");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            backend
+                .write(&key, draft.as_bytes())
+                .await
+                .expect("type draft into composer");
             let mut before = Vec::new();
             for _ in 0..100 {
                 before = backend.snapshot(&key).await.expect("snapshot").replay;
-                if String::from_utf8_lossy(&before).contains(&marker) {
+                let visible_rows = active_rows(&before, 120, 32);
+                let final_line = draft.lines().last().expect("non-empty draft");
+                if String::from_utf8_lossy(&before).contains(&marker)
+                    && std::fs::read(&captured_draft)
+                        .is_ok_and(|captured| captured == draft.as_bytes())
+                    && visible_rows.iter().any(|row| row.contains(final_line))
+                {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
@@ -385,18 +624,39 @@ async fn tmux_prompt_transition_matrix_is_byte_faithful() {
                 String::from_utf8_lossy(&before).contains(&marker),
                 "initial composer never rendered"
             );
+
+            let issue_number = 100 + index as u64;
+            let pr_number = 200 + index as u64;
+            let issue_task = github_task(issue_number, false, Vec::new());
+            let issue_id = issue_task.id.clone();
+            let issue_workspace = Workspace::from_task(issue_task, chrono::Utc::now());
+            let pr_workspace = Workspace::from_task(
+                github_task(pr_number, true, vec![issue_id]),
+                chrono::Utc::now(),
+            );
+            let issue_workspace_key = issue_workspace.key.clone();
+            let session_key = SessionKey::from(&issue_workspace_key);
+            let pr_session_key = SessionKey::from(&pr_workspace.key);
+
             prompt_cases.push(PromptCase {
                 terminal_id: TerminalId(index as u64 + 1),
                 backend_key: key,
-                session_key: SessionKey::new(format!("test:issue-{index}")),
-                agent: agent.to_ascii_lowercase(),
+                session_key,
+                pr_session_key,
+                issue_workspace_key,
+                agent: agent.to_string(),
                 marker,
                 draft: draft.to_string(),
+                captured_draft,
                 expected_rows: active_rows(&before, 120, 32),
             });
+
+            let config = ServerConfig::with_store_and_backend(store.clone(), backend.clone());
+            save_workspace(&config, &issue_workspace);
+            save_workspace(&config, &pr_workspace);
         }
 
-        let mut config = ServerConfig::with_store_and_backend(store.clone(), backend.clone());
+        let config = ServerConfig::with_store_and_backend(store.clone(), backend.clone());
         register_prompt_cases(&config, &prompt_cases).await;
         for case in &prompt_cases {
             handle_record_composing_buffer(&config, case.terminal_id, &case.draft).await;
@@ -406,80 +666,100 @@ async fn tmux_prompt_transition_matrix_is_byte_faithful() {
         assert_prompt_snapshots(&prompt_cases, &initial, "initial");
 
         for cycle in 0..4 {
-            let snapshots = snapshot_terminals(&config).await;
-            assert_prompt_snapshots(
+            let transition = format!("client reattach cycle {cycle}");
+            let (snapshots, resyncs) =
+                snapshot_and_resync_via_client(config.clone(), &transition).await;
+            assert_prompt_snapshots(&prompt_cases, &snapshots, &transition);
+            assert_prompt_resyncs(
                 &prompt_cases,
                 &snapshots,
-                &format!("client reattach cycle {cycle}"),
+                &resyncs,
+                &format!("client resync cycle {cycle}"),
             );
         }
 
-        for cycle in 0..4 {
-            {
-                let mut meta = config.terminal_meta.lock().await;
-                for (index, case) in prompt_cases.iter_mut().enumerate() {
-                    case.session_key = SessionKey::new(format!("test:pr-{index}-{cycle}"));
-                    meta.get_mut(&case.terminal_id)
-                        .expect("terminal metadata")
-                        .0 = case.session_key.clone();
+        let (mut client, server) = channel::pair();
+        let collapse_daemon = {
+            let config = config.clone();
+            tokio::spawn(async move {
+                let _ = Server::new(config).serve(server).await;
+            })
+        };
+        client.send(Command::Subscribe).expect("subscribe");
+        while !matches!(client.recv().await, Some(Event::Snapshot { .. })) {}
+        for case in &mut prompt_cases {
+            client
+                .send(Command::CollapseIntoPr {
+                    issue_workspace_key: case.issue_workspace_key.as_str().into(),
+                })
+                .expect("collapse issue into PR");
+            loop {
+                match client.recv().await.expect("collapse event") {
+                    Event::TerminalsRebadged { from, to }
+                        if from == case.session_key && to == case.pr_session_key =>
+                    {
+                        case.session_key = to;
+                        break;
+                    }
+                    _ => {}
                 }
             }
-            let snapshots = snapshot_terminals(&config).await;
-            assert_prompt_snapshots(
+        }
+        drop(client);
+        collapse_daemon.await.expect("collapse serve task");
+
+        for cycle in 0..4 {
+            let transition = format!("post-rebadge client reattach cycle {cycle}");
+            let (snapshots, resyncs) =
+                snapshot_and_resync_via_client(config.clone(), &transition).await;
+            assert_prompt_snapshots(&prompt_cases, &snapshots, &transition);
+            assert_prompt_resyncs(
                 &prompt_cases,
                 &snapshots,
-                &format!("TerminalsRebadged cycle {cycle}"),
+                &resyncs,
+                &format!("post-rebadge resync cycle {cycle}"),
             );
         }
 
-        for cycle in 0..4 {
-            drop(config);
-            drop(backend);
-            tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(config);
+        drop(backend);
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
-            backend = Arc::new(TmuxBackend::with_socket(&socket).expect("conf written"));
-            config = ServerConfig::with_store_and_backend(store.clone(), backend.clone());
-            register_prompt_cases(&config, &prompt_cases).await;
-
-            let mut subscriptions = Vec::new();
+        let restarted_backend = Arc::new(TmuxBackend::with_socket(&socket).expect("conf written"));
+        let restarted_config =
+            ServerConfig::with_store_and_backend(store.clone(), restarted_backend.clone());
+        lazybox_server::spawn_handler::recover_sessions(&restarted_config).await;
+        for attempt in 0..100 {
+            let mut ready = true;
             for case in &prompt_cases {
-                subscriptions.push(
-                    backend
-                        .subscribe(&case.backend_key)
-                        .await
-                        .expect("reattach surviving tmux session"),
-                );
-            }
-
-            let mut snapshots = Vec::new();
-            for attempt in 0..100 {
-                snapshots = snapshot_terminals(&config).await;
-                let settled = snapshots.len() == prompt_cases.len()
-                    && snapshots.iter().all(|snapshot| {
-                        snapshot.last_seq > 1
-                            && prompt_cases.iter().any(|case| {
-                                case.terminal_id == snapshot.terminal_id
-                                    && String::from_utf8_lossy(&snapshot.replay)
-                                        .contains(&case.marker)
-                            })
-                    });
-                if settled {
-                    break;
+                match restarted_backend.snapshot(&case.backend_key).await {
+                    Ok(snapshot)
+                        if String::from_utf8_lossy(&snapshot.replay).contains(&case.marker) => {}
+                    _ => ready = false,
                 }
-                assert!(attempt < 99, "tmux live repaint never settled");
-                tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            assert_prompt_snapshots(
+            if ready {
+                break;
+            }
+            assert!(attempt < 99, "recovered tmux relays never became ready");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        for cycle in 0..4 {
+            let transition = format!("post-restart client reattach cycle {cycle}");
+            let (snapshots, resyncs) =
+                snapshot_and_resync_via_client(restarted_config.clone(), &transition).await;
+            assert_prompt_snapshots(&prompt_cases, &snapshots, &transition);
+            assert_prompt_resyncs(
                 &prompt_cases,
                 &snapshots,
-                &format!("daemon restart cycle {cycle}"),
+                &resyncs,
+                &format!("daemon restart resync cycle {cycle}"),
             );
-            drop(subscriptions);
-            tokio::task::yield_now().await;
         }
 
         for case in &prompt_cases {
-            let _ = backend.kill(&case.backend_key).await;
+            let _ = restarted_backend.kill(&case.backend_key).await;
         }
     })
     .await;

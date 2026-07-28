@@ -35,6 +35,35 @@ Press `]]` then `q` to return to the sidebar; the session keeps running.
 (Prefer the old top-level keys? Remap them via `ui.action_keys`, keyed
 `spawn_agent.<id>` — e.g. `spawn_agent.claude: "c"`.)
 
+## Add another agent CLI
+
+Generic agent definitions are loaded from `agents.<id>` at daemon startup.
+Enable the same id and assign its chord explicitly:
+
+```yaml
+setup:
+  agents: [claude, aider]
+  default_agent: claude
+
+agents:
+  aider:
+    name: Aider
+    command: aider
+    args: [--model, sonnet]
+    resume_args: [--resume]
+    asking_patterns: ["Proceed?"]
+
+ui:
+  action_keys:
+    spawn_agent.aider: "a z"
+```
+
+After restarting lazybox, `a z` launches `aider --model sonnet` in the focused
+workspace's managed worktree. Selecting Aider as `setup.default_agent` makes
+`w w` launch it; `a c` still overrides that default with Claude for one task.
+The command runs directly, without a shell, so each argument stays a separate
+YAML list item.
+
 ## Point at the work and press `w w`
 
 `w w` is the primary **work on this** action. The first `w` opens the work

@@ -138,19 +138,25 @@ impl Component for Settings {
         let tab_bar_w = self
             .tabs
             .iter()
-            .map(|t| t.section.title().chars().count() as u16 + 2)
-            .sum::<u16>()
-            + (self.tabs.len().saturating_sub(1) as u16) * 5;
+            .map(|t| crate::util::visual_width(t.section.title()) + 2)
+            .sum::<usize>()
+            + self.tabs.len().saturating_sub(1) * 5;
         let widest = self
             .tabs
             .iter()
             .flat_map(|t| t.rows.iter())
-            .map(|(l, _)| l.chars().count() as u16)
+            .map(|(l, _)| crate::util::visual_width(l))
             .max()
             .unwrap_or(0)
             .max(tab_bar_w);
-        let modal_w = (widest + 8).clamp(46, area.width.saturating_sub(4)).max(20);
-        let modal_h = (tallest + 6).min(area.height.saturating_sub(2)).max(6);
+        let modal_w = widest
+            .saturating_add(8)
+            .max(46)
+            .min(usize::from(area.width.saturating_sub(4))) as u16;
+        let modal_h = tallest
+            .saturating_add(6)
+            .max(6)
+            .min(area.height.saturating_sub(2));
         let x = area.x + area.width.saturating_sub(modal_w) / 2;
         let y = area.y + area.height.saturating_sub(modal_h) / 2;
         let modal = Rect::new(x, y, modal_w, modal_h);
@@ -402,5 +408,12 @@ mod tests {
         t[0].rows.clear();
         let comp = Settings::new(t);
         assert_eq!(comp.active, 1, "must not open onto a blank pane");
+    }
+
+    #[test]
+    fn tiny_terminal_does_not_panic() {
+        let mut comp = Settings::new(tabs());
+        let out = render(&mut comp, 30, 5);
+        assert!(out.lines().count() <= 5);
     }
 }

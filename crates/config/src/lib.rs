@@ -54,10 +54,8 @@ pub struct Config {
     pub display: DisplayConfig,
     pub slack: SlackConfig,
     pub agent: AgentSection,
-    /// Per-agent overrides keyed by agent id (`claude`, `codex`, …).
-    /// Today this carries the model-tier menu (`agents.claude.models`)
-    /// the `w`/`a` chords pick from; see [`AgentEntry`]. Agents without
-    /// an entry fall back to [`lazybox_core::AgentModels::builtin`].
+    /// Per-agent definitions and overrides keyed by agent id (`claude`,
+    /// `codex`, …). See [`AgentEntry`].
     #[serde(default)]
     pub agents: std::collections::BTreeMap<String, AgentEntry>,
     pub shell: ShellSection,
@@ -819,12 +817,22 @@ impl Default for HooksSchedule {
     }
 }
 
-/// Per-agent config block (`agents.<id>:`). Currently just the model
-/// menu; more per-agent knobs can hang here without another top-level
-/// key.
+/// Per-agent config block (`agents.<id>:`).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct AgentEntry {
+    /// Human-readable name for a custom CLI. Defaults to the map key.
+    pub name: Option<String>,
+    /// Executable for a custom CLI. When absent, the entry only
+    /// overrides a built-in agent.
+    pub command: Option<String>,
+    /// Arguments appended to `command` for a fresh session.
+    pub args: Vec<String>,
+    /// Arguments appended to `command` when resuming. `None` reuses
+    /// the fresh-session argv.
+    pub resume_args: Option<Vec<String>>,
+    /// Output markers that mean the custom CLI is waiting for input.
+    pub asking_patterns: Vec<String>,
     /// The tier menu the `w S` / `a M` chords pick from, and which tier
     /// a bare spawn uses. Empty → fall back to the built-in preset for
     /// this agent id.
@@ -834,6 +842,35 @@ pub struct AgentEntry {
     /// default: the check still runs and surfaces "update available",
     /// but installing waits for the manual "update agent CLIs" action.
     pub auto_update: bool,
+}
+
+impl AgentEntry {
+    /// Build the configured fresh-session argv for a custom CLI.
+    pub fn spawn_argv(&self) -> Option<Vec<String>> {
+        let command = self
+            .command
+            .as_deref()
+            .map(str::trim)
+            .filter(|command| !command.is_empty())?;
+        let mut argv = vec![command.to_string()];
+        argv.extend(self.args.iter().cloned());
+        Some(argv)
+    }
+
+    /// Build the custom CLI's resume argv. An omitted `resume_args`
+    /// deliberately reuses the fresh-session command.
+    pub fn resume_argv(&self) -> Option<Vec<String>> {
+        let mut argv = vec![
+            self.command
+                .as_deref()
+                .map(str::trim)
+                .filter(|command| !command.is_empty())?
+                .to_string(),
+        ];
+        let args = self.resume_args.as_ref().unwrap_or(&self.args);
+        argv.extend(args.iter().cloned());
+        Some(argv)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2525,5 +2562,50 @@ agents:
         assert!(cfg.agents["claude"].auto_update);
         assert!(!cfg.agents["codex"].auto_update);
         assert!(!AgentEntry::default().auto_update);
+    }
+
+    #[test]
+    fn custom_agent_entry_builds_spawn_and_resume_argv() {
+        let yaml = r#"
+agents:
+  aider:
+    name: Aider
+    command: aider
+    args: [--model, sonnet]
+    resume_args: [--resume]
+    asking_patterns: ["Proceed?"]
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse custom agent");
+        let entry = &cfg.agents["aider"];
+
+        assert_eq!(
+            entry.spawn_argv(),
+            Some(vec!["aider".into(), "--model".into(), "sonnet".into()])
+        );
+        assert_eq!(
+            entry.resume_argv(),
+            Some(vec!["aider".into(), "--resume".into()])
+        );
+        assert_eq!(entry.name.as_deref(), Some("Aider"));
+        assert_eq!(entry.asking_patterns, ["Proceed?"]);
+    }
+
+    #[test]
+    fn custom_agent_without_resume_args_reuses_spawn_argv() {
+        let entry = AgentEntry {
+            command: Some("  aider  ".into()),
+            args: vec!["--yes".into()],
+            ..Default::default()
+        };
+
+        assert_eq!(entry.resume_argv(), entry.spawn_argv());
+        assert_eq!(
+            AgentEntry {
+                command: Some("  ".into()),
+                ..Default::default()
+            }
+            .spawn_argv(),
+            None
+        );
     }
 }

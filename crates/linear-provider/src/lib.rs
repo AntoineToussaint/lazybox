@@ -285,6 +285,11 @@ impl LinearClient {
             }
             cursor = page_info.end_cursor;
             if cursor.is_none() {
+                tracing::error!(
+                    "Linear paged: hasNextPage=true but endCursor=null; returning {} partial issues",
+                    tasks.len()
+                );
+                partial = true;
                 break;
             }
             page += 1;

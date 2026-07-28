@@ -23,7 +23,7 @@ which is the canonical source of truth for defaults and field names.
 | [`editors`](#editors) | Override / extend the detected editors |
 | [`repos`](#repos) | Per-repo env, mounts, scripts, branch prefix |
 | [`agent`](#agent) | Permission prompts, LLM gateway, agent state-detection timers |
-| [`agents`](#agentsid) | Per-agent overrides — the model-tier menu |
+| [`agents`](#agentsid) | Custom CLI definitions and per-agent model-tier overrides |
 | [`worktree`](#worktree) | Global mounts, scripts, branch prefix, merged-cleanup |
 | [`scan`](#scan) | Roots and depth for read-only external-checkout discovery |
 | [`terminal`](#terminal) | Terminal escape chord + scrollback behavior |
@@ -84,7 +84,7 @@ repos:
 # by hand.
 setup:
   providers: [github, linear]
-  agents: [claude, codex]
+  agents: [claude, codex, aider]
   default_agent: claude      # what `w w` spawns; unset → claude
 
 # ── agent ────────────────────────────────────────────────────────────
@@ -109,6 +109,12 @@ agents:
         - alias: M
           label: GPT-5
           args: ["-m", "gpt-5"]
+  aider:
+    name: Aider
+    command: aider
+    args: [--model, sonnet]
+    resume_args: [--resume]
+    asking_patterns: ["Proceed?"]
 
 # ── worktree ─────────────────────────────────────────────────────────
 worktree:
@@ -151,6 +157,7 @@ ui:
     merge_pr: Ctrl-m
     refresh: Ctrl-r
     spawn_agent.claude: c    # restore a top-level Claude spawn key
+    spawn_agent.aider: "a z" # custom agents choose their own chord
   short_snooze: 4h
   long_snooze: 365d
   browser: Google Chrome
@@ -255,23 +262,25 @@ hand.
 | `quiet_classify_secs` | int | `5` | Quiet-timer window: seconds of PTY silence before a `Working` turn settles to `Done`. Cannot be disabled (`0` falls back to 5); raise it to be less eager to call a turn finished. |
 
 The legacy `name`, `command`, `args`, `resume_args`, and `asking_patterns`
-fields are still accepted under `agent` so old config files parse, but the
-current registry does not read them. Built-in agents (Claude, Codex, Cursor)
-own their spawn/resume command lines, and per-agent knobs (the model-tier menu,
-auto-update) live under [`agents.<id>`](#agentsid). Extra per-spawn args come
-from the model-tier menu's `args` ([`agents.<id>.models`](#agentsid));
-arbitrary CLIs are the `GenericCli` agent's territory (`crates/agents/`).
+fields under `agent` remain accepted so old files parse, but new custom agents
+belong under [`agents.<id>`](#agentsid).
 
 ## `agents.<id>`
 
-Per-agent overrides keyed by agent id (`claude`, `codex`, …). This carries the
-**model-tier menu** the `w S` / `w M` / `w L` and `a S` / `a M` / `a L` chords
-pick from, plus the per-agent `auto_update` switch. Agents without an entry
-fall back to the built-in preset — Claude ships Haiku (`S`) / Sonnet (`M`) /
-Opus (`L`); other agents have no built-in menu.
+Per-agent definitions and overrides keyed by agent id (`claude`, `codex`, …).
+An entry with `command` registers a generic agent CLI at daemon startup. Add
+that id to `setup.agents`, then give it a chord through
+`ui.action_keys.spawn_agent.<id>`. Entries without `command` simply customize
+a built-in. Claude ships a Haiku (`S`) / Sonnet (`M`) / Opus (`L`) model menu;
+other agents have no built-in menu.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
+| `name` | string | agent id | Display name for a custom CLI |
+| `command` | string | unset | Executable for a custom CLI; its entry is registered only when this is set |
+| `args` | list of string | `[]` | Arguments appended to `command` for a fresh session |
+| `resume_args` | list of string | unset | Arguments appended to `command` for resume; unset reuses `args` |
+| `asking_patterns` | list of string | `[]` | Output markers that classify the custom agent as **Input Needed** |
 | `models.default` | string | unset | Alias of the tier a bare spawn uses; unset → the agent's own default model |
 | `models.tiers` | list | `[]` | Ordered tier menu. Each entry: `alias` (the chord key — a single uppercase letter binds as `Shift`, e.g. `S` → `w S`), `label` (shown in the popup and the `◆` tab badge), `args` (appended to the spawn argv) |
 | `models.priority` | map | `{}` | `high` / `medium` / `low` → tier alias, used when a spawn declares no explicit tier but the task carries a priority |
@@ -329,10 +338,12 @@ ui:
     refresh: Ctrl-r        # was Shift-R
     quit: Ctrl-q           # single press (default is the q q chord)
     spawn_agent.claude: c  # restore a top-level Claude spawn key (default a c)
+    spawn_agent.aider: "a z"
 ```
 
 Agent spawn chords are remapped with `spawn_agent.<agent-id>` keys (the
-defaults are the `a` leader chords: `a c` Claude, `a x` Codex, `a u` Cursor).
+built-in defaults are `a c` Claude, `a x` Codex, `a u` Cursor; custom agents
+have no implicit chord).
 Alternatives are separated by `|` (`"g r | Shift-V"`).
 
 **Key-spec format:**

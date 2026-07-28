@@ -1442,6 +1442,7 @@ pub(crate) async fn delete_orphaned_worktree_with(
     path: std::path::PathBuf,
     force: bool,
 ) {
+    let _ownership_guard = config.worktree_ownership_lock.lock().await;
     let tracked = collect_tracked_sessions(config).await;
 
     // Re-inspect, then look up this path in the report. Cheap: one
@@ -1467,6 +1468,16 @@ pub(crate) async fn delete_orphaned_worktree_with(
         });
         return;
     };
+    if !target.is_orphaned()
+        || crate::spawn_handler::managed_worktree_has_live_session_owner(config, &target.path)
+    {
+        let _ = config.bus.send(Event::OrphanedWorktreeDeleted {
+            path,
+            ok: false,
+            error: Some("worktree is no longer orphaned".into()),
+        });
+        return;
+    }
 
     match mgr.delete_inspected(&target, force).await {
         Ok(()) => {

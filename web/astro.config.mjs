@@ -49,6 +49,10 @@ export default defineConfig({
           items: [
             { label: 'Overview', slug: 'docs/tutorials' },
             { label: 'Quickstart', slug: 'docs/tutorials/quickstart' },
+            {
+              label: 'Core workflows',
+              slug: 'docs/tutorials/core-workflows',
+            },
           ],
         },
         {

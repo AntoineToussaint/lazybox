@@ -126,6 +126,7 @@ crossterm          = { version = "0.29", features = ["event-stream"] }
 ratatui            = "0.30"
 tuirealm           = "4.1"
 tui-markdown       = "0.3"
+unicode-segmentation = "1"
 # Markdown parser (CommonMark + GFM tables/strikethrough/tasklists),
 # scoped to the description-reader modal's renderer. Parser-only — no
 # ratatui coupling, so it stays compatible with the workspace's ratatui

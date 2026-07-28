@@ -101,7 +101,7 @@ Status is best-effort as of this catalog's first pass; correct it as you audit.
 | [Spawn shell & agents](terminals-and-agents.md#spawn-shell--agents) | stable | `agents`, `server` |
 | ["Work" command](terminals-and-agents.md#work-command) | stable | `tui-core`, `core` |
 | [Autonomous sessions](terminals-and-agents.md#autonomous-sessions) | beta | `server`, `agents` |
-| [Agent state detection](terminals-and-agents.md#agent-state-detection) | beta | `agents` |
+| [Agent state detection](terminals-and-agents.md#agent-state-detection) | stable | `agents` |
 | [Structured agent runtime](terminals-and-agents.md#structured-agent-runtime) | experimental | `server`, `ipc` |
 | [LLM gateway](terminals-and-agents.md#llm-gateway) | shipped | `server`, `agents`, `config` |
 | [Snippet workflows](terminals-and-agents.md#snippet-workflows) | stable | `config`, `tui` |

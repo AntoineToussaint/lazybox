@@ -42,9 +42,9 @@ description, and body; press `e` there to open the global YAML file.
 Two persisted cues answer different questions:
 
 - **What do I reuse most?** The five most recently sent keys float to the top of
-  every picker, newest first, with the last one selected. Recent is
-  de-duplicated and stored in `~/.lazybox/v2/state.db`, so `]]s` then `Enter`
-  still repeats your last workflow after a restart.
+  every picker, newest first, with the last one selected. Recent order persists
+  in `~/.lazybox/v2/state.db`, so `]]s` then `Enter` still repeats your last
+  workflow after a restart; duplicate keys are folded into one entry.
 - **What has this workspace recently received?** Each workspace remembers an
   MRU of its 12 most recently distinct sent snippet keys. The sidebar renders
   that bounded count as `]N`: `]2` means two different workflows are in
@@ -56,6 +56,9 @@ cancelling the picker records nothing.
 
 ## Create or improve one with Ask Lazybox
 
+Conversational Ask Lazybox requires an enabled Claude Code or Codex agent.
+Without one, the same `?` surface still searches your effective keybindings.
+
 Press `?` and ask in plain language:
 
 > Add a snippet called `feedback` that integrates review feedback, runs the
@@ -66,6 +69,8 @@ confirm-with-preview. If the key already exists, the preview explicitly says it
 will replace the workflow. Accepting validates and writes the global
 `~/.lazybox/snippets.yaml`, then **hot-reloads** the catalog. Use
 `]]sfeedback` immediately; no restart is needed. Declining writes nothing.
+The proposal is an allowlisted action. lazybox—not the agent—owns the filesystem write
+and validates it against the live catalog.
 
 This flow can also improve a built-in or global workflow by replacing its key
 in the global layer. Launch-directory workflows remain file-owned: edit

@@ -153,6 +153,17 @@ pub enum AgentRuntimeMode {
     StreamJson,
 }
 
+/// Host access granted to a structured agent run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentRunAccess {
+    /// Use the structured adapter's normal provider policy.
+    #[default]
+    Default,
+    /// Prevent the child from changing the host and ignore user-provided
+    /// extensions that could escape that boundary.
+    ReadOnly,
+}
+
 /// What to launch inside a terminal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TerminalKind {
@@ -1030,6 +1041,8 @@ pub enum Command {
         mode: AgentRuntimeMode,
         cwd: Option<String>,
         initial_input: Option<AgentInputMessage>,
+        #[serde(default)]
+        access: AgentRunAccess,
     },
     SendAgentInput {
         run_id: AgentRunId,
@@ -1967,8 +1980,8 @@ pub enum WorktreeRecovery {
     /// more specific matches but the text smells like network.
     Transient,
     /// B1: the branch is checked out in another *live* worktree; git
-    /// refuses to co-opt it. The user must free that worktree (close it
-    /// or switch its branch) first.
+    /// refuses to co-opt it. The user must explicitly join or adopt the
+    /// workspace that owns the checkout.
     BranchHeldLive,
     /// B3: a leftover directory holds real uncommitted work, so the
     /// provisioner refuses to reuse or overwrite it. Manual `mv` aside.
@@ -2076,8 +2089,7 @@ impl WorktreeRecovery {
     /// Whether re-pressing (`r` in the modal / a fresh `w`) can succeed
     /// *without* the user first doing something out-of-band. `false` for
     /// the classes that need a manual fix (free the holder, move a dir,
-    /// re-sync the branch, fix the repo string) — the modal still offers
-    /// retry there, but frames it as "after you fix it".
+    /// re-sync the branch, fix the repo string).
     pub fn retryable(&self) -> bool {
         matches!(
             self,
@@ -2090,21 +2102,21 @@ impl WorktreeRecovery {
     }
 
     /// One-line, imperative recovery guidance shown under the error in
-    /// the modal. Always names a concrete next step; the modal appends
-    /// the `r retry · Esc dismiss` affordance separately.
+    /// the modal. Always names a concrete next step; the modal separately
+    /// renders only the affordances valid for this class.
     pub fn hint(&self) -> &'static str {
         match self {
             Self::Transient => "Looks transient — press r to retry.",
             Self::BranchHeldLive => {
-                "That branch is open in another workspace. Close it (or switch its \
-                 branch), then press r."
+                "Press Esc; use x a in the holding workspace to adopt it, or free \
+                 an external checkout."
             }
             Self::DirtyLeftover => {
-                "A leftover folder holds uncommitted work. Move it aside, then press r."
+                "A leftover folder holds uncommitted work. Move it aside, then start again."
             }
             Self::BranchMissing => {
                 "The branch isn't on origin (fork or deleted head). Re-sync the PR \
-                 (g s), then press r."
+                 (g s), then start again."
             }
             Self::Offline => "Can't download files while offline. Reconnect, then press r.",
             Self::DefaultBranchUnresolved => {

@@ -12,6 +12,9 @@ completion. Pick the one that matches what you need to do.
 - **[Run an agent per workspace](/docs/how-to/run-an-agent-per-workspace/)** —
   use `w w` and GitHub priorities to route task context, the target agent,
   model, and reasoning effort into one isolated worktree.
+- **[Keep your issue session in its PR](/docs/how-to/keep-session-from-issue-to-pr/)** —
+  start an agent before the PR exists, then carry its live terminal, worktree,
+  and context into the closing PR.
 - **[Orchestrate multiple agents](/docs/how-to/orchestrate-multiple-agents/)** —
   multi-select, broadcast one instruction to many workspaces, bulk-update
   branches, and hand work from one agent to another.

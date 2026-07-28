@@ -15,6 +15,7 @@
 //! the last step OR pressing Esc/q — returns [`Msg::TourFinished`],
 //! which marks the tour seen and pops it.
 
+use crate::components::comment_render::wrap_one;
 use crate::realm::Msg;
 use crate::realm::UserEvent;
 use lazybox_tui_core::action::{ActionKind, CatalogEntry, Chord, Param};
@@ -196,7 +197,28 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "4 · Juggle many sessions",
+        title: "4 · Keep your session when an issue becomes a PR",
+        body: &[
+            line!("Start work from the issue and keep your session when it"),
+            line!("becomes a PR:"),
+            line!(""),
+            line!("  issue #42  →  PR #108 opens  →  same live agent"),
+            line!(""),
+            line!("When lazybox sees that the PR closes the issue, it carries"),
+            line!("the running terminal and worktree into the PR workspace."),
+            line!("Your agent, edits, scrollback and activity stay with you —"),
+            line!("no duplicate terminal, lost context or manual handoff."),
+            line!(""),
+            line!("With a live terminal, lazybox asks before joining. Press"),
+            line!(
+                TourSegment::Text("Enter to continue. To do it later, select the issue: "),
+                TourSegment::Hint(ActionKind::CollapseIntoPr),
+                TourSegment::Text("."),
+            ),
+        ],
+    },
+    TourStep {
+        title: "5 · Juggle many sessions",
         body: &[
             line!("Every task is its own worktree-backed session, so you can"),
             line!("run several at once without minding the git plumbing."),
@@ -235,7 +257,7 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "5 · Ship it",
+        title: "6 · Ship it",
         body: &[
             line!("When a PR is ready, these shortcuts act on it:"),
             line!(""),
@@ -265,7 +287,7 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "6 · Make it yours",
+        title: "7 · Make it yours",
         body: &[
             line!(
                 TourSegment::Hint(ActionKind::OpenHelp),
@@ -470,7 +492,38 @@ impl Component for Tour {
         let step = &STEPS[self.cursor];
 
         let modal_w = 68u16.min(area.width.saturating_sub(4));
-        let modal_h = 22u16.min(area.height.saturating_sub(2));
+        let content_width = modal_w.saturating_sub(4);
+        let mut lines: Vec<Line> = vec![Line::raw("")];
+        {
+            let mut push_wrapped = |text: &str, style: Style| {
+                for line in wrap_one(
+                    Line::from(Span::styled(text.to_string(), style)),
+                    content_width,
+                ) {
+                    let mut spans = vec![Span::raw("  ")];
+                    spans.extend(line.spans);
+                    lines.push(Line::from(spans));
+                }
+            };
+            push_wrapped(
+                step.title,
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            );
+            push_wrapped("", Style::default());
+            for &line in step.body {
+                if let Some(rendered) = self.render_line(line) {
+                    push_wrapped(&rendered, Style::default().fg(theme.text_strong));
+                }
+            }
+        }
+        let body_lines = lines.len() as u16;
+        let body = Paragraph::new(lines);
+        let modal_h = body_lines
+            .saturating_add(3)
+            .max(22)
+            .min(area.height.saturating_sub(2));
         let x = area.x + area.width.saturating_sub(modal_w) / 2;
         let y = area.y + area.height.saturating_sub(modal_h) / 2;
         let modal = Rect::new(x, y, modal_w, modal_h);
@@ -500,25 +553,7 @@ impl Component for Tour {
             height: 1,
         };
 
-        let mut lines: Vec<Line> = vec![
-            Line::raw(""),
-            Line::from(Span::styled(
-                format!("  {}", step.title),
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::raw(""),
-        ];
-        for &line in step.body {
-            if let Some(rendered) = self.render_line(line) {
-                lines.push(Line::from(Span::styled(
-                    format!("  {rendered}"),
-                    Style::default().fg(theme.text_strong),
-                )));
-            }
-        }
-        frame.render_widget(Paragraph::new(lines), body_rect);
+        frame.render_widget(body, body_rect);
 
         // Footer buttons. Each is rendered AND recorded as a hit-box so
         // `on_mouse` can route clicks — the tour is fully mouse-drivable.
@@ -655,15 +690,16 @@ mod tests {
 
     /// Render the card at `cursor` into a throwaway backend and return
     /// the visible text — the snapshot surface for the step content.
-    fn render_step_with_catalog(
+    fn render_step_with_catalog_at(
         cursor: usize,
         catalog: Vec<lazybox_tui_core::action::CatalogEntry>,
+        w: u16,
+        h: u16,
     ) -> String {
         use tuirealm::ratatui::Terminal;
         use tuirealm::ratatui::backend::TestBackend;
         let mut t = Tour::new(catalog);
         t.cursor = cursor;
-        let (w, h) = (90u16, 30u16);
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
         term.draw(|f| t.view(f, Rect::new(0, 0, w, h))).unwrap();
         let buf = term.backend().buffer();
@@ -677,6 +713,21 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn render_step_with_catalog(
+        cursor: usize,
+        catalog: Vec<lazybox_tui_core::action::CatalogEntry>,
+    ) -> String {
+        render_step_with_catalog_at(cursor, catalog, 90, 30)
+    }
+
+    fn render_step_at(cursor: usize, w: u16, h: u16) -> String {
+        render_step_with_catalog_at(cursor, default_catalog(), w, h)
+    }
+
+    fn render_step(cursor: usize) -> String {
+        render_step_at(cursor, 90, 30)
     }
 
     /// The whole tour rendered top to bottom — one string to scan for
@@ -763,6 +814,65 @@ mod tests {
     #[test]
     fn mentions_adopt_sessions() {
         assert!(render_all().contains("x a"), "adopt-sessions key missing");
+    }
+
+    #[test]
+    fn issue_to_pr_handoff_has_a_dedicated_step() {
+        let matching: Vec<_> = STEPS
+            .iter()
+            .filter(|step| step.title.contains("issue becomes a PR"))
+            .collect();
+        assert_eq!(matching.len(), 1, "handoff must have exactly one full step");
+
+        let rendered = render_step(
+            STEPS
+                .iter()
+                .position(|step| step.title.contains("issue becomes a PR"))
+                .expect("handoff step"),
+        );
+        for expected in [
+            "Start work from the issue and keep your session",
+            "same live agent",
+            "running terminal and worktree",
+            "no duplicate terminal, lost context or manual handoff",
+            "select the issue: x j",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "handoff step missing {expected:?}"
+            );
+        }
+
+        let narrow = render_step_at(
+            STEPS
+                .iter()
+                .position(|step| step.title.contains("issue becomes a PR"))
+                .expect("handoff step"),
+            60,
+            30,
+        );
+        let narrow = narrow
+            .replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            narrow.contains("select the issue: x j"),
+            "narrow terminals must keep the manual join instruction visible:\n{narrow}"
+        );
+    }
+
+    #[test]
+    fn issue_to_pr_handoff_hint_follows_the_runtime_catalog() {
+        let cursor = STEPS
+            .iter()
+            .position(|step| step.title.contains("issue becomes a PR"))
+            .expect("handoff step");
+        let rendered =
+            render_step_with_catalog(cursor, catalog(&[], &[("collapse_into_pr", "Ctrl-j")]));
+
+        assert!(rendered.contains("select the issue: Ctrl-j"));
+        assert!(!rendered.contains("select the issue: x j"));
     }
 
     #[test]

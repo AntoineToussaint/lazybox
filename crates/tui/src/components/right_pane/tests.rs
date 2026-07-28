@@ -696,6 +696,15 @@ mod teaser_tests {
     fn heading_markers_still_strip() {
         assert_eq!(teaser_text("### Title\nbody text", 80), "Title");
     }
+
+    #[test]
+    fn teaser_clips_to_terminal_cell_width() {
+        let teaser = teaser_text("界界界", 4);
+        assert_eq!(teaser, "界…");
+        assert!(crate::util::visual_width(&teaser) <= 4);
+        assert_eq!(teaser_text("👩‍💻abc", 4), "👩‍💻a…");
+        assert_eq!(teaser_text("visible", 0), "");
+    }
 }
 
 #[cfg(test)]

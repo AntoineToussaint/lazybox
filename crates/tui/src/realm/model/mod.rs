@@ -2925,6 +2925,7 @@ impl<T: TerminalAdapter> Model<T> {
         // stale component. `mount` errors with `ComponentAlreadyMounted`
         // and we swallow the result, which left the first-step component
         // frozen on screen while `modal_stack` tracked it as current.
+        self.modal_stack.retain(|mounted| mounted != &id);
         let _ = self.app.remount(
             id.clone(),
             component,

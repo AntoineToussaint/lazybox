@@ -21,7 +21,9 @@ use std::io::{BufRead, Write};
 
 use lazybox_config::Config;
 use lazybox_core::Workspace;
-use lazybox_slack::api::{Client as SlackApi, channel_name_for_terminal, sluggify};
+use lazybox_slack::api::{
+    Client as SlackApi, channel_name_for_terminal, workspace_slug_for_terminal,
+};
 use lazybox_slack::prune::{ChannelInfo, Filter, parse_duration, plan as build_plan};
 use lazybox_store::Store;
 
@@ -359,7 +361,10 @@ pub async fn run_with_clock<S: PruneSlack + ?Sized, I: PrunePromptIo + ?Sized>(
         },
         None => None,
     };
-    let workspace_slug = args.workspace.as_deref().map(sluggify);
+    let workspace_slug = args
+        .workspace
+        .as_deref()
+        .map(|workspace| workspace_slug_for_terminal(workspace, channel_prefix));
     let filter = Filter {
         older_than_secs,
         workspace_slug,

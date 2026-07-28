@@ -14,6 +14,7 @@
 //! per-frame render paths.
 
 use std::borrow::Cow;
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Visual width of a string in terminal cells.
@@ -24,6 +25,11 @@ pub fn visual_width(s: &str) -> usize {
 /// Visual width of a single character in terminal cells.
 pub fn char_visual_width(ch: char) -> usize {
     UnicodeWidthChar::width(ch).unwrap_or(0)
+}
+
+/// Extended grapheme clusters in display order.
+pub fn graphemes(s: &str) -> impl DoubleEndedIterator<Item = &str> {
+    UnicodeSegmentation::graphemes(s, true)
 }
 
 /// Truncate `s` so it fits in `budget` cells, adding `…` when
@@ -37,13 +43,13 @@ pub fn truncate_ellipsis(s: &str, budget: usize) -> Cow<'_, str> {
     }
     let mut out = String::new();
     let mut used = 0usize;
-    for ch in s.chars() {
-        let w = char_visual_width(ch);
+    for grapheme in graphemes(s) {
+        let w = visual_width(grapheme);
         if used + w > budget - 1 {
             break;
         }
         used += w;
-        out.push(ch);
+        out.push_str(grapheme);
     }
     // Never render a double ellipsis: text that was already
     // ellipsis-truncated upstream (e.g. a notice slug) can land its
@@ -75,32 +81,34 @@ pub fn truncate_ellipsis_middle(s: &str, budget: usize) -> Cow<'_, str> {
 
     let mut head = String::new();
     let mut used = 0usize;
-    for ch in s.chars() {
-        let w = char_visual_width(ch);
+    for grapheme in graphemes(s) {
+        let w = visual_width(grapheme);
         if used + w > head_budget {
             break;
         }
         used += w;
-        head.push(ch);
+        head.push_str(grapheme);
     }
 
-    let mut tail_rev: Vec<char> = Vec::new();
+    let mut tail_rev: Vec<&str> = Vec::new();
     used = 0;
-    for ch in s.chars().rev() {
-        let w = char_visual_width(ch);
+    for grapheme in graphemes(s).rev() {
+        let w = visual_width(grapheme);
         if used + w > tail_budget {
             break;
         }
         used += w;
-        tail_rev.push(ch);
+        tail_rev.push(grapheme);
     }
 
     // As in `truncate_ellipsis`: don't double up with an ellipsis
     // the input already carries at the cut point.
-    if !head.ends_with('…') && tail_rev.last() != Some(&'…') {
+    if !head.ends_with('…') && tail_rev.last() != Some(&"…") {
         head.push('…');
     }
-    head.extend(tail_rev.into_iter().rev());
+    for grapheme in tail_rev.into_iter().rev() {
+        head.push_str(grapheme);
+    }
     Cow::Owned(head)
 }
 
@@ -165,6 +173,13 @@ mod tests {
         assert_eq!(truncate_ellipsis("好好好好", 5), "好好…");
         assert_eq!(visual_width(&truncate_ellipsis("好好好好", 6)), 5);
         assert_eq!(truncate_ellipsis("好好好好", 6), "好好…");
+    }
+
+    #[test]
+    fn truncate_preserves_emoji_grapheme_clusters() {
+        assert_eq!(truncate_ellipsis("👩‍💻abc", 4), "👩‍💻a…");
+        assert_eq!(truncate_ellipsis("👩‍💻abc", 3), "👩‍💻…");
+        assert_eq!(truncate_ellipsis_middle("ab👩‍💻cd", 5), "ab…cd");
     }
 
     /// Input already carrying an `…` at the cut point must not render

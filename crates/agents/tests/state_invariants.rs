@@ -135,7 +135,12 @@ const CURRENTS: [Option<AgentState>; 6] = [
     Some(EXITED),
 ];
 
-const LIVENESSES: [Liveness; 3] = [Liveness::Streaming, Liveness::Silent, Liveness::Stalled];
+const LIVENESSES: [Liveness; 4] = [
+    Liveness::Streaming,
+    Liveness::Silent,
+    Liveness::Stalled,
+    Liveness::Watchdog,
+];
 const HOOK_AGES: [Option<Duration>; 3] = [None, Some(FRESH), Some(STALE)];
 
 /// **Exhaustive single-step check of `on_pty_reading`.**
@@ -184,7 +189,7 @@ fn every_single_pty_fold_is_a_legal_move() {
         }
     }
     // Guard against the loop silently collapsing to nothing.
-    assert_eq!(folds, 6 * 4 * 2 * 2 * 3 * 2 * 3 * 2 * 2);
+    assert_eq!(folds, 6 * 4 * 2 * 2 * 4 * 2 * 3 * 2 * 2);
 }
 
 /// **Exhaustive check of the direct `transition` table.**

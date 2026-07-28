@@ -15,11 +15,12 @@
 //! gate** (`hooks_gate_allows`) — the whole "while a lifecycle hook is
 //! fresh, hooks win the Working↔Idle call and the PTY only supplies the
 //! corrections hooks structurally miss" policy — plus the **inactivity
-//! authority** ([`Liveness::Silent`]): a screen classified after true PTY
-//! byte-silence settles a `Working` turn to `Done` even under a fresh
-//! hook, the fail-safe for an agent whose `Stop` hook never fires. Keeping
-//! that policy here (rather than in the daemon's output pump) means one
-//! unit-tested place decides every state, hooks and scraping alike.
+//! authority** ([`Liveness::Silent`] and [`Liveness::Watchdog`]): a screen
+//! classified after the configured byte-silence or content-stability bound
+//! settles a `Working` turn to `Done` even under a fresh hook, the fail-safe
+//! for an agent whose `Stop` hook never fires. Keeping that policy here
+//! (rather than in the daemon's output pump) means one unit-tested place
+//! decides every state, hooks and scraping alike.
 //!
 //! Mapping the lifecycle onto the wire vocabulary:
 //! - `Idle` — freshly launched, no work run yet ("starting").
@@ -117,12 +118,15 @@ pub enum Liveness {
     /// interrupt, a lost hook, or an agent that emits working-shaped hooks
     /// but no terminal one).
     Silent,
-    /// A classification taken after no meaningful **content change** for
-    /// the watchdog window, while bytes may still be flowing (a ticking
-    /// elapsed-time / token counter). A long silent tool call looks exactly
-    /// like this, so this tier stays subordinate to a fresh hook — gated
-    /// identically to [`Liveness::Streaming`].
+    /// A content-stable synthetic reading that remains subordinate to a
+    /// fresh lifecycle hook. Used when the detector buffer is known stale,
+    /// so elapsed time alone is not enough to overrule affirmative hook
+    /// evidence.
     Stalled,
+    /// The configured content-stability watchdog expired. This is the hard
+    /// upper bound for content-stable `Working`, so it may settle the turn
+    /// even when the last lifecycle hook is still fresh.
+    Watchdog,
 }
 
 /// A PTY-detector reading plus the two facts the hooks-primary gate needs
@@ -344,10 +348,11 @@ impl AgentStateMachine {
     /// `Working` demoting a cached `?`), so its cost — re-scanning the
     /// detect window — stays off the per-chunk hot path.
     ///
-    /// The gate lets three PTY corrections through even while a hook is
+    /// The gate lets PTY corrections through even while a hook is
     /// fresh — an on-screen dialog (`InputNeeded`), a ready idle composer,
-    /// and the byte-silent inactivity settle ([`Liveness::Silent`]) — and
-    /// otherwise defers to hooks until they go stale ([`HOOK_STALENESS`]).
+    /// and the bounded inactivity settles ([`Liveness::Silent`] and
+    /// [`Liveness::Watchdog`]) — and otherwise defers to hooks until they go
+    /// stale ([`HOOK_STALENESS`]).
     /// See `hooks_gate_allows` for the full policy. A suppressed reading
     /// returns [`Outcome::Gated`]; a reading that passes is folded exactly
     /// as [`Self::on_reading`] would fold it.
@@ -521,7 +526,7 @@ impl AgentStateMachine {
 /// policy in one place (moved off the daemon's output pump so it can be
 /// exercised without a running terminal).
 ///
-/// Three PTY corrections pass even while a hook is fresh:
+/// PTY corrections that pass even while a hook is fresh:
 ///   - **an on-screen dialog** (`InputNeeded`). An inline mid-turn
 ///     approval fires no hook (`PreToolUse` lands only AFTER approval,
 ///     `Notification` only after Claude goes idle), so the rendered
@@ -533,15 +538,12 @@ impl AgentStateMachine {
 ///     hook-set `InputNeeded`, though: the idle nudge (`Claude is waiting
 ///     for your input`, #62) raises `?` precisely WHEN the composer is
 ///     ready, so a ready composer is corroborating, not contradicting.
-///   - **the byte-silent inactivity settle** ([`Liveness::Silent`] while
-///     `Working`). A busy agent repaints its status ticker within the
-///     quiet window, so a screen that produced no bytes for that long has
-///     genuinely stopped — authoritative enough to settle `Working` →
-///     `Done` without waiting for the hook pipeline to go stale. This is
-///     the fail-safe that keeps a hook-driven agent whose `Stop` hook
-///     never fires from pinning `Working`. Only the settle is granted; a
-///     byte-silent reading never *clears* a parked `?` this way (a live
-///     dialog is itself what silences the stream).
+///   - **the bounded inactivity settles** ([`Liveness::Silent`] or
+///     [`Liveness::Watchdog`] while `Working`). The quiet timer proves byte
+///     silence; the watchdog enforces the configured upper bound when
+///     repaint bytes keep flowing without meaningful progress. Both keep a
+///     missing terminal hook from pinning `Working`. The authority applies
+///     only while `Working`; inactivity never clears a parked `?`.
 ///
 /// Once the last hook is older than [`HOOK_STALENESS`] the terminal
 /// degrades to plain PTY detection — every reading passes, with one
@@ -557,9 +559,10 @@ fn hooks_gate_allows(
     since_last_hook: Duration,
     supersedes_dialog: impl FnOnce() -> bool,
 ) -> bool {
-    // Inactivity authority — overrides even a fresh hook. See the doc
-    // above and [`Liveness::Silent`].
-    if reading.liveness == Liveness::Silent && current == Some(AgentState::Working) {
+    // Inactivity authority — overrides even a fresh hook. See the doc above.
+    if matches!(reading.liveness, Liveness::Silent | Liveness::Watchdog)
+        && current == Some(AgentState::Working)
+    {
         return true;
     }
     if since_last_hook >= HOOK_STALENESS {
@@ -1105,10 +1108,9 @@ mod tests {
     fn silent(state: AgentState) -> PtyReading {
         pty(state, true, Liveness::Silent, state == Idle)
     }
-    /// A classification taken after content-stability (the watchdog); bytes
-    /// may still be ticking, so it stays hook-subordinate.
-    fn stalled(state: AgentState) -> PtyReading {
-        pty(state, true, Liveness::Stalled, state == Idle)
+    /// A classification taken after the configured watchdog bound.
+    fn watchdog(state: AgentState) -> PtyReading {
+        pty(state, true, Liveness::Watchdog, state == Idle)
     }
     /// The per-chunk byte-flow inference while output streams.
     fn streaming(state: AgentState, clear: bool) -> PtyReading {
@@ -1206,19 +1208,13 @@ mod tests {
     }
 
     #[test]
-    fn a_stalled_screen_stays_gated_by_a_fresh_hook() {
-        // The watchdog fires on content-stability, not byte-silence: a
-        // ticking counter keeps the stream alive, which is exactly the
-        // shape of a long silent tool call. So a Stalled classification is
-        // NOT authoritative — it defers to a fresh hook, unchanged.
+    fn content_stability_settles_working_under_a_fresh_hook() {
+        // The configured watchdog is an upper bound on content-stable
+        // Working, including hook-driven terminals whose final Stop hook
+        // was lost while their status ticker kept repainting.
         let mut m = machine();
         assert_eq!(
-            m.on_pty_reading(Some(Working), stalled(Done), Some(FRESH), || false),
-            Outcome::Gated,
-        );
-        // Once the hook pipeline goes stale it forces through.
-        assert_eq!(
-            m.on_pty_reading(Some(Working), stalled(Done), Some(STALE), || false),
+            m.on_pty_reading(Some(Working), watchdog(Done), Some(FRESH), || false),
             Outcome::Committed(Done),
         );
     }

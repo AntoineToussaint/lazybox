@@ -2774,7 +2774,13 @@ async fn continuously_ready_codex_repaints_do_not_starve_the_working_watchdog() 
         let (terminal_id, key) = spawn_idle_codex(&mut client, &mock).await;
 
         const FROZEN_FRAME: &str = "• Working alpha (1s · esc to interrupt)";
-        mock.emit(&key, FROZEN_FRAME).await;
+        client
+            .send(Command::IngestHook {
+                terminal_id,
+                hook: hook(lazybox_ipc::HookEventKind::UserPromptSubmit),
+                backend_key: Some(key.clone()),
+            })
+            .unwrap();
         assert!(
             wait_for(
                 &mut client,
@@ -2790,6 +2796,23 @@ async fn continuously_ready_codex_repaints_do_not_starve_the_working_watchdog() 
             .await
             .is_some(),
             "the Codex turn must enter Working",
+        );
+        mock.emit(&key, FROZEN_FRAME).await;
+        assert!(
+            wait_for(
+                &mut client,
+                |event| matches!(
+                    event,
+                    Event::TerminalOutput {
+                        terminal_id: id,
+                        ..
+                    } if *id == terminal_id
+                ),
+                Duration::from_secs(2),
+            )
+            .await
+            .is_some(),
+            "the first Working frame must reach the pump",
         );
 
         while client.rx.try_recv().is_ok() {}
@@ -2823,7 +2846,7 @@ async fn continuously_ready_codex_repaints_do_not_starve_the_working_watchdog() 
         );
 
         tokio::time::advance(Duration::from_secs(1)).await;
-        for _ in 0..128 {
+        for _ in 0..2_048 {
             if config.agent_state_for(terminal_id).await == Some(lazybox_ipc::AgentState::Done) {
                 break;
             }
@@ -2946,6 +2969,75 @@ async fn continuously_ready_meaningful_codex_output_advances_the_watchdog_anchor
 
         producer.abort();
         let _ = producer.await;
+    })
+    .await
+    .expect("deadline");
+}
+
+/// Output already queued when the watchdog deadline becomes due precedes the
+/// watchdog decision. If that bounded batch contains meaningful progress, it
+/// must advance the anchor instead of allowing stale state to settle first.
+#[tokio::test(start_paused = true)]
+async fn queued_meaningful_output_at_the_watchdog_deadline_prevents_a_stale_done() {
+    timeout(Duration::from_secs(120), async {
+        let _home = IsolatedConfigHome::new();
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config.clone()).await;
+        let (terminal_id, key) = spawn_idle_codex(&mut client, &mock).await;
+
+        const FROZEN_FRAME: &str = "• Working alpha (1s · esc to interrupt)";
+        const PROGRESS_FRAME: &str = "• Working beta (2s · esc to interrupt)";
+        mock.emit(&key, FROZEN_FRAME).await;
+        assert!(
+            wait_for(
+                &mut client,
+                |event| matches!(
+                    event,
+                    Event::AgentState {
+                        terminal_id: id,
+                        state: lazybox_ipc::AgentState::Working,
+                        ..
+                    } if *id == terminal_id
+                ),
+                Duration::from_secs(2),
+            )
+            .await
+            .is_some(),
+        );
+        while client.rx.try_recv().is_ok() {}
+
+        tokio::time::advance(Duration::from_millis(14_999)).await;
+        for _ in 0..32 {
+            mock.emit(&key, FROZEN_FRAME).await;
+        }
+        mock.emit(&key, PROGRESS_FRAME).await;
+        tokio::time::advance(Duration::from_millis(1)).await;
+
+        for _ in 0..256 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            config.agent_state_for(terminal_id).await,
+            Some(lazybox_ipc::AgentState::Working),
+            "the watchdog settled stale state before queued meaningful output",
+        );
+        assert!(
+            wait_for(
+                &mut client,
+                |event| matches!(
+                    event,
+                    Event::AgentState {
+                        terminal_id: id,
+                        state: lazybox_ipc::AgentState::Done,
+                        ..
+                    } if *id == terminal_id
+                ),
+                Duration::from_millis(100),
+            )
+            .await
+            .is_none(),
+            "queued progress was overtaken by a stale Done transition",
+        );
     })
     .await
     .expect("deadline");

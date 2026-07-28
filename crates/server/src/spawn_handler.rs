@@ -6158,6 +6158,27 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
                     (Vec::new(), 0, false)
                 }
             };
+            if let Some(replay_fingerprint) = crate::pty::debug_byte_fingerprint(&replay) {
+                let composing_fingerprint = composing_buffer
+                    .as_deref()
+                    .map(str::as_bytes)
+                    .map(crate::pty::byte_fingerprint);
+                tracing::debug!(
+                    terminal_id = ?id,
+                    key = %key,
+                    last_seq,
+                    replay_available,
+                    replay_len = replay_fingerprint.len,
+                    replay_newlines = replay_fingerprint.newlines,
+                    replay_hash = replay_fingerprint.hash,
+                    draft_present = composing_fingerprint.is_some(),
+                    draft_len = composing_fingerprint.map_or(0, |fingerprint| fingerprint.len),
+                    draft_newlines = composing_fingerprint
+                        .map_or(0, |fingerprint| fingerprint.newlines),
+                    draft_hash = composing_fingerprint.map_or(0, |fingerprint| fingerprint.hash),
+                    "terminal snapshot assembled at restore boundary"
+                );
+            }
             TerminalSnapshot {
                 no_permission: no_permission.contains(&id),
                 on_main: on_main.contains(&id),

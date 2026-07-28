@@ -7245,7 +7245,7 @@ mod leader_tile_tests {
         match inject {
             Some((terminal_id, prompt, submit)) => {
                 assert_eq!(terminal_id, TerminalId(1));
-                assert_eq!(prompt, "recover me");
+                assert_eq!(prompt, "\n  recover me");
                 assert!(!submit, "recall drops text in the composer, unsubmitted");
             }
             None => panic!("`]]r` must emit an InjectPrompt"),
@@ -7254,9 +7254,9 @@ mod leader_tile_tests {
             std::iter::from_fn(|| server.rx.try_recv().ok()).any(|command| matches!(
                 command,
                 IpcCommand::RecordComposingBuffer { terminal_id, buffer }
-                    if terminal_id == TerminalId(1) && buffer == "recover me"
+                    if terminal_id == TerminalId(1) && buffer == "\n  recover me"
             )),
-            "recall must persist the canonical draft mirrored by the client",
+            "recall must persist the exact draft mirrored by the client",
         );
     }
 

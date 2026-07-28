@@ -142,6 +142,29 @@ impl MockBackend {
         });
     }
 
+    /// Inject synthetic output while waiting for every live subscriber to
+    /// accept the chunk. Consumer-scheduling tests use this to keep a
+    /// subscription continuously ready without manufacturing sequence gaps.
+    pub async fn emit_backpressured(&self, key: &str, bytes: impl AsRef<[u8]>) {
+        let bytes = bytes.as_ref().to_vec();
+        let (chunk, subscribers) = {
+            let mut map = self.inner.sessions.lock().await;
+            let Some(session) = map.get_mut(key) else {
+                return;
+            };
+            session.last_seq += 1;
+            let chunk = OutputChunk {
+                seq: session.last_seq,
+                bytes: bytes.clone(),
+            };
+            session.replay.extend_from_slice(&bytes);
+            (chunk, session.subscribers.clone())
+        };
+        for subscriber in subscribers {
+            let _ = subscriber.send(chunk.clone()).await;
+        }
+    }
+
     /// Mark the session exited with `code`. Subsequent `wait_exit`
     /// calls resolve to `Some(code)`. Mirrors a child-exit event.
     pub async fn finish(&self, key: &str, code: i32) {

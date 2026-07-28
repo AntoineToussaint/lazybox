@@ -1221,13 +1221,12 @@ pub async fn handle_spawn(
             // prompt chrome in the current chunk (see `note_pty_activity`).
             // Never armed for non-agent terminals (no detector to run).
             let mut quiet_deadline: Option<tokio::time::Instant> = None;
-            // Working-watchdog anchor (#398): the last time a chunk
-            // changed the content fingerprint — i.e. real output, not
-            // repaint churn. A spinner/keepalive re-arms the quiet
-            // timer above on every frame but never moves this anchor,
-            // so `WORKING_WATCHDOG_AFTER` of churn-only output still
-            // fires `watchdog_escape_working`.
-            let mut watchdog_anchor = tokio::time::Instant::now();
+            // Working watchdog (#398): meaningful content changes move both
+            // its stability origin and deadline. Firing moves only the next
+            // check, so telemetry retains the true no-progress duration.
+            let mut working_watchdog = WorkingWatchdog::new(
+                agent_for_pump.as_ref().and(watchdog_after),
+            );
             let mut watchdog_fp: Option<u64> = None;
             // The last time any byte arrived — moves with `quiet_deadline`,
             // not with the content fingerprint. Feeds the #538 status
@@ -1264,7 +1263,7 @@ pub async fn handle_spawn(
                     last_output_at = tokio::time::Instant::now();
                     quiet_deadline = Some(last_output_at + quiet_after);
                     if progress {
-                        watchdog_anchor = last_output_at;
+                        working_watchdog.note_progress(last_output_at);
                     }
                 }
                 if sub.replay_complete {
@@ -1308,18 +1307,22 @@ pub async fn handle_spawn(
             let mut last_seq = sub.last_seq;
             let mut resync_unavailable_announced = false;
             loop {
+                let watchdog_due = working_watchdog
+                    .prepare_select(tokio::time::Instant::now(), sub.live.len());
                 tokio::select! {
-                    // Biased, chunk arm first: pending output is always
-                    // drained before the quiet timer may classify, so an
-                    // expired deadline racing an arriving chunk can't
-                    // read a screen that's about to change. A busy stream
-                    // starving the timer is exactly the intended
-                    // semantics — chunks flowing means no classification.
+                    // Pending output is drained before the quiet timer may
+                    // classify, so a racing chunk cannot leave the classifier
+                    // one frame behind. At the content-stability deadline the
+                    // pump drains exactly the bounded batch that was already
+                    // queued. New traffic cannot extend that batch, so repaint
+                    // bytes cannot starve the watchdog; meaningful queued
+                    // output can still move its anchor before classification.
                     biased;
-                    chunk = sub.live.recv() => {
+                    chunk = sub.live.recv(), if working_watchdog.receiver_enabled(watchdog_due) => {
                 let Some(chunk) = chunk else {
                     break;
                 };
+                working_watchdog.note_received(watchdog_due);
                 // `subscribe` subscribes before snapshotting, so a live
                 // chunk already covered by the replay (seq within the
                 // snapshot's high-water mark) must be dropped to avoid
@@ -1379,7 +1382,7 @@ pub async fn handle_spawn(
                         last_output_at = tokio::time::Instant::now();
                         quiet_deadline = Some(last_output_at + quiet_after);
                         if progress {
-                            watchdog_anchor = last_output_at;
+                            working_watchdog.note_progress(last_output_at);
                         }
                     }
                     check_ready(
@@ -1446,7 +1449,7 @@ pub async fn handle_spawn(
                     last_output_at = tokio::time::Instant::now();
                     quiet_deadline = Some(last_output_at + quiet_after);
                     if progress {
-                        watchdog_anchor = last_output_at;
+                        working_watchdog.note_progress(last_output_at);
                     }
                 }
                 if !signaled_first_output {
@@ -1479,7 +1482,7 @@ pub async fn handle_spawn(
                     // precondition is false, it just never polls it.
                     _ = tokio::time::sleep_until(
                         quiet_deadline.unwrap_or_else(tokio::time::Instant::now)
-                    ), if quiet_deadline.is_some() => {
+                    ), if quiet_deadline.is_some() && !watchdog_due => {
                         quiet_deadline = None;
                         // #538 status telemetry: the stream went byte-silent.
                         // `elapsed_since_output_ms` is ~the quiet window by
@@ -1494,7 +1497,9 @@ pub async fn handle_spawn(
                             terminal_id = ?id_for_pump,
                             trigger = "quiet-timer",
                             elapsed_since_output_ms = last_output_at.elapsed().as_millis(),
-                            content_stable_ms = watchdog_anchor.elapsed().as_millis(),
+                            content_stable_ms = working_watchdog
+                                .content_stable_for(tokio::time::Instant::now())
+                                .as_millis(),
                             "quiet classify firing",
                         );
                         classify_quiet_screen(
@@ -1517,14 +1522,22 @@ pub async fn handle_spawn(
                     // Working watchdog (#398): unlike the quiet arm
                     // this one cannot be re-armed by byte flow alone —
                     // only a content-fingerprint change moves
-                    // `watchdog_anchor` — so a spinner-alive-but-idle
+                    // the stability origin — so a spinner-alive-but-idle
                     // agent still gets classified and forced out of
                     // `Working`. A no-op tick (terminal not Working,
-                    // or the force gated by fresh hooks) just re-arms.
+                    // or a concurrent state change) just schedules the next
+                    // check without erasing the content-stability age.
                     _ = tokio::time::sleep_until(
-                        watchdog_anchor + watchdog_after.unwrap_or_default()
-                    ), if agent_for_pump.is_some() && watchdog_after.is_some() => {
-                        watchdog_anchor = tokio::time::Instant::now();
+                        working_watchdog.deadline()
+                            .unwrap_or_else(tokio::time::Instant::now)
+                    ), if working_watchdog.deadline().is_some() => {
+                        let fired_at = tokio::time::Instant::now();
+                        let Some((watchdog_window, content_stable)) =
+                            working_watchdog.fire(fired_at)
+                        else {
+                            continue;
+                        };
+                        let elapsed_since_output = last_output_at.elapsed();
                         // #538 status telemetry. Only meaningful while the
                         // turn is actually `Working`: the watchdog arm re-arms
                         // every window regardless of state, so an idle/done
@@ -1540,12 +1553,24 @@ pub async fn handle_spawn(
                         if agent_states_map.lock().await.get(&id_for_pump).copied()
                             == Some(lazybox_ipc::AgentState::Working)
                         {
+                            if content_stable >= watchdog_window.saturating_mul(2) {
+                                tracing::warn!(
+                                    target: "lazybox::agent_status_telemetry",
+                                    terminal_id = ?id_for_pump,
+                                    reason = "pty-watchdog-force",
+                                    elapsed_since_output_ms = elapsed_since_output.as_millis(),
+                                    content_stable_ms = content_stable.as_millis(),
+                                    watchdog_ms = watchdog_window.as_millis(),
+                                    "working terminal exceeded twice the content-stability watchdog",
+                                );
+                            }
                             tracing::debug!(
                                 target: "lazybox::agent_status_telemetry",
                                 terminal_id = ?id_for_pump,
                                 trigger = "working-watchdog",
-                                elapsed_since_output_ms = last_output_at.elapsed().as_millis(),
-                                content_stable_ms = watchdog_after.unwrap_or_default().as_millis(),
+                                reason = "pty-watchdog-force",
+                                elapsed_since_output_ms = elapsed_since_output.as_millis(),
+                                content_stable_ms = content_stable.as_millis(),
                                 "working watchdog firing",
                             );
                         }
@@ -2792,6 +2817,73 @@ pub(crate) const PTY_QUIET_CLASSIFY_AFTER: Duration = Duration::from_secs(5);
 /// the turn closed ([`watchdog_escape_working`]). Default; override
 /// with `agent.working_watchdog_secs` (0 disables).
 pub(crate) const WORKING_WATCHDOG_AFTER: Duration = Duration::from_secs(15);
+
+#[derive(Debug)]
+struct WorkingWatchdog {
+    window: Option<Duration>,
+    content_stable_since: tokio::time::Instant,
+    deadline: Option<tokio::time::Instant>,
+    deadline_batch_remaining: Option<usize>,
+}
+
+impl WorkingWatchdog {
+    fn new(window: Option<Duration>) -> Self {
+        let now = tokio::time::Instant::now();
+        Self {
+            window,
+            content_stable_since: now,
+            deadline: window.map(|window| now + window),
+            deadline_batch_remaining: None,
+        }
+    }
+
+    fn note_progress(&mut self, at: tokio::time::Instant) {
+        self.content_stable_since = at;
+        self.deadline = self.window.map(|window| at + window);
+        self.deadline_batch_remaining = None;
+    }
+
+    fn is_due(&self, now: tokio::time::Instant) -> bool {
+        self.deadline.is_some_and(|deadline| now >= deadline)
+    }
+
+    fn prepare_select(&mut self, now: tokio::time::Instant, queued_chunks: usize) -> bool {
+        let due = self.is_due(now);
+        if due {
+            self.deadline_batch_remaining.get_or_insert(queued_chunks);
+        } else {
+            self.deadline_batch_remaining = None;
+        }
+        due
+    }
+
+    fn receiver_enabled(&self, due: bool) -> bool {
+        !due || self
+            .deadline_batch_remaining
+            .is_some_and(|remaining| remaining > 0)
+    }
+
+    fn note_received(&mut self, due: bool) {
+        if due && let Some(remaining) = &mut self.deadline_batch_remaining {
+            *remaining = remaining.saturating_sub(1);
+        }
+    }
+
+    fn deadline(&self) -> Option<tokio::time::Instant> {
+        self.deadline
+    }
+
+    fn content_stable_for(&self, now: tokio::time::Instant) -> Duration {
+        now.saturating_duration_since(self.content_stable_since)
+    }
+
+    fn fire(&mut self, now: tokio::time::Instant) -> Option<(Duration, Duration)> {
+        let window = self.window?;
+        self.deadline = Some(now + window);
+        self.deadline_batch_remaining = None;
+        Some((window, self.content_stable_for(now)))
+    }
+}
 
 /// The per-spawn watchdog window: the `agent.working_watchdog_secs`
 /// override when set (`0` = disabled → `None`), else the default.
@@ -4081,10 +4173,9 @@ pub(crate) async fn classify_quiet_screen(
     buf: &[u8],
     last_chunk_len: usize,
     // How the pump reached this classification: [`Liveness::Silent`] from
-    // the quiet timer (no BYTES for the quiet window — authoritative that
-    // the turn ended) or [`Liveness::Stalled`] from the watchdog (no
-    // CONTENT change but bytes may still tick). The state machine's gate
-    // treats the two differently for a hook-driven terminal.
+    // the quiet timer (no BYTES for the quiet window) or
+    // [`Liveness::Watchdog`] from the configured content-stability bound.
+    // Both are authoritative inactivity evidence while `Working`.
     liveness: lazybox_agents::Liveness,
     states: &std::sync::Arc<
         tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
@@ -4121,14 +4212,14 @@ pub(crate) async fn classify_quiet_screen(
     // bare return leaves `Working` pinned, because the quiet timer disarms on
     // fire and only a chunk re-arms it, and zero output means no chunk is
     // coming (the watchdog was the sole escape, and none exists when
-    // `working_watchdog_secs = 0`). This mirrors the watchdog's answered
-    // branch exactly, including its liveness: force `Stalled`, not this
-    // timer's `Silent`, so the `Done` yields to a fresh hook through
-    // `commit_pty_reading`'s hooks-primary gate (`Silent` would override it —
-    // see `hooks_gate_allows`). A genuinely live silent turn keeps a fresh
-    // hook and stays `Working`; only a hook-stale or hookless terminal
-    // settles here. Leave the reset latched: a late chunk still clears the
-    // stale buffer via the pump's chunk arm, and by then the state is `Done`.
+    // `working_watchdog_secs = 0`). Force `Stalled`, not this timer's
+    // `Silent`, so the ambiguous zero-output `Done` yields to a fresh hook
+    // through `commit_pty_reading`'s hooks-primary gate (`Silent` would
+    // override it — see `hooks_gate_allows`). A genuinely live silent turn
+    // keeps a fresh hook and stays `Working`; only a hook-stale or hookless
+    // terminal settles here. Leave the reset latched: a late chunk still
+    // clears the stale buffer via the pump's chunk arm, and by then the state
+    // is `Done`.
     if detect_resets.lock().await.contains(&id) {
         commit_pty_reading(
             agent,
@@ -4237,10 +4328,9 @@ pub(crate) async fn classify_quiet_screen(
 /// hookless agents have no other exit), force the turn closed with a
 /// clear `Done` reading.
 ///
-/// The force commits through [`commit_pty_reading`], so the
-/// hooks-primary gate still applies: while hooks are fresh they own
-/// `Working` (a long silent tool call is normal there) and the forced
-/// `Done` is dropped — the pump re-arms and retries a window later.
+/// The force commits through [`commit_pty_reading`]. Its
+/// [`Liveness::Watchdog`] evidence is authoritative while `Working`, so a
+/// fresh lifecycle hook cannot extend the configured upper bound.
 /// A pending answer reset no longer vetoes the whole tick: still latched
 /// a full watchdog window after the answer, it means zero PTY output
 /// followed, so the stale-buffer classify (which would re-raise the
@@ -4285,14 +4375,10 @@ pub(crate) async fn watchdog_escape_working(
     // reset or settle the turn. Skipping the tick then pins `Working`
     // forever (the quiet timer disarms itself and only a chunk re-arms it).
     // So skip only the stale-buffer classify (which would re-raise the
-    // answered prompt) and commit the `Done` straight away. That commit
-    // still folds through `on_pty_reading`'s hooks-primary gate, so a
-    // genuinely live silent turn — one whose agent kept a *fresh* hook —
-    // is suppressed and stays `Working`; only a hook-stale or hookless
-    // terminal actually settles here, and it self-corrects the instant the
-    // next byte arrives (the chunk arm re-classifies from `Done`). Leave
-    // the reset latched — that late chunk clears the buffer via the chunk
-    // arm, and by then the state is `Done`, so the watchdog no-ops.
+    // answered prompt) and commit the `Done` straight away. The configured
+    // watchdog bound is authoritative even for a fresh-hook terminal. Leave
+    // the reset latched — a late chunk clears the buffer via the chunk arm,
+    // and by then the state is `Done`, so the watchdog no-ops.
     let answered = detect_resets.lock().await.contains(&id);
     if !answered {
         classify_quiet_screen(
@@ -4300,11 +4386,9 @@ pub(crate) async fn watchdog_escape_working(
             buf,
             last_chunk_len,
             // The watchdog fires on content-stability, not byte-silence: a
-            // ticking counter can keep the stream alive. So this
-            // classification is `Stalled`, not `Silent` — it stays
-            // subordinate to a fresh hook (a long silent tool call looks
-            // identical).
-            lazybox_agents::Liveness::Stalled,
+            // ticking counter can keep the stream alive. This evidence is
+            // the configured upper bound even when the last hook is fresh.
+            lazybox_agents::Liveness::Watchdog,
             states,
             bus,
             id,
@@ -4332,7 +4416,7 @@ pub(crate) async fn watchdog_escape_working(
             state: lazybox_ipc::AgentState::Done,
             clear: true,
             progress: false,
-            liveness: lazybox_agents::Liveness::Stalled,
+            liveness: lazybox_agents::Liveness::Watchdog,
             ready_for_prompt: false,
         },
         states,
@@ -4397,7 +4481,9 @@ async fn commit_pty_reading(
     // settle to Done / why is it still Working" — is answered by this tier.
     let reason = match (pty.liveness, pty.state) {
         (lazybox_agents::Liveness::Silent, _) => "pty-quiet-settle",
-        (lazybox_agents::Liveness::Stalled, _) => "pty-watchdog-force",
+        (lazybox_agents::Liveness::Stalled | lazybox_agents::Liveness::Watchdog, _) => {
+            "pty-watchdog-force"
+        }
         (lazybox_agents::Liveness::Streaming, lazybox_ipc::AgentState::InputNeeded) => "pty-dialog",
         (lazybox_agents::Liveness::Streaming, _) => "pty-stream",
     };
@@ -5566,7 +5652,6 @@ pub async fn handle_ingest_hook(
         .lock()
         .await
         .insert(terminal_id, std::time::Instant::now());
-
     // Proof-of-submission signal for the prompt-inject paths: a
     // `UserPromptSubmit` hook means the injected prompt actually
     // entered Claude's turn (issue #122's failure is the prompt parked
@@ -10821,11 +10906,10 @@ mod tests {
         );
     }
 
-    /// The hooks-primary gate holds for the watchdog's force too: fresh
-    /// hooks own `Working` (a long silent tool call is normal there), so
-    /// the forced `Done` is dropped until the hook pipeline goes stale.
+    /// The content-stability watchdog is the configured upper bound for a
+    /// Working terminal even when its last lifecycle hook is still fresh.
     #[tokio::test]
-    async fn watchdog_force_respects_fresh_hooks() {
+    async fn watchdog_force_overrides_a_fresh_working_hook() {
         use lazybox_ipc::AgentState::{Done, Working};
         let working = include_bytes!("../../agents/tests/fixtures/working_status_line.bin");
 
@@ -10834,26 +10918,19 @@ mod tests {
         p.hook_now().await;
         assert_eq!(
             p.watchdog().await,
-            Vec::<lazybox_ipc::AgentState>::new(),
-            "fresh hooks own Working — the watchdog force must be gated",
+            vec![Done],
+            "a fresh hook must not extend the configured watchdog bound",
         );
-        assert_eq!(p.states.lock().await.get(&p.id), Some(&Working));
-        // The hook pipeline stopped flowing; the next tick forces.
-        p.hook_driven
-            .lock()
-            .await
-            .insert(p.id, std::time::Instant::now() - Duration::from_secs(31));
-        assert_eq!(p.watchdog().await, vec![Done]);
+        assert_eq!(p.states.lock().await.get(&p.id), Some(&Done));
     }
 
     /// The fix (#504). The quiet timer measures true byte-silence, and a
     /// busy agent repaints its ticker within that window — so a byte-silent
-    /// screen is authoritative that the turn ended. Unlike the watchdog's
-    /// content-stability force (gated above), the quiet classification
-    /// settles a `Working` agent to `Done` even while a hook is still
-    /// fresh. This is what stops a hook-driven agent whose `Stop` hook
-    /// never fires (a manual interrupt, a lost hook) from pinning `Working`
-    /// until the 30s staleness window elapses.
+    /// screen is authoritative that the turn ended. Like the watchdog's
+    /// content-stability bound, the quiet classification settles a
+    /// `Working` agent to `Done` even while a hook is still fresh. This is
+    /// what stops a hook-driven agent whose `Stop` hook never fires (a
+    /// manual interrupt, a lost hook) from pinning `Working`.
     #[tokio::test]
     async fn quiet_settles_working_to_done_despite_a_fresh_hook() {
         use lazybox_ipc::AgentState::{Done, Working};
@@ -10861,7 +10938,7 @@ mod tests {
 
         let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
         assert_eq!(p.feed(working).await, vec![Working]);
-        // A hook fired one instant ago — the watchdog would defer to it.
+        // A hook fired one instant ago.
         p.hook_driven
             .lock()
             .await
@@ -10909,33 +10986,27 @@ mod tests {
         assert_eq!(p.states.lock().await.get(&p.id), Some(&Done));
     }
 
-    /// The zero-output settle is the fail-safe for a *dead* silent turn,
-    /// not a live one. An answered agent that is genuinely still at work
-    /// (a long tool call fires no bytes) keeps a *fresh* lifecycle hook,
-    /// and the forced `Done` still folds through the hooks-primary gate —
-    /// so it is suppressed and the terminal stays `Working`. Only once the
-    /// hook goes stale does the PTY watchdog own the settle. This guards
-    /// the exact invariant the answered path leans on by bypassing the
-    /// classify: the gate, not the classify, is what protects a live turn.
+    /// A fresh hook protects an ambiguous post-answer screen from the short
+    /// quiet timer, but it cannot extend the configured watchdog upper bound.
     #[tokio::test]
-    async fn watchdog_zero_output_settle_still_yields_to_a_fresh_hook() {
-        use lazybox_ipc::AgentState::Working;
+    async fn watchdog_zero_output_settle_obeys_the_bound_despite_a_fresh_hook() {
+        use lazybox_ipc::AgentState::{Done, Working};
         let working = include_bytes!("../../agents/tests/fixtures/working_status_line.bin");
 
         let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
         assert_eq!(p.feed(working).await, vec![Working]);
-        // The user answered and no chunk has cleared the reset — but a
-        // hook landed just now, so the agent is provably still at work.
+        // The user answered, no chunk cleared the reset, and the terminal
+        // remained content-stable for the full watchdog window.
         p.detect_resets.lock().await.insert(p.id);
         p.hook_now().await;
         assert_eq!(
             p.watchdog().await,
-            Vec::<lazybox_ipc::AgentState>::new(),
-            "a fresh hook must gate the forced Done — the turn is still live",
+            vec![Done],
+            "a fresh hook must not extend the configured watchdog bound",
         );
-        assert_eq!(p.states.lock().await.get(&p.id), Some(&Working));
+        assert_eq!(p.states.lock().await.get(&p.id), Some(&Done));
         // The reset stays latched: the buffer still predates the answer,
-        // so the next chunk (not this gated tick) is what clears it.
+        // so the next chunk is still what clears it.
         assert!(p.detect_resets.lock().await.contains(&p.id));
     }
 
@@ -10964,6 +11035,27 @@ mod tests {
             working_watchdog_after(&cfg),
             None,
             "0 disables the watchdog"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watchdog_rechecks_preserve_the_full_content_stability_age() {
+        let mut watchdog = WorkingWatchdog::new(Some(Duration::from_secs(15)));
+
+        tokio::time::advance(Duration::from_secs(15)).await;
+        let first_at = tokio::time::Instant::now();
+        assert!(watchdog.prepare_select(first_at, 0));
+        let (window, first_stable) = watchdog.fire(first_at).unwrap();
+        assert_eq!(first_stable, window);
+
+        tokio::time::advance(Duration::from_secs(15)).await;
+        let second_at = tokio::time::Instant::now();
+        assert!(watchdog.prepare_select(second_at, 0));
+        let (window, second_stable) = watchdog.fire(second_at).unwrap();
+        assert_eq!(
+            second_stable,
+            window.saturating_mul(2),
+            "a no-op watchdog check must not erase the no-progress invariant age",
         );
     }
 

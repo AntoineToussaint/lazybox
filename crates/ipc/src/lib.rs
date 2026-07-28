@@ -153,6 +153,17 @@ pub enum AgentRuntimeMode {
     StreamJson,
 }
 
+/// Host access granted to a structured agent run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentRunAccess {
+    /// Use the structured adapter's normal provider policy.
+    #[default]
+    Default,
+    /// Prevent the child from changing the host and ignore user-provided
+    /// extensions that could escape that boundary.
+    ReadOnly,
+}
+
 /// What to launch inside a terminal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TerminalKind {
@@ -1029,6 +1040,8 @@ pub enum Command {
         mode: AgentRuntimeMode,
         cwd: Option<String>,
         initial_input: Option<AgentInputMessage>,
+        #[serde(default)]
+        access: AgentRunAccess,
     },
     SendAgentInput {
         run_id: AgentRunId,

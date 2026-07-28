@@ -149,7 +149,12 @@ semantics, and per-workspace history.
 
 ## What next
 
-You opened live sessions and coordinated them — now wire up a real repository:
+You opened live sessions and coordinated them. Continue with the
+**[Core workflows](/docs/tutorials/core-workflows/)** to see how lazybox keeps
+the correct task folder, agent session, Git changes, and GitHub state together
+all the way through a real workflow.
+
+Then wire up a real repository:
 
 - **[Add a repo](/docs/how-to/add-a-repo/)** so your own pull requests flow into
   the inbox.

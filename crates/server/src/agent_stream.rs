@@ -8,6 +8,7 @@
 
 use crate::{ResultExt, ServerError};
 use lazybox_agents::StructuredAgentProtocol;
+use lazybox_ipc::AgentRunAccess;
 use serde::{Deserialize, Serialize};
 
 // Local shorthands so the migration touches each `?`/`Context` line
@@ -42,6 +43,8 @@ pub struct AgentStreamConfig {
     /// Extra environment variables for the child (e.g. the LLM-gateway
     /// base URL the interactive PTY path also injects).
     pub env: Vec<(String, String)>,
+    /// Host-access boundary for this structured run.
+    pub access: AgentRunAccess,
 }
 
 impl AgentStreamConfig {
@@ -54,6 +57,7 @@ impl AgentStreamConfig {
             continue_latest: false,
             extra_args: Vec::new(),
             env: Vec::new(),
+            access: AgentRunAccess::Default,
         }
     }
 
@@ -82,6 +86,17 @@ impl AgentStreamConfig {
             "--replay-user-messages".to_string(),
         ];
 
+        if self.access == AgentRunAccess::ReadOnly {
+            argv.extend([
+                "--safe-mode".to_string(),
+                "--strict-mcp-config".to_string(),
+                "--tools".to_string(),
+                String::new(),
+                "--permission-mode".to_string(),
+                "dontAsk".to_string(),
+            ]);
+        }
+
         if let Some(session_id) = &self.resume_session_id {
             argv.push("--resume".to_string());
             argv.push(session_id.clone());
@@ -99,10 +114,13 @@ impl AgentStreamConfig {
             argv.push("resume".to_string());
         }
         argv.extend(["--json".to_string(), "--skip-git-repo-check".to_string()]);
+        if self.access == AgentRunAccess::ReadOnly {
+            argv.extend([
+                "--ignore-user-config".to_string(),
+                "--ignore-rules".to_string(),
+            ]);
+        }
         // The initial turn establishes the thread's sandbox policy.
-        // Help is read-only; future meta-agent actions are executed by
-        // lazybox's own allowlisted command layer, never by granting the
-        // model an unrestricted shell here.
         if self.resume_session_id.is_none() {
             argv.extend(["--sandbox".to_string(), "read-only".to_string()]);
         }

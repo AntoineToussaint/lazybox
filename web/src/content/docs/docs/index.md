@@ -14,6 +14,28 @@ plain shell.
 lazybox is source-agnostic. GitHub and Linear today, with an optional Slack
 mirror — all in the same inbox, with the same keys.
 
+## Start with the core workflows
+
+The **[Core workflows](/docs/tutorials/core-workflows/)** path follows real
+tasks rather than teaching isolated controls. It shows how to:
+
+- open an agent, shell, and editor in the correct task checkout without
+  managing paths or worktrees;
+- trust stable, accurate agent status and jump directly to the workspace that
+  needs input or has failing CI;
+- reuse recent snippets, read the per-workspace `]N` progress cue, and create a
+  new snippet safely through Ask Lazybox;
+- carry a live issue session into its implementation PR, then complete the
+  GitHub workflow inside the TUI;
+- return to the same live tmux-backed session after restarting lazybox;
+- keep 10 repositories and 15 concurrent sessions controlled from one inbox;
+- choose among Claude Code, Codex, Cursor, or a custom CLI while retaining a
+  one-action default; and
+- learn leader shortcuts through which-key and generated, remap-aware help.
+
+Start with the [Quickstart](/docs/tutorials/quickstart/) if lazybox is not
+installed yet, then take the core path before diving into reference material.
+
 :::tip[Start from the issue. Keep your session in the PR.]
 Put an agent to work before a pull request exists. When the closing PR arrives,
 lazybox carries the live terminal, worktree, edits, and activity into the PR
@@ -41,7 +63,10 @@ The documentation is split into four sections, following the
 
 - **[Tutorials](/docs/tutorials/)** — learning-oriented. Start here if you are
   new. The [Quickstart](/docs/tutorials/quickstart/) gets you from clone to a
-  live terminal session, then walks through a two-workspace broadcast.
+  live terminal session in about five minutes; the
+  [Core workflows](/docs/tutorials/core-workflows/) then connects that session
+  to the complete task, Git, agent, and GitHub lifecycle after a two-workspace
+  broadcast.
 - **[How-to guides](/docs/how-to/)** — task-oriented recipes: add a repo, run
   an agent per workspace, [keep that session when its issue becomes a
   PR](/docs/how-to/keep-session-from-issue-to-pr/), orchestrate a fleet of

@@ -133,10 +133,10 @@ pub fn default_badge(id: &str) -> char {
 
 pub trait Agent: Send + Sync {
     /// Stable id used in config and IPC (`"claude"`, `"codex"`, etc.).
-    fn id(&self) -> &'static str;
+    fn id(&self) -> &str;
 
     /// Human-readable display name.
-    fn display_name(&self) -> &'static str;
+    fn display_name(&self) -> &str;
 
     /// Single-letter badge for the sidebar runner column and any other
     /// compact "which agent is live here" indicator. Declared by the
@@ -422,7 +422,7 @@ pub trait Agent: Send + Sync {
 /// Registry of known agents. Keyed by `Agent::id()`.
 #[derive(Default, Clone)]
 pub struct Registry {
-    agents: HashMap<&'static str, Arc<dyn Agent>>,
+    agents: HashMap<String, Arc<dyn Agent>>,
 }
 
 impl Registry {
@@ -435,7 +435,7 @@ impl Registry {
     }
 
     pub fn register(&mut self, agent: Arc<dyn Agent>) {
-        self.agents.insert(agent.id(), agent);
+        self.agents.insert(agent.id().to_string(), agent);
     }
 
     pub fn get(&self, id: &str) -> Option<Arc<dyn Agent>> {
@@ -452,8 +452,8 @@ impl Registry {
             .map_or_else(|| default_badge(id), |a| a.badge())
     }
 
-    pub fn ids(&self) -> impl Iterator<Item = &&'static str> {
-        self.agents.keys()
+    pub fn ids(&self) -> impl Iterator<Item = &str> {
+        self.agents.keys().map(String::as_str)
     }
 }
 
@@ -846,19 +846,19 @@ pub mod builtins {
     /// agent integrations without code.
     #[derive(Debug, Clone)]
     pub struct GenericCli {
-        pub id: &'static str,
-        pub display_name: &'static str,
+        pub id: String,
+        pub display_name: String,
         pub spawn_cmd: Vec<String>,
         pub resume_cmd: Option<Vec<String>>,
         pub asking_patterns: Vec<String>,
     }
 
     impl Agent for GenericCli {
-        fn id(&self) -> &'static str {
-            self.id
+        fn id(&self) -> &str {
+            &self.id
         }
-        fn display_name(&self) -> &'static str {
-            self.display_name
+        fn display_name(&self) -> &str {
+            &self.display_name
         }
         fn spawn(&self, _ctx: &SpawnCtx) -> Vec<String> {
             self.spawn_cmd.clone()
@@ -923,8 +923,8 @@ mod tests {
     #[test]
     fn generic_cli_badge_defaults_to_first_char() {
         let agent = super::builtins::GenericCli {
-            id: "aider",
-            display_name: "Aider",
+            id: "aider".into(),
+            display_name: "Aider".into(),
             spawn_cmd: vec!["aider".into()],
             resume_cmd: None,
             asking_patterns: vec![],
@@ -959,8 +959,8 @@ mod tests {
     #[test]
     fn generic_cli_has_no_inferable_provider() {
         let agent = super::builtins::GenericCli {
-            id: "custom",
-            display_name: "Custom",
+            id: "custom".into(),
+            display_name: "Custom".into(),
             spawn_cmd: vec!["custom".into()],
             resume_cmd: None,
             asking_patterns: vec![],
@@ -975,8 +975,8 @@ mod tests {
         assert!(super::builtins::Codex.update_channel().is_some());
         assert!(super::builtins::Cursor.update_channel().is_some());
         let generic = super::builtins::GenericCli {
-            id: "custom",
-            display_name: "Custom",
+            id: "custom".into(),
+            display_name: "Custom".into(),
             spawn_cmd: vec!["custom".into()],
             resume_cmd: None,
             asking_patterns: vec![],
@@ -1146,8 +1146,8 @@ mod tests {
         assert!(super::builtins::Cursor.spawn_env().is_empty());
         assert!(super::builtins::Cursor.pty_spawn_env().is_empty());
         let generic = super::builtins::GenericCli {
-            id: "custom",
-            display_name: "Custom",
+            id: "custom".into(),
+            display_name: "Custom".into(),
             spawn_cmd: vec!["custom".into()],
             resume_cmd: None,
             asking_patterns: vec![],

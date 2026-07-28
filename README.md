@@ -139,6 +139,7 @@ an orientation of every command.
 📖 **[lazybox.ai/docs](https://lazybox.ai/docs/)** — organized by what you're trying to do:
 
 - **[Quickstart](https://lazybox.ai/docs/tutorials/quickstart/)** — install → run → your first win, in ~5 minutes.
+- **[Core workflows](https://lazybox.ai/docs/tutorials/core-workflows/)** — transparent worktrees, attention-driven agent orchestration, snippets with memory, issue→PR continuity, restart-safe sessions, and the complete GitHub loop.
 - **[How-to guides](https://lazybox.ai/docs/how-to/)** — add a repo, run an agent per workspace, per-repo env/mounts, remote over SSH, mirror to Slack.
 - **[Reference](https://lazybox.ai/docs/reference/)** — every [CLI command](https://lazybox.ai/docs/reference/cli/), the full [keybindings](https://lazybox.ai/docs/reference/keybindings/), and the [`~/.lazybox/config.yaml`](https://lazybox.ai/docs/reference/configuration/) schema.
 - **[Explanation](https://lazybox.ai/docs/explanation/)** — the [mental model](https://lazybox.ai/docs/explanation/mental-model/) (worktree- and agent-per-workspace) and the [architecture](https://lazybox.ai/docs/explanation/architecture/).

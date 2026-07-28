@@ -453,7 +453,7 @@ impl<T: TerminalAdapter> Model<T> {
     ///
     /// **Effects**: returns commands as a `Vec` for testability.
     pub fn handle_help_asked(&mut self, question: String) -> Vec<IpcCommand> {
-        use lazybox_ipc::{AgentInputMessage, AgentRuntimeMode};
+        use lazybox_ipc::{AgentInputMessage, AgentRunAccess, AgentRuntimeMode};
         use lazybox_tui_core::help::{HELP_AGENT_PREFERENCE, HELP_SESSION_KEY, select_help_agent};
 
         let question = question.trim().to_string();
@@ -516,6 +516,7 @@ showing keybinding search only",
                 text: Some(format!("{context}\n\n# Question\n\n{question}")),
                 json: None,
             }),
+            access: AgentRunAccess::ReadOnly,
         }]
     }
 

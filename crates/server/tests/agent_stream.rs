@@ -5,6 +5,7 @@
 // lazybox-server. Import via the public re-export instead;
 // `agent_stream` is already `pub mod` in lib.rs.
 use lazybox_agents::StructuredAgentProtocol;
+use lazybox_ipc::AgentRunAccess;
 use lazybox_server::agent_stream::{
     AgentStreamConfig, ParsedAgentEvent, encode_user_text_jsonl, parse_agent_jsonl_line,
     parse_jsonl_line, user_text_value,
@@ -62,6 +63,22 @@ fn builds_resume_and_extra_args_without_encoding_cwd_as_argv() {
 }
 
 #[test]
+fn read_only_claude_run_disables_ambient_and_builtin_tools() {
+    let mut config = AgentStreamConfig::new(StructuredAgentProtocol::ClaudeStreamJson, "claude");
+    config.access = AgentRunAccess::ReadOnly;
+
+    let argv = config.argv();
+
+    assert!(argv.windows(2).any(|args| args == ["--tools", ""]));
+    assert!(
+        argv.windows(2)
+            .any(|args| args == ["--permission-mode", "dontAsk"])
+    );
+    assert!(argv.iter().any(|arg| arg == "--safe-mode"));
+    assert!(argv.iter().any(|arg| arg == "--strict-mcp-config"));
+}
+
+#[test]
 fn builds_codex_initial_and_resume_argv() {
     let initial = AgentStreamConfig::new(StructuredAgentProtocol::CodexExecJson, "codex");
     assert_eq!(
@@ -91,6 +108,28 @@ fn builds_codex_initial_and_resume_argv() {
             "-",
         ]
     );
+}
+
+#[test]
+fn read_only_codex_run_ignores_ambient_extensions() {
+    let mut config = AgentStreamConfig::new(StructuredAgentProtocol::CodexExecJson, "codex");
+    config.access = AgentRunAccess::ReadOnly;
+
+    let initial = config.argv();
+    for flag in ["--ignore-user-config", "--ignore-rules", "--sandbox"] {
+        assert!(initial.iter().any(|arg| arg == flag), "missing {flag}");
+    }
+    assert!(
+        initial
+            .windows(2)
+            .any(|args| args == ["--sandbox", "read-only"])
+    );
+
+    config.resume_session_id = Some("thread-123".into());
+    let resume = config.argv();
+    for flag in ["--ignore-user-config", "--ignore-rules"] {
+        assert!(resume.iter().any(|arg| arg == flag), "missing {flag}");
+    }
 }
 
 #[test]

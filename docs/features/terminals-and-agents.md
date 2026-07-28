@@ -76,9 +76,9 @@ from your enabled agents; `setup.default_agent` is what
 The `Agent` trait (`crates/agents/src/agent.rs`) defines `spawn`/`resume` argv,
 `detect_state`, `detect_ready_for_prompt`, and prompt injection. Built-ins:
 Claude (`claude`, hooks-based state), Codex (`codex`), Cursor (`cursor-agent`),
-GenericCli (user YAML). `registry()` (`crates/agents/src/lib.rs`) registers the
-builtins; the server's `spawn_handler` builds the worktree, env, and
-`SpawnCtx`, then launches through the tmux wrapper.
+GenericCli (user YAML). The server registers built-ins plus every
+`agents.<id>` entry with a `command` at startup; `spawn_handler` builds the
+worktree, env, and `SpawnCtx`, then launches through the tmux wrapper.
 
 ### Test checklist
 - [ ] `s` opens a shell in the correct worktree dir.
@@ -204,15 +204,17 @@ counterweight to relaxed approvals.
 
 ## Agent state detection
 
-**Status:** beta
+**Status:** stable
 **Crate(s):** `agents` (`src/detect.rs`, `src/state_machine.rs`, `tests/detect_fixtures.rs`), `ipc` (`AgentState`)
 **Config / flags:** `agent.quiet_classify_secs` (quiet-timer → `Done` window, default 5), `agent.working_watchdog_secs` (stuck-`Working` fail-safe, default 15, `0` disables)
 **Key bindings:** `!` jump to next waiting agent, `Shift-F` jump to next failing-CI PR
 
 ### What it does
-Infers whether an agent is **Working**, needs input (**InputNeeded**), or is
-**Idle** from its terminal output, so the sidebar can badge waiting sessions and
-`!` can jump to the next one needing you.
+Tracks whether an agent is **Working**, needs input (**InputNeeded**), or has
+finished a turn (**Done**) so the sidebar can accurately badge sessions and `!`
+can jump to the next one needing you. Structured lifecycle hooks are
+authoritative where the agent provides them; tested terminal-state detection
+and settle invariants cover the remaining paths.
 
 ### How to use it
 Watch the sidebar agent-state chips. Press `!` to move the cursor to the next
@@ -254,8 +256,9 @@ since a ticking counter can mask a genuinely long silent tool call.
 - [ ] `Shift-F` jumps to the next PR with failing/mixed CI.
 
 ### Known sharp edges
-- Detection is heuristic over rendered terminal bytes; novel agent UIs or themes can fool it. The structured runtime is the longer-term replacement.
-- Codex/Cursor pattern sets are narrower than Claude's and miss custom prompt phrasings.
+- Generic CLIs rely on their configured `asking_patterns`; add a pattern when a
+  custom agent uses a prompt lazybox cannot identify.
+- Novel third-party agent UI changes can require a detector fixture update.
 
 ---
 

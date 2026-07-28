@@ -97,7 +97,26 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "1 · Start from scratch",
+        title: "1 · Learn only the next key you need",
+        body: &[
+            line!("lazybox keeps keyboard speed discoverable: actions follow"),
+            line!("the workspace, activity row, or terminal you have focused."),
+            line!(""),
+            line!("Related agent and GitHub actions live behind memorable"),
+            line!("leaders. Press one and a non-racing which-key popup shows"),
+            line!("every valid continuation and label while you use it."),
+            line!(""),
+            line!("Footer hints, context menus, Ask Lazybox, and help all"),
+            line!("read the same effective action catalog, including remaps."),
+            line!(""),
+            line!("Inside a terminal, ]] is the escape leader: lazybox"),
+            line!("commands follow it while ordinary keys reach the program."),
+            line!("Choose a starter preset or remap actions later; the live"),
+            line!("guidance updates to match the bindings you actually use."),
+        ],
+    },
+    TourStep {
+        title: "2 · Always open in the right folder",
         body: &[
             line!("Empty inbox? Here's a first move that needs no PRs:"),
             line!(""),
@@ -115,10 +134,13 @@ const STEPS: &[TourStep] = &[
             line!(
                 TourSegment::Text("  "),
                 TourSegment::Hint(ActionKind::SpawnShell),
-                TourSegment::Text("         start a plain shell in it"),
+                TourSegment::Text(" shell in it    "),
+                TourSegment::Hint(ActionKind::OpenEditor),
+                TourSegment::Text(" editor in it"),
             ),
             line!(""),
-            line!("You land in a fresh git worktree + session, zero setup."),
+            line!("Agent, shell, and editor land in the same task checkout."),
+            line!("lazybox creates, locates, and cleans up the worktree."),
             line!(""),
             line!(
                 TourSegment::Text("In a hurry? "),
@@ -129,12 +151,13 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "2 · Your inbox",
+        title: "3 · Trust the reactive inbox",
         body: &[
             line!("Once you track GitHub repos, PRs and issues flow in,"),
             line!("grouped by repo and sorted by what needs you."),
             line!(""),
-            line!("Rows carry attention signals so you triage at a glance:"),
+            line!("Working, Input Needed, and Done are stable, accurate states."),
+            line!("They combine with the other signals you triage at a glance:"),
             line!("  • CI failing            • review pending"),
             line!("  • agent asking          • unread activity"),
             line!(""),
@@ -157,7 +180,7 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "3 · Point at the work",
+        title: "4 · Point at the work",
         body: &[
             line!(
                 TourSegment::Text("Press "),
@@ -178,10 +201,10 @@ const STEPS: &[TourStep] = &[
             line!("your default agent in the task worktree; with several, it"),
             line!("asks which agent should take it."),
             line!(""),
-            line!("A GitHub high / medium / low priority picks its model tier;"),
+            line!("GitHub priority can pick a configured model tier;"),
             line!(
                 TourSegment::TierHints(ActionKind::WorkWith),
-                TourSegment::Text(" overrides that choice in the TUI."),
+                TourSegment::Text(" overrides when the default agent has tiers."),
             ),
             line!(""),
             line!(
@@ -197,7 +220,62 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "4 · Keep your session when an issue becomes a PR",
+        title: "5 · Choose an agent without lock-in",
+        body: &[
+            line!("Claude Code, Codex, and Cursor are built in. Generic YAML"),
+            line!("agent definitions add any other CLI without recompiling."),
+            line!(""),
+            line!("Choose a default once for the fastest daily path:"),
+            line!(
+                TourSegment::Hint(ActionKind::Work),
+                TourSegment::Text(" briefs it from the focused task and starts it in"),
+            ),
+            line!("the managed worktree when no agent is already running."),
+            line!(""),
+            line!(
+                TourSegment::AgentHints,
+                TourSegment::Text(" explicitly overrides the default for one task."),
+            ),
+            line!("Every agent shares the same status, tmux persistence,"),
+            line!("snippets, model tiers, worktree, and GitHub workflow."),
+        ],
+    },
+    TourStep {
+        title: "6 · Snippets remember your progress",
+        body: &[
+            line!(
+                TourSegment::Hint(ActionKind::OpenSnippets),
+                TourSegment::Text(" opens the picker; from a terminal use ]]s."),
+            ),
+            line!("Send a review snippet, switch workspaces, and return later:"),
+            line!("each workspace remembers the distinct snippets it received."),
+            line!(""),
+            line!("Recently sent snippets float into Recent and persist across"),
+            line!("restarts. Open the picker and press Enter to repeat the"),
+            line!("most recent instruction immediately."),
+            line!(""),
+            line!("The sidebar's ]N badge counts distinct snippet keys already"),
+            line!("applied here, so review, testing, and release work have a"),
+            line!("visible progress cue instead of relying on memory."),
+        ],
+    },
+    TourStep {
+        title: "7 · Return to the same live session",
+        body: &[
+            line!("With supported tmux 3.3 or newer, agent and shell sessions"),
+            line!("outlive the lazybox UI and server process."),
+            line!(""),
+            line!("Start a long task, close or restart lazybox, then reconnect."),
+            line!("lazybox reattaches to the same running tmux session and"),
+            line!("reconstructs its screen and scrollback so work continues."),
+            line!(""),
+            line!("Without supported tmux, lazybox falls back to a raw PTY."),
+            line!("The terminal still works, but its process cannot survive a"),
+            line!("lazybox process restart."),
+        ],
+    },
+    TourStep {
+        title: "8 · Keep your session when an issue becomes a PR",
         body: &[
             line!("Start work from the issue and keep your session when it"),
             line!("becomes a PR:"),
@@ -218,10 +296,10 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "5 · Juggle many sessions",
+        title: "9 · Control many repositories at once",
         body: &[
-            line!("Every task is its own worktree-backed session, so you can"),
-            line!("run several at once without minding the git plumbing."),
+            line!("A real 10-repository, 15-live-session workload stays"),
+            line!("controlled because every task keeps its own workspace."),
             line!(""),
             line!(
                 TourSegment::Text("  "),
@@ -257,14 +335,15 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "6 · Ship it",
+        title: "10 · Complete GitHub work here",
         body: &[
-            line!("When a PR is ready, these shortcuts act on it:"),
+            line!("Read issue/PR descriptions, comments, checks, reviews, and"),
+            line!("conflicts, then act without rebuilding context in a browser."),
             line!(""),
             line!(
                 TourSegment::Text("  "),
-                TourSegment::Hint(ActionKind::MergePr),
-                TourSegment::Text("  merge PR    "),
+                TourSegment::Hint(ActionKind::Reply),
+                TourSegment::Text("  reply       "),
                 TourSegment::Hint(ActionKind::RequestReviewers),
                 TourSegment::Text("  reviewers   "),
                 TourSegment::Hint(ActionKind::AddAssignees),
@@ -279,6 +358,14 @@ const STEPS: &[TourStep] = &[
             ),
             line!(""),
             line!(
+                TourSegment::Hint(ActionKind::MergePr),
+                TourSegment::Text(" merge PR; "),
+                TourSegment::Hint(ActionKind::CloseIssue),
+                TourSegment::Text(" closes issues; "),
+                TourSegment::Hint(ActionKind::Archive),
+                TourSegment::Text(" cleans up."),
+            ),
+            line!(
                 TourSegment::Leader(TourGroup::Github),
                 TourSegment::Text(" shows the menu; the second key picks. Grouped actions"),
             ),
@@ -287,11 +374,31 @@ const STEPS: &[TourStep] = &[
         ],
     },
     TourStep {
-        title: "7 · Make it yours",
+        title: "11 · Ask Lazybox, then reuse the answer",
         body: &[
             line!(
                 TourSegment::Hint(ActionKind::OpenHelp),
-                TourSegment::Text(" opens Ask Lazybox (press "),
+                TourSegment::Text(" searches live keys and opens conversational help."),
+            ),
+            line!("Conversation and actions need enabled Claude Code or Codex;"),
+            line!("effective-key search remains available with any agent."),
+            line!(""),
+            line!("Ask for a review workflow, then ask to create or improve its"),
+            line!("snippet. Inspect the proposed key, category, description,"),
+            line!("and full body in the confirm-with-preview."),
+            line!(""),
+            line!("Actions and config keys are allowlisted and validated."),
+            line!("Nothing changes until you confirm; lazybox, not the agent,"),
+            line!("owns the filesystem write and hot-reloads the catalog."),
+            line!("Use the snippet immediately; it joins Recent and the ]N cue."),
+        ],
+    },
+    TourStep {
+        title: "12 · Make it yours",
+        body: &[
+            line!(
+                TourSegment::Hint(ActionKind::OpenHelp),
+                TourSegment::Text(" opens live help (press "),
                 TourSegment::Hint(ActionKind::OpenHelp),
                 TourSegment::Text(" again for all keys); "),
                 TourSegment::Hint(ActionKind::OpenSettings),
@@ -806,7 +913,7 @@ mod tests {
         assert!(all.contains("x p"), "new-project key missing");
         assert!(all.contains("new workspace"), "new-workspace step missing");
         assert!(
-            all.contains("Start from scratch"),
+            all.contains("Always open in the right folder"),
             "from-scratch step missing",
         );
     }
@@ -884,8 +991,8 @@ mod tests {
             "address only those comments",
             "One running agent gets the brief",
             "default agent in the task worktree",
-            "high / medium / low priority picks its model tier",
-            "w S / w M / w L overrides",
+            "GitHub priority can pick a configured model tier",
+            "w S / w M / w L overrides when",
         ] {
             assert!(
                 all.contains(behavior),
@@ -895,14 +1002,41 @@ mod tests {
     }
 
     #[test]
-    fn snippets_step_is_gone() {
-        // Snippets are a power-user feature; onboarding shouldn't carry
-        // them. Guard against the step creeping back in.
-        let all = render_all().to_lowercase();
-        assert!(
-            !all.contains("snippet"),
-            "snippets leaked back into the tour"
-        );
+    fn covers_the_flagship_workflows() {
+        let all = render_all();
+        for expected in [
+            "Always open in the right folder",
+            "Working, Input Needed, and Done are stable, accurate",
+            "Snippets remember your progress",
+            "Recent and persist across",
+            "sidebar's ]N badge",
+            "same running tmux session",
+            "issue becomes a PR",
+            "Complete GitHub work here",
+            "10-repository, 15-live-session",
+            "Ask Lazybox, then reuse the answer",
+            "Claude Code, Codex, and Cursor are built in",
+            "Learn only the next key you need",
+        ] {
+            assert!(all.contains(expected), "tour missing {expected:?}");
+        }
+    }
+
+    #[test]
+    fn leader_mental_model_precedes_workflow_chords() {
+        let leader_step = STEPS
+            .iter()
+            .position(|step| step.title.contains("Learn only the next key"))
+            .expect("leader mental model");
+        let first_workflow_step = STEPS
+            .iter()
+            .position(|step| step.title.contains("Always open in the right folder"))
+            .expect("first workflow step");
+
+        assert!(leader_step < first_workflow_step);
+        let leader_copy = render_step(leader_step);
+        assert!(leader_copy.contains("non-racing which-key popup"));
+        assert!(leader_copy.contains("Inside a terminal, ]]"));
     }
 
     #[test]

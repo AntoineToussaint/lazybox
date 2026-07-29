@@ -1943,10 +1943,13 @@ pub enum WorktreeStep {
 /// [`Interactive`](Self::Interactive) spawn is one the local user just
 /// asked for (a `w` / `a` / `x …` chord), so its checklist mounts as a
 /// modal they're waiting on; an [`Autonomous`](Self::Autonomous) spawn
-/// is background work the daemon started from a GitHub label or an
-/// `@lazybox` mention, so it reports as a footer notice instead of
-/// stealing focus with a modal (issue #645). A genuine *failure* still
-/// surfaces the modal regardless of origin, since it needs a decision.
+/// is background work the daemon started (a GitHub label, an `@lazybox`
+/// mention, an auto-fix, or session recovery), so it reports as a
+/// footer notice instead of stealing focus with a modal (issue #645).
+/// The [`AutonomousTrigger`] it carries names *which* background source
+/// fired, so the notice can read `(@lazybox)` / `(label)` / … A genuine
+/// *failure* still surfaces the modal regardless of origin, since it
+/// needs a decision.
 ///
 /// This is orthogonal to `handle_spawn`'s `autonomous` flag, which
 /// controls unattended (no-permission) launch mode — a user `w` "work
@@ -1957,9 +1960,36 @@ pub enum SpawnOrigin {
     /// progress modal (today's behavior).
     #[default]
     Interactive,
-    /// The daemon auto-spawned from a GitHub label or `@lazybox`
-    /// mention. Provisioning reports a footer notice, no modal.
-    Autonomous,
+    /// The daemon auto-spawned this as background work. Provisioning
+    /// reports a footer notice tagged with the trigger, no modal.
+    Autonomous(AutonomousTrigger),
+}
+
+/// Which autonomous source started a spawn — names the parenthetical
+/// tag on the "starting agent…" footer notice (issue #645).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AutonomousTrigger {
+    /// An `@lazybox` mention in an issue/PR body or comment.
+    Mention,
+    /// A GitHub label whose presence maps to an auto-spawn.
+    Label,
+    /// The auto-fix scan acting on a CI-failing / conflicting PR.
+    AutoFix,
+    /// Startup session recovery re-provisioning a missing worktree.
+    Restore,
+}
+
+impl AutonomousTrigger {
+    /// Parenthetical tag for the footer notice — e.g. `@lazybox` renders
+    /// as "starting agent on owner/repo#7 (@lazybox)".
+    pub fn notice_tag(self) -> &'static str {
+        match self {
+            Self::Mention => "@lazybox",
+            Self::Label => "label",
+            Self::AutoFix => "auto-fix",
+            Self::Restore => "restored",
+        }
+    }
 }
 
 /// State transition for a [`WorktreeStep`]. `Started`/`Done` advance

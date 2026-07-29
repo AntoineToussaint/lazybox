@@ -7142,7 +7142,7 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
                 // Startup session recovery, not a live user chord — a
                 // re-provision of a missing worktree reports quietly
                 // rather than popping a modal.
-                lazybox_ipc::SpawnOrigin::Autonomous,
+                lazybox_ipc::SpawnOrigin::Autonomous(lazybox_ipc::AutonomousTrigger::Restore),
             )
             .await;
         }
@@ -10534,7 +10534,7 @@ mod tests {
             &dir,
             &session_key,
             false,
-            lazybox_ipc::SpawnOrigin::Autonomous,
+            lazybox_ipc::SpawnOrigin::Autonomous(lazybox_ipc::AutonomousTrigger::Mention),
         )
         .await
         .unwrap();
@@ -10557,7 +10557,7 @@ mod tests {
                 assert_eq!(sk, session_key);
                 assert_eq!(
                     origin,
-                    lazybox_ipc::SpawnOrigin::Autonomous,
+                    lazybox_ipc::SpawnOrigin::Autonomous(lazybox_ipc::AutonomousTrigger::Mention),
                     "the spawn origin must ride every progress step, not just the first",
                 );
                 progress.push((step, status));

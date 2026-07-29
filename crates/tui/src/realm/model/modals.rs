@@ -1755,11 +1755,13 @@ impl<T: TerminalAdapter> Model<T> {
         status: lazybox_ipc::WorktreeStepStatus,
         origin: lazybox_ipc::SpawnOrigin,
     ) {
-        if origin == lazybox_ipc::SpawnOrigin::Interactive {
-            self.apply_worktree_progress(session_key, step, status);
-            return;
-        }
-        // Autonomous from here down.
+        let trigger = match origin {
+            lazybox_ipc::SpawnOrigin::Interactive => {
+                self.apply_worktree_progress(session_key, step, status);
+                return;
+            }
+            lazybox_ipc::SpawnOrigin::Autonomous(trigger) => trigger,
+        };
         if matches!(status, lazybox_ipc::WorktreeStepStatus::Failed(_)) {
             // A failed background provision needs the recovery modal.
             self.autonomous_spawn_notified.remove(&session_key);
@@ -1776,8 +1778,9 @@ impl<T: TerminalAdapter> Model<T> {
         // emits.
         if self.autonomous_spawn_notified.insert(session_key.clone()) {
             self.flash_info(format!(
-                "starting agent on {} (autonomous)",
-                worktree_notice_label(&session_key)
+                "starting agent on {} ({})",
+                worktree_notice_label(&session_key),
+                trigger.notice_tag()
             ));
         }
         if finished {
@@ -1858,6 +1861,13 @@ impl<T: TerminalAdapter> Model<T> {
         if self.worktree_progress_dismissed.as_ref() == Some(session_key) {
             self.worktree_progress_dismissed = None;
         }
+        // Same release for the autonomous footer-notice marker. It
+        // normally clears on the terminal `Setup`/`Done` step, but a
+        // lagged broadcast can drop that event; a live terminal for the
+        // session proves provisioning finished, so drop the marker here
+        // too — otherwise a later re-spawn on this workspace would stay
+        // silent (issue #645).
+        self.autonomous_spawn_notified.remove(session_key);
         if let Some(state) = self.worktree_progress.as_mut()
             && &state.session_key == session_key
             && !state.failed()

@@ -12949,22 +12949,32 @@ mod worktree_progress_dismiss_tests {
         );
     }
 
-    fn autonomous_progress(
+    fn autonomous_progress_with(
         key: &SessionKey,
         step: WorktreeStep,
         status: WorktreeStepStatus,
+        trigger: lazybox_ipc::AutonomousTrigger,
     ) -> IpcEvent {
         IpcEvent::WorktreeProgress {
             session_key: key.clone(),
             step,
             status,
-            origin: lazybox_ipc::SpawnOrigin::Autonomous,
+            origin: lazybox_ipc::SpawnOrigin::Autonomous(trigger),
         }
+    }
+
+    fn autonomous_progress(
+        key: &SessionKey,
+        step: WorktreeStep,
+        status: WorktreeStepStatus,
+    ) -> IpcEvent {
+        autonomous_progress_with(key, step, status, lazybox_ipc::AutonomousTrigger::Mention)
     }
 
     /// An autonomous (label / `@lazybox`) spawn is background work the
     /// user didn't ask for — its provisioning must NOT pop the modal,
-    /// only report a footer notice (issue #645).
+    /// only report a footer notice naming the workspace and trigger
+    /// (issue #645).
     #[test]
     fn autonomous_progress_reports_notice_not_modal() {
         use crate::realm::components::footer::NoticeSeverity;
@@ -12986,11 +12996,40 @@ mod worktree_progress_dismiss_tests {
         );
         let n = m.status.notice.as_ref().expect("autonomous start notice");
         assert_eq!(n.severity, NoticeSeverity::Info);
-        assert!(
-            n.message.contains("codefly-dev/warden-platform#7"),
-            "the notice names the workspace, got {:?}",
-            n.message
+        assert_eq!(
+            n.message, "starting agent on codefly-dev/warden-platform#7 (@lazybox)",
+            "the notice names the workspace (source prefix stripped) and the trigger tag",
         );
+    }
+
+    /// The footer notice's parenthetical names the actual autonomous
+    /// source, not a generic "(autonomous)" — a `@lazybox` mention, a
+    /// GitHub label, and an auto-fix each read differently (issue #645).
+    #[test]
+    fn autonomous_notice_tag_reflects_the_trigger() {
+        let cases = [
+            (lazybox_ipc::AutonomousTrigger::Mention, "(@lazybox)"),
+            (lazybox_ipc::AutonomousTrigger::Label, "(label)"),
+            (lazybox_ipc::AutonomousTrigger::AutoFix, "(auto-fix)"),
+            (lazybox_ipc::AutonomousTrigger::Restore, "(restored)"),
+        ];
+        for (trigger, tag) in cases {
+            let mut m = build_model();
+            let key = SessionKey::from("github:o/r#1");
+            m.handle_daemon_event(autonomous_progress_with(
+                &key,
+                WorktreeStep::Fetch,
+                WorktreeStepStatus::Started,
+                trigger,
+            ));
+            let n = m.status.notice.as_ref().expect("start notice");
+            assert!(
+                n.message.ends_with(tag),
+                "trigger {trigger:?} must tag the notice {tag}, got {:?}",
+                n.message
+            );
+            assert!(!m.modal_stack.contains(&Id::WorktreeProgress));
+        }
     }
 
     /// The one-line "starting agent…" notice fires once, not once per
@@ -13067,6 +13106,71 @@ mod worktree_progress_dismiss_tests {
         assert!(
             !m.autonomous_spawn_notified.contains(&key),
             "a finished provision releases the marker for a future re-spawn"
+        );
+    }
+
+    /// The `Setup`/`Done` step normally clears the notice marker, but a
+    /// lagged broadcast can drop it. A live terminal (`TerminalSpawned`)
+    /// proves provisioning finished, so it must release the marker too —
+    /// otherwise a later re-spawn on the workspace would stay silent.
+    #[test]
+    fn terminal_spawned_backstops_a_dropped_completion_for_the_notice_marker() {
+        let mut m = build_model();
+        let key = SessionKey::from("github:o/r#1");
+
+        m.handle_daemon_event(autonomous_progress(
+            &key,
+            WorktreeStep::Fetch,
+            WorktreeStepStatus::Started,
+        ));
+        assert!(m.autonomous_spawn_notified.contains(&key));
+
+        // The terminal came up but `Setup`/`Done` never arrived (dropped).
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            terminal_id: lazybox_ipc::TerminalId(7),
+            session_key: key.clone(),
+            kind: lazybox_ipc::TerminalKind::Agent("claude".into()),
+            no_permission: true,
+            on_main: false,
+            model_label: None,
+        });
+        assert!(
+            !m.autonomous_spawn_notified.contains(&key),
+            "a live terminal releases the marker even without the Setup/Done step"
+        );
+
+        // A genuine re-spawn on the same workspace announces again.
+        m.handle_daemon_event(autonomous_progress(
+            &key,
+            WorktreeStep::Fetch,
+            WorktreeStepStatus::Started,
+        ));
+        assert!(
+            m.autonomous_spawn_notified.contains(&key),
+            "the re-spawn re-announces because the marker was released"
+        );
+    }
+
+    /// A workspace removed before its autonomous spawn ever reached a
+    /// live terminal must not leak the notice marker.
+    #[test]
+    fn workspace_removal_clears_the_autonomous_notice_marker() {
+        let mut m = build_model();
+        let key = SessionKey::from("github:o/r#1");
+
+        m.handle_daemon_event(autonomous_progress(
+            &key,
+            WorktreeStep::Fetch,
+            WorktreeStepStatus::Started,
+        ));
+        assert!(m.autonomous_spawn_notified.contains(&key));
+
+        m.handle_daemon_event(IpcEvent::WorkspaceRemoved(lazybox_core::WorkspaceKey::new(
+            key.as_str(),
+        )));
+        assert!(
+            !m.autonomous_spawn_notified.contains(&key),
+            "a removed workspace must not leak its notice marker"
         );
     }
 }

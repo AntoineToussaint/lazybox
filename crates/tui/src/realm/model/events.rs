@@ -945,6 +945,11 @@ impl<T: TerminalAdapter> Model<T> {
             // workspace doesn't inherit a stale restore target.
             let session_key: lazybox_core::SessionKey = key.into();
             self.workspace_focus.remove(&session_key);
+            // Drop the autonomous-spawn notice marker so a re-added
+            // workspace's next auto-spawn announces again, and a spawn
+            // that never reached a live terminal can't leak the entry
+            // (issue #645).
+            self.autonomous_spawn_notified.remove(&session_key);
             // Capture this BEFORE the sidebar (below) moves the cursor
             // off the now-gone row: if the user was viewing the
             // workspace being removed, a trailing `WorkspaceMerged`

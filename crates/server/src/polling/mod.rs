@@ -1990,6 +1990,14 @@ async fn dispatch_action(
                 has_prompt = prompt.is_some(),
                 "auto-spawning agent on provider action"
             );
+            // Label-triggered spawns carry a store-backed `dedup_key`;
+            // `@lazybox` mentions dedupe via the 👀 reaction and carry
+            // none. That tells the footer notice which tag to show (#645).
+            let trigger = if dedup_key.is_some() {
+                lazybox_ipc::AutonomousTrigger::Label
+            } else {
+                lazybox_ipc::AutonomousTrigger::Mention
+            };
             crate::spawn_handler::handle_spawn(
                 config,
                 session_key.clone(),
@@ -2011,7 +2019,7 @@ async fn dispatch_action(
                 // Label / `@lazybox`-mention auto-spawn — background work
                 // the user didn't initiate, so it reports a footer notice
                 // instead of stealing focus with a progress modal (#645).
-                lazybox_ipc::SpawnOrigin::Autonomous,
+                lazybox_ipc::SpawnOrigin::Autonomous(trigger),
             )
             .await;
             // Record the label marker only once a live agent session
@@ -2207,7 +2215,9 @@ async fn dispatch_action(
                         false,
                         // Auto-fix is daemon-initiated background work —
                         // report it, don't interrupt with a modal (#645).
-                        lazybox_ipc::SpawnOrigin::Autonomous,
+                        lazybox_ipc::SpawnOrigin::Autonomous(
+                            lazybox_ipc::AutonomousTrigger::AutoFix,
+                        ),
                     )
                     .await;
                 }

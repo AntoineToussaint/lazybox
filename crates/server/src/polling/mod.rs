@@ -5294,6 +5294,22 @@ fn github_slug_from_config_scopes(key: &lazybox_core::ProjectKey) -> Option<Stri
     key.github_slug_from_scopes(scopes.iter().map(String::as_str))
 }
 
+fn github_slug_for_workspace(
+    project_key: &lazybox_core::ProjectKey,
+    workspace: &Workspace,
+) -> Option<String> {
+    if project_key.source_prefix() != "github" {
+        return None;
+    }
+    workspace
+        .primary_task()
+        .and_then(|task| task.repo.as_deref())
+        .filter(|slug| project_key.matches_github_slug(slug))
+        .map(str::to_string)
+        .or_else(|| github_slug_from_config_scopes(project_key))
+        .or_else(|| project_key.unambiguous_github_slug())
+}
+
 /// Prepare the missing parent Project, if any, so it can be committed in the
 /// same atomic batch as the workspace that references it.
 fn project_record_for_workspace(
@@ -5303,30 +5319,52 @@ fn project_record_for_workspace(
     let Some(project_key) = workspace.project_key.clone() else {
         return Ok(None);
     };
-    // Skip the write + broadcast if we've already registered this
-    // project. Keeps bus traffic to one event per project per process
-    // — without this, every workspace upsert would re-fire the project
-    // event and consumers that drain "one event per upsert" would
-    // desync (mark_workspace_read in particular).
-    if config.store.get_project(&project_key)?.is_some() {
-        return Ok(None);
+    let github_slug = github_slug_for_workspace(&project_key, workspace);
+    if let Some(record) = config.store.get_project(&project_key)? {
+        let Some(json) = record.project_json else {
+            return Ok(None);
+        };
+        let Ok(mut project) = serde_json::from_str::<lazybox_core::Project>(&json) else {
+            return Ok(None);
+        };
+        if project.github_repo().is_some() {
+            return Ok(None);
+        }
+        let Some(slug) = github_slug else {
+            return Ok(None);
+        };
+        if !project.set_github_repo(&slug) {
+            return Ok(None);
+        }
+        let json =
+            serde_json::to_string(&project).map_err(|source| CommitError::SerializeProject {
+                key: project_key.as_str().to_string(),
+                source,
+            })?;
+        return Ok(Some((
+            project,
+            lazybox_store::ProjectRecord {
+                project_json: Some(json),
+                ..record
+            },
+        )));
     }
-    // Display name for the project. Prefer the workspace's
-    // `primary_task().repo` (the "owner/repo" string) when present —
-    // that's what the sidebar header has always shown. A blank
-    // workspace has no task, so recover the exact `owner/repo` from the
-    // user's subscribed scope slug. A key-only fallback is safe only
-    // when the flat key contains one possible owner/repo boundary.
-    let name = workspace
-        .primary_task()
-        .and_then(|t| t.repo.clone())
-        .or_else(|| github_slug_from_config_scopes(&project_key))
-        .or_else(|| project_key.unambiguous_github_slug())
-        .unwrap_or_else(|| match project_key.source_prefix() {
-            "github" => project_key.as_str().to_string(),
-            _ => project_key.display_name(),
-        });
-    let project = lazybox_core::Project::new(project_key.clone(), name, Utc::now());
+
+    let project = if let Some(slug) = github_slug {
+        let (owner, repo) = slug
+            .split_once('/')
+            .expect("validated GitHub slug contains owner/repo");
+        lazybox_core::Project::github(owner, repo, Utc::now())
+    } else {
+        let name = workspace
+            .primary_task()
+            .and_then(|task| task.repo.clone())
+            .unwrap_or_else(|| match project_key.source_prefix() {
+                "github" => project_key.as_str().to_string(),
+                _ => project_key.display_name(),
+            });
+        lazybox_core::Project::new(project_key.clone(), name, Utc::now())
+    };
     let json = serde_json::to_string(&project).map_err(|source| CommitError::SerializeProject {
         key: project_key.as_str().to_string(),
         source,

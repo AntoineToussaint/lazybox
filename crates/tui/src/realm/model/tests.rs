@@ -3964,21 +3964,16 @@ mod subscribed_projects_tests {
     }
 
     #[test]
-    fn subscribed_scope_repairs_lossy_github_project_name() {
+    fn authoritative_github_repo_drives_hyphenated_project_header() {
         let mut m = build_model();
         let pk = ProjectKey::github("codefly-dev", "warden-platform");
-        m.setup.persisted = Some(persisted_with_scopes(&[
-            "github:codefly-dev/warden-platform",
-        ]));
+        let mut project = Project::github("codefly-dev", "warden-platform", chrono::Utc::now());
+        project.name = "codefly/dev-warden-platform".to_string();
 
-        m.handle_daemon_event(IpcEvent::ProjectUpserted(Box::new(Project::new(
-            pk.clone(),
-            "codefly/dev-warden-platform",
-            chrono::Utc::now(),
-        ))));
+        m.handle_daemon_event(IpcEvent::ProjectUpserted(Box::new(project)));
 
         assert_eq!(
-            m.projects.get(&pk).map(|p| p.name.as_str()),
+            m.projects.get(&pk).and_then(Project::github_repo),
             Some("codefly-dev/warden-platform")
         );
         assert_eq!(

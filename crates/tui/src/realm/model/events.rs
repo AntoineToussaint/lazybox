@@ -550,7 +550,7 @@ impl<T: TerminalAdapter> Model<T> {
         // the sidebar can render headers from it, then push the
         // updated map to the sidebar component.
         if let IpcEvent::ProjectUpserted(p) = &event {
-            let project = self.project_with_scope_name((**p).clone());
+            let project = (**p).clone();
             self.projects.insert(project.key.clone(), project.clone());
             // Daemon owns this project now — stop treating it as a
             // client-side placeholder so a later scope edit won't yank
@@ -598,7 +598,7 @@ impl<T: TerminalAdapter> Model<T> {
             self.projects
                 .retain(|k, _| snapshot_keys.contains(k) || synthesized.contains(k));
             for p in projects {
-                let project = self.project_with_scope_name(p.clone());
+                let project = p.clone();
                 self.projects.insert(project.key.clone(), project.clone());
                 self.synthesized_projects.remove(&project.key);
             }

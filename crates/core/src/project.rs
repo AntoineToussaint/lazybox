@@ -80,6 +80,18 @@ impl ProjectKey {
             .then(|| format!("{owner}/{repo}"))
     }
 
+    /// Whether an exact `owner/repo` slug is a valid identity for this
+    /// GitHub project key.
+    pub fn matches_github_slug(&self, slug: &str) -> bool {
+        let Some((owner, repo)) = slug.split_once('/') else {
+            return false;
+        };
+        !owner.is_empty()
+            && !repo.is_empty()
+            && !repo.contains('/')
+            && Self::github(owner, repo) == *self
+    }
+
     /// Best-effort human-readable name derived from the key alone, for
     /// add paths and renders that lack an upstream display name.
     /// `github-<owner>-<repo>` → `<owner>/<repo>`; other prefixes
@@ -121,8 +133,7 @@ impl ProjectKey {
         }
         scopes.into_iter().find_map(|scope| {
             let slug = scope.strip_prefix("github:")?;
-            let (owner, repo) = slug.split_once('/')?;
-            (Self::github(owner, repo) == *self).then(|| slug.to_string())
+            self.matches_github_slug(slug).then(|| slug.to_string())
         })
     }
 }
@@ -168,6 +179,11 @@ pub struct Project {
     /// `"Frontend"` for a Linear team, the user-chosen string for
     /// local projects).
     pub name: String,
+    /// Exact GitHub `owner/repo` identity. Kept separately from `name`
+    /// because the display name is mutable presentation data and the
+    /// legacy flat project key cannot preserve a hyphenated boundary.
+    #[serde(default)]
+    github_repo: Option<String>,
     /// Where worktrees for workspaces under this project root. `None`
     /// means "use the default `~/.lazybox/v2/<workspace_key>/`". Local
     /// projects can override this to point at an existing repo on
@@ -183,9 +199,42 @@ impl Project {
         Self {
             key,
             name: name.into(),
+            github_repo: None,
             root_dir: None,
             created_at: now,
         }
+    }
+
+    /// Build a GitHub-backed project with an explicit, round-trippable
+    /// repository identity.
+    pub fn github(owner: &str, repo: &str, now: DateTime<Utc>) -> Self {
+        let slug = format!("{owner}/{repo}");
+        Self {
+            key: ProjectKey::github(owner, repo),
+            name: slug.clone(),
+            github_repo: Some(slug),
+            root_dir: None,
+            created_at: now,
+        }
+    }
+
+    /// Return the canonical GitHub repo only when it is well-formed and
+    /// belongs to this project's key. Persisted JSON is a system boundary,
+    /// so malformed or mismatched identity data is rejected here.
+    pub fn github_repo(&self) -> Option<&str> {
+        let slug = self.github_repo.as_deref()?;
+        self.key.matches_github_slug(slug).then_some(slug)
+    }
+
+    /// Attach a trusted GitHub slug to a legacy project record. Returns
+    /// `false` when the slug is malformed or does not map to this key.
+    pub fn set_github_repo(&mut self, slug: &str) -> bool {
+        if !self.key.matches_github_slug(slug) {
+            return false;
+        }
+        self.name = slug.to_string();
+        self.github_repo = Some(slug.to_string());
+        true
     }
 
     /// Display name for the sidebar, repairing the legacy raw-key
@@ -194,6 +243,9 @@ impl Project {
     /// key-derived name instead so the sidebar never shows
     /// `github-owner-repo`.
     pub fn display_name(&self) -> String {
+        if let Some(repo) = self.github_repo() {
+            return repo.to_string();
+        }
         if self.name == self.key.as_str() || self.name.is_empty() {
             self.key
                 .unambiguous_github_slug()
@@ -256,6 +308,16 @@ mod tests {
             ProjectKey::local("acme-widget").unambiguous_github_slug(),
             None
         );
+    }
+
+    #[test]
+    fn github_key_matches_only_well_formed_slugs_that_reproduce_it() {
+        let key = ProjectKey::github("codefly-dev", "warden-platform");
+        assert!(key.matches_github_slug("codefly-dev/warden-platform"));
+        assert!(key.matches_github_slug("codefly/dev-warden-platform"));
+        assert!(!key.matches_github_slug("other/warden-platform"));
+        assert!(!key.matches_github_slug("codefly-dev/warden/platform"));
+        assert!(!key.matches_github_slug("codefly-dev"));
     }
 
     #[test]
@@ -325,6 +387,40 @@ mod tests {
         let key = ProjectKey::github("codefly-dev", "warden-platform");
         let project = Project::new(key.clone(), key.as_str(), Utc::now());
         assert_eq!(project.display_name(), "github-codefly-dev-warden-platform");
+    }
+
+    #[test]
+    fn github_project_keeps_repo_identity_separate_from_display_name() {
+        let mut project = Project::github("codefly-dev", "warden-platform", Utc::now());
+        project.name = "renamed label".to_string();
+
+        assert_eq!(project.github_repo(), Some("codefly-dev/warden-platform"));
+        assert_eq!(project.display_name(), "codefly-dev/warden-platform");
+    }
+
+    #[test]
+    fn legacy_project_can_be_given_a_trusted_github_repo() {
+        let key = ProjectKey::github("codefly-dev", "warden-platform");
+        let mut project = Project::new(key, "codefly/dev-warden-platform", Utc::now());
+
+        assert_eq!(project.github_repo(), None);
+        assert!(project.set_github_repo("codefly-dev/warden-platform"));
+        assert_eq!(project.github_repo(), Some("codefly-dev/warden-platform"));
+        assert_eq!(project.display_name(), "codefly-dev/warden-platform");
+    }
+
+    #[test]
+    fn legacy_project_json_defaults_to_no_github_repo() {
+        let json = r#"{
+            "key":"github-codefly-dev-warden-platform",
+            "name":"codefly/dev-warden-platform",
+            "root_dir":null,
+            "created_at":"2025-01-01T00:00:00Z"
+        }"#;
+
+        let project: Project = serde_json::from_str(json).expect("legacy project decodes");
+
+        assert_eq!(project.github_repo(), None);
     }
 
     #[test]

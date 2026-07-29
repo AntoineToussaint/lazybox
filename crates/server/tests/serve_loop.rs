@@ -439,6 +439,7 @@ async fn start_agent_run_unknown_agent_reports_error() {
             mode: AgentRuntimeMode::StreamJson,
             cwd: None,
             initial_input: None,
+            resume_latest: false,
             access: lazybox_ipc::AgentRunAccess::Default,
         })
         .unwrap();
@@ -795,6 +796,7 @@ fn all_non_shutdown_commands() -> Vec<Command> {
             mode: AgentRuntimeMode::StreamJson,
             cwd: None,
             initial_input: None,
+            resume_latest: false,
             access: lazybox_ipc::AgentRunAccess::Default,
         },
         Command::SendAgentInput {

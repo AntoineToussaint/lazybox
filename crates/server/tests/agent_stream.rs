@@ -63,6 +63,30 @@ fn builds_resume_and_extra_args_without_encoding_cwd_as_argv() {
 }
 
 #[test]
+fn builds_continue_latest_argv_for_both_structured_providers() {
+    let mut claude = AgentStreamConfig::new(StructuredAgentProtocol::ClaudeStreamJson, "claude");
+    claude.continue_latest = true;
+    let claude_argv = claude.argv();
+    assert!(claude_argv.iter().any(|arg| arg == "--continue"));
+    assert!(!claude_argv.iter().any(|arg| arg == "--resume"));
+
+    let mut codex = AgentStreamConfig::new(StructuredAgentProtocol::CodexExecJson, "codex");
+    codex.continue_latest = true;
+    assert_eq!(
+        codex.argv(),
+        vec![
+            "codex",
+            "exec",
+            "resume",
+            "--json",
+            "--skip-git-repo-check",
+            "--last",
+            "-",
+        ]
+    );
+}
+
+#[test]
 fn read_only_claude_run_disables_ambient_and_builtin_tools() {
     let mut config = AgentStreamConfig::new(StructuredAgentProtocol::ClaudeStreamJson, "claude");
     config.access = AgentRunAccess::ReadOnly;

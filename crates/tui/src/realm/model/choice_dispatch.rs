@@ -88,6 +88,9 @@ impl<T: TerminalAdapter> Model<T> {
             Id::HandoffTarget => PickFlow::HandoffTarget {
                 active: matches!(self.modal_flow, Some(ModalFlow::Handoff { .. })),
             },
+            Id::ConvertSessionRole => PickFlow::ConvertSession {
+                active: matches!(self.modal_flow, Some(ModalFlow::ConvertSession { .. })),
+            },
             Id::StartAgentProject => PickFlow::StartAgentProject,
             Id::NewWorkspaceRepo => PickFlow::NewWorkspaceRepo,
             Id::RequestReviewers => PickFlow::Reviewers {
@@ -193,6 +196,11 @@ impl<T: TerminalAdapter> Model<T> {
                 self.modal_flow = None;
             }
             Id::HandoffTarget if !matches!(outcome, PickOutcome::MountHandoffComposer { .. }) => {
+                self.modal_flow = None;
+            }
+            Id::ConvertSessionRole
+                if !matches!(outcome, PickOutcome::StartSessionConversion { .. }) =>
+            {
                 self.modal_flow = None;
             }
             Id::ManageLabels => {
@@ -323,6 +331,42 @@ impl<T: TerminalAdapter> Model<T> {
                 if let Some(ModalFlow::Handoff { draft }) = self.modal_flow.as_mut() {
                     draft.target = Some(target);
                     self.mount_handoff_textarea();
+                }
+            }
+            PickOutcome::StartSessionConversion { role } => {
+                if let Some(ModalFlow::ConvertSession { draft }) = self.modal_flow.take() {
+                    let request_id =
+                        lazybox_ipc::AgentRunRequestId(uuid::Uuid::new_v4().to_string());
+                    let prompt =
+                        lazybox_core::prompts::build_agent_handoff_request_prompt(role);
+                    cmds.push(IpcCommand::StartAgentRun {
+                        request_id: request_id.clone(),
+                        session_key: draft.source.clone(),
+                        session_id: draft.session_id,
+                        agent: draft.agent.clone(),
+                        mode: lazybox_ipc::AgentRuntimeMode::StreamJson,
+                        cwd: None,
+                        initial_input: Some(lazybox_ipc::AgentInputMessage {
+                            text: Some(prompt),
+                            json: None,
+                        }),
+                        resume_latest: true,
+                        access: lazybox_ipc::AgentRunAccess::ReadOnly,
+                    });
+                    self.flash_info(format!(
+                        "asking {} to author a {} handoff…",
+                        draft.agent,
+                        role.label().to_ascii_lowercase(),
+                    ));
+                    self.conversion = Some(super::PendingConversion {
+                        draft,
+                        role,
+                        request_id,
+                        run_id: None,
+                        response: String::new(),
+                        target_prompt: None,
+                        phase: super::ConversionPhase::Starting,
+                    });
                 }
             }
             PickOutcome::MountNewWorkspace(project_key) => {

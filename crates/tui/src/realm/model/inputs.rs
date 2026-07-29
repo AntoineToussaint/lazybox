@@ -523,6 +523,7 @@ showing keybinding search only",
                 text: Some(format!("{context}\n\n# Question\n\n{question}")),
                 json: None,
             }),
+            resume_latest: false,
             access: AgentRunAccess::ReadOnly,
         })
     }

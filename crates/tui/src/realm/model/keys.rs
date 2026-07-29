@@ -1919,6 +1919,7 @@ pub(super) fn action_from_kind(
         ActionKind::ForceRedraw => Action::ForceRedraw,
         ActionKind::AdoptSessions => Action::AdoptSessions,
         ActionKind::SendToSession => Action::SendToSession,
+        ActionKind::ConvertSession => Action::ConvertSession,
         ActionKind::CollapseIntoPr => Action::CollapseIntoPr,
         ActionKind::Reply => Action::Reply,
         ActionKind::EditNotes => Action::EditNotes,

@@ -1142,6 +1142,55 @@ impl<T: TerminalAdapter> Model<T> {
                 let intent = crate::intent::resolve_send_to_session(workspace.as_ref(), captured);
                 cmds.extend(self.execute_dispatch_intent(intent, workspace.as_ref()));
             }
+            Action::ConvertSession => {
+                if self.conversion.is_some() {
+                    self.flash_info("a session conversion is already in progress");
+                    return cmds;
+                }
+                let Some(source_key) = self.sidebar.selected_workspace_key().cloned() else {
+                    return cmds;
+                };
+                let focused_source = self.terminals.focused_terminal_id().filter(|terminal_id| {
+                    self.terminals.terminal_is_agent(*terminal_id)
+                        && self.terminals.session_key_for(*terminal_id) == Some(&source_key)
+                });
+                let Some(source_terminal) =
+                    focused_source.or_else(|| self.terminals.agent_terminal_for(&source_key))
+                else {
+                    self.flash_info("no agent session here to convert");
+                    return cmds;
+                };
+                let Some(agent) = self
+                    .terminals
+                    .terminal_agent_id(source_terminal)
+                    .map(str::to_string)
+                else {
+                    self.flash_info("no agent session here to convert");
+                    return cmds;
+                };
+                if !matches!(agent.as_str(), "claude" | "codex") {
+                    self.flash_info(format!(
+                        "{agent} does not support structured session handoffs"
+                    ));
+                    return cmds;
+                }
+                if self.terminals.terminal_is_on_main(source_terminal) {
+                    self.flash_info("session conversion currently requires an isolated worktree");
+                    return cmds;
+                }
+                let source_name = self
+                    .sidebar
+                    .workspace_by_key(&source_key)
+                    .map(|workspace| workspace.name.clone())
+                    .unwrap_or_else(|| source_key.to_string());
+                self.mount_conversion_role_picker(super::ConversionDraft {
+                    source_terminal,
+                    source: source_key,
+                    session_id,
+                    source_name,
+                    agent,
+                });
+            }
             // Actions not yet handled here stay in the existing
             // handlers. As we migrate, the per-key match arms in
             // `handle_pane_key` and the pane wrappers get deleted

@@ -4,7 +4,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use lazybox_core::{AutoFixKind, ProjectKey, SessionId, SessionKey, Workspace, WorkspaceKey};
+use lazybox_core::{
+    AutoFixKind, ProjectKey, SessionId, SessionKey, Workspace, WorkspaceKey,
+    prompts::AgentHandoffRole,
+};
 use lazybox_ipc::{
     Command, DiscoveredCheckoutDto, TerminalId, TerminalKind, WorktreeInspectionDto,
 };
@@ -26,6 +29,7 @@ pub trait PickPayload {
     fn project(&self) -> Option<ProjectKey>;
     fn is_new_local_project(&self) -> bool;
     fn session(&self) -> Option<SessionKey>;
+    fn handoff_role(&self) -> Option<AgentHandoffRole>;
 }
 
 /// Renderer-independent automation policy payload.
@@ -89,6 +93,9 @@ pub enum PickFlow {
         source: Option<WorkspaceKey>,
     },
     HandoffTarget {
+        active: bool,
+    },
+    ConvertSession {
         active: bool,
     },
     StartAgentProject,
@@ -163,6 +170,9 @@ pub enum PickOutcome<F> {
     },
     MountHandoffComposer {
         target: SessionKey,
+    },
+    StartSessionConversion {
+        role: AgentHandoffRole,
     },
     MountNewWorkspace(ProjectKey),
     MountNewProject,
@@ -318,6 +328,16 @@ pub fn resolve_pick<P: PickPayload>(picks: &[P], flow: PickFlow) -> PickOutcome<
                 .first()
                 .and_then(P::session)
                 .map(|target| PickOutcome::MountHandoffComposer { target })
+                .unwrap_or(PickOutcome::NoOp)
+        }
+        PickFlow::ConvertSession { active } => {
+            if !active {
+                return PickOutcome::NoOp;
+            }
+            picks
+                .first()
+                .and_then(P::handoff_role)
+                .map(|role| PickOutcome::StartSessionConversion { role })
                 .unwrap_or(PickOutcome::NoOp)
         }
         PickFlow::StartAgentProject => picks
@@ -568,6 +588,7 @@ mod tests {
         Project(ProjectKey),
         NewLocal,
         Session(SessionKey),
+        HandoffRole(AgentHandoffRole),
     }
 
     impl PickPayload for Payload {
@@ -636,6 +657,13 @@ mod tests {
         fn session(&self) -> Option<SessionKey> {
             match self {
                 Self::Session(key) => Some(key.clone()),
+                _ => None,
+            }
+        }
+
+        fn handoff_role(&self) -> Option<AgentHandoffRole> {
+            match self {
+                Self::HandoffRole(role) => Some(*role),
                 _ => None,
             }
         }
@@ -780,6 +808,15 @@ mod tests {
                 PickFlow::HandoffTarget { active: true },
             ),
             PickOutcome::MountHandoffComposer { target } if target == session_key
+        ));
+        assert!(matches!(
+            resolve_pick(
+                &[Payload::HandoffRole(AgentHandoffRole::Critic)],
+                PickFlow::ConvertSession { active: true },
+            ),
+            PickOutcome::StartSessionConversion {
+                role: AgentHandoffRole::Critic,
+            }
         ));
         assert!(matches!(
             resolve_pick(&[Payload::NewLocal], PickFlow::NewWorkspaceRepo),

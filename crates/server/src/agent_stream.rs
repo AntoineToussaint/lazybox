@@ -110,7 +110,8 @@ impl AgentStreamConfig {
 
     fn codex_argv(&self) -> Vec<String> {
         let mut argv = vec![self.program.clone(), "exec".to_string()];
-        if self.resume_session_id.is_some() {
+        let resuming = self.resume_session_id.is_some() || self.continue_latest;
+        if resuming {
             argv.push("resume".to_string());
         }
         argv.extend(["--json".to_string(), "--skip-git-repo-check".to_string()]);
@@ -121,12 +122,14 @@ impl AgentStreamConfig {
             ]);
         }
         // The initial turn establishes the thread's sandbox policy.
-        if self.resume_session_id.is_none() {
+        if !resuming {
             argv.extend(["--sandbox".to_string(), "read-only".to_string()]);
         }
         argv.extend(self.extra_args.iter().cloned());
         if let Some(session_id) = &self.resume_session_id {
             argv.push(session_id.clone());
+        } else if self.continue_latest {
+            argv.push("--last".to_string());
         }
         // Read the prompt body from stdin. Unlike Claude's persistent
         // stream, Codex consumes stdin to EOF once per turn.

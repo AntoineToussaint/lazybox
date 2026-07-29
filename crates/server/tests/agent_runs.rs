@@ -160,6 +160,7 @@ async fn stream_json_agent_run_emits_normalized_events_until_process_exit() {
             mode: AgentRuntimeMode::StreamJson,
             cwd: None,
             initial_input: None,
+            resume_latest: false,
             access: lazybox_ipc::AgentRunAccess::Default,
         })
         .unwrap();
@@ -391,6 +392,7 @@ async fn codex_turn_processes_resume_as_one_logical_run() {
                 text: Some("first question".into()),
                 json: None,
             }),
+            resume_latest: false,
             access: lazybox_ipc::AgentRunAccess::Default,
         })
         .unwrap();
@@ -519,6 +521,7 @@ async fn workspace_less_run_resolves_to_neutral_cwd() {
             mode: AgentRuntimeMode::StreamJson,
             cwd: None,
             initial_input: None,
+            resume_latest: true,
             access: lazybox_ipc::AgentRunAccess::ReadOnly,
         })
         .unwrap();
@@ -532,6 +535,7 @@ async fn workspace_less_run_resolves_to_neutral_cwd() {
     let config = captured.lock().unwrap().take().expect("spawner invoked");
     assert_eq!(config.cwd.as_deref(), Some(std::env::temp_dir().as_path()));
     assert_eq!(config.access, lazybox_ipc::AgentRunAccess::ReadOnly);
+    assert!(config.continue_latest);
     // FakeStreamAgent has no LLM provider, so no gateway env applies —
     // regardless of the host's YAML.
     assert!(config.env.is_empty());
@@ -590,6 +594,7 @@ async fn stdout_error_emits_run_finished_with_error() {
             mode: AgentRuntimeMode::StreamJson,
             cwd: None,
             initial_input: None,
+            resume_latest: false,
             access: lazybox_ipc::AgentRunAccess::Default,
         })
         .unwrap();
@@ -635,6 +640,7 @@ async fn terminal_mode_agent_run_reports_that_spawn_should_be_used() {
             mode: AgentRuntimeMode::Terminal,
             cwd: None,
             initial_input: None,
+            resume_latest: false,
             access: lazybox_ipc::AgentRunAccess::Default,
         })
         .unwrap();

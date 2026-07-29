@@ -143,6 +143,10 @@ pub enum Action {
     /// the target's agent. The user routes it — no agent tooling — so
     /// the planner→executor pipe stays in one keystroke chain.
     SendToSession,
+    /// Replace the focused agent with a fresh-context Continue or Critic
+    /// session, seeded from a clean handoff authored by the current
+    /// agent through its structured runtime.
+    ConvertSession,
     /// Manually fold an issue workspace into the PR workspace that
     /// closes it. Only available when the local state already knows
     /// of a PR claiming this issue (via `closes_issues`). Same end-
@@ -401,6 +405,7 @@ pub enum ActionKind {
     ManagePolicies,
     AdoptSessions,
     SendToSession,
+    ConvertSession,
     CollapseIntoPr,
     RequestReviewers,
     AddAssignees,
@@ -511,6 +516,7 @@ impl ActionKind {
         Self::AddScanRoot,
         Self::AdoptSessions,
         Self::SendToSession,
+        Self::ConvertSession,
         Self::CollapseIntoPr,
         Self::LongSnooze,
         Self::Archive,
@@ -626,6 +632,7 @@ impl Action {
             Action::ManagePolicies => ActionKind::ManagePolicies,
             Action::AdoptSessions => ActionKind::AdoptSessions,
             Action::SendToSession => ActionKind::SendToSession,
+            Action::ConvertSession => ActionKind::ConvertSession,
             Action::CollapseIntoPr => ActionKind::CollapseIntoPr,
             Action::RequestReviewers => ActionKind::RequestReviewers,
             Action::AddAssignees => ActionKind::AddAssignees,
@@ -1040,6 +1047,13 @@ impl ActionDef {
                 default_keys: "x s",
                 label: "send to session",
                 describe: "Hand this agent's on-screen output off to another session: pick a target workspace, edit the brief, and inject + submit it into that session's agent.",
+                section: Section::Workspace,
+            },
+            ActionKind::ConvertSession => &Self {
+                kind: ActionKind::ConvertSession,
+                default_keys: "x f",
+                label: "convert session",
+                describe: "Replace this agent with a fresh Continue or Critic session in the same worktree, seeded from a structured handoff authored by the current agent.",
                 section: Section::Workspace,
             },
             ActionKind::CollapseIntoPr => &Self {
@@ -1718,6 +1732,7 @@ impl ActionKind {
             ActionKind::ManagePolicies => "manage_policies",
             ActionKind::AdoptSessions => "adopt_sessions",
             ActionKind::SendToSession => "send_to_session",
+            ActionKind::ConvertSession => "convert_session",
             ActionKind::CollapseIntoPr => "collapse_into_pr",
             ActionKind::RequestReviewers => "request_reviewers",
             ActionKind::AddAssignees => "add_assignees",
@@ -1966,6 +1981,7 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::CloseIssue
         | ActionKind::AdoptSessions
         | ActionKind::SendToSession
+        | ActionKind::ConvertSession
         | ActionKind::CollapseIntoPr => Some("workspace"),
         _ => None,
     }
@@ -2427,7 +2443,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         // Needs a source workspace; the dispatcher checks it actually
         // carries a running agent terminal and nudges when it doesn't
         // (the catalog can't see live terminals).
-        ActionKind::SendToSession => has_ws,
+        ActionKind::SendToSession | ActionKind::ConvertSession => has_ws,
         // Activity actions need a workspace AND that workspace
         // having some activity to act on. The pane that owns this
         // section already enforces "has activity"; the catalog
@@ -3843,6 +3859,7 @@ mod tests {
             (ActionKind::AddScanRoot, 'r'),
             (ActionKind::AdoptSessions, 'a'),
             (ActionKind::SendToSession, 's'),
+            (ActionKind::ConvertSession, 'f'),
             (ActionKind::CollapseIntoPr, 'j'),
             (ActionKind::LongSnooze, 'z'),
             (ActionKind::Archive, 'x'),

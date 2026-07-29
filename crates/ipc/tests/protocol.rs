@@ -132,6 +132,7 @@ fn all_commands() -> Vec<Command> {
                 text: Some("review this diff".into()),
                 json: Some(r#"{"type":"user","message":"review this diff"}"#.into()),
             }),
+            resume_latest: true,
             access: lazybox_ipc::AgentRunAccess::Default,
         },
         Command::StartAgentRun {
@@ -142,6 +143,7 @@ fn all_commands() -> Vec<Command> {
             mode: AgentRuntimeMode::Terminal,
             cwd: None,
             initial_input: None,
+            resume_latest: false,
             access: lazybox_ipc::AgentRunAccess::Default,
         },
         Command::SendAgentInput {

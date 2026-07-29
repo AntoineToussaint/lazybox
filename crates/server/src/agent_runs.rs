@@ -45,11 +45,12 @@ pub async fn handle_start_agent_run(
     mode: AgentRuntimeMode,
     cwd: Option<String>,
     initial_input: Option<AgentInputMessage>,
+    resume_latest: bool,
     access: AgentRunAccess,
 ) {
     if mode != AgentRuntimeMode::StreamJson {
         let _ = config.bus.send(Event::AgentRunStartFailed {
-            request_id,
+            request_id: request_id.clone(),
             message: "only StreamJson agent runs are wired; use Spawn for terminal mode".into(),
         });
         return;
@@ -57,14 +58,14 @@ pub async fn handle_start_agent_run(
 
     let Some(agent_impl) = config.agents.get(&agent) else {
         let _ = config.bus.send(Event::AgentRunStartFailed {
-            request_id,
+            request_id: request_id.clone(),
             message: format!("no agent registered for id {agent}"),
         });
         return;
     };
     let Some(protocol) = agent_impl.structured_protocol() else {
         let _ = config.bus.send(Event::AgentRunStartFailed {
-            request_id,
+            request_id: request_id.clone(),
             message: format!(
                 "{agent} supports interactive terminals but has no structured runtime adapter"
             ),
@@ -90,7 +91,7 @@ pub async fn handle_start_agent_run(
     let argv = agent_impl.spawn(&spawn_ctx);
     let Some((program, extra_args)) = argv.split_first() else {
         let _ = config.bus.send(Event::AgentRunStartFailed {
-            request_id,
+            request_id: request_id.clone(),
             message: format!("{agent} returned an empty argv"),
         });
         return;
@@ -109,6 +110,7 @@ pub async fn handle_start_agent_run(
     stream_config.extra_args = extra_args.to_vec();
     stream_config.env = env;
     stream_config.access = access;
+    stream_config.continue_latest = resume_latest;
 
     let io = match config
         .agent_stream_spawner
@@ -118,7 +120,7 @@ pub async fn handle_start_agent_run(
         Ok(io) => io,
         Err(e) => {
             let _ = config.bus.send(Event::AgentRunStartFailed {
-                request_id,
+                request_id: request_id.clone(),
                 message: e.to_string(),
             });
             return;

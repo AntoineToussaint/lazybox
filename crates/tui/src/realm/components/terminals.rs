@@ -106,6 +106,22 @@ impl Terminals {
         self.inner.terminal_is_agent(id)
     }
 
+    pub(crate) fn terminal_agent_id(&self, id: TerminalId) -> Option<&str> {
+        self.inner.terminal_agent_id(id)
+    }
+
+    pub(crate) fn terminal_is_on_main(&self, id: TerminalId) -> bool {
+        self.inner.terminal_is_on_main(id)
+    }
+
+    pub(crate) fn prepare_agent_replacement(
+        &mut self,
+        id: TerminalId,
+        cmds: &mut Vec<IpcCommand>,
+    ) -> bool {
+        self.inner.prepare_agent_replacement(id, cmds)
+    }
+
     /// The session a tracked terminal belongs to. Used by the spawn-
     /// follow pin to recover the workspace for a `TerminalFocusRequested`.
     pub fn session_key_for(&self, id: TerminalId) -> Option<&SessionKey> {

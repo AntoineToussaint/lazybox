@@ -199,6 +199,7 @@ Press the leader key, then the second key. Every menu shows a which-key popup wh
 | `x r` | add scan root |
 | `x a` | adopt sessions |
 | `x s` | send to session |
+| `x f` | convert session |
 | `x j` | join into PR |
 | `x z` | long snooze *(confirmed first)* |
 | `x x` | archive *(confirmed first)* |

@@ -1054,6 +1054,10 @@ pub enum Command {
         mode: AgentRuntimeMode,
         cwd: Option<String>,
         initial_input: Option<AgentInputMessage>,
+        /// Resume the most recent provider conversation in the resolved
+        /// cwd instead of starting with empty context.
+        #[serde(default)]
+        resume_latest: bool,
         #[serde(default)]
         access: AgentRunAccess,
     },

@@ -11,7 +11,7 @@
 //! `handle_choice_picked` / `handle_confirmed` arms (in mod.rs or
 //! events.rs) read the stashed state and execute on submit.
 
-use super::{ChoicePayload, HandoffDraft, Id, ModalFlow, Model};
+use super::{ChoicePayload, ConversionDraft, HandoffDraft, Id, ModalFlow, Model};
 use tuirealm::terminal::TerminalAdapter;
 
 /// Choice-modal item wrapper for the worktree inspector. Picker
@@ -1662,6 +1662,21 @@ impl<T: TerminalAdapter> Model<T> {
             modal = modal.with_body(format!("{}\n\n", draft.seed.trim_end()));
         }
         self.mount_modal(Id::HandoffText, modal);
+    }
+
+    pub(super) fn mount_conversion_role_picker(&mut self, draft: ConversionDraft) {
+        use crate::realm::components::choice::Choice;
+        use lazybox_core::prompts::AgentHandoffRole;
+
+        self.set_modal_flow(ModalFlow::ConvertSession { draft });
+        let modal = Choice::single(
+            "Continue resets context · Critic reviews without editing",
+            vec![AgentHandoffRole::Continue, AgentHandoffRole::Critic],
+        )
+        .title("Convert session")
+        .label(|role: &AgentHandoffRole| role.label().to_string())
+        .payload_for(|role: &AgentHandoffRole| ChoicePayload::HandoffRole(*role));
+        self.mount_modal(Id::ConvertSessionRole, modal);
     }
 
     /// Drive the global "start agent" (`Shift-W`) flow. Resolve the

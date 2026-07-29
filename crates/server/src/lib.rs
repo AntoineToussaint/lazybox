@@ -1421,6 +1421,7 @@ pub async fn dispatch_command(
             mode,
             cwd,
             initial_input,
+            resume_latest,
             access,
         } => {
             agent_runs::handle_start_agent_run(
@@ -1432,6 +1433,7 @@ pub async fn dispatch_command(
                 mode,
                 cwd,
                 initial_input,
+                resume_latest,
                 access,
             )
             .await;

@@ -648,6 +648,7 @@ async fn stream_route_can_start_structured_agent_run() {
             text: Some("hello".into()),
             json: None,
         }),
+        resume_latest: false,
         access: lazybox_ipc::AgentRunAccess::Default,
     };
     let mut line = serde_json::to_vec(&JsonClientFrame::Command(command)).unwrap();

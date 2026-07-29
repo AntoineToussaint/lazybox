@@ -1468,6 +1468,34 @@ impl TerminalStack {
             .is_some_and(|slot| matches!(slot.kind, TerminalKind::Agent(_)))
     }
 
+    pub(crate) fn terminal_agent_id(&self, id: TerminalId) -> Option<&str> {
+        match &self.terminals.get(&id)?.kind {
+            TerminalKind::Agent(agent_id) => Some(agent_id.as_str()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn terminal_is_on_main(&self, id: TerminalId) -> bool {
+        self.terminals.get(&id).is_some_and(|slot| slot.on_main)
+    }
+
+    pub(crate) fn prepare_agent_replacement(
+        &mut self,
+        id: TerminalId,
+        cmds: &mut Vec<Command>,
+    ) -> bool {
+        let Some(slot) = self.terminals.get(&id) else {
+            return false;
+        };
+        if slot.exited.is_some() {
+            self.drop_slot(id);
+            return false;
+        }
+        self.closing.insert(id);
+        cmds.push(Command::Close { terminal_id: id });
+        true
+    }
+
     /// The session a tracked terminal belongs to. Used by the spawn-
     /// follow pin to recover the workspace for a `TerminalFocusRequested`
     /// (which carries only the terminal id).
@@ -5430,6 +5458,45 @@ mod selection_offset_tests {
         );
         stack.terminals.insert(TerminalId(5), live);
         assert_eq!(stack.agent_terminal_for(&sk), Some(TerminalId(5)));
+    }
+
+    #[test]
+    fn conversion_metadata_and_live_replacement_are_terminal_scoped() {
+        let mut stack = stack_with(TerminalKind::Agent("codex".into()), None, &["working tree"]);
+        assert_eq!(stack.terminal_agent_id(TerminalId(1)), Some("codex"));
+        assert!(!stack.terminal_is_on_main(TerminalId(1)));
+        stack.terminals.get_mut(&TerminalId(1)).unwrap().on_main = true;
+        assert!(stack.terminal_is_on_main(TerminalId(1)));
+
+        let mut commands = Vec::new();
+        assert!(stack.prepare_agent_replacement(TerminalId(1), &mut commands));
+        assert!(matches!(
+            commands.as_slice(),
+            [Command::Close {
+                terminal_id: TerminalId(1)
+            }]
+        ));
+        stack.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(1),
+            exit_code: None,
+            last_output: None,
+        });
+        assert!(!stack.terminals.contains_key(&TerminalId(1)));
+    }
+
+    #[test]
+    fn replacing_an_exited_agent_drops_it_without_closing_again() {
+        let mut stack = stack_with(TerminalKind::Agent("claude".into()), None, &["done"]);
+        stack.terminals.get_mut(&TerminalId(1)).unwrap().exited = Some(TerminalExit {
+            code: Some(1),
+            dead_on_arrival: false,
+            last_output: None,
+        });
+        let mut commands = Vec::new();
+
+        assert!(!stack.prepare_agent_replacement(TerminalId(1), &mut commands));
+        assert!(commands.is_empty());
+        assert!(!stack.terminals.contains_key(&TerminalId(1)));
     }
 
     /// Map two crossterm points through `selection_point` and copy the

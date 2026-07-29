@@ -249,6 +249,28 @@ impl MergeBackend for lazybox_gh::GhClient {
 /// credential leaves the key `Blocked` (not released) so a daemon
 /// without GitHub auth doesn't spin a doomed attempt on every tick.
 async fn run_real_attempt(config: &ServerConfig, ticket: AttemptPlan) {
+    let key = &ticket.workspace_key;
+    let settle = |latch: Option<Latch>| {
+        config.auto_merge.lock().settle(key, latch);
+    };
+    let Some(ws) = load_workspace(config, key) else {
+        settle(None);
+        return;
+    };
+    if !ws.auto_merge_on_green {
+        settle(None);
+        return;
+    }
+    if ws
+        .pr
+        .as_ref()
+        .and_then(super::handlers::github_target)
+        .is_none()
+    {
+        settle(Some(Latch::Blocked(ticket.skip_if_head.clone())));
+        return;
+    }
+
     match super::handlers::resolve_gh_client(config).await {
         Some(client) => run_attempt(config, ticket, &client).await,
         None => {
@@ -834,21 +856,11 @@ mod tests {
         super::super::upsert(&config, task.clone()).await;
         assert_eq!(config.auto_merge.lock().attempts_started, 1);
         // … and the dispatched attempt settles (no GitHub target).
-        let settled = async {
-            loop {
-                let blocked = matches!(
-                    config.auto_merge.lock().latch(&key),
-                    Some(Latch::Blocked(_))
-                );
-                if blocked {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        };
-        tokio::time::timeout(std::time::Duration::from_secs(3), settled)
-            .await
-            .expect("attempt must settle");
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            config.auto_merge.lock().latch(&key),
+            Some(Latch::Blocked(_))
+        ));
 
         // The same green state again is byte-identical → unchanged
         // commit → a Blocked key must NOT re-probe.

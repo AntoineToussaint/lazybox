@@ -2541,8 +2541,8 @@ fn sanitize_branch_component(raw: &str) -> String {
 
 /// `owner/repo` for a workspace with no linked task, recovered from its
 /// project. Only `github-` keys carry a clonable repo — `local-`
-/// projects legitimately have none, so they error and the caller's
-/// empty-dir fallback stays the right outcome for them.
+/// projects legitimately have none and are routed to standalone
+/// provisioning before this lookup.
 ///
 /// The clone target must not be reconstructed by splitting the flat
 /// `github-{owner}-{repo}` key on `-`: both fields can hold hyphens, so
@@ -2589,9 +2589,6 @@ pub(crate) fn clonable_repo_from_project(
     })
 }
 
-/// Try to set up a real git worktree at `target` for the workspace's
-/// primary task. Returns Ok(()) when a checkout succeeded, Err when
-/// we couldn't (caller falls back to a plain mkdir).
 /// Broadcast a single worktree-provisioning progress transition.
 /// Best-effort: a closed bus (no TUI attached) just drops it.
 fn emit_worktree_progress(
@@ -10236,8 +10233,7 @@ mod tests {
         );
     }
 
-    /// `local-` projects have no upstream repo — the lookup errors so
-    /// the caller's empty-dir fallback stays their outcome.
+    /// `local-` projects have no upstream repo and are not clone targets.
     #[test]
     fn clonable_repo_from_project_rejects_local_project() {
         let config = ServerConfig::in_memory();

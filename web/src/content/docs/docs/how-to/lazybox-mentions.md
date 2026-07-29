@@ -8,6 +8,10 @@ lazybox can watch for `@lazybox` mentions in your GitHub issues and
 (or an allowed teammate) can kick off work by leaving a comment, without
 touching the TUI.
 
+The same works from a `lazybox:` **label**: tag one issue or a whole backlog,
+in a single repo or across many, and lazybox starts an agent on each. See
+[Start many at once, across repos](#start-many-at-once-across-repos).
+
 ## How it works
 
 When the full GitHub sweep finds `@lazybox` in an **issue body or an issue
@@ -68,7 +72,29 @@ lazybox:codex
 
 Pull requests and issues where you are only mentioned or requested as a
 reviewer are ignored. The first matching label is handled once and persisted,
-so leaving it on the issue does not restart the agent on every poll.
+so leaving it on the issue does not restart the agent on every sweep.
+
+### Start many at once, across repos
+
+Because the trigger is just a GitHub label, you can start work in bulk. Tag a
+batch of issues — from the GitHub UI, a saved search, or `gh` — with a
+`lazybox:` label, in one repository or across several, and the next full GitHub
+sweep opens a workspace and spawns an agent for each. A triaged backlog becomes
+a running fleet without opening the TUI or a terminal:
+
+```sh
+# one-time: create the trigger label in the repo
+gh label create lazybox:claude/M --repo owner/app
+
+# hand every "ready" issue to Claude (Sonnet tier) in one go
+gh issue list --repo owner/app --label ready --json number --jq '.[].number' \
+  | xargs -I {} gh issue edit {} --repo owner/app --add-label lazybox:claude/M
+```
+
+Each label is handled once and persisted, so re-running the loop or leaving the
+labels in place never respawns an agent that is already working. Every issue
+gets its own isolated worktree, so the agents run side by side without
+colliding.
 
 ## Allow other people to trigger it
 

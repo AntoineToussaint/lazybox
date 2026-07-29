@@ -48,6 +48,12 @@ const features = [
     wide: true,
   },
   {
+    icon: '⊞',
+    title: 'Start a fleet by tagging issues',
+    body: 'Drop a lazybox:claude label on GitHub issues — across one repo or many — and lazybox opens each worktree and spawns an agent on the next sweep. No TUI, no terminal. Tag a triaged backlog and come back to dozens of agents already working. A high / medium / low label picks the model and effort per issue.',
+    wide: true,
+  },
+  {
     icon: '⑂',
     title: 'Worktrees, handled',
     body: 'Every task gets a fresh, isolated git checkout — created automatically. No branches to make, nothing to stash, no collisions between agents running side by side. You never think about it.',
@@ -541,6 +547,9 @@ const steps = [
             </div>
           ))}
         </div>
+        <p class="features-compare" data-reveal style="text-align:center;margin-top:2rem">
+          <a href="/docs/explanation/comparison/">See how lazybox compares to Conductor and other parallel-agent tools →</a>
+        </p>
       </div>
     </section>
 

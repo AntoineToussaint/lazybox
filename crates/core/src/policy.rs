@@ -139,6 +139,7 @@ pub fn should_auto_merge(workspace: &Workspace) -> bool {
 /// discoverable replacement for "label opt-out only" — a workspace can
 /// now positively arm or explicitly disarm auto-fix for itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum PolicyArm {
     /// Follow the global auto-fix configuration (feature switch + label
     /// opt-out). The safe default: a workspace with no explicit choice
@@ -200,6 +201,7 @@ impl PolicyArm {
 /// field. Keep new per-session, lazybox-owned policies here; leave
 /// GitHub-owned server state on `Task`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct AutomationPolicies {
     #[serde(default)]
     pub auto_fix_ci: PolicyArm,

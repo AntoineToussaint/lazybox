@@ -1,17 +1,16 @@
-# lazybox desktop spike
+# lazybox desktop client
 
-This is a deliberately narrow Tauri v2 client proving that the existing
-client/daemon boundary can support a commercial desktop app:
+This focused Tauri v2 client consumes the production desktop boundary:
 
-- the Rust process starts the production `lazybox-server` services in-process;
-- an authenticated gateway binds to an ephemeral loopback port;
-- the webview lists the real persisted inbox and follows live NDJSON events;
-- `Spawn`, `Write`, `Resize`, replay, sequence-gap detection, and terminal
-  resync drive one interactive xterm.js terminal.
+- the Rust shell starts `lazybox-server` through the shared `ClientRuntime`;
+- an authenticated gateway binds an ephemeral loopback port;
+- the frontend imports Rust-generated, versioned contract types;
+- inbox/control events use NDJSON while terminal data uses bounded raw binary
+  frames suitable for xterm.js;
+- reconnect uses daemon snapshots, sequence metadata, replay, and resync.
 
-The bearer token stays in Rust. The webview reaches the gateway through typed
-Tauri commands and an ordered Tauri channel, so the prototype does not add a
-permissive CORS policy or expose the token to JavaScript.
+The bearer token and gateway URL stay in Rust. The webview reaches them only
+through narrow Tauri commands and never receives a reusable credential.
 
 ## Run
 
@@ -20,11 +19,11 @@ exist, then:
 
 ```sh
 cd apps/desktop
-npm install
+npm ci
 npm run tauri dev
 ```
 
-The frontend can be reviewed without starting the daemon:
+Review the frontend without a daemon:
 
 ```sh
 npm run dev
@@ -41,5 +40,5 @@ npm run build
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-See [`../../docs/desktop-spike.md`](../../docs/desktop-spike.md) for the API
-gap analysis, delivery estimate, and licensing recommendation.
+See [`../../docs/desktop-spike.md`](../../docs/desktop-spike.md) for the
+lifecycle, protocol, security, and separate-product packaging boundary.

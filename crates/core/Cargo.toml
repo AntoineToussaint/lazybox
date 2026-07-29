@@ -6,6 +6,9 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+desktop-contract = ["dep:ts-rs"]
+
 [dependencies]
 chrono = { workspace = true }
 serde = { workspace = true, features = ["derive", "rc"] }
@@ -14,6 +17,7 @@ serde = { workspace = true, features = ["derive", "rc"] }
 # version it enforces, so the JSON codec is a real dependency here.
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+ts-rs = { workspace = true, optional = true }
 uuid = { version = "1", features = ["serde", "v4"] }
 
 [dev-dependencies]

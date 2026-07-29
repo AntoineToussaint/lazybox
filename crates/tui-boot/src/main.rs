@@ -36,8 +36,8 @@ mod test_mode;
 mod worktree_gc;
 
 use lazybox_ipc::{channel, socket};
+use lazybox_server::client_runtime::{ClientRuntime, ClientRuntimeOptions};
 use lazybox_server::lifecycle::{self, ServerStatus};
-use lazybox_server::polling;
 use lazybox_server::socket_service::SocketService;
 use lazybox_server::{Server, ServerConfig};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -284,7 +284,7 @@ Remote & services:
   lazybox server status       show daemon status
   lazybox server api [addr]   JSON HTTP API gateway (default 127.0.0.1:8787;
                               needs LAZYBOX_API_TOKEN or --insecure-no-auth;
-                              non-loopback also needs --allow-insecure-http)
+                              loopback only — use an encrypted tunnel remotely)
   lazybox --connect <socket>  attach a TUI to a running daemon
   lazybox slack init          set up the optional Slack mirror
   lazybox slack doctor        validate an existing Slack setup
@@ -787,34 +787,17 @@ async fn run_embedded_realm(
     let config = server_config_from_user()?;
     let update_check = tokio::spawn(build_guard::available_update(Some(config.store.clone())));
 
-    // Recovery probes the backend (`tmux list-sessions`) before the UI
-    // paints — bound it so a wedged tmux server degrades to "no
-    // recovered sessions" instead of a frozen launch. The timeout
-    // cancels `recover_sessions` MID-LOOP, so some live tmux sessions
-    // can end up alive-but-unregistered; `restore_persisted_sessions`
-    // below re-lists the backend itself and skips those, so the
-    // cancellation can never lead to a second agent spawned into a
-    // worktree whose tmux session survived.
-    if tokio::time::timeout(
-        Duration::from_secs(5),
-        lazybox_server::spawn_handler::recover_sessions(&config),
+    let client_runtime = ClientRuntime::start(
+        config.clone(),
+        ClientRuntimeOptions {
+            poll_interval: resolve_poll_interval(),
+            restore_persisted_sessions: true,
+            slack: lazybox_config::Config::load()
+                .ok()
+                .map(|config| config.slack),
+        },
     )
-    .await
-    .is_err()
-    {
-        tracing::warn!("recover_sessions timed out after 5s — continuing without recovery");
-    }
-    // Restore persisted sessions AFTER the UI is up: each restore can
-    // touch git worktrees and the backend, and restored terminals
-    // announce themselves via `TerminalSpawned` events — the same path
-    // live spawns use — so the TUI picks them up whenever they land.
-    {
-        let config = config.clone();
-        tokio::spawn(async move {
-            lazybox_server::spawn_handler::restore_persisted_sessions(&config).await;
-        });
-    }
-    lazybox_server::workspace::migrate_legacy_sandbox(&config);
+    .await;
 
     let serve_config = config.clone();
     // Graceful-teardown plumbing for the in-process daemon (#FIX-shutdown):
@@ -881,39 +864,6 @@ async fn run_embedded_realm(
         .map(|p| p.enabled_providers.iter().cloned().collect())
         .unwrap_or_default();
     let persisted_for_model = persisted.clone();
-    // Spawn the long-lived poll loop ONCE, UNCONDITIONALLY. It
-    // re-reads YAML on every tick so filter / scope edits made via
-    // the Settings palette take effect on the next cycle without a
-    // respawn. Replaces the old per-Finish-respawn pattern that
-    // leaked one tokio task per edit.
-    //
-    // Why unconditional (not `if persisted.is_some()`): on first run
-    // there's no persisted setup yet, so the old gate skipped the
-    // spawn entirely. The wizard's on-complete hook persists config
-    // and fires `Command::Refresh` (→ `poll_wake.notify_one()`) to
-    // kick an immediate tick — but that notify hit a loop that was
-    // never spawned, so polling never started until the user
-    // restarted lazybox (empty inbox after first-run setup). Spawning
-    // here regardless is safe: with no config yet, `run_one_tick`
-    // sees no providers and ticks as a cheap no-op until the wizard
-    // writes `config.yaml` and the Refresh wakes the loop.
-    polling::spawn(config.clone(), resolve_poll_interval());
-
-    // Keep-awake watcher — reads `ui.keep_awake` live, so it spawns
-    // unconditionally and is inert until the user opts in.
-    let _ = lazybox_server::keep_awake::spawn(&config);
-
-    // Out-of-band agent-CLI update sweep (managed replacement for the
-    // suppressed in-session self-updaters; issue #400).
-    lazybox_server::agent_updates::spawn_scheduled(config.clone());
-
-    // Slack mirror — opt-in via `~/.lazybox/config.yaml::slack.{bot_token,
-    // app_token}` (or `$SLACK_BOT_TOKEN` / `$SLACK_APP_TOKEN`). No-op
-    // when neither token is set.
-    if let Ok(yaml) = lazybox_config::Config::load() {
-        let _ = lazybox_server::slack::spawn(config.clone(), yaml.slack);
-    }
-
     // Always pre-run detection + scope sources. Two reasons: (1)
     // first-run users need them to seed the wizard; (2) returning
     // users may press `,` mid-session to reopen the wizard for
@@ -1149,6 +1099,7 @@ async fn run_embedded_realm(
         // connections; most of that window already elapsed in parallel.
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
     }
+    client_runtime.shutdown().await;
     realm_result?
 }
 
@@ -1471,7 +1422,7 @@ async fn server_subcommand(args: &[String]) -> anyhow::Result<()> {
         Some("api") => server_api(&args[1..]).await,
         _ => {
             eprintln!(
-                "usage: lazybox server [start|stop|status|api [addr:port] [--insecure-no-auth] [--allow-insecure-http]]"
+                "usage: lazybox server [start|stop|status|api [addr:port] [--insecure-no-auth]]"
             );
             std::process::exit(2);
         }
@@ -1487,22 +1438,17 @@ async fn server_start() -> anyhow::Result<()> {
     let pid_file = lifecycle::pid_path();
 
     let config = server_config_from_user()?;
-    if tokio::time::timeout(
-        Duration::from_secs(5),
-        lazybox_server::spawn_handler::recover_sessions(&config),
+    let client_runtime = ClientRuntime::start(
+        config.clone(),
+        ClientRuntimeOptions {
+            poll_interval: resolve_poll_interval(),
+            restore_persisted_sessions: false,
+            slack: lazybox_config::Config::load()
+                .ok()
+                .map(|config| config.slack),
+        },
     )
-    .await
-    .is_err()
-    {
-        tracing::warn!("recover_sessions timed out after 5s — continuing without recovery");
-    }
-    lazybox_server::workspace::migrate_legacy_sandbox(&config);
-    polling::spawn(config.clone(), resolve_poll_interval());
-    let _ = lazybox_server::keep_awake::spawn(&config);
-    lazybox_server::agent_updates::spawn_scheduled(config.clone());
-    if let Ok(yaml) = lazybox_config::Config::load() {
-        let _ = lazybox_server::slack::spawn(config.clone(), yaml.slack);
-    }
+    .await;
 
     let factory_config = config.clone();
     let service = SocketService::new(socket.clone(), pid_file, move || factory_config.clone());
@@ -1514,7 +1460,9 @@ async fn server_start() -> anyhow::Result<()> {
     });
 
     println!("lazybox-server listening on {}", socket.display());
-    service.run().await?;
+    let result = service.run().await;
+    client_runtime.shutdown().await;
+    result?;
     println!("lazybox-server stopped");
     Ok(())
 }
@@ -1541,14 +1489,13 @@ fn server_status() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn api_bind_requires_insecure_http_ack(bind_addr: SocketAddr, allowed: bool) -> bool {
-    !bind_addr.ip().is_loopback() && !allowed
+fn api_bind_is_local(bind_addr: SocketAddr) -> bool {
+    bind_addr.ip().is_loopback()
 }
 
 async fn server_api(args: &[String]) -> anyhow::Result<()> {
     let mut args = args.to_vec();
     let insecure_no_auth = take_flag(&mut args, "--insecure-no-auth");
-    let allow_insecure_http = take_flag(&mut args, "--allow-insecure-http");
     let bind_addr = match args.first() {
         Some(raw) => raw
             .parse::<SocketAddr>()
@@ -1576,29 +1523,27 @@ async fn server_api(args: &[String]) -> anyhow::Result<()> {
         std::process::exit(2);
     }
 
-    // Bearer auth does not encrypt HTTP. Refuse a routable listener unless
-    // the operator separately acknowledges that a trusted tunnel, TLS proxy,
-    // or private overlay protects the network path.
-    if api_bind_requires_insecure_http_ack(bind_addr, allow_insecure_http) {
+    if !api_bind_is_local(bind_addr) {
         println!(
             "refusing to expose the plaintext JSON API on {bind_addr}.\n\
-             Keep it on loopback and use an SSH tunnel or authenticated TLS proxy.\n\
-             Pass --allow-insecure-http only when a trusted private network already protects the connection."
+             Keep it on loopback and use an encrypted tunnel. Direct remote transport\n\
+             remains disabled until lazybox provides TLS and principal-scoped authorization."
         );
         std::process::exit(2);
     }
 
     let config = server_config_from_user()?;
-    if tokio::time::timeout(
-        Duration::from_secs(5),
-        lazybox_server::spawn_handler::recover_sessions(&config),
+    let client_runtime = ClientRuntime::start(
+        config.clone(),
+        ClientRuntimeOptions {
+            poll_interval: resolve_poll_interval(),
+            restore_persisted_sessions: true,
+            slack: lazybox_config::Config::load()
+                .ok()
+                .map(|config| config.slack),
+        },
     )
-    .await
-    .is_err()
-    {
-        tracing::warn!("recover_sessions timed out after 5s — continuing without recovery");
-    }
-    let _ = lazybox_server::keep_awake::spawn(&config);
+    .await;
     println!("lazybox API listening on http://{bind_addr}");
     if token.is_some() {
         println!("lazybox API bearer auth enabled via LAZYBOX_API_TOKEN");
@@ -1608,21 +1553,26 @@ async fn server_api(args: &[String]) -> anyhow::Result<()> {
              anything that can reach {bind_addr} can drive your agents"
         );
     }
-    if !bind_addr.ip().is_loopback() {
-        println!(
-            "WARNING: serving plaintext HTTP on non-loopback {bind_addr}; bearer tokens and commands are not encrypted"
-        );
-    }
-
-    lazybox_server::api_gateway::serve(
+    let mut gateway = tokio::spawn(lazybox_server::api_gateway::serve(
         config,
         lazybox_server::api_gateway::GatewayOptions {
             bind_addr,
             bearer_token: token,
             ..lazybox_server::api_gateway::GatewayOptions::default()
         },
-    )
-    .await?;
+    ));
+    let result = tokio::select! {
+        result = &mut gateway => result
+            .map_err(|error| anyhow::anyhow!("API gateway task failed: {error}"))?
+            .map_err(anyhow::Error::from),
+        () = lazybox_tui::platform::wait_for_shutdown_signal() => {
+            gateway.abort();
+            let _ = gateway.await;
+            Ok(())
+        }
+    };
+    client_runtime.shutdown().await;
+    result?;
     Ok(())
 }
 
@@ -1789,14 +1739,13 @@ mod argv_tests {
     }
 
     #[test]
-    fn api_plaintext_bind_policy_requires_separate_non_loopback_ack() {
+    fn api_plaintext_bind_policy_is_loopback_only() {
         let loopback: SocketAddr = "127.0.0.1:8787".parse().unwrap();
         let wildcard: SocketAddr = "0.0.0.0:8787".parse().unwrap();
         let private: SocketAddr = "192.168.1.10:8787".parse().unwrap();
 
-        assert!(!api_bind_requires_insecure_http_ack(loopback, false));
-        assert!(api_bind_requires_insecure_http_ack(wildcard, false));
-        assert!(api_bind_requires_insecure_http_ack(private, false));
-        assert!(!api_bind_requires_insecure_http_ack(private, true));
+        assert!(api_bind_is_local(loopback));
+        assert!(!api_bind_is_local(wildcard));
+        assert!(!api_bind_is_local(private));
     }
 }

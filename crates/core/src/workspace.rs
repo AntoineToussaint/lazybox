@@ -39,6 +39,7 @@ use uuid::Uuid;
 /// Stable identifier for a workspace. Human-readable so it survives
 /// renames and shows up well in logs / UIs ("fix-auth-2026-04").
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct WorkspaceKey(pub String);
 
 impl WorkspaceKey {
@@ -60,6 +61,7 @@ impl std::fmt::Display for WorkspaceKey {
 /// Stable identifier for a session within a workspace. UUID so we can
 /// allocate one client-side without round-tripping the daemon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct SessionId(pub Uuid);
 
 impl SessionId {
@@ -133,6 +135,7 @@ fn activity_identities(list: &[Activity]) -> Vec<ActivityIdentity> {
 /// launch. Removal deletes the whole row, so there's no "done" state to
 /// persist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum CleanupPrompt {
     /// No answer recorded. While the primary task sits in a terminal
@@ -193,6 +196,7 @@ pub enum WorkspaceDecodeError {
 /// disk; without sessions the workspace is purely a tracking row
 /// with no on-disk presence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct Workspace {
     /// Persistence schema version this row was LOADED at (0 for
     /// records predating the field). Serialization always stamps
@@ -1219,6 +1223,7 @@ fn sanitize_key(raw: &str) -> String {
 // ─────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum SessionKind {
     /// `claude`, `codex`, `cursor`, etc. The agent registry resolves
     /// `agent_id` to argv at spawn time.
@@ -1234,6 +1239,7 @@ pub enum SessionKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum SessionRunState {
     /// Process is running and producing output.
     Active,
@@ -1261,6 +1267,7 @@ pub enum SessionRunState {
 // internally-tagged enums fail `bincode::deserialize` because the
 // format isn't self-describing.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum SessionLayout {
     Tabs {
         /// Index into `Session.runners`. Clamped on save.
@@ -1299,6 +1306,7 @@ pub enum RemoveAtError {
 /// by terminal id (numeric, daemon-allocated). Splits hold a 0-100
 /// `ratio` for the first child's share of the available space.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum TileTree {
     Leaf {
         terminal_id: u64,
@@ -1548,6 +1556,7 @@ impl TileTree {
 /// a session there's no folder, so a workspace with `sessions = []`
 /// is a pure tracking row with no on-disk presence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct Session {
     pub id: SessionId,
     pub workspace_key: WorkspaceKey,

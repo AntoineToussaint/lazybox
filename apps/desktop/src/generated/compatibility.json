@@ -1,0 +1,1323 @@
+{
+  "commands": [
+    "Subscribe",
+    {
+      "Spawn": {
+        "cwd": "/tmp",
+        "initial_prompt": null,
+        "kind": {
+          "Agent": "claude"
+        },
+        "model_alias": "L",
+        "on_main": false,
+        "session_id": null,
+        "session_key": "github:o/r#1"
+      }
+    },
+    {
+      "Spawn": {
+        "cwd": null,
+        "initial_prompt": null,
+        "kind": "Shell",
+        "model_alias": null,
+        "on_main": true,
+        "session_id": "00000000-0000-0000-0000-000000000001",
+        "session_key": "github:o/r#1"
+      }
+    },
+    {
+      "Spawn": {
+        "cwd": null,
+        "initial_prompt": "fix the failing CI",
+        "kind": {
+          "LogTail": {
+            "path": "/var/log/x.log"
+          }
+        },
+        "model_alias": null,
+        "on_main": false,
+        "session_id": null,
+        "session_key": "github:o/r#1"
+      }
+    },
+    {
+      "CancelSpawn": {
+        "session_key": "github:o/r#1"
+      }
+    },
+    {
+      "CreateSession": {
+        "kind": "Shell",
+        "label": "review",
+        "session_key": "github:o/r#1"
+      }
+    },
+    {
+      "Write": {
+        "bytes": [
+          104,
+          101,
+          108,
+          108,
+          111,
+          10
+        ],
+        "terminal_id": 7
+      }
+    },
+    {
+      "Resize": {
+        "cols": 120,
+        "rows": 40,
+        "terminal_id": 7
+      }
+    },
+    {
+      "RequestTerminalResync": {
+        "required_seq": 42,
+        "terminal_id": 7
+      }
+    },
+    {
+      "Close": {
+        "terminal_id": 7
+      }
+    },
+    {
+      "StartAgentRun": {
+        "access": "Default",
+        "agent": "claude",
+        "cwd": "/tmp/worktree",
+        "initial_input": {
+          "json": "{\"type\":\"user\",\"message\":\"review this diff\"}",
+          "text": "review this diff"
+        },
+        "mode": "StreamJson",
+        "session_id": "00000000-0000-0000-0000-000000000002",
+        "session_key": "github:o/r#1"
+      }
+    },
+    {
+      "StartAgentRun": {
+        "access": "Default",
+        "agent": "claude",
+        "cwd": null,
+        "initial_input": null,
+        "mode": "Terminal",
+        "session_id": null,
+        "session_key": "github:o/r#1"
+      }
+    },
+    {
+      "SendAgentInput": {
+        "message": {
+          "json": null,
+          "text": "continue"
+        },
+        "run_id": 9
+      }
+    },
+    {
+      "InterruptAgentRun": {
+        "run_id": 9
+      }
+    },
+    {
+      "DecideAgentApproval": {
+        "decision": "Approve",
+        "request_id": "perm-1",
+        "run_id": 9
+      }
+    },
+    {
+      "DecideAgentApproval": {
+        "decision": {
+          "Deny": {
+            "reason": "outside workspace"
+          }
+        },
+        "request_id": "perm-2",
+        "run_id": 9
+      }
+    },
+    {
+      "AnswerAgentQuestion": {
+        "answer": {
+          "answer": "use the existing style"
+        },
+        "question_id": "q-1",
+        "run_id": 9
+      }
+    },
+    {
+      "UpsertProviderCredential": {
+        "credential": {
+          "expires_at": null,
+          "provider_id": "github",
+          "scopes": [
+            "repo"
+          ],
+          "source": "unit-test",
+          "token": "secret-token"
+        },
+        "principal_id": "local"
+      }
+    },
+    {
+      "RemoveProviderCredential": {
+        "principal_id": "local",
+        "provider_id": "github"
+      }
+    },
+    {
+      "ListProviderCredentials": {
+        "principal_id": "local"
+      }
+    },
+    {
+      "RecordUserMessage": {
+        "prompt": {
+          "source": {
+            "Snippet": {
+              "category": "CI",
+              "key": "test"
+            }
+          },
+          "text": "fix the flaky test",
+          "timestamp_ms": 1700000000000
+        },
+        "terminal_id": 7
+      }
+    },
+    {
+      "InjectPrompt": {
+        "fallback_spawn": {
+          "cwd": "/tmp/worktree",
+          "kind": {
+            "Agent": "codex"
+          },
+          "model_alias": "L",
+          "session_id": null,
+          "session_key": "github:o/r#1"
+        },
+        "prompt": "review this diff",
+        "submit": false,
+        "terminal_id": 7
+      }
+    },
+    {
+      "RecordComposingBuffer": {
+        "buffer": "half typed",
+        "terminal_id": 7
+      }
+    },
+    {
+      "IngestHook": {
+        "backend_key": "tmux-key",
+        "hook": {
+          "cwd": "/tmp/worktree",
+          "kind": "PermissionRequest",
+          "notification": "permission_prompt",
+          "session_id": "agent-session",
+          "tool_name": "Bash"
+        },
+        "terminal_id": 7
+      }
+    },
+    {
+      "Kill": {
+        "session_key": "github:o/r#1"
+      }
+    },
+    {
+      "RemoveMergedWorkspace": {
+        "session_key": "github:o/r#1"
+      }
+    },
+    {
+      "DeleteProject": {
+        "project_key": "github-o-r"
+      }
+    },
+    {
+      "CollapseIntoPr": {
+        "issue_workspace_key": "github:o/r#1"
+      }
+    },
+    {
+      "MarkRead": {
+        "session_key": "github:o/r#1"
+      }
+    },
+    {
+      "FocusWorkspace": {
+        "session_key": "github:o/r#1"
+      }
+    },
+    {
+      "MarkActivityRead": {
+        "fingerprint": {
+          "NodeId": "IC_kwDOtest123"
+        },
+        "index": 2,
+        "session_key": "github:o/r#1"
+      }
+    },
+    {
+      "UnmarkActivityRead": {
+        "index": 2,
+        "session_key": "github:o/r#1"
+      }
+    },
+    {
+      "CreateWorkspace": {
+        "name": "audit-wire",
+        "project_key": "github-o-r",
+        "spawn_agent": "codex"
+      }
+    },
+    {
+      "CreateProject": {
+        "name": "local project"
+      }
+    },
+    {
+      "SetSessionLayout": {
+        "layout_json": "{\"mode\":\"tabs\"}",
+        "session_id_raw": "00000000-0000-0000-0000-000000000001",
+        "session_key": "github:o/r#1"
+      }
+    },
+    {
+      "Snooze": {
+        "session_key": "github:o/r#1",
+        "until": "2026-01-02T07:04:05Z"
+      }
+    },
+    {
+      "Unsnooze": {
+        "session_key": "github:o/r#1"
+      }
+    },
+    {
+      "SetAutoMergeOnGreen": {
+        "enabled": true,
+        "session_key": "github:o/r#1"
+      }
+    },
+    {
+      "SetTrackMain": {
+        "enabled": true,
+        "session_key": "github:o/r#1"
+      }
+    },
+    {
+      "SetAutoFixPolicy": {
+        "arm": "Arm",
+        "kind": "CiFailure",
+        "session_key": "github:o/r#1"
+      }
+    },
+    {
+      "PostReply": {
+        "body": "ship it",
+        "session_key": "github:o/r#1"
+      }
+    },
+    {
+      "ConfirmMerge": {
+        "accept": true,
+        "issue_workspace_key": "github:o/r#1",
+        "pr_workspace_key": "github:o/r#2"
+      }
+    },
+    {
+      "AdoptSessions": {
+        "source_workspace_key": "github:o/r#1",
+        "target_workspace_key": "github:o/r#2"
+      }
+    },
+    {
+      "MergePr": {
+        "workspace_key": "github:o/r#2"
+      }
+    },
+    {
+      "CloseIssue": {
+        "workspace_key": "github:o/r#1"
+      }
+    },
+    {
+      "DeleteOrClose": {
+        "workspace_key": "github:o/r#1"
+      }
+    },
+    {
+      "RequestReviewers": {
+        "logins": [
+          "octocat"
+        ],
+        "workspace_key": "github:o/r#2"
+      }
+    },
+    {
+      "AddAssignees": {
+        "logins": [
+          "octocat"
+        ],
+        "workspace_key": "github:o/r#2"
+      }
+    },
+    {
+      "SetAssignees": {
+        "logins": [],
+        "workspace_key": "github:o/r#2"
+      }
+    },
+    {
+      "SetLabels": {
+        "names": [
+          "bug"
+        ],
+        "workspace_key": "github:o/r#2"
+      }
+    },
+    {
+      "FetchRepoLabels": {
+        "workspace_key": "github:o/r#2"
+      }
+    },
+    "Refresh",
+    "CleanWorktrees",
+    "InspectWorktrees",
+    {
+      "ScanCheckouts": {
+        "roots": []
+      }
+    },
+    {
+      "ScanCheckouts": {
+        "roots": [
+          "/home/dev/code"
+        ]
+      }
+    },
+    {
+      "ImportLocalCheckout": {
+        "path": "/home/dev/code/acme/widget",
+        "spawn_agent": "claude"
+      }
+    },
+    {
+      "ImportLocalCheckout": {
+        "path": "/home/dev/code/acme/widget",
+        "spawn_agent": null
+      }
+    },
+    {
+      "DeleteOrphanedWorktree": {
+        "force": false,
+        "path": "/tmp/wt"
+      }
+    },
+    {
+      "DeleteOrphanedWorktree": {
+        "force": true,
+        "path": "/tmp/wt-dirty"
+      }
+    },
+    {
+      "FetchPrDetails": {
+        "workspace_key": "github:o/r#2"
+      }
+    },
+    {
+      "SyncWorkspace": {
+        "workspace_key": "github:o/r#2"
+      }
+    },
+    {
+      "KeepMergedWorkspace": {
+        "session_key": "github:o/r#1"
+      }
+    },
+    {
+      "FetchScrollback": {
+        "terminal_id": 12
+      }
+    },
+    "CheckAgentCliUpdates",
+    "UpdateAgentClis",
+    {
+      "SetNotes": {
+        "notes": "check the flaky retry",
+        "session_key": "github:o/r#1"
+      }
+    },
+    {
+      "UpdateBranch": {
+        "workspace_key": "github:o/r#2"
+      }
+    },
+    {
+      "DeliverSnippet": {
+        "body": "review the diff",
+        "category": "Review",
+        "snippet_key": "rev",
+        "terminal_id": 12
+      }
+    },
+    {
+      "SetUpdateDismissal": {
+        "target": "release:v0.2.0"
+      }
+    },
+    "Shutdown"
+  ],
+  "events": [
+    {
+      "Snapshot": {
+        "dismissed_updates": [
+          "release:v0.2.0"
+        ],
+        "projects": [],
+        "recent_snippets": [
+          "rev",
+          "pr"
+        ],
+        "terminals": [
+          {
+            "agent_state": "InputNeeded",
+            "composing_buffer": "half typed prompt",
+            "kind": {
+              "Agent": "claude"
+            },
+            "last_seq": 42,
+            "model_label": "Opus",
+            "no_permission": true,
+            "on_main": true,
+            "prompt_history": [
+              {
+                "source": "Typed",
+                "text": "fix the flaky test",
+                "timestamp_ms": 1700000000000
+              }
+            ],
+            "replay": [
+              114,
+              101,
+              112,
+              108,
+              97,
+              121,
+              45,
+              98,
+              121,
+              116,
+              101,
+              115
+            ],
+            "replay_available": true,
+            "session_key": "github:o/r#1",
+            "terminal_id": 1
+          }
+        ],
+        "workspaces": [
+          {
+            "activity": [],
+            "auto_merge_on_green": false,
+            "base_branch": null,
+            "branch": "b",
+            "cleanup_prompt": "unresolved",
+            "created_at": "2026-01-02T03:04:05Z",
+            "gh_issues": [],
+            "key": "github-o-r-1",
+            "last_viewed_at": null,
+            "linear_issues": [],
+            "linked_checkout": null,
+            "local": false,
+            "name": "t",
+            "notes": "",
+            "policies": {
+              "auto_fix_ci": "Default",
+              "auto_fix_conflict": "Default"
+            },
+            "pr": {
+              "additions": 0,
+              "assignees": [],
+              "auto_merge_enabled": false,
+              "base_branch": null,
+              "body": null,
+              "branch": "b",
+              "checks": [],
+              "ci": "None",
+              "closed_at": null,
+              "closes_issues": [],
+              "created_at": null,
+              "deletions": 0,
+              "id": {
+                "key": "o/r#1",
+                "source": "github"
+              },
+              "is_behind_base": false,
+              "is_in_merge_queue": false,
+              "kind": null,
+              "labels": [],
+              "last_commenter": null,
+              "mergeable": "Mergeable",
+              "needs_reply": false,
+              "node_id": null,
+              "recent_activity": [],
+              "repo": "o/r",
+              "review": "None",
+              "reviewers": [],
+              "role": "Author",
+              "state": "Open",
+              "title": "t",
+              "unread_count": 0,
+              "updated_at": "2026-01-02T03:04:05Z",
+              "url": "https://github.com/o/r/pull/1"
+            },
+            "project_key": "github-o-r",
+            "read_indices": [],
+            "schema": 1,
+            "seen_count": 0,
+            "sent_snippets": [],
+            "sessions": [],
+            "snoozed_until": null,
+            "track_main": false,
+            "track_main_behind": false
+          }
+        ]
+      }
+    },
+    {
+      "ViewerIdentities": {
+        "logins": [
+          [
+            "github",
+            "octocat"
+          ]
+        ]
+      }
+    },
+    {
+      "AutoFixPolicyConfig": {
+        "enabled": true,
+        "opt_out_labels": [
+          "no-auto-fix",
+          "do-not-lazybox"
+        ]
+      }
+    },
+    {
+      "ShellCommandConfig": {
+        "command": "/bin/zsh",
+        "configured": false
+      }
+    },
+    {
+      "WorkspaceUpserted": {
+        "activity": [],
+        "auto_merge_on_green": false,
+        "base_branch": null,
+        "branch": "b",
+        "cleanup_prompt": "unresolved",
+        "created_at": "2026-01-02T03:04:05Z",
+        "gh_issues": [],
+        "key": "github-o-r-1",
+        "last_viewed_at": null,
+        "linear_issues": [],
+        "linked_checkout": null,
+        "local": false,
+        "name": "t",
+        "notes": "",
+        "policies": {
+          "auto_fix_ci": "Default",
+          "auto_fix_conflict": "Default"
+        },
+        "pr": {
+          "additions": 0,
+          "assignees": [],
+          "auto_merge_enabled": false,
+          "base_branch": null,
+          "body": null,
+          "branch": "b",
+          "checks": [],
+          "ci": "None",
+          "closed_at": null,
+          "closes_issues": [],
+          "created_at": null,
+          "deletions": 0,
+          "id": {
+            "key": "o/r#1",
+            "source": "github"
+          },
+          "is_behind_base": false,
+          "is_in_merge_queue": false,
+          "kind": null,
+          "labels": [],
+          "last_commenter": null,
+          "mergeable": "Mergeable",
+          "needs_reply": false,
+          "node_id": null,
+          "recent_activity": [],
+          "repo": "o/r",
+          "review": "None",
+          "reviewers": [],
+          "role": "Author",
+          "state": "Open",
+          "title": "t",
+          "unread_count": 0,
+          "updated_at": "2026-01-02T03:04:05Z",
+          "url": "https://github.com/o/r/pull/1"
+        },
+        "project_key": "github-o-r",
+        "read_indices": [],
+        "schema": 1,
+        "seen_count": 0,
+        "sent_snippets": [],
+        "sessions": [],
+        "snoozed_until": null,
+        "track_main": false,
+        "track_main_behind": false
+      }
+    },
+    {
+      "WorkspaceRemoved": "github:o/r#1"
+    },
+    {
+      "ProjectUpserted": {
+        "created_at": "2026-01-02T03:04:05Z",
+        "github_repo": null,
+        "key": "github-o-r",
+        "name": "o/r",
+        "root_dir": null
+      }
+    },
+    {
+      "ProjectRemoved": "github-o-r"
+    },
+    {
+      "WorkspaceOutOfScope": {
+        "active_terminal_count": 2,
+        "label": "o/r#1",
+        "title": "wire audit",
+        "workspace_key": "github:o/r#1"
+      }
+    },
+    {
+      "WorkspaceMergePending": {
+        "active_terminal_count": 1,
+        "issue_label": "o/r#1",
+        "issue_workspace_key": "github:o/r#1",
+        "pr_label": "o/r#2",
+        "pr_workspace_key": "github:o/r#2"
+      }
+    },
+    {
+      "WorkspaceMerged": {
+        "issue_label": "o/r#1",
+        "issue_workspace_key": "github:o/r#1",
+        "pr_label": "o/r#2",
+        "pr_workspace_key": "github:o/r#2"
+      }
+    },
+    {
+      "PrMerged": {
+        "pr_label": "o/r#2",
+        "workspace_key": "github:o/r#2"
+      }
+    },
+    {
+      "PrMergeFailed": {
+        "pr_label": "o/r#2",
+        "reason": "required review",
+        "workspace_key": "github:o/r#2"
+      }
+    },
+    {
+      "IssueClosed": {
+        "issue_label": "o/r#1",
+        "workspace_key": "github:o/r#1"
+      }
+    },
+    {
+      "IssueCloseFailed": {
+        "issue_label": "o/r#1",
+        "reason": "permission denied",
+        "workspace_key": "github:o/r#1"
+      }
+    },
+    {
+      "PrClosed": {
+        "pr_label": "o/r#2",
+        "workspace_key": "github:o/r#2"
+      }
+    },
+    {
+      "IssueDeleted": {
+        "fell_back_to_close": true,
+        "issue_label": "o/r#1",
+        "workspace_key": "github:o/r#1"
+      }
+    },
+    {
+      "DeleteOrCloseFailed": {
+        "label": "o/r#1",
+        "reason": "permission denied",
+        "workspace_key": "github:o/r#1"
+      }
+    },
+    {
+      "MergedPrRemovable": {
+        "active_terminal_count": 1,
+        "has_local_work": true,
+        "label": "o/r#2",
+        "terminal_state": "Merged",
+        "workspace_key": "github:o/r#2"
+      }
+    },
+    {
+      "RemovalCancelled": {
+        "workspace_key": "github:o/r#2"
+      }
+    },
+    {
+      "RepoLabels": {
+        "labels": [
+          {
+            "color": "d73a4a",
+            "name": "bug"
+          }
+        ],
+        "workspace_key": "github:o/r#2"
+      }
+    },
+    {
+      "SessionCreated": {
+        "created_at": "2026-01-02T03:04:05Z",
+        "id": "00000000-0000-0000-0000-000000000005",
+        "kind": "Shell",
+        "last_output_at": null,
+        "layout": {
+          "Tabs": {
+            "active": 0
+          }
+        },
+        "name": "shell",
+        "state": "Active",
+        "workspace_key": "github:o/r#1",
+        "worktree_path": "/tmp/wt"
+      }
+    },
+    {
+      "WorktreeProgress": {
+        "session_key": "github:o/r#1",
+        "status": {
+          "Warned": "using cached base"
+        },
+        "step": "Fetch"
+      }
+    },
+    {
+      "WorktreeProgress": {
+        "session_key": "github:o/r#1",
+        "status": {
+          "Progress": "Receiving objects: 42% (1200/2900)"
+        },
+        "step": "Clone"
+      }
+    },
+    {
+      "SessionEnded": {
+        "session_id": "00000000-0000-0000-0000-000000000003",
+        "workspace_key": "github:o/r#1"
+      }
+    },
+    {
+      "TerminalSpawned": {
+        "kind": "Shell",
+        "model_label": null,
+        "no_permission": false,
+        "on_main": false,
+        "session_key": "github:o/r#1",
+        "terminal_id": 2
+      }
+    },
+    {
+      "TerminalOutput": {
+        "bytes": [
+          65,
+          78,
+          83,
+          73,
+          58,
+          32,
+          27,
+          91,
+          51,
+          49,
+          109,
+          114,
+          101,
+          100,
+          27,
+          91,
+          48,
+          109
+        ],
+        "first_seq": 1,
+        "seq": 1,
+        "terminal_id": 2
+      }
+    },
+    {
+      "TerminalResync": {
+        "replay": [
+          102,
+          117,
+          108,
+          108,
+          32,
+          114,
+          101,
+          112,
+          108,
+          97,
+          121
+        ],
+        "seq": 9,
+        "terminal_id": 2
+      }
+    },
+    {
+      "TerminalResyncUnavailable": {
+        "terminal_id": 2
+      }
+    },
+    {
+      "TerminalExited": {
+        "exit_code": 0,
+        "last_output": null,
+        "terminal_id": 2
+      }
+    },
+    {
+      "TerminalExited": {
+        "exit_code": null,
+        "last_output": "boom: could not start",
+        "terminal_id": 2
+      }
+    },
+    {
+      "TerminalFocusRequested": {
+        "terminal_id": 2
+      }
+    },
+    {
+      "TerminalsRebadged": {
+        "from": "github:o/r#1",
+        "to": "github:o/r#2"
+      }
+    },
+    {
+      "AgentState": {
+        "session_key": "github:o/r#1",
+        "state": "InputNeeded",
+        "terminal_id": 2
+      }
+    },
+    {
+      "AgentState": {
+        "session_key": "github:o/r#1",
+        "state": "Working",
+        "terminal_id": 2
+      }
+    },
+    {
+      "AgentState": {
+        "session_key": "github:o/r#1",
+        "state": "Idle",
+        "terminal_id": 2
+      }
+    },
+    {
+      "AgentState": {
+        "session_key": "github:o/r#1",
+        "state": "Done",
+        "terminal_id": 2
+      }
+    },
+    {
+      "AgentState": {
+        "session_key": "github:o/r#1",
+        "state": {
+          "Exited": {
+            "code": 9
+          }
+        },
+        "terminal_id": 2
+      }
+    },
+    {
+      "AgentRunStarted": {
+        "agent": "claude",
+        "mode": "StreamJson",
+        "run_id": 9,
+        "session_id": "00000000-0000-0000-0000-000000000004",
+        "session_key": "github:o/r#1"
+      }
+    },
+    {
+      "AgentRawJson": {
+        "json": "{\"type\":\"assistant\",\"message\":{\"content\":[]}}",
+        "run_id": 9
+      }
+    },
+    {
+      "AgentDebug": {
+        "message": "runtime stderr line",
+        "run_id": 9
+      }
+    },
+    {
+      "AgentAssistantTextDelta": {
+        "delta": "hello",
+        "run_id": 9
+      }
+    },
+    {
+      "AgentToolCallStarted": {
+        "call_id": "toolu-1",
+        "input_json": "{\"file_path\":\"src/lib.rs\"}",
+        "name": "Edit",
+        "run_id": 9
+      }
+    },
+    {
+      "AgentToolCallDelta": {
+        "call_id": "toolu-1",
+        "delta_json": "{\"old_string\":\"a\"}",
+        "run_id": 9
+      }
+    },
+    {
+      "AgentToolCallFinished": {
+        "call_id": "toolu-1",
+        "error": null,
+        "output_json": "{\"ok\":true}",
+        "run_id": 9
+      }
+    },
+    {
+      "AgentToolCallFinished": {
+        "call_id": "toolu-2",
+        "error": "permission denied",
+        "output_json": null,
+        "run_id": 9
+      }
+    },
+    {
+      "AgentPermissionRequest": {
+        "input_json": "{\"command\":\"cargo test\"}",
+        "reason": "run tests",
+        "request_id": "perm-1",
+        "run_id": 9,
+        "tool_name": "Bash"
+      }
+    },
+    {
+      "AgentUserQuestion": {
+        "allow_freeform": true,
+        "choices": [
+          "main",
+          "develop"
+        ],
+        "prompt": "Which branch should I use?",
+        "question_id": "q-1",
+        "run_id": 9
+      }
+    },
+    {
+      "AgentUsage": {
+        "run_id": 9,
+        "usage": {
+          "cache_creation_input_tokens": 3,
+          "cache_read_input_tokens": 4,
+          "cost_usd_micros": 1234,
+          "input_tokens": 10,
+          "output_tokens": 20
+        }
+      }
+    },
+    {
+      "AgentTurnFinished": {
+        "error": null,
+        "result": "turn complete",
+        "run_id": 9,
+        "session_id": "claude-session-1"
+      }
+    },
+    {
+      "AgentTurnFinished": {
+        "error": "max turns reached",
+        "result": null,
+        "run_id": 9,
+        "session_id": null
+      }
+    },
+    {
+      "AgentRunFinished": {
+        "error": null,
+        "exit_code": 0,
+        "run_id": 9
+      }
+    },
+    {
+      "AgentRunFinished": {
+        "error": "interrupted",
+        "exit_code": null,
+        "run_id": 10
+      }
+    },
+    {
+      "ProviderCredentialUpdated": {
+        "metadata": {
+          "expires_at": null,
+          "principal_id": "local",
+          "provider_id": "github",
+          "scopes": [
+            "repo"
+          ],
+          "source": "unit-test",
+          "updated_at": "2026-01-02T03:04:05Z"
+        },
+        "principal_id": "local",
+        "provider_id": "github"
+      }
+    },
+    {
+      "ProviderCredentialRemoved": {
+        "principal_id": "local",
+        "provider_id": "github"
+      }
+    },
+    {
+      "ProviderCredentialsListed": {
+        "credentials": [
+          {
+            "expires_at": null,
+            "principal_id": "local",
+            "provider_id": "github",
+            "scopes": [
+              "repo"
+            ],
+            "source": "unit-test",
+            "updated_at": "2026-01-02T03:04:05Z"
+          }
+        ],
+        "principal_id": "local"
+      }
+    },
+    {
+      "ProviderError": {
+        "detail": "",
+        "kind": "",
+        "message": "rate limited",
+        "source": "github"
+      }
+    },
+    {
+      "PollCompleted": {
+        "count": 3,
+        "source": "github"
+      }
+    },
+    {
+      "PollProgress": {
+        "message": "fetching reviews",
+        "source": "github"
+      }
+    },
+    {
+      "Notification": {
+        "body": "body",
+        "title": "hi"
+      }
+    },
+    {
+      "CleanWorktreesCompleted": {
+        "removed": 3,
+        "skipped": 1
+      }
+    },
+    {
+      "WorktreesInspected": {
+        "inspections": []
+      }
+    },
+    {
+      "WorktreesInspected": {
+        "inspections": [
+          {
+            "bare_path": "/tmp/repos/o/r.git",
+            "branch": "feat",
+            "has_uncommitted_changes": true,
+            "has_unpushed_commits": false,
+            "is_safe_to_delete": false,
+            "last_modified_unix": 1700000000,
+            "path": "/tmp/wt",
+            "reasons": [
+              "untracked",
+              "branch-deleted-upstream"
+            ],
+            "session_id": "12345678",
+            "size_bytes": 4096
+          }
+        ]
+      }
+    },
+    {
+      "CheckoutsDiscovered": {
+        "checkouts": []
+      }
+    },
+    {
+      "CheckoutsDiscovered": {
+        "checkouts": [
+          {
+            "branch": "main",
+            "has_uncommitted_changes": true,
+            "path": "/home/dev/code/acme/widget",
+            "repo": "acme/widget"
+          }
+        ]
+      }
+    },
+    {
+      "OrphanedWorktreeDeleted": {
+        "error": null,
+        "ok": true,
+        "path": "/tmp/wt"
+      }
+    },
+    {
+      "OrphanedWorktreeDeleted": {
+        "error": "has uncommitted changes",
+        "ok": false,
+        "path": "/tmp/wt"
+      }
+    },
+    {
+      "TerminalInputRejected": {
+        "message": "write timed out",
+        "terminal_id": 12
+      }
+    },
+    {
+      "CommandRejected": {
+        "command": "Write",
+        "message": "terminal command queue is full"
+      }
+    },
+    {
+      "TerminalScrollback": {
+        "replay": [
+          100,
+          101,
+          101,
+          112,
+          32,
+          104,
+          105,
+          115,
+          116,
+          111,
+          114,
+          121,
+          13,
+          10,
+          108,
+          105,
+          118,
+          101,
+          32,
+          98,
+          111,
+          116,
+          116,
+          111,
+          109
+        ],
+        "seq": 42,
+        "terminal_id": 12
+      }
+    },
+    {
+      "AgentCliUpdatesChecked": {
+        "manual": true,
+        "statuses": [
+          {
+            "agent_id": "claude",
+            "auto_update": true,
+            "display_name": "Claude Code",
+            "error": null,
+            "installed": "2.1.3",
+            "latest": "2.1.4",
+            "update_available": true
+          }
+        ]
+      }
+    },
+    {
+      "AgentCliUpdateFinished": {
+        "agent_id": "codex",
+        "display_name": "Codex",
+        "installed_after": null,
+        "installed_before": "0.46.0",
+        "message": "brew upgrade --cask codex failed: exit 1",
+        "ok": false
+      }
+    },
+    {
+      "RecoveredTerminalsRequireRestart": {
+        "terminal_ids": [
+          12,
+          13
+        ]
+      }
+    },
+    {
+      "BranchUpdated": {
+        "pr_label": "o/r#2",
+        "workspace_key": "github:o/r#2"
+      }
+    },
+    {
+      "BranchUpdateFailed": {
+        "pr_label": "o/r#2",
+        "reason": "merge conflict",
+        "workspace_key": "github:o/r#2"
+      }
+    },
+    {
+      "SnippetDelivered": {
+        "prompt": {
+          "source": {
+            "Snippet": {
+              "category": "Review",
+              "key": "rev"
+            }
+          },
+          "text": "review the diff",
+          "timestamp_ms": 1700000000000
+        },
+        "session_key": "github:o/r#1",
+        "snippet_key": "rev",
+        "terminal_id": 12
+      }
+    }
+  ],
+  "protocol_version": 1
+}

@@ -30,6 +30,7 @@ use std::time::Duration;
 /// (CI failures and merge conflicts get *separate* attempt budgets —
 /// a flaky test shouldn't burn the conflict budget and vice versa).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum AutoFixKind {
     /// A required check transitioned to failing.
     CiFailure,

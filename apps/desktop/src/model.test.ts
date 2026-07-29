@@ -14,28 +14,76 @@ function task(title: string, unread = 0, updatedAt = "2026-01-01"): Task {
     body: null,
     state: "Open",
     role: "Author",
-    ci: "Passing",
+    ci: "Success",
     review: "Approved",
+    checks: [],
     unread_count: unread,
     url: "https://example.test/task",
     repo: "owner/repo",
+    branch: null,
+    base_branch: null,
     updated_at: updatedAt,
+    created_at: null,
+    closed_at: null,
+    labels: [],
+    reviewers: [],
+    assignees: [],
+    auto_merge_enabled: false,
+    is_in_merge_queue: false,
+    mergeable: "Unknown",
+    is_behind_base: false,
+    node_id: null,
+    needs_reply: false,
+    last_commenter: null,
+    recent_activity: [],
+    additions: 0,
+    deletions: 0,
+    closes_issues: [],
     kind: "Pr",
   };
 }
 
 function workspace(key: string, pr: Task | null): Workspace {
   return {
+    schema: 1,
     key,
+    project_key: null,
+    local: false,
+    linked_checkout: null,
     name: key,
     branch: "main",
+    sessions: [],
     pr,
     gh_issues: [],
     linear_issues: [],
     activity: [],
     seen_count: 0,
     read_indices: [],
-    sessions: [],
+    snoozed_until: null,
+    auto_merge_on_green: false,
+    track_main: false,
+    base_branch: null,
+    track_main_behind: false,
+    policies: { auto_fix_ci: "Default", auto_fix_conflict: "Default" },
+    notes: "",
+    sent_snippets: [],
+    cleanup_prompt: "unresolved",
+    created_at: "2026-01-01T00:00:00Z",
+    last_viewed_at: null,
+  };
+}
+
+function activity(author: string, body: string) {
+  return {
+    author,
+    body,
+    created_at: "2026-01-01T00:00:00Z",
+    kind: "Comment" as const,
+    node_id: null,
+    path: null,
+    line: null,
+    diff_hunk: null,
+    thread_id: null,
   };
 }
 
@@ -58,9 +106,9 @@ describe("workspace model", () => {
   it("uses unseen activity when it exceeds task unread counts", () => {
     const item = workspace("activity", task("activity", 1));
     item.activity = [
-      { author: "a", body: "one", created_at: "", kind: "Comment" },
-      { author: "b", body: "two", created_at: "", kind: "Comment" },
-      { author: "c", body: "three", created_at: "", kind: "Comment" },
+      activity("a", "one"),
+      activity("b", "two"),
+      activity("c", "three"),
     ];
     item.seen_count = 1;
     expect(unreadCount(item)).toBe(2);
@@ -71,7 +119,15 @@ describe("workspace model", () => {
     const second = workspace("second", task("second"));
     let state = applyWorkspaceEvent(
       new Map([["stale", workspace("stale", null)]]),
-      { Snapshot: { workspaces: [first], terminals: [] } },
+      {
+        Snapshot: {
+          workspaces: [first],
+          terminals: [],
+          projects: [],
+          recent_snippets: [],
+          dismissed_updates: [],
+        },
+      },
     );
     state = applyWorkspaceEvent(state, { WorkspaceUpserted: second });
     state = applyWorkspaceEvent(state, { WorkspaceRemoved: "first" });

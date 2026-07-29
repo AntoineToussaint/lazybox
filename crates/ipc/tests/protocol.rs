@@ -509,11 +509,13 @@ fn all_events() -> Vec<Event> {
             session_key: key.clone(),
             step: WorktreeStep::Fetch,
             status: WorktreeStepStatus::Warned("using cached base".into()),
+            origin: lazybox_ipc::SpawnOrigin::Interactive,
         },
         Event::WorktreeProgress {
             session_key: key.clone(),
             step: WorktreeStep::Clone,
             status: WorktreeStepStatus::Progress("Receiving objects: 42% (1200/2900)".into()),
+            origin: lazybox_ipc::SpawnOrigin::Autonomous(lazybox_ipc::AutonomousTrigger::Label),
         },
         Event::SessionEnded {
             workspace_key: lazybox_core::WorkspaceKey::new(key.as_str()),

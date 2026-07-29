@@ -1094,6 +1094,14 @@ pub struct Model<T: TerminalAdapter> {
     /// starts provisioning. A failed step still surfaces as a footer
     /// error so a dismissed checklist can't hide a broken provision.
     worktree_progress_dismissed: Option<lazybox_core::SessionKey>,
+    /// Sessions whose *autonomous* (GitHub label / `@lazybox` mention)
+    /// spawn we've already announced with a footer notice. Autonomous
+    /// provisioning shows no modal (issue #645), so this de-dups the
+    /// one-line "starting agent…" notice against the several
+    /// `WorktreeProgress` steps a single provision emits; the entry
+    /// clears when provisioning finishes or fails so a later re-spawn on
+    /// the same workspace announces again.
+    autonomous_spawn_notified: std::collections::HashSet<lazybox_core::SessionKey>,
     /// Transient UI status (polling spinner + footer notice). See
     /// `StatusCtx`.
     status: StatusCtx,
@@ -1517,6 +1525,7 @@ impl<T: TerminalAdapter> Model<T> {
             merge_prompt_queue: std::collections::VecDeque::new(),
             worktree_progress: None,
             worktree_progress_dismissed: None,
+            autonomous_spawn_notified: std::collections::HashSet::new(),
             status: StatusCtx::new(),
             ui_defaults: lazybox_config::UiDefaults::default(),
             auto_fix_opt_out_labels: lazybox_core::AutoFixSettings::default().opt_out_labels,

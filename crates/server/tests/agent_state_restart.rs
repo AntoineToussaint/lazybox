@@ -374,6 +374,7 @@ async fn recovered_dead_process_exits_and_fresh_spawn_has_no_old_state() {
         false,
         None,
         false,
+        lazybox_ipc::SpawnOrigin::Interactive,
     )
     .await;
     let fresh = snapshot_terminals(&restarted)

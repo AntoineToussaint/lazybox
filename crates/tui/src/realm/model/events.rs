@@ -945,6 +945,11 @@ impl<T: TerminalAdapter> Model<T> {
             // workspace doesn't inherit a stale restore target.
             let session_key: lazybox_core::SessionKey = key.into();
             self.workspace_focus.remove(&session_key);
+            // Drop the autonomous-spawn notice marker so a re-added
+            // workspace's next auto-spawn announces again, and a spawn
+            // that never reached a live terminal can't leak the entry
+            // (issue #645).
+            self.autonomous_spawn_notified.remove(&session_key);
             // Capture this BEFORE the sidebar (below) moves the cursor
             // off the now-gone row: if the user was viewing the
             // workspace being removed, a trailing `WorkspaceMerged`
@@ -969,17 +974,22 @@ impl<T: TerminalAdapter> Model<T> {
             }
             return;
         }
-        // First-time worktree provisioning progress. Drives the
-        // spinner + step checklist modal. The panes ignore it, so
-        // handle + return here rather than fan out. The matching
-        // `TerminalSpawned` below dismisses the modal once ready.
+        // First-time worktree provisioning progress. A user-initiated
+        // spawn drives the spinner + step checklist modal; an autonomous
+        // (GitHub label / `@lazybox` mention) spawn is background work
+        // the user didn't ask for, so it reports a footer notice instead
+        // of stealing focus with a modal (issue #645). Either way the
+        // panes ignore it, so handle + return here rather than fan out.
+        // The matching `TerminalSpawned` below dismisses the modal once
+        // ready.
         if let IpcEvent::WorktreeProgress {
             session_key,
             step,
             status,
+            origin,
         } = &event
         {
-            self.apply_worktree_progress(session_key.clone(), *step, status.clone());
+            self.route_worktree_progress(session_key.clone(), *step, status.clone(), *origin);
             self.redraw = true;
             return;
         }

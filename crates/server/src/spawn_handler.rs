@@ -725,6 +725,7 @@ pub async fn handle_spawn(
     on_main: bool,
     model_alias: Option<String>,
     resume: bool,
+    origin: lazybox_ipc::SpawnOrigin,
 ) {
     // Autonomous sessions (e.g. `@lazybox`-triggered work) launch with
     // tool-use permission prompts disabled so the agent runs unattended
@@ -873,7 +874,8 @@ pub async fn handle_spawn(
         // group — and release the claim (guard drop at return) so a
         // retry starts fresh, instead of the clone running on and
         // every later spawn collapsing onto it (issue #403).
-        let resolve = resolve_or_create_session(config, &session_key, session_id, &kind, on_main);
+        let resolve =
+            resolve_or_create_session(config, &session_key, session_id, &kind, on_main, origin);
         let cancel = inflight.cancel.clone();
         let resolved = tokio::select! {
             res = resolve => Some(res),
@@ -889,6 +891,7 @@ pub async fn handle_spawn(
                 &session_key,
                 WorktreeStep::Clone,
                 WorktreeStepStatus::Failed(lazybox_ipc::SPAWN_CANCELLED_NOTE.into()),
+                origin,
             );
             return;
         };
@@ -2115,6 +2118,7 @@ async fn resolve_or_create_session(
     session_id: Option<SessionId>,
     kind: &TerminalKind,
     on_main: bool,
+    origin: lazybox_ipc::SpawnOrigin,
 ) -> Result<(PathBuf, SessionId, bool), crate::ServerError> {
     let workspace_key = WorkspaceKey::new(session_key.as_str());
 
@@ -2191,7 +2195,9 @@ async fn resolve_or_create_session(
         // directory that masqueraded as the shared main checkout —
         // the terminal opened in a non-git folder and the agent's
         // first `git` command was the only thing that noticed.
-        if let Err(e) = provision_worktree(config, &workspace, &path, session_key, true).await {
+        if let Err(e) =
+            provision_worktree(config, &workspace, &path, session_key, true, origin).await
+        {
             tracing::warn!("main-checkout worktree provisioning failed: {e}");
             // Land the ✗ on the checklist row that actually aborted
             // (issue #557 B, acceptance #2) rather than always "Cloning".
@@ -2201,6 +2207,7 @@ async fn resolve_or_create_session(
                 session_key,
                 lazybox_ipc::WorktreeRecovery::classify(&message).failed_step(),
                 WorktreeStepStatus::Failed(message),
+                origin,
             );
             return Err(crate::ServerError::Worktree(format!(
                 "main checkout setup failed — spawn aborted, retry once the cause is fixed: {e}"
@@ -2213,11 +2220,25 @@ async fn resolve_or_create_session(
         let session = workspace.find_session(id).ok_or_else(|| {
             crate::ServerError::Workspace(format!("session {id:?} not in workspace"))
         })?;
-        ensure_worktree_present(config, &workspace, &session.worktree_path, session_key).await?;
+        ensure_worktree_present(
+            config,
+            &workspace,
+            &session.worktree_path,
+            session_key,
+            origin,
+        )
+        .await?;
         return Ok((session.worktree_path.clone(), session.id, false));
     }
     if let Some(session) = workspace.default_session() {
-        ensure_worktree_present(config, &workspace, &session.worktree_path, session_key).await?;
+        ensure_worktree_present(
+            config,
+            &workspace,
+            &session.worktree_path,
+            session_key,
+            origin,
+        )
+        .await?;
         return Ok((session.worktree_path.clone(), session.id, false));
     }
 
@@ -2236,6 +2257,7 @@ async fn resolve_or_create_session(
         &kind_for_session,
         &path,
         session_key,
+        origin,
     )
     .await?
     {
@@ -2243,7 +2265,8 @@ async fn resolve_or_create_session(
     }
 
     let prov_start = std::time::Instant::now();
-    let provisioned = provision_worktree(config, &workspace, &path, session_key, false).await;
+    let provisioned =
+        provision_worktree(config, &workspace, &path, session_key, false, origin).await;
     tracing::info!(
         elapsed_ms = prov_start.elapsed().as_millis(),
         ok = provisioned.is_ok(),
@@ -2278,6 +2301,7 @@ async fn resolve_or_create_session(
             session_key,
             lazybox_ipc::WorktreeRecovery::classify(&message).failed_step(),
             WorktreeStepStatus::Failed(message),
+            origin,
         );
         return Err(crate::ServerError::Worktree(format!(
             "git worktree setup failed — spawn aborted, retry once the cause is fixed: {e}"
@@ -2312,6 +2336,7 @@ async fn adopt_untracked_pr_worktree(
     kind: &SessionKind,
     intended_path: &Path,
     session_key: &SessionKey,
+    origin: lazybox_ipc::SpawnOrigin,
 ) -> Result<Option<(PathBuf, SessionId)>, crate::ServerError> {
     let _ownership_guard = config.worktree_ownership_lock.lock().await;
     let _workspace_guard = config.lock_workspace(workspace_key.as_str()).await;
@@ -2366,6 +2391,7 @@ async fn adopt_untracked_pr_worktree(
         &worktree,
         Some(&repo),
         session_key,
+        origin,
     )
     .await;
 
@@ -2596,11 +2622,13 @@ fn emit_worktree_progress(
     session_key: &SessionKey,
     step: WorktreeStep,
     status: WorktreeStepStatus,
+    origin: lazybox_ipc::SpawnOrigin,
 ) {
     let _ = config.bus.send(Event::WorktreeProgress {
         session_key: session_key.clone(),
         step,
         status,
+        origin,
     });
 }
 
@@ -2610,6 +2638,7 @@ async fn provision_worktree(
     target: &std::path::Path,
     session_key: &SessionKey,
     on_main: bool,
+    origin: lazybox_ipc::SpawnOrigin,
 ) -> Result<(), crate::ServerError> {
     use crate::ServerError;
     use lazybox_git_ops::CheckoutPhase;
@@ -2626,6 +2655,7 @@ async fn provision_worktree(
         session_key,
         WorktreeStep::Fetch,
         WorktreeStepStatus::Started,
+        origin,
     );
 
     // A blank workspace (created via `n` under a project, no issue/PR
@@ -2675,6 +2705,7 @@ async fn provision_worktree(
                 session_key: session_key.clone(),
                 step,
                 status,
+                origin,
             });
         })
     };
@@ -2779,7 +2810,15 @@ async fn provision_worktree(
             (worktree, None)
         }
     };
-    apply_worktree_setup(config, &mgr, &worktree, repo_key.as_deref(), session_key).await;
+    apply_worktree_setup(
+        config,
+        &mgr,
+        &worktree,
+        repo_key.as_deref(),
+        session_key,
+        origin,
+    )
+    .await;
     Ok(())
 }
 
@@ -2789,12 +2828,14 @@ async fn apply_worktree_setup(
     worktree: &lazybox_git_ops::Worktree,
     repo_key: Option<&str>,
     session_key: &SessionKey,
+    origin: lazybox_ipc::SpawnOrigin,
 ) {
     emit_worktree_progress(
         config,
         session_key,
         WorktreeStep::Setup,
         WorktreeStepStatus::Started,
+        origin,
     );
 
     let cfg = match lazybox_config::Config::load() {
@@ -2841,6 +2882,7 @@ async fn apply_worktree_setup(
         session_key,
         WorktreeStep::Setup,
         WorktreeStepStatus::Done,
+        origin,
     );
 }
 
@@ -3203,6 +3245,7 @@ async fn ensure_worktree_present(
     workspace: &Workspace,
     path: &std::path::Path,
     session_key: &SessionKey,
+    origin: lazybox_ipc::SpawnOrigin,
 ) -> Result<(), crate::ServerError> {
     if lazybox_git_ops::worktree_dir_ready(path).await {
         return Ok(());
@@ -3214,13 +3257,14 @@ async fn ensure_worktree_present(
     // Re-provisioning a persisted session's worktree — always an
     // isolated per-session tree (main-checkout terminals aren't
     // persisted as sessions).
-    if let Err(e) = provision_worktree(config, workspace, path, session_key, false).await {
+    if let Err(e) = provision_worktree(config, workspace, path, session_key, false, origin).await {
         tracing::warn!("re-provision failed: {e}");
         emit_worktree_progress(
             config,
             session_key,
             WorktreeStep::Clone,
             WorktreeStepStatus::Failed(e.to_string()),
+            origin,
         );
         return Err(crate::ServerError::Worktree(format!(
             "re-checkout of {} failed — spawn aborted, retry once the cause is fixed: {e}",
@@ -5513,6 +5557,9 @@ async fn handle_inject_prompt_inner(
                     fb.model_alias,
                     // A fresh re-spawn, not a restore.
                     false,
+                    // The user pressed `w`/`a` — the injected prompt is
+                    // theirs, so this stays an interactive spawn.
+                    lazybox_ipc::SpawnOrigin::Interactive,
                 )
                 .await;
                 return;
@@ -7092,6 +7139,10 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
                 // prior conversation reattaches (Claude `--continue`, Codex
                 // `resume --last`) instead of coming back blank.
                 true,
+                // Startup session recovery, not a live user chord — a
+                // re-provision of a missing worktree reports quietly
+                // rather than popping a modal.
+                lazybox_ipc::SpawnOrigin::Autonomous(lazybox_ipc::AutonomousTrigger::Restore),
             )
             .await;
         }
@@ -7271,6 +7322,7 @@ mod tests {
             false,
             None,
             false,
+            lazybox_ipc::SpawnOrigin::Interactive,
         )
         .await;
 
@@ -10437,10 +10489,16 @@ mod tests {
         let kind = TerminalKind::Agent("claude".into());
         // Even with on_main=false and a bogus session_id, the linked
         // branch wins.
-        let (path, _id, landed_on_main) =
-            resolve_or_create_session(&config, &session_key, Some(SessionId::new()), &kind, false)
-                .await
-                .expect("linked spawn resolves");
+        let (path, _id, landed_on_main) = resolve_or_create_session(
+            &config,
+            &session_key,
+            Some(SessionId::new()),
+            &kind,
+            false,
+            lazybox_ipc::SpawnOrigin::Interactive,
+        )
+        .await
+        .expect("linked spawn resolves");
 
         assert_eq!(path, checkout, "sessions land in the real checkout");
         assert!(
@@ -10467,9 +10525,19 @@ mod tests {
         let dir = tmp.path().join("worktree");
         let session_key = SessionKey::new("scratch");
         let mut bus_rx = config.bus.subscribe();
-        provision_worktree(&config, &ws, &dir, &session_key, false)
-            .await
-            .unwrap();
+        // An autonomous provision must stamp EVERY progress event with
+        // its origin so the client can route the whole stream to a
+        // footer notice rather than a modal (issue #645).
+        provision_worktree(
+            &config,
+            &ws,
+            &dir,
+            &session_key,
+            false,
+            lazybox_ipc::SpawnOrigin::Autonomous(lazybox_ipc::AutonomousTrigger::Mention),
+        )
+        .await
+        .unwrap();
         assert!(dir.join(".git").exists(), "a real git repo was created");
 
         // The checklist-driving progress events fire in order. A
@@ -10483,9 +10551,15 @@ mod tests {
                 session_key: sk,
                 step,
                 status,
+                origin,
             } = ev
             {
                 assert_eq!(sk, session_key);
+                assert_eq!(
+                    origin,
+                    lazybox_ipc::SpawnOrigin::Autonomous(lazybox_ipc::AutonomousTrigger::Mention),
+                    "the spawn origin must ride every progress step, not just the first",
+                );
                 progress.push((step, status));
             }
         }
@@ -10521,9 +10595,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("worktree");
 
-        let error = provision_worktree(&config, &ws, &dir, &SessionKey::new("scratch"), true)
-            .await
-            .expect_err("an unresolved GitHub project must abort provisioning");
+        let error = provision_worktree(
+            &config,
+            &ws,
+            &dir,
+            &SessionKey::new("scratch"),
+            true,
+            lazybox_ipc::SpawnOrigin::Interactive,
+        )
+        .await
+        .expect_err("an unresolved GitHub project must abort provisioning");
 
         assert!(
             error
@@ -10552,9 +10633,16 @@ mod tests {
         let kind = TerminalKind::Agent("claude".into());
         let mut bus_rx = config.bus.subscribe();
 
-        let err = resolve_or_create_session(&config, &session_key, None, &kind, false)
-            .await
-            .expect_err("provision failure must fail the spawn loudly");
+        let err = resolve_or_create_session(
+            &config,
+            &session_key,
+            None,
+            &kind,
+            false,
+            lazybox_ipc::SpawnOrigin::Interactive,
+        )
+        .await
+        .expect_err("provision failure must fail the spawn loudly");
         assert!(
             err.to_string().contains("spawn aborted"),
             "the error names the abort: {err}"
@@ -10615,9 +10703,15 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("mkdir");
         let session_key = SessionKey::new("scratch-repair");
 
-        ensure_worktree_present(&config, &ws, &dir, &session_key)
-            .await
-            .expect("an empty leftover dir must be repaired, not trusted");
+        ensure_worktree_present(
+            &config,
+            &ws,
+            &dir,
+            &session_key,
+            lazybox_ipc::SpawnOrigin::Interactive,
+        )
+        .await
+        .expect("an empty leftover dir must be repaired, not trusted");
         assert!(
             dir.join(".git").exists(),
             "the empty dir became a real checkout"
@@ -10625,9 +10719,15 @@ mod tests {
 
         // A healthy checkout short-circuits without touching anything.
         std::fs::write(dir.join("work.txt"), "user work").expect("write");
-        ensure_worktree_present(&config, &ws, &dir, &session_key)
-            .await
-            .expect("healthy fast path");
+        ensure_worktree_present(
+            &config,
+            &ws,
+            &dir,
+            &session_key,
+            lazybox_ipc::SpawnOrigin::Interactive,
+        )
+        .await
+        .expect("healthy fast path");
         assert!(dir.join("work.txt").exists(), "fast path is a no-op");
     }
 

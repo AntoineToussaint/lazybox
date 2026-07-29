@@ -751,6 +751,7 @@ async fn autonomous_spawn_wires_no_permission_consistently() {
             false, // on_main
             None,  // model_alias
             false,
+            lazybox_ipc::SpawnOrigin::Interactive,
         )
         .await;
 
@@ -2089,6 +2090,7 @@ async fn concurrent_spawns_collapse_onto_one_backend_session() {
                 false, // on_main
                 None,  // model_alias
                 false,
+                lazybox_ipc::SpawnOrigin::Interactive,
             )
             .await;
         });
@@ -2109,6 +2111,7 @@ async fn concurrent_spawns_collapse_onto_one_backend_session() {
                 false, // on_main
                 None,  // model_alias
                 false,
+                lazybox_ipc::SpawnOrigin::Interactive,
             )
             .await;
         });
@@ -2186,6 +2189,7 @@ async fn spawn_aborts_when_workspace_was_deleted_mid_flight() {
             false, // on_main
             None,  // model_alias
             false,
+            lazybox_ipc::SpawnOrigin::Interactive,
         )
         .await;
 
@@ -2229,6 +2233,7 @@ async fn spawn_aborts_when_workspace_does_not_exist() {
             false,
             None,
             false,
+            lazybox_ipc::SpawnOrigin::Interactive,
         )
         .await;
 
@@ -3319,6 +3324,7 @@ async fn many_concurrent_prompt_spawns_all_deliver() {
                     false, // on_main
                     None,  // model_alias
                     false,
+                    lazybox_ipc::SpawnOrigin::Interactive,
                 )
                 .await;
             }));
@@ -3507,6 +3513,7 @@ async fn restore_skips_live_but_unregistered_backend_sessions() {
             false, // on_main
             None,  // model_alias
             false, // resume
+            lazybox_ipc::SpawnOrigin::Interactive,
         )
         .await;
         assert_eq!(

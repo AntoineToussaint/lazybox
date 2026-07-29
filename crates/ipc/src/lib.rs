@@ -1490,6 +1490,11 @@ pub enum Event {
         session_key: SessionKey,
         step: WorktreeStep,
         status: WorktreeStepStatus,
+        /// Whether the local user asked for this spawn or the daemon
+        /// started it autonomously — routes the client between the
+        /// progress modal and a quiet footer notice (issue #645).
+        #[serde(default)]
+        origin: SpawnOrigin,
     },
     /// A session ended (process exited and the worktree was reaped,
     /// OR the user explicitly killed it). Includes the workspace
@@ -1931,6 +1936,60 @@ pub enum WorktreeStep {
     WorktreeAdd,
     /// Applying configured mounts + setup scripts to the fresh tree.
     Setup,
+}
+
+/// Who triggered the spawn a `WorktreeProgress` stream belongs to.
+/// Drives how the client surfaces provisioning: an
+/// [`Interactive`](Self::Interactive) spawn is one the local user just
+/// asked for (a `w` / `a` / `x …` chord), so its checklist mounts as a
+/// modal they're waiting on; an [`Autonomous`](Self::Autonomous) spawn
+/// is background work the daemon started (a GitHub label, an `@lazybox`
+/// mention, an auto-fix, or session recovery), so it reports as a
+/// footer notice instead of stealing focus with a modal (issue #645).
+/// The [`AutonomousTrigger`] it carries names *which* background source
+/// fired, so the notice can read `(@lazybox)` / `(label)` / … A genuine
+/// *failure* still surfaces the modal regardless of origin, since it
+/// needs a decision.
+///
+/// This is orthogonal to `handle_spawn`'s `autonomous` flag, which
+/// controls unattended (no-permission) launch mode — a user `w` "work
+/// on this" runs unattended yet is `Interactive` here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SpawnOrigin {
+    /// The local user issued the spawn. Provisioning mounts the
+    /// progress modal (today's behavior).
+    #[default]
+    Interactive,
+    /// The daemon auto-spawned this as background work. Provisioning
+    /// reports a footer notice tagged with the trigger, no modal.
+    Autonomous(AutonomousTrigger),
+}
+
+/// Which autonomous source started a spawn — names the parenthetical
+/// tag on the "starting agent…" footer notice (issue #645).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AutonomousTrigger {
+    /// An `@lazybox` mention in an issue/PR body or comment.
+    Mention,
+    /// A GitHub label whose presence maps to an auto-spawn.
+    Label,
+    /// The auto-fix scan acting on a CI-failing / conflicting PR.
+    AutoFix,
+    /// Startup session recovery re-provisioning a missing worktree.
+    Restore,
+}
+
+impl AutonomousTrigger {
+    /// Parenthetical tag for the footer notice — e.g. `@lazybox` renders
+    /// as "starting agent on owner/repo#7 (@lazybox)".
+    pub fn notice_tag(self) -> &'static str {
+        match self {
+            Self::Mention => "@lazybox",
+            Self::Label => "label",
+            Self::AutoFix => "auto-fix",
+            Self::Restore => "restored",
+        }
+    }
 }
 
 /// State transition for a [`WorktreeStep`]. `Started`/`Done` advance

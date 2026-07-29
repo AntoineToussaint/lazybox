@@ -96,7 +96,10 @@ async fn seed_persisted_state(
 }
 
 async fn wait_for_subscribers(backend: &MockBackend, backend_key: &str, expected: usize) {
-    tokio::time::timeout(Duration::from_secs(2), async {
+    // Recovery deliberately backs off after consecutive attachment failures.
+    // The second retry can land just after 2s (plus stable jitter), so this
+    // deadline tests eventual self-healing without pinning the old 250ms spin.
+    tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if backend.subscriber_count(backend_key).await == expected {
                 break;

@@ -40,6 +40,7 @@ pub mod lifecycle;
 pub mod metrics;
 pub mod polling;
 pub mod pty;
+mod resource_limits;
 pub mod slack;
 pub mod socket_service;
 pub mod spawn_handler;
@@ -586,6 +587,29 @@ impl ServerConfig {
     /// production process must never impersonate an empty installation
     /// when the user's persisted state is temporarily unavailable.
     pub fn from_user_config() -> Result<Self, ServerError> {
+        match resource_limits::raise_open_file_limit() {
+            Ok(limit) if limit.soft > limit.previous_soft => {
+                tracing::info!(
+                    previous_soft = limit.previous_soft,
+                    soft = limit.soft,
+                    hard = ?limit.hard,
+                    "raised open-file limit for terminal and IPC headroom"
+                );
+            }
+            Ok(limit) => {
+                tracing::debug!(
+                    soft = limit.soft,
+                    hard = ?limit.hard,
+                    "open-file limit already has sufficient headroom"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "could not raise open-file limit; many recovered terminals may exhaust descriptors"
+                );
+            }
+        }
         let store = open_store()?;
         let user_config = lazybox_config::Config::load()
             .map_err(|error| ServerError::Config(error.to_string()))?;

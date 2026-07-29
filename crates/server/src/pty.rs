@@ -1506,6 +1506,85 @@ mod seed_tests {
         );
     }
 
+    /// Repeated relay teardown must return the daemon to its descriptor
+    /// baseline. Run the measurement in an exact-test subprocess so unrelated
+    /// parallel Rust tests cannot make the process-wide `/dev/fd` count flap.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn relay_descriptor_count_returns_to_baseline_after_repeated_drop() {
+        const CHILD_ENV: &str = "LAZYBOX_RELAY_FD_STABILITY_CHILD";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let status = std::process::Command::new(
+                std::env::current_exe().expect("current test executable"),
+            )
+            .args([
+                "--exact",
+                "pty::seed_tests::relay_descriptor_count_returns_to_baseline_after_repeated_drop",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            .status()
+            .expect("run isolated relay descriptor test");
+            assert!(status.success(), "isolated descriptor test failed");
+            return;
+        }
+
+        fn open_descriptor_count() -> usize {
+            std::fs::read_dir("/dev/fd")
+                .expect("/dev/fd is readable")
+                .count()
+        }
+
+        let baseline = open_descriptor_count();
+        for cycle in 0..12 {
+            let pty = DaemonPty::spawn_relay(
+                &[
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "trap 'exit 0' HUP TERM; printf READY; \
+                     while IFS= read -r _; do :; done"
+                        .to_string(),
+                ],
+                small(),
+                None,
+                Vec::new(),
+                &[],
+            )
+            .expect("spawn relay");
+
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                loop {
+                    let replay = pty.snapshot_only().await.replay;
+                    if replay.windows(5).any(|bytes| bytes == b"READY") {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("relay child ready");
+            drop(pty);
+
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while open_descriptor_count() > baseline + 1 {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "relay cycle {cycle} retained descriptors: baseline={baseline}, current={}",
+                    open_descriptor_count()
+                )
+            });
+        }
+
+        assert!(
+            open_descriptor_count() <= baseline + 1,
+            "repeated relay teardown must not accumulate descriptors"
+        );
+    }
+
     /// A seeded spawn replays the seed AHEAD of the child's own output:
     /// the seed occupies the front of the ring snapshot, live bytes
     /// follow, and `last_seq` accounts for the seed chunk so the

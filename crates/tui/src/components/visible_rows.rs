@@ -82,7 +82,10 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
         // Scoped free-text search: only the matching project's rows
         // are filtered; every other project stays fully visible.
         .filter(|(_, w)| match input.search {
-            Some(s) if !s.query.is_empty() && group_label(w, input.projects) == s.scope => {
+            Some(s)
+                if !s.query.is_empty()
+                    && group_label(w, input.projects, input.workspaces) == s.scope =>
+            {
                 search_matches(&s.query, w)
             }
             _ => true,
@@ -98,7 +101,7 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
     let mut by_repo: BTreeMap<String, Vec<(&SessionKey, &Workspace)>> = BTreeMap::new();
     for (k, w) in &filtered {
         by_repo
-            .entry(group_label(w, input.projects))
+            .entry(group_label(w, input.projects, input.workspaces))
             .or_default()
             .push((k, w));
     }
@@ -147,7 +150,12 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
     // filter only repos with matching workspaces get a header.
     let mut all_repos: BTreeSet<String> = by_repo.keys().cloned().collect();
     if input.mailbox == Mailbox::Inbox && input.filters.is_empty() {
-        all_repos.extend(input.projects.values().map(|p| p.display_name()));
+        all_repos.extend(
+            input
+                .projects
+                .values()
+                .map(|p| project_label(p, input.workspaces)),
+        );
     }
 
     // Step 5: emit headers + workspace rows + session sub-rows.
@@ -206,14 +214,42 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
     ComputeOutcome { visible, summaries }
 }
 
-fn group_label(w: &Workspace, projects: &BTreeMap<ProjectKey, Project>) -> String {
-    // Prefer the project_key → project record path: the display
-    // name matches the standalone Project header so they collapse
-    // into one bucket.
-    if let Some(pk) = lazybox_core::workspace_project_key(w)
-        && let Some(p) = projects.get(&pk)
-    {
-        return p.display_name();
+fn github_task_repo(w: &Workspace, project_key: &ProjectKey) -> Option<String> {
+    if project_key.source_prefix() != "github" {
+        return None;
+    }
+    let task = w.primary_task()?;
+    let repo = task.repo.as_deref()?.trim();
+    (!repo.is_empty() && lazybox_core::project_key_for_task(task).as_ref() == Some(project_key))
+        .then(|| repo.to_string())
+}
+
+pub(crate) fn project_label(
+    project: &Project,
+    workspaces: &HashMap<SessionKey, Workspace>,
+) -> String {
+    workspaces
+        .values()
+        .filter(|w| lazybox_core::workspace_project_key(w).as_ref() == Some(&project.key))
+        .find_map(|w| github_task_repo(w, &project.key))
+        .unwrap_or_else(|| project.display_name())
+}
+
+fn group_label(
+    w: &Workspace,
+    projects: &BTreeMap<ProjectKey, Project>,
+    workspaces: &HashMap<SessionKey, Workspace>,
+) -> String {
+    // A matching GitHub task carries the owner/repo boundary that the
+    // flat project key loses. Otherwise use the project record label so
+    // moved/local workspaces still group under their chosen project.
+    if let Some(pk) = lazybox_core::workspace_project_key(w) {
+        if let Some(repo) = github_task_repo(w, &pk) {
+            return repo;
+        }
+        if let Some(p) = projects.get(&pk) {
+            return project_label(p, workspaces);
+        }
     }
     // Workspace knows its project but we haven't seen the record
     // yet (startup race, or polling hasn't completed). Fall back
@@ -463,6 +499,33 @@ mod tests {
             "header should be the project's display name"
         );
         assert!(!out.summaries.contains_key("owner/r"));
+    }
+
+    #[test]
+    fn github_workspace_repairs_lossy_project_header_from_task_repo() {
+        let mut w = workspace_with_task("k1", Some("codefly-dev/warden-platform"), 10);
+        let pk = ProjectKey::github("codefly-dev", "warden-platform");
+        w.project_key = Some(pk.clone());
+        let mut ws = HashMap::new();
+        ws.insert(SessionKey::from(&w.key), w);
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let asking = HashMap::new();
+        let mut projects = BTreeMap::new();
+        projects.insert(
+            pk.clone(),
+            Project::new(pk, "codefly/dev-warden-platform", chrono::Utc::now()),
+        );
+
+        let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
+
+        assert_eq!(out.visible.len(), 2);
+        assert!(matches!(
+            &out.visible[0],
+            VisibleRow::RepoHeader(name) if name == "codefly-dev/warden-platform"
+        ));
+        assert!(!out.summaries.contains_key("codefly/dev-warden-platform"));
     }
 
     /// Project with no workspace yields a header in Inbox

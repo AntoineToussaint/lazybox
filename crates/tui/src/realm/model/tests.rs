@@ -3963,6 +3963,30 @@ mod subscribed_projects_tests {
         );
     }
 
+    #[test]
+    fn subscribed_scope_repairs_lossy_github_project_name() {
+        let mut m = build_model();
+        let pk = ProjectKey::github("codefly-dev", "warden-platform");
+        m.setup.persisted = Some(persisted_with_scopes(&[
+            "github:codefly-dev/warden-platform",
+        ]));
+
+        m.handle_daemon_event(IpcEvent::ProjectUpserted(Box::new(Project::new(
+            pk.clone(),
+            "codefly/dev-warden-platform",
+            chrono::Utc::now(),
+        ))));
+
+        assert_eq!(
+            m.projects.get(&pk).map(|p| p.name.as_str()),
+            Some("codefly-dev/warden-platform")
+        );
+        assert_eq!(
+            m.sidebar.project_label_for(&pk).as_deref(),
+            Some("codefly-dev/warden-platform")
+        );
+    }
+
     /// Whole-org subscriptions never synthesize a placeholder, so
     /// org-discovered projects are left untouched by a refresh.
     #[test]

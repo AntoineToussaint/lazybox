@@ -550,11 +550,12 @@ impl<T: TerminalAdapter> Model<T> {
         // the sidebar can render headers from it, then push the
         // updated map to the sidebar component.
         if let IpcEvent::ProjectUpserted(p) = &event {
-            self.projects.insert(p.key.clone(), (**p).clone());
+            let project = self.project_with_scope_name((**p).clone());
+            self.projects.insert(project.key.clone(), project.clone());
             // Daemon owns this project now — stop treating it as a
             // client-side placeholder so a later scope edit won't yank
             // it out from under the daemon's `ProjectRemoved`.
-            self.synthesized_projects.remove(&p.key);
+            self.synthesized_projects.remove(&project.key);
             self.sidebar.apply_projects(self.projects.clone());
             // Hand-off from x p → CreateProject: the project
             // just landed in the sidebar, but its RepoHeader row
@@ -562,9 +563,9 @@ impl<T: TerminalAdapter> Model<T> {
             // this upsert matches the name the user just typed,
             // focus the row + auto-mount the new-workspace input so
             // they can keep typing without re-aiming.
-            if self.deferred_focus_project.as_deref() == Some(p.name.as_str()) {
+            if self.deferred_focus_project.as_deref() == Some(project.name.as_str()) {
                 self.deferred_focus_project = None;
-                let project_key = p.key.clone();
+                let project_key = project.key;
                 if self.sidebar.focus_project_header(&project_key) {
                     self.mount_new_workspace_input(project_key);
                 }
@@ -597,8 +598,9 @@ impl<T: TerminalAdapter> Model<T> {
             self.projects
                 .retain(|k, _| snapshot_keys.contains(k) || synthesized.contains(k));
             for p in projects {
-                self.projects.insert(p.key.clone(), p.clone());
-                self.synthesized_projects.remove(&p.key);
+                let project = self.project_with_scope_name(p.clone());
+                self.projects.insert(project.key.clone(), project.clone());
+                self.synthesized_projects.remove(&project.key);
             }
             self.sidebar.apply_projects(self.projects.clone());
         }

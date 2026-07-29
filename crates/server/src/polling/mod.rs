@@ -5315,14 +5315,17 @@ fn project_record_for_workspace(
     // `primary_task().repo` (the "owner/repo" string) when present —
     // that's what the sidebar header has always shown. A blank
     // workspace has no task, so recover the exact `owner/repo` from the
-    // user's subscribed scope slug; the key-derived fallback splits
-    // `github-{owner}-{repo}` on the first `-` and mangles a hyphenated
-    // owner (`codefly-dev/warden-platform` → `codefly/dev-warden-platform`).
+    // user's subscribed scope slug. A key-only fallback is safe only
+    // when the flat key contains one possible owner/repo boundary.
     let name = workspace
         .primary_task()
         .and_then(|t| t.repo.clone())
         .or_else(|| github_slug_from_config_scopes(&project_key))
-        .unwrap_or_else(|| project_key.display_name());
+        .or_else(|| project_key.unambiguous_github_slug())
+        .unwrap_or_else(|| match project_key.source_prefix() {
+            "github" => project_key.as_str().to_string(),
+            _ => project_key.display_name(),
+        });
     let project = lazybox_core::Project::new(project_key.clone(), name, Utc::now());
     let json = serde_json::to_string(&project).map_err(|source| CommitError::SerializeProject {
         key: project_key.as_str().to_string(),

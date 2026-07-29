@@ -1068,7 +1068,7 @@ impl Sidebar {
     /// new-project flow feel broken.
     pub fn focus_project_header(&mut self, key: &lazybox_core::ProjectKey) -> bool {
         let label = match self.projects.get(key) {
-            Some(p) => p.name.clone(),
+            Some(p) => crate::components::visible_rows::project_label(p, &self.workspaces),
             None => return false,
         };
         for (i, row) in self.visible.iter().enumerate() {
@@ -1388,7 +1388,12 @@ impl Sidebar {
     pub fn projects_for_picker(&self) -> Vec<(lazybox_core::ProjectKey, String)> {
         self.projects
             .values()
-            .map(|p| (p.key.clone(), p.name.clone()))
+            .map(|p| {
+                (
+                    p.key.clone(),
+                    crate::components::visible_rows::project_label(p, &self.workspaces),
+                )
+            })
             .collect()
     }
 
@@ -1415,7 +1420,9 @@ impl Sidebar {
             VisibleRow::RepoHeader(name) => self
                 .projects
                 .values()
-                .find(|p| &p.name == name)
+                .find(|p| {
+                    crate::components::visible_rows::project_label(p, &self.workspaces) == *name
+                })
                 .map(|p| p.key.clone()),
             // Kind headers (PRs / Issues) don't belong to a single
             // project — they partition workspaces within a project,
@@ -1430,7 +1437,10 @@ impl Sidebar {
                         VisibleRow::RepoHeader(name) => self
                             .projects
                             .values()
-                            .find(|p| &p.name == name)
+                            .find(|p| {
+                                crate::components::visible_rows::project_label(p, &self.workspaces)
+                                    == *name
+                            })
                             .map(|p| p.key.clone()),
                         _ => None,
                     })
@@ -1556,7 +1566,9 @@ impl Sidebar {
     /// shouldn't happen for any user-driven action, since the user
     /// can only target a project that's on screen).
     pub fn project_label_for(&self, key: &lazybox_core::ProjectKey) -> Option<String> {
-        self.projects.get(key).map(|p| p.display_name())
+        self.projects
+            .get(key)
+            .map(|p| crate::components::visible_rows::project_label(p, &self.workspaces))
     }
 
     /// Count how many workspaces in the local cache belong to the

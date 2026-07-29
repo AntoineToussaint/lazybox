@@ -2363,6 +2363,20 @@ impl<T: TerminalAdapter> Model<T> {
         &self.catalog
     }
 
+    fn project_with_scope_name(&self, mut project: lazybox_core::Project) -> lazybox_core::Project {
+        if let Some(setup) = &self.setup.persisted
+            && let Some(slug) = project.key.github_slug_from_scopes(
+                setup
+                    .selected_scopes
+                    .values()
+                    .flat_map(|scopes| scopes.iter().map(String::as_str)),
+            )
+        {
+            project.name = slug;
+        }
+        project
+    }
+
     /// Synthesize Project records for every scope the user is
     /// subscribed to (e.g. `github:owner/repo`) and merge them into
     /// the TUI's project table — so a freshly-added repo gets a
@@ -2409,14 +2423,19 @@ impl<T: TerminalAdapter> Model<T> {
         let mut changed = false;
         // Add a placeholder header for each freshly-subscribed repo.
         for (pk, name) in &desired {
-            if !self.projects.contains_key(pk) {
-                self.projects.insert(
-                    pk.clone(),
-                    lazybox_core::Project::new(pk.clone(), name.clone(), chrono::Utc::now()),
-                );
-                self.synthesized_projects.insert(pk.clone());
-                changed = true;
+            if let Some(project) = self.projects.get_mut(pk) {
+                if pk.source_prefix() == "github" && project.name != *name {
+                    project.name = name.clone();
+                    changed = true;
+                }
+                continue;
             }
+            self.projects.insert(
+                pk.clone(),
+                lazybox_core::Project::new(pk.clone(), name.clone(), chrono::Utc::now()),
+            );
+            self.synthesized_projects.insert(pk.clone());
+            changed = true;
         }
         // Drop placeholders for repos the user just unsubscribed. Only
         // remove keys WE synthesized — daemon-authoritative projects

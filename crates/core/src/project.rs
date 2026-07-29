@@ -67,6 +67,19 @@ impl ProjectKey {
         self.0.split_once('-').map(|(p, _)| p).unwrap_or("")
     }
 
+    /// Recover `owner/repo` only when the flat GitHub key has exactly
+    /// one possible boundary. Keys containing another `-` need an
+    /// upstream task, project record, or subscribed scope to recover
+    /// the slug without guessing.
+    pub fn unambiguous_github_slug(&self) -> Option<String> {
+        let rest = self.0.strip_prefix("github-")?;
+        let mut parts = rest.split('-');
+        let owner = parts.next()?;
+        let repo = parts.next()?;
+        (!owner.is_empty() && !repo.is_empty() && parts.next().is_none())
+            .then(|| format!("{owner}/{repo}"))
+    }
+
     /// Best-effort human-readable name derived from the key alone, for
     /// add paths and renders that lack an upstream display name.
     /// `github-<owner>-<repo>` → `<owner>/<repo>`; other prefixes
@@ -182,7 +195,12 @@ impl Project {
     /// `github-owner-repo`.
     pub fn display_name(&self) -> String {
         if self.name == self.key.as_str() || self.name.is_empty() {
-            self.key.display_name()
+            self.key
+                .unambiguous_github_slug()
+                .unwrap_or_else(|| match self.key.source_prefix() {
+                    "github" => self.key.as_str().to_string(),
+                    _ => self.key.display_name(),
+                })
         } else {
             self.name.clone()
         }
@@ -217,6 +235,26 @@ mod tests {
         assert_eq!(
             ProjectKey::github("AntoineToussaint", "pretty-hackernews").display_name(),
             "AntoineToussaint/pretty-hackernews"
+        );
+    }
+
+    #[test]
+    fn github_slug_is_key_derived_only_when_the_boundary_is_unambiguous() {
+        assert_eq!(
+            ProjectKey::github("acme", "widget").unambiguous_github_slug(),
+            Some("acme/widget".to_string())
+        );
+        assert_eq!(
+            ProjectKey::github("codefly-dev", "warden-platform").unambiguous_github_slug(),
+            None
+        );
+        assert_eq!(
+            ProjectKey::github("acme", "pretty-widget").unambiguous_github_slug(),
+            None
+        );
+        assert_eq!(
+            ProjectKey::local("acme-widget").unambiguous_github_slug(),
+            None
         );
     }
 
@@ -280,6 +318,13 @@ mod tests {
         // A proper name is left untouched.
         let good = Project::new(key, "AntoineToussaint/lazybox", Utc::now());
         assert_eq!(good.display_name(), "AntoineToussaint/lazybox");
+    }
+
+    #[test]
+    fn project_display_name_does_not_guess_an_ambiguous_github_slug() {
+        let key = ProjectKey::github("codefly-dev", "warden-platform");
+        let project = Project::new(key.clone(), key.as_str(), Utc::now());
+        assert_eq!(project.display_name(), "github-codefly-dev-warden-platform");
     }
 
     #[test]

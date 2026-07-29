@@ -2551,16 +2551,9 @@ fn sanitize_branch_component(raw: &str) -> String {
 /// exist. We recover the exact `owner/repo` from, in order: the user's
 /// subscribed scope slug (`github:owner/repo`, unambiguous); the
 /// canonical name on the project *record* (populated from the upstream
-/// task's repo string); and finally the lossy key-derived name — only
-/// reached with no scope match and no record, where it still round-trips
-/// non-hyphenated repos.
-///
-/// Invariant this leans on: a workspace can only reach here under a
-/// GitHub project the user actually reached in the UI, and every such
-/// path leaves either a subscribed per-repo scope (added it explicitly)
-/// or a task-seeded record (polling materialized it) behind. If a future
-/// entry point surfaces a GitHub project header with neither, a
-/// hyphenated owner silently falls back to the lossy name again.
+/// task's repo string); and a key-only slug when the flat key has exactly
+/// one possible boundary. Ambiguous key-only projects fail instead of
+/// cloning a guessed repository.
 pub(crate) fn clonable_repo_from_project(
     config: &ServerConfig,
     workspace: &Workspace,
@@ -2586,8 +2579,21 @@ pub(crate) fn clonable_repo_from_project(
         .flatten()
         .and_then(|r| r.project_json)
         .and_then(|j| serde_json::from_str::<lazybox_core::Project>(&j).ok())
-        .map(|p| p.display_name());
-    Ok(canonical.unwrap_or_else(|| key.display_name()))
+        .and_then(|p| {
+            let slug = p.name.trim();
+            let (owner, repo) = slug.split_once('/')?;
+            (!owner.is_empty()
+                && !repo.is_empty()
+                && !repo.contains('/')
+                && lazybox_core::ProjectKey::github(owner, repo) == key)
+                .then(|| slug.to_string())
+        })
+        .or_else(|| key.unambiguous_github_slug());
+    canonical.ok_or_else(|| {
+        crate::ServerError::Workspace(format!(
+            "project '{key}' has no unambiguous GitHub repo slug"
+        ))
+    })
 }
 
 /// Try to set up a real git worktree at `target` for the workspace's
@@ -10196,6 +10202,18 @@ mod tests {
             clonable_repo_from_project(&config, &ws, None).unwrap(),
             "AntoineToussaint/lazybox"
         );
+    }
+
+    #[test]
+    fn clonable_repo_from_project_rejects_ambiguous_key_without_canonical_slug() {
+        let config = ServerConfig::in_memory();
+        let mut ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", Utc::now());
+        ws.project_key = Some(lazybox_core::ProjectKey::github(
+            "codefly-dev",
+            "warden-platform",
+        ));
+
+        assert!(clonable_repo_from_project(&config, &ws, None).is_err());
     }
 
     /// `local-` projects have no upstream repo — the lookup errors so

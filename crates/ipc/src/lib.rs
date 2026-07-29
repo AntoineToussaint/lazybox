@@ -1490,6 +1490,11 @@ pub enum Event {
         session_key: SessionKey,
         step: WorktreeStep,
         status: WorktreeStepStatus,
+        /// Whether the local user asked for this spawn or the daemon
+        /// started it autonomously — routes the client between the
+        /// progress modal and a quiet footer notice (issue #645).
+        #[serde(default)]
+        origin: SpawnOrigin,
     },
     /// A session ended (process exited and the worktree was reaped,
     /// OR the user explicitly killed it). Includes the workspace
@@ -1931,6 +1936,30 @@ pub enum WorktreeStep {
     WorktreeAdd,
     /// Applying configured mounts + setup scripts to the fresh tree.
     Setup,
+}
+
+/// Who triggered the spawn a `WorktreeProgress` stream belongs to.
+/// Drives how the client surfaces provisioning: an
+/// [`Interactive`](Self::Interactive) spawn is one the local user just
+/// asked for (a `w` / `a` / `x …` chord), so its checklist mounts as a
+/// modal they're waiting on; an [`Autonomous`](Self::Autonomous) spawn
+/// is background work the daemon started from a GitHub label or an
+/// `@lazybox` mention, so it reports as a footer notice instead of
+/// stealing focus with a modal (issue #645). A genuine *failure* still
+/// surfaces the modal regardless of origin, since it needs a decision.
+///
+/// This is orthogonal to `handle_spawn`'s `autonomous` flag, which
+/// controls unattended (no-permission) launch mode — a user `w` "work
+/// on this" runs unattended yet is `Interactive` here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SpawnOrigin {
+    /// The local user issued the spawn. Provisioning mounts the
+    /// progress modal (today's behavior).
+    #[default]
+    Interactive,
+    /// The daemon auto-spawned from a GitHub label or `@lazybox`
+    /// mention. Provisioning reports a footer notice, no modal.
+    Autonomous,
 }
 
 /// State transition for a [`WorktreeStep`]. `Started`/`Done` advance

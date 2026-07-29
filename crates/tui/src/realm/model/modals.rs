@@ -299,6 +299,19 @@ fn snippet_body_preview(body: &str) -> String {
     out
 }
 
+/// Human-friendly workspace label for the autonomous-spawn footer
+/// notice: drop the `source:` prefix so a key like
+/// `github:owner/repo#7` reads as `owner/repo#7`. Keys without a prefix
+/// (local projects) pass through unchanged.
+fn worktree_notice_label(session_key: &lazybox_core::SessionKey) -> String {
+    session_key
+        .as_str()
+        .split_once(':')
+        .map(|(_, rest)| rest)
+        .unwrap_or_else(|| session_key.as_str())
+        .to_string()
+}
+
 fn format_age_short(unix_secs: Option<u64>) -> String {
     let Some(t) = unix_secs else {
         return "—".into();
@@ -1725,6 +1738,51 @@ impl<T: TerminalAdapter> Model<T> {
             pr: pr_key,
         });
         self.mount_modal(Id::MergeConfirm, modal);
+    }
+
+    /// Route a `WorktreeProgress` event by spawn origin (issue #645).
+    /// A user-initiated spawn mounts the progress checklist modal; an
+    /// autonomous (GitHub label / `@lazybox` mention) spawn is
+    /// background work the user didn't ask for, so it reports a one-line
+    /// footer notice and provisions quietly — never grabbing focus with
+    /// a modal. A genuine *failure* still routes to the checklist modal
+    /// regardless of origin, since it carries the recovery affordance
+    /// (#594) and needs a decision.
+    pub(super) fn route_worktree_progress(
+        &mut self,
+        session_key: lazybox_core::SessionKey,
+        step: lazybox_ipc::WorktreeStep,
+        status: lazybox_ipc::WorktreeStepStatus,
+        origin: lazybox_ipc::SpawnOrigin,
+    ) {
+        if origin == lazybox_ipc::SpawnOrigin::Interactive {
+            self.apply_worktree_progress(session_key, step, status);
+            return;
+        }
+        // Autonomous from here down.
+        if matches!(status, lazybox_ipc::WorktreeStepStatus::Failed(_)) {
+            // A failed background provision needs the recovery modal.
+            self.autonomous_spawn_notified.remove(&session_key);
+            self.apply_worktree_progress(session_key, step, status);
+            return;
+        }
+        // Provisioning finished (the terminal `Setup` step reached
+        // `Done`) — drop the marker so a later re-spawn on this
+        // workspace announces again.
+        let finished = matches!(step, lazybox_ipc::WorktreeStep::Setup)
+            && matches!(status, lazybox_ipc::WorktreeStepStatus::Done);
+        // `insert` is true only on the first event for this spawn, so
+        // the notice fires once across the several steps a provision
+        // emits.
+        if self.autonomous_spawn_notified.insert(session_key.clone()) {
+            self.flash_info(format!(
+                "starting agent on {} (autonomous)",
+                worktree_notice_label(&session_key)
+            ));
+        }
+        if finished {
+            self.autonomous_spawn_notified.remove(&session_key);
+        }
     }
 
     /// Fold one `WorktreeProgress` daemon event into the checklist and

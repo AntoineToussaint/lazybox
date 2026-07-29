@@ -1625,6 +1625,9 @@ pub async fn dispatch_command(
                 on_main,
                 model_alias,
                 false,
+                // A client `Spawn` is always a local-user action (`w` /
+                // `a` / `x …`), so provisioning mounts the progress modal.
+                lazybox_ipc::SpawnOrigin::Interactive,
             )
             .await;
         }
@@ -1809,6 +1812,8 @@ pub async fn dispatch_command(
                     false,
                     None,
                     false,
+                    // `x n` / `Shift-W` — a local-user spawn.
+                    lazybox_ipc::SpawnOrigin::Interactive,
                 )
                 .await;
             }
@@ -1992,6 +1997,8 @@ pub async fn dispatch_command(
                     false,
                     None,
                     false,
+                    // `x a` adopt / import checkout — a local-user spawn.
+                    lazybox_ipc::SpawnOrigin::Interactive,
                 )
                 .await;
             }

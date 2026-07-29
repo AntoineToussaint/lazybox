@@ -1894,6 +1894,7 @@ fn worktree_progress_event_mounts_the_checklist_modal() {
         session_key: sk,
         step: WorktreeStep::Clone,
         status: WorktreeStepStatus::Started,
+        origin: lazybox_ipc::SpawnOrigin::Interactive,
     });
     assert_eq!(
         m.modal_stack.last(),
@@ -1916,12 +1917,14 @@ fn progress_events_remount_in_place_without_stacking() {
             session_key: sk.clone(),
             step,
             status: WorktreeStepStatus::Started,
+            origin: lazybox_ipc::SpawnOrigin::Interactive,
         });
     }
     m.handle_daemon_event(IpcEvent::WorktreeProgress {
         session_key: sk,
         step: WorktreeStep::Setup,
         status: WorktreeStepStatus::Started,
+        origin: lazybox_ipc::SpawnOrigin::Interactive,
     });
     assert_eq!(
         m.modal_stack
@@ -1946,6 +1949,7 @@ fn terminal_spawned_mid_checklist_walks_every_step_before_dismissing() {
         session_key: sk.clone(),
         step: WorktreeStep::Clone,
         status: WorktreeStepStatus::Started,
+        origin: lazybox_ipc::SpawnOrigin::Interactive,
     });
     assert_eq!(m.modal_stack.last(), Some(&Id::WorktreeProgress));
     m.handle_daemon_event(IpcEvent::TerminalSpawned {
@@ -2001,6 +2005,7 @@ fn snapshot_terminal_backstops_worktree_progress_dismissal() {
         session_key: sk.clone(),
         step: WorktreeStep::Clone,
         status: WorktreeStepStatus::Started,
+        origin: lazybox_ipc::SpawnOrigin::Interactive,
     });
     assert_eq!(m.modal_stack.last(), Some(&Id::WorktreeProgress));
 
@@ -2096,6 +2101,7 @@ fn failed_step_keeps_the_checklist_up_past_terminal_spawned() {
         session_key: sk.clone(),
         step: WorktreeStep::Clone,
         status: WorktreeStepStatus::Failed("remote unreachable".into()),
+        origin: lazybox_ipc::SpawnOrigin::Interactive,
     });
     // The daemon's empty-dir fallback still spawns a terminal.
     m.handle_daemon_event(IpcEvent::TerminalSpawned {

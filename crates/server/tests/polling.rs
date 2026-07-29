@@ -3975,6 +3975,7 @@ async fn spawn_losing_to_merge_cannot_recreate_the_deleted_source() {
             false,
             None,
             false,
+            lazybox_ipc::SpawnOrigin::Interactive,
         )
         .await;
     });

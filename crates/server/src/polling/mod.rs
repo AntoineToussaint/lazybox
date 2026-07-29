@@ -2008,6 +2008,10 @@ async fn dispatch_action(
                 model_alias,
                 // Fresh spawn, not a session restore.
                 false,
+                // Label / `@lazybox`-mention auto-spawn — background work
+                // the user didn't initiate, so it reports a footer notice
+                // instead of stealing focus with a progress modal (#645).
+                lazybox_ipc::SpawnOrigin::Autonomous,
             )
             .await;
             // Record the label marker only once a live agent session
@@ -2201,6 +2205,9 @@ async fn dispatch_action(
                         None,
                         // Fresh spawn, not a session restore.
                         false,
+                        // Auto-fix is daemon-initiated background work —
+                        // report it, don't interrupt with a modal (#645).
+                        lazybox_ipc::SpawnOrigin::Autonomous,
                     )
                     .await;
                 }

@@ -10250,6 +10250,7 @@ mod worktree_progress_recovery_tests {
             session_key: session_key.clone(),
             step: WorktreeStep::Clone,
             status: WorktreeStepStatus::Started,
+            origin: lazybox_ipc::SpawnOrigin::Interactive,
         });
         assert!(
             m.modal_stack.contains(&Id::WorktreeProgress),
@@ -10294,6 +10295,7 @@ mod worktree_progress_recovery_tests {
             session_key: session_key.clone(),
             step: WorktreeStep::Clone,
             status: WorktreeStepStatus::Started,
+            origin: lazybox_ipc::SpawnOrigin::Interactive,
         });
         m.handle_daemon_event(IpcEvent::Snapshot {
             workspaces: vec![Workspace::empty(key, "main", Utc::now())],
@@ -10376,11 +10378,13 @@ mod worktree_progress_recovery_tests {
             session_key: session_key.clone(),
             step: WorktreeStep::WorktreeAdd,
             status: WorktreeStepStatus::Started,
+            origin: lazybox_ipc::SpawnOrigin::Interactive,
         });
         m.handle_daemon_event(IpcEvent::WorktreeProgress {
             session_key,
             step: WorktreeStep::Setup,
             status: WorktreeStepStatus::Started,
+            origin: lazybox_ipc::SpawnOrigin::Interactive,
         });
         // The freshly-mounted modal shows step 0 as the in-flight spinner
         // — nothing is checked off yet.
@@ -10412,6 +10416,7 @@ mod worktree_progress_recovery_tests {
             session_key,
             step: WorktreeStep::Clone,
             status: WorktreeStepStatus::Started,
+            origin: lazybox_ipc::SpawnOrigin::Interactive,
         });
 
         // A snapshot whose live terminals are for OTHER sessions says
@@ -10439,11 +10444,13 @@ mod worktree_progress_recovery_tests {
             session_key: session_key.clone(),
             step: WorktreeStep::Clone,
             status: WorktreeStepStatus::Started,
+            origin: lazybox_ipc::SpawnOrigin::Interactive,
         });
         m.handle_daemon_event(IpcEvent::WorktreeProgress {
             session_key: session_key.clone(),
             step: WorktreeStep::Clone,
             status: WorktreeStepStatus::Failed("fatal: could not read from remote".into()),
+            origin: lazybox_ipc::SpawnOrigin::Interactive,
         });
 
         // Even with a live terminal in the snapshot, a checklist frozen on
@@ -10485,6 +10492,7 @@ mod worktree_progress_recovery_tests {
             status: WorktreeStepStatus::Failed(
                 "worktree: checkout_at: branch 'feat' not found locally or on origin".into(),
             ),
+            origin: lazybox_ipc::SpawnOrigin::Interactive,
         });
         assert!(m.modal_stack.contains(&Id::WorktreeProgress));
 
@@ -10641,6 +10649,7 @@ mod worktree_progress_recovery_tests {
             session_key: other_session.clone(),
             step: WorktreeStep::Fetch,
             status: WorktreeStepStatus::Started,
+            origin: lazybox_ipc::SpawnOrigin::Interactive,
         });
         assert!(m.modal_stack.contains(&Id::WorktreeProgress));
 
@@ -10702,6 +10711,7 @@ mod worktree_progress_recovery_tests {
             session_key,
             step: WorktreeStep::Fetch,
             status: WorktreeStepStatus::Failed("boom".into()),
+            origin: lazybox_ipc::SpawnOrigin::Interactive,
         });
         assert!(m.modal_stack.contains(&Id::WorktreeProgress));
         while server.rx.try_recv().is_ok() {} // drain init traffic
@@ -10800,6 +10810,7 @@ mod click_outside_modal_dismiss_tests {
             session_key: a.clone(),
             step: WorktreeStep::Fetch,
             status: WorktreeStepStatus::Started,
+            origin: lazybox_ipc::SpawnOrigin::Interactive,
         });
         assert!(m.modal_stack.contains(&Id::WorktreeProgress));
 
@@ -10855,6 +10866,7 @@ mod click_outside_modal_dismiss_tests {
             session_key: a.clone(),
             step: WorktreeStep::Fetch,
             status: WorktreeStepStatus::Started,
+            origin: lazybox_ipc::SpawnOrigin::Interactive,
         });
         assert!(m.modal_stack.contains(&Id::WorktreeProgress));
 
@@ -12726,6 +12738,7 @@ mod worktree_progress_dismiss_tests {
             session_key: key.clone(),
             step,
             status,
+            origin: lazybox_ipc::SpawnOrigin::Interactive,
         }
     }
 
@@ -12933,6 +12946,127 @@ mod worktree_progress_dismiss_tests {
         assert!(
             m.modal_stack.contains(&Id::WorktreeProgress),
             "the next provision on this workspace gets its checklist again"
+        );
+    }
+
+    fn autonomous_progress(
+        key: &SessionKey,
+        step: WorktreeStep,
+        status: WorktreeStepStatus,
+    ) -> IpcEvent {
+        IpcEvent::WorktreeProgress {
+            session_key: key.clone(),
+            step,
+            status,
+            origin: lazybox_ipc::SpawnOrigin::Autonomous,
+        }
+    }
+
+    /// An autonomous (label / `@lazybox`) spawn is background work the
+    /// user didn't ask for — its provisioning must NOT pop the modal,
+    /// only report a footer notice (issue #645).
+    #[test]
+    fn autonomous_progress_reports_notice_not_modal() {
+        use crate::realm::components::footer::NoticeSeverity;
+        let mut m = build_model();
+        let key = SessionKey::from("github:codefly-dev/warden-platform#7");
+
+        m.handle_daemon_event(autonomous_progress(
+            &key,
+            WorktreeStep::Fetch,
+            WorktreeStepStatus::Started,
+        ));
+        assert!(
+            !m.modal_stack.contains(&Id::WorktreeProgress),
+            "an autonomous spawn must not steal focus with the progress modal"
+        );
+        assert!(
+            m.worktree_progress.is_none(),
+            "no checklist state is accumulated for a quiet autonomous spawn"
+        );
+        let n = m.status.notice.as_ref().expect("autonomous start notice");
+        assert_eq!(n.severity, NoticeSeverity::Info);
+        assert!(
+            n.message.contains("codefly-dev/warden-platform#7"),
+            "the notice names the workspace, got {:?}",
+            n.message
+        );
+    }
+
+    /// The one-line "starting agent…" notice fires once, not once per
+    /// `WorktreeProgress` step a single provision emits.
+    #[test]
+    fn autonomous_notice_fires_once_per_spawn() {
+        let mut m = build_model();
+        let key = SessionKey::from("github:o/r#1");
+
+        for step in [
+            WorktreeStep::Fetch,
+            WorktreeStep::Clone,
+            WorktreeStep::WorktreeAdd,
+        ] {
+            m.handle_daemon_event(autonomous_progress(&key, step, WorktreeStepStatus::Started));
+        }
+        assert_eq!(
+            m.autonomous_spawn_notified.len(),
+            1,
+            "a single spawn is tracked once across its several steps"
+        );
+        assert!(m.autonomous_spawn_notified.contains(&key));
+        assert!(!m.modal_stack.contains(&Id::WorktreeProgress));
+    }
+
+    /// A failed autonomous provision still needs a decision, so it
+    /// surfaces the checklist/recovery modal even though its normal
+    /// steps stayed quiet (issue #645 keeps #594 for genuine failures).
+    #[test]
+    fn autonomous_failure_still_mounts_recovery_modal() {
+        let mut m = build_model();
+        let key = SessionKey::from("github:o/r#1");
+
+        m.handle_daemon_event(autonomous_progress(
+            &key,
+            WorktreeStep::Fetch,
+            WorktreeStepStatus::Started,
+        ));
+        assert!(!m.modal_stack.contains(&Id::WorktreeProgress));
+
+        m.handle_daemon_event(autonomous_progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Failed(
+                "worktree: checkout_at: branch 'feat' not found locally or on origin".into(),
+            ),
+        ));
+        assert!(
+            m.modal_stack.contains(&Id::WorktreeProgress),
+            "a failed autonomous provision surfaces the recovery modal"
+        );
+    }
+
+    /// After an autonomous provision finishes (`Setup` reaches `Done`)
+    /// the marker clears so a later re-spawn on the same workspace
+    /// announces again.
+    #[test]
+    fn autonomous_completion_clears_notice_marker() {
+        let mut m = build_model();
+        let key = SessionKey::from("github:o/r#1");
+
+        m.handle_daemon_event(autonomous_progress(
+            &key,
+            WorktreeStep::Fetch,
+            WorktreeStepStatus::Started,
+        ));
+        assert!(m.autonomous_spawn_notified.contains(&key));
+
+        m.handle_daemon_event(autonomous_progress(
+            &key,
+            WorktreeStep::Setup,
+            WorktreeStepStatus::Done,
+        ));
+        assert!(
+            !m.autonomous_spawn_notified.contains(&key),
+            "a finished provision releases the marker for a future re-spawn"
         );
     }
 }

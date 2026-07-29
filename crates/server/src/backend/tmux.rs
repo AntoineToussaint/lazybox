@@ -912,10 +912,18 @@ impl SessionBackend for TmuxBackend {
             // no live output, no recovery. Detect that and open a
             // fresh attach client instead, replacing the dead Slot.
             let cached = {
-                let map = self.sessions.lock().await;
-                map.get(key)
-                    .filter(|slot| !slot.client.is_finished())
-                    .map(|slot| slot.client.clone())
+                let mut map = self.sessions.lock().await;
+                if map.get(key).is_some_and(|slot| !slot.client.is_finished()) {
+                    map.get(key).map(|slot| slot.client.clone())
+                } else {
+                    // Drop a finished conduit BEFORE allocating its
+                    // replacement. One relay owns three PTY descriptors and
+                    // a socketpair; retaining those while `openpty()` tries
+                    // to reserve the next set makes recovery impossible when
+                    // the process is already close to RLIMIT_NOFILE.
+                    map.remove(key);
+                    None
+                }
             };
             let pty = if let Some(pty) = cached {
                 pty
@@ -948,6 +956,11 @@ impl SessionBackend for TmuxBackend {
                 if let Some(slot) = map.get(key).filter(|slot| !slot.client.is_finished()) {
                     slot.client.clone()
                 } else {
+                    // A finished slot may have appeared while capture-pane
+                    // was in flight. Release its descriptor set before the
+                    // replacement allocation for the same reason as the
+                    // optimistic check above.
+                    map.remove(key);
                     let (cols, rows) = size;
                     let size = PtySize {
                         cols,

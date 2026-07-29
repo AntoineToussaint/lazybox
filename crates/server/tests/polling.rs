@@ -2533,6 +2533,90 @@ async fn delete_workspace_kills_terminals_via_terminal_meta() {
 }
 
 #[tokio::test]
+async fn delete_workspace_kills_every_owned_session_and_spares_other_workspaces() {
+    use lazybox_core::{SessionKey, WorkspaceKey};
+    use lazybox_ipc::{TerminalId, TerminalKind};
+
+    let backend = MockBackend::new();
+    let config =
+        ServerConfig::with_store_and_backend(Arc::new(MemoryStore::new()), backend.as_backend());
+    let target_task = make_task("o/r#701");
+    let other_task = make_task("o/r#702");
+    polling::upsert(&config, target_task.clone()).await;
+    polling::upsert(&config, other_task.clone()).await;
+    let target_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&target_task));
+    let other_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&other_task));
+
+    let first = backend
+        .spawn(&["codex".into()], None, &[], "delete-all-agent")
+        .await
+        .expect("spawn first target terminal");
+    let second = backend
+        .spawn(&["shell".into()], None, &[], "delete-all-shell")
+        .await
+        .expect("spawn second target terminal");
+    let unrelated = backend
+        .spawn(&["codex".into()], None, &[], "keep-agent")
+        .await
+        .expect("spawn unrelated terminal");
+    for (id, backend_key, workspace_key, kind) in [
+        (
+            TerminalId(501),
+            first.clone(),
+            target_key.clone(),
+            TerminalKind::Agent("codex".into()),
+        ),
+        (
+            TerminalId(502),
+            second.clone(),
+            target_key.clone(),
+            TerminalKind::Shell,
+        ),
+        (
+            TerminalId(503),
+            unrelated.clone(),
+            other_key.clone(),
+            TerminalKind::Agent("codex".into()),
+        ),
+    ] {
+        config
+            .terminals
+            .lock()
+            .await
+            .insert(id, backend_key.clone());
+        config
+            .terminal_meta
+            .lock()
+            .await
+            .insert(id, (SessionKey::from(workspace_key.as_str()), kind));
+    }
+
+    assert!(
+        polling::delete_workspace(&config, &target_key)
+            .await
+            .is_some()
+    );
+    assert_eq!(backend.wait_exit(&first).await, Some(-1));
+    assert_eq!(backend.wait_exit(&second).await, Some(-1));
+    assert!(
+        backend
+            .is_alive(&unrelated)
+            .await
+            .expect("unrelated liveness"),
+        "deleting one workspace must not touch another workspace's tmux session"
+    );
+    assert_eq!(
+        config.terminals.lock().await.get(&TerminalId(503)),
+        Some(&unrelated)
+    );
+    let terminals = config.terminals.lock().await;
+    assert!(
+        terminals.get(&TerminalId(501)).is_none() && terminals.get(&TerminalId(502)).is_none(),
+        "every terminal owned by the deleted workspace must be detached"
+    );
+}
+
+#[tokio::test]
 async fn failed_terminal_kill_preserves_workspace_and_retryable_mappings() {
     use lazybox_core::{SessionKey, WorkspaceKey};
     use lazybox_ipc::{TerminalId, TerminalKind};

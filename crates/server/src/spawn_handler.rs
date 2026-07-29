@@ -37,7 +37,7 @@ use lazybox_ipc::{
 };
 use lazybox_store::{StoreMutation, WorkspaceRecord};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 /// Hard ceiling on `backend.snapshot(key)` calls inside `snapshot_terminals`.
@@ -6192,6 +6192,37 @@ fn replace_detection_history(
     let _ = watchdog_notes_progress(watchdog_fp, replay);
 }
 
+/// Recovery attaches allocate several descriptors apiece. Serializing them in
+/// a small pool avoids a startup stampede when dozens of tmux sessions survive
+/// a daemon restart, especially when the inherited descriptor limit is low.
+const RECOVERY_ATTACH_CONCURRENCY: usize = 4;
+
+/// A failed attach must not spin on the async runtime or flood the synchronous
+/// log writer. The capped schedule remains self-healing while containing a
+/// persistent backend/OS outage.
+const RECOVERY_RETRY_MAX: Duration = Duration::from_secs(30);
+const RECOVERY_HEALTHY_WINDOW: Duration = Duration::from_secs(30);
+
+fn recovery_retry_delay(failures: u32, terminal_id: TerminalId) -> Duration {
+    let exponent = failures.saturating_sub(1).min(5);
+    let base_secs = (1u64 << exponent).min(20);
+    // Stable per-terminal spread prevents every failed survivor from waking
+    // on the same boundary once the exponential component reaches its cap.
+    let spread_cap_ms = if base_secs >= 20 { 10_000 } else { 500 };
+    let spread_ms = terminal_id.0.wrapping_mul(6_364_136_223_846_793_005) % (spread_cap_ms + 1);
+    Duration::from_secs(base_secs)
+        .saturating_add(Duration::from_millis(spread_ms))
+        .min(RECOVERY_RETRY_MAX)
+}
+
+fn should_warn_recovery_failure(failures: u32) -> bool {
+    failures.is_power_of_two() || failures.is_multiple_of(10)
+}
+
+fn is_open_file_exhaustion(message: &str) -> bool {
+    message.contains("Too many open files") || message.contains("os error 24")
+}
+
 /// Bind already-running backend sessions to fresh wire TerminalIds.
 /// Called once at server startup so lazybox restarts don't lose the
 /// agents the user was running.
@@ -6213,6 +6244,9 @@ pub async fn recover_sessions(config: &ServerConfig) {
     let live_keys: std::collections::HashSet<_> = keys.iter().cloned().collect();
     reconcile_missing_recovered_sessions(config, &live_keys).await;
     tracing::info!("recovering {} surviving session(s)", keys.len());
+    let attach_permits =
+        std::sync::Arc::new(tokio::sync::Semaphore::new(RECOVERY_ATTACH_CONCURRENCY));
+    let resource_warning_emitted = std::sync::Arc::new(AtomicBool::new(false));
     for key in keys {
         let (session_key, kind) = load_terminal_meta(config, &key)
             .await
@@ -6292,6 +6326,8 @@ pub async fn recover_sessions(config: &ServerConfig) {
         };
         let restored_state = recovered_agent.as_ref().map(|(_, state)| *state);
         let state_durability = recovered_agent.map(|(durability, _)| durability);
+        let attach_permits_for_pump = attach_permits.clone();
+        let resource_warning_for_pump = resource_warning_emitted.clone();
         // Broadcast Spawned before spawning the pump — same race
         // guard as the main spawn path.
         let _ = config.bus.send(Event::TerminalSpawned {
@@ -6308,8 +6344,27 @@ pub async fn recover_sessions(config: &ServerConfig) {
             model_label: None,
         });
         tokio::spawn(async move {
+            let mut failures = 0u32;
             loop {
-                match config_for_pump.backend.subscribe(&key_for_pump).await {
+                if config_for_pump
+                    .backend_key_for(terminal_id)
+                    .await
+                    .as_deref()
+                    != Some(key_for_pump.as_str())
+                {
+                    break;
+                }
+
+                let permit = match attach_permits_for_pump.acquire().await {
+                    Ok(permit) => permit,
+                    Err(_) => break,
+                };
+                let attach_started = tokio::time::Instant::now();
+                let subscribe_result = config_for_pump.backend.subscribe(&key_for_pump).await;
+                drop(permit);
+                let mut failure_reason = None;
+                let attached = subscribe_result.is_ok();
+                match subscribe_result {
                     Ok(sub) => {
                         let current_state = config_for_pump
                             .agent_states
@@ -6331,13 +6386,21 @@ pub async fn recover_sessions(config: &ServerConfig) {
                         .await;
                     }
                     Err(e) => {
-                        tracing::warn!(
-                            "recover subscribe {key_for_pump}: {e}; checking session liveness"
-                        );
+                        failure_reason = Some(format!("subscribe failed: {e}"));
                     }
                 }
+                let attachment_lifetime = attach_started.elapsed();
+                if attached && attachment_lifetime >= RECOVERY_HEALTHY_WINDOW {
+                    failures = 0;
+                }
 
-                match config_for_pump.backend.is_alive(&key_for_pump).await {
+                let permit = match attach_permits_for_pump.acquire().await {
+                    Ok(permit) => permit,
+                    Err(_) => break,
+                };
+                let liveness = config_for_pump.backend.is_alive(&key_for_pump).await;
+                drop(permit);
+                match liveness {
                     Ok(false) => {
                         let exit_code = config_for_pump.backend.wait_exit(&key_for_pump).await;
                         teardown_exited_terminal(
@@ -6350,23 +6413,51 @@ pub async fn recover_sessions(config: &ServerConfig) {
                         break;
                     }
                     Ok(true) => {
-                        tracing::warn!(
-                            backend_key = %key_for_pump,
-                            ?terminal_id,
-                            "recovered terminal output conduit ended while session remained alive; reattaching"
-                        );
                         config_for_pump.backend.release(&key_for_pump).await;
+                        failure_reason.get_or_insert_with(|| {
+                            "output conduit ended while tmux session remained alive".into()
+                        });
                     }
                     Err(error) => {
-                        tracing::warn!(
-                            backend_key = %key_for_pump,
-                            ?terminal_id,
-                            %error,
-                            "could not prove recovered session exited; preserving lifecycle state"
-                        );
+                        failure_reason.get_or_insert_with(|| {
+                            format!("could not prove session liveness: {error}")
+                        });
                     }
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+                failures = failures.saturating_add(1);
+                let retry_after = recovery_retry_delay(failures, terminal_id);
+                let reason = failure_reason
+                    .unwrap_or_else(|| "output conduit ended unexpectedly".to_string());
+                if is_open_file_exhaustion(&reason)
+                    && !resource_warning_for_pump.swap(true, Ordering::AcqRel)
+                {
+                    let _ = config_for_pump.bus.send(Event::provider_error_retryable(
+                        "terminal",
+                        "terminal recovery hit the process open-file limit; retries are throttled \
+                         and existing sessions remain safe",
+                    ));
+                }
+                if should_warn_recovery_failure(failures) {
+                    tracing::warn!(
+                        backend_key = %key_for_pump,
+                        ?terminal_id,
+                        failures,
+                        retry_after_ms = retry_after.as_millis(),
+                        %reason,
+                        "recovered terminal attachment unavailable; retrying with backoff"
+                    );
+                } else {
+                    tracing::debug!(
+                        backend_key = %key_for_pump,
+                        ?terminal_id,
+                        failures,
+                        retry_after_ms = retry_after.as_millis(),
+                        %reason,
+                        "recovered terminal attachment still unavailable"
+                    );
+                }
+                tokio::time::sleep(retry_after).await;
             }
         });
     }
@@ -7211,6 +7302,38 @@ fn kind_id(kind: &TerminalKind) -> String {
 mod tests {
     use super::*;
     use crate::backend::SessionBackend;
+
+    #[test]
+    fn recovered_terminal_retry_is_exponential_spread_and_bounded() {
+        let first = recovery_retry_delay(1, TerminalId(1));
+        let second = recovery_retry_delay(2, TerminalId(1));
+        let fourth = recovery_retry_delay(4, TerminalId(1));
+        assert!(first >= Duration::from_secs(1));
+        assert!(first <= Duration::from_millis(1_500));
+        assert!(second > first);
+        assert!(fourth >= Duration::from_secs(8));
+
+        let capped_a = recovery_retry_delay(50, TerminalId(1));
+        let capped_b = recovery_retry_delay(50, TerminalId(2));
+        assert!(capped_a <= RECOVERY_RETRY_MAX);
+        assert!(capped_b <= RECOVERY_RETRY_MAX);
+        assert_ne!(
+            capped_a, capped_b,
+            "terminal-stable jitter must prevent a retry herd at the cap"
+        );
+    }
+
+    #[test]
+    fn recovered_terminal_retry_warnings_are_rate_limited() {
+        let warned: Vec<u32> = (1..=30)
+            .filter(|n| should_warn_recovery_failure(*n))
+            .collect();
+        assert_eq!(warned, [1, 2, 4, 8, 10, 16, 20, 30]);
+        assert!(is_open_file_exhaustion(
+            "PTY spawn: Too many open files (os error 24)"
+        ));
+        assert!(!is_open_file_exhaustion("tmux server unavailable"));
+    }
 
     struct RejectingBatchStore {
         inner: lazybox_store::MemoryStore,

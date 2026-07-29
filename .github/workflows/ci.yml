@@ -25,6 +25,7 @@ jobs:
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       web: ${{ steps.filter.outputs.web }}
+      desktop: ${{ steps.filter.outputs.desktop }}
       contracts: ${{ steps.filter.outputs.contracts }}
     steps:
       - uses: actions/checkout@v7
@@ -56,6 +57,9 @@ jobs:
               - ".github/workflows/ci.yml"
               - "crates/server/src/api_client.html"
               - "web/**"
+            desktop:
+              - ".github/workflows/ci.yml"
+              - "apps/desktop/**"
             contracts:
               - ".github/ISSUE_TEMPLATE/**"
               - ".github/workflows/ci.yml"
@@ -191,6 +195,35 @@ jobs:
       - name: Verify Rust-backed web contracts
         if: needs.changes.outputs.contracts == 'true' && needs.changes.outputs.rust != 'true'
         run: cargo nextest run -p lazybox-tui --profile ci --test web_docs --test keymap_docs
+
+  desktop:
+    name: desktop spike (macos-14)
+    needs: changes
+    if: needs.changes.outputs.desktop == 'true'
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Install frontend dependencies
+        working-directory: apps/desktop
+        run: npm ci
+      - name: Test and build frontend
+        working-directory: apps/desktop
+        run: |
+          npm audit --audit-level=moderate
+          npm test
+          npm run build
+      - name: Format and test desktop shell
+        run: |
+          cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
 
   rustdoc:
     name: rustdoc

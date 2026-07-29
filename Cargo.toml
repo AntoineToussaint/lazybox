@@ -24,6 +24,7 @@ members = [
     "crates/libghostty-vt",
     "crates/libghostty-vt-sys",
 ]
+exclude = ["apps/desktop/src-tauri"]
 
 # Lazybox's own crates opt into this lint config via `[lints]
 # workspace = true` in their Cargo.toml. The two vendored libghostty

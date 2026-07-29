@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="A desktop proof of lazybox's client-agnostic daemon."
+    />
+    <title>lazybox desktop</title>
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">lb</span>
+          <div>
+            <strong>lazybox</strong>
+            <span>desktop spike</span>
+          </div>
+        </div>
+        <div class="connection">
+          <span id="connection-dot" class="connection-dot"></span>
+          <span id="connection-label">Starting daemon…</span>
+        </div>
+      </header>
+
+      <main class="workspace-grid">
+        <aside class="inbox-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Reactive inbox</p>
+              <h1>Workspaces</h1>
+            </div>
+            <button id="refresh-button" class="icon-button" title="Refresh inbox">↻</button>
+          </div>
+          <div class="inbox-summary">
+            <span id="workspace-count">0 workspaces</span>
+            <span id="unread-count">0 unread</span>
+          </div>
+          <div id="workspace-list" class="workspace-list" aria-live="polite"></div>
+        </aside>
+
+        <section class="activity-panel">
+          <div id="workspace-empty" class="empty-state">
+            <span class="empty-glyph">↳</span>
+            <h2>Choose a workspace</h2>
+            <p>Open a task to see its context and start an agent.</p>
+          </div>
+          <div id="workspace-detail" class="workspace-detail hidden">
+            <div class="detail-heading">
+              <div>
+                <p id="task-kicker" class="eyebrow"></p>
+                <h2 id="task-title"></h2>
+                <p id="task-meta" class="task-meta"></p>
+              </div>
+              <button id="spawn-button" class="primary-button">
+                <span>Start</span>
+                <strong id="agent-label">agent</strong>
+              </button>
+            </div>
+            <div id="task-description" class="task-description"></div>
+            <div class="activity-heading">
+              <h3>Activity</h3>
+              <span id="activity-count"></span>
+            </div>
+            <div id="activity-list" class="activity-list"></div>
+          </div>
+        </section>
+
+        <section class="terminal-panel">
+          <div class="terminal-heading">
+            <div>
+              <p class="eyebrow">Live daemon PTY</p>
+              <h2 id="terminal-title">No terminal attached</h2>
+            </div>
+            <span id="terminal-state" class="terminal-state">idle</span>
+          </div>
+          <div id="terminal-shell" class="terminal-shell">
+            <div id="terminal-empty" class="terminal-empty">
+              <span>›_</span>
+              <p>Start an agent to prove the terminal bridge end to end.</p>
+            </div>
+            <div id="terminal" class="terminal-host hidden"></div>
+          </div>
+        </section>
+      </main>
+
+      <footer class="statusbar">
+        <span id="status-message">Loading persisted workspaces…</span>
+        <span>daemon → HTTP/NDJSON → Tauri channel → xterm.js</span>
+      </footer>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

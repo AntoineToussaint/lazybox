@@ -2541,8 +2541,8 @@ fn sanitize_branch_component(raw: &str) -> String {
 
 /// `owner/repo` for a workspace with no linked task, recovered from its
 /// project. Only `github-` keys carry a clonable repo — `local-`
-/// projects legitimately have none, so they error and the caller's
-/// empty-dir fallback stays the right outcome for them.
+/// projects legitimately have none and are routed to standalone
+/// provisioning before this lookup.
 ///
 /// The clone target must not be reconstructed by splitting the flat
 /// `github-{owner}-{repo}` key on `-`: both fields can hold hyphens, so
@@ -2550,17 +2550,10 @@ fn sanitize_branch_component(raw: &str) -> String {
 /// wrong `codefly/dev-warden-platform` and clones a repo that doesn't
 /// exist. We recover the exact `owner/repo` from, in order: the user's
 /// subscribed scope slug (`github:owner/repo`, unambiguous); the
-/// canonical name on the project *record* (populated from the upstream
-/// task's repo string); and finally the lossy key-derived name — only
-/// reached with no scope match and no record, where it still round-trips
-/// non-hyphenated repos.
-///
-/// Invariant this leans on: a workspace can only reach here under a
-/// GitHub project the user actually reached in the UI, and every such
-/// path leaves either a subscribed per-repo scope (added it explicitly)
-/// or a task-seeded record (polling materialized it) behind. If a future
-/// entry point surfaces a GitHub project header with neither, a
-/// hyphenated owner silently falls back to the lossy name again.
+/// canonical repo identity on the project record; and a key-only slug
+/// when the flat key has exactly one possible boundary. `Project.name`
+/// is presentation data and is never accepted as clone identity.
+/// Ambiguous key-only projects fail instead of cloning a guessed repository.
 pub(crate) fn clonable_repo_from_project(
     config: &ServerConfig,
     workspace: &Workspace,
@@ -2579,20 +2572,23 @@ pub(crate) fn clonable_repo_from_project(
     {
         return Ok(slug);
     }
-    let canonical = config
+    let record = config
         .store
         .get_project(&key)
-        .ok()
-        .flatten()
-        .and_then(|r| r.project_json)
-        .and_then(|j| serde_json::from_str::<lazybox_core::Project>(&j).ok())
-        .map(|p| p.display_name());
-    Ok(canonical.unwrap_or_else(|| key.display_name()))
+        .map_err(|error| crate::ServerError::Store(format!("load project '{key}': {error}")))?;
+    let canonical = record
+        .and_then(|record| record.project_json)
+        .map(|json| serde_json::from_str::<lazybox_core::Project>(&json))
+        .transpose()?
+        .and_then(|project| project.github_repo().map(str::to_string))
+        .or_else(|| key.unambiguous_github_slug());
+    canonical.ok_or_else(|| {
+        crate::ServerError::Workspace(format!(
+            "project '{key}' has no unambiguous GitHub repo slug"
+        ))
+    })
 }
 
-/// Try to set up a real git worktree at `target` for the workspace's
-/// primary task. Returns Ok(()) when a checkout succeeded, Err when
-/// we couldn't (caller falls back to a plain mkdir).
 /// Broadcast a single worktree-provisioning progress transition.
 /// Best-effort: a closed bus (no TUI attached) just drops it.
 fn emit_worktree_progress(
@@ -2633,9 +2629,8 @@ async fn provision_worktree(
     );
 
     // A blank workspace (created via `n` under a project, no issue/PR
-    // linked) has no task to read a repo from — but its project key
-    // still encodes `owner/repo` for GitHub projects, so it gets a
-    // real clone instead of the caller's empty-dir fallback.
+    // linked) has no task to read a repo from. GitHub projects must
+    // resolve an exact clone identity; local projects have no upstream.
     let task = workspace.primary_task();
 
     // Map git-ops' clone/fetch/worktree-add boundaries onto
@@ -2694,10 +2689,17 @@ async fn provision_worktree(
     // `git init` worktree below instead of an empty, non-git directory.
     let repo = match task {
         Some(task) => task.repo.clone(),
-        None => {
+        None if lazybox_core::workspace_project_key(workspace)
+            .is_some_and(|key| key.source_prefix() == "github") =>
+        {
             let github_scopes = crate::polling::github_scopes_from_config(&cfg);
-            clonable_repo_from_project(config, workspace, Some(&github_scopes)).ok()
+            Some(clonable_repo_from_project(
+                config,
+                workspace,
+                Some(&github_scopes),
+            )?)
         }
+        None => None,
     };
 
     let (worktree, repo_key) = match repo {
@@ -10108,13 +10110,9 @@ mod tests {
         assert_eq!(resolve_branch_prefix(&cfg, None), "lazybox");
     }
 
-    /// Persist a project record so `clonable_repo_from_project` can read
-    /// its canonical `owner/repo` name, mirroring what the polling loop's
-    /// `ensure_project_for_workspace` writes.
-    fn save_project(config: &ServerConfig, key: &lazybox_core::ProjectKey, name: &str) {
-        let project = lazybox_core::Project::new(key.clone(), name, Utc::now());
+    fn save_project(config: &ServerConfig, project: lazybox_core::Project) {
         let record = lazybox_store::ProjectRecord {
-            key: key.as_str().to_string(),
+            key: project.key.as_str().to_string(),
             created_at: project.created_at,
             project_json: Some(serde_json::to_string(&project).unwrap()),
         };
@@ -10128,7 +10126,10 @@ mod tests {
     fn clonable_repo_from_project_recovers_github_owner_repo() {
         let config = ServerConfig::in_memory();
         let key = lazybox_core::ProjectKey::github("AntoineToussaint", "lazybox");
-        save_project(&config, &key, "AntoineToussaint/lazybox");
+        save_project(
+            &config,
+            lazybox_core::Project::github("AntoineToussaint", "lazybox", Utc::now()),
+        );
         let mut ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", Utc::now());
         ws.project_key = Some(key);
         assert_eq!(
@@ -10148,7 +10149,10 @@ mod tests {
         let config = ServerConfig::in_memory();
         let key = lazybox_core::ProjectKey::github("codefly-dev", "warden-platform");
         // The record the buggy blank-workspace path would have written.
-        save_project(&config, &key, &key.display_name());
+        save_project(
+            &config,
+            lazybox_core::Project::new(key.clone(), key.display_name(), Utc::now()),
+        );
         assert_eq!(key.display_name(), "codefly/dev-warden-platform");
         let mut ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", Utc::now());
         ws.project_key = Some(key);
@@ -10161,18 +10165,17 @@ mod tests {
         );
     }
 
-    /// Regression for #83: an owner *or* repo with a hyphen
-    /// (`mind-build/mind`) can't be recovered from the `github-{owner}-
-    /// {repo}` key — the lossy first-hyphen split gives `mind/build-mind`.
-    /// Reading the canonical name from the project record fixes it, so a
-    /// new workspace clones the repo the user is actually in.
+    /// An explicit project repo remains exact when the owner contains a
+    /// hyphen, independently of the mutable display name.
     #[test]
     fn clonable_repo_from_project_handles_hyphenated_owner() {
         let config = ServerConfig::in_memory();
         let key = lazybox_core::ProjectKey::github("mind-build", "mind");
         // Sanity: the lossy key path would mangle this.
         assert_eq!(key.display_name(), "mind/build-mind");
-        save_project(&config, &key, "mind-build/mind");
+        let mut project = lazybox_core::Project::github("mind-build", "mind", Utc::now());
+        project.name = "presentation label".to_string();
+        save_project(&config, project);
         let mut ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", Utc::now());
         ws.project_key = Some(key);
         assert_eq!(
@@ -10198,8 +10201,39 @@ mod tests {
         );
     }
 
-    /// `local-` projects have no upstream repo — the lookup errors so
-    /// the caller's empty-dir fallback stays their outcome.
+    #[test]
+    fn clonable_repo_from_project_rejects_ambiguous_key_without_canonical_slug() {
+        let config = ServerConfig::in_memory();
+        let mut ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", Utc::now());
+        ws.project_key = Some(lazybox_core::ProjectKey::github(
+            "codefly-dev",
+            "warden-platform",
+        ));
+
+        assert!(clonable_repo_from_project(&config, &ws, None).is_err());
+    }
+
+    #[test]
+    fn clonable_repo_from_project_rejects_legacy_display_name_as_identity() {
+        let config = ServerConfig::in_memory();
+        let key = lazybox_core::ProjectKey::github("codefly-dev", "warden-platform");
+        save_project(
+            &config,
+            lazybox_core::Project::new(key.clone(), "codefly/dev-warden-platform", Utc::now()),
+        );
+        let mut ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", Utc::now());
+        ws.project_key = Some(key);
+
+        let error = clonable_repo_from_project(&config, &ws, None)
+            .expect_err("a display label cannot establish clone identity");
+        assert!(
+            error
+                .to_string()
+                .contains("no unambiguous GitHub repo slug")
+        );
+    }
+
+    /// `local-` projects have no upstream repo and are not clone targets.
     #[test]
     fn clonable_repo_from_project_rejects_local_project() {
         let config = ServerConfig::in_memory();
@@ -10473,6 +10507,32 @@ mod tests {
             String::from_utf8_lossy(&head.stdout).trim(),
             "scratch",
             "standalone worktree is on the workspace branch",
+        );
+    }
+
+    #[tokio::test]
+    async fn unresolved_github_project_does_not_initialize_a_standalone_repo() {
+        let config = ServerConfig::in_memory();
+        let mut ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", Utc::now());
+        ws.project_key = Some(lazybox_core::ProjectKey::github(
+            "unresolvable-owner-name",
+            "unresolvable-repo-name",
+        ));
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("worktree");
+
+        let error = provision_worktree(&config, &ws, &dir, &SessionKey::new("scratch"), true)
+            .await
+            .expect_err("an unresolved GitHub project must abort provisioning");
+
+        assert!(
+            error
+                .to_string()
+                .contains("no unambiguous GitHub repo slug")
+        );
+        assert!(
+            !dir.exists(),
+            "resolution failure must not masquerade as a standalone checkout"
         );
     }
 

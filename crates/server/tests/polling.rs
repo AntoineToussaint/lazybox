@@ -6557,6 +6557,41 @@ async fn empty_workspace_registers_project_with_pretty_name() {
     let project: lazybox_core::Project =
         serde_json::from_str(&record.project_json.unwrap()).unwrap();
     assert_eq!(project.name, "AntoineToussaint/lazybox");
+    assert_eq!(project.github_repo(), Some("AntoineToussaint/lazybox"));
+}
+
+#[tokio::test]
+async fn task_upsert_repairs_legacy_project_with_canonical_repo() {
+    use lazybox_core::{Project, ProjectKey};
+
+    let config = ServerConfig::in_memory();
+    let project_key = ProjectKey::github("codefly-dev", "warden-platform");
+    let legacy = Project::new(
+        project_key.clone(),
+        "codefly/dev-warden-platform",
+        Utc::now(),
+    );
+    config
+        .store
+        .save_project(&lazybox_store::ProjectRecord {
+            key: project_key.as_str().to_string(),
+            created_at: legacy.created_at,
+            project_json: Some(serde_json::to_string(&legacy).unwrap()),
+        })
+        .unwrap();
+
+    let mut task = make_task("codefly-dev/warden-platform#638");
+    task.repo = Some("codefly-dev/warden-platform".to_string());
+    polling::upsert(&config, task).await;
+
+    let record = config
+        .store
+        .get_project(&project_key)
+        .unwrap()
+        .expect("project remains registered");
+    let project: Project = serde_json::from_str(&record.project_json.unwrap()).unwrap();
+    assert_eq!(project.github_repo(), Some("codefly-dev/warden-platform"));
+    assert_eq!(project.display_name(), "codefly-dev/warden-platform");
 }
 
 /// `LinearSource` coverage wiring: a Linear fetch that loses a page

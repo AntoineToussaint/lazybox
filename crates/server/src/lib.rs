@@ -1296,9 +1296,10 @@ impl Server {
                             );
                             let store = self.config.store.clone();
                             match tokio::task::spawn_blocking(move || {
+                                let github_scopes = configured_github_scopes();
                                 (
                                     load_workspaces(&*store),
-                                    load_projects(&*store),
+                                    load_projects(&*store, &github_scopes),
                                     client_kv::snapshot(&*store),
                                 )
                             })
@@ -1495,9 +1496,10 @@ pub async fn dispatch_command(
             // breadcrumb.
             let store = config.store.clone();
             let (workspaces, projects, client_kv) = match tokio::task::spawn_blocking(move || {
+                let github_scopes = configured_github_scopes();
                 (
                     load_workspaces(&*store),
-                    load_projects(&*store),
+                    load_projects(&*store, &github_scopes),
                     client_kv::snapshot(&*store),
                 )
             })
@@ -2157,8 +2159,21 @@ fn budget_snapshot_replay(terminals: &mut [lazybox_ipc::TerminalSnapshot]) {
     }
 }
 
+fn configured_github_scopes() -> std::collections::BTreeSet<String> {
+    match lazybox_config::Config::load() {
+        Ok(config) => polling::github_scopes_from_config(&config),
+        Err(error) => {
+            tracing::warn!("load GitHub scopes for project snapshot failed: {error}");
+            std::collections::BTreeSet::new()
+        }
+    }
+}
+
 /// Same shape as `load_workspaces` for the project table.
-fn load_projects(store: &dyn Store) -> LoadOutcome<lazybox_core::Project> {
+fn load_projects(
+    store: &dyn Store,
+    github_scopes: &std::collections::BTreeSet<String>,
+) -> LoadOutcome<lazybox_core::Project> {
     let records = match store.list_projects() {
         Ok(r) => r,
         Err(e) => {
@@ -2173,7 +2188,16 @@ fn load_projects(store: &dyn Store) -> LoadOutcome<lazybox_core::Project> {
     for record in records {
         match record.project_json {
             Some(json) => match serde_json::from_str::<lazybox_core::Project>(&json) {
-                Ok(project) => outcome.values.push(project),
+                Ok(mut project) => {
+                    if project.github_repo().is_none()
+                        && let Some(slug) = project
+                            .key
+                            .github_slug_from_scopes(github_scopes.iter().map(String::as_str))
+                    {
+                        project.set_github_repo(&slug);
+                    }
+                    outcome.values.push(project);
+                }
                 Err(error) => {
                     tracing::warn!("preserving unreadable project {}: {error}", record.key);
                     outcome
@@ -2228,6 +2252,50 @@ mod store_open_tests {
             error
                 .to_string()
                 .contains(&blocked_parent.display().to_string())
+        );
+    }
+}
+
+#[cfg(test)]
+mod project_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn provider_filter_repairs_legacy_project_in_snapshot() {
+        let store = MemoryStore::new();
+        let key = lazybox_core::ProjectKey::github("codefly-dev", "warden-platform");
+        let project = lazybox_core::Project::new(
+            key.clone(),
+            "codefly/dev-warden-platform",
+            chrono::Utc::now(),
+        );
+        store
+            .save_project(&lazybox_store::ProjectRecord {
+                key: key.as_str().to_string(),
+                created_at: project.created_at,
+                project_json: Some(serde_json::to_string(&project).expect("serialize project")),
+            })
+            .expect("save project");
+
+        let mut config = lazybox_config::Config::default();
+        config.providers.github.filters = vec![lazybox_config::Filter {
+            org: None,
+            repo: Some("codefly-dev/warden-platform".to_string()),
+            watch: None,
+        }];
+        let scopes = polling::github_scopes_from_config(&config);
+
+        let outcome = load_projects(&store, &scopes);
+
+        assert!(outcome.errors.is_empty());
+        assert_eq!(outcome.values.len(), 1);
+        assert_eq!(
+            outcome.values[0].github_repo(),
+            Some("codefly-dev/warden-platform")
+        );
+        assert_eq!(
+            outcome.values[0].display_name(),
+            "codefly-dev/warden-platform"
         );
     }
 }

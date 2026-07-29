@@ -2409,14 +2409,24 @@ impl<T: TerminalAdapter> Model<T> {
         let mut changed = false;
         // Add a placeholder header for each freshly-subscribed repo.
         for (pk, name) in &desired {
-            if !self.projects.contains_key(pk) {
-                self.projects.insert(
-                    pk.clone(),
-                    lazybox_core::Project::new(pk.clone(), name.clone(), chrono::Utc::now()),
-                );
-                self.synthesized_projects.insert(pk.clone());
-                changed = true;
+            if let Some(project) = self.projects.get_mut(pk) {
+                if pk.source_prefix() == "github"
+                    && project.github_repo() != Some(name.as_str())
+                    && project.set_github_repo(name)
+                {
+                    changed = true;
+                }
+                continue;
             }
+            let project = if pk.source_prefix() == "github" {
+                let (owner, repo) = name.split_once('/').expect("scope contains owner/repo");
+                lazybox_core::Project::github(owner, repo, chrono::Utc::now())
+            } else {
+                lazybox_core::Project::new(pk.clone(), name.clone(), chrono::Utc::now())
+            };
+            self.projects.insert(pk.clone(), project);
+            self.synthesized_projects.insert(pk.clone());
+            changed = true;
         }
         // Drop placeholders for repos the user just unsubscribed. Only
         // remove keys WE synthesized — daemon-authoritative projects

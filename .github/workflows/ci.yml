@@ -1,28 +1,73 @@
-# Build + test every PR, merge-queue composition, and main push. Catches
-# regressions before they hit main when the repository requires this workflow
-# through a merge queue; the main-push run is the recovery alarm, not the
-# first integration check.
+# Linux builds and tests every Rust PR. The merge queue adds the expensive
+# macOS and MSRV lanes against the exact candidate tree before it reaches main.
 #
 # Test breadth cannot compensate for a stale PR base: two independently-green
 # PRs may still fail when composed. Keep `merge_group` enabled here and require
 # CI on the repository's merge queue (or require branches be up to date) so
 # GitHub tests the exact candidate tree before advancing main.
 #
-# Jobs that compile workspace code share `.github/actions/rust-build-env`
-# (Zig + C toolchain + Rust stable + cache) so the install step
-# doesn't drift across jobs.
+# Stable Linux clippy, tests, and rustdoc run in one job so the slow native
+# build and target cache are restored once and reused by all three gates.
 
 name: CI
 
 on:
   pull_request:
   merge_group:
-  push:
-    branches: [main]
 
 jobs:
+  changes:
+    name: changes
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      web: ${{ steps.filter.outputs.web }}
+      contracts: ${{ steps.filter.outputs.contracts }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4.0.2
+        id: filter
+        with:
+          filters: |
+            rust:
+              - ".cargo/**"
+              - ".config/nextest.toml"
+              - ".github/actions/rust-build-env/**"
+              - ".github/workflows/ci.yml"
+              - ".ghostty-version"
+              - ".zig-checksums"
+              - ".zig-version"
+              - "Cargo.lock"
+              - "Cargo.toml"
+              - "README.md"
+              - "crates/**"
+              - "deny.toml"
+              - "docs/features/**"
+              - "docs/slack-setup.md"
+              - "docs/snippets.md"
+              - "docs/themes.md"
+              - "prompts/**"
+              - "rust-toolchain.toml"
+              - "scripts/**"
+            web:
+              - ".github/workflows/ci.yml"
+              - "web/**"
+            contracts:
+              - ".github/ISSUE_TEMPLATE/**"
+              - ".github/workflows/ci.yml"
+              - ".github/workflows/release.yml"
+              - "CONTRIBUTING.md"
+              - "README.md"
+              - "SUPPORT.md"
+              - "web/**"
+
   msrv:
     name: msrv (Rust 1.88.0)
+    needs: changes
+    if: github.event_name == 'merge_group' && needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
@@ -32,12 +77,39 @@ jobs:
       - run: cargo check --workspace --all-targets
 
   test:
-    name: test
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [ubuntu-22.04, macos-14]
-    runs-on: ${{ matrix.runner }}
+    name: test (ubuntu-22.04)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-22.04
+    env:
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/rust-build-env
+        with:
+          rust-components: clippy
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Link benchmark targets
+        run: cargo build --workspace --benches
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Test with per-test timeout enforcement
+        run: cargo nextest run --workspace --profile ci
+
+      - name: Rustdoc
+        run: cargo doc --no-deps --workspace
+
+  macos:
+    name: test (macos-14)
+    needs: changes
+    if: github.event_name == 'merge_group' && needs.changes.outputs.rust == 'true'
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/rust-build-env
@@ -52,18 +124,19 @@ jobs:
       - name: Test with per-test timeout enforcement
         run: cargo nextest run --workspace --profile ci
 
+  # These required-check names now run inside the Linux test job. Keeping
+  # zero-run jobs lets existing branch protection recognize the transition.
   clippy:
     name: clippy
+    if: ${{ false }}
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/rust-build-env
-        with:
-          rust-components: clippy
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: "true"
 
   fmt:
     name: fmt
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
@@ -74,41 +147,56 @@ jobs:
 
   web:
     name: web (types, build, Lighthouse budgets)
+    needs: changes
+    if: >-
+      needs.changes.outputs.web == 'true' ||
+      (needs.changes.outputs.contracts == 'true' && needs.changes.outputs.rust != 'true')
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
+        if: needs.changes.outputs.web == 'true'
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: web/package-lock.json
       - name: Install web dependencies
+        if: needs.changes.outputs.web == 'true'
         working-directory: web
         run: npm ci
       - name: Audit deployable web dependencies
+        if: needs.changes.outputs.web == 'true'
         working-directory: web
         run: npm audit --omit=dev --audit-level=moderate
       - name: Type-check and build site
+        if: needs.changes.outputs.web == 'true'
         working-directory: web
         run: |
           npm run check
           npm run build
       - name: Enforce Lighthouse and transfer-size budgets
+        if: needs.changes.outputs.web == 'true'
         working-directory: web
         run: npm run lighthouse
+      # Most web edits need no workspace build. These two Rust-backed
+      # contract tests are the exception: they compare public docs with
+      # the shipped config and runtime action catalog.
+      - uses: ./.github/actions/rust-build-env
+        if: needs.changes.outputs.contracts == 'true' && needs.changes.outputs.rust != 'true'
+      - uses: taiki-e/install-action@v2
+        if: needs.changes.outputs.contracts == 'true' && needs.changes.outputs.rust != 'true'
+        with:
+          tool: cargo-nextest
+      - name: Verify Rust-backed web contracts
+        if: needs.changes.outputs.contracts == 'true' && needs.changes.outputs.rust != 'true'
+        run: cargo nextest run -p lazybox-tui --profile ci --test web_docs --test keymap_docs
 
   rustdoc:
-    # Broken intra-doc links / bad rustdoc references fail CI. Linux
-    # only — rustdoc behavior doesn't differ across the matrix and
-    # matrixing would just double the build time of a slow job.
     name: rustdoc
+    if: ${{ false }}
     runs-on: ubuntu-22.04
-    env:
-      RUSTDOCFLAGS: "-D warnings"
     steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/rust-build-env
-      - run: cargo doc --no-deps --workspace
+      - run: "true"
 
   deny:
     # cargo-deny gates on RustSec advisories, banned/duplicated deps,
@@ -116,6 +204,8 @@ jobs:
     # `deny.toml` at the repo root. No Rust toolchain or build of the
     # workspace needed — cargo-deny only reads Cargo.lock.
     name: deny
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
@@ -125,8 +215,12 @@ jobs:
 
   typos:
     name: typos
+    needs: changes
+    if: ${{ always() }}
     runs-on: ubuntu-22.04
     steps:
+      - name: Verify path filtering
+        run: test "${{ needs.changes.result }}" = "success"
       - uses: actions/checkout@v7
       # Pinned to a tagged release rather than `@master` so CI is
       # reproducible across re-runs and a silent upstream change
@@ -138,6 +232,8 @@ jobs:
     # compile time, advisory surface, and the set of contracts maintainers
     # falsely believe a crate owns.
     name: machete
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7

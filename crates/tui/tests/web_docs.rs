@@ -17,6 +17,88 @@ fn read(relative: impl AsRef<Path>) -> String {
         .unwrap_or_else(|error| panic!("read website source {}: {error}", path.display()))
 }
 
+fn ci_filters() -> std::collections::BTreeMap<String, Vec<String>> {
+    let workflow = read(".github/workflows/ci.yml");
+    let block = workflow
+        .split_once("          filters: |\n")
+        .map(|(_, block)| block)
+        .expect("CI path filters");
+    let yaml = block
+        .lines()
+        .take_while(|line| line.is_empty() || line.starts_with("            "))
+        .map(|line| line.strip_prefix("            ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    serde_yaml::from_str(&yaml).expect("parse CI path filters")
+}
+
+fn ci_filter_matches(filter: &str, path: &str) -> bool {
+    ci_filters()[filter].iter().any(|pattern| {
+        pattern.strip_suffix("/**").map_or_else(
+            || pattern == path,
+            |prefix| path == prefix || path.starts_with(&format!("{prefix}/")),
+        )
+    })
+}
+
+#[test]
+fn ci_routes_every_compiled_non_crate_input_through_the_rust_lane() {
+    for path in [
+        ".zig-checksums",
+        "README.md",
+        "docs/features/inbox-and-sync.md",
+        "docs/slack-setup.md",
+        "docs/snippets.md",
+        "docs/themes.md",
+        "prompts/agent-work.md",
+    ] {
+        assert!(
+            ci_filter_matches("rust", path),
+            "{path} is consumed by a Rust build and must select the Rust CI lane"
+        );
+    }
+}
+
+#[test]
+fn ci_web_lane_runs_the_rust_backed_documentation_contracts() {
+    let workflow = read(".github/workflows/ci.yml");
+    for path in [
+        ".github/ISSUE_TEMPLATE/config.yml",
+        ".github/workflows/release.yml",
+        "CONTRIBUTING.md",
+        "SUPPORT.md",
+        "web/src/content/docs/docs/reference/keybindings.md",
+        "web/src/pages/index.astro",
+    ] {
+        assert!(
+            ci_filter_matches("rust", path) || ci_filter_matches("contracts", path),
+            "{path} is read by a Rust-backed documentation contract"
+        );
+    }
+    assert!(workflow.contains(
+        "cargo nextest run -p lazybox-tui --profile ci --test web_docs --test keymap_docs"
+    ));
+    assert!(
+        workflow
+            .matches(
+                "if: needs.changes.outputs.contracts == 'true' && \
+                 needs.changes.outputs.rust != 'true'",
+            )
+            .count()
+            >= 3,
+        "contract setup and execution must be skipped only when the full Rust lane runs"
+    );
+}
+
+#[test]
+fn ci_linux_lane_links_benchmark_targets() {
+    let workflow = read(".github/workflows/ci.yml");
+    assert!(
+        workflow.contains("cargo build --workspace --benches"),
+        "the PR lane must link benchmark targets omitted by default nextest selection"
+    );
+}
+
 #[test]
 fn configuration_reference_lists_every_top_level_section() {
     let page = read("web/src/content/docs/docs/reference/configuration.md");

@@ -249,7 +249,43 @@ impl MergeBackend for lazybox_gh::GhClient {
 /// credential leaves the key `Blocked` (not released) so a daemon
 /// without GitHub auth doesn't spin a doomed attempt on every tick.
 async fn run_real_attempt(config: &ServerConfig, ticket: AttemptPlan) {
-    match super::handlers::resolve_gh_client(config).await {
+    run_real_attempt_with_resolver(config, ticket, || {
+        super::handlers::resolve_gh_client(config)
+    })
+    .await;
+}
+
+async fn run_real_attempt_with_resolver<F, Fut>(
+    config: &ServerConfig,
+    ticket: AttemptPlan,
+    resolve_client: F,
+) where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Option<lazybox_gh::GhClient>>,
+{
+    let key = &ticket.workspace_key;
+    let settle = |latch: Option<Latch>| {
+        config.auto_merge.lock().settle(key, latch);
+    };
+    let Some(ws) = load_workspace(config, key) else {
+        settle(None);
+        return;
+    };
+    if !ws.auto_merge_on_green {
+        settle(None);
+        return;
+    }
+    if ws
+        .pr
+        .as_ref()
+        .and_then(super::handlers::github_target)
+        .is_none()
+    {
+        settle(Some(Latch::Blocked(ticket.skip_if_head.clone())));
+        return;
+    }
+
+    match resolve_client().await {
         Some(client) => run_attempt(config, ticket, &client).await,
         None => {
             tracing::warn!(
@@ -811,15 +847,13 @@ mod tests {
     // ── wiring: the polling commit path drives the hook ──────────
 
     /// End-to-end through `polling::upsert`: committing an armed +
-    /// green workspace dispatches exactly one attempt; a byte-identical
-    /// re-poll dispatches none; red→green re-probes. The seeded task
-    /// carries no `repo`, so the dispatched attempt settles `Blocked`
-    /// before any network/provider work — this test pins the WIRING,
-    /// the attempt behavior is pinned by the fake-backend tests above.
+    /// green workspace dispatches an attempt. The attempt behavior and
+    /// latch transitions are pinned independently below and by the
+    /// fake-backend tests above.
     #[tokio::test(flavor = "current_thread")]
     async fn upsert_commit_path_dispatches_the_attempt() {
         let mut task = green_task("o/r#1");
-        task.repo = None; // no GitHub target → attempt aborts pre-network
+        task.repo = None;
         let store = Arc::new(MemoryStore::new());
         let config = ServerConfig::with_store(store);
 
@@ -833,40 +867,27 @@ mod tests {
         // A re-poll of the armed green workspace dispatches once …
         super::super::upsert(&config, task.clone()).await;
         assert_eq!(config.auto_merge.lock().attempts_started, 1);
-        // … and the dispatched attempt settles (no GitHub target).
-        let settled = async {
-            loop {
-                let blocked = matches!(
-                    config.auto_merge.lock().latch(&key),
-                    Some(Latch::Blocked(_))
-                );
-                if blocked {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        };
-        tokio::time::timeout(std::time::Duration::from_secs(3), settled)
-            .await
-            .expect("attempt must settle");
+    }
 
-        // The same green state again is byte-identical → unchanged
-        // commit → a Blocked key must NOT re-probe.
-        super::super::upsert(&config, task.clone()).await;
-        assert_eq!(config.auto_merge.lock().attempts_started, 1);
+    #[tokio::test(flavor = "current_thread")]
+    async fn real_attempt_without_a_target_settles_before_client_resolution() {
+        let mut ws = armed_ws("o/r#1");
+        ws.pr.as_mut().unwrap().repo = None;
+        let config = config_with(&ws);
+        let ticket = plan(&mut config.auto_merge.lock(), &ws.key, Signal::Fire, true)
+            .expect("armed green workspace dispatches");
+        let resolver_called = std::cell::Cell::new(false);
 
-        // Red CI holds (no dispatch), a genuine re-green re-probes.
-        let mut red = task.clone();
-        red.ci = CiStatus::Failure;
-        super::super::upsert(&config, red).await;
-        assert_eq!(config.auto_merge.lock().attempts_started, 1);
-        let mut regreen = task.clone();
-        regreen.updated_at = Utc::now() + chrono::Duration::seconds(5);
-        super::super::upsert(&config, regreen).await;
-        assert_eq!(
-            config.auto_merge.lock().attempts_started,
-            2,
-            "a changed re-green re-probes a blocked key"
-        );
+        run_real_attempt_with_resolver(&config, ticket, || {
+            resolver_called.set(true);
+            async { None }
+        })
+        .await;
+
+        assert!(!resolver_called.get(), "credential lookup must not run");
+        assert!(matches!(
+            config.auto_merge.lock().latch(&ws.key),
+            Some(Latch::Blocked(_))
+        ));
     }
 }

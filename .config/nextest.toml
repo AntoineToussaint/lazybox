@@ -29,9 +29,8 @@ filter = 'test(/^e2e_/)'
 slow-timeout = { period = "150s", terminate-after = 1 }
 
 [profile.ci]
-# CI uses the same bound but retries flaky tests once before failing.
+# CI uses the same bound and fails on the first broken test.
 slow-timeout = { period = "10s", terminate-after = 1 }
-retries = 1
 failure-output = "immediate-final"
 
 # Nightly lane: the full workspace including #[ignore]'d real-backend /

@@ -425,23 +425,36 @@ impl<T: TerminalAdapter> Model<T> {
         cmds
     }
 
-    /// A question submitted from the `HelpAsk` modal (#302). Records
-    /// the turn in the shared conversation and routes it to the help
-    /// agent: the first question starts a headless structured run
-    /// with the generated catalog + docs context as its opening
-    /// message; follow-ups ride the same run so the context stays
-    /// prompt-cached. Questions racing the run start are queued and
-    /// flushed by the `AgentRunStarted` handler.
+    /// A follow-up submitted to the current help thread.
     ///
     /// **Effects**: returns commands as a `Vec` for testability.
     pub fn handle_help_asked(&mut self, question: String) -> Vec<IpcCommand> {
-        use lazybox_ipc::{AgentInputMessage, AgentRunAccess, AgentRuntimeMode};
-        use lazybox_tui_core::help::{HELP_AGENT_PREFERENCE, HELP_SESSION_KEY, select_help_agent};
+        self.handle_help_question(
+            question,
+            crate::realm::components::help_ask::HelpQuestionKind::FollowUp,
+        )
+    }
+
+    /// A question submitted from the `HelpAsk` modal. Follow-ups ride
+    /// the current run; new questions interrupt it and start with fresh
+    /// context.
+    pub fn handle_help_question(
+        &mut self,
+        question: String,
+        kind: crate::realm::components::help_ask::HelpQuestionKind,
+    ) -> Vec<IpcCommand> {
+        use lazybox_ipc::AgentInputMessage;
 
         let question = question.trim().to_string();
         if question.is_empty() {
             return Vec::new();
         }
+        let mut cmds = if kind == crate::realm::components::help_ask::HelpQuestionKind::NewQuestion
+        {
+            self.reset_help_session()
+        } else {
+            Vec::new()
+        };
         {
             let mut convo = self.help_convo_mut();
             convo.notice = None;
@@ -453,38 +466,56 @@ impl<T: TerminalAdapter> Model<T> {
                 });
         }
         self.redraw = true;
-        let Some(help_agent) = select_help_agent(&self.agents, Some(self.sidebar.default_agent()))
-        else {
-            let mut convo = self.help_convo_mut();
-            convo.notice = Some(format!(
-                "the help assistant needs a structured agent ({}) enabled — \
-showing keybinding search only",
-                HELP_AGENT_PREFERENCE.join(" or ")
-            ));
-            if let Some(turn) = convo.streaming_turn_mut() {
-                turn.done = true;
+        if self.help_interrupt_on_start {
+            if self.help_restart_question.is_none() {
+                self.help_restart_question = Some(question);
+            } else {
+                self.help_pending_questions.push(question);
             }
-            return Vec::new();
-        };
+            return cmds;
+        }
         if let Some(run_id) = self.help_run {
-            return vec![IpcCommand::SendAgentInput {
+            cmds.push(IpcCommand::SendAgentInput {
                 run_id,
                 message: AgentInputMessage {
                     text: Some(question),
                     json: None,
                 },
-            }];
+            });
+            return cmds;
         }
         if self.help_run_starting {
             self.help_pending_questions.push(question);
-            return Vec::new();
+            return cmds;
         }
+        if let Some(cmd) = self.start_help_run_command(&question) {
+            cmds.push(cmd);
+        }
+        cmds
+    }
+
+    pub(super) fn start_help_run_command(&mut self, question: &str) -> Option<IpcCommand> {
+        use lazybox_ipc::{AgentInputMessage, AgentRunAccess, AgentRuntimeMode};
+        use lazybox_tui_core::help::{HELP_AGENT_PREFERENCE, HELP_SESSION_KEY, select_help_agent};
+
+        let Some(help_agent) = select_help_agent(&self.agents, Some(self.sidebar.default_agent()))
+        else {
+            self.help_pending_questions.clear();
+            let mut convo = self.help_convo_mut();
+            convo.close_open_turns();
+            convo.notice = Some(format!(
+                "the help assistant needs a structured agent ({}) enabled — \
+showing keybinding search only",
+                HELP_AGENT_PREFERENCE.join(" or ")
+            ));
+            return None;
+        };
         self.help_run_starting = true;
         let context = lazybox_tui_core::help::agent_context(
             &self.catalog,
             self.ui_defaults.terminal_escape_char,
         );
-        vec![IpcCommand::StartAgentRun {
+        Some(IpcCommand::StartAgentRun {
             session_key: lazybox_core::SessionKey::new(HELP_SESSION_KEY),
             session_id: None,
             agent: help_agent.to_string(),
@@ -499,7 +530,24 @@ showing keybinding search only",
                 json: None,
             }),
             access: AgentRunAccess::ReadOnly,
-        }]
+        })
+    }
+
+    fn reset_help_session(&mut self) -> Vec<IpcCommand> {
+        let interrupt = self
+            .help_run
+            .take()
+            .map(|run_id| IpcCommand::InterruptAgentRun { run_id });
+        self.help_pending_questions.clear();
+        self.help_restart_question = None;
+        if interrupt.is_some() {
+            self.help_run_starting = false;
+            self.help_interrupt_on_start = false;
+        } else {
+            self.help_interrupt_on_start = self.help_run_starting;
+        }
+        *self.help_convo_mut() = Default::default();
+        interrupt.into_iter().collect()
     }
 
     /// Route a Choice modal pick to the right handler. Five
@@ -1302,6 +1350,9 @@ showing keybinding search only",
         // A few modals carry cancel state that is NOT part of the flow
         // enum — release it here.
         match top {
+            Some(Id::Help) | Some(Id::HelpAsk) => {
+                cmds.extend(self.reset_help_session());
+            }
             Some(Id::ManageLabels) => {
                 // The label picker's target lives in `awaiting_repo_labels`
                 // (armed before the modal, coexists with others), not in

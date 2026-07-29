@@ -215,6 +215,20 @@ impl<T: TerminalAdapter> Model<T> {
                 session_key,
                 ..
             } if session_key.as_str() == HELP_SESSION_KEY => {
+                if self.help_interrupt_on_start {
+                    self.help_interrupt_on_start = false;
+                    self.help_run_starting = false;
+                    self.send_cmd(lazybox_ipc::Command::InterruptAgentRun { run_id: *run_id });
+                    if let Some(question) = self.help_restart_question.take() {
+                        if let Some(cmd) = self.start_help_run_command(&question) {
+                            self.send_cmd(cmd);
+                        }
+                    } else {
+                        self.help_pending_questions.clear();
+                    }
+                    self.redraw = true;
+                    return true;
+                }
                 self.help_run = Some(*run_id);
                 self.help_run_starting = false;
                 // Questions that raced the run start ride in now, in
@@ -318,6 +332,19 @@ impl<T: TerminalAdapter> Model<T> {
             IpcEvent::ProviderError {
                 source, message, ..
             } if source.starts_with("agent_run") && self.help_run_starting => {
+                if self.help_interrupt_on_start {
+                    self.help_interrupt_on_start = false;
+                    self.help_run_starting = false;
+                    if let Some(question) = self.help_restart_question.take() {
+                        if let Some(cmd) = self.start_help_run_command(&question) {
+                            self.send_cmd(cmd);
+                        }
+                    } else {
+                        self.help_pending_questions.clear();
+                    }
+                    self.redraw = true;
+                    return true;
+                }
                 self.help_run_starting = false;
                 self.help_pending_questions.clear();
                 let mut convo = self.help_convo_mut();

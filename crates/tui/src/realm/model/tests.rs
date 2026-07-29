@@ -10725,13 +10725,14 @@ mod worktree_progress_recovery_tests {
 #[cfg(test)]
 mod click_outside_modal_dismiss_tests {
     //! Issue #253 — a *dismissable* modal (a read-only / progress
-    //! overlay, never a destructive confirm) must not trap the user: a
-    //! press outside it closes it exactly like Esc AND lets the click do
-    //! its normal thing, so clicking a sidebar workspace both dismisses
-    //! the worktree-provisioning checklist and selects that workspace in
-    //! one action. Destructive confirms keep owning input so a stray
-    //! click can't skip or trigger data loss.
-    use super::super::{Id, Model, PaneFocus};
+    //! overlay, never a destructive confirm or conversational Help)
+    //! must not trap the user: a press outside it closes it exactly like
+    //! Esc AND lets the click do its normal thing, so clicking a sidebar
+    //! workspace both dismisses the worktree-provisioning checklist and
+    //! selects that workspace in one action. Blocking surfaces keep
+    //! owning input so a stray click can't skip or trigger data loss.
+    use super::super::{Id, Model};
+    use crate::realm::Msg;
     use chrono::Utc;
     use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use lazybox_core::{SessionKey, Workspace, WorkspaceKey};
@@ -10927,10 +10928,10 @@ mod click_outside_modal_dismiss_tests {
         assert!(m.modal_stack.contains(&Id::SyncStatus));
     }
 
-    /// Focus doesn't matter to the classification — help is dismissable
-    /// regardless of which pane the click lands in.
+    /// Help owns a conversation, so clicks outside either of its two
+    /// surfaces must leave it open.
     #[test]
-    fn help_overlay_dismisses_on_outside_click() {
+    fn help_ignores_outside_click() {
         let mut m = build_model();
         m.handle_daemon_event(IpcEvent::Snapshot {
             workspaces: vec![empty_ws("github:o/r#1")],
@@ -10943,12 +10944,19 @@ mod click_outside_modal_dismiss_tests {
         assert!(m.modal_stack.contains(&Id::Help));
 
         m.layout.last_area = Rect::new(0, 0, 120, 40);
-        assert!(m.dismiss_modal_on_outside_click(left_down(1, 6)));
+        assert!(!m.dismiss_modal_on_outside_click(left_down(1, 6)));
         assert!(
-            !m.modal_stack.contains(&Id::Help),
-            "help closes on an outside press",
+            m.modal_stack.contains(&Id::Help),
+            "shortcut index stays open after an outside press",
         );
-        assert_eq!(m.focus(), PaneFocus::Sidebar);
+
+        m.update(Msg::HelpAskOpen);
+        assert_eq!(m.modal_stack.last(), Some(&Id::HelpAsk));
+        assert!(!m.dismiss_modal_on_outside_click(left_down(1, 6)));
+        assert!(
+            m.modal_stack.contains(&Id::HelpAsk),
+            "conversation stays open after an outside press",
+        );
     }
 }
 
@@ -11412,6 +11420,7 @@ mod help_ask_tests {
     //! conversation, and the modal hand-off from the `?` help panel.
 
     use super::super::*;
+    use crate::realm::components::help_ask::HelpQuestionKind;
     use lazybox_core::SessionKey;
     use lazybox_ipc::Event as IpcEvent;
     use lazybox_ipc::{
@@ -11494,6 +11503,36 @@ mod help_ask_tests {
         }
     }
 
+    #[test]
+    fn new_question_interrupts_the_run_and_starts_a_fresh_thread() {
+        let mut m = build_model();
+        m.help_run = Some(AgentRunId(7));
+        m.help_convo_mut()
+            .turns
+            .push(crate::realm::components::help_ask::HelpTurn {
+                question: "old question".into(),
+                answer: "old answer".into(),
+                done: true,
+            });
+
+        let cmds =
+            m.handle_help_question("unrelated question".into(), HelpQuestionKind::NewQuestion);
+        assert!(matches!(
+            cmds.first(),
+            Some(IpcCommand::InterruptAgentRun {
+                run_id: AgentRunId(7)
+            })
+        ));
+        assert!(matches!(
+            cmds.get(1),
+            Some(IpcCommand::StartAgentRun { .. })
+        ));
+        let convo = m.help_convo_mut();
+        assert_eq!(convo.turns.len(), 1);
+        assert_eq!(convo.turns[0].question, "unrelated question");
+        assert!(!convo.turns[0].answer.contains("old answer"));
+    }
+
     /// A question racing the run start queues instead of double-
     /// starting; `AgentRunStarted` flushes the queue in order.
     #[test]
@@ -11508,6 +11547,36 @@ mod help_ask_tests {
         assert_eq!(m.help_run, Some(AgentRunId(3)));
         assert!(!m.help_run_starting);
         assert!(m.help_pending_questions.is_empty());
+    }
+
+    #[test]
+    fn new_question_while_starting_replaces_the_pending_thread() {
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        assert!(!m.handle_help_asked("old question".into()).is_empty());
+
+        let cmds = m.handle_help_question("fresh question".into(), HelpQuestionKind::NewQuestion);
+        assert!(cmds.is_empty(), "the old run has no id to interrupt yet");
+        assert!(m.help_interrupt_on_start);
+        assert_eq!(
+            m.help_convo_mut().turns[0].question,
+            "fresh question",
+            "the old transcript is cleared immediately"
+        );
+
+        m.handle_daemon_event(run_started(3));
+        assert!(matches!(
+            server.rx.try_recv(),
+            Ok(IpcCommand::InterruptAgentRun {
+                run_id: AgentRunId(3)
+            })
+        ));
+        assert!(matches!(
+            server.rx.try_recv(),
+            Ok(IpcCommand::StartAgentRun { .. })
+        ));
+        assert!(m.help_run_starting);
+        assert_eq!(m.help_run, None);
     }
 
     /// Empty / whitespace questions are dropped without touching the
@@ -11745,13 +11814,80 @@ mod help_ask_tests {
         assert_eq!(m.modal_stack.as_slice(), &[Id::Help]);
         m.update(Msg::HelpAskOpen);
         assert_eq!(m.modal_stack.as_slice(), &[Id::HelpAsk]);
-        m.update(Msg::HelpAsked("how do I merge?".into()));
+        m.update(Msg::HelpAsked(
+            "how do I merge?".into(),
+            HelpQuestionKind::NewQuestion,
+        ));
         assert_eq!(
             m.modal_stack.as_slice(),
             &[Id::HelpAsk],
             "asking must not dismiss the modal",
         );
         assert_eq!(m.help_convo_mut().turns.len(), 1);
+        m.update(Msg::HelpIndexOpen);
+        assert_eq!(m.modal_stack.as_slice(), &[Id::Help]);
+        assert_eq!(m.help_convo_mut().turns.len(), 1);
+        m.update(Msg::HelpAskOpen);
+        assert_eq!(m.modal_stack.as_slice(), &[Id::HelpAsk]);
+        assert_eq!(
+            m.help_convo_mut().turns.len(),
+            1,
+            "switching Help surfaces keeps the active conversation",
+        );
+    }
+
+    #[test]
+    fn explicit_help_exit_interrupts_and_resets_the_conversation() {
+        let mut m = build_model();
+        m.mount_help_ask();
+        m.help_run = Some(AgentRunId(7));
+        m.help_convo_mut()
+            .turns
+            .push(crate::realm::components::help_ask::HelpTurn {
+                question: "q".into(),
+                answer: "a".into(),
+                done: true,
+            });
+
+        let cmds = m.handle_modal_dismissed();
+        assert!(matches!(
+            cmds.as_slice(),
+            [IpcCommand::InterruptAgentRun {
+                run_id: AgentRunId(7)
+            }]
+        ));
+        assert!(m.modal_stack.is_empty());
+        assert!(m.help_convo_mut().turns.is_empty());
+        assert_eq!(m.help_run, None);
+
+        m.mount_help_ask();
+        let cmds = m.handle_help_question("fresh".into(), HelpQuestionKind::NewQuestion);
+        assert!(matches!(
+            cmds.as_slice(),
+            [IpcCommand::StartAgentRun { .. }]
+        ));
+    }
+
+    #[test]
+    fn exit_during_start_interrupts_the_run_when_its_id_arrives() {
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        m.mount_help_ask();
+        assert!(!m.handle_help_asked("q".into()).is_empty());
+        assert!(m.handle_modal_dismissed().is_empty());
+        assert!(m.help_interrupt_on_start);
+        assert!(m.help_convo_mut().turns.is_empty());
+
+        m.handle_daemon_event(run_started(7));
+        assert_eq!(m.help_run, None);
+        assert!(!m.help_run_starting);
+        assert!(!m.help_interrupt_on_start);
+        assert!(matches!(
+            server.rx.try_recv(),
+            Ok(IpcCommand::InterruptAgentRun {
+                run_id: AgentRunId(7)
+            })
+        ));
     }
 
     // ── Ask Lazybox actions (#353) ──────────────────────────────────

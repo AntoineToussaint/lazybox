@@ -11,7 +11,7 @@ use tuirealm::terminal::TerminalAdapter;
 
 /// The ` #N` suffix parsed from a task id key
 /// (`"github:o/r#42"` → `" #42"`), or empty when the key carries no
-/// number. Feeds the pending merge / close footer notices. (The
+/// number. Feeds the pending close footer notices. (The
 /// *workspace* key won't do — `sanitize_key` strips the `#`.)
 fn task_number_suffix(task_key: &str) -> String {
     task_key
@@ -32,6 +32,106 @@ fn truncate_title(title: &str) -> String {
 }
 
 impl<T: TerminalAdapter> Model<T> {
+    fn execute_dispatch_intent(
+        &mut self,
+        intent: crate::intent::Intent,
+        workspace: Option<&lazybox_core::Workspace>,
+    ) -> Vec<IpcCommand> {
+        use crate::intent::Intent;
+
+        if let Some(notice) = crate::intent::pending_notice(&intent, workspace) {
+            self.flash_info(notice);
+        }
+        match intent {
+            Intent::MergePr { workspace_key } => {
+                vec![IpcCommand::MergePr { workspace_key }]
+            }
+            Intent::UpdateBranch { workspace_key } => {
+                vec![IpcCommand::UpdateBranch { workspace_key }]
+            }
+            Intent::Snooze {
+                session_key,
+                duration,
+            } => {
+                let until = chrono::Utc::now()
+                    + chrono::Duration::from_std(duration)
+                        .unwrap_or_else(|_| chrono::Duration::days(365));
+                vec![IpcCommand::Snooze { session_key, until }]
+            }
+            Intent::MarkAllRead { session_key } => {
+                vec![IpcCommand::MarkRead { session_key }]
+            }
+            Intent::MarkActivitiesRead {
+                session_key,
+                targets,
+                optimistic,
+                notice,
+            } => {
+                if let Some(notice) = notice {
+                    self.flash_info(notice);
+                }
+                if optimistic {
+                    for target in &targets {
+                        self.right.mark_activity_read_locally(target.index);
+                    }
+                }
+                targets
+                    .into_iter()
+                    .map(|target| IpcCommand::MarkActivityRead {
+                        session_key: session_key.clone(),
+                        index: target.index,
+                        fingerprint: target.fingerprint,
+                    })
+                    .collect()
+            }
+            Intent::UpdateSelectedBranches {
+                workspace_keys,
+                selected_count: _,
+            } => {
+                if !workspace_keys.is_empty() {
+                    self.sidebar.clear_broadcast_selection();
+                    self.redraw = true;
+                }
+                workspace_keys
+                    .into_iter()
+                    .map(|workspace_key| IpcCommand::UpdateBranch { workspace_key })
+                    .collect()
+            }
+            Intent::CollapseIntoPr {
+                issue_workspace_key,
+            } => vec![IpcCommand::CollapseIntoPr {
+                issue_workspace_key,
+            }],
+            Intent::MountHandoffPicker {
+                source_key,
+                source_name,
+                seed,
+                notice,
+            } => {
+                if let Some(notice) = notice {
+                    self.flash_info(notice);
+                }
+                self.mount_handoff_picker(&source_key, source_name, seed);
+                Vec::new()
+            }
+            Intent::Notice(notice) => {
+                self.flash_info(notice);
+                Vec::new()
+            }
+            Intent::NoOp
+            | Intent::SpawnAgent { .. }
+            | Intent::SpawnShell { .. }
+            | Intent::MountReply { .. }
+            | Intent::MountNewWorkspaceInput { .. }
+            | Intent::MountAdoptPicker { .. }
+            | Intent::OpenEditor
+            | Intent::SetAutoMergeOnGreen { .. }
+            | Intent::SetTrackMain { .. }
+            | Intent::KillWorkspace { .. }
+            | Intent::Unsnooze { .. } => Vec::new(),
+        }
+    }
+
     /// Single fan-out from a catalog `Action` to its effect (IPC
     /// command, modal mount, focus shift, …). Surfaces (keyboard,
     /// right-click menu, future remap UI) all call this so behavior
@@ -206,47 +306,20 @@ impl<T: TerminalAdapter> Model<T> {
                         }
                     },
                     Action::LongSnooze => {
-                        // Re-resolve against the stashed workspace so a
-                        // state change while the modal was up can't
-                        // snooze the wrong row.
-                        if let crate::intent::Intent::Snooze {
-                            session_key,
-                            duration,
-                        } = crate::intent::resolve_long_snooze(
+                        let intent = crate::intent::resolve_long_snooze(
                             workspace.as_ref(),
                             self.ui_defaults.long_snooze,
-                        ) {
-                            let until = chrono::Utc::now()
-                                + chrono::Duration::from_std(duration)
-                                    .unwrap_or_else(|_| chrono::Duration::days(365));
-                            vec![IpcCommand::Snooze { session_key, until }]
-                        } else {
-                            Vec::new()
-                        }
+                        );
+                        self.execute_dispatch_intent(intent, workspace.as_ref())
                     }
                     Action::MergePr => {
                         // Re-check merge preconditions against the
                         // STASHED workspace — state may have moved
                         // (new failing CI, fresh conflict) while the
                         // modal was up.
-                        if let crate::intent::Intent::MergePr { workspace_key } =
-                            crate::intent::resolve_merge(workspace.as_ref())
-                        {
-                            // Pending feedback: the merge result arrives
-                            // seconds later via PrMerged / an error event,
-                            // and a silent footer in between reads as a
-                            // dropped confirm.
-                            self.flash_info(format!(
-                                "merging PR{}…",
-                                task_number_suffix(
-                                    workspace
-                                        .as_ref()
-                                        .and_then(|w| w.pr.as_ref())
-                                        .map(|t| t.id.key.as_str())
-                                        .unwrap_or("")
-                                )
-                            ));
-                            vec![IpcCommand::MergePr { workspace_key }]
+                        let intent = crate::intent::resolve_merge(workspace.as_ref());
+                        if matches!(intent, crate::intent::Intent::MergePr { .. }) {
+                            self.execute_dispatch_intent(intent, workspace.as_ref())
                         } else {
                             let reason = workspace
                                 .as_ref()
@@ -529,7 +602,11 @@ impl<T: TerminalAdapter> Model<T> {
                     | Intent::KillWorkspace { .. }
                     | Intent::Snooze { .. }
                     | Intent::Unsnooze { .. }
-                    | Intent::MarkAllRead { .. } => {}
+                    | Intent::MarkAllRead { .. }
+                    | Intent::MarkActivitiesRead { .. }
+                    | Intent::UpdateSelectedBranches { .. }
+                    | Intent::CollapseIntoPr { .. }
+                    | Intent::MountHandoffPicker { .. } => {}
                 }
             }
             Action::NewProject => {
@@ -542,38 +619,14 @@ impl<T: TerminalAdapter> Model<T> {
                 self.mount_add_scan_root_input();
             }
             Action::MarkAllRead => {
-                // Context-sensitive: when the user has activities
-                // multi-selected in the right pane, `m` marks only
-                // THOSE rows. With no selection but the activity
-                // cursor on a row (right pane focused), `m` marks
-                // just that row — the explicit counterpart to the
-                // auto-mark-on-hover timer. Otherwise it falls back
-                // to the bulk "mark all of this workspace"
-                // behaviour. Same key, smarter semantics based on
-                // where the user is acting.
-                let Some(sk) = session_key else {
-                    return cmds;
-                };
+                let workspace = self.sidebar.selected_workspace().cloned();
                 let selected = self.right.selected_activity_indices();
-                if selected.is_empty() {
-                    if self.focus != PaneFocus::Right || !self.right.mark_cursor_row_read(&mut cmds)
-                    {
-                        cmds.push(IpcCommand::MarkRead { session_key: sk });
-                    }
-                } else {
-                    let n = selected.len();
-                    for index in selected {
-                        cmds.push(IpcCommand::MarkActivityRead {
-                            session_key: sk.clone(),
-                            index,
-                            fingerprint: self.right.activity_fingerprint_at(index),
-                        });
-                    }
-                    self.flash_info(format!(
-                        "marked {n} selected activit{} read",
-                        if n == 1 { "y" } else { "ies" }
-                    ));
-                }
+                let cursor = (self.focus == PaneFocus::Right)
+                    .then(|| self.right.activity_cursor_target())
+                    .flatten();
+                let intent =
+                    crate::intent::resolve_mark_read_targets(workspace.as_ref(), &selected, cursor);
+                cmds.extend(self.execute_dispatch_intent(intent, workspace.as_ref()));
             }
             Action::Archive => {
                 // Destructive — normally routed through
@@ -622,41 +675,19 @@ impl<T: TerminalAdapter> Model<T> {
                     | Intent::KillWorkspace { .. }
                     | Intent::Snooze { .. }
                     | Intent::Unsnooze { .. }
-                    | Intent::MarkAllRead { .. } => {}
+                    | Intent::MarkAllRead { .. }
+                    | Intent::MarkActivitiesRead { .. }
+                    | Intent::UpdateSelectedBranches { .. }
+                    | Intent::CollapseIntoPr { .. }
+                    | Intent::MountHandoffPicker { .. } => {}
                 }
             }
             Action::CollapseIntoPr => {
-                // Catalog availability gates on "issue workspace exists"
-                // — the cross-workspace lookup ("does any PR close
-                // this?") happens here so the catalog stays
-                // single-workspace. When no claiming PR is known
-                // locally, surface a footer notice instead of firing
-                // a no-op IPC the daemon would just log + drop.
-                let Some(issue_ws) = self.sidebar.selected_workspace().cloned() else {
-                    return cmds;
-                };
-                let Some(primary) = issue_ws.primary_task() else {
-                    return cmds;
-                };
-                let claiming_pr = self
-                    .sidebar
-                    .workspaces_iter()
-                    .find(|w| {
-                        w.pr.as_ref()
-                            .is_some_and(|pr| pr.closes_issues.contains(&primary.id))
-                    })
-                    .map(|w| lazybox_core::SessionKey::from(&w.key));
-                match claiming_pr {
-                    Some(_pr_key) => {
-                        cmds.push(IpcCommand::CollapseIntoPr {
-                            issue_workspace_key: lazybox_core::SessionKey::from(&issue_ws.key),
-                        });
-                        self.flash_info("joining into PR…");
-                    }
-                    None => {
-                        self.flash_info("no PR closes this issue (or it isn't synced yet)");
-                    }
-                }
+                let issue_workspace = self.sidebar.selected_workspace().cloned();
+                let workspaces = self.sidebar.workspaces_iter().collect::<Vec<_>>();
+                let intent =
+                    crate::intent::resolve_collapse_into_pr(issue_workspace.as_ref(), &workspaces);
+                cmds.extend(self.execute_dispatch_intent(intent, issue_workspace.as_ref()));
             }
             Action::ToggleSnooze => {
                 // When the workspace is already snoozed, `z` toggles
@@ -687,23 +718,8 @@ impl<T: TerminalAdapter> Model<T> {
                 // mostly catches the rare race where state
                 // changed while the modal was open.)
                 let workspace = self.sidebar.selected_workspace().cloned();
-                if let crate::intent::Intent::MergePr { workspace_key } =
-                    crate::intent::resolve_merge(workspace.as_ref())
-                {
-                    // Same pending feedback as the confirmed path — the
-                    // result lands seconds later.
-                    self.flash_info(format!(
-                        "merging PR{}…",
-                        task_number_suffix(
-                            workspace
-                                .as_ref()
-                                .and_then(|w| w.pr.as_ref())
-                                .map(|t| t.id.key.as_str())
-                                .unwrap_or("")
-                        )
-                    ));
-                    cmds.push(IpcCommand::MergePr { workspace_key });
-                }
+                let intent = crate::intent::resolve_merge(workspace.as_ref());
+                cmds.extend(self.execute_dispatch_intent(intent, workspace.as_ref()));
             }
             Action::UpdateBranch => {
                 // Non-destructive (Guard::None), so it fires straight
@@ -711,60 +727,17 @@ impl<T: TerminalAdapter> Model<T> {
                 // the catalog availability gate already keeps the action
                 // off non-behind PRs, so this mostly names the target.
                 let workspace = self.sidebar.selected_workspace().cloned();
-                if let crate::intent::Intent::UpdateBranch { workspace_key } =
-                    crate::intent::resolve_update_branch(workspace.as_ref())
-                {
-                    self.flash_info(format!(
-                        "updating branch PR{}…",
-                        task_number_suffix(
-                            workspace
-                                .as_ref()
-                                .and_then(|w| w.pr.as_ref())
-                                .map(|t| t.id.key.as_str())
-                                .unwrap_or("")
-                        )
-                    ));
-                    cmds.push(IpcCommand::UpdateBranch { workspace_key });
-                }
+                let intent = crate::intent::resolve_update_branch(workspace.as_ref());
+                cmds.extend(self.execute_dispatch_intent(intent, workspace.as_ref()));
             }
             Action::UpdateBranchSelected => {
-                // Bulk fan-out over the sidebar multi-select: one
-                // `UpdateBranch` per selected PR that's actually behind
-                // its base. Up-to-date and non-PR selections are skipped
-                // and reported so the count adds up.
                 let keys = self.sidebar.selected_broadcast_keys();
-                let mut targets = Vec::new();
-                let mut skipped = 0usize;
-                for sk in &keys {
-                    match self.sidebar.workspace_by_key(sk) {
-                        Some(ws) if ws.pr.as_ref().is_some_and(|p| p.is_behind_base) => {
-                            targets.push(ws.key.clone());
-                        }
-                        _ => skipped += 1,
-                    }
-                }
-                if targets.is_empty() {
-                    self.flash_info(if keys.is_empty() {
-                        "update branches: nothing selected".to_string()
-                    } else {
-                        "update branches: no selected PR is behind base".to_string()
-                    });
-                } else {
-                    let n = targets.len();
-                    let plural = if n == 1 { "" } else { "es" };
-                    if skipped == 0 {
-                        self.flash_info(format!("updating {n} branch{plural}…"));
-                    } else {
-                        self.flash_info(format!(
-                            "updating {n} branch{plural} ({skipped} skipped)…"
-                        ));
-                    }
-                    for workspace_key in targets {
-                        cmds.push(IpcCommand::UpdateBranch { workspace_key });
-                    }
-                    self.sidebar.clear_broadcast_selection();
-                    self.redraw = true;
-                }
+                let selected = keys
+                    .iter()
+                    .filter_map(|key| self.sidebar.workspace_by_key(key))
+                    .collect::<Vec<_>>();
+                let intent = crate::intent::resolve_update_branch_selected(keys.len(), &selected);
+                cmds.extend(self.execute_dispatch_intent(intent, None));
             }
             Action::ToggleAutoMerge => {
                 let workspace = self.sidebar.selected_workspace().cloned();
@@ -804,7 +777,11 @@ impl<T: TerminalAdapter> Model<T> {
                     | Intent::KillWorkspace { .. }
                     | Intent::Snooze { .. }
                     | Intent::Unsnooze { .. }
-                    | Intent::MarkAllRead { .. } => {}
+                    | Intent::MarkAllRead { .. }
+                    | Intent::MarkActivitiesRead { .. }
+                    | Intent::UpdateSelectedBranches { .. }
+                    | Intent::CollapseIntoPr { .. }
+                    | Intent::MountHandoffPicker { .. } => {}
                 }
             }
             Action::ToggleTrackMain => {
@@ -845,7 +822,11 @@ impl<T: TerminalAdapter> Model<T> {
                     | Intent::KillWorkspace { .. }
                     | Intent::Snooze { .. }
                     | Intent::Unsnooze { .. }
-                    | Intent::MarkAllRead { .. } => {}
+                    | Intent::MarkAllRead { .. }
+                    | Intent::MarkActivitiesRead { .. }
+                    | Intent::UpdateSelectedBranches { .. }
+                    | Intent::CollapseIntoPr { .. }
+                    | Intent::MountHandoffPicker { .. } => {}
                 }
             }
             Action::ManagePolicies => {
@@ -1149,36 +1130,17 @@ impl<T: TerminalAdapter> Model<T> {
                 self.mount_broadcast_picker();
             }
             Action::SendToSession => {
-                // Source = the focused workspace's agent terminal, live or
-                // a kept exited pane (so a finished agent's final output is
-                // still capturable). A workspace with no agent slot at all
-                // — shell-only or session-less — nudges instead.
-                let Some(source_key) = self.sidebar.selected_workspace_key().cloned() else {
-                    return cmds;
-                };
-                match self.terminals.agent_terminal_for(&source_key) {
-                    Some(terminal_id) => {
-                        let seed = self.terminals.visible_text(terminal_id).unwrap_or_default();
-                        if seed.is_empty() {
-                            // Scrape came back blank (VT unreadable / grid
-                            // is only chrome). Proceed to the picker anyway
-                            // — the user composes the brief by hand — but
-                            // say so rather than opening a silent empty box.
-                            self.flash_info(
-                                "couldn't capture this agent's output — compose the brief yourself",
-                            );
-                        }
-                        let source_name = self
-                            .sidebar
-                            .workspace_by_key(&source_key)
-                            .map(|w| w.name.clone())
-                            .unwrap_or_else(|| source_key.to_string());
-                        self.mount_handoff_picker(&source_key, source_name, seed);
-                    }
-                    None => {
-                        self.flash_info("no agent session here to hand off from");
-                    }
-                }
+                let workspace = self.sidebar.selected_workspace().cloned();
+                let captured = workspace.as_ref().and_then(|workspace| {
+                    let source_key = lazybox_core::SessionKey::from(&workspace.key);
+                    self.terminals
+                        .agent_terminal_for(&source_key)
+                        .map(|terminal_id| {
+                            self.terminals.visible_text(terminal_id).unwrap_or_default()
+                        })
+                });
+                let intent = crate::intent::resolve_send_to_session(workspace.as_ref(), captured);
+                cmds.extend(self.execute_dispatch_intent(intent, workspace.as_ref()));
             }
             // Actions not yet handled here stay in the existing
             // handlers. As we migrate, the per-key match arms in

@@ -117,6 +117,7 @@ export default defineConfig({
           items: [
             { label: 'Overview', slug: 'docs/explanation' },
             { label: 'Mental model', slug: 'docs/explanation/mental-model' },
+            { label: 'How lazybox compares', slug: 'docs/explanation/comparison' },
             { label: 'Architecture', slug: 'docs/explanation/architecture' },
           ],
         },

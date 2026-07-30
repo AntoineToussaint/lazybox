@@ -8,6 +8,7 @@ import {
   filteredWorkspaces,
   preferredTerminal,
   primaryTask,
+  projectKeyLabel,
   shouldHandleWorkspaceEnter,
   sortedWorkspaces,
   unreadCount,
@@ -164,6 +165,8 @@ describe("workspace model", () => {
   it("searches metadata and filters unread and attention work", () => {
     const failing = workspace("failing", task("Broken release", 0));
     failing.pr!.ci = "Failure";
+    const mixed = workspace("mixed", task("Mixed checks", 0));
+    mixed.pr!.ci = "Mixed";
     const unread = workspace("unread", task("Provider labels", 2));
     unread.activity = [activity("a", "new")];
     const quiet = workspace("quiet", task("Documentation", 0));
@@ -181,11 +184,11 @@ describe("workspace model", () => {
       }).map((item) => item.key),
     ).toEqual(["unread"]);
     expect(
-      filteredWorkspaces([quiet, failing, unread], {
+      filteredWorkspaces([quiet, failing, mixed, unread], {
         query: "",
         filter: "attention",
       }).map((item) => item.key),
-    ).toEqual(["failing"]);
+    ).toEqual(["failing", "mixed"]);
   });
 
   it("replaces the baseline and then applies live upserts and removals", () => {
@@ -244,5 +247,15 @@ describe("workspace model", () => {
     expect(shouldHandleWorkspaceEnter(true, false, false)).toBe(true);
     expect(shouldHandleWorkspaceEnter(true, false, true)).toBe(false);
     expect(shouldHandleWorkspaceEnter(true, true, false)).toBe(false);
+  });
+
+  it("derives a human label from a project key instead of the raw key", () => {
+    expect(projectKeyLabel("github-acme-widget")).toBe("acme/widget");
+    expect(projectKeyLabel("github-o-pretty-hackernews")).toBe(
+      "o/pretty-hackernews",
+    );
+    expect(projectKeyLabel("local-scratch")).toBe("scratch");
+    expect(projectKeyLabel("linear-team123")).toBe("team123");
+    expect(projectKeyLabel("standalone")).toBe("standalone");
   });
 });

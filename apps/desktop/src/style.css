@@ -234,6 +234,11 @@ textarea::placeholder {
   padding: 19px 16px 11px;
 }
 
+.panel-actions {
+  display: flex;
+  gap: 6px;
+}
+
 .eyebrow {
   margin: 0 0 5px;
   color: #6dbda6;
@@ -935,6 +940,38 @@ dialog::backdrop {
 
 .confirm-dialog .dialog-footer {
   justify-content: flex-end;
+}
+
+.new-workspace-dialog form,
+.new-workspace-dialog label {
+  display: grid;
+  gap: 7px;
+}
+
+.new-workspace-dialog form {
+  gap: 13px;
+}
+
+.new-workspace-dialog label {
+  color: #c2cdd0;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.new-workspace-dialog input,
+.new-workspace-dialog select {
+  width: 100%;
+  padding: 8px 9px;
+  font-size: 10px;
+}
+
+.new-workspace-dialog .analytics-choice {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+}
+
+.new-workspace-dialog .analytics-choice input {
+  width: auto;
 }
 
 ::-webkit-scrollbar {

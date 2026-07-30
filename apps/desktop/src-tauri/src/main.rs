@@ -6,8 +6,8 @@ use lazybox_server::ServerConfig;
 use lazybox_server::api_gateway::{
     CommandResponse, DESKTOP_PROTOCOL_FINGERPRINT, DESKTOP_PROTOCOL_VERSION,
     DESKTOP_TERMINAL_STREAM_ITEM_DATA, DESKTOP_TERMINAL_STREAM_ITEM_RESET, DesktopCommand,
-    DesktopInfo, DesktopStreamMessage, GatewayOptions, JsonClientFrame, JsonServerFrame,
-    PROTOCOL_FINGERPRINT_HEADER, PROTOCOL_VERSION_HEADER, ProtocolResponse,
+    DesktopInfo, DesktopRepository, DesktopStreamMessage, GatewayOptions, JsonClientFrame,
+    JsonServerFrame, PROTOCOL_FINGERPRINT_HEADER, PROTOCOL_VERSION_HEADER, ProtocolResponse,
     TERMINAL_BINARY_CONTENT_TYPE, WorkspacesResponse, desktop_event,
 };
 use lazybox_server::client_runtime::{ClientRuntime, ClientRuntimeOptions};
@@ -43,6 +43,7 @@ struct DesktopState {
     gateway: GatewayClient,
     agents: Vec<String>,
     default_agent: String,
+    repositories: Vec<DesktopRepository>,
     terminal_commands: mpsc::Sender<Bytes>,
     terminal_command_rx: Arc<Mutex<mpsc::Receiver<Bytes>>>,
     terminal_rx: Mutex<mpsc::Receiver<TerminalStreamItem>>,
@@ -62,7 +63,7 @@ struct DesktopAgentOption {
 #[derive(Serialize)]
 struct DesktopSetupState {
     first_run: bool,
-    selected_repositories: Vec<String>,
+    selected_scopes: Vec<String>,
     agents: Vec<DesktopAgentOption>,
     default_agent: String,
     analytics_enabled: bool,
@@ -85,7 +86,7 @@ struct GithubRepositoryOption {
 
 #[derive(Deserialize)]
 struct SaveDesktopSettings {
-    repositories: Vec<String>,
+    github_scopes: Vec<String>,
     default_agent: String,
     analytics_enabled: bool,
 }
@@ -109,6 +110,7 @@ fn desktop_info(state: State<'_, DesktopState>) -> DesktopInfo {
         max_terminal_write_bytes: lazybox_ipc::MAX_WRITE_CHUNK_BYTES,
         agents: state.agents.clone(),
         default_agent: state.default_agent.clone(),
+        repositories: state.repositories.clone(),
     }
 }
 
@@ -120,26 +122,19 @@ fn desktop_setup_state() -> Result<DesktopSetupState, String> {
 }
 
 fn desktop_setup_state_from_config(config: &lazybox_config::Config) -> DesktopSetupState {
-    let mut selected_repositories = config
+    let mut selected_scopes = config
         .setup
         .scopes
         .get("github")
         .into_iter()
         .flatten()
-        .filter(|scope| {
-            scope
-                .strip_prefix("github:")
-                .is_some_and(|repository| repository.contains('/'))
-        })
         .cloned()
         .collect::<Vec<_>>();
-    selected_repositories.sort();
-    let first_run = !config.setup.wizard_completed
-        || !config.setup.providers.contains("github")
-        || selected_repositories.is_empty();
+    selected_scopes.sort();
+    let first_run = !config.setup.wizard_completed || !config.setup.providers.contains("github");
     DesktopSetupState {
         first_run,
-        selected_repositories,
+        selected_scopes,
         agents: detect_agent_options(config),
         default_agent: effective_default_agent(config),
         analytics_enabled: config.desktop.analytics_enabled,
@@ -214,9 +209,12 @@ async fn list_github_repositories() -> Result<Vec<GithubRepositoryOption>, Strin
 
 #[tauri::command]
 fn save_desktop_settings(app: AppHandle, settings: SaveDesktopSettings) -> Result<(), String> {
-    let repositories = validate_repository_scopes(settings.repositories)?;
     let config = lazybox_config::Config::load()
         .map_err(|error| format!("load lazybox configuration: {error}"))?;
+    let scopes = validate_github_scopes(
+        settings.github_scopes,
+        !config.setup.wizard_completed || !config.setup.providers.contains("github"),
+    )?;
     if !detect_agent_options(&config)
         .iter()
         .any(|agent| agent.id == settings.default_agent && agent.available)
@@ -226,7 +224,7 @@ fn save_desktop_settings(app: AppHandle, settings: SaveDesktopSettings) -> Resul
     let default_agent = settings.default_agent;
     let analytics_enabled = settings.analytics_enabled;
     lazybox_config::Config::save_with(move |config| {
-        apply_desktop_settings(config, repositories, default_agent, analytics_enabled);
+        apply_desktop_settings(config, scopes, default_agent, analytics_enabled);
     })
     .map_err(|error| format!("save lazybox configuration: {error}"))?;
     if analytics_enabled
@@ -588,30 +586,34 @@ async fn authenticated_github_client() -> Result<lazybox_gh::GhClient, String> {
     .map_err(|error| format!("GitHub credential verification failed: {error}"))
 }
 
-fn validate_repository_scopes(scopes: Vec<String>) -> Result<BTreeSet<String>, String> {
-    let repositories = scopes
+fn validate_github_scopes(
+    scopes: Vec<String>,
+    require_selection: bool,
+) -> Result<BTreeSet<String>, String> {
+    let scopes = scopes
         .into_iter()
         .map(|scope| scope.trim().to_string())
+        .filter(|scope| !scope.is_empty())
         .collect::<BTreeSet<_>>();
-    if repositories.is_empty() {
-        return Err("select at least one GitHub repository".to_string());
+    if require_selection && scopes.is_empty() {
+        return Err("select a GitHub organization or repository".to_string());
     }
-    if repositories.iter().any(|scope| {
-        !scope.strip_prefix("github:").is_some_and(|repository| {
-            let mut parts = repository.split('/');
-            parts.next().is_some_and(|part| !part.is_empty())
-                && parts.next().is_some_and(|part| !part.is_empty())
-                && parts.next().is_none()
+    if scopes.iter().any(|scope| {
+        !scope.strip_prefix("github:").is_some_and(|path| {
+            let mut parts = path.split('/');
+            let owner = parts.next().is_some_and(|part| !part.is_empty());
+            let repository = parts.next();
+            owner && repository.is_none_or(|part| !part.is_empty()) && parts.next().is_none()
         })
     }) {
-        return Err("GitHub repository scopes must use github:owner/repository".to_string());
+        return Err("GitHub scopes must use github:owner or github:owner/repository".to_string());
     }
-    Ok(repositories)
+    Ok(scopes)
 }
 
 fn apply_desktop_settings(
     config: &mut lazybox_config::Config,
-    repositories: BTreeSet<String>,
+    scopes: BTreeSet<String>,
     default_agent: String,
     analytics_enabled: bool,
 ) {
@@ -622,17 +624,14 @@ fn apply_desktop_settings(
         .filters
         .entry("github".to_string())
         .or_insert_with(|| ProviderConfig::default_for("github").enabled_keys);
-    config
-        .setup
-        .scopes
-        .insert("github".to_string(), repositories);
+    config.setup.scopes.insert("github".to_string(), scopes);
     config.setup.default_agent = Some(default_agent);
     config.setup.wizard_completed = true;
     config.desktop.analytics_enabled = analytics_enabled;
 }
 
 fn detect_agent_options(config: &lazybox_config::Config) -> Vec<DesktopAgentOption> {
-    let mut ids = ["claude", "codex", "cursor"]
+    let mut ids = ["claude", "codex", "cursor-agent"]
         .into_iter()
         .map(str::to_string)
         .collect::<BTreeSet<_>>();
@@ -642,18 +641,13 @@ fn detect_agent_options(config: &lazybox_config::Config) -> Vec<DesktopAgentOpti
             let configured = config.agents.get(&id);
             let command = configured
                 .and_then(|entry| entry.command.clone())
-                .unwrap_or_else(|| match id.as_str() {
-                    "claude" => "claude".to_string(),
-                    "codex" => "codex".to_string(),
-                    "cursor" => "cursor-agent".to_string(),
-                    _ => id.clone(),
-                });
+                .unwrap_or_else(|| id.clone());
             let label = configured
                 .and_then(|entry| entry.name.clone())
                 .unwrap_or_else(|| match id.as_str() {
                     "claude" => "Claude Code".to_string(),
                     "codex" => "Codex".to_string(),
-                    "cursor" => "Cursor Agent".to_string(),
+                    "cursor-agent" => "Cursor Agent".to_string(),
                     _ => id.clone(),
                 });
             DesktopAgentOption {
@@ -677,10 +671,32 @@ fn effective_default_agent(config: &lazybox_config::Config) -> String {
 fn configured_agent_ids(config: &lazybox_config::Config) -> Vec<String> {
     let mut agents = config.setup.agents.iter().cloned().collect::<BTreeSet<_>>();
     if agents.is_empty() {
-        agents.extend(["claude", "codex", "cursor"].map(str::to_string));
+        agents.extend(["claude", "codex", "cursor-agent"].map(str::to_string));
     }
     agents.insert(effective_default_agent(config));
     agents.into_iter().collect()
+}
+
+fn configured_repositories(config: &lazybox_config::Config) -> Vec<DesktopRepository> {
+    let mut repositories = config
+        .setup
+        .scopes
+        .get("github")
+        .into_iter()
+        .flatten()
+        .filter_map(|scope| {
+            let slug = scope.strip_prefix("github:")?;
+            let (owner, repository) = slug.split_once('/')?;
+            (!owner.is_empty() && !repository.is_empty() && !repository.contains('/')).then(|| {
+                DesktopRepository {
+                    project_key: lazybox_core::ProjectKey::github(owner, repository),
+                    label: slug.to_string(),
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    repositories.sort_by(|left, right| left.label.cmp(&right.label));
+    repositories
 }
 
 fn diagnostics_dir() -> std::path::PathBuf {
@@ -836,6 +852,7 @@ async fn start_desktop_state() -> Result<DesktopState, String> {
 
     let agents = configured_agent_ids(&user_config);
     let default_agent = effective_default_agent(&user_config);
+    let repositories = configured_repositories(&user_config);
     let (terminal_commands, terminal_command_rx) = mpsc::channel(256);
     let (terminal_tx, terminal_rx) = mpsc::channel(32);
 
@@ -843,6 +860,7 @@ async fn start_desktop_state() -> Result<DesktopState, String> {
         gateway,
         agents,
         default_agent,
+        repositories,
         terminal_commands,
         terminal_command_rx: Arc::new(Mutex::new(terminal_command_rx)),
         terminal_rx: Mutex::new(terminal_rx),
@@ -1036,6 +1054,20 @@ mod tests {
             Command::PostReply { session_key: key, body }
                 if key == session_key && body == "reply"
         ));
+        assert!(matches!(
+            Command::from(DesktopCommand::CreateWorkspace {
+                name: "first workspace".to_string(),
+                project_key: lazybox_core::ProjectKey::github("acme", "widget"),
+                agent: Some("codex".to_string()),
+            }),
+            Command::CreateWorkspace {
+                name,
+                project_key,
+                spawn_agent: Some(agent),
+            } if name == "first workspace"
+                && project_key == lazybox_core::ProjectKey::github("acme", "widget")
+                && agent == "codex"
+        ));
     }
 
     #[test]
@@ -1046,13 +1078,16 @@ mod tests {
         config.setup.providers.insert("linear".to_string());
         config.save_to(&path).expect("seed config");
 
-        let repositories = validate_repository_scopes(vec![
-            " github:acme/widget ".to_string(),
-            "github:acme/api".to_string(),
-        ])
+        let scopes = validate_github_scopes(
+            vec![
+                " github:acme/widget ".to_string(),
+                "github:acme".to_string(),
+            ],
+            true,
+        )
         .expect("valid repository scopes");
         let mut config = lazybox_config::Config::load_from(&path).expect("load seeded config");
-        apply_desktop_settings(&mut config, repositories, "codex".to_string(), true);
+        apply_desktop_settings(&mut config, scopes, "codex".to_string(), true);
         config.save_to(&path).expect("persist desktop setup");
 
         let saved = lazybox_config::Config::load_from(&path).expect("reload desktop setup");
@@ -1065,7 +1100,7 @@ mod tests {
         assert_eq!(
             saved.setup.scopes.get("github"),
             Some(&BTreeSet::from([
-                "github:acme/api".to_string(),
+                "github:acme".to_string(),
                 "github:acme/widget".to_string(),
             ]))
         );
@@ -1082,22 +1117,86 @@ mod tests {
     fn setup_state_reads_the_current_config_and_defaults_like_the_tui() {
         let mut config = lazybox_config::Config::default();
         config.setup.agents.insert("codex".to_string());
+        config.agents.insert(
+            "review-bot".to_string(),
+            lazybox_config::AgentEntry {
+                name: Some("Review Bot".to_string()),
+                command: Some("true".to_string()),
+                ..Default::default()
+            },
+        );
+        // No explicit command: availability must resolve from the agent
+        // id itself (`true` is a real binary), not a hardcoded name map.
+        config.agents.insert(
+            "true".to_string(),
+            lazybox_config::AgentEntry {
+                name: Some("Truthy".to_string()),
+                command: None,
+                ..Default::default()
+            },
+        );
 
         let initial = desktop_setup_state_from_config(&config);
         assert_eq!(initial.default_agent, "claude");
         assert!(configured_agent_ids(&config).contains(&"claude".to_string()));
+        assert!(initial.agents.iter().any(|agent| agent.id == "review-bot"
+            && agent.label == "Review Bot"
+            && agent.available));
+        assert!(
+            initial
+                .agents
+                .iter()
+                .any(|agent| agent.id == "true" && agent.label == "Truthy" && agent.available)
+        );
 
-        config.setup.default_agent = Some("cursor".to_string());
+        config.setup.default_agent = Some("cursor-agent".to_string());
         let changed = desktop_setup_state_from_config(&config);
-        assert_eq!(changed.default_agent, "cursor");
-        assert!(configured_agent_ids(&config).contains(&"cursor".to_string()));
+        assert_eq!(changed.default_agent, "cursor-agent");
+        assert!(configured_agent_ids(&config).contains(&"cursor-agent".to_string()));
+        assert!(
+            changed
+                .agents
+                .iter()
+                .any(|agent| agent.id == "cursor-agent" && agent.label == "Cursor Agent")
+        );
     }
 
     #[test]
-    fn desktop_settings_reject_non_repository_scopes() {
-        assert!(validate_repository_scopes(Vec::new()).is_err());
-        assert!(validate_repository_scopes(vec!["github:acme".to_string()]).is_err());
-        assert!(validate_repository_scopes(vec!["linear:acme/widget".to_string()]).is_err());
+    fn desktop_settings_accept_shared_github_scope_semantics() {
+        assert!(
+            validate_github_scopes(Vec::new(), false)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            validate_github_scopes(vec!["github:acme".to_string()], true).unwrap(),
+            BTreeSet::from(["github:acme".to_string()])
+        );
+        assert!(validate_github_scopes(Vec::new(), true).is_err());
+        assert!(
+            validate_github_scopes(vec!["github:acme/widget/extra".to_string()], false).is_err()
+        );
+        assert!(validate_github_scopes(vec!["linear:acme/widget".to_string()], false).is_err());
+    }
+
+    #[test]
+    fn configured_repository_is_available_before_its_first_workspace() {
+        let mut config = lazybox_config::Config::default();
+        config.setup.scopes.insert(
+            "github".into(),
+            ["github:acme/widget".into(), "github:whole-org".into()]
+                .into_iter()
+                .collect(),
+        );
+
+        let repositories = configured_repositories(&config);
+
+        assert_eq!(repositories.len(), 1);
+        assert_eq!(repositories[0].label, "acme/widget");
+        assert_eq!(
+            repositories[0].project_key,
+            lazybox_core::ProjectKey::github("acme", "widget")
+        );
     }
 
     #[test]
@@ -1186,7 +1285,7 @@ mod tests {
         let reloaded =
             lazybox_config::Config::load_from(&config_path).expect("reload desktop setup fixture");
         assert_eq!(
-            desktop_setup_state_from_config(&reloaded).selected_repositories,
+            desktop_setup_state_from_config(&reloaded).selected_scopes,
             vec!["github:acme/widget"]
         );
 

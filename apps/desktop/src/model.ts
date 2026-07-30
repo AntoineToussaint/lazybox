@@ -205,3 +205,27 @@ export function taskReference(task: Task | null): string {
   }
   return task.id.key;
 }
+
+/**
+ * Human-readable name derived from a ProjectKey alone, for renders that
+ * lack an upstream repo name. `github-<owner>-<repo>` → `<owner>/<repo>`;
+ * other recognized prefixes return the suffix; an unprefixed key returns
+ * itself. Mirrors the daemon's `ProjectKey::display_name`, including its
+ * first-`-` owner/repo split (a hyphenated owner is a rare, accepted miss
+ * for a fallback label).
+ */
+export function projectKeyLabel(key: string): string {
+  const dash = key.indexOf("-");
+  if (dash === -1) {
+    return key;
+  }
+  const prefix = key.slice(0, dash);
+  const rest = key.slice(dash + 1);
+  if (prefix === "github") {
+    const slash = rest.indexOf("-");
+    return slash === -1
+      ? rest
+      : `${rest.slice(0, slash)}/${rest.slice(slash + 1)}`;
+  }
+  return rest;
+}

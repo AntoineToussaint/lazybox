@@ -1,6 +1,7 @@
 export type { DesktopCommand as LazyboxCommand } from "./DesktopCommand";
 export type { DesktopEvent as LazyboxEvent } from "./DesktopEvent";
 export type { DesktopInfo } from "./DesktopInfo";
+export type { DesktopRepository } from "./DesktopRepository";
 export type { DesktopStreamMessage } from "./DesktopStreamMessage";
 export type { TerminalKind } from "./TerminalKind";
 export type { DesktopTerminalSnapshot as TerminalSnapshot } from "./DesktopTerminalSnapshot";

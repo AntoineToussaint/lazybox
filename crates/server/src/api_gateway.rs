@@ -224,6 +224,14 @@ pub struct DesktopInfo {
     pub max_terminal_write_bytes: usize,
     pub agents: Vec<String>,
     pub default_agent: String,
+    pub repositories: Vec<DesktopRepository>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct DesktopRepository {
+    pub project_key: lazybox_core::ProjectKey,
+    pub label: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -235,6 +243,11 @@ pub enum DesktopCommand {
     },
     SpawnShell {
         session_key: lazybox_core::SessionKey,
+    },
+    CreateWorkspace {
+        name: String,
+        project_key: lazybox_core::ProjectKey,
+        agent: Option<String>,
     },
     FocusWorkspace {
         session_key: lazybox_core::SessionKey,
@@ -279,6 +292,15 @@ impl DesktopCommand {
                 on_main: false,
                 model_alias: None,
                 access: lazybox_ipc::AgentRunAccess::Default,
+            },
+            DesktopCommand::CreateWorkspace {
+                name,
+                project_key,
+                agent,
+            } => Command::CreateWorkspace {
+                name,
+                project_key,
+                spawn_agent: agent,
             },
             DesktopCommand::FocusWorkspace { session_key } => {
                 Command::FocusWorkspace { session_key }

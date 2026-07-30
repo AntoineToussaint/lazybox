@@ -4,8 +4,8 @@ compile_error!("run with --features desktop-contract");
 use lazybox_server::api_gateway::{
     DESKTOP_PROTOCOL_FINGERPRINT, DESKTOP_PROTOCOL_VERSION, DESKTOP_TERMINAL_STREAM_ITEM_DATA,
     DESKTOP_TERMINAL_STREAM_ITEM_RESET, DesktopCommand, DesktopEvent, DesktopInfo,
-    DesktopStreamMessage, DesktopTerminalSnapshot, HealthResponse, ProtocolResponse,
-    TERMINAL_CLIENT_COMMAND_CLOSE, TERMINAL_CLIENT_COMMAND_FETCH_SCROLLBACK,
+    DesktopRepository, DesktopStreamMessage, DesktopTerminalSnapshot, HealthResponse,
+    ProtocolResponse, TERMINAL_CLIENT_COMMAND_CLOSE, TERMINAL_CLIENT_COMMAND_FETCH_SCROLLBACK,
     TERMINAL_CLIENT_COMMAND_RESIZE, TERMINAL_CLIENT_COMMAND_RESYNC, TERMINAL_CLIENT_COMMAND_WRITE,
     TERMINAL_CLIENT_FRAME_HEADER_BYTES, TERMINAL_CLIENT_FRAME_KIND_OFFSET,
     TERMINAL_CLIENT_FRAME_PAYLOAD_OFFSET, TERMINAL_CLIENT_FRAME_TERMINAL_ID_OFFSET,
@@ -46,6 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     DesktopEvent::export_all(&config)?;
     DesktopTerminalSnapshot::export_all(&config)?;
     DesktopInfo::export_all(&config)?;
+    DesktopRepository::export_all(&config)?;
     DesktopStreamMessage::export_all(&config)?;
 
     for entry in std::fs::read_dir(&output)? {
@@ -66,6 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "export type {{ DesktopCommand as LazyboxCommand }} from \"./DesktopCommand\";\n\
          export type {{ DesktopEvent as LazyboxEvent }} from \"./DesktopEvent\";\n\
          export type {{ DesktopInfo }} from \"./DesktopInfo\";\n\
+         export type {{ DesktopRepository }} from \"./DesktopRepository\";\n\
          export type {{ DesktopStreamMessage }} from \"./DesktopStreamMessage\";\n\
          export type {{ TerminalKind }} from \"./TerminalKind\";\n\
          export type {{ DesktopTerminalSnapshot as TerminalSnapshot }} from \"./DesktopTerminalSnapshot\";\n\

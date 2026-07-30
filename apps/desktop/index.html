@@ -43,15 +43,26 @@
               <p class="eyebrow">Reactive inbox</p>
               <h1>Workspaces</h1>
             </div>
-            <button
-              id="refresh-button"
-              class="icon-button"
-              type="button"
-              aria-label="Refresh inbox"
-              title="Refresh inbox (⇧R)"
-            >
-              ↻
-            </button>
+            <div class="panel-actions">
+              <button
+                id="new-workspace-button"
+                class="icon-button"
+                type="button"
+                aria-label="Create workspace"
+                title="Create workspace"
+              >
+                ＋
+              </button>
+              <button
+                id="refresh-button"
+                class="icon-button"
+                type="button"
+                aria-label="Refresh inbox"
+                title="Refresh inbox (⇧R)"
+              >
+                ↻
+              </button>
+            </div>
           </div>
           <div class="inbox-controls">
             <label class="search-control">
@@ -210,7 +221,10 @@
           <div class="setup-section-heading">
             <div>
               <h3 id="repo-setup-title">2. Repositories</h3>
-              <p>Select the repositories lazybox should poll.</p>
+              <p>
+                Watch an entire organization or choose individual repositories.
+                In Settings, no selection means all accessible repositories.
+              </p>
             </div>
             <button id="discover-repos-button" class="quiet-button" type="button">
               Discover
@@ -257,6 +271,37 @@
           <button id="save-settings-button" class="primary-button" type="submit">
             Save and restart
           </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog
+      id="new-workspace-dialog"
+      class="confirm-dialog new-workspace-dialog"
+      aria-labelledby="new-workspace-title"
+    >
+      <form id="new-workspace-form">
+        <p class="eyebrow">Local worktree</p>
+        <h2 id="new-workspace-title">Create workspace</h2>
+        <p>Create a separate worktree in a configured repository.</p>
+        <label>
+          <span>Repository</span>
+          <select id="new-workspace-project" required></select>
+        </label>
+        <label>
+          <span>Name</span>
+          <input id="new-workspace-name" type="text" maxlength="80" required />
+        </label>
+        <label class="analytics-choice">
+          <input id="new-workspace-agent" type="checkbox" checked />
+          <span>Start the configured agent</span>
+        </label>
+        <p id="new-workspace-error" class="dialog-error hidden" role="alert"></p>
+        <div class="dialog-footer">
+          <button id="new-workspace-cancel" class="quiet-button" type="button">
+            Cancel
+          </button>
+          <button class="primary-button" type="submit">Create workspace</button>
         </div>
       </form>
     </dialog>

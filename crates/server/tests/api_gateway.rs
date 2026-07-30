@@ -169,6 +169,7 @@ fn desktop_command_tag(command: &DesktopCommand) -> &'static str {
     match command {
         DesktopCommand::SpawnAgent { .. } => "SpawnAgent",
         DesktopCommand::SpawnShell { .. } => "SpawnShell",
+        DesktopCommand::CreateWorkspace { .. } => "CreateWorkspace",
         DesktopCommand::FocusWorkspace { .. } => "FocusWorkspace",
         DesktopCommand::MarkRead { .. } => "MarkRead",
         DesktopCommand::PostReply { .. } => "PostReply",
@@ -204,6 +205,11 @@ fn desktop_compatibility_fixture_is_current() {
         },
         DesktopCommand::SpawnShell {
             session_key: session_key.clone(),
+        },
+        DesktopCommand::CreateWorkspace {
+            name: "first workspace".into(),
+            project_key: lazybox_core::ProjectKey::github("o", "r"),
+            agent: Some("codex".into()),
         },
         DesktopCommand::FocusWorkspace {
             session_key: session_key.clone(),
@@ -278,7 +284,7 @@ fn desktop_compatibility_fixture_is_current() {
         .iter()
         .map(desktop_event_tag)
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(command_tags.len(), 6);
+    assert_eq!(command_tags.len(), 7);
     assert_eq!(event_tags.len(), 12);
     let fixture = serde_json::json!({
         "protocol_version": api_gateway::DESKTOP_PROTOCOL_VERSION,

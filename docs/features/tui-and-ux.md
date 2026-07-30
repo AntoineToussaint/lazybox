@@ -388,9 +388,11 @@ Disable all OS banners with `attention.desktop_notify: false` (the footer notice
 stays). Which provider events notify follows the per-signal `attention` flags
 (`ci_failing`, `review_pending`, `unread`) that already gate the in-app badge.
 On macOS with `terminal-notifier` installed, clicking a banner activates the
-terminal app and jumps every attached TUI to the workspace that raised it. The
-app is inferred from macOS's inherited bundle identifier or `$TERM_PROGRAM`;
-set `attention.terminal_bundle_id` when the host cannot be recognized.
+terminal session and jumps every attached TUI to the workspace that raised it.
+Terminal.app and iTerm2 are targeted by TTY; WezTerm is targeted by pane id.
+Other hosts fall back to app-level activation. The app is inferred from macOS's
+inherited bundle identifier or `$TERM_PROGRAM`; set
+`attention.terminal_bundle_id` when the host cannot be recognized.
 
 ### How it works (brief)
 Notifications funnel through `platform::notify_user`
@@ -424,8 +426,11 @@ Each notification carries its originating workspace key. On macOS,
 `terminal-notifier -execute` launches a one-shot hidden lazybox command on
 click; it activates the configured terminal bundle, sends an
 `ActivateWorkspace` request to the exact daemon socket used by the client, and
-the daemon broadcasts the resulting focus request to attached TUIs. OSC,
-`osascript`, and `notify-send` banners remain non-clickable.
+the daemon broadcasts the resulting focus request to attached TUIs. An embedded
+client only adds the click action after verifying that its own socket service
+owns that path; otherwise the banner remains non-clickable rather than
+targeting another daemon. OSC, `osascript`, and `notify-send` banners remain
+non-clickable.
 
 Banners are suppressed while lazybox's terminal is reported focused (DEC mode
 1004 focus reporting) so it doesn't self-spam — a terminal that never reports
@@ -442,6 +447,7 @@ focus is treated as unfocused so it still notifies.
 
 ### Known sharp edges
 - macOS subprocess fallback has no bundle id yet (no custom icon); `terminal-notifier` must be installed for grouped banners, else it falls back to `osascript`.
+- Terminal hosts that expose no stable session identifier can activate the app but not reliably select one window.
 - tmux passthrough needs `allow-passthrough on` (default since tmux 3.3a) for OSC banners to reach the outer terminal.
 - A provider-event signal that's already present when a workspace first appears seeds the baseline silently — only the rising edge notifies, so a second unread comment before you've read the first won't re-notify.
 - Windows notifications are not implemented.

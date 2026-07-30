@@ -350,6 +350,12 @@ impl Sidebar {
         self.inner.focus_workspace_key(key)
     }
 
+    /// Reveal and select a workspace even when the current sidebar view
+    /// hides it.
+    pub fn reveal_workspace_key(&mut self, key: &lazybox_core::SessionKey) -> bool {
+        self.inner.reveal_workspace_key(key)
+    }
+
     /// Move the cursor onto the RepoHeader row for the given project.
     /// See `Sidebar::focus_project_header`.
     pub fn focus_project_header(&mut self, key: &lazybox_core::ProjectKey) -> bool {

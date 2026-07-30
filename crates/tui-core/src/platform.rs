@@ -117,6 +117,13 @@ struct NotificationClickContext {
     executable: std::path::PathBuf,
     socket_path: std::path::PathBuf,
     terminal_bundle_id: String,
+    terminal_session: Option<TerminalSession>,
+}
+
+#[cfg(target_os = "macos")]
+enum TerminalSession {
+    Tty(String),
+    WezTermPane(String),
 }
 
 #[cfg(target_os = "macos")]
@@ -129,7 +136,7 @@ static NOTIFICATION_CLICK_CONTEXT: std::sync::OnceLock<Option<NotificationClickC
 /// the default daemon location.
 #[cfg(target_os = "macos")]
 pub fn set_notification_click_context(
-    socket_path: std::path::PathBuf,
+    socket_path: Option<std::path::PathBuf>,
     configured_bundle_id: Option<String>,
 ) {
     let terminal_bundle_id = detect_terminal_bundle_id(
@@ -137,19 +144,26 @@ pub fn set_notification_click_context(
         std::env::var("__CFBundleIdentifier").ok().as_deref(),
         std::env::var("TERM_PROGRAM").ok().as_deref(),
     );
-    let context = std::env::current_exe().ok().zip(terminal_bundle_id).map(
-        |(executable, terminal_bundle_id)| NotificationClickContext {
-            executable,
-            socket_path,
-            terminal_bundle_id,
-        },
-    );
+    let terminal_session = terminal_bundle_id
+        .as_deref()
+        .and_then(detect_terminal_session);
+    let context = socket_path
+        .zip(std::env::current_exe().ok())
+        .zip(terminal_bundle_id)
+        .map(
+            |((socket_path, executable), terminal_bundle_id)| NotificationClickContext {
+                executable,
+                socket_path,
+                terminal_bundle_id,
+                terminal_session,
+            },
+        );
     let _ = NOTIFICATION_CLICK_CONTEXT.set(context);
 }
 
 #[cfg(not(target_os = "macos"))]
 pub fn set_notification_click_context(
-    socket_path: std::path::PathBuf,
+    socket_path: Option<std::path::PathBuf>,
     configured_bundle_id: Option<String>,
 ) {
     let _ = (socket_path, configured_bundle_id);
@@ -179,6 +193,44 @@ pub fn detect_terminal_bundle_id(
             };
             Some(bundle_id.to_string())
         })
+}
+
+#[cfg(target_os = "macos")]
+fn detect_terminal_session(bundle_id: &str) -> Option<TerminalSession> {
+    if bundle_id == "com.github.wez.wezterm" {
+        return std::env::var("WEZTERM_PANE")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(TerminalSession::WezTermPane);
+    }
+    if !matches!(bundle_id, "com.apple.Terminal" | "com.googlecode.iterm2") {
+        return None;
+    }
+
+    let tty = if std::env::var_os("TMUX").is_some() {
+        command_stdout("tmux", &["display-message", "-p", "#{client_tty}"])
+    } else {
+        None
+    }
+    .or_else(|| command_stdout("tty", &[]))?;
+    Some(TerminalSession::Tty(tty))
+}
+
+#[cfg(target_os = "macos")]
+fn command_stdout(program: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn notifier_backend() -> Option<NotifierBackend> {
@@ -498,6 +550,7 @@ fn notification_click_command(workspace_key: &lazybox_core::SessionKey) -> Optio
         executable,
         socket_path,
         &context.terminal_bundle_id,
+        context.terminal_session.as_ref(),
         workspace_key,
     ))
 }
@@ -507,15 +560,28 @@ fn build_notification_click_command(
     executable: &str,
     socket_path: &str,
     terminal_bundle_id: &str,
+    terminal_session: Option<&TerminalSession>,
     workspace_key: &lazybox_core::SessionKey,
 ) -> String {
-    format!(
+    let mut command = format!(
         "{} notification-click --workspace {} --socket {} --terminal-bundle-id {}",
         shell_quote(executable),
         shell_quote(workspace_key.as_str()),
         shell_quote(socket_path),
         shell_quote(terminal_bundle_id),
-    )
+    );
+    match terminal_session {
+        Some(TerminalSession::Tty(tty)) => {
+            command.push_str(" --terminal-tty ");
+            command.push_str(&shell_quote(tty));
+        }
+        Some(TerminalSession::WezTermPane(pane_id)) => {
+            command.push_str(" --wezterm-pane-id ");
+            command.push_str(&shell_quote(pane_id));
+        }
+        None => {}
+    }
+    command
 }
 
 #[cfg(target_os = "macos")]
@@ -762,6 +828,7 @@ mod tests {
             "/Applications/Lazy Box/lazybox",
             "/tmp/lazy'box/daemon.sock",
             "com.example.Terminal",
+            Some(&TerminalSession::Tty("/dev/ttys674".into())),
             &lazybox_core::SessionKey::new("github:o/repo#674; touch /tmp/no"),
         );
         assert_eq!(
@@ -769,14 +836,14 @@ mod tests {
             "'/Applications/Lazy Box/lazybox' notification-click --workspace \
              'github:o/repo#674; touch /tmp/no' --socket \
              '/tmp/lazy'\"'\"'box/daemon.sock' --terminal-bundle-id \
-             'com.example.Terminal'"
+             'com.example.Terminal' --terminal-tty '/dev/ttys674'"
         );
     }
 
     #[test]
     fn notification_click_context_uses_the_client_socket_and_bundle_override() {
         set_notification_click_context(
-            std::path::PathBuf::from("/tmp/lazybox-remote.sock"),
+            Some(std::path::PathBuf::from("/tmp/lazybox-remote.sock")),
             Some("com.example.Terminal".into()),
         );
         let command = notification_click_command(&lazybox_core::SessionKey::new("github:o/r#674"))

@@ -2307,7 +2307,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// the screen. Backs both the `` ` `` picker and the `]]` `` ` ``
     /// terminal jump.
     pub(crate) fn jump_to_workspace_key(&mut self, key: &lazybox_core::SessionKey) {
-        if !self.sidebar.focus_workspace_key(key) {
+        if !self.sidebar.reveal_workspace_key(key) {
             self.flash_info("workspace is gone — nothing to jump to");
             return;
         }

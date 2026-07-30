@@ -1060,6 +1060,57 @@ impl Sidebar {
         false
     }
 
+    /// Make a tracked workspace visible, then move the cursor to it.
+    /// User-driven jumps cross mailbox, filter, search, and collapsed
+    /// group boundaries; a missing workspace leaves the current view
+    /// untouched.
+    pub fn reveal_workspace_key(&mut self, key: &SessionKey) -> bool {
+        if self.focus_workspace_key(key) {
+            return true;
+        }
+
+        let now = self.now();
+        let Some(workspace) = self.workspaces.get(key) else {
+            return false;
+        };
+        let mailbox = [
+            self.mailbox,
+            Mailbox::Inbox,
+            Mailbox::Inactive,
+            Mailbox::Snoozed,
+        ]
+        .into_iter()
+        .find(|mailbox| mailbox_membership(workspace, *mailbox, now, self.show_inactive_in_inbox));
+        let Some(mailbox) = mailbox else {
+            return false;
+        };
+        let group = crate::components::visible_rows::group_label(
+            workspace,
+            &self.projects,
+            &self.workspaces,
+        );
+        let filter_hides = !self.filters.accepts(&FilterCtx {
+            w: workspace,
+            agents: &self.agents,
+        });
+        let search_hides = self.search.as_ref().is_some_and(|search| {
+            !search.query.is_empty()
+                && search.scope == group
+                && !crate::components::visible_rows::search_matches(&search.query, workspace)
+        });
+
+        self.mailbox = mailbox;
+        if filter_hides {
+            self.filters.replace(std::iter::empty());
+        }
+        if search_hides {
+            self.search = None;
+        }
+        self.collapsed_repos.remove(&group);
+        self.recompute_visible();
+        self.focus_workspace_key(key)
+    }
+
     /// Move the cursor onto the RepoHeader row for the given project.
     /// Returns true on a hit. Used by the just-created-a-project flow
     /// so the user lands on their new project ready to press `n` to

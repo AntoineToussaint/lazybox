@@ -83,12 +83,15 @@ sweep opens a workspace and spawns an agent for each. A triaged backlog becomes
 a running fleet without opening the TUI or a terminal:
 
 ```sh
-# one-time: create the trigger label in the repo
-gh label create lazybox:claude/M --repo owner/app
-
-# hand every "ready" issue to Claude (Sonnet tier) in one go
-gh issue list --repo owner/app --label ready --json number --jq '.[].number' \
-  | xargs -I {} gh issue edit {} --repo owner/app --add-label lazybox:claude/M
+# hand every "ready" issue across these repos to Claude (Sonnet tier)
+for repo in owner/app owner/api owner/worker; do
+  gh label create 'lazybox:claude/M' --repo "$repo" --force
+  gh issue list --repo "$repo" --label ready --limit 1000 \
+    --json number --jq '.[].number' |
+    while read -r issue; do
+      gh issue edit "$issue" --repo "$repo" --add-label 'lazybox:claude/M'
+    done
+done
 ```
 
 Each label is handled once and persisted, so re-running the loop or leaving the

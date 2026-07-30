@@ -407,6 +407,36 @@ img, video { max-width: 100%; display: block; }
 .strip .row b { color: var(--fg-dim); font-weight: 600; }
 .strip .row .mk { color: var(--accent); }
 
+/* ── founder note ────────────────────────────────────────── */
+.founder-note {
+  padding: clamp(2.25rem, 5vw, 3.5rem) 0;
+  border-bottom: 1px solid var(--border-soft);
+  background: linear-gradient(90deg, rgba(124, 196, 255, 0.035), rgba(110, 231, 168, 0.035));
+}
+.founder-note-inner {
+  max-width: 52rem;
+  margin: 0 auto;
+  padding: clamp(1.25rem, 3vw, 1.75rem) clamp(1.25rem, 3vw, 2rem);
+  border-left: 3px solid var(--accent-2);
+  background: rgba(17, 21, 31, 0.7);
+}
+.founder-note-title {
+  margin: 0 0 0.55rem;
+  color: var(--accent-2);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.founder-note-inner > p:last-child {
+  margin: 0;
+  color: var(--fg-dim);
+  font-size: clamp(1rem, 2vw, 1.12rem);
+  line-height: 1.7;
+}
+.founder-note-inner strong { color: var(--fg); }
+
 /* ── snippet workflow showcase ───────────────────────────── */
 .snippets-section {
   position: relative;

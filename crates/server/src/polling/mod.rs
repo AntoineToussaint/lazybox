@@ -941,10 +941,10 @@ pub enum PolledScope {
 pub fn gh_polled_scope(
     run_global: bool,
     repos: &[String],
-    partial: bool,
+    coverage: lazybox_core::FetchCoverage,
     windowed: bool,
 ) -> PolledScope {
-    if partial || windowed {
+    if coverage.is_partial() || windowed {
         return PolledScope::Repos(Vec::new());
     }
     if run_global {

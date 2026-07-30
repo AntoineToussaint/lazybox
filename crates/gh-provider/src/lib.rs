@@ -9,7 +9,7 @@ pub mod mentions;
 mod notifications;
 pub mod rate_budget;
 
-pub use client::{GhClient, SelectedFetchCoverage, SelectedFetchOutcome, credential_fingerprint};
+pub use client::{GhClient, SelectedFetchOutcome, credential_fingerprint};
 pub use graphql::PrDetails;
 pub use mentions::{LazyboxMention, MentionSource, parse_label_directive, scan_issue};
 pub use notifications::{

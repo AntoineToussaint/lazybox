@@ -2724,92 +2724,16 @@ impl TerminalStack {
         "Terminals"
     }
 
-    /// Bindings shown in the hint bar. Drops the legacy
-    /// `all keys → PTY` entry — that describes an implementation mode
-    /// rather than an actionable shortcut, so it was noise in the
-    /// footer. The user always knows their typing reaches the inner
-    /// program; what they need surfaced is *escape hatches*: leave the
-    /// pane (the only way back to the sidebar once the PTY owns the
-    /// keyboard), toggle focus mode, split panes, send SIGINT. The
-    /// `Shift-PgUp/PgDn` scroll hint is deliberately omitted —
-    /// scrolling is intuitive (the mouse wheel works too) and it
-    /// crowded out more useful hints (#202).
-    ///
-    /// `escape_char` is the configured `terminal.escape_char` (the
-    /// `]` in the default `]]` leader). The leader-based hints render
-    /// it doubled rather than a hardcoded `]]` so a user who remapped
-    /// the escape char sees the chord they actually type (#170).
-    ///
-    /// Associated function (no `&self`) because the bindings don't
-    /// depend on terminal-stack state — they're the same whether the
-    /// pane has zero terminals or twenty. The pane wrapper still
-    /// takes `&self` for symmetry with the other panes (Sidebar /
-    /// Right both inspect state to decide what to surface), but
-    /// reaches through to this stateless implementation.
+    /// Bindings shown in the hint bar. Terminal commands share one
+    /// leader, whose popup carries the individual shortcuts.
     pub fn contextual_bindings(escape_char: char) -> Vec<crate::Binding> {
         use crate::Binding;
-        use lazybox_tui_core::action::{ActionDef, ActionKind};
         use std::borrow::Cow;
-        let leave = ActionDef::for_kind(ActionKind::LeaveTerminal);
         let leader = format!("{escape_char}{escape_char}");
-        // The leave chord is owned by `terminal.escape_char`, NOT the
-        // `leave_terminal` action_keys slot. Terminal-pane dispatch
-        // (`model::keys`) matches only the configured escape char and
-        // never the catalog chord, so honoring a `leave_terminal`
-        // override here would advertise a key the dispatcher ignores —
-        // the footer would say "Esc exit to sidebar" while Esc does
-        // nothing (#188). Render the escape char doubled + `q` (`]]q`):
-        // the `]]` leader is non-timed now (#252) and `q` is its exit
-        // command, replacing the old idle-timeout leave.
-        let leave_keys: Cow<'static, str> = Cow::Owned(format!("{leader}q"));
-        let focus = ActionDef::for_kind(ActionKind::ToggleFocusMode);
-        vec![
-            // `]]q` (the escape char doubled, then `q`) — the way back to
-            // the sidebar once the PTY owns the keyboard. The issue
-            // (#170) was that this had no footer hint, so the route back
-            // to focus was invisible from inside Claude Code.
-            Binding {
-                keys: leave_keys,
-                label: Cow::Borrowed(leave.label),
-            },
-            // `]]f` toggles focus mode (near-fullscreen agent terminal).
-            // Like the leave chord it rides the `]]` leader rather than
-            // the catalog default key (`.`, which the PTY would eat), so
-            // the keys are hand-built from the escape char while the
-            // label tracks the catalog so a rename flows through (#202).
-            Binding {
-                keys: Cow::Owned(format!("{leader}f")),
-                label: Cow::Borrowed(focus.label),
-            },
-            // `Ctrl-c` is forwarded straight to the PTY rather than
-            // being a catalog action — but it's actionable knowledge
-            // for the user (escape a hung process), so it stays in
-            // the hint bar as a hand-curated entry.
-            Binding {
-                keys: Cow::Borrowed("Ctrl-c"),
-                label: Cow::Borrowed("interrupt"),
-            },
-            // Tile management rides the `]]` leader like every other
-            // lazybox chord in terminal mode (#286): `]]|` / `]]-`
-            // split, `]]<arrow>` moves tile focus, `]]x` closes the
-            // focused terminal. Surface the split entry point; the
-            // leader popup lists the rest. Labeled "split panes"
-            // rather than "tiles" — the latter meant nothing to a
-            // user who'd never used tmux-style panes (#202).
-            Binding {
-                keys: Cow::Owned(format!("{leader}|")),
-                label: Cow::Borrowed("split panes"),
-            },
-            // Snippet picker entry point (issues #40, #205, #252). `]]s`
-            // opens the picker; typing a full key there auto-submits its
-            // body to the agent (the `]]srev` fast path). Routing the
-            // picker under the leader frees a lone `]` to reach the agent
-            // verbatim.
-            Binding {
-                keys: Cow::Owned(format!("{leader}s")),
-                label: Cow::Borrowed("snippets"),
-            },
-        ]
+        vec![Binding {
+            keys: Cow::Owned(leader),
+            label: Cow::Borrowed("menu"),
+        }]
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, cmds: &mut Vec<Command>) -> PaneOutcome {
@@ -8001,7 +7925,7 @@ mod terminal_availability_tests {
     //! flag `available_in_terminal` is the single source of truth, and
     //! the pane's real behavior agrees with it.
     use super::*;
-    use lazybox_tui_core::action::{self, ActionDef, ActionKind};
+    use lazybox_tui_core::action;
 
     fn stack_with_agent() -> TerminalStack {
         let sk = SessionKey::new("github:o/r#1");
@@ -8045,18 +7969,13 @@ mod terminal_availability_tests {
     }
 
     #[test]
-    fn advertised_terminal_bindings_are_what_the_catalog_allows() {
-        // The hint bar must only surface keys the pane will actually
-        // dispatch in terminal focus. The single catalog-backed binding
-        // is the `]]` leave chord — the gateway back to the globals —
-        // and none of the universal shortcuts may be advertised here.
+    fn terminal_bindings_collapse_into_the_configured_leader() {
         let bindings = TerminalStack::contextual_bindings(']');
 
-        let leave = ActionDef::for_kind(ActionKind::LeaveTerminal);
-        assert!(
-            bindings.iter().any(|b| b.keys == leave.default_keys),
-            "the `]]` leave chord must be advertised as the way out",
-        );
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].keys, "]]");
+        assert_eq!(bindings[0].label, "menu");
+        assert_eq!(TerminalStack::contextual_bindings('~')[0].keys, "~~");
         for def in action::universal_shortcuts() {
             assert!(
                 bindings.iter().all(|b| b.keys != def.default_keys),

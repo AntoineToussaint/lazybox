@@ -7723,7 +7723,7 @@ mod terminal_url_mouse_tests {
     }
 
     #[test]
-    fn mouse_mode_guidance_persists_without_receiving_a_mouse_event() {
+    fn mouse_mode_guidance_only_appears_when_links_are_disabled() {
         let (mut model, _server, _opened) = build_model(1);
         model.mouse_capture_on = false;
         model.status.notice = None;
@@ -7731,11 +7731,14 @@ mod terminal_url_mouse_tests {
         let host_mode = rendered_model(&mut model);
         assert!(host_mode.contains("F8"));
         assert!(host_mode.contains("links off"));
+        assert!(host_mode.contains("]] menu"));
 
         model.mouse_capture_on = true;
         let capture_mode = rendered_model(&mut model);
-        assert!(capture_mode.contains("mouse on"));
-        assert!(capture_mode.contains("]]u"));
+        assert!(capture_mode.contains("]] menu"));
+        assert!(!capture_mode.contains("mouse on"));
+        assert!(!capture_mode.contains("]]u"));
+        assert!(!capture_mode.contains("Ctrl-c"));
     }
 
     #[test]

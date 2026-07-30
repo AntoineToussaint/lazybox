@@ -57,6 +57,28 @@ pub trait GitRunner: Send + Sync {
         args: &'a [&'a str],
         env: &'a [(String, String)],
     ) -> Pin<Box<dyn Future<Output = Result<Output, GitError>> + Send + 'a>>;
+
+    /// Run a network-heavy git command, optionally streaming progress.
+    /// The default delegates to [`Self::run`]; runners that can stream
+    /// progress override it.
+    fn run_transfer<'a>(
+        &'a self,
+        cwd: &'a Path,
+        args: &'a [&'a str],
+        env: &'a [(String, String)],
+        _on_progress: Option<&'a (dyn Fn(&str) + Sync)>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), GitError>> + Send + 'a>> {
+        Box::pin(async move {
+            let output = self.run(Some(cwd), args, env).await?;
+            if output.status.success() {
+                Ok(())
+            } else {
+                Err(GitError::Command(
+                    String::from_utf8_lossy(&output.stderr).into_owned(),
+                ))
+            }
+        })
+    }
 }
 
 struct BoundedGitRunner;
@@ -74,6 +96,16 @@ impl GitRunner for BoundedGitRunner {
             GIT_NO_CWD_TIMEOUT
         };
         Box::pin(exec_git_bounded(cwd, args, env, timeout))
+    }
+
+    fn run_transfer<'a>(
+        &'a self,
+        cwd: &'a Path,
+        args: &'a [&'a str],
+        env: &'a [(String, String)],
+        on_progress: Option<&'a (dyn Fn(&str) + Sync)>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), GitError>> + Send + 'a>> {
+        Box::pin(run_git_transfer(cwd, args, env, on_progress))
     }
 }
 
@@ -394,7 +426,7 @@ impl WorktreeManager {
             // failure, resource exhaustion) proves nothing about the
             // repo and must propagate as an error instead of nuking a
             // possibly-healthy cache.
-            match bare_repo_health(&bare_path).await {
+            match bare_repo_health(self.git_runner(), &bare_path).await {
                 Ok(true) => return Ok(bare_path),
                 Ok(false) => {
                     // git ran and confirmed the repo is unusable
@@ -412,7 +444,7 @@ impl WorktreeManager {
                     return Err(e);
                 }
             }
-            if let Some(prev) = configured_origin_url(&bare_path).await {
+            if let Some(prev) = configured_origin_url(self.git_runner(), &bare_path).await {
                 url = prev;
             }
             tracing::warn!(
@@ -438,7 +470,7 @@ impl WorktreeManager {
             // for the same rewritten-origin reasons as above), and
             // fetching into it keeps every object already transferred
             // instead of restarting from zero on each retry.
-            match resumable_partial_origin(&partial).await {
+            match resumable_partial_origin(self.git_runner(), &partial).await {
                 Some(prev) => {
                     url = prev;
                     resuming = true;
@@ -462,6 +494,7 @@ impl WorktreeManager {
         }
         if !resuming {
             run_git(
+                self.git_runner(),
                 &["init", "--quiet", "--bare", &partial.to_string_lossy()],
                 &[],
             )
@@ -471,7 +504,12 @@ impl WorktreeManager {
             // never had, silently diverging new cache entries from old
             // ones (a plain `git fetch` in a worktree would start
             // materializing remote-tracking refs for every branch).
-            run_git_in(&partial, &["config", "remote.origin.url", &url]).await?;
+            run_git_in(
+                self.git_runner(),
+                &partial,
+                &["config", "remote.origin.url", &url],
+            )
+            .await?;
         }
         self.report(CheckoutPhase::Cloning);
         let auth = self.network_env().await;
@@ -481,19 +519,21 @@ impl WorktreeManager {
         // actually reads them. A server without filter support ignores
         // the flag (git warns and sends everything), so this degrades
         // to a full clone rather than failing.
-        if let Err(e) = run_git_transfer(
-            &partial,
-            &[
-                "fetch",
-                "--progress",
-                "--filter=blob:none",
-                "origin",
-                "+refs/heads/*:refs/heads/*",
-            ],
-            &auth,
-            Some(&progress),
-        )
-        .await
+        if let Err(e) = self
+            .git_runner()
+            .run_transfer(
+                &partial,
+                &[
+                    "fetch",
+                    "--progress",
+                    "--filter=blob:none",
+                    "origin",
+                    "+refs/heads/*:refs/heads/*",
+                ],
+                &auth,
+                Some(&progress),
+            )
+            .await
         {
             // Nothing else ever discards a resumable `.partial`, so a
             // staging repo aimed at a remote a fresh attempt would not
@@ -516,7 +556,7 @@ impl WorktreeManager {
             }
             return Err(e);
         }
-        set_head_to_remote_default(&partial, &auth).await?;
+        set_head_to_remote_default(self.git_runner(), &partial, &auth).await?;
         tokio::fs::rename(&partial, &bare_path).await?;
         Ok(bare_path)
     }
@@ -564,7 +604,8 @@ impl WorktreeManager {
         // to "succeed" here forever, dumping sessions into a non-git
         // folder.
         if wt_path.exists()
-            && validate_worktree_dir(wt_path, &bare_path).await? == WorktreeDirState::Valid
+            && validate_worktree_dir(self.git_runner(), wt_path, &bare_path).await?
+                == WorktreeDirState::Valid
         {
             let name = wt_path
                 .file_name()
@@ -597,7 +638,8 @@ impl WorktreeManager {
         // branch from a non-fresh ref (see the gated report below).
         self.report(CheckoutPhase::Fetching);
         let auth = self.network_env().await;
-        let origin_fetch = fetch_origin_ref(&bare_path, owner, repo, branch, &auth).await;
+        let origin_fetch =
+            fetch_origin_ref(self.git_runner(), &bare_path, owner, repo, branch, &auth).await;
 
         // Prefer the fresh remote-tracking ref. When the head branch
         // isn't a plain branch on `origin` — a fork PR (head lives on the
@@ -624,7 +666,7 @@ impl WorktreeManager {
         .await;
         let pr_fetched = if !has_origin
             && let Some(pr) = pr_number
-            && fetch_pull_head(&bare_path, owner, repo, pr, &auth)
+            && fetch_pull_head(self.git_runner(), &bare_path, owner, repo, pr, &auth)
                 .await
                 .is_ok()
         {
@@ -703,7 +745,15 @@ impl WorktreeManager {
         // gets the auth env and the transfer-class timeout instead of
         // the 30s in-repo cap. Resilient to a nested agent worktree
         // already holding the branch (issue #439).
-        add_worktree_resilient(&bare_path, wt_path, branch, &start_point, &auth).await?;
+        add_worktree_resilient(
+            self.git_runner(),
+            &bare_path,
+            wt_path,
+            branch,
+            &start_point,
+            &auth,
+        )
+        .await?;
 
         // Record the upstream when we branched off the remote-tracking
         // ref. `git worktree add -B` doesn't set it, so without this
@@ -714,11 +764,13 @@ impl WorktreeManager {
         // must not fail the checkout.
         if start_point.starts_with("refs/remotes/origin/") {
             let _ = run_git_in(
+                self.git_runner(),
                 &bare_path,
                 &["config", &format!("branch.{branch}.remote"), "origin"],
             )
             .await;
             let _ = run_git_in(
+                self.git_runner(),
                 &bare_path,
                 &[
                     "config",
@@ -776,7 +828,8 @@ impl WorktreeManager {
         // this bare clone short-circuits; an empty leftover dir is
         // cleared and re-provisioned.
         if wt_path.exists()
-            && validate_worktree_dir(wt_path, &bare_path).await? == WorktreeDirState::Valid
+            && validate_worktree_dir(self.git_runner(), wt_path, &bare_path).await?
+                == WorktreeDirState::Valid
         {
             let name = wt_path
                 .file_name()
@@ -821,9 +874,19 @@ impl WorktreeManager {
         // legacy full clone, or a tree checked out before).
         self.report(CheckoutPhase::Fetching);
         let auth = self.network_env().await;
-        match fetch_origin_ref(&bare_path, owner, repo, base_branch, &auth).await {
+        match fetch_origin_ref(
+            self.git_runner(),
+            &bare_path,
+            owner,
+            repo,
+            base_branch,
+            &auth,
+        )
+        .await
+        {
             Ok(()) => {
                 if let Err(e) = run_git_in(
+                    self.git_runner(),
                     &bare_path,
                     &[
                         "update-ref",
@@ -895,7 +958,15 @@ impl WorktreeManager {
         // clone makes this a network transfer, and a nested agent
         // worktree already holding the branch is resolved rather than
         // fatal (issue #439).
-        add_worktree_resilient(&bare_path, wt_path, new_branch, &start_point, &auth).await?;
+        add_worktree_resilient(
+            self.git_runner(),
+            &bare_path,
+            wt_path,
+            new_branch,
+            &start_point,
+            &auth,
+        )
+        .await?;
 
         let name = wt_path
             .file_name()
@@ -940,10 +1011,14 @@ impl WorktreeManager {
         // Reading HEAD keeps the returned branch honest if the user
         // renamed it inside the worktree.
         if is_git_repo(wt_path).await {
-            let current = run_git_in(wt_path, &["symbolic-ref", "--short", "HEAD"])
-                .await
-                .map(|s| s.trim().to_string())
-                .unwrap_or_else(|_| branch.to_string());
+            let current = run_git_in(
+                self.git_runner(),
+                wt_path,
+                &["symbolic-ref", "--short", "HEAD"],
+            )
+            .await
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| branch.to_string());
             return Ok(Worktree {
                 name,
                 path: wt_path.to_path_buf(),
@@ -953,12 +1028,13 @@ impl WorktreeManager {
 
         self.report(CheckoutPhase::AddingWorktree);
         tokio::fs::create_dir_all(wt_path).await?;
-        run_git_in(wt_path, &["init", "-q"]).await?;
+        run_git_in(self.git_runner(), wt_path, &["init", "-q"]).await?;
         // Point HEAD at lazybox's branch as an unborn ref. `symbolic-ref`
         // works on every git version (no `git init -b` dependency) and
         // needs no commit — `git status` reads "On branch <branch>, no
         // commits yet" and the user's first commit lands there.
         run_git_in(
+            self.git_runner(),
             wt_path,
             &["symbolic-ref", "HEAD", &format!("refs/heads/{branch}")],
         )
@@ -987,13 +1063,19 @@ impl WorktreeManager {
         // afterwards, and only fail if that also can't resolve.
         let auth = self.network_env().await;
         let _ = run_git_in_env(
+            self.git_runner(),
             &bare_path,
             &["remote", "set-head", "origin", "--auto"],
             &auth,
         )
         .await;
 
-        let out = run_git_in(&bare_path, &["symbolic-ref", "refs/remotes/origin/HEAD"]).await;
+        let out = run_git_in(
+            self.git_runner(),
+            &bare_path,
+            &["symbolic-ref", "refs/remotes/origin/HEAD"],
+        )
+        .await;
         if let Ok(ref_str) = out {
             let trimmed = ref_str.trim();
             if let Some(branch) = trimmed.strip_prefix("refs/remotes/origin/") {
@@ -1067,7 +1149,15 @@ impl WorktreeManager {
         // last-known local remote-tracking ref, same as every other
         // network-optional path here.
         let auth = self.network_env().await;
-        let _ = fetch_origin_ref(&bare_path, owner, repo, base_branch, &auth).await;
+        let _ = fetch_origin_ref(
+            self.git_runner(),
+            &bare_path,
+            owner,
+            repo,
+            base_branch,
+            &auth,
+        )
+        .await;
 
         let base_ref = format!("refs/remotes/origin/{base_branch}");
         if !ref_exists_with(self.git_runner(), &bare_path, &base_ref).await {
@@ -1084,7 +1174,7 @@ impl WorktreeManager {
         // plain `git checkout <sha>` inspection. Checked before the
         // dirty probe because a mid-operation tree can be status-clean
         // (a clean detached HEAD, a bisect at a clean step).
-        if let Some(reason) = worktree_unsafe_to_advance(wt_path).await? {
+        if let Some(reason) = worktree_unsafe_to_advance(self.git_runner(), wt_path).await? {
             tracing::debug!(
                 worktree = %wt_path.display(),
                 reason,
@@ -1106,8 +1196,12 @@ impl WorktreeManager {
         // refuses exactly that case (surfaced below as an `Err` that
         // leaves the tree untouched), so ignoring untracked files here is
         // safe.
-        let status =
-            run_git_in(wt_path, &["status", "--porcelain", "--untracked-files=no"]).await?;
+        let status = run_git_in(
+            self.git_runner(),
+            wt_path,
+            &["status", "--porcelain", "--untracked-files=no"],
+        )
+        .await?;
         if !status.trim().is_empty() {
             return Ok(TrackSyncOutcome::SkippedDirty);
         }
@@ -1115,18 +1209,23 @@ impl WorktreeManager {
         // Behind count: commits in the base not yet in HEAD. Zero means
         // the base is already an ancestor of HEAD (up to date, or HEAD is
         // ahead with local work — either way, not behind).
-        let behind = count_commits(wt_path, &format!("HEAD..{base_ref}")).await;
+        let behind = count_commits(self.git_runner(), wt_path, &format!("HEAD..{base_ref}")).await;
         if behind == 0 {
             return Ok(TrackSyncOutcome::UpToDate);
         }
         // Ahead count: local commits not on the base. Behind AND ahead =
         // diverged, so a fast-forward is impossible.
-        let ahead = count_commits(wt_path, &format!("{base_ref}..HEAD")).await;
+        let ahead = count_commits(self.git_runner(), wt_path, &format!("{base_ref}..HEAD")).await;
         if ahead > 0 {
             return Ok(TrackSyncOutcome::SkippedDiverged);
         }
 
-        run_git_in(wt_path, &["merge", "--ff-only", &base_ref]).await?;
+        run_git_in(
+            self.git_runner(),
+            wt_path,
+            &["merge", "--ff-only", &base_ref],
+        )
+        .await?;
         Ok(TrackSyncOutcome::FastForwarded)
     }
 
@@ -1296,6 +1395,7 @@ impl WorktreeManager {
         let wt_path = self.worktree_path(owner, repo, branch);
         if wt_path.exists() {
             run_git_in(
+                self.git_runner(),
                 &bare_path,
                 &["worktree", "remove", &wt_path.to_string_lossy(), "--force"],
             )
@@ -1322,6 +1422,7 @@ impl WorktreeManager {
         let _guard = lock.lock().await;
         if worktree_path.exists() {
             let result = run_git_in(
+                self.git_runner(),
                 bare_path,
                 &[
                     "worktree",
@@ -1338,12 +1439,12 @@ impl WorktreeManager {
                 // fails (permissions, FS in use), there's nothing
                 // the caller can do that lazybox can't.
                 let _ = tokio::fs::remove_dir_all(worktree_path).await;
-                let _ = run_git_in(bare_path, &["worktree", "prune"]).await;
+                let _ = run_git_in(self.git_runner(), bare_path, &["worktree", "prune"]).await;
             }
         } else {
             // Directory's already gone — just prune so git's
             // metadata catches up.
-            let _ = run_git_in(bare_path, &["worktree", "prune"]).await;
+            let _ = run_git_in(self.git_runner(), bare_path, &["worktree", "prune"]).await;
         }
         Ok(())
     }
@@ -1376,50 +1477,57 @@ fn partial_clone_path(bare: &Path) -> PathBuf {
 ///   healthy bare clone — orphaning every worktree whose gitdir
 ///   metadata lived under `<bare>/worktrees/` — whenever spawning
 ///   git hiccuped.
-async fn bare_repo_health(bare: &Path) -> Result<bool, GitError> {
+async fn bare_repo_health(git: &dyn GitRunner, bare: &Path) -> Result<bool, GitError> {
     // Quiet probes (no error-level logging): a failing probe is an
     // expected, recoverable state, not a git invocation bug. A probe
     // that can't SPAWN, however, is an environment error we surface.
-    async fn probe(bare: &Path, args: &[&str]) -> Result<Option<String>, GitError> {
-        let out = apply_git_env(Command::new("git").current_dir(bare).args(args))
-            .output()
-            .await
-            .map_err(|e| {
-                GitError::Command(format!(
-                    "could not run `git {}` in {}: {e}",
-                    args.join(" "),
-                    bare.display()
-                ))
-            })?;
+    async fn probe(
+        git: &dyn GitRunner,
+        bare: &Path,
+        args: &[&str],
+    ) -> Result<Option<String>, GitError> {
+        let out = git.run(Some(bare), args, &[]).await.map_err(|e| {
+            GitError::Command(format!(
+                "could not run `git {}` in {}: {e}",
+                args.join(" "),
+                bare.display()
+            ))
+        })?;
         Ok(out
             .status
             .success()
             .then(|| String::from_utf8_lossy(&out.stdout).into_owned()))
     }
-    match probe(bare, &["rev-parse", "--is-bare-repository"]).await? {
+    match probe(git, bare, &["rev-parse", "--is-bare-repository"]).await? {
         Some(out) if out.trim() == "true" => {}
         _ => return Ok(false),
     }
-    Ok(probe(bare, &["rev-parse", "--verify", "--quiet", "HEAD"])
-        .await?
-        .is_some())
+    Ok(
+        probe(git, bare, &["rev-parse", "--verify", "--quiet", "HEAD"])
+            .await?
+            .is_some(),
+    )
 }
 
 /// Read `remote.origin.url` straight from the config file of a (possibly
 /// broken) bare clone. Uses `git config --file` so it works even when
 /// the directory is too damaged for normal repo commands.
-async fn configured_origin_url(bare: &Path) -> Option<String> {
+async fn configured_origin_url(git: &dyn GitRunner, bare: &Path) -> Option<String> {
     let config = bare.join("config");
-    let out = apply_git_env(Command::new("git").args([
-        "config",
-        "--file",
-        &config.to_string_lossy(),
-        "--get",
-        "remote.origin.url",
-    ]))
-    .output()
-    .await
-    .ok()?;
+    let out = git
+        .run(
+            None,
+            &[
+                "config",
+                "--file",
+                &config.to_string_lossy(),
+                "--get",
+                "remote.origin.url",
+            ],
+            &[],
+        )
+        .await
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -1433,20 +1541,16 @@ async fn configured_origin_url(bare: &Path) -> Option<String> {
 /// interrupted attempt was actually cloning. Probe failures count as
 /// not-resumable — unlike the final bare clone, deleting a staging dir
 /// orphans nothing.
-async fn resumable_partial_origin(partial: &Path) -> Option<String> {
-    let is_bare = apply_git_env(
-        Command::new("git")
-            .current_dir(partial)
-            .args(["rev-parse", "--is-bare-repository"]),
-    )
-    .output()
-    .await
-    .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
-    .unwrap_or(false);
+async fn resumable_partial_origin(git: &dyn GitRunner, partial: &Path) -> Option<String> {
+    let is_bare = git
+        .run(Some(partial), &["rev-parse", "--is-bare-repository"], &[])
+        .await
+        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
+        .unwrap_or(false);
     if !is_bare {
         return None;
     }
-    configured_origin_url(partial).await
+    configured_origin_url(git, partial).await
 }
 
 /// Point the staged clone's HEAD at the remote's default branch.
@@ -1458,27 +1562,33 @@ async fn resumable_partial_origin(partial: &Path) -> Option<String> {
 /// branches resolves nothing and keeps the init-time HEAD (the clone
 /// stays unusable for worktrees, same as before).
 async fn set_head_to_remote_default(
+    git: &dyn GitRunner,
     partial: &Path,
     envs: &[(String, String)],
 ) -> Result<(), GitError> {
     // `ls-remote --symref origin HEAD` prints e.g.
     // "ref: refs/heads/main\tHEAD" when the server advertises it.
-    let advertised = run_git_in_env(partial, &["ls-remote", "--symref", "origin", "HEAD"], envs)
-        .await
-        .ok()
-        .and_then(|out| {
-            out.lines().find_map(|l| {
-                l.strip_prefix("ref: ")?
-                    .split_whitespace()
-                    .next()
-                    .filter(|r| r.starts_with("refs/heads/"))
-                    .map(str::to_string)
-            })
-        });
+    let advertised = run_git_in_env(
+        git,
+        partial,
+        &["ls-remote", "--symref", "origin", "HEAD"],
+        envs,
+    )
+    .await
+    .ok()
+    .and_then(|out| {
+        out.lines().find_map(|l| {
+            l.strip_prefix("ref: ")?
+                .split_whitespace()
+                .next()
+                .filter(|r| r.starts_with("refs/heads/"))
+                .map(str::to_string)
+        })
+    });
     let mut head = advertised;
     if head.is_none() {
         for guess in ["refs/heads/main", "refs/heads/master"] {
-            if ref_exists(partial, guess).await {
+            if ref_exists_with(git, partial, guess).await {
                 head = Some(guess.to_string());
                 break;
             }
@@ -1486,6 +1596,7 @@ async fn set_head_to_remote_default(
     }
     if head.is_none() {
         head = run_git_in(
+            git,
             partial,
             &[
                 "for-each-ref",
@@ -1500,7 +1611,7 @@ async fn set_head_to_remote_default(
         .filter(|s| !s.is_empty());
     }
     if let Some(head) = head {
-        run_git_in(partial, &["symbolic-ref", "HEAD", &head]).await?;
+        run_git_in(git, partial, &["symbolic-ref", "HEAD", &head]).await?;
     }
     Ok(())
 }
@@ -1527,6 +1638,7 @@ enum WorktreeDirState {
 /// dir is removed and `Reprovision` returned. Invalid with real
 /// content → loud error; we never delete user data.
 async fn validate_worktree_dir(
+    git: &dyn GitRunner,
     wt_path: &Path,
     bare_path: &Path,
 ) -> Result<WorktreeDirState, GitError> {
@@ -1572,7 +1684,7 @@ async fn validate_worktree_dir(
                     // no tracked-file edits are at risk; otherwise fall
                     // through to the content check, which refuses loudly
                     // (real work is non-pristine) rather than clobber.
-                    if worktree_has_tracked_edits(&gitdir, wt_path).await {
+                    if worktree_has_tracked_edits(git, &gitdir, wt_path).await {
                         tracing::warn!(
                             path = %wt_path.display(),
                             gitdir = %gitdir.display(),
@@ -1587,7 +1699,7 @@ async fn validate_worktree_dir(
                             "worktree checkout incomplete (no index — interrupted \
                              `git worktree add`?); repairing with reset --hard"
                         );
-                        if run_git_in(wt_path, &["reset", "--hard"]).await.is_ok() {
+                        if run_git_in(git, wt_path, &["reset", "--hard"]).await.is_ok() {
                             return Ok(WorktreeDirState::Valid);
                         }
                     }
@@ -1623,7 +1735,7 @@ async fn validate_worktree_dir(
             break;
         }
     }
-    if has_real_content && !leftover_is_pristine_checkout(bare_path, wt_path).await {
+    if has_real_content && !leftover_is_pristine_checkout(git, bare_path, wt_path).await {
         return Err(GitError::Command(format!(
             "{} exists but is not a worktree of {} and holds uncommitted work — \
              refusing to reuse or overwrite it; move the directory aside and retry",
@@ -1641,7 +1753,7 @@ async fn validate_worktree_dir(
     // entry is prunable, and clearing it keeps the re-provision's
     // `worktree add -B <branch>` from failing with "'<branch>' is
     // already used by worktree".
-    let _ = run_git_in(bare_path, &["worktree", "prune"]).await;
+    let _ = run_git_in(git, bare_path, &["worktree", "prune"]).await;
     Ok(WorktreeDirState::Reprovision)
 }
 
@@ -1663,7 +1775,7 @@ async fn validate_worktree_dir(
 ///
 /// Any probe failure returns `true`: without a confident "no edits"
 /// verdict the caller must not run the destructive repair.
-async fn worktree_has_tracked_edits(gitdir: &Path, wt: &Path) -> bool {
+async fn worktree_has_tracked_edits(git: &dyn GitRunner, gitdir: &Path, wt: &Path) -> bool {
     static PROBE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = PROBE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let index = gitdir.join(format!(
@@ -1678,6 +1790,7 @@ async fn worktree_has_tracked_edits(gitdir: &Path, wt: &Path) -> bool {
     )];
 
     let loaded = run_git_in_env(
+        git,
         wt,
         &[
             "--git-dir",
@@ -1696,6 +1809,7 @@ async fn worktree_has_tracked_edits(gitdir: &Path, wt: &Path) -> bool {
         return true;
     }
     let diff = run_git_in_env(
+        git,
         wt,
         &[
             "--git-dir",
@@ -1741,7 +1855,7 @@ async fn worktree_has_tracked_edits(gitdir: &Path, wt: &Path) -> bool {
 ///
 /// Any probe failure returns `false`: without a confident "pristine"
 /// verdict the caller refuses rather than risk clobbering.
-async fn leftover_is_pristine_checkout(bare: &Path, wt: &Path) -> bool {
+async fn leftover_is_pristine_checkout(git: &dyn GitRunner, bare: &Path, wt: &Path) -> bool {
     // A per-call throwaway index. The name is process-and-sequence
     // unique so two probes on the same bare can never share it — the
     // one shared-state hazard of this otherwise read-only inspection,
@@ -1766,6 +1880,7 @@ async fn leftover_is_pristine_checkout(bare: &Path, wt: &Path) -> bool {
     // already exist (no-op dedup); for a dirty one the extra loose
     // objects are unreachable and reaped by the next `git gc`.
     let staged = run_git_in_env(
+        git,
         wt,
         &["--git-dir", &bare_arg, "--work-tree", &wt_arg, "add", "-A"],
         &index_env,
@@ -1773,7 +1888,7 @@ async fn leftover_is_pristine_checkout(bare: &Path, wt: &Path) -> bool {
     .await
     .is_ok();
     let tree = if staged {
-        run_git_in_env(wt, &["--git-dir", &bare_arg, "write-tree"], &index_env).await
+        run_git_in_env(git, wt, &["--git-dir", &bare_arg, "write-tree"], &index_env).await
     } else {
         Err(GitError::Command(
             "staging the leftover checkout failed".into(),
@@ -1794,6 +1909,7 @@ async fn leftover_is_pristine_checkout(bare: &Path, wt: &Path) -> bool {
     // `refs/tags/junio-gpg-pub`) would fail the whole batched
     // `rev-parse` and disable recovery for the entire repo.
     let Ok(specs) = run_git_in(
+        git,
         bare,
         &[
             "for-each-ref",
@@ -1812,7 +1928,7 @@ async fn leftover_is_pristine_checkout(bare: &Path, wt: &Path) -> bool {
     }
     let mut args: Vec<&str> = vec!["rev-parse"];
     args.extend(specs);
-    match run_git_in(bare, &args).await {
+    match run_git_in(git, bare, &args).await {
         Ok(out) => out.lines().any(|l| l.trim() == tree),
         Err(_) => false,
     }
@@ -1899,6 +2015,7 @@ fn base64_std(bytes: &[u8]) -> String {
 /// `checkout_at` and `checkout_new_branch_at` get identical
 /// diagnostics (issue #35).
 async fn fetch_origin_ref(
+    git: &dyn GitRunner,
     bare_path: &Path,
     owner: &str,
     repo: &str,
@@ -1916,6 +2033,7 @@ async fn fetch_origin_ref(
     // source to a branch, so a tag sharing the branch's name can't win
     // the DWIM lookup.
     run_git_in_env(
+        git,
         bare_path,
         &[
             "fetch",
@@ -1950,6 +2068,7 @@ async fn fetch_origin_ref(
 /// and return the error — the caller falls back to a local ref or a clear
 /// error.
 async fn fetch_pull_head(
+    git: &dyn GitRunner,
     bare_path: &Path,
     owner: &str,
     repo: &str,
@@ -1957,6 +2076,7 @@ async fn fetch_pull_head(
     envs: &[(String, String)],
 ) -> Result<(), GitError> {
     run_git_in_env(
+        git,
         bare_path,
         &[
             "fetch",
@@ -2128,6 +2248,7 @@ async fn ref_exists_with(git: &dyn GitRunner, bare_path: &Path, ref_name: &str) 
     .unwrap_or(false)
 }
 
+#[cfg(test)]
 async fn ref_exists(bare_path: &Path, ref_name: &str) -> bool {
     ref_exists_with(default_git_runner(), bare_path, ref_name).await
 }
@@ -2270,6 +2391,7 @@ fn is_transfer_progress(line: &str) -> bool {
 ///    lazybox session on the same branch); surface a clear, actionable
 ///    error instead of silently stealing its branch.
 async fn add_worktree_resilient(
+    git: &dyn GitRunner,
     bare_path: &Path,
     wt_path: &Path,
     branch: &str,
@@ -2281,7 +2403,7 @@ async fn add_worktree_resilient(
     let plain: [&str; 6] = ["worktree", "add", "-B", branch, wt, start_point];
     let forced: [&str; 5] = ["worktree", "add", "--force", wt, branch];
 
-    let err = match run_git_transfer(bare_path, &plain, auth, None).await {
+    let err = match git.run_transfer(bare_path, &plain, auth, None).await {
         Ok(()) => return Ok(()),
         Err(e) => e,
     };
@@ -2292,16 +2414,18 @@ async fn add_worktree_resilient(
         // the branch-holder ladder below because git names the path,
         // not a holding worktree.
         if worktree_missing_but_registered(&err) {
-            let _ = run_git_in(bare_path, &["worktree", "prune"]).await;
-            return run_git_transfer(bare_path, &plain, auth, None)
+            let _ = run_git_in(git, bare_path, &["worktree", "prune"]).await;
+            return git
+                .run_transfer(bare_path, &plain, auth, None)
                 .await
                 .map_err(explain_promisor_failure);
         }
         return Err(explain_promisor_failure(err));
     };
 
-    let _ = run_git_in(bare_path, &["worktree", "prune"]).await;
-    if run_git_transfer(bare_path, &plain, auth, None)
+    let _ = run_git_in(git, bare_path, &["worktree", "prune"]).await;
+    if git
+        .run_transfer(bare_path, &plain, auth, None)
         .await
         .is_ok()
     {
@@ -2317,7 +2441,8 @@ async fn add_worktree_resilient(
     // it falls through to the loud refusal below.
     let agent_root = canonical_or_self(&bare_path.join(".claude").join("worktrees"));
     if canonical_or_self(&holder).starts_with(&agent_root) {
-        return run_git_transfer(bare_path, &forced, auth, None)
+        return git
+            .run_transfer(bare_path, &forced, auth, None)
             .await
             .map_err(explain_promisor_failure);
     }
@@ -2380,15 +2505,18 @@ fn worktree_missing_but_registered(err: &GitError) -> bool {
 /// the worktree's private git dir (`BISECT_LOG`, `rebase-merge/`,
 /// `rebase-apply/`, `MERGE_HEAD`, `CHERRY_PICK_HEAD`). Errors only
 /// when the git dir itself can't be resolved (not a worktree at all).
-async fn worktree_unsafe_to_advance(wt_path: &Path) -> Result<Option<&'static str>, GitError> {
+async fn worktree_unsafe_to_advance(
+    git: &dyn GitRunner,
+    wt_path: &Path,
+) -> Result<Option<&'static str>, GitError> {
     // Resolve the worktree's own git dir first (where per-worktree
     // operation state lives). Failure here means "not a usable
     // worktree" — a real error the caller should surface, not an
     // unsafe-state skip.
-    let gitdir = run_git_in(wt_path, &["rev-parse", "--absolute-git-dir"]).await?;
+    let gitdir = run_git_in(git, wt_path, &["rev-parse", "--absolute-git-dir"]).await?;
     let gitdir = PathBuf::from(gitdir.trim());
 
-    if run_git_in(wt_path, &["symbolic-ref", "-q", "HEAD"])
+    if run_git_in(git, wt_path, &["symbolic-ref", "-q", "HEAD"])
         .await
         .is_err()
     {
@@ -2620,8 +2748,12 @@ async fn run_git_transfer(
 const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const GIT_NO_CWD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
-async fn run_git(args: &[&str], envs: &[(String, String)]) -> Result<String, GitError> {
-    run_git_with(default_git_runner(), None, args, envs).await
+async fn run_git(
+    git: &dyn GitRunner,
+    args: &[&str],
+    envs: &[(String, String)],
+) -> Result<String, GitError> {
+    run_git_with(git, None, args, envs).await
 }
 
 async fn run_git_with(
@@ -2853,16 +2985,16 @@ async fn apply_inline_script(target: &Path, body: &str) -> Result<(), GitError> 
     Ok(())
 }
 
-async fn run_git_in(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
-    run_git_in_env(cwd, args, &[]).await
+async fn run_git_in(git: &dyn GitRunner, cwd: &Path, args: &[&str]) -> Result<String, GitError> {
+    run_git_in_env(git, cwd, args, &[]).await
 }
 
 /// `git rev-list --count <range>` in `cwd`, as a `u64`. Any failure
 /// (unresolvable range, unborn HEAD, not a repo) counts as `0` — the
 /// callers all treat "no commits in the range" and "couldn't tell" the
 /// same conservative way.
-async fn count_commits(cwd: &Path, range: &str) -> u64 {
-    run_git_in(cwd, &["rev-list", "--count", range])
+async fn count_commits(git: &dyn GitRunner, cwd: &Path, range: &str) -> u64 {
+    run_git_in(git, cwd, &["rev-list", "--count", range])
         .await
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
@@ -2870,6 +3002,7 @@ async fn count_commits(cwd: &Path, range: &str) -> u64 {
 }
 
 async fn run_git_in_env(
+    git: &dyn GitRunner,
     cwd: &Path,
     args: &[&str],
     envs: &[(String, String)],
@@ -2882,7 +3015,7 @@ async fn run_git_in_env(
     // enough that a real `git fetch` over a slow network can still
     // complete; short enough that a hung process surfaces as an
     // error rather than silent paralysis.
-    run_git_with(default_git_runner(), Some(cwd), args, envs).await
+    run_git_with(git, Some(cwd), args, envs).await
 }
 
 #[cfg(test)]
@@ -3011,6 +3144,137 @@ mod decision_tests {
     }
 }
 
+#[cfg(all(test, unix))]
+mod runner_seam_tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    #[derive(Debug)]
+    struct Call {
+        cwd: Option<PathBuf>,
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+    }
+
+    struct ScriptedGit {
+        worktree: PathBuf,
+        calls: Mutex<Vec<Call>>,
+    }
+
+    impl ScriptedGit {
+        fn output(success: bool, stdout: &[u8]) -> Output {
+            Output {
+                status: std::process::ExitStatus::from_raw(if success { 0 } else { 1 << 8 }),
+                stdout: stdout.to_vec(),
+                stderr: Vec::new(),
+            }
+        }
+    }
+
+    impl GitRunner for ScriptedGit {
+        fn run<'a>(
+            &'a self,
+            cwd: Option<&'a Path>,
+            args: &'a [&'a str],
+            env: &'a [(String, String)],
+        ) -> Pin<Box<dyn Future<Output = Result<Output, GitError>> + Send + 'a>> {
+            self.calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(Call {
+                    cwd: cwd.map(Path::to_path_buf),
+                    args: args.iter().map(|arg| (*arg).to_string()).collect(),
+                    env: env.to_vec(),
+                });
+            let worktree = self.worktree.to_string_lossy();
+            let response = match args {
+                ["rev-parse", "--is-bare-repository"] => Ok(Self::output(true, b"true\n")),
+                ["rev-parse", "--verify", "--quiet", "HEAD"]
+                | [
+                    "fetch",
+                    "--no-prune",
+                    "origin",
+                    "+refs/heads/feature:refs/remotes/origin/feature",
+                ]
+                | [
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    "refs/remotes/origin/feature",
+                ]
+                | ["config", "branch.feature.remote", "origin"]
+                | ["config", "branch.feature.merge", "refs/heads/feature"] => {
+                    Ok(Self::output(true, &[]))
+                }
+                ["show-ref", "--verify", "--quiet", "refs/heads/feature"] => {
+                    Ok(Self::output(false, &[]))
+                }
+                [
+                    "worktree",
+                    "add",
+                    "-B",
+                    "feature",
+                    target,
+                    "refs/remotes/origin/feature",
+                ] if *target == worktree => Ok(Self::output(true, &[])),
+                _ => Err(GitError::Command(format!(
+                    "unexpected scripted git command: {}",
+                    args.join(" ")
+                ))),
+            };
+            Box::pin(async move { response })
+        }
+    }
+
+    #[tokio::test]
+    async fn checkout_provisioning_uses_the_injected_runner_end_to_end() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare = tmp.path().join("repos/acme/widget.git");
+        let worktree = tmp.path().join("worktrees/session");
+        std::fs::create_dir_all(&bare).expect("bare dir");
+        let git = Arc::new(ScriptedGit {
+            worktree: worktree.clone(),
+            calls: Mutex::new(Vec::new()),
+        });
+        let manager = WorktreeManager::new(tmp.path())
+            .with_git_runner(Arc::clone(&git) as Arc<dyn GitRunner>);
+
+        let checkout = manager
+            .checkout_at(&worktree, "acme", "widget", "feature", None)
+            .await
+            .expect("scripted checkout");
+
+        assert_eq!(checkout.path, worktree);
+        assert_eq!(checkout.branch, "feature");
+        let calls = git.calls.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            calls
+                .iter()
+                .all(|call| call.cwd.as_deref() == Some(bare.as_path()))
+        );
+        assert!(calls.iter().all(|call| call.env.is_empty()));
+        assert_eq!(
+            calls
+                .iter()
+                .map(|call| call.args.join(" "))
+                .collect::<Vec<_>>(),
+            [
+                "rev-parse --is-bare-repository",
+                "rev-parse --verify --quiet HEAD",
+                "fetch --no-prune origin +refs/heads/feature:refs/remotes/origin/feature",
+                "show-ref --verify --quiet refs/heads/feature",
+                "show-ref --verify --quiet refs/remotes/origin/feature",
+                &format!(
+                    "worktree add -B feature {} refs/remotes/origin/feature",
+                    checkout.path.display()
+                ),
+                "config branch.feature.remote origin",
+                "config branch.feature.merge refs/heads/feature",
+            ]
+        );
+    }
+}
+
 #[cfg(test)]
 mod auth_env_tests {
     use super::*;
@@ -3126,7 +3390,7 @@ mod auth_env_tests {
         );
 
         assert!(
-            fetch_origin_ref(&bare, "acme", "widgets", "main", &[])
+            fetch_origin_ref(default_git_runner(), &bare, "acme", "widgets", "main", &[])
                 .await
                 .is_err(),
             "sanity: the dead SSH-style URL must not fetch on its own"
@@ -3135,9 +3399,16 @@ mod auth_env_tests {
         let hub_base = format!("{}/", tmp.path().join("hub").display());
         let envs =
             git_config_env(&[(&format!("url.{hub_base}.insteadOf"), "git@invalid.example:")]);
-        fetch_origin_ref(&bare, "acme", "widgets", "main", &envs)
-            .await
-            .expect("env-injected rewrite makes the same fetch succeed");
+        fetch_origin_ref(
+            default_git_runner(),
+            &bare,
+            "acme",
+            "widgets",
+            "main",
+            &envs,
+        )
+        .await
+        .expect("env-injected rewrite makes the same fetch succeed");
         assert!(
             ref_exists(&bare, "refs/remotes/origin/main").await,
             "fetch updated the remote-tracking ref"
@@ -3314,7 +3585,9 @@ mod stalled_clone_tests {
             .expect("retry re-clones from the recorded origin");
         assert_eq!(recloned, bare);
         assert!(
-            bare_repo_health(&bare).await.expect("probe runs"),
+            bare_repo_health(default_git_runner(), &bare)
+                .await
+                .expect("probe runs"),
             "retry must leave a healthy bare clone"
         );
         assert!(!partial.exists(), "stale partial must be cleared");
@@ -3367,7 +3640,7 @@ mod health_probe_tests {
     #[tokio::test]
     async fn healthy_bare_clone_probes_ok_true() {
         let (_tmp, bare) = local_bare_clone();
-        assert!(bare_repo_health(&bare).await.unwrap());
+        assert!(bare_repo_health(default_git_runner(), &bare).await.unwrap());
     }
 
     /// B10 (issue #557): when `origin/HEAD` can't be resolved (offline,
@@ -3463,7 +3736,7 @@ mod health_probe_tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let dir = tmp.path().join("not-a-repo.git");
         std::fs::create_dir(&dir).expect("mkdir");
-        assert!(!bare_repo_health(&dir).await.unwrap());
+        assert!(!bare_repo_health(default_git_runner(), &dir).await.unwrap());
     }
 
     /// Regression: the probe FAILING TO RUN (spawn error — here a cwd
@@ -3478,7 +3751,7 @@ mod health_probe_tests {
         let file = tmp.path().join("bare.git");
         std::fs::write(&file, "not a directory").expect("write file");
         assert!(
-            bare_repo_health(&file).await.is_err(),
+            bare_repo_health(default_git_runner(), &file).await.is_err(),
             "a probe that couldn't run must propagate an error, not condemn the repo"
         );
     }
@@ -3586,7 +3859,9 @@ mod health_probe_tests {
         std::fs::write(wt.join("user-notes.md"), "keep me").expect("write untracked");
 
         assert_eq!(
-            validate_worktree_dir(&wt, &bare).await.unwrap(),
+            validate_worktree_dir(default_git_runner(), &wt, &bare)
+                .await
+                .unwrap(),
             WorktreeDirState::Valid,
             "repair completes the checkout and reuses the worktree"
         );
@@ -3629,7 +3904,7 @@ mod health_probe_tests {
         std::fs::write(wt.join("f.txt"), "important fallback-session edits\n")
             .expect("edit tracked file");
 
-        let verdict = validate_worktree_dir(&wt, &bare).await;
+        let verdict = validate_worktree_dir(default_git_runner(), &wt, &bare).await;
         assert!(
             verdict.is_err(),
             "a tracked-file edit must refuse (got {verdict:?}), never reset --hard it away"
@@ -3657,11 +3932,17 @@ mod health_probe_tests {
         let junk = tmp.path().join("junk.partial");
         std::fs::create_dir(&junk).expect("mkdir");
         std::fs::write(junk.join("half-written"), "x").expect("write");
-        assert_eq!(resumable_partial_origin(&junk).await, None);
+        assert_eq!(
+            resumable_partial_origin(default_git_runner(), &junk).await,
+            None
+        );
 
         let no_origin = tmp.path().join("no-origin.partial");
         git(tmp.path(), &["init", "-q", "--bare", "no-origin.partial"]);
-        assert_eq!(resumable_partial_origin(&no_origin).await, None);
+        assert_eq!(
+            resumable_partial_origin(default_git_runner(), &no_origin).await,
+            None
+        );
 
         let staged = tmp.path().join("staged.partial");
         git(tmp.path(), &["init", "-q", "--bare", "staged.partial"]);
@@ -3670,7 +3951,7 @@ mod health_probe_tests {
             &["remote", "add", "origin", "git@github.com:acme/widgets.git"],
         );
         assert_eq!(
-            resumable_partial_origin(&staged).await,
+            resumable_partial_origin(default_git_runner(), &staged).await,
             Some("git@github.com:acme/widgets.git".to_string())
         );
     }
@@ -3699,7 +3980,9 @@ mod health_probe_tests {
         );
 
         assert_eq!(
-            validate_worktree_dir(&wt, &bare).await.unwrap(),
+            validate_worktree_dir(default_git_runner(), &wt, &bare)
+                .await
+                .unwrap(),
             WorktreeDirState::Valid,
             "sanity: a live worktree of this bare clone is Valid"
         );
@@ -3707,7 +3990,9 @@ mod health_probe_tests {
         std::fs::remove_dir_all(bare.join("worktrees")).expect("nuke worktree metadata");
 
         assert_eq!(
-            validate_worktree_dir(&wt, &bare).await.unwrap(),
+            validate_worktree_dir(default_git_runner(), &wt, &bare)
+                .await
+                .unwrap(),
             WorktreeDirState::Reprovision,
             "a pristine dangling leftover is reclaimed, never wedged"
         );
@@ -3743,7 +4028,7 @@ mod health_probe_tests {
 
         std::fs::remove_dir_all(bare.join("worktrees")).expect("nuke worktree metadata");
 
-        let verdict = validate_worktree_dir(&wt, &bare).await;
+        let verdict = validate_worktree_dir(default_git_runner(), &wt, &bare).await;
         assert!(
             verdict.is_err(),
             "a dirty dangling leftover must refuse (got {verdict:?}), never delete work"
@@ -3790,7 +4075,9 @@ mod health_probe_tests {
         std::fs::remove_dir_all(bare.join("worktrees")).expect("nuke worktree metadata");
 
         assert_eq!(
-            validate_worktree_dir(&wt, &bare).await.unwrap(),
+            validate_worktree_dir(default_git_runner(), &wt, &bare)
+                .await
+                .unwrap(),
             WorktreeDirState::Reprovision,
             "only-ignored-debris leftover is pristine and reclaimable"
         );
@@ -3835,7 +4122,9 @@ mod health_probe_tests {
         std::fs::remove_dir_all(bare.join("worktrees")).expect("nuke worktree metadata");
 
         assert_eq!(
-            validate_worktree_dir(&wt, &bare).await.unwrap(),
+            validate_worktree_dir(default_git_runner(), &wt, &bare)
+                .await
+                .unwrap(),
             WorktreeDirState::Reprovision,
             "a non-peelable tag must not wedge recovery of a pristine leftover"
         );
@@ -3943,13 +4232,15 @@ mod resilient_add_tests {
         std::fs::write(nested.join("agent-work.txt"), "in progress").expect("write agent file");
 
         let target = tmp.path().join("target");
-        add_worktree_resilient(&bare, &target, "feat", "HEAD", &[])
+        add_worktree_resilient(default_git_runner(), &bare, &target, "feat", "HEAD", &[])
             .await
             .expect("nested agent collision must resolve, not fail");
 
         assert!(target.join(".git").exists(), "target is a real worktree");
         assert_eq!(
-            validate_worktree_dir(&target, &bare).await.unwrap(),
+            validate_worktree_dir(default_git_runner(), &target, &bare)
+                .await
+                .unwrap(),
             WorktreeDirState::Valid,
             "the forced worktree checked out on the branch"
         );
@@ -4003,11 +4294,13 @@ mod resilient_add_tests {
         );
 
         let target = tmp.path().join("target");
-        add_worktree_resilient(&bare, &target, "feat", "HEAD", &[])
+        add_worktree_resilient(default_git_runner(), &bare, &target, "feat", "HEAD", &[])
             .await
             .expect("prune must clear the stale registration and let the retry win");
         assert_eq!(
-            validate_worktree_dir(&target, &bare).await.unwrap(),
+            validate_worktree_dir(default_git_runner(), &target, &bare)
+                .await
+                .unwrap(),
             WorktreeDirState::Valid
         );
     }
@@ -4033,7 +4326,7 @@ mod resilient_add_tests {
         );
 
         let target = tmp.path().join("target");
-        let err = add_worktree_resilient(&bare, &target, "feat", "HEAD", &[])
+        let err = add_worktree_resilient(default_git_runner(), &bare, &target, "feat", "HEAD", &[])
             .await
             .expect_err("a live external holder must not be silently stolen from");
         let msg = err.to_string();
@@ -4074,7 +4367,7 @@ mod resilient_add_tests {
         std::fs::write(rogue.join("f.txt"), "someone else's work\n").expect("edit rogue file");
 
         let target = tmp.path().join("target");
-        let err = add_worktree_resilient(&bare, &target, "feat", "HEAD", &[])
+        let err = add_worktree_resilient(default_git_runner(), &bare, &target, "feat", "HEAD", &[])
             .await
             .expect_err("a non-agent holder inside the bare dir must not be force-stolen");
         let msg = err.to_string();
@@ -4122,7 +4415,7 @@ mod resilient_add_tests {
     async fn rm_rfed_worktree_readded_at_same_path_recovers() {
         let (tmp, bare) = local_bare_clone();
         let target = tmp.path().join("target");
-        add_worktree_resilient(&bare, &target, "feat", "HEAD", &[])
+        add_worktree_resilient(default_git_runner(), &bare, &target, "feat", "HEAD", &[])
             .await
             .expect("initial provision");
         // Simulate the user's manual `rm -rf`: the directory is gone,
@@ -4131,11 +4424,20 @@ mod resilient_add_tests {
 
         // Re-add on a DIFFERENT branch → the "missing but already
         // registered worktree" refusal, the shape the new matcher owns.
-        add_worktree_resilient(&bare, &target, "feat-renamed", "HEAD", &[])
-            .await
-            .expect("re-add at the same path must prune the stale registration and retry");
+        add_worktree_resilient(
+            default_git_runner(),
+            &bare,
+            &target,
+            "feat-renamed",
+            "HEAD",
+            &[],
+        )
+        .await
+        .expect("re-add at the same path must prune the stale registration and retry");
         assert_eq!(
-            validate_worktree_dir(&target, &bare).await.unwrap(),
+            validate_worktree_dir(default_git_runner(), &target, &bare)
+                .await
+                .unwrap(),
             WorktreeDirState::Valid,
             "the recovered directory is a real worktree again"
         );
@@ -4143,11 +4445,20 @@ mod resilient_add_tests {
         // And the same-branch shape (branch matcher + prune rung)
         // keeps working.
         std::fs::remove_dir_all(&target).expect("rm -rf again");
-        add_worktree_resilient(&bare, &target, "feat-renamed", "HEAD", &[])
-            .await
-            .expect("same-branch re-add also recovers");
+        add_worktree_resilient(
+            default_git_runner(),
+            &bare,
+            &target,
+            "feat-renamed",
+            "HEAD",
+            &[],
+        )
+        .await
+        .expect("same-branch re-add also recovers");
         assert_eq!(
-            validate_worktree_dir(&target, &bare).await.unwrap(),
+            validate_worktree_dir(default_git_runner(), &target, &bare)
+                .await
+                .unwrap(),
             WorktreeDirState::Valid,
         );
     }

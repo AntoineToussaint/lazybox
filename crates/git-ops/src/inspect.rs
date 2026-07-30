@@ -652,7 +652,7 @@ async fn inspect_one(
             format!("refs/remotes/origin/{b}"),
         )
     });
-    let (local_exists, remote_exists, size_pair, has_uncommitted_changes, has_unpushed_commits) = tokio::join!(
+    let (local_exists, remote_exists, size_pair, uncommitted_state, has_unpushed_commits) = tokio::join!(
         async {
             match (bare_path.as_ref(), branch_refs.as_ref()) {
                 (Some(bare), Some((local_ref, _))) => ref_exists(git, bare, local_ref).await,
@@ -670,6 +670,7 @@ async fn inspect_one(
         unpushed(git, path, bare_path.as_deref()),
     );
     let (size_bytes, last_modified) = size_pair;
+    let has_uncommitted_changes = uncommitted_state.unwrap_or(false);
 
     // Branch-existence reasons only fire when we knew the branch +
     // bare in the first place; otherwise the lookups defaulted to
@@ -696,7 +697,7 @@ async fn inspect_one(
     }
 
     let is_safe_to_delete = !locked
-        && !has_uncommitted_changes
+        && uncommitted_state == Some(false)
         && !has_unpushed_commits
         && reasons.iter().any(|r| {
             matches!(
@@ -829,7 +830,7 @@ async fn worktree_is_pristine_with(
     bare: Option<&Path>,
 ) -> bool {
     let (dirty, ahead) = tokio::join!(uncommitted(git, worktree), unpushed(git, worktree, bare));
-    !dirty && !ahead
+    dirty == Some(false) && !ahead
 }
 
 /// Whether `path` holds anything other than a `.git` entry — the same
@@ -857,14 +858,12 @@ async fn directory_has_real_content(path: &Path) -> bool {
     }
 }
 
-async fn uncommitted(git: &dyn GitRunner, worktree: &Path) -> bool {
-    let Ok(output) = git
+async fn uncommitted(git: &dyn GitRunner, worktree: &Path) -> Option<bool> {
+    let output = git
         .run(Some(worktree), &["status", "--porcelain"], &[])
         .await
-    else {
-        return false;
-    };
-    output.status.success() && !output.stdout.is_empty()
+        .ok()?;
+    output.status.success().then_some(!output.stdout.is_empty())
 }
 
 /// `git rev-list --count <range>` in `worktree`. `None` when the
@@ -1017,6 +1016,7 @@ mod tests {
     struct ScriptedGit {
         bare: PathBuf,
         worktree: PathBuf,
+        fail_status: bool,
         calls: Mutex<Vec<Call>>,
     }
 
@@ -1064,6 +1064,9 @@ mod tests {
                     "--quiet",
                     "refs/remotes/origin/feature",
                 ] => Ok(Self::output(false, Vec::new())),
+                ["status", "--porcelain"] if self.fail_status => {
+                    Err(GitError::Command("status probe failed".into()))
+                }
                 ["status", "--porcelain"] => Ok(Self::output(true, Vec::new())),
                 ["rev-list", "--count", "@{u}..HEAD"] => Ok(Self::output(true, b"0\n".to_vec())),
                 ["config", "--get", "branch.feature.remote"] => {
@@ -1088,6 +1091,7 @@ mod tests {
         let git = Arc::new(ScriptedGit {
             bare: bare.clone(),
             worktree: worktree.clone(),
+            fail_status: false,
             calls: Mutex::new(Vec::new()),
         });
         let manager = WorktreeManager::new(tmp.path())
@@ -1129,5 +1133,32 @@ mod tests {
                 "worktree list --porcelain",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn failed_cleanliness_probe_is_not_safe_to_delete() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare = tmp.path().join("repos/acme/widget.git");
+        let worktree = tmp.path().join("worktrees/session");
+        std::fs::create_dir_all(&bare).expect("bare dir");
+        std::fs::create_dir_all(&worktree).expect("worktree dir");
+        let git = Arc::new(ScriptedGit {
+            bare: bare.clone(),
+            worktree: worktree.clone(),
+            fail_status: true,
+            calls: Mutex::new(Vec::new()),
+        });
+        let manager = WorktreeManager::new(tmp.path())
+            .with_git_runner(Arc::clone(&git) as Arc<dyn GitRunner>);
+
+        let inspections = manager
+            .inspect_worktrees(&[])
+            .await
+            .expect("scripted inspection");
+
+        assert_eq!(inspections.len(), 1);
+        assert!(!inspections[0].has_uncommitted_changes);
+        assert!(!inspections[0].is_safe_to_delete);
+        assert!(!worktree_is_pristine_with(git.as_ref(), &worktree, Some(&bare)).await);
     }
 }

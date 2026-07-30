@@ -1265,8 +1265,7 @@ impl<T: TerminalAdapter> Model<T> {
                     && rect_contains(right_top_rect, m.column, m.row)
                     && let Some(ws_key) = self.sidebar.selected_workspace().map(|w| w.key.clone())
                 {
-                    self.activity_pane_overrides
-                        .insert(ws_key, lazybox_config::ActivityPaneMode::Full);
+                    self.activity_pane.expand(ws_key);
                     self.set_focus(PaneFocus::Right);
                     self.redraw = true;
                     return;

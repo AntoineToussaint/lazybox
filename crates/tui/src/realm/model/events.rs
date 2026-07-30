@@ -940,7 +940,7 @@ impl<T: TerminalAdapter> Model<T> {
             // Drop any Activity-pane visibility override so a re-added
             // workspace re-applies the empty-aware default instead of a
             // stale manual choice.
-            self.activity_pane_overrides.remove(key);
+            self.activity_pane.forget(key);
             // Forget the remembered pane focus too, so a re-added
             // workspace doesn't inherit a stale restore target.
             let session_key: lazybox_core::SessionKey = key.into();

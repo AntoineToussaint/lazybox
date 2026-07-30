@@ -22,6 +22,7 @@
 //! the top changes. Modal payloads come back as `Msg`s from
 //! `app.tick(...)` and `Model::update` decides what to do.
 
+mod activity_pane;
 mod dispatch;
 mod events;
 mod helpers;
@@ -60,6 +61,7 @@ use crate::realm::components::right::Right;
 use crate::realm::components::sidebar::Sidebar;
 use crate::realm::components::splash::Splash;
 use crate::realm::components::terminals::Terminals;
+use activity_pane::ActivityPaneState;
 use lazybox_ipc::{Client, Command as IpcCommand};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -1187,16 +1189,8 @@ pub struct Model<T: TerminalAdapter> {
     /// overwrites the terminal focus of the workspace being left.
     /// Session-scoped — not persisted across launches.
     workspace_focus: std::collections::HashMap<lazybox_core::SessionKey, PaneFocus>,
-    /// Per-workspace manual override of the Activity pane's mode,
-    /// keyed by workspace. Absent → the pane starts in
-    /// `ui.activity_pane_default` (and still auto-hides when the
-    /// workspace has no activity worth showing, `Right::
-    /// has_visible_content`). `ToggleActivityPane` (Shift-P) cycles
-    /// `Full → Summary → Hidden` and records the user's choice here so
-    /// navigating away and back keeps it. Session-scoped — not
-    /// persisted across launches.
-    activity_pane_overrides:
-        std::collections::HashMap<lazybox_core::WorkspaceKey, ActivityPaneMode>,
+    /// Session-scoped Activity pane modes and per-workspace overrides.
+    activity_pane: ActivityPaneState,
     /// User-supplied key overrides for catalog actions. Keys are
     /// snake_case `ActionKind` names (see `ActionKind::name`), or
     /// `spawn_agent.<id>` for a per-agent row; values are key-spec
@@ -1538,7 +1532,7 @@ impl<T: TerminalAdapter> Model<T> {
             last_focused_session_key: None,
             needs_pane_sync: false,
             workspace_focus: std::collections::HashMap::new(),
-            activity_pane_overrides: std::collections::HashMap::new(),
+            activity_pane: ActivityPaneState::default(),
             action_key_overrides: std::collections::BTreeMap::new(),
             agent_models: std::collections::BTreeMap::new(),
             // Built-in agents + their `a c` / `a x` / `a u` convention.
@@ -3661,16 +3655,11 @@ impl<T: TerminalAdapter> Model<T> {
     /// nothing to show still auto-hides. With nothing selected (empty
     /// inbox) the pane keeps its prior always-on behavior.
     pub(super) fn activity_pane_mode(&self) -> ActivityPaneMode {
-        let Some(ws) = self.sidebar.selected_workspace() else {
-            return ActivityPaneMode::Full;
-        };
-        if let Some(&mode) = self.activity_pane_overrides.get(&ws.key) {
-            return mode;
-        }
-        if !self.right.has_visible_content() {
-            return ActivityPaneMode::Hidden;
-        }
-        self.ui_defaults.activity_pane_default
+        self.activity_pane.mode(
+            self.sidebar.selected_workspace().map(|ws| &ws.key),
+            self.right.has_visible_content(),
+            self.ui_defaults.activity_pane_default,
+        )
     }
 
     /// Whether the *full* Activity pane is shown (and thus focusable).
@@ -3678,7 +3667,11 @@ impl<T: TerminalAdapter> Model<T> {
     /// summary line is a non-focusable header, so Tab / click / Enter
     /// route past it exactly like a hidden pane.
     pub(super) fn activity_pane_visible(&self) -> bool {
-        self.activity_pane_mode() == ActivityPaneMode::Full
+        self.activity_pane.visible(
+            self.sidebar.selected_workspace().map(|ws| &ws.key),
+            self.right.has_visible_content(),
+            self.ui_defaults.activity_pane_default,
+        )
     }
 
     /// The three pane rects, accounting for the Activity pane's mode.

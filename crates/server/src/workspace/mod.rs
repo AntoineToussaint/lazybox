@@ -301,7 +301,7 @@ pub async fn set_auto_merge_on_green(config: &ServerConfig, key: &WorkspaceKey, 
 /// Persist the workspace's "track main" arm (issue #535). Mirrors
 /// [`set_auto_merge_on_green`]: load, flip the field, commit (persists +
 /// broadcasts `WorkspaceUpserted`). The actual fast-forwarding happens
-/// in the background sweep ([`sync_tracked_workspaces`]); this only
+/// in the background sweep ([`crate::polling::sync_tracked_workspaces`]); this only
 /// records the intent. Disabling clears the stale "behind" badge so it
 /// doesn't linger after the user stops tracking.
 pub async fn set_track_main(config: &ServerConfig, key: &WorkspaceKey, enabled: bool) {

@@ -2,9 +2,9 @@
 //!
 //! Lazybox exposes an `o` (sidebar) shortcut that opens the focused
 //! workspace's worktree in the user's editor of choice. We probe
-//! PATH at startup for known editors (Zed, VS Code, Cursor, Vim,
-//! Neovim, Helix, JetBrains IDEs, Fleet, …) so the user doesn't
-//! have to configure anything if they have a standard install.
+//! PATH at startup for known GUI editors. On macOS, app bundles in
+//! `/Applications` and `~/Applications` provide a fallback when an
+//! editor has no command-line launcher.
 //!
 //! ## Customization
 //!
@@ -32,7 +32,7 @@
 //! `crate::platform::detach_child_process` helper.
 
 use serde::Deserialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// One launchable editor. Builtins are static; user additions are
 /// loaded from config and merged at startup.
@@ -47,29 +47,52 @@ pub struct EditorTemplate {
     pub command: String,
     /// Argv. `{path}` is replaced with the worktree dir at launch.
     pub args: Vec<String>,
+    /// macOS app-bundle name, used when the CLI is not on PATH.
+    pub macos_app_name: Option<String>,
 }
 
 /// Built-in editor list. **GUI editors only** — vim/neovim/helix
 /// belong in a terminal pane, which lazybox already provides. Users
 /// who want them can add via `editors:` in `~/.lazybox/config.yaml`.
 fn builtin_editors() -> Vec<EditorTemplate> {
-    let template = |id: &str, display: &str, command: &str| EditorTemplate {
+    let template = |id: &str, display: &str, command: &str, macos_app_name: &str| EditorTemplate {
         id: id.to_string(),
         display: display.to_string(),
         command: command.to_string(),
         args: vec!["{path}".to_string()],
+        macos_app_name: Some(macos_app_name.to_string()),
     };
     vec![
-        template("zed", "Zed", "zed"),
-        template("code", "VS Code", "code"),
-        template("cursor", "Cursor", "cursor"),
-        template("windsurf", "Windsurf", "windsurf"),
-        template("fleet", "JetBrains Fleet", "fleet"),
-        template("idea", "IntelliJ IDEA", "idea"),
+        template("zed", "Zed", "zed", "Zed"),
+        template("code", "VS Code", "code", "Visual Studio Code"),
+        template("cursor", "Cursor", "cursor", "Cursor"),
+        template("windsurf", "Windsurf", "windsurf", "Windsurf"),
+        template("subl", "Sublime Text", "subl", "Sublime Text"),
+        template("fleet", "JetBrains Fleet", "fleet", "Fleet"),
+        template("idea", "IntelliJ IDEA", "idea", "IntelliJ IDEA"),
+        template("pycharm", "PyCharm", "pycharm", "PyCharm"),
+        template("webstorm", "WebStorm", "webstorm", "WebStorm"),
+        template("goland", "GoLand", "goland", "GoLand"),
+        template("clion", "CLion", "clion", "CLion"),
+        template("rubymine", "RubyMine", "rubymine", "RubyMine"),
+        template("phpstorm", "PhpStorm", "phpstorm", "PhpStorm"),
+        template("rider", "Rider", "rider", "Rider"),
+        template("datagrip", "DataGrip", "datagrip", "DataGrip"),
+        template(
+            "android-studio",
+            "Android Studio",
+            "android-studio",
+            "Android Studio",
+        ),
+        template("conductor", "Conductor", "conductor", "Conductor"),
+        template("nova", "Nova", "nova", "Nova"),
+        template("mate", "TextMate", "mate", "TextMate"),
+        template("bbedit", "BBEdit", "bbedit", "BBEdit"),
+        template("emacs", "Emacs", "emacs", "Emacs"),
         // Gram: a Zed fork with AI, telemetry, and collaboration
         // stripped out (codeberg.org/GramEditor/gram). Its CLI binary
         // is `gram`; obscure enough that the name reads like a typo.
-        template("gram", "Gram", "gram"),
+        template("gram", "Gram", "gram", "Gram"),
     ]
 }
 
@@ -104,6 +127,7 @@ impl From<UserEditorEntry> for EditorTemplate {
             display,
             command: u.command,
             args: u.args.unwrap_or_else(|| vec!["{path}".to_string()]),
+            macos_app_name: None,
         }
     }
 }
@@ -124,15 +148,80 @@ pub fn merge(builtins: Vec<EditorTemplate>, user: Vec<EditorTemplate>) -> Vec<Ed
     out
 }
 
-/// Filter the provided template list to those whose command is
-/// actually on PATH. Cheap (`which` resolves once per editor at
-/// startup) and synchronous.
-pub fn detect_available(templates: &[EditorTemplate]) -> Vec<EditorTemplate> {
+fn macos_application_dirs() -> Vec<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut dirs = vec![PathBuf::from("/Applications")];
+        if let Some(home) = std::env::var_os("HOME") {
+            dirs.push(PathBuf::from(home).join("Applications"));
+        }
+        dirs
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Vec::new()
+    }
+}
+
+fn find_macos_app_name(app_name: &str, application_dirs: &[PathBuf]) -> Option<String> {
+    for dir in application_dirs {
+        if dir.join(format!("{app_name}.app")).is_dir() {
+            return Some(app_name.to_string());
+        }
+
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        let mut matches = entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                if !path.is_dir() || path.extension().and_then(|ext| ext.to_str()) != Some("app") {
+                    return None;
+                }
+                let name = path.file_stem()?.to_str()?;
+                name.strip_prefix(app_name)
+                    .is_some_and(|suffix| suffix.starts_with(' '))
+                    .then(|| name.to_string())
+            })
+            .collect::<Vec<_>>();
+        matches.sort_unstable();
+        if let Some(name) = matches.pop() {
+            return Some(name);
+        }
+    }
+    None
+}
+
+fn detect_available_with(
+    templates: &[EditorTemplate],
+    application_dirs: &[PathBuf],
+    mut command_available: impl FnMut(&str) -> bool,
+) -> Vec<EditorTemplate> {
     templates
         .iter()
-        .filter(|t| which::which(&t.command).is_ok())
-        .cloned()
+        .filter_map(|template| {
+            if command_available(&template.command) {
+                return Some(template.clone());
+            }
+
+            let app_name =
+                find_macos_app_name(template.macos_app_name.as_deref()?, application_dirs)?;
+            let mut detected = template.clone();
+            detected.command = "open".to_string();
+            detected.args = vec!["-a".to_string(), app_name, "{path}".to_string()];
+            Some(detected)
+        })
         .collect()
+}
+
+/// Filter the provided template list to installed editors. Commands
+/// on PATH are preferred. On macOS, a matching app bundle falls back
+/// to `open -a` when the command is unavailable.
+pub fn detect_available(templates: &[EditorTemplate]) -> Vec<EditorTemplate> {
+    detect_available_with(templates, &macos_application_dirs(), |command| {
+        which::which(command).is_ok()
+    })
 }
 
 /// Top-level convenience: load user config, merge with builtins,
@@ -257,18 +346,22 @@ fn spawn_url_reaper(
 ///
 /// The target is `file`, with `:line` / `:line:col` appended when
 /// present. VS Code-family editors only honor that suffix after a
-/// `--goto` flag, so we prepend it for them. The target is then
-/// substituted into the template's `{path}` placeholder (matching
-/// [`launch`]); templates with no placeholder get the target
-/// appended as a trailing positional argument.
+/// `--goto` flag, so we prepend it for them. macOS app launchers open
+/// the file without a location because `open -a` cannot interpret
+/// editor-specific line arguments. The target is then substituted
+/// into the template's `{path}` placeholder (matching [`launch`]);
+/// templates with no placeholder get the target appended as a
+/// trailing positional argument.
 fn open_file_args(
     template: &EditorTemplate,
     file: &str,
     line: Option<u32>,
     col: Option<u32>,
 ) -> Vec<String> {
+    let uses_macos_app =
+        template.command == "open" && template.args.first().map(String::as_str) == Some("-a");
     let mut target = file.to_string();
-    if let Some(l) = line {
+    if let Some(l) = line.filter(|_| !uses_macos_app) {
         target.push(':');
         target.push_str(&l.to_string());
         if let Some(c) = col {
@@ -282,7 +375,7 @@ fn open_file_args(
         template.id.as_str(),
         "code" | "cursor" | "windsurf" | "codium" | "vscodium"
     );
-    if line.is_some() && vscode_family {
+    if line.is_some() && vscode_family && !uses_macos_app {
         out.push("--goto".to_string());
     }
 
@@ -394,6 +487,7 @@ mod tests {
             display: "Zed (custom)".to_string(),
             command: "/opt/zed/zed".to_string(),
             args: vec!["{path}".into()],
+            macos_app_name: None,
         }];
         let merged = merge(builtin_editors(), user);
         let zed = merged.iter().find(|e| e.id == "zed").expect("zed present");
@@ -408,6 +502,7 @@ mod tests {
             display: "My".to_string(),
             command: "myedit".to_string(),
             args: vec!["{path}".into()],
+            macos_app_name: None,
         }];
         let merged = merge(builtin_editors(), user);
         assert!(merged.iter().any(|e| e.id == "myedit"));
@@ -432,7 +527,118 @@ mod tests {
             display: id.into(),
             command: id.into(),
             args: args.iter().map(|s| s.to_string()).collect(),
+            macos_app_name: None,
         }
+    }
+
+    #[test]
+    fn builtin_registry_covers_common_gui_editors() {
+        let builtins = builtin_editors();
+        let expected = [
+            ("zed", "Zed", "zed", "Zed"),
+            ("code", "VS Code", "code", "Visual Studio Code"),
+            ("cursor", "Cursor", "cursor", "Cursor"),
+            ("windsurf", "Windsurf", "windsurf", "Windsurf"),
+            ("subl", "Sublime Text", "subl", "Sublime Text"),
+            ("fleet", "JetBrains Fleet", "fleet", "Fleet"),
+            ("idea", "IntelliJ IDEA", "idea", "IntelliJ IDEA"),
+            ("pycharm", "PyCharm", "pycharm", "PyCharm"),
+            ("webstorm", "WebStorm", "webstorm", "WebStorm"),
+            ("goland", "GoLand", "goland", "GoLand"),
+            ("clion", "CLion", "clion", "CLion"),
+            ("rubymine", "RubyMine", "rubymine", "RubyMine"),
+            ("phpstorm", "PhpStorm", "phpstorm", "PhpStorm"),
+            ("rider", "Rider", "rider", "Rider"),
+            ("datagrip", "DataGrip", "datagrip", "DataGrip"),
+            (
+                "android-studio",
+                "Android Studio",
+                "android-studio",
+                "Android Studio",
+            ),
+            ("conductor", "Conductor", "conductor", "Conductor"),
+            ("nova", "Nova", "nova", "Nova"),
+            ("mate", "TextMate", "mate", "TextMate"),
+            ("bbedit", "BBEdit", "bbedit", "BBEdit"),
+            ("emacs", "Emacs", "emacs", "Emacs"),
+            ("gram", "Gram", "gram", "Gram"),
+        ];
+
+        for (id, display, command, app_name) in expected {
+            let editor = builtins
+                .iter()
+                .find(|editor| editor.id == id)
+                .unwrap_or_else(|| panic!("{id} builtin present"));
+            assert_eq!(editor.display, display);
+            assert_eq!(editor.command, command);
+            assert_eq!(editor.args, vec!["{path}"]);
+            assert_eq!(editor.macos_app_name.as_deref(), Some(app_name));
+        }
+    }
+
+    #[test]
+    fn detection_prefers_an_available_cli_over_a_macos_app() {
+        let apps = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(apps.path().join("Zed.app")).expect("create app bundle");
+        let mut zed = tpl("zed", &["{path}"]);
+        zed.macos_app_name = Some("Zed".into());
+
+        let detected = detect_available_with(&[zed], &[apps.path().to_path_buf()], |command| {
+            command == "zed"
+        });
+
+        assert_eq!(detected.len(), 1);
+        assert_eq!(detected[0].command, "zed");
+        assert_eq!(detected[0].args, vec!["{path}"]);
+    }
+
+    #[test]
+    fn detection_falls_back_to_an_exact_macos_app_name() {
+        let apps = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(apps.path().join("Sublime Text.app")).expect("create app bundle");
+        let mut sublime = tpl("subl", &["{path}"]);
+        sublime.macos_app_name = Some("Sublime Text".into());
+
+        let detected = detect_available_with(&[sublime], &[apps.path().to_path_buf()], |_| false);
+
+        assert_eq!(detected.len(), 1);
+        assert_eq!(detected[0].command, "open");
+        assert_eq!(detected[0].args, vec!["-a", "Sublime Text", "{path}"]);
+    }
+
+    #[test]
+    fn detection_falls_back_to_a_versioned_jetbrains_toolbox_app() {
+        let system_apps = tempfile::tempdir().expect("system tempdir");
+        let user_apps = tempfile::tempdir().expect("user tempdir");
+        std::fs::create_dir(user_apps.path().join("PyCharm Professional 2026.1.app"))
+            .expect("create Toolbox app bundle");
+        let mut pycharm = tpl("pycharm", &["{path}"]);
+        pycharm.macos_app_name = Some("PyCharm".into());
+
+        let detected = detect_available_with(
+            &[pycharm],
+            &[
+                system_apps.path().join("missing"),
+                user_apps.path().to_path_buf(),
+            ],
+            |_| false,
+        );
+
+        assert_eq!(detected.len(), 1);
+        assert_eq!(detected[0].command, "open");
+        assert_eq!(
+            detected[0].args,
+            vec!["-a", "PyCharm Professional 2026.1", "{path}"]
+        );
+    }
+
+    #[test]
+    fn detection_excludes_an_editor_without_a_cli_or_macos_app() {
+        let apps = tempfile::tempdir().expect("tempdir");
+        let mut zed = tpl("zed", &["{path}"]);
+        zed.macos_app_name = Some("Zed".into());
+
+        assert!(detect_available_with(&[zed], &[apps.path().to_path_buf()], |_| false).is_empty());
     }
 
     #[test]
@@ -466,6 +672,16 @@ mod tests {
     }
 
     #[test]
+    fn open_file_args_for_a_macos_app_ignores_the_line_location() {
+        let mut t = tpl("code", &["-a", "Visual Studio Code", "{path}"]);
+        t.command = "open".into();
+        assert_eq!(
+            open_file_args(&t, "/a/b.rs", Some(7), Some(3)),
+            vec!["-a", "Visual Studio Code", "/a/b.rs"]
+        );
+    }
+
+    #[test]
     fn gram_is_a_builtin_editor() {
         let builtins = builtin_editors();
         let gram = builtins
@@ -475,6 +691,7 @@ mod tests {
         assert_eq!(gram.display, "Gram");
         assert_eq!(gram.command, "gram");
         assert_eq!(gram.args, vec!["{path}"]);
+        assert_eq!(gram.macos_app_name.as_deref(), Some("Gram"));
         // "Glam" is a mishearing of Gram (the Zed fork); there is no
         // separate `glam` editor, so the builtin stays a single entry.
         assert!(

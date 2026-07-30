@@ -1085,7 +1085,11 @@ impl<T: TerminalAdapter> Model<T> {
         bytes.extend_from_slice(b"\x1b[200~");
         bytes.extend_from_slice(text.as_bytes());
         bytes.extend_from_slice(b"\x1b[201~");
-        self.send_cmd(IpcCommand::Write { terminal_id, bytes });
+        self.send_cmd(IpcCommand::Write {
+            terminal_id,
+            bytes,
+            intent: lazybox_ipc::TerminalInputIntent::Compose,
+        });
         // Persist the pasted-but-unsubmitted draft (issue #373) so a
         // restart can recall it — the same path key-by-key typing takes.
         if let Some((id, buffer)) = draft {
@@ -1333,7 +1337,11 @@ impl<T: TerminalAdapter> Model<T> {
                                             cell_row,
                                         )
                                 {
-                                    self.send_cmd(IpcCommand::Write { terminal_id, bytes });
+                                    self.send_cmd(IpcCommand::Write {
+                                        terminal_id,
+                                        bytes,
+                                        intent: lazybox_ipc::TerminalInputIntent::View,
+                                    });
                                     self.redraw = true;
                                 }
                                 return;
@@ -1446,7 +1454,11 @@ impl<T: TerminalAdapter> Model<T> {
                         cell_col,
                         cell_row,
                     ) {
-                        self.send_cmd(IpcCommand::Write { terminal_id, bytes });
+                        self.send_cmd(IpcCommand::Write {
+                            terminal_id,
+                            bytes,
+                            intent: lazybox_ipc::TerminalInputIntent::View,
+                        });
                         self.redraw = true;
                         return;
                     }
@@ -1628,7 +1640,11 @@ impl<T: TerminalAdapter> Model<T> {
                             self.terminals
                                 .encode_mouse(action, Some(vt_button), cell_col, cell_row)
                         {
-                            self.send_cmd(IpcCommand::Write { terminal_id, bytes });
+                            self.send_cmd(IpcCommand::Write {
+                                terminal_id,
+                                bytes,
+                                intent: lazybox_ipc::TerminalInputIntent::View,
+                            });
                         }
                     }
                     self.redraw = true;

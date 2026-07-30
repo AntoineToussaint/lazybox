@@ -25,6 +25,7 @@ import {
 import {
   TerminalFrameDecoder,
   type TerminalBinaryFrame,
+  type TerminalInputIntent,
   type TerminalReplayState,
   decodeTerminalStreamItem,
   discardTerminalView,
@@ -80,7 +81,12 @@ let defaultAgent = "claude";
 let previewMode = false;
 let activeTerminal: ActiveTerminal | null = null;
 let resizeTimer: number | undefined;
-const pendingInput = new Map<number, number[]>();
+interface PendingTerminalInput {
+  bytes: number[];
+  intent: TerminalInputIntent;
+}
+
+const pendingInput = new Map<number, PendingTerminalInput[]>();
 const inputTimers = new Map<number, number>();
 const inputSending = new Set<number>();
 const encoder = new TextEncoder();
@@ -474,7 +480,7 @@ function attachTerminal(id: number): void {
   }
 
   const inputDisposable = terminal.onData((data) => {
-    queueTerminalInput(id, [...encoder.encode(data)]);
+    queueTerminalInput(id, [...encoder.encode(data)], terminalInputIntent(data));
   });
   const resizeDisposable = terminal.onResize(({ cols, rows }) => {
     void sendTerminalFrame(resizeTerminalFrame(id, cols, rows));
@@ -582,9 +588,18 @@ function requestTerminalResync(
   }
 }
 
-function queueTerminalInput(id: number, bytes: number[]): void {
+function queueTerminalInput(
+  id: number,
+  bytes: number[],
+  intent: TerminalInputIntent,
+): void {
   const pending = pendingInput.get(id) ?? [];
-  pending.push(...bytes);
+  const tail = pending.at(-1);
+  if (tail?.intent === intent) {
+    tail.bytes.push(...bytes);
+  } else {
+    pending.push({ bytes, intent });
+  }
   pendingInput.set(id, pending);
   if (inputTimers.has(id)) {
     return;
@@ -608,18 +623,31 @@ async function flushTerminalInput(id: number): Promise<void> {
       if (buffered.length === 0) {
         return;
       }
-      await sendTerminalFramesSequentially(
-        writeTerminalFrames(
-          id,
-          Uint8Array.from(buffered),
-          maxTerminalWriteBytes,
-        ),
-        sendTerminalFrame,
-      );
+      for (const input of buffered) {
+        await sendTerminalFramesSequentially(
+          writeTerminalFrames(
+            id,
+            Uint8Array.from(input.bytes),
+            maxTerminalWriteBytes,
+            input.intent,
+          ),
+          sendTerminalFrame,
+        );
+      }
     }
   } finally {
     inputSending.delete(id);
   }
+}
+
+function terminalInputIntent(data: string): TerminalInputIntent {
+  if (data === "\r" || data === "\n") {
+    return "submit";
+  }
+  if (/^\x1b\[<\d+;\d+;\d+[mM]$/.test(data)) {
+    return "view";
+  }
+  return "compose";
 }
 
 function scheduleResize(): void {

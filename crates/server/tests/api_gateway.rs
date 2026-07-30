@@ -20,7 +20,7 @@ use lazybox_agents::{Agent, SpawnCtx, StructuredAgentProtocol};
 use lazybox_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace};
 use lazybox_ipc::{
     AgentInputMessage, AgentRunRequestId, AgentRuntimeMode, AgentState, Command, Event, TerminalId,
-    TerminalKind, WorktreeStep, WorktreeStepStatus,
+    TerminalInputIntent, TerminalKind, WorktreeStep, WorktreeStepStatus,
 };
 use lazybox_server::ServerError;
 use lazybox_server::agent_stream::{AgentStreamConfig, AgentStreamIo, AgentStreamSpawner};
@@ -626,6 +626,7 @@ fn every_terminal_command_round_trips_the_binary_codec() {
         Command::Write {
             terminal_id: lazybox_ipc::TerminalId(2),
             bytes: vec![0, 27, 0xff],
+            intent: TerminalInputIntent::Submit,
         },
         Command::Resize {
             terminal_id: lazybox_ipc::TerminalId(2),
@@ -676,6 +677,7 @@ async fn terminal_command_body_forwards_every_complete_binary_frame() {
         Command::Write {
             terminal_id: TerminalId(2),
             bytes: b"hello\n".to_vec(),
+            intent: TerminalInputIntent::Submit,
         },
     ];
     let bytes = expected
@@ -698,10 +700,12 @@ async fn terminal_command_body_accepts_coalesced_frames_over_the_buffer_limit() 
         Command::Write {
             terminal_id: TerminalId(2),
             bytes: vec![b'a'; lazybox_ipc::MAX_WRITE_CHUNK_BYTES],
+            intent: TerminalInputIntent::Compose,
         },
         Command::Write {
             terminal_id: TerminalId(2),
             bytes: vec![b'b'; lazybox_ipc::MAX_WRITE_CHUNK_BYTES],
+            intent: TerminalInputIntent::Compose,
         },
     ];
     let bytes = expected
@@ -876,6 +880,7 @@ async fn desktop_runtime_real_pty_handles_backpressure_reconnect_replay_and_resy
         api_gateway::encode_terminal_command(&Command::Write {
             terminal_id,
             bytes: b"desktop-input\n".to_vec(),
+            intent: TerminalInputIntent::Submit,
         })
         .expect("write frame"),
     );
@@ -1130,6 +1135,7 @@ async fn json_command_route_rejects_every_binary_terminal_command() {
         Command::Write {
             terminal_id: TerminalId(1),
             bytes: vec![1],
+            intent: TerminalInputIntent::Compose,
         },
         Command::Resize {
             terminal_id: TerminalId(1),
@@ -1172,6 +1178,7 @@ async fn json_stream_drops_terminal_commands_and_forwards_control_commands() {
     let mut input = serde_json::to_vec(&JsonClientFrame::Command(Command::Write {
         terminal_id: TerminalId(1),
         bytes: vec![1, 2, 3],
+        intent: TerminalInputIntent::Compose,
     }))
     .unwrap();
     input.push(b'\n');

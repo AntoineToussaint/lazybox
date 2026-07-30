@@ -1,4 +1,4 @@
-use crate::polling;
+use crate::{polling, terminal_io};
 use lazybox_core::{SessionId, SessionKey};
 use lazybox_ipc::{AgentRunAccess, AgentState, TerminalId, TerminalKind};
 use std::collections::{HashMap, HashSet};
@@ -35,6 +35,9 @@ pub struct TerminalRegistry {
     pub(crate) hook_driven_terminals: Arc<Mutex<HashMap<TerminalId, std::time::Instant>>>,
     /// Distinguishes one-key chooser answers from free-text input requests.
     pub(crate) input_needed_shapes: Arc<Mutex<HashMap<TerminalId, lazybox_agents::PromptShape>>>,
+    /// View and submission epochs used to keep client-provoked repaint output
+    /// out of agent lifecycle detection.
+    pub(crate) agent_terminal_activities: terminal_io::AgentTerminalActivities,
     /// Prevents a delayed prompt write from resurrecting state after teardown.
     terminal_persistence_locks: Arc<parking_lot::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     /// Prevents concurrent keyboard, chat, and injection writers corrupting a PTY stream.
@@ -123,6 +126,7 @@ impl TerminalRegistry {
         self.agent_detect_resets.lock().await.remove(&id);
         self.hook_driven_terminals.lock().await.remove(&id);
         self.input_needed_shapes.lock().await.remove(&id);
+        self.agent_terminal_activities.lock().await.remove(&id);
         backend_key
     }
 
@@ -314,6 +318,9 @@ impl TerminalRegistry {
             return false;
         }
         if !self.input_needed_shapes.lock().await.is_empty() {
+            return false;
+        }
+        if !self.agent_terminal_activities.lock().await.is_empty() {
             return false;
         }
         true

@@ -10,8 +10,8 @@ use lazybox_ipc::{
     AgentApprovalDecision, AgentInputMessage, AgentQuestionAnswer, AgentRunId, AgentRunRequestId,
     AgentRuntimeMode, AgentState, AgentUsage, Command, Event, HookEvent, HookEventKind,
     PrincipalId, PromptSource, ProviderCredentialInput, ProviderCredentialMetadata,
-    RemovableTerminalState, SpawnFallback, TerminalId, TerminalKind, TerminalSnapshot, UserPrompt,
-    WorktreeStep, WorktreeStepStatus,
+    RemovableTerminalState, SpawnFallback, TerminalId, TerminalInputIntent, TerminalKind,
+    TerminalSnapshot, UserPrompt, WorktreeStep, WorktreeStepStatus,
 };
 use tokio::io::duplex;
 
@@ -124,6 +124,7 @@ fn all_commands() -> Vec<Command> {
         Command::Write {
             terminal_id: TerminalId(7),
             bytes: b"hello\n".to_vec(),
+            intent: TerminalInputIntent::Submit,
         },
         Command::Resize {
             terminal_id: TerminalId(7),
@@ -1154,6 +1155,7 @@ async fn socket_zero_byte_payload_works() {
     let msg = Command::Write {
         terminal_id: TerminalId(1),
         bytes: vec![],
+        intent: TerminalInputIntent::Compose,
     };
     write_frame(&mut a, &msg).await.expect("write");
     drop(a);

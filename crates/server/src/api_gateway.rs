@@ -73,6 +73,11 @@ pub const TERMINAL_RESIZE_COLS_OFFSET: usize = 0;
 pub const TERMINAL_RESIZE_ROWS_OFFSET: usize = size_of::<u16>();
 pub const TERMINAL_RESYNC_PAYLOAD_BYTES: usize = size_of::<u64>();
 pub const TERMINAL_RESYNC_REQUIRED_SEQ_OFFSET: usize = 0;
+pub const TERMINAL_WRITE_INTENT_OFFSET: usize = 0;
+pub const TERMINAL_WRITE_BYTES_OFFSET: usize = size_of::<u8>();
+pub const TERMINAL_WRITE_INTENT_COMPOSE: u8 = 0;
+pub const TERMINAL_WRITE_INTENT_SUBMIT: u8 = 1;
+pub const TERMINAL_WRITE_INTENT_VIEW: u8 = 2;
 pub const DESKTOP_TERMINAL_STREAM_ITEM_RESET: u8 = 0;
 pub const DESKTOP_TERMINAL_STREAM_ITEM_DATA: u8 = 1;
 
@@ -965,8 +970,19 @@ fn encode_terminal_server_frame(
 
 pub fn encode_terminal_command(command: &Command) -> Option<Vec<u8>> {
     let (kind, terminal_id, tail) = match command {
-        Command::Write { terminal_id, bytes } => {
-            (TERMINAL_CLIENT_COMMAND_WRITE, *terminal_id, bytes.clone())
+        Command::Write {
+            terminal_id,
+            bytes,
+            intent,
+        } => {
+            let mut tail = Vec::with_capacity(TERMINAL_WRITE_BYTES_OFFSET + bytes.len());
+            tail.push(match intent {
+                lazybox_ipc::TerminalInputIntent::Compose => TERMINAL_WRITE_INTENT_COMPOSE,
+                lazybox_ipc::TerminalInputIntent::Submit => TERMINAL_WRITE_INTENT_SUBMIT,
+                lazybox_ipc::TerminalInputIntent::View => TERMINAL_WRITE_INTENT_VIEW,
+            });
+            tail.extend_from_slice(bytes);
+            (TERMINAL_CLIENT_COMMAND_WRITE, *terminal_id, tail)
         }
         Command::Resize {
             terminal_id,
@@ -1083,12 +1099,24 @@ pub(crate) fn decode_terminal_command(body: &[u8]) -> Result<Command, &'static s
     ));
     let tail = &body[TERMINAL_CLIENT_BODY_PAYLOAD_OFFSET..];
     match kind {
-        TERMINAL_CLIENT_COMMAND_WRITE if tail.len() <= lazybox_ipc::MAX_WRITE_CHUNK_BYTES => {
+        TERMINAL_CLIENT_COMMAND_WRITE
+            if (TERMINAL_WRITE_BYTES_OFFSET
+                ..=lazybox_ipc::MAX_WRITE_CHUNK_BYTES + TERMINAL_WRITE_BYTES_OFFSET)
+                .contains(&tail.len()) =>
+        {
+            let intent = match tail[TERMINAL_WRITE_INTENT_OFFSET] {
+                TERMINAL_WRITE_INTENT_COMPOSE => lazybox_ipc::TerminalInputIntent::Compose,
+                TERMINAL_WRITE_INTENT_SUBMIT => lazybox_ipc::TerminalInputIntent::Submit,
+                TERMINAL_WRITE_INTENT_VIEW => lazybox_ipc::TerminalInputIntent::View,
+                _ => return Err("write intent is invalid"),
+            };
             Ok(Command::Write {
                 terminal_id,
-                bytes: tail.to_vec(),
+                bytes: tail[TERMINAL_WRITE_BYTES_OFFSET..].to_vec(),
+                intent,
             })
         }
+        TERMINAL_CLIENT_COMMAND_WRITE if tail.is_empty() => Err("write intent is missing"),
         TERMINAL_CLIENT_COMMAND_WRITE => Err("write payload exceeds its limit"),
         TERMINAL_CLIENT_COMMAND_RESIZE if tail.len() == TERMINAL_RESIZE_PAYLOAD_BYTES => {
             Ok(Command::Resize {

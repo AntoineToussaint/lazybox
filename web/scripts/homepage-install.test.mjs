@@ -79,6 +79,38 @@ test('hero alignment does not change the centered footer call to action', () => 
   assert.match(heroCta, /justify-content:\s*flex-start/);
 });
 
+test('the homepage presents the five recorded workflow demos', () => {
+  const demosStart = html.indexOf('<section id="demos"');
+  const demos = html.slice(demosStart, html.indexOf('</section>', demosStart));
+  const clips = [
+    { file: '01-inbox', label: 'inbox at scale' }, // hero, above the strip
+    { file: '02-snippets', label: 'snippets' },
+    { file: '03-policies', label: 'github controls' },
+    { file: '04-spawn', label: 'worktree + agent' },
+    { file: '05-autowork', label: 'github auto-work' },
+  ];
+  // The hero clip lives above the strip; the other four are in the grid.
+  assert.ok(html.includes('src="/demo/01-inbox.mp4"'), 'expected the inbox hero clip');
+  for (const { file, label } of clips.slice(1)) {
+    assert.ok(demos.includes(`src="/demo/${file}.mp4"`), `missing demo video: ${file}`);
+    assert.ok(demos.includes(`<span class="title">${label}</span>`), `missing demo label: ${label}`);
+  }
+});
+
+test('every referenced demo asset ships as a non-empty file', async () => {
+  const referenced = new Set(html.match(/\/demo\/[\w.-]+\.(?:mp4|jpg)/g));
+  assert.ok(referenced.size > 0, 'expected the homepage to reference demo assets');
+  for (const ref of referenced) {
+    const bytes = await readFile(new URL(`../public${ref}`, import.meta.url));
+    assert.ok(bytes.length > 0, `empty or missing demo asset: ${ref}`);
+  }
+});
+
+test('demo captions render key hints in the terminal mono font', () => {
+  const rule = css.match(/\.demo-item figcaption code\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(rule, /font-family:\s*var\(--mono\)/, 'expected the g key hint to use the mono font');
+});
+
 test('the homepage publishes the established public-safe social preview', () => {
   assert.ok(html.includes('<meta property="og:image" content="https://lazybox.ai/og.png">'));
   assert.ok(html.includes('<meta name="twitter:image" content="https://lazybox.ai/og.png">'));

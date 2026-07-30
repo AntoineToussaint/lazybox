@@ -110,6 +110,9 @@ fn desktop_dogfood_artifact_preserves_the_app_executable() {
                 .and_then(|name| name.strip_suffix('"'))
         })
         .expect("desktop package name");
+    assert!(workflow.contains(
+        "- name: Package executable macOS app\n        working-directory: apps/desktop/src-tauri"
+    ));
     assert!(workflow.contains(&format!(
         "test -x target/debug/bundle/macos/lazybox.app/Contents/MacOS/{binary_name}"
     )));
@@ -117,7 +120,9 @@ fn desktop_dogfood_artifact_preserves_the_app_executable() {
         "test -x target/debug/bundle/macos/archive-check/lazybox.app/Contents/MacOS/{binary_name}"
     )));
     assert!(workflow.contains("tar -czf target/debug/bundle/macos/lazybox-macos-dogfood.tar.gz"));
-    assert!(workflow.contains("path: target/debug/bundle/macos/lazybox-macos-dogfood.tar.gz"));
+    assert!(workflow.contains(
+        "path: apps/desktop/src-tauri/target/debug/bundle/macos/lazybox-macos-dogfood.tar.gz"
+    ));
     assert!(!workflow.contains("path: target/debug/bundle/macos/lazybox.app"));
 }
 

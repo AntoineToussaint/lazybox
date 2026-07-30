@@ -243,6 +243,7 @@ jobs:
         working-directory: apps/desktop
         run: npm run tauri build -- --debug --bundles app
       - name: Package executable macOS app
+        working-directory: apps/desktop/src-tauri
         run: |
           test -x target/debug/bundle/macos/lazybox.app/Contents/MacOS/lazybox-desktop
           tar -czf target/debug/bundle/macos/lazybox-macos-dogfood.tar.gz \
@@ -254,7 +255,7 @@ jobs:
       - uses: actions/upload-artifact@v6
         with:
           name: lazybox-macos-dogfood
-          path: target/debug/bundle/macos/lazybox-macos-dogfood.tar.gz
+          path: apps/desktop/src-tauri/target/debug/bundle/macos/lazybox-macos-dogfood.tar.gz
           if-no-files-found: error
 
   rustdoc:

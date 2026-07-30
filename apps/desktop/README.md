@@ -32,7 +32,7 @@ npm run tauri build -- --debug --bundles app
 The app bundle is written to:
 
 ```text
-target/debug/bundle/macos/lazybox.app
+src-tauri/target/debug/bundle/macos/lazybox.app
 ```
 
 CI packages that bundle as `lazybox-macos-dogfood.tar.gz` before artifact

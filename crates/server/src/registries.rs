@@ -259,6 +259,31 @@ impl TerminalRegistry {
             .collect()
     }
 
+    pub(crate) async fn agent_terminals_for_review(
+        &self,
+        session_key: &SessionKey,
+        session_id: Option<SessionId>,
+    ) -> Vec<TerminalId> {
+        let terminal_sessions = self.terminal_sessions.lock().await.clone();
+        let terminal_meta = self.terminal_meta.lock().await;
+        let mut ids = terminal_meta
+            .iter()
+            .filter_map(|(terminal_id, (owner, kind))| {
+                if owner != session_key || !matches!(kind, TerminalKind::Agent(_)) {
+                    return None;
+                }
+                if session_id.is_some_and(|expected| {
+                    terminal_sessions.get(terminal_id).copied() != Some(expected)
+                }) {
+                    return None;
+                }
+                Some(*terminal_id)
+            })
+            .collect::<Vec<_>>();
+        ids.sort_unstable_by_key(|id| id.0);
+        ids
+    }
+
     /// Report whether a recovered agent requires a compatibility restart.
     pub async fn is_outdated_agent(&self, id: TerminalId) -> bool {
         self.outdated_agent_terminals.lock().await.contains(&id)

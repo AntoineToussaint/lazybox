@@ -587,6 +587,31 @@ impl<T: TerminalAdapter> Model<T> {
                 // picker; none → footer notice).
                 self.open_editor();
             }
+            Action::ViewDiff => {
+                if let Some((workspace_key, target)) =
+                    self.sidebar.selected_workspace().and_then(|workspace| {
+                        let target = session_id
+                            .or_else(|| workspace.default_session().map(|session| session.id))
+                            .map(lazybox_ipc::WorkspaceDiffTarget::Session)
+                            .or_else(|| {
+                                workspace
+                                    .linked_checkout
+                                    .as_ref()
+                                    .map(|_| lazybox_ipc::WorkspaceDiffTarget::LinkedCheckout)
+                            })?;
+                        Some((workspace.key.clone(), target))
+                    })
+                {
+                    self.pending_diff_session = Some((workspace_key.clone(), target.clone()));
+                    self.flash_hint("reading worktree diff…");
+                    cmds.push(IpcCommand::InspectWorkspaceDiff {
+                        workspace_key,
+                        target,
+                    });
+                } else {
+                    self.flash_hint("this workspace has no worktree to review");
+                }
+            }
             Action::NewWorkspace => {
                 let focused = self.sidebar.focused_project_key();
                 // Explicit variant list (no `_` catch-all) so a new

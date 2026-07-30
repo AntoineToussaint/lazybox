@@ -143,6 +143,50 @@ pub struct DiscoveredCheckout {
     pub has_uncommitted_changes: bool,
 }
 
+/// Combined status and `HEAD` diff for one checkout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeDiff {
+    pub status: Vec<String>,
+    pub stat: Vec<String>,
+    pub files: Vec<DiffFile>,
+    pub truncated: bool,
+}
+
+/// One file in a worktree diff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffFile {
+    pub old_path: Option<String>,
+    pub path: String,
+    pub headers: Vec<String>,
+    pub hunks: Vec<DiffHunk>,
+}
+
+/// One unified-diff hunk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffHunk {
+    pub header: String,
+    pub old_start: u32,
+    pub new_start: u32,
+    pub lines: Vec<DiffLine>,
+}
+
+/// One line inside a unified-diff hunk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffLine {
+    pub kind: DiffLineKind,
+    pub text: String,
+    pub old_line: Option<u32>,
+    pub new_line: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffLineKind {
+    Context,
+    Addition,
+    Deletion,
+    Meta,
+}
+
 /// Internal: one row from `git worktree list --porcelain`. We only
 /// parse the fields that drive orphan detection.
 #[derive(Debug, Default, Clone)]
@@ -905,6 +949,400 @@ pub async fn worktree_is_pristine(worktree: &Path, bare: Option<&Path>) -> bool 
     worktree_is_pristine_with(default_git_runner(), worktree, bare).await
 }
 
+/// Read the checkout's status and combined staged/unstaged diff against
+/// `HEAD`. A throwaway index marks untracked paths intent-to-add so one
+/// bounded diff includes them without mutating the checkout's real index.
+pub async fn inspect_worktree_diff(worktree: &Path) -> Result<WorktreeDiff, GitError> {
+    inspect_worktree_diff_with(default_git_runner(), worktree).await
+}
+
+const DIFF_STATUS_BYTES: usize = 512 * 1024;
+const DIFF_PATCH_BYTES: usize = 4 * 1024 * 1024;
+const DIFF_STAT_BYTES: usize = 512 * 1024;
+
+struct ReviewIndex(PathBuf);
+
+impl ReviewIndex {
+    fn new() -> Self {
+        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let created = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        Self(std::env::temp_dir().join(format!(
+            "lazybox-review-index-{}-{created}-{sequence}",
+            std::process::id(),
+        )))
+    }
+
+    fn env(&self) -> Vec<(String, String)> {
+        vec![(
+            "GIT_INDEX_FILE".to_string(),
+            self.0.to_string_lossy().into_owned(),
+        )]
+    }
+}
+
+impl Drop for ReviewIndex {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+        let mut lock = self.0.as_os_str().to_os_string();
+        lock.push(".lock");
+        let _ = std::fs::remove_file(lock);
+    }
+}
+
+async fn inspect_worktree_diff_with(
+    git: &dyn GitRunner,
+    worktree: &Path,
+) -> Result<WorktreeDiff, GitError> {
+    let (mut status_output, status_truncated) = git
+        .run_with_stdout_limit(
+            Some(worktree),
+            &["status", "--porcelain=v1", "--untracked-files=all", "-z"],
+            &[],
+            DIFF_STATUS_BYTES,
+        )
+        .await?;
+    if !status_truncated {
+        require_success(status_output.status.success(), &status_output.stderr)?;
+    }
+    if status_truncated {
+        truncate_after_last(&mut status_output.stdout, 0);
+    }
+    let status = parse_status_porcelain(&status_output.stdout);
+    let head = git
+        .run(
+            Some(worktree),
+            &["rev-parse", "--verify", "--quiet", "HEAD"],
+            &[],
+        )
+        .await?;
+    let has_head = head.status.success();
+
+    let index = ReviewIndex::new();
+    let index_env = index.env();
+    let index_output = if has_head {
+        git.run(Some(worktree), &["read-tree", "HEAD"], &index_env)
+            .await?
+    } else {
+        git.run(Some(worktree), &["read-tree", "--empty"], &index_env)
+            .await?
+    };
+    require_success(index_output.status.success(), &index_output.stderr)?;
+    let intent_output = git
+        .run(Some(worktree), &["add", "-N", "-A", "--"], &index_env)
+        .await?;
+    require_success(intent_output.status.success(), &intent_output.stderr)?;
+
+    let patch_args = if has_head {
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-color",
+            "--find-renames",
+            "--find-copies",
+            "HEAD",
+            "--",
+        ][..]
+    } else {
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-color",
+            "--find-renames",
+            "--find-copies",
+            "--",
+        ][..]
+    };
+    let (mut patch_output, patch_truncated) = git
+        .run_with_stdout_limit(Some(worktree), patch_args, &index_env, DIFF_PATCH_BYTES)
+        .await?;
+    if !patch_truncated {
+        require_success(patch_output.status.success(), &patch_output.stderr)?;
+    } else {
+        truncate_after_last(&mut patch_output.stdout, b'\n');
+    }
+
+    let stat_args = if has_head {
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-color",
+            "--stat",
+            "HEAD",
+            "--",
+        ][..]
+    } else {
+        &["diff", "--no-ext-diff", "--no-color", "--stat", "--"][..]
+    };
+    let (mut stat_output, stat_truncated) = git
+        .run_with_stdout_limit(Some(worktree), stat_args, &index_env, DIFF_STAT_BYTES)
+        .await?;
+    if !stat_truncated {
+        require_success(stat_output.status.success(), &stat_output.stderr)?;
+    } else {
+        truncate_after_last(&mut stat_output.stdout, b'\n');
+    }
+
+    Ok(WorktreeDiff {
+        status,
+        stat: text_lines(&stat_output.stdout),
+        files: parse_unified_diff(&String::from_utf8_lossy(&patch_output.stdout)),
+        truncated: status_truncated || patch_truncated || stat_truncated,
+    })
+}
+
+fn require_success(success: bool, stderr: &[u8]) -> Result<(), GitError> {
+    if success {
+        Ok(())
+    } else {
+        Err(GitError::Command(
+            String::from_utf8_lossy(stderr).trim().to_string(),
+        ))
+    }
+}
+
+fn text_lines(bytes: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+fn truncate_after_last(bytes: &mut Vec<u8>, delimiter: u8) {
+    let length = bytes
+        .iter()
+        .rposition(|byte| *byte == delimiter)
+        .map_or(0, |index| index + 1);
+    bytes.truncate(length);
+}
+
+fn parse_status_porcelain(bytes: &[u8]) -> Vec<String> {
+    let mut fields = bytes
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty());
+    let mut rows = Vec::new();
+    while let Some(field) = fields.next() {
+        let text = String::from_utf8_lossy(field);
+        if text.len() < 3 {
+            continue;
+        }
+        let code = &text[..2];
+        let path = text[3..].to_string();
+        if (code.contains('R') || code.contains('C'))
+            && let Some(old) = fields.next()
+        {
+            rows.push(format!("{code} {} -> {path}", String::from_utf8_lossy(old)));
+            continue;
+        }
+        rows.push(format!("{code} {path}"));
+    }
+    rows
+}
+
+fn parse_unified_diff(source: &str) -> Vec<DiffFile> {
+    let mut files = Vec::new();
+    let mut file: Option<DiffFile> = None;
+    let mut hunk: Option<DiffHunk> = None;
+    let mut old_line = 0u32;
+    let mut new_line = 0u32;
+
+    for line in source.lines() {
+        if line.starts_with("diff --git ") {
+            finish_hunk(&mut file, &mut hunk);
+            if let Some(previous) = file.take() {
+                files.push(previous);
+            }
+            file = Some(DiffFile {
+                old_path: None,
+                path: diff_header_path(line).unwrap_or_default(),
+                headers: vec![line.to_string()],
+                hunks: Vec::new(),
+            });
+            continue;
+        }
+
+        let Some(current_file) = file.as_mut() else {
+            continue;
+        };
+        if line.starts_with("@@ ") {
+            finish_hunk(&mut file, &mut hunk);
+            let (parsed_old, parsed_new) = parse_hunk_starts(line);
+            old_line = parsed_old;
+            new_line = parsed_new;
+            hunk = Some(DiffHunk {
+                header: line.to_string(),
+                old_start: old_line,
+                new_start: new_line,
+                lines: Vec::new(),
+            });
+            continue;
+        }
+        if let Some(current_hunk) = hunk.as_mut() {
+            let (kind, old, new) = match line.as_bytes().first() {
+                Some(b'+') => {
+                    let current = new_line;
+                    new_line = new_line.saturating_add(1);
+                    (DiffLineKind::Addition, None, Some(current))
+                }
+                Some(b'-') => {
+                    let current = old_line;
+                    old_line = old_line.saturating_add(1);
+                    (DiffLineKind::Deletion, Some(current), None)
+                }
+                Some(b' ') => {
+                    let old = old_line;
+                    let new = new_line;
+                    old_line = old_line.saturating_add(1);
+                    new_line = new_line.saturating_add(1);
+                    (DiffLineKind::Context, Some(old), Some(new))
+                }
+                _ => (DiffLineKind::Meta, None, None),
+            };
+            current_hunk.lines.push(DiffLine {
+                kind,
+                text: line.to_string(),
+                old_line: old,
+                new_line: new,
+            });
+            continue;
+        }
+
+        if let Some(path) = line.strip_prefix("--- ") {
+            current_file.old_path = diff_marker_path(path);
+        } else if let Some(path) = line.strip_prefix("+++ ")
+            && let Some(path) = diff_marker_path(path)
+        {
+            current_file.path = path;
+        }
+        current_file.headers.push(line.to_string());
+    }
+
+    finish_hunk(&mut file, &mut hunk);
+    if let Some(file) = file {
+        files.push(file);
+    }
+    files
+}
+
+fn finish_hunk(file: &mut Option<DiffFile>, hunk: &mut Option<DiffHunk>) {
+    if let (Some(file), Some(hunk)) = (file.as_mut(), hunk.take()) {
+        file.hunks.push(hunk);
+    }
+}
+
+fn diff_header_path(header: &str) -> Option<String> {
+    let paths = header.strip_prefix("diff --git ")?;
+    if paths.starts_with('"') {
+        let (_, rest) = take_quoted_token(paths)?;
+        let (new_path, _) = take_quoted_token(rest.trim_start())?;
+        normalize_diff_path(new_path)
+    } else {
+        let (_, path) = paths.rsplit_once(" b/")?;
+        Some(path.to_string())
+    }
+}
+
+fn diff_marker_path(source: &str) -> Option<String> {
+    let token = if source.starts_with('"') {
+        take_quoted_token(source)?.0
+    } else {
+        source.split_once('\t').map_or(source, |(path, _)| path)
+    };
+    normalize_diff_path(token)
+}
+
+fn normalize_diff_path(path: &str) -> Option<String> {
+    let path = decode_git_path(path)?;
+    if path == "/dev/null" {
+        return None;
+    }
+    Some(
+        path.strip_prefix("a/")
+            .or_else(|| path.strip_prefix("b/"))
+            .unwrap_or(&path)
+            .to_string(),
+    )
+}
+
+fn take_quoted_token(source: &str) -> Option<(&str, &str)> {
+    let bytes = source.as_bytes();
+    if bytes.first() != Some(&b'"') {
+        return None;
+    }
+    let mut escaped = false;
+    for (index, byte) in bytes.iter().enumerate().skip(1) {
+        if escaped {
+            escaped = false;
+        } else if *byte == b'\\' {
+            escaped = true;
+        } else if *byte == b'"' {
+            return Some((&source[..=index], &source[index + 1..]));
+        }
+    }
+    None
+}
+
+fn decode_git_path(source: &str) -> Option<String> {
+    if !source.starts_with('"') {
+        return Some(source.to_string());
+    }
+    let inner = source.strip_prefix('"')?.strip_suffix('"')?;
+    let bytes = inner.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'\\' {
+            decoded.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+        index += 1;
+        let escaped = *bytes.get(index)?;
+        let value = match escaped {
+            b'a' => 0x07,
+            b'b' => 0x08,
+            b't' => b'\t',
+            b'n' => b'\n',
+            b'v' => 0x0b,
+            b'f' => 0x0c,
+            b'r' => b'\r',
+            b'\\' => b'\\',
+            b'"' => b'"',
+            b'0'..=b'7' => {
+                let mut value = escaped - b'0';
+                let mut digits = 1;
+                while digits < 3
+                    && index + 1 < bytes.len()
+                    && matches!(bytes[index + 1], b'0'..=b'7')
+                {
+                    index += 1;
+                    value = value * 8 + (bytes[index] - b'0');
+                    digits += 1;
+                }
+                value
+            }
+            _ => return None,
+        };
+        decoded.push(value);
+        index += 1;
+    }
+    Some(String::from_utf8_lossy(&decoded).into_owned())
+}
+
+fn parse_hunk_starts(header: &str) -> (u32, u32) {
+    let mut ranges = header.split_whitespace().skip(1);
+    let old = ranges.next().and_then(parse_range_start).unwrap_or(0);
+    let new = ranges.next().and_then(parse_range_start).unwrap_or(0);
+    (old, new)
+}
+
+fn parse_range_start(range: &str) -> Option<u32> {
+    range.get(1..)?.split(',').next()?.parse::<u32>().ok()
+}
+
 async fn worktree_is_pristine_with(
     git: &dyn GitRunner,
     worktree: &Path,
@@ -1162,6 +1600,38 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct LocalRecordingGit {
+        calls: Mutex<Vec<Vec<String>>>,
+        fail_intent_add: bool,
+    }
+
+    impl GitRunner for LocalRecordingGit {
+        fn run<'a>(
+            &'a self,
+            cwd: Option<&'a Path>,
+            args: &'a [&'a str],
+            env: &'a [(String, String)],
+        ) -> Pin<Box<dyn Future<Output = Result<Output, GitError>> + Send + 'a>> {
+            self.calls
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(args.iter().map(|arg| (*arg).to_string()).collect());
+            if self.fail_intent_add && matches!(args, ["add", "-N", "-A", "--"]) {
+                return Box::pin(async { Ok(ScriptedGit::output(false, Vec::new())) });
+            }
+            let mut command = std::process::Command::new("git");
+            if let Some(cwd) = cwd {
+                command.current_dir(cwd);
+            }
+            command
+                .args(args)
+                .envs(env.iter().map(|(key, value)| (key, value)));
+            let output = command.output();
+            Box::pin(async move { output.map_err(GitError::Io) })
+        }
+    }
+
     #[tokio::test]
     async fn inspection_decisions_run_through_the_injected_runner() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1241,5 +1711,271 @@ mod tests {
         assert!(!inspections[0].has_uncommitted_changes);
         assert!(!inspections[0].is_safe_to_delete);
         assert!(!worktree_is_pristine_with(git.as_ref(), &worktree, Some(&bare)).await);
+    }
+
+    #[tokio::test]
+    async fn worktree_diff_combines_staged_unstaged_and_untracked_changes() {
+        fn git(repo: &Path, args: &[&str]) {
+            let output = std::process::Command::new("git")
+                .current_dir(repo)
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        git(tmp.path(), &["init", "-q"]);
+        git(tmp.path(), &["config", "user.name", "Lazybox Test"]);
+        git(
+            tmp.path(),
+            &["config", "user.email", "lazybox@example.invalid"],
+        );
+        std::fs::write(tmp.path().join("tracked.txt"), "one\ntwo\n").expect("seed tracked");
+        git(tmp.path(), &["add", "tracked.txt"]);
+        git(tmp.path(), &["commit", "-qm", "seed"]);
+
+        std::fs::write(tmp.path().join("tracked.txt"), "one\nstaged\n").expect("stage edit");
+        git(tmp.path(), &["add", "tracked.txt"]);
+        std::fs::write(tmp.path().join("tracked.txt"), "one\nworking\n").expect("working edit");
+        std::fs::write(tmp.path().join("new.rs"), "fn added() {}\n").expect("untracked file");
+        let staged_before = std::process::Command::new("git")
+            .current_dir(tmp.path())
+            .args(["diff", "--cached"])
+            .output()
+            .expect("read staged diff")
+            .stdout;
+
+        let diff = inspect_worktree_diff(tmp.path())
+            .await
+            .expect("inspect diff");
+        let staged_after = std::process::Command::new("git")
+            .current_dir(tmp.path())
+            .args(["diff", "--cached"])
+            .output()
+            .expect("read staged diff")
+            .stdout;
+
+        assert!(!diff.truncated);
+        assert_eq!(staged_after, staged_before);
+        assert!(diff.status.iter().any(|line| line == "MM tracked.txt"));
+        assert!(diff.status.iter().any(|line| line == "?? new.rs"));
+        let tracked = diff
+            .files
+            .iter()
+            .find(|file| file.path == "tracked.txt")
+            .expect("tracked diff");
+        assert!(
+            tracked
+                .hunks
+                .iter()
+                .flat_map(|hunk| &hunk.lines)
+                .any(|line| line.kind == DiffLineKind::Addition && line.text == "+working")
+        );
+        let untracked = diff
+            .files
+            .iter()
+            .find(|file| file.path == "new.rs")
+            .expect("untracked diff");
+        assert!(
+            untracked
+                .hunks
+                .iter()
+                .flat_map(|hunk| &hunk.lines)
+                .any(|line| line.kind == DiffLineKind::Addition && line.text == "+fn added() {}")
+        );
+        assert!(diff.stat.iter().any(|line| line.contains("tracked.txt")));
+        assert!(diff.stat.iter().any(|line| line.contains("new.rs")));
+    }
+
+    #[tokio::test]
+    async fn worktree_diff_reads_files_before_the_first_commit() {
+        fn git(repo: &Path, args: &[&str]) {
+            let output = std::process::Command::new("git")
+                .current_dir(repo)
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        git(tmp.path(), &["init", "-q"]);
+        std::fs::write(tmp.path().join("staged.txt"), "staged\n").expect("staged file");
+        git(tmp.path(), &["add", "staged.txt"]);
+        std::fs::write(tmp.path().join("staged.txt"), "working\n").expect("working edit");
+        std::fs::write(tmp.path().join("new.txt"), "untracked\n").expect("untracked file");
+
+        let diff = inspect_worktree_diff(tmp.path())
+            .await
+            .expect("inspect unborn diff");
+
+        assert!(diff.status.iter().any(|line| line == "AM staged.txt"));
+        assert!(diff.status.iter().any(|line| line == "?? new.txt"));
+        assert!(diff.files.iter().any(|file| {
+            file.path == "staged.txt"
+                && file
+                    .hunks
+                    .iter()
+                    .flat_map(|hunk| &hunk.lines)
+                    .any(|line| line.text == "+working")
+        }));
+        assert!(diff.files.iter().any(|file| {
+            file.path == "new.txt"
+                && file
+                    .hunks
+                    .iter()
+                    .flat_map(|hunk| &hunk.lines)
+                    .any(|line| line.text == "+untracked")
+        }));
+    }
+
+    #[tokio::test]
+    async fn worktree_diff_decodes_quoted_and_space_separated_paths() {
+        fn git(repo: &Path, args: &[&str]) {
+            let output = std::process::Command::new("git")
+                .current_dir(repo)
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        git(tmp.path(), &["init", "-q"]);
+        git(tmp.path(), &["config", "user.name", "Lazybox Test"]);
+        git(
+            tmp.path(),
+            &["config", "user.email", "lazybox@example.invalid"],
+        );
+        std::fs::write(tmp.path().join("café.rs"), "old\n").expect("unicode path");
+        std::fs::create_dir(tmp.path().join("foo b")).expect("space directory");
+        std::fs::write(tmp.path().join("foo b/bar.rs"), "old\n").expect("space path");
+        git(tmp.path(), &["add", "."]);
+        git(tmp.path(), &["commit", "-qm", "seed"]);
+        std::fs::write(tmp.path().join("café.rs"), "new\n").expect("unicode edit");
+        std::fs::write(tmp.path().join("foo b/bar.rs"), "new\n").expect("space edit");
+
+        let diff = inspect_worktree_diff(tmp.path())
+            .await
+            .expect("inspect paths");
+        let paths = diff
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(paths.contains(&"café.rs"), "{paths:?}");
+        assert!(paths.contains(&"foo b/bar.rs"), "{paths:?}");
+    }
+
+    #[tokio::test]
+    async fn worktree_diff_batches_many_untracked_files_into_one_patch() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let init = std::process::Command::new("git")
+            .current_dir(tmp.path())
+            .args(["init", "-q"])
+            .output()
+            .expect("init");
+        assert!(init.status.success());
+        for index in 0..25 {
+            std::fs::write(
+                tmp.path().join(format!("new-{index:02}.txt")),
+                format!("file {index}\n"),
+            )
+            .expect("untracked file");
+        }
+        let git = LocalRecordingGit::default();
+
+        let diff = inspect_worktree_diff_with(&git, tmp.path())
+            .await
+            .expect("inspect many files");
+        let calls = git.calls.lock().unwrap_or_else(|error| error.into_inner());
+        let patch_calls = calls
+            .iter()
+            .filter(|args| args.first().is_some_and(|arg| arg == "diff"))
+            .count();
+
+        assert_eq!(diff.files.len(), 25);
+        assert_eq!(patch_calls, 2, "one patch and one stat command: {calls:?}");
+        assert!(
+            calls
+                .iter()
+                .all(|args| !args.iter().any(|arg| arg == "--no-index")),
+            "per-file no-index commands must not be used: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn worktree_diff_propagates_failure_to_prepare_untracked_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let init = std::process::Command::new("git")
+            .current_dir(tmp.path())
+            .args(["init", "-q"])
+            .output()
+            .expect("init");
+        assert!(init.status.success());
+        std::fs::write(tmp.path().join("new.txt"), "new\n").expect("untracked file");
+        let git = LocalRecordingGit {
+            fail_intent_add: true,
+            ..LocalRecordingGit::default()
+        };
+
+        let error = inspect_worktree_diff_with(&git, tmp.path())
+            .await
+            .expect_err("intent-to-add failure must fail inspection");
+
+        assert!(matches!(error, GitError::Command(_)));
+    }
+
+    #[tokio::test]
+    async fn worktree_diff_bounds_large_patch_output() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let init = std::process::Command::new("git")
+            .current_dir(tmp.path())
+            .args(["init", "-q"])
+            .output()
+            .expect("init");
+        assert!(init.status.success());
+        let line = format!("{}\n", "x".repeat(1000));
+        std::fs::write(tmp.path().join("large.txt"), line.repeat(5_000)).expect("large file");
+
+        let diff = inspect_worktree_diff(tmp.path())
+            .await
+            .expect("inspect large diff");
+        let retained_patch_bytes = diff
+            .files
+            .iter()
+            .map(|file| {
+                file.path.len()
+                    + file.headers.iter().map(String::len).sum::<usize>()
+                    + file
+                        .hunks
+                        .iter()
+                        .map(|hunk| {
+                            hunk.header.len()
+                                + hunk.lines.iter().map(|line| line.text.len()).sum::<usize>()
+                        })
+                        .sum::<usize>()
+            })
+            .sum::<usize>();
+
+        assert!(diff.truncated);
+        assert!(retained_patch_bytes <= DIFF_PATCH_BYTES + 1024);
     }
 }

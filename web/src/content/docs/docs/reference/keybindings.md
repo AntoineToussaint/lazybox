@@ -58,6 +58,7 @@ Act on the focused workspace. Available from the sidebar **and** the activity pa
 | `Enter` | open | Focus the workspace's activity / terminal. |
 | `s` | shell | Open a shell in the workspace's worktree. |
 | `e` | editor | Open the worktree in the configured editor. |
+| `Shift-V` | review diff | Review the worktree's staged, unstaged, and untracked changes; search or annotate lines and send the draft to the running agent. |
 | `m` | mark read | Mark every activity row on the focused workspace read. |
 | `z` | snooze | Snooze the workspace for ~4h (toggle). |
 | `Shift-A` | toggle auto-fix | Arm or disarm auto-fix for the focused PR. |

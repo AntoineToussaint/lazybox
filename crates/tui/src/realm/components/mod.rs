@@ -7,6 +7,7 @@
 
 pub mod choice;
 pub mod confirm;
+pub mod diff_review;
 pub mod error;
 pub mod filterable;
 pub mod focus_header;

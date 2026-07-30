@@ -277,6 +277,7 @@ impl LinearClient {
             DEFAULT_MAX_PAGES,
         )
         .await?;
+        let outcome = outcome.into_fetch_outcome();
         if outcome.is_partial() {
             tracing::error!(
                 "Linear pagination stopped before completion; returning {} partial issues",

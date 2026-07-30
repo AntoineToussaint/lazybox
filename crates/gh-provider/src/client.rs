@@ -212,13 +212,20 @@ fn body_prefix_bytes(body: &str, max_bytes: usize) -> &str {
     &body[..end]
 }
 
-fn incomplete_pagination_error(operation: &str, count: usize, pages: usize) -> GhError {
-    if pages >= DEFAULT_MAX_PAGES {
-        GhError::Truncated { count, pages }
-    } else {
-        GhError::Graphql(format!(
-            "{operation}: pagination stopped after {pages} page(s) without complete coverage"
-        ))
+fn incomplete_pagination_error(
+    operation: &str,
+    count: usize,
+    reason: PaginationStop<GhError>,
+) -> GhError {
+    match reason {
+        PaginationStop::PageError(error) => error,
+        PaginationStop::MissingPageInfo => {
+            GhError::Graphql(format!("{operation}: response omitted pageInfo"))
+        }
+        PaginationStop::MissingEndCursor => {
+            GhError::Graphql(format!("{operation}: hasNextPage=true but endCursor=null"))
+        }
+        PaginationStop::PageLimit { pages } => GhError::Truncated { count, pages },
     }
 }
 
@@ -2216,12 +2223,15 @@ impl GhClient {
             DEFAULT_MAX_PAGES,
         )
         .await?;
-        let tasks = outcome.items;
+        let (tasks, incomplete) = match outcome {
+            PaginationOutcome::Complete(tasks) => (tasks, None),
+            PaginationOutcome::Partial { items, reason } => (items, Some(reason)),
+        };
         let mut metrics = metrics.into_inner();
         metrics.prs = tasks.len();
         metrics.elapsed_ms = started.elapsed().as_millis();
         metrics.emit();
-        if outcome.coverage.is_partial() {
+        if let Some(reason) = incomplete {
             tracing::error!(
                 "GraphQL pagination stopped after {} pages; tail is non-authoritative",
                 metrics.requests
@@ -2229,7 +2239,7 @@ impl GhClient {
             return Err(incomplete_pagination_error(
                 "PR search",
                 tasks.len(),
-                metrics.requests,
+                reason,
             ));
         }
         Ok(tasks)
@@ -2315,21 +2325,20 @@ impl GhClient {
             DEFAULT_MAX_PAGES,
         )
         .await?;
-        let tasks = outcome.items;
+        let (tasks, incomplete) = match outcome {
+            PaginationOutcome::Complete(tasks) => (tasks, None),
+            PaginationOutcome::Partial { items, reason } => (items, Some(reason)),
+        };
         let mut metrics = metrics.into_inner();
         metrics.prs = tasks.len();
         metrics.elapsed_ms = started.elapsed().as_millis();
         metrics.emit();
-        if outcome.coverage.is_partial() {
+        if let Some(reason) = incomplete {
             tracing::error!(
                 "{op} pagination stopped after {} pages; tail is non-authoritative",
                 metrics.requests
             );
-            return Err(incomplete_pagination_error(
-                op,
-                tasks.len(),
-                metrics.requests,
-            ));
+            return Err(incomplete_pagination_error(op, tasks.len(), reason));
         }
         Ok(tasks)
     }
@@ -2436,22 +2445,25 @@ impl GhClient {
             DEFAULT_MAX_PAGES,
         )
         .await?;
-        let coverage = outcome.coverage;
-        let mut tasks = Vec::with_capacity(outcome.items.len());
+        let (items, incomplete) = match outcome {
+            PaginationOutcome::Complete(items) => (items, None),
+            PaginationOutcome::Partial { items, reason } => (items, Some(reason)),
+        };
+        let mut tasks = Vec::with_capacity(items.len());
         let mut mentions = Vec::new();
-        for (task, mut issue_mentions) in outcome.items {
+        for (task, mut issue_mentions) in items {
             tasks.push(task);
             mentions.append(&mut issue_mentions);
         }
         let pages_fetched = pages_fetched.into_inner();
-        if coverage.is_partial() {
+        if let Some(reason) = incomplete {
             tracing::error!(
                 "Issues pagination stopped after {pages_fetched} pages; tail is non-authoritative"
             );
             return Err(incomplete_pagination_error(
                 "issues search",
                 tasks.len(),
-                pages_fetched,
+                reason,
             ));
         }
 
@@ -4252,6 +4264,39 @@ mod tests {
         format!("http://{addr}")
     }
 
+    async fn spawn_sequenced_http_response_server(
+        responses: Vec<(&'static str, &'static str, &'static str, &'static str)>,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut served = 0usize;
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(connection) => connection,
+                    Err(_) => continue,
+                };
+                let response = responses[served.min(responses.len() - 1)];
+                served += 1;
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let _ = sock.read(&mut buf).await;
+                    let (status, content_type, extra_headers, body) = response;
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\n\
+                         Content-Type: {content_type}\r\n\
+                         {extra_headers}Content-Length: {}\r\n\
+                         Connection: close\r\n\r\n{body}",
+                        body.len(),
+                    );
+                    let _ = sock.write_all(response.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
     async fn spawn_repo_routing_server() -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -4512,8 +4557,67 @@ mod tests {
             .await
             .expect_err("a response without pageInfo is not complete coverage");
 
+        assert!(matches!(error, GhError::Graphql(message) if message.contains("omitted pageInfo")));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn later_page_rate_limit_preserves_retry_contract() {
+        let page1: &'static str =
+            Box::leak(pr_search_page(1, Some((true, Some("CUR1")))).into_boxed_str());
+        let base_uri = spawn_sequenced_http_response_server(vec![
+            ("200 OK", "application/json", "", page1),
+            (
+                "429 Too Many Requests",
+                "application/json",
+                "Retry-After: 37\r\n",
+                r#"{"message":"API rate limit exceeded"}"#,
+            ),
+        ])
+        .await;
+        let client = make_client(&base_uri);
+
+        let error = client
+            .fetch_pr_single_query("test-branch", "is:open is:pr repo:o/r".to_string())
+            .await
+            .expect_err("the second-page rate limit must fail the branch");
         assert!(
-            matches!(error, GhError::Graphql(message) if message.contains("without complete coverage"))
+            matches!(
+                &error,
+                GhError::RateLimited {
+                    retry_after_secs: 37,
+                    ..
+                }
+            ),
+            "got {error:?}"
+        );
+
+        let provider_error = lazybox_core::ProviderError::from(error);
+        assert!(provider_error.is_retryable());
+        assert_eq!(provider_error.retry_after_secs(), Some(37));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn twentieth_page_missing_metadata_is_not_reported_as_the_page_cap() {
+        let mut pages = Vec::new();
+        for number in 1..20 {
+            let cursor = format!("CUR{number}");
+            let cursor: &'static str = Box::leak(cursor.into_boxed_str());
+            let page: &'static str =
+                Box::leak(pr_search_page(number, Some((true, Some(cursor)))).into_boxed_str());
+            pages.push(page);
+        }
+        pages.push(Box::leak(pr_search_page(20, None).into_boxed_str()));
+        let base_uri = spawn_sequenced_response_server(pages).await;
+        let client = make_client(&base_uri);
+
+        let error = client
+            .fetch_pr_single_query("test-branch", "is:open is:pr repo:o/r".to_string())
+            .await
+            .expect_err("missing metadata on page 20 must fail");
+
+        assert!(
+            matches!(error, GhError::Graphql(message) if message.contains("omitted pageInfo")),
+            "page 20 was malformed; reaching it was not page-cap exhaustion"
         );
     }
 

@@ -587,6 +587,31 @@ impl<T: TerminalAdapter> Model<T> {
                 // picker; none → footer notice).
                 self.open_editor();
             }
+            Action::ViewDiff => {
+                if let Some((workspace_key, target)) =
+                    self.sidebar.selected_workspace().and_then(|workspace| {
+                        let target = session_id
+                            .or_else(|| workspace.default_session().map(|session| session.id))
+                            .map(lazybox_ipc::WorkspaceDiffTarget::Session)
+                            .or_else(|| {
+                                workspace
+                                    .linked_checkout
+                                    .as_ref()
+                                    .map(|_| lazybox_ipc::WorkspaceDiffTarget::LinkedCheckout)
+                            })?;
+                        Some((workspace.key.clone(), target))
+                    })
+                {
+                    self.pending_diff_session = Some((workspace_key.clone(), target.clone()));
+                    self.flash_hint("reading worktree diff…");
+                    cmds.push(IpcCommand::InspectWorkspaceDiff {
+                        workspace_key,
+                        target,
+                    });
+                } else {
+                    self.flash_hint("this workspace has no worktree to review");
+                }
+            }
             Action::NewWorkspace => {
                 let focused = self.sidebar.focused_project_key();
                 // Explicit variant list (no `_` catch-all) so a new
@@ -797,6 +822,37 @@ impl<T: TerminalAdapter> Model<T> {
                     | Intent::CollapseIntoPr { .. }
                     | Intent::MountHandoffPicker { .. } => {}
                 }
+            }
+            Action::ToggleAutoFix => {
+                let Some(workspace) = self.sidebar.selected_workspace().cloned() else {
+                    return cmds;
+                };
+                if workspace.pr.is_none() {
+                    return cmds;
+                }
+                let arm = if workspace.policies.any_auto_fix_armed() {
+                    lazybox_core::PolicyArm::Disarm
+                } else {
+                    lazybox_core::PolicyArm::Arm
+                };
+                let name = crate::util::notice_slug(&workspace.name);
+                match arm {
+                    lazybox_core::PolicyArm::Arm if self.auto_fix_enabled => self.flash_info(
+                        format!("auto-fix: armed for {name} (CI failures + conflicts)"),
+                    ),
+                    lazybox_core::PolicyArm::Arm => self
+                        .flash_info(format!("auto-fix: armed for {name}, but disabled globally")),
+                    lazybox_core::PolicyArm::Disarm => {
+                        self.flash_info(format!("auto-fix: off for {name}"))
+                    }
+                    lazybox_core::PolicyArm::Default => unreachable!(),
+                }
+                let session_key = lazybox_core::SessionKey::from(&workspace.key);
+                cmds.push(IpcCommand::SetAutoFixPolicies {
+                    session_key,
+                    ci: arm,
+                    conflict: arm,
+                });
             }
             Action::ToggleTrackMain => {
                 let workspace = self.sidebar.selected_workspace().cloned();

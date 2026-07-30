@@ -107,6 +107,239 @@ mod effects_tests {
         Model::new_for_test(client, Size::new(120, 40)).expect("model init")
     }
 
+    #[test]
+    fn diff_review_uses_the_settle_gated_agent_injection_path() {
+        use crate::realm::components::diff_review::DiffReviewComment;
+        use lazybox_core::Workspace;
+        use lazybox_ipc::{TerminalKind, UserPrompt};
+
+        let mut model = build_model();
+        let workspace_key = WorkspaceKey::new("github:o/r#1");
+        let session_key: SessionKey = (&workspace_key).into();
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(Box::new(
+            Workspace::empty(workspace_key.clone(), "review", chrono::Utc::now()),
+        )));
+        model.handle_daemon_event(lazybox_ipc::Event::TerminalSpawned {
+            terminal_id: lazybox_ipc::TerminalId(7),
+            session_key,
+            kind: TerminalKind::Agent("codex".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+        });
+
+        let commands = model.dispatch_diff_review(
+            workspace_key,
+            lazybox_ipc::WorkspaceDiffTarget::Session(lazybox_core::SessionId::new()),
+            vec![lazybox_ipc::TerminalId(7)],
+            vec![DiffReviewComment {
+                path: "src/lib.rs".into(),
+                old_line: None,
+                new_line: Some(11),
+                hunk_header: "@@ -10 +10,2 @@ fn run()".into(),
+                referenced_line: "+fix();".into(),
+                context: vec![" keep();".into(), "+fix();".into()],
+                body: "rename this helper".into(),
+                anchor_row: 3,
+            }],
+        );
+
+        assert!(
+            matches!(
+                commands.as_slice(),
+                [
+                    IpcCommand::RecordUserMessage {
+                        terminal_id: lazybox_ipc::TerminalId(7),
+                        prompt: UserPrompt { text, .. },
+                    },
+                    IpcCommand::InjectPrompt {
+                        terminal_id: lazybox_ipc::TerminalId(7),
+                        prompt,
+                        submit: true,
+                        fallback_spawn: None,
+                    }
+                ] if text.contains("src/lib.rs:11")
+                    && text.contains("rename this helper")
+                    && prompt.contains("src/lib.rs:11")
+                    && prompt.contains("rename this helper")
+            ),
+            "unexpected review commands: {commands:#?}"
+        );
+    }
+
+    #[test]
+    fn diff_review_targets_the_agent_resolved_for_the_inspected_session() {
+        use crate::realm::components::diff_review::DiffReviewComment;
+        use lazybox_core::Workspace;
+        use lazybox_ipc::{TerminalKind, WorkspaceDiffTarget};
+
+        let mut model = build_model();
+        let workspace_key = WorkspaceKey::new("github:o/r#1");
+        let session_key: SessionKey = (&workspace_key).into();
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(Box::new(
+            Workspace::empty(workspace_key.clone(), "review", chrono::Utc::now()),
+        )));
+        for terminal_id in [8, 7] {
+            model.handle_daemon_event(lazybox_ipc::Event::TerminalSpawned {
+                terminal_id: lazybox_ipc::TerminalId(terminal_id),
+                session_key: session_key.clone(),
+                kind: TerminalKind::Agent("codex".into()),
+                no_permission: false,
+                on_main: false,
+                model_label: None,
+            });
+        }
+
+        let commands = model.dispatch_diff_review(
+            workspace_key,
+            WorkspaceDiffTarget::Session(lazybox_core::SessionId::new()),
+            vec![lazybox_ipc::TerminalId(8)],
+            vec![DiffReviewComment {
+                path: "src/lib.rs".into(),
+                old_line: None,
+                new_line: Some(11),
+                hunk_header: "@@ -10 +10,2 @@ fn run()".into(),
+                referenced_line: "+fix();".into(),
+                context: vec!["+fix();".into()],
+                body: "fix this".into(),
+                anchor_row: 3,
+            }],
+        );
+
+        assert!(commands.iter().all(|command| match command {
+            IpcCommand::RecordUserMessage { terminal_id, .. }
+            | IpcCommand::InjectPrompt { terminal_id, .. } =>
+                *terminal_id == lazybox_ipc::TerminalId(8),
+            _ => true,
+        }));
+        assert_eq!(commands.len(), 2);
+    }
+
+    #[test]
+    fn view_diff_requests_the_selected_worktree_and_mounts_its_response() {
+        use lazybox_core::{SessionKind, Workspace, WorkspaceSession};
+        use lazybox_ipc::WorkspaceDiffDto;
+        use lazybox_tui_core::action::Action;
+
+        let mut model = build_model();
+        let workspace_key = WorkspaceKey::new("github:o/r#1");
+        let mut workspace = Workspace::empty(workspace_key.clone(), "review", chrono::Utc::now());
+        workspace.sessions.push(WorkspaceSession::new(
+            workspace_key.clone(),
+            SessionKind::Agent {
+                agent_id: "codex".into(),
+            },
+            "/tmp/review-a".into(),
+            chrono::Utc::now(),
+        ));
+        let session = WorkspaceSession::new(
+            workspace_key.clone(),
+            SessionKind::Agent {
+                agent_id: "codex".into(),
+            },
+            "/tmp/review-b".into(),
+            chrono::Utc::now(),
+        );
+        let session_id = session.id;
+        workspace.sessions.push(session);
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(Box::new(workspace)));
+        assert!(model.sidebar.focus_session_id(session_id));
+
+        let commands = model.dispatch_action(&Action::ViewDiff);
+        assert!(matches!(
+            commands.as_slice(),
+            [IpcCommand::InspectWorkspaceDiff {
+                workspace_key: target,
+                target: lazybox_ipc::WorkspaceDiffTarget::Session(target_session),
+            }] if target == &workspace_key && target_session == &session_id
+        ));
+        assert_eq!(
+            model.pending_diff_session.as_ref(),
+            Some(&(
+                workspace_key.clone(),
+                lazybox_ipc::WorkspaceDiffTarget::Session(session_id)
+            ))
+        );
+
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceDiffInspected {
+            workspace_key,
+            target: lazybox_ipc::WorkspaceDiffTarget::Session(session_id),
+            agent_terminal_ids: vec![lazybox_ipc::TerminalId(7)],
+            diff: Some(WorkspaceDiffDto {
+                status: Vec::new(),
+                stat: Vec::new(),
+                files: Vec::new(),
+                truncated: false,
+            }),
+            error: None,
+        });
+        assert_eq!(model.modal_stack.last(), Some(&Id::DiffReview));
+        assert!(model.pending_diff_session.is_none());
+    }
+
+    #[test]
+    fn view_diff_uses_the_workspace_default_session_when_no_session_row_is_selected() {
+        use lazybox_core::{SessionKind, Workspace, WorkspaceSession};
+        use lazybox_tui_core::action::Action;
+
+        let mut model = build_model();
+        let workspace_key = WorkspaceKey::new("github:o/r#1");
+        let now = chrono::Utc::now();
+        let mut workspace = Workspace::empty(workspace_key.clone(), "review", now);
+        let older = WorkspaceSession::new(
+            workspace_key.clone(),
+            SessionKind::Shell,
+            "/tmp/review-older".into(),
+            now - chrono::Duration::minutes(1),
+        );
+        let newer = WorkspaceSession::new(
+            workspace_key.clone(),
+            SessionKind::Shell,
+            "/tmp/review-newer".into(),
+            now,
+        );
+        let newer_id = newer.id;
+        workspace.sessions.extend([older, newer]);
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(Box::new(workspace)));
+        let session_key: SessionKey = (&workspace_key).into();
+        assert!(model.sidebar.focus_workspace_key(&session_key));
+
+        let commands = model.dispatch_action(&Action::ViewDiff);
+
+        assert!(matches!(
+            commands.as_slice(),
+            [IpcCommand::InspectWorkspaceDiff {
+                target: lazybox_ipc::WorkspaceDiffTarget::Session(session_id),
+                ..
+            }] if *session_id == newer_id
+        ));
+    }
+
+    #[test]
+    fn view_diff_targets_a_linked_checkout_without_sessions() {
+        use lazybox_core::Workspace;
+        use lazybox_tui_core::action::Action;
+
+        let mut model = build_model();
+        let workspace_key = WorkspaceKey::new("github:o/r#1");
+        let mut workspace =
+            Workspace::empty(workspace_key.clone(), "linked review", chrono::Utc::now());
+        workspace.linked_checkout = Some("/tmp/linked-review".into());
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(Box::new(workspace)));
+        let session_key: SessionKey = (&workspace_key).into();
+        assert!(model.sidebar.focus_workspace_key(&session_key));
+
+        let commands = model.dispatch_action(&Action::ViewDiff);
+
+        assert!(matches!(
+            commands.as_slice(),
+            [IpcCommand::InspectWorkspaceDiff {
+                workspace_key: target,
+                target: lazybox_ipc::WorkspaceDiffTarget::LinkedCheckout,
+            }] if target == &workspace_key
+        ));
+    }
+
     /// Reply submission with a non-empty body + a pending reply
     /// target produces `PostReply` followed by `Refresh` (in that
     /// order — the Refresh kicks an immediate poll instead of
@@ -5407,6 +5640,87 @@ mod merge_focus_follow_tests {
             }
             other => panic!("expected SetAutoFixPolicy, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn direct_auto_fix_toggle_arms_both_failure_kinds() {
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        m.auto_fix_enabled = true;
+        let ws = workspace("owner/repo#7", true, Duration::hours(1));
+        let ws_key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
+
+        let cmds = m.dispatch_action(&Action::ToggleAutoFix);
+        assert!(matches!(
+            cmds.as_slice(),
+            [IpcCommand::SetAutoFixPolicies {
+                session_key,
+                ci: lazybox_core::PolicyArm::Arm,
+                conflict: lazybox_core::PolicyArm::Arm,
+            }] if session_key.as_str() == ws_key.as_str()
+        ));
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .map(|notice| notice.message.as_str())
+            .unwrap_or_default();
+        assert!(
+            notice.contains("CI failures + conflicts"),
+            "toggle notice must explain both repair signals: {notice:?}"
+        );
+    }
+
+    #[test]
+    fn direct_auto_fix_toggle_disarms_both_when_either_is_armed() {
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        let mut ws = workspace("owner/repo#8", true, Duration::hours(1));
+        ws.policies.set(
+            lazybox_core::AutoFixKind::CiFailure,
+            lazybox_core::PolicyArm::Arm,
+        );
+        let ws_key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
+
+        let cmds = m.dispatch_action(&Action::ToggleAutoFix);
+        assert!(matches!(
+            cmds.as_slice(),
+            [IpcCommand::SetAutoFixPolicies {
+                ci: lazybox_core::PolicyArm::Disarm,
+                conflict: lazybox_core::PolicyArm::Disarm,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn shift_a_dispatches_the_direct_auto_fix_toggle() {
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let mut m = build_model();
+        m.auto_fix_enabled = true;
+        let ws = workspace("owner/repo#9", true, Duration::hours(1));
+        let ws_key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
+
+        m.dispatch_key(KeyEvent::new(Key::Char('A'), KeyModifiers::SHIFT));
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .map(|notice| notice.message.as_str())
+            .unwrap_or_default();
+        assert!(
+            notice.starts_with("auto-fix: armed"),
+            "Shift-A must fire the direct catalog action: {notice:?}"
+        );
     }
 
     /// The native-auto-merge row is read-only: picking it emits no

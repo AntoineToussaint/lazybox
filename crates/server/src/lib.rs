@@ -845,6 +845,7 @@ impl Server {
                         lazybox_ipc::Command::SetAutoMergeOnGreen { .. } => "SetAutoMergeOnGreen",
                         lazybox_ipc::Command::SetTrackMain { .. } => "SetTrackMain",
                         lazybox_ipc::Command::SetAutoFixPolicy { .. } => "SetAutoFixPolicy",
+                        lazybox_ipc::Command::SetAutoFixPolicies { .. } => "SetAutoFixPolicies",
                         lazybox_ipc::Command::Kill { .. } => "Kill",
                         lazybox_ipc::Command::RemoveMergedWorkspace { .. } => "RemoveMergedWorkspace",
                         lazybox_ipc::Command::KeepMergedWorkspace { .. } => "KeepMergedWorkspace",
@@ -869,6 +870,9 @@ impl Server {
                         lazybox_ipc::Command::ListProviderCredentials { .. } => "ListProviderCredentials",
                         lazybox_ipc::Command::CleanWorktrees => "CleanWorktrees",
                         lazybox_ipc::Command::InspectWorktrees => "InspectWorktrees",
+                        lazybox_ipc::Command::InspectWorkspaceDiff { .. } => {
+                            "InspectWorkspaceDiff"
+                        }
                         lazybox_ipc::Command::ScanCheckouts { .. } => "ScanCheckouts",
                         lazybox_ipc::Command::ImportLocalCheckout { .. } => "ImportLocalCheckout",
                         lazybox_ipc::Command::DeleteOrphanedWorktree { .. } => "DeleteOrphanedWorktree",
@@ -1590,6 +1594,14 @@ pub async fn dispatch_command(
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
             workspace::set_auto_fix_policy(config, &key, kind, arm).await;
         }
+        lazybox_ipc::Command::SetAutoFixPolicies {
+            session_key,
+            ci,
+            conflict,
+        } => {
+            let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
+            workspace::set_auto_fix_policies(config, &key, ci, conflict).await;
+        }
         lazybox_ipc::Command::Kill { session_key } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
             if let Some(reclaimed) = workspace::delete_workspace(config, &key).await {
@@ -1724,6 +1736,12 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::InspectWorktrees => {
             polling::handle_inspect_worktrees(config).await;
+        }
+        lazybox_ipc::Command::InspectWorkspaceDiff {
+            workspace_key,
+            target,
+        } => {
+            polling::handle_inspect_workspace_diff(config, workspace_key, target).await;
         }
         lazybox_ipc::Command::ScanCheckouts { roots } => {
             polling::handle_scan_checkouts(config, roots).await;

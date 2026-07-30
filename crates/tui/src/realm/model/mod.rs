@@ -356,6 +356,8 @@ pub enum Id {
     /// the modal so link clicks open, and the modal dismisses its own
     /// outside-clicks.
     DescriptionModal,
+    /// Navigable local worktree diff with an inline review draft.
+    DiffReview,
 }
 
 impl Id {
@@ -709,6 +711,12 @@ pub enum Msg {
     /// `c` pressed in the messages window (#309) — wipe the notice
     /// history and re-render the (now empty) window.
     MessagesCleared,
+    DiffReviewSubmitted {
+        workspace_key: lazybox_core::WorkspaceKey,
+        target: lazybox_ipc::WorkspaceDiffTarget,
+        agent_terminal_ids: Vec<lazybox_ipc::TerminalId>,
+        comments: Vec<crate::realm::components::diff_review::DiffReviewComment>,
+    },
     /// Sidebar / Right / Terminals routes — kept in case a future
     /// pane goes through tuirealm. Today panes drain themselves
     /// directly inside the orchestrator's pane-dispatch path.
@@ -1144,6 +1152,8 @@ pub struct Model<T: TerminalAdapter> {
     /// (the reply then disarms it), so it stays out of [`ModalFlow`].
     /// Cleared on mount / submit / dismiss / fetch-failure.
     awaiting_repo_labels: Option<lazybox_core::WorkspaceKey>,
+    /// Exact checkout whose diff response this client is waiting for.
+    pending_diff_session: Option<(lazybox_core::WorkspaceKey, lazybox_ipc::WorkspaceDiffTarget)>,
     /// Optimistic mutations applied locally and awaiting the daemon's
     /// echo (#476). Each carries the prior rows so a rejected
     /// round-trip rolls back; the success echo drops the entry. See
@@ -1642,6 +1652,7 @@ impl<T: TerminalAdapter> Model<T> {
             conversion: None,
             last_reply_body: None,
             awaiting_repo_labels: None,
+            pending_diff_session: None,
             pending_mutations: Vec::new(),
             removal_prompt_queue: std::collections::VecDeque::new(),
             merge_prompt_queue: std::collections::VecDeque::new(),
@@ -4246,6 +4257,16 @@ impl<T: TerminalAdapter> Model<T> {
                     self.pop_modal();
                 }
                 self.mount_messages();
+            }
+            Msg::DiffReviewSubmitted {
+                workspace_key,
+                target,
+                agent_terminal_ids,
+                comments,
+            } => {
+                let commands =
+                    self.dispatch_diff_review(workspace_key, target, agent_terminal_ids, comments);
+                self.dispatch_cmds(commands);
             }
             Msg::OpenSnippetsFile => {
                 // `e` in the browser: drop the modal, then open the YAML

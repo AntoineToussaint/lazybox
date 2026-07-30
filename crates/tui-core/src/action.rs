@@ -82,6 +82,8 @@ pub enum Action {
     SpawnShellOnMain,
     /// Open the workspace's worktree in the user's editor.
     OpenEditor,
+    /// Review the workspace's combined staged/unstaged worktree diff.
+    ViewDiff,
     /// Create a brand-new pre-PR workspace (asks for a name).
     NewWorkspace,
     /// Create a brand-new local Project — a top-level container the
@@ -125,6 +127,10 @@ pub enum Action {
     /// PR becomes merge-ready. Distinct from GitHub's native
     /// auto-merge; acts only while lazybox is running.
     ToggleAutoMerge,
+    /// Arm or disarm both per-workspace auto-fix policies. When armed,
+    /// lazybox asks a settled agent to repair failed CI or a merge
+    /// conflict on the workspace's PR.
+    ToggleAutoFix,
     /// Toggle the workspace's "track main" arm (issue #535). When armed,
     /// the daemon keeps this workspace's worktree fast-forwarded to
     /// `origin/<default>` while the tree is clean — a persistent scratch
@@ -389,6 +395,7 @@ pub enum ActionKind {
     SpawnAgentOnMain,
     SpawnShellOnMain,
     OpenEditor,
+    ViewDiff,
     NewWorkspace,
     NewProject,
     ImportCheckout,
@@ -401,6 +408,7 @@ pub enum ActionKind {
     MergePr,
     UpdateBranch,
     ToggleAutoMerge,
+    ToggleAutoFix,
     ToggleTrackMain,
     ManagePolicies,
     AdoptSessions,
@@ -505,6 +513,7 @@ impl ActionKind {
         Self::SpawnAgentOnMain,
         Self::SpawnShellOnMain,
         Self::OpenEditor,
+        Self::ViewDiff,
         Self::MarkAllRead,
         Self::ToggleSnooze,
         // Workspace-management menu: creation and movement first,
@@ -525,6 +534,7 @@ impl ActionKind {
         Self::MergePr,
         Self::UpdateBranch,
         Self::ToggleAutoMerge,
+        Self::ToggleAutoFix,
         Self::ToggleTrackMain,
         Self::ManagePolicies,
         Self::RequestReviewers,
@@ -616,6 +626,7 @@ impl Action {
             Action::SpawnAgentOnMain(_) => ActionKind::SpawnAgentOnMain,
             Action::SpawnShellOnMain => ActionKind::SpawnShellOnMain,
             Action::OpenEditor => ActionKind::OpenEditor,
+            Action::ViewDiff => ActionKind::ViewDiff,
             Action::NewWorkspace => ActionKind::NewWorkspace,
             Action::NewProject => ActionKind::NewProject,
             Action::ImportCheckout => ActionKind::ImportCheckout,
@@ -628,6 +639,7 @@ impl Action {
             Action::MergePr => ActionKind::MergePr,
             Action::UpdateBranch => ActionKind::UpdateBranch,
             Action::ToggleAutoMerge => ActionKind::ToggleAutoMerge,
+            Action::ToggleAutoFix => ActionKind::ToggleAutoFix,
             Action::ToggleTrackMain => ActionKind::ToggleTrackMain,
             Action::ManagePolicies => ActionKind::ManagePolicies,
             Action::AdoptSessions => ActionKind::AdoptSessions,
@@ -934,6 +946,13 @@ impl ActionDef {
                 describe: "Open the worktree in the configured editor.",
                 section: Section::Workspace,
             },
+            ActionKind::ViewDiff => &Self {
+                kind: ActionKind::ViewDiff,
+                default_keys: "Shift-V",
+                label: "review diff",
+                describe: "Review the worktree's staged, unstaged, and untracked changes; search or annotate lines and send the draft to the running agent.",
+                section: Section::Workspace,
+            },
             ActionKind::NewWorkspace => &Self {
                 kind: ActionKind::NewWorkspace,
                 default_keys: "x n",
@@ -1019,6 +1038,13 @@ impl ActionDef {
                 default_keys: "g g",
                 label: "auto-merge on green",
                 describe: "Toggle \"auto-merge on green\": arm the workspace so lazybox merges your PR automatically once CI goes green (own PR, no conflicts, no changes requested). Fires only while lazybox is running.",
+                section: Section::Workspace,
+            },
+            ActionKind::ToggleAutoFix => &Self {
+                kind: ActionKind::ToggleAutoFix,
+                default_keys: "Shift-A",
+                label: "toggle auto-fix",
+                describe: "Arm or disarm auto-fix for the focused PR. When armed, lazybox waits for its agent to finish, then injects repair work if CI failed or the branch conflicts. This shortcut toggles both failure kinds together.",
                 section: Section::Workspace,
             },
             ActionKind::ToggleTrackMain => &Self {
@@ -1716,6 +1742,7 @@ impl ActionKind {
             ActionKind::SpawnAgentOnMain => "spawn_agent_on_main",
             ActionKind::SpawnShellOnMain => "spawn_shell_on_main",
             ActionKind::OpenEditor => "open_editor",
+            ActionKind::ViewDiff => "view_diff",
             ActionKind::NewWorkspace => "new_workspace",
             ActionKind::NewProject => "new_project",
             ActionKind::ImportCheckout => "import_checkout",
@@ -1728,6 +1755,7 @@ impl ActionKind {
             ActionKind::MergePr => "merge_pr",
             ActionKind::UpdateBranch => "update_branch",
             ActionKind::ToggleAutoMerge => "toggle_auto_merge",
+            ActionKind::ToggleAutoFix => "toggle_auto_fix",
             ActionKind::ToggleTrackMain => "toggle_track_main",
             ActionKind::ManagePolicies => "manage_policies",
             ActionKind::AdoptSessions => "adopt_sessions",
@@ -2341,6 +2369,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         // can do something; the resolver Notices on non-PR workspaces
         // if the user presses it anyway.
         ActionKind::ToggleAutoMerge => workspace.map(|w| w.pr.is_some()).unwrap_or(false),
+        ActionKind::ToggleAutoFix => workspace.map(|w| w.pr.is_some()).unwrap_or(false),
         // Track-main applies to a GitHub-backed lazybox worktree — a
         // scratch/branch workspace under a github project. Gate on the
         // same predicate the resolver Notices on, so `g t` only surfaces
@@ -2362,6 +2391,11 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
             intent::resolve_open_editor(workspace),
             intent::Intent::OpenEditor,
         ),
+        ActionKind::ViewDiff => workspace
+            .map(|workspace| {
+                !workspace.sessions.is_empty() || workspace.linked_checkout.is_some()
+            })
+            .unwrap_or(false),
         ActionKind::AdoptSessions => matches!(
             intent::resolve_adopt(workspace),
             intent::Intent::MountAdoptPicker { .. },
@@ -3341,6 +3375,18 @@ mod tests {
 
         // No workspace → not offered.
         assert!(!availability(ActionKind::UpdateBranch, None));
+    }
+
+    #[test]
+    fn diff_review_is_available_for_a_linked_checkout_without_sessions() {
+        let mut workspace = lazybox_core::Workspace::empty(
+            lazybox_core::WorkspaceKey::new("linked"),
+            "linked",
+            chrono::Utc::now(),
+        );
+        workspace.linked_checkout = Some("/tmp/linked".into());
+
+        assert!(availability(ActionKind::ViewDiff, Some(&workspace)));
     }
 
     #[test]

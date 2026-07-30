@@ -335,6 +335,87 @@ pub async fn set_auto_fix_policy(
     commit_upsert_offloaded_reported(config, key, workspace, "set auto-fix policy").await;
 }
 
+/// Persist both per-session auto-fix arms in one workspace commit.
+pub async fn set_auto_fix_policies(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    ci: lazybox_core::PolicyArm,
+    conflict: lazybox_core::PolicyArm,
+) {
+    let _ws_guard = config.lock_workspace(key.as_str()).await;
+    let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
+        return;
+    };
+    workspace
+        .policies
+        .set(lazybox_core::AutoFixKind::CiFailure, ci);
+    workspace
+        .policies
+        .set(lazybox_core::AutoFixKind::MergeConflict, conflict);
+    commit_upsert_offloaded_reported(config, key, workspace, "set auto-fix policies").await;
+}
+
+#[cfg(test)]
+mod auto_fix_policy_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn both_auto_fix_arms_commit_and_broadcast_together() {
+        let config = ServerConfig::in_memory();
+        let key = WorkspaceKey::new("github:o/r#705");
+        let workspace = Workspace::empty(key.clone(), "auto-fix", Utc::now());
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: key.as_str().to_string(),
+                created_at: workspace.created_at,
+                workspace_json: Some(serde_json::to_string(&workspace).expect("workspace json")),
+            })
+            .expect("seed workspace");
+        let mut events = config.bus.subscribe();
+
+        set_auto_fix_policies(
+            &config,
+            &key,
+            lazybox_core::PolicyArm::Arm,
+            lazybox_core::PolicyArm::Disarm,
+        )
+        .await;
+
+        let Event::WorkspaceUpserted(workspace) = events.recv().await.expect("workspace update")
+        else {
+            panic!("expected WorkspaceUpserted");
+        };
+        assert_eq!(
+            workspace.policies.arm(lazybox_core::AutoFixKind::CiFailure),
+            lazybox_core::PolicyArm::Arm
+        );
+        assert_eq!(
+            workspace
+                .policies
+                .arm(lazybox_core::AutoFixKind::MergeConflict),
+            lazybox_core::PolicyArm::Disarm
+        );
+        assert!(
+            events.try_recv().is_err(),
+            "one atomic policy command emits one workspace update"
+        );
+        let stored = config
+            .store
+            .get_workspace(&key)
+            .expect("read workspace")
+            .expect("stored workspace");
+        let stored: Workspace = serde_json::from_str(
+            stored
+                .workspace_json
+                .as_deref()
+                .expect("stored workspace json"),
+        )
+        .expect("decode workspace");
+        assert_eq!(stored.policies, workspace.policies);
+    }
+}
+
 /// Delete a workspace + all its sessions from the store. Broadcasts
 /// `WorkspaceRemoved` so every connected TUI prunes its sidebar row.
 /// Used by the sidebar's confirmed `x x` archive flow.

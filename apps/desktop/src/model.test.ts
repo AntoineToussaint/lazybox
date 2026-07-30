@@ -8,6 +8,7 @@ import {
   filteredWorkspaces,
   preferredTerminal,
   primaryTask,
+  projectKeyLabel,
   shouldHandleWorkspaceEnter,
   sortedWorkspaces,
   unreadCount,
@@ -246,5 +247,15 @@ describe("workspace model", () => {
     expect(shouldHandleWorkspaceEnter(true, false, false)).toBe(true);
     expect(shouldHandleWorkspaceEnter(true, false, true)).toBe(false);
     expect(shouldHandleWorkspaceEnter(true, true, false)).toBe(false);
+  });
+
+  it("derives a human label from a project key instead of the raw key", () => {
+    expect(projectKeyLabel("github-acme-widget")).toBe("acme/widget");
+    expect(projectKeyLabel("github-o-pretty-hackernews")).toBe(
+      "o/pretty-hackernews",
+    );
+    expect(projectKeyLabel("local-scratch")).toBe("scratch");
+    expect(projectKeyLabel("linear-team123")).toBe("team123");
+    expect(projectKeyLabel("standalone")).toBe("standalone");
   });
 });

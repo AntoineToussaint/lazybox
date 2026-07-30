@@ -11,6 +11,7 @@ import {
   filteredWorkspaces,
   preferredTerminal,
   primaryTask,
+  projectKeyLabel,
   shouldHandleWorkspaceEnter,
   taskReference,
   unreadCount,
@@ -180,6 +181,7 @@ let selectedScopes = new Set<string>();
 let configuredRepositories: DesktopRepository[] = [];
 let setupRequired = false;
 const replySubmitting = new Set<string>();
+let creatingWorkspace = false;
 const replyDrafts = new ReplyDrafts();
 const pendingLaunches = new Set<string>();
 let focusRequestedSession: string | null = null;
@@ -1201,13 +1203,15 @@ function availableRepositories(): DesktopRepository[] {
     ]),
   );
   for (const workspace of workspaces.values()) {
-    if (workspace.project_key === null) {
+    const projectKey = workspace.project_key;
+    if (projectKey === null) {
       continue;
     }
-    repositories.set(workspace.project_key, {
-      project_key: workspace.project_key,
-      label: primaryTask(workspace)?.repo ?? workspace.project_key,
-    });
+    const label =
+      primaryTask(workspace)?.repo ??
+      repositories.get(projectKey)?.label ??
+      projectKeyLabel(projectKey);
+    repositories.set(projectKey, { project_key: projectKey, label });
   }
   return [...repositories.values()].sort((left, right) =>
     left.label.localeCompare(right.label),
@@ -1237,6 +1241,9 @@ function openNewWorkspaceDialog(): void {
 }
 
 async function createWorkspace(): Promise<void> {
+  if (creatingWorkspace) {
+    return;
+  }
   const name = newWorkspaceName.value.trim();
   if (newWorkspaceProject.value === "") {
     newWorkspaceError.textContent = "Choose a repository.";
@@ -1249,16 +1256,21 @@ async function createWorkspace(): Promise<void> {
     newWorkspaceName.focus();
     return;
   }
-  const succeeded = await sendCommand(
-    createWorkspaceCommand(
-      name,
-      newWorkspaceProject.value,
-      newWorkspaceAgent.checked ? defaultAgent : null,
-    ),
-  );
-  if (succeeded) {
-    newWorkspaceDialog.close();
-    setStatus(`Creating ${name}…`);
+  creatingWorkspace = true;
+  try {
+    const succeeded = await sendCommand(
+      createWorkspaceCommand(
+        name,
+        newWorkspaceProject.value,
+        newWorkspaceAgent.checked ? defaultAgent : null,
+      ),
+    );
+    if (succeeded) {
+      newWorkspaceDialog.close();
+      setStatus(`Creating ${name}…`);
+    }
+  } finally {
+    creatingWorkspace = false;
   }
 }
 

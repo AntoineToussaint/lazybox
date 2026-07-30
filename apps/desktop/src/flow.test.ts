@@ -404,6 +404,125 @@ describe("credential-free desktop workflow", () => {
     button("new-workspace-button").click();
     expect(dialog("new-workspace-dialog").open).toBe(false);
   });
+
+  it("sends only one CreateWorkspace when submitted twice in flight", async () => {
+    let releaseCreate: (() => void) | undefined;
+
+    harness.invoke.mockImplementation((command: string, args?: unknown) => {
+      if (command === "desktop_setup_state") {
+        return Promise.resolve({
+          first_run: false,
+          selected_scopes: ["github:acme/widget"],
+          agents: [{ id: "codex", label: "Codex", available: true }],
+          default_agent: "codex",
+          analytics_enabled: false,
+          diagnostics_path: "/tmp/lazybox-crashes",
+        });
+      }
+      if (command === "desktop_info") {
+        return Promise.resolve({
+          protocol_version: 1,
+          max_terminal_frame_bytes: 2048,
+          max_terminal_write_bytes: 1024,
+          agents: ["codex"],
+          default_agent: "codex",
+          repositories: [{ project_key: "github-acme-widget", label: "acme/widget" }],
+        });
+      }
+      if (command === "list_workspaces") {
+        return Promise.resolve({ workspaces: [], warnings: [] });
+      }
+      if (command === "read_terminal_data") {
+        return new Promise<Uint8Array>(() => {});
+      }
+      if (command === "send_command") {
+        const payload = args as { command?: { CreateWorkspace?: unknown } };
+        if (payload.command?.CreateWorkspace !== undefined) {
+          return new Promise<void>((resolve) => {
+            releaseCreate = resolve;
+          });
+        }
+        return Promise.resolve();
+      }
+      return Promise.resolve();
+    });
+
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() =>
+      expect(button("new-workspace-button").disabled).toBe(false),
+    );
+
+    button("new-workspace-button").click();
+    expect(dialog("new-workspace-dialog").open).toBe(true);
+    input("#new-workspace-name").value = "scratch space";
+    form("new-workspace-form").dispatchEvent(submitEvent());
+    form("new-workspace-form").dispatchEvent(submitEvent());
+
+    await vi.waitFor(() => expect(createCommands().length).toBe(1));
+    // Let any erroneous second dispatch settle before asserting it stayed at one.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(createCommands()).toHaveLength(1);
+    expect(dialog("new-workspace-dialog").open).toBe(true);
+
+    releaseCreate?.();
+  });
+
+  it("labels a task-less workspace with a friendly name in the picker", async () => {
+    harness.invoke.mockImplementation((command: string) => {
+      if (command === "desktop_setup_state") {
+        return Promise.resolve({
+          first_run: false,
+          selected_scopes: [],
+          agents: [{ id: "codex", label: "Codex", available: true }],
+          default_agent: "codex",
+          analytics_enabled: false,
+          diagnostics_path: "/tmp/lazybox-crashes",
+        });
+      }
+      if (command === "desktop_info") {
+        return Promise.resolve({
+          protocol_version: 1,
+          max_terminal_frame_bytes: 2048,
+          max_terminal_write_bytes: 1024,
+          agents: ["codex"],
+          default_agent: "codex",
+          repositories: [],
+        });
+      }
+      if (command === "list_workspaces") {
+        return Promise.resolve({ workspaces: [], warnings: [] });
+      }
+      if (command === "read_terminal_data") {
+        return new Promise<Uint8Array>(() => {});
+      }
+      return Promise.resolve();
+    });
+
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() =>
+      expect(element("workspace-list").textContent).toContain("inbox is empty"),
+    );
+
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: {
+        Snapshot: { workspaces: [taskless("local-scratch")], terminals: [] },
+      },
+    });
+    await vi.waitFor(() =>
+      expect(button("new-workspace-button").disabled).toBe(false),
+    );
+
+    button("new-workspace-button").click();
+    const options = [...select("new-workspace-project").options].map(
+      (option) => option.textContent,
+    );
+    expect(options).toContain("scratch");
+    expect(options).not.toContain("local-scratch");
+  });
 });
 
 function pr(number: number): Record<string, unknown> {
@@ -425,6 +544,19 @@ function pr(number: number): Record<string, unknown> {
   task.id.key = `o/r#${number}`;
   task.title = `PR o/r#${number}`;
   task.url = `https://github.com/o/r/pull/${number}`;
+  return workspace;
+}
+
+function taskless(projectKey: string): Record<string, unknown> {
+  const workspace = pr(1);
+  workspace.key = "scratch";
+  workspace.branch = "scratch";
+  workspace.name = "Scratch";
+  workspace.project_key = projectKey;
+  workspace.local = true;
+  workspace.pr = null;
+  workspace.gh_issues = [];
+  workspace.linear_issues = [];
   return workspace;
 }
 
@@ -509,6 +641,15 @@ function replyCommands(): unknown[] {
       typeof command === "object" &&
       command !== null &&
       "PostReply" in command,
+  );
+}
+
+function createCommands(): unknown[] {
+  return commandCalls().filter(
+    (command) =>
+      typeof command === "object" &&
+      command !== null &&
+      "CreateWorkspace" in command,
   );
 }
 

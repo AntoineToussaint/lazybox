@@ -567,17 +567,18 @@ async fn run_case(case: Case) {
             |event| {
                 matches!(
                     event,
-                    Event::TerminalSpawned {
+                    Event::TerminalReplaced {
+                        old_terminal_id,
                         kind: TerminalKind::Agent(agent),
                         ..
-                    } if agent == "codex"
+                    } if *old_terminal_id == terminal_ids[0] && agent == "codex"
                 )
             },
             EVENT_BUDGET,
         )
         .await
         .expect("moved agent exact resume");
-        let Event::TerminalSpawned {
+        let Event::TerminalReplaced {
             terminal_id: resumed_id,
             ..
         } = resumed

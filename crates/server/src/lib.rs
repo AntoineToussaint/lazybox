@@ -279,8 +279,8 @@ const CONNECTION_ROUTER_TASKS: usize = 2;
 /// Any co-holding site (one that locks two of these maps at once)
 /// must follow this order; the constant exists as a discoverable name
 /// future callers can grep when they add one.
-pub const TERMINAL_MAP_LOCK_ORDER: &str =
-    "terminals → terminal_meta → terminal_sessions → agent_state_generations → agent_states";
+pub const TERMINAL_MAP_LOCK_ORDER: &str = "terminals → terminal_meta → terminal_sessions → agent_state_generations → \
+     superseded_terminals → authenticating_terminals → agent_states";
 
 /// `ServerConfig` is the per-process state shared across all client
 /// connections — the persistent store, the broadcast bus the poller
@@ -1149,7 +1149,10 @@ fn command_lane(cmd: &lazybox_ipc::Command) -> CommandLane {
         | Command::Resize { .. }
         | Command::Close { .. }
         | Command::InjectPrompt { .. }
-        | Command::DeliverSnippet { .. } => CommandLane::TerminalIo,
+        | Command::DeliverSnippet { .. }
+        | Command::ResumeAgent { .. }
+        | Command::ReauthenticateAgent { .. }
+        | Command::CancelAgentReauthentication { .. } => CommandLane::TerminalIo,
         Command::RecordUserMessage { .. } | Command::RecordComposingBuffer { .. } => {
             CommandLane::TerminalPersistence
         }
@@ -1294,9 +1297,12 @@ pub async fn dispatch_command(
             if !logins.is_empty() {
                 let _ = tx.send(Event::ViewerIdentities { logins });
             }
-            for event in config.agent_recovery.replay_events().await {
+            let (recovery_events, auth_replays) =
+                config.agent_recovery.replay_events(Some(tx)).await;
+            for event in recovery_events {
                 let _ = tx.send(event);
             }
+            agent_auth::replay_auth_output(config, tx, auth_replays).await;
             // Resolve daemon-owned settings off the async runtime: automatic
             // shell discovery can consult the account database through NSS.
             let daemon_settings = tokio::task::spawn_blocking(|| {
@@ -1592,7 +1598,13 @@ pub async fn dispatch_command(
             terminal_id,
             switch_account,
         } => {
-            agent_auth::start_reauthentication(config, terminal_id, switch_account).await;
+            agent_auth::start_reauthentication(
+                config,
+                terminal_id,
+                switch_account,
+                Some(tx.clone()),
+            )
+            .await;
         }
         lazybox_ipc::Command::CancelAgentReauthentication { terminal_id } => {
             agent_auth::cancel_reauthentication(config, terminal_id).await;

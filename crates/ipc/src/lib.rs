@@ -2091,6 +2091,7 @@ pub enum Event {
     /// Non-secret orchestration progress. Provider PTY bytes continue over
     /// the terminal stream and are never copied into this message.
     AgentAuthProgress {
+        recovery_terminal_id: TerminalId,
         terminal_id: TerminalId,
         phase: AgentAuthPhase,
     },
@@ -2098,6 +2099,7 @@ pub enum Event {
     /// scrubbed status assembled from process exit state, never provider
     /// output.
     AgentAuthFinished {
+        recovery_terminal_id: TerminalId,
         terminal_id: TerminalId,
         display_name: String,
         success: bool,
@@ -2108,6 +2110,35 @@ pub enum Event {
     AgentResumeFallback {
         terminal_id: TerminalId,
         display_name: String,
+    },
+    /// A daemon-owned terminal replaced a recoverable pane. Unlike matching
+    /// by workspace/agent, this relation remains unambiguous when isolated and
+    /// on-main terminals for the same agent coexist.
+    TerminalReplaced {
+        old_terminal_id: TerminalId,
+        terminal_id: TerminalId,
+        session_key: SessionKey,
+        kind: TerminalKind,
+        no_permission: bool,
+        on_main: bool,
+        model_label: Option<String>,
+        authenticating: bool,
+    },
+    /// Provider-owned authentication PTY bytes sent only to the connection
+    /// currently attached to the recovery flow. They never enter the daemon's
+    /// process-wide broadcast bus.
+    AgentAuthOutput {
+        terminal_id: TerminalId,
+        bytes: Vec<u8>,
+        first_seq: u64,
+        seq: u64,
+    },
+    /// Connection-private authoritative replay for an authentication PTY,
+    /// used when ownership moves to a reconnecting client.
+    AgentAuthReplay {
+        terminal_id: TerminalId,
+        replay: Vec<u8>,
+        seq: u64,
     },
 }
 
@@ -2690,6 +2721,13 @@ impl EventSender {
         match self {
             Self::Bounded { tx, .. } => tx.closed().await,
             Self::Unbounded(tx) => tx.closed().await,
+        }
+    }
+
+    pub fn is_closed(&self) -> bool {
+        match self {
+            Self::Bounded { tx, .. } => tx.is_closed(),
+            Self::Unbounded(tx) => tx.is_closed(),
         }
     }
 }

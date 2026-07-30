@@ -123,6 +123,7 @@ mod agent_auth_recovery_tests {
     fn failed_login_offers_retry_without_losing_recovery_identity() {
         let mut model = build_model();
         model.handle_daemon_event(Event::AgentAuthFinished {
+            recovery_terminal_id: TerminalId(9),
             terminal_id: TerminalId(9),
             display_name: "Claude Code".into(),
             success: false,

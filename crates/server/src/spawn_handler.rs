@@ -94,10 +94,11 @@ enum TerminalPersistedField {
     Draft,
     PtyLaunchGeneration,
     AgentStateGeneration,
+    AgentResume,
 }
 
 impl TerminalPersistedField {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Metadata,
         Self::Access,
         Self::NoPermission,
@@ -106,6 +107,7 @@ impl TerminalPersistedField {
         Self::Draft,
         Self::PtyLaunchGeneration,
         Self::AgentStateGeneration,
+        Self::AgentResume,
     ];
 
     fn key(self, backend_key: &str) -> String {
@@ -118,6 +120,7 @@ impl TerminalPersistedField {
             Self::Draft => "terminal-draft",
             Self::PtyLaunchGeneration => "terminal-pty-generation",
             Self::AgentStateGeneration => "terminal-agent-state-generation",
+            Self::AgentResume => "terminal-agent-resume",
         };
         format!("{prefix}:{backend_key}")
     }
@@ -135,7 +138,7 @@ fn agent_state_key(backend_key: &str, generation: u64) -> String {
 /// still reference it.
 static TERMINAL_ID_PERSIST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
-fn alloc_terminal_id(store: &dyn lazybox_store::Store) -> TerminalId {
+pub(crate) fn alloc_terminal_id(store: &dyn lazybox_store::Store) -> TerminalId {
     // The guard makes the read-max-allocate-persist below atomic with
     // respect to every other in-process allocator, so the persisted
     // mark is always max(stored, allocated). Allocation is rare (one
@@ -695,13 +698,13 @@ pub async fn handle_spawn(
     session_id: Option<SessionId>,
     kind: TerminalKind,
     options: SpawnOptions,
-) {
+) -> Option<TerminalId> {
     let _workspace_agent = if matches!(kind, TerminalKind::Agent(_)) {
         Some(config.spawn.lock_workspace_agent(&session_key).await)
     } else {
         None
     };
-    handle_spawn_inner(config, session_key, session_id, kind, options).await;
+    handle_spawn_inner(config, session_key, session_id, kind, options).await
 }
 
 async fn handle_spawn_inner(
@@ -710,7 +713,7 @@ async fn handle_spawn_inner(
     session_id: Option<SessionId>,
     kind: TerminalKind,
     options: SpawnOptions,
-) {
+) -> Option<TerminalId> {
     let SpawnOptions {
         cwd,
         initial_prompt,
@@ -720,6 +723,9 @@ async fn handle_spawn_inner(
         resume,
         provider_session_id,
         no_permission_override,
+        replace_terminal_id,
+        prompt_history,
+        composing_buffer,
         access,
         client_request_id,
         origin,
@@ -800,7 +806,7 @@ async fn handle_spawn_inner(
             {
                 outcome.complete();
             }
-            return;
+            return None;
         }
     };
     // Singleton enforcement at the daemon (the source of truth for
@@ -817,7 +823,7 @@ async fn handle_spawn_inner(
                 "spawn",
                 "an agent with a different host-access policy is already running in this checkout",
             ));
-            return;
+            return None;
         }
         tracing::info!(
             terminal_id = ?existing,
@@ -839,7 +845,7 @@ async fn handle_spawn_inner(
             terminal_id: existing,
         });
         outcome.complete();
-        return;
+        return Some(existing);
     }
     // Resolve target session + cwd. The cwd param wins over
     // workspace lookup so the existing `Spawn { cwd: Some(...) }`
@@ -884,7 +890,7 @@ async fn handle_spawn_inner(
                 WorktreeStepStatus::Failed(lazybox_ipc::SPAWN_CANCELLED_NOTE.into()),
                 origin,
             );
-            return;
+            return None;
         };
         match resolved {
             Ok((path, sid, landed)) => (path, Some(sid), landed),
@@ -902,7 +908,7 @@ async fn handle_spawn_inner(
                 let _ = config
                     .bus
                     .send(Event::provider_error_permanent(source, e.to_string()));
-                return;
+                return None;
             }
         }
     };
@@ -929,7 +935,7 @@ async fn handle_spawn_inner(
                     "spawn:workspace",
                     format!("spawn target changed while provisioning: {error}"),
                 ));
-                return;
+                return None;
             }
         };
         let requires_persisted_session = !landed_on_main
@@ -942,7 +948,7 @@ async fn handle_spawn_inner(
                 "spawn:session",
                 "spawn target session moved while provisioning; retry from its current workspace",
             ));
-            return;
+            return None;
         }
         Some(guard)
     } else {
@@ -1013,6 +1019,9 @@ async fn handle_spawn_inner(
             resume,
             provider_session_id,
             no_permission_override,
+            replace_terminal_id,
+            prompt_history,
+            composing_buffer,
             access,
             shell_command,
         },
@@ -1025,18 +1034,18 @@ async fn handle_spawn_inner(
                 &plan_error_source,
                 "no agent registered for this id",
             ));
-            return;
+            return None;
         }
     };
     let executed = match execute_spawn_plan(config, plan, workspace_registration_guard, t0).await {
         Ok(SpawnExecutionOutcome::Spawned(executed)) => executed,
-        Ok(SpawnExecutionOutcome::Cancelled) => return,
+        Ok(SpawnExecutionOutcome::Cancelled) => return None,
         Err(error) => {
             tracing::error!("handle_spawn: spawn execution failed: {error}");
             let _ = config
                 .bus
                 .send(Event::provider_error_permanent("spawn", error.to_string()));
-            return;
+            return None;
         }
     };
     let ExecutedSpawn {
@@ -1760,6 +1769,7 @@ async fn handle_spawn_inner(
             }
         });
     }
+    Some(terminal_id)
 }
 
 /// Kill a backend process that finished spawning after its workspace entered
@@ -3271,6 +3281,7 @@ pub(crate) async fn find_existing_singleton(
         .find(|t| {
             t.session_key == *session_key
                 && t.kind.singleton_key().as_deref() == Some(&target)
+                && !t.authenticating
                 && on_main.is_none_or(|want| t.on_main == want)
         })
         .map(|t| t.terminal_id)
@@ -3696,11 +3707,22 @@ async fn live_singleton(
     if candidates.is_empty() {
         return None;
     }
+    let superseded = config.terminal.superseded_terminals.lock().await.clone();
+    let authenticating = config
+        .terminal
+        .authenticating_terminals
+        .lock()
+        .await
+        .clone();
     let present: Vec<TerminalId> = {
         let terminals = config.terminal.terminals.lock().await;
         candidates
             .into_iter()
-            .filter(|id| terminals.contains_key(id))
+            .filter(|id| {
+                terminals.contains_key(id)
+                    && !superseded.contains(id)
+                    && !authenticating.contains(id)
+            })
             .collect()
     };
     if present.is_empty() {
@@ -4350,6 +4372,12 @@ async fn finish_terminal(
         Some((session_key, kind)) => (Some(session_key.as_str()), Some(kind)),
         None => (None, None),
     };
+    let provider_auth_terminal = config
+        .terminal
+        .authenticating_terminals
+        .lock()
+        .await
+        .contains(&terminal_id);
     // Capture the cleaned tail of an exiting agent's output so a frozen
     // pane can show *why* it died instead of a blank screen (issue #368).
     // The client decides whether to surface it — a dead-on-arrival launch
@@ -4359,7 +4387,7 @@ async fn finish_terminal(
     // timeout every other reader uses so a wedged backend can't stall
     // teardown and leak the slot; read here, before `release` drops the
     // ring below.
-    let last_output = if matches!(kind, Some(TerminalKind::Agent(_))) {
+    let last_output = if matches!(kind, Some(TerminalKind::Agent(_))) && !provider_auth_terminal {
         match tokio::time::timeout(
             SNAPSHOT_PER_SESSION_TIMEOUT,
             config.backend.snapshot(backend_key),
@@ -4391,7 +4419,7 @@ async fn finish_terminal(
             .mark_exited(terminal_id, backend_key, prompt_history, composing_buffer)
             .await;
     }
-    let authenticating = config.agent_recovery.active(terminal_id).await;
+    let authenticating = provider_auth_terminal || config.agent_recovery.active(terminal_id).await;
     match exit_code {
         Some(0) => tracing::info!(
             ?terminal_id,
@@ -4523,6 +4551,18 @@ async fn finish_terminal(
     config
         .terminal
         .terminal_models
+        .lock()
+        .await
+        .remove(&terminal_id);
+    config
+        .terminal
+        .superseded_terminals
+        .lock()
+        .await
+        .remove(&terminal_id);
+    config
+        .terminal
+        .authenticating_terminals
         .lock()
         .await
         .remove(&terminal_id);
@@ -6146,7 +6186,18 @@ pub async fn handle_close(
     terminal_id: TerminalId,
     client_request_id: Option<&str>,
 ) -> bool {
-    config.agent_recovery.forget(terminal_id).await;
+    if let Some(result) = crate::agent_auth::close_failed_auth_terminal(config, terminal_id).await {
+        if let Err(error) = &result {
+            tracing::warn!(?terminal_id, %error, "backend auth-terminal kill failed");
+            if let Some(client_request_id) = client_request_id {
+                let _ = config.bus.send(Event::CommandFailed {
+                    client_request_id: client_request_id.into(),
+                    message: format!("could not close authentication terminal: {error}"),
+                });
+            }
+        }
+        return result.is_ok();
+    }
     let Some(key) = config.terminal.backend_key_for(terminal_id).await else {
         return true;
     };
@@ -6163,6 +6214,7 @@ pub async fn handle_close(
         }
         return false;
     }
+    config.agent_recovery.forget(terminal_id).await;
     true
 }
 
@@ -6248,6 +6300,9 @@ pub async fn handle_ingest_hook(
             .agent_recovery
             .update_provider_session(terminal_id, provider_session_id.to_string())
             .await;
+        if let Some(context) = config.agent_recovery.context(terminal_id).await {
+            persist_agent_resume_context(config, &resolved_backend_key, &context).await;
+        }
         if let Some(session_id) = config.terminal.terminal_session_for(terminal_id).await {
             persist_provider_session_id(
                 config,
@@ -6399,9 +6454,32 @@ async fn pump_recovered_session(
         WorkingWatchdog::new(agent.as_ref().and(working_watchdog_after(&cfg)));
     let mut quiet_deadline = None;
     let mut last_chunk_len = 0;
+    let mut auth_required_emitted = false;
 
     if !sub.replay.is_empty() {
         replace_detection_history(&mut state_buf, &mut watchdog_fp, &sub.replay);
+        note_pty_activity(
+            agent.as_ref(),
+            &mut state_buf,
+            &[],
+            sub.last_seq,
+            false,
+            &config.terminal,
+            &config.bus,
+            durability,
+            terminal_id,
+            session_key,
+            &mut state_machine,
+        )
+        .await;
+        maybe_emit_auth_required(
+            config,
+            agent.as_ref(),
+            &state_buf,
+            terminal_id,
+            &mut auth_required_emitted,
+        )
+        .await;
         if agent.is_some() {
             quiet_deadline = Some(tokio::time::Instant::now() + quiet_after);
         }
@@ -6453,6 +6531,14 @@ async fn pump_recovered_session(
                         &mut watchdog_fp,
                         &snapshot.replay,
                     );
+                    maybe_emit_auth_required(
+                        config,
+                        agent.as_ref(),
+                        &state_buf,
+                        terminal_id,
+                        &mut auth_required_emitted,
+                    )
+                    .await;
                     last_chunk_len = 0;
                     if agent.is_some() {
                         quiet_deadline = Some(tokio::time::Instant::now() + quiet_after);
@@ -6485,6 +6571,14 @@ async fn pump_recovered_session(
                     terminal_id,
                     session_key,
                     &mut state_machine,
+                )
+                .await;
+                maybe_emit_auth_required(
+                    config,
+                    agent.as_ref(),
+                    &state_buf,
+                    terminal_id,
+                    &mut auth_required_emitted,
                 )
                 .await;
                 last_chunk_len = chunk.bytes.len();
@@ -6587,6 +6681,42 @@ fn is_open_file_exhaustion(message: &str) -> bool {
     message.contains("Too many open files") || message.contains("os error 24")
 }
 
+fn reconstruct_legacy_agent_resume_context(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    backend_key: &str,
+    session_key: &SessionKey,
+    agent_id: &str,
+    access: AgentRunAccess,
+    no_permission: bool,
+) -> Option<crate::agent_auth::AgentResumeContext> {
+    let workspace_key = WorkspaceKey::new(session_key.as_str());
+    let workspace = load_workspace(config, &workspace_key).ok()?;
+    let session = workspace.sessions.iter().find(|session| {
+        matches!(
+            &session.kind,
+            SessionKind::Agent {
+                agent_id: session_agent_id
+            } if session_agent_id == agent_id
+        )
+    })?;
+    Some(crate::agent_auth::AgentResumeContext {
+        terminal_id,
+        session_key: session_key.clone(),
+        session_id: Some(session.id),
+        agent_id: agent_id.to_string(),
+        cwd: session.worktree_path.clone(),
+        backend_key: Some(backend_key.to_string()),
+        on_main: false,
+        model_alias: None,
+        access,
+        no_permission,
+        provider_session_id: session.provider_session_ids.get(agent_id).cloned(),
+        prompt_history: Vec::new(),
+        composing_buffer: None,
+    })
+}
+
 /// Bind already-running backend sessions to fresh wire TerminalIds.
 /// Called once at server startup so lazybox restarts don't lose the
 /// agents the user was running.
@@ -6617,6 +6747,12 @@ pub async fn recover_sessions(config: &ServerConfig) {
             .unwrap_or_else(|| (SessionKey::from(""), TerminalKind::Shell));
         let access = load_terminal_access(config, &key).await;
         let no_permission = load_no_permission(config, &key).await;
+        let mut resume_context = match &kind {
+            TerminalKind::Agent(agent_id) => load_agent_resume_context(config, &key)
+                .await
+                .filter(|context| context.agent_id == *agent_id),
+            _ => None,
+        };
         let required_generation = match &kind {
             TerminalKind::Agent(agent_id) => config
                 .agents
@@ -6628,6 +6764,41 @@ pub async fn recover_sessions(config: &ServerConfig) {
         let persisted_generation = load_pty_launch_generation(config, &key).await.unwrap_or(0);
         let outdated_launch = required_generation > 0 && persisted_generation < required_generation;
         let terminal_id = alloc_terminal_id(&*config.store);
+        if resume_context.is_none()
+            && let TerminalKind::Agent(agent_id) = &kind
+        {
+            resume_context = reconstruct_legacy_agent_resume_context(
+                config,
+                terminal_id,
+                &key,
+                &session_key,
+                agent_id,
+                access,
+                no_permission,
+            );
+        }
+        if let Some(context) = &mut resume_context {
+            let (prompt_history, composing_buffer) = tokio::join!(
+                load_prompt_history(config, &key),
+                load_composing_buffer(config, &key),
+            );
+            context.terminal_id = terminal_id;
+            context.session_key = session_key.clone();
+            context.backend_key = Some(key.clone());
+            context.access = access;
+            context.no_permission = no_permission;
+            context.prompt_history = prompt_history;
+            context.composing_buffer = composing_buffer;
+        }
+        let recovered_model_label = resume_context.as_ref().and_then(|context| {
+            let cfg = lazybox_config::Config::load().unwrap_or_default();
+            let models = cfg.agent_models(&context.agent_id);
+            context
+                .model_alias
+                .as_deref()
+                .and_then(|alias| models.tier(alias))
+                .map(|tier| tier.label.clone())
+        });
         let recovered_agent = if matches!(kind, TerminalKind::Agent(_)) {
             match load_recovered_agent_state(config, &key, terminal_id.0).await {
                 Ok(restored) => Some(restored),
@@ -6638,6 +6809,20 @@ pub async fn recover_sessions(config: &ServerConfig) {
         };
         if access != AgentRunAccess::Default {
             config.terminal.record_access(terminal_id, access).await;
+        }
+        if let Some(context) = &resume_context {
+            config
+                .terminal
+                .record_spawn_attributes(
+                    terminal_id,
+                    context.session_id,
+                    context.access,
+                    context.no_permission,
+                    context.on_main,
+                    recovered_model_label.as_deref(),
+                )
+                .await;
+            config.agent_recovery.remember_spawn(context.clone()).await;
         }
         // Recover the primary maps as one visible registration, under the
         // same canonical lock pair as a fresh spawn. This prevents snapshot
@@ -6702,18 +6887,16 @@ pub async fn recover_sessions(config: &ServerConfig) {
         let resource_warning_for_pump = resource_warning_emitted.clone();
         // Broadcast Spawned before spawning the pump — same race
         // guard as the main spawn path.
+        let on_main = resume_context
+            .as_ref()
+            .is_some_and(|context| context.on_main);
         let _ = config.bus.send(Event::TerminalSpawned {
             terminal_id,
             session_key,
             kind,
             no_permission,
-            // The main-checkout marker lives in an in-memory set that a
-            // daemon restart clears; a recovered terminal keeps running
-            // on its worktree but the badge doesn't survive the restart.
-            on_main: false,
-            // Same as `on_main`: the recovered terminal's tier isn't
-            // persisted, so no badge after a restart-driven recovery.
-            model_label: None,
+            on_main,
+            model_label: recovered_model_label,
         });
         tokio::spawn(async move {
             let mut failures = 0u32;
@@ -6963,6 +7146,59 @@ async fn load_terminal_meta(
         .flatten()?;
     let parsed: (String, TerminalKind) = serde_json::from_str(&raw).ok()?;
     Some((SessionKey::from(parsed.0.as_str()), parsed.1))
+}
+
+pub(crate) async fn persist_agent_resume_context(
+    config: &ServerConfig,
+    backend_key: &str,
+    context: &crate::agent_auth::AgentResumeContext,
+) {
+    let _guard = config.terminal.lock_terminal_persistence(backend_key).await;
+    if config
+        .terminal
+        .backend_key_for(context.terminal_id)
+        .await
+        .as_deref()
+        != Some(backend_key)
+    {
+        return;
+    }
+    let payload = match serde_json::to_string(context) {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::warn!(%error, "persist agent resume context: encode failed");
+            return;
+        }
+    };
+    let store = config.store.clone();
+    let key = TerminalPersistedField::AgentResume.key(backend_key);
+    match tokio::task::spawn_blocking(move || store.set_kv(&key, &payload)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "persist agent resume context: store write failed")
+        }
+        Err(error) => tracing::warn!(%error, "persist agent resume context: store task failed"),
+    }
+}
+
+async fn load_agent_resume_context(
+    config: &ServerConfig,
+    backend_key: &str,
+) -> Option<crate::agent_auth::AgentResumeContext> {
+    let store = config.store.clone();
+    let key = TerminalPersistedField::AgentResume.key(backend_key);
+    let raw = tokio::task::spawn_blocking(move || store.get_kv(&key))
+        .await
+        .ok()?
+        .ok()
+        .flatten()?;
+    match serde_json::from_str(&raw) {
+        Ok(context) => Some(context),
+        Err(error) => {
+            tracing::warn!(%error, "persisted agent resume context is invalid");
+            None
+        }
+    }
 }
 
 fn session_agent_access_key(session_id: SessionId) -> String {
@@ -7376,6 +7612,7 @@ async fn load_composing_buffer(config: &ServerConfig, backend_key: &str) -> Opti
         .flatten()
 }
 
+#[cfg(test)]
 pub(crate) async fn restore_terminal_conversation_state(
     config: &ServerConfig,
     terminal_id: TerminalId,
@@ -7385,9 +7622,45 @@ pub(crate) async fn restore_terminal_conversation_state(
     let Some(backend_key) = config.terminal.backend_key_for(terminal_id).await else {
         return;
     };
+    restore_backend_conversation_state(config, &backend_key, prompt_history, composing_buffer)
+        .await;
+}
+
+pub(crate) async fn capture_terminal_conversation_state(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+) -> Option<(Vec<UserPrompt>, Option<String>)> {
+    let Some(backend_key) = config.terminal.backend_key_for(terminal_id).await else {
+        return None;
+    };
+    let _guard = config
+        .terminal
+        .lock_terminal_persistence(&backend_key)
+        .await;
+    if config
+        .terminal
+        .backend_key_for(terminal_id)
+        .await
+        .as_deref()
+        != Some(backend_key.as_str())
+    {
+        return None;
+    }
+    Some(tokio::join!(
+        load_prompt_history(config, &backend_key),
+        load_composing_buffer(config, &backend_key),
+    ))
+}
+
+pub(crate) async fn restore_backend_conversation_state(
+    config: &ServerConfig,
+    backend_key: &str,
+    prompt_history: &[UserPrompt],
+    composing_buffer: Option<&str>,
+) {
     let store = config.store.clone();
-    let history_key = TerminalPersistedField::UserMessageHistory.key(&backend_key);
-    let draft_key = TerminalPersistedField::Draft.key(&backend_key);
+    let history_key = TerminalPersistedField::UserMessageHistory.key(backend_key);
+    let draft_key = TerminalPersistedField::Draft.key(backend_key);
     let prompt_history = prompt_history.to_vec();
     let composing_buffer = composing_buffer.map(str::to_string);
     let _ = tokio::task::spawn_blocking(move || {
@@ -7429,12 +7702,18 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
         SessionKey,
         TerminalKind,
         Option<lazybox_ipc::AgentState>,
+        bool,
     )> = {
         let map = config.terminal.terminals.lock().await;
         let meta = config.terminal.terminal_meta.lock().await;
+        let superseded = config.terminal.superseded_terminals.lock().await;
+        let authenticating = config.terminal.authenticating_terminals.lock().await;
         let agent_states = config.terminal.agent_states.lock().await;
         map.iter()
             .filter_map(|(id, key)| {
+                if superseded.contains(id) {
+                    return None;
+                }
                 // Skip orphaned ids (terminals map says yes,
                 // terminal_meta says no) — they should never exist in
                 // steady state, only in a window during teardown.
@@ -7442,9 +7721,14 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
                 // TUI an empty-session-key workspace which the
                 // sidebar would render as `(no repo)`.
                 match meta.get(id).cloned() {
-                    Some((sk, kind)) => {
-                        Some((*id, key.clone(), sk, kind, agent_states.get(id).copied()))
-                    }
+                    Some((sk, kind)) => Some((
+                        *id,
+                        key.clone(),
+                        sk,
+                        kind,
+                        agent_states.get(id).copied(),
+                        authenticating.contains(id),
+                    )),
                     None => {
                         tracing::warn!(
                             terminal_id = ?id,
@@ -7459,7 +7743,6 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
     let no_permission = config.terminal.no_permission_terminals.lock().await.clone();
     let on_main = config.terminal.on_main_terminals.lock().await.clone();
     let terminal_models = config.terminal.terminal_models.lock().await.clone();
-    let authenticating = config.agent_recovery.recovery_terminal_ids().await;
 
     // Assemble independent terminals concurrently. `buffered` preserves the
     // stable map-entry order while capping fan-out; one wedged session now
@@ -7469,11 +7752,21 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
     let no_permission = &no_permission;
     let on_main = &on_main;
     let terminal_models = &terminal_models;
-    let authenticating = &authenticating;
     stream::iter(entries)
-        .map(|(id, key, session_key, kind, agent_state)| async move {
-            let snapshot_fut =
-                tokio::time::timeout(SNAPSHOT_PER_SESSION_TIMEOUT, config.backend.snapshot(&key));
+        .map(|(id, key, session_key, kind, agent_state, is_authenticating)| async move {
+            let snapshot_fut = async {
+                if is_authenticating {
+                    None
+                } else {
+                    Some(
+                        tokio::time::timeout(
+                            SNAPSHOT_PER_SESSION_TIMEOUT,
+                            config.backend.snapshot(&key),
+                        )
+                        .await,
+                    )
+                }
+            };
             let history_fut = load_prompt_history(config, &key);
             let composing_fut = load_composing_buffer(config, &key);
             let (snapshot, prompt_history, composing_buffer) =
@@ -7488,8 +7781,9 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
             // path alone reports `replay_available: false` (and the client then
             // requests a resync via `handle_terminal_resync_request`).
             let (replay, last_seq, replay_available) = match snapshot {
-                Ok(Ok(snap)) => (snap.replay, snap.last_seq, true),
-                Ok(Err(error)) => {
+                None => (Vec::new(), 0, true),
+                Some(Ok(Ok(snap))) => (snap.replay, snap.last_seq, true),
+                Some(Ok(Err(error))) => {
                     tracing::warn!(
                         terminal_id = ?id,
                         key = %key,
@@ -7498,7 +7792,7 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
                     );
                     (Vec::new(), 0, false)
                 }
-                Err(_) => {
+                Some(Err(_)) => {
                     tracing::warn!(
                         terminal_id = ?id,
                         key = %key,
@@ -7542,7 +7836,7 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
                 last_seq,
                 replay_available,
                 agent_state,
-                authenticating: authenticating.contains(&id),
+                authenticating: is_authenticating,
             }
         })
         .buffered(SNAPSHOT_CONCURRENCY)
@@ -7979,7 +8273,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_spawn_plan_publishes_a_durable_registered_terminal() {
+    async fn execute_spawn_plan_publishes_an_exact_durable_replacement() {
         let (config, backend) = ServerConfig::in_memory_with_mock();
         let mut events = config.bus.subscribe();
         let session_key = SessionKey::from("test:spawn-plan-execution");
@@ -7999,11 +8293,14 @@ mod tests {
                 repo_env: vec![("PROJECT_ENV".into(), "test".into())],
                 priority_model_alias: None,
                 autonomous: false,
-                landed_on_main: false,
+                landed_on_main: true,
                 model_alias: None,
                 resume: false,
                 provider_session_id: None,
                 no_permission_override: None,
+                replace_terminal_id: Some(TerminalId(17)),
+                prompt_history: Vec::new(),
+                composing_buffer: None,
                 access: AgentRunAccess::Default,
                 shell_command: String::new(),
             },
@@ -8044,14 +8341,201 @@ mod tests {
                 .expect("load lifecycle generation"),
             Some(terminal_id.0.to_string())
         );
+        assert!(
+            config
+                .store
+                .get_kv(&TerminalPersistedField::AgentResume.key(&executed.backend_key))
+                .expect("load resume metadata")
+                .is_some()
+        );
         assert!(matches!(
             events.recv().await.expect("spawn event"),
-            Event::TerminalSpawned {
+            Event::TerminalReplaced {
+                old_terminal_id: TerminalId(17),
                 terminal_id: event_terminal_id,
                 session_key: event_session_key,
+                on_main: true,
+                authenticating: false,
                 ..
             } if event_terminal_id == terminal_id && event_session_key == session_key
         ));
+    }
+
+    #[tokio::test]
+    async fn recovered_agent_restores_resume_metadata_and_detects_auth_failure() {
+        let backend = crate::backend::MockBackend::new();
+        let backend_key = backend
+            .spawn(
+                &["claude".into()],
+                Some(std::path::Path::new("/tmp")),
+                &[],
+                "surviving-agent",
+            )
+            .await
+            .expect("spawn surviving backend");
+        backend
+            .emit(
+                &backend_key,
+                b"Not logged in. Run `claude auth login` to continue.\r\n",
+            )
+            .await;
+        let store: std::sync::Arc<dyn lazybox_store::Store> =
+            std::sync::Arc::new(lazybox_store::MemoryStore::new());
+        let seed = ServerConfig::with_store_and_backend(store.clone(), backend.as_backend());
+        let session_key = SessionKey::new("github:owner/repo#708");
+        let kind = TerminalKind::Agent("claude".into());
+        persist_terminal_meta(&seed, &backend_key, &session_key, &kind).await;
+        persist_agent_access(&seed, &backend_key, None, AgentRunAccess::ReadOnly)
+            .await
+            .expect("persist access");
+        let resume_context = crate::agent_auth::AgentResumeContext {
+            terminal_id: TerminalId(1),
+            session_key: session_key.clone(),
+            session_id: None,
+            agent_id: "claude".into(),
+            cwd: "/tmp".into(),
+            backend_key: Some(backend_key.clone()),
+            on_main: true,
+            model_alias: Some("L".into()),
+            access: AgentRunAccess::ReadOnly,
+            no_permission: false,
+            provider_session_id: None,
+            prompt_history: Vec::new(),
+            composing_buffer: None,
+        };
+        seed.store
+            .set_kv(
+                &TerminalPersistedField::AgentResume.key(&backend_key),
+                &serde_json::to_string(&resume_context).expect("serialize resume context"),
+            )
+            .expect("persist resume context");
+
+        let restarted = ServerConfig::with_store_and_backend(store, backend.as_backend());
+        let mut events = restarted.bus.subscribe();
+        recover_sessions(&restarted).await;
+        let terminal_id = restarted
+            .terminal
+            .terminal_ids()
+            .await
+            .into_iter()
+            .next()
+            .expect("recovered terminal id");
+        let snapshot = snapshot_terminals(&restarted).await;
+        assert_eq!(snapshot.len(), 1);
+        assert!(snapshot[0].on_main);
+        assert_eq!(snapshot[0].model_label.as_deref(), Some("Opus"));
+        let context = restarted
+            .agent_recovery
+            .context(terminal_id)
+            .await
+            .expect("recovered resume context");
+        assert!(context.provider_session_id.is_none());
+        assert!(context.on_main);
+        assert_eq!(context.model_alias.as_deref(), Some("L"));
+        assert_eq!(context.access, AgentRunAccess::ReadOnly);
+        handle_ingest_hook(
+            &restarted,
+            terminal_id,
+            Some(backend_key.clone()),
+            lazybox_ipc::HookEvent {
+                kind: lazybox_ipc::HookEventKind::SessionStart,
+                session_id: Some("claude-session-708".into()),
+                cwd: None,
+                tool_name: None,
+                notification: None,
+            },
+        )
+        .await;
+        assert_eq!(
+            load_agent_resume_context(&restarted, &backend_key)
+                .await
+                .and_then(|context| context.provider_session_id)
+                .as_deref(),
+            Some("claude-session-708"),
+            "an on-main hook must durably refresh the exact resume id"
+        );
+
+        let auth_required = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let event = events.recv().await.expect("recovery event");
+                if matches!(event, Event::AgentAuthRequired { .. }) {
+                    return event;
+                }
+            }
+        })
+        .await
+        .expect("recovered auth detection deadline");
+        assert!(matches!(
+            auth_required,
+            Event::AgentAuthRequired {
+                terminal_id: id,
+                agent_id,
+                ..
+            } if id == terminal_id && agent_id == "claude"
+        ));
+    }
+
+    #[tokio::test]
+    async fn legacy_recovered_agent_reconstructs_resume_context_from_workspace_session() {
+        let backend = crate::backend::MockBackend::new();
+        let backend_key = backend
+            .spawn(
+                &["codex".into()],
+                Some(std::path::Path::new("/tmp/legacy-agent")),
+                &[],
+                "legacy-agent",
+            )
+            .await
+            .expect("spawn surviving backend");
+        let store: std::sync::Arc<dyn lazybox_store::Store> =
+            std::sync::Arc::new(lazybox_store::MemoryStore::new());
+        let seed = ServerConfig::with_store_and_backend(store.clone(), backend.as_backend());
+        let mut workspace =
+            Workspace::from_task(task_for("github", "owner/repo#709"), chrono::Utc::now());
+        let mut session = Session::new(
+            workspace.key.clone(),
+            SessionKind::Agent {
+                agent_id: "codex".into(),
+            },
+            "/tmp/legacy-agent".into(),
+            chrono::Utc::now(),
+        );
+        session
+            .provider_session_ids
+            .insert("codex".into(), "legacy-conversation-709".into());
+        workspace.sessions.push(session.clone());
+        seed.store
+            .save_workspace(&WorkspaceRecord {
+                key: workspace.key.as_str().into(),
+                created_at: workspace.created_at,
+                workspace_json: Some(
+                    serde_json::to_string(&workspace).expect("serialize workspace"),
+                ),
+            })
+            .expect("persist workspace");
+        let session_key = SessionKey::new(workspace.key.as_str());
+        persist_terminal_meta(
+            &seed,
+            &backend_key,
+            &session_key,
+            &TerminalKind::Agent("codex".into()),
+        )
+        .await;
+
+        let restarted = ServerConfig::with_store_and_backend(store, backend.as_backend());
+        recover_sessions(&restarted).await;
+        let terminal_id = restarted.terminal.terminal_ids().await[0];
+        let context = restarted
+            .agent_recovery
+            .context(terminal_id)
+            .await
+            .expect("legacy context reconstructed");
+        assert_eq!(context.session_id, Some(session.id));
+        assert_eq!(context.cwd, std::path::PathBuf::from("/tmp/legacy-agent"));
+        assert_eq!(
+            context.provider_session_id.as_deref(),
+            Some("legacy-conversation-709")
+        );
     }
 
     #[tokio::test]
@@ -8513,6 +8997,7 @@ mod tests {
                 "terminal-draft:backend".to_string(),
                 "terminal-pty-generation:backend".to_string(),
                 "terminal-agent-state-generation:backend".to_string(),
+                "terminal-agent-resume:backend".to_string(),
             ]
             .into(),
             "every persisted terminal field must live in the teardown inventory",

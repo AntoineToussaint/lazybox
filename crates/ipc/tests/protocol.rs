@@ -583,11 +583,32 @@ fn all_events() -> Vec<Event> {
             on_main: false,
             model_label: None,
         },
+        Event::TerminalReplaced {
+            old_terminal_id: TerminalId(2),
+            terminal_id: TerminalId(3),
+            session_key: key.clone(),
+            kind: TerminalKind::Agent("codex".into()),
+            no_permission: false,
+            on_main: true,
+            model_label: Some("Large".into()),
+            authenticating: true,
+        },
         Event::TerminalOutput {
             terminal_id: TerminalId(2),
             bytes: b"ANSI: \x1b[31mred\x1b[0m".to_vec(),
             first_seq: 1,
             seq: 1,
+        },
+        Event::AgentAuthOutput {
+            terminal_id: TerminalId(3),
+            bytes: b"provider login".to_vec(),
+            first_seq: 1,
+            seq: 1,
+        },
+        Event::AgentAuthReplay {
+            terminal_id: TerminalId(3),
+            replay: b"provider login replay".to_vec(),
+            seq: 2,
         },
         Event::TerminalResync {
             terminal_id: TerminalId(2),
@@ -913,10 +934,12 @@ fn all_events() -> Vec<Event> {
             other_session_count: 2,
         },
         Event::AgentAuthProgress {
+            recovery_terminal_id: TerminalId(12),
             terminal_id: TerminalId(12),
             phase: lazybox_ipc::AgentAuthPhase::LoginInteractive,
         },
         Event::AgentAuthFinished {
+            recovery_terminal_id: TerminalId(12),
             terminal_id: TerminalId(12),
             display_name: "Codex".into(),
             success: false,
@@ -1038,7 +1061,10 @@ fn event_tag(event: &Event) -> &'static str {
         Event::WorktreeProgress { .. } => "WorktreeProgress",
         Event::SessionEnded { .. } => "SessionEnded",
         Event::TerminalSpawned { .. } => "TerminalSpawned",
+        Event::TerminalReplaced { .. } => "TerminalReplaced",
         Event::TerminalOutput { .. } => "TerminalOutput",
+        Event::AgentAuthOutput { .. } => "AgentAuthOutput",
+        Event::AgentAuthReplay { .. } => "AgentAuthReplay",
         Event::TerminalResync { .. } => "TerminalResync",
         Event::TerminalResyncUnavailable { .. } => "TerminalResyncUnavailable",
         Event::TerminalExited { .. } => "TerminalExited",
@@ -1103,7 +1129,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
     );
     assert_eq!(
         event_tags.len(),
-        74,
+        77,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

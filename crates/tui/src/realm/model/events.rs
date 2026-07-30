@@ -813,7 +813,10 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::WorktreeProgress { .. }
                 | IpcEvent::SessionEnded { .. }
                 | IpcEvent::TerminalSpawned { .. }
+                | IpcEvent::TerminalReplaced { .. }
                 | IpcEvent::TerminalOutput { .. }
+                | IpcEvent::AgentAuthOutput { .. }
+                | IpcEvent::AgentAuthReplay { .. }
                 | IpcEvent::TerminalResync { .. }
                 | IpcEvent::TerminalResyncUnavailable { .. }
                 | IpcEvent::TerminalScrollback { .. }
@@ -1426,7 +1429,8 @@ impl<T: TerminalAdapter> Model<T> {
                 self.flash_info(message);
             }
             IpcEvent::AgentAuthFinished {
-                terminal_id,
+                recovery_terminal_id,
+                terminal_id: _,
                 display_name,
                 success,
                 error,
@@ -1436,7 +1440,7 @@ impl<T: TerminalAdapter> Model<T> {
                     self.set_focus(PaneFocus::Terminals);
                 } else {
                     self.queue_agent_auth_prompt(super::AgentAuthPrompt {
-                        terminal_id: *terminal_id,
+                        terminal_id: *recovery_terminal_id,
                         display_name: display_name.clone(),
                         other_session_count: 0,
                         retry: true,
@@ -1550,7 +1554,10 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::WorktreeProgress { .. }
             | IpcEvent::SessionEnded { .. }
             | IpcEvent::TerminalSpawned { .. }
+            | IpcEvent::TerminalReplaced { .. }
             | IpcEvent::TerminalOutput { .. }
+            | IpcEvent::AgentAuthOutput { .. }
+            | IpcEvent::AgentAuthReplay { .. }
             | IpcEvent::TerminalResync { .. }
             | IpcEvent::TerminalResyncUnavailable { .. }
             | IpcEvent::TerminalScrollback { .. }
@@ -1773,7 +1780,10 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::WorktreeProgress { .. }
                 | IpcEvent::SessionEnded { .. }
                 | IpcEvent::TerminalSpawned { .. }
+                | IpcEvent::TerminalReplaced { .. }
                 | IpcEvent::TerminalOutput { .. }
+                | IpcEvent::AgentAuthOutput { .. }
+                | IpcEvent::AgentAuthReplay { .. }
                 | IpcEvent::TerminalResync { .. }
                 | IpcEvent::TerminalResyncUnavailable { .. }
                 | IpcEvent::TerminalScrollback { .. }

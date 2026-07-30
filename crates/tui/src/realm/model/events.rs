@@ -1868,11 +1868,12 @@ impl<T: TerminalAdapter> Model<T> {
         }
         if let IpcEvent::WorkspaceDiffInspected {
             workspace_key,
-            session_id,
+            target,
+            agent_terminal_ids,
             diff,
             error,
         } = &event
-            && self.pending_diff_session.as_ref() == Some(&(workspace_key.clone(), *session_id))
+            && self.pending_diff_session.as_ref() == Some(&(workspace_key.clone(), target.clone()))
         {
             self.pending_diff_session = None;
             match (diff, error) {
@@ -1881,6 +1882,8 @@ impl<T: TerminalAdapter> Model<T> {
                         Id::DiffReview,
                         crate::realm::components::diff_review::DiffReview::new(
                             workspace_key.clone(),
+                            target.clone(),
+                            agent_terminal_ids.clone(),
                             diff.clone(),
                         ),
                     );

@@ -23,26 +23,30 @@ impl<T: TerminalAdapter> Model<T> {
     pub(super) fn dispatch_diff_review(
         &mut self,
         workspace_key: lazybox_core::WorkspaceKey,
+        target: lazybox_ipc::WorkspaceDiffTarget,
+        agent_terminal_ids: Vec<TerminalId>,
         comments: Vec<crate::realm::components::diff_review::DiffReviewComment>,
     ) -> Vec<IpcCommand> {
-        let session_key: lazybox_core::SessionKey = workspace_key.as_str().into();
         let active = self
             .terminals
             .active_session()
             .filter(|active| active.as_str() == workspace_key.as_str())
             .and_then(|_| self.terminals.active_terminal_id())
-            .filter(|terminal| self.terminals.terminal_is_agent(*terminal));
-        let target = active.or_else(|| {
-            let targets = self.sidebar.running_work_targets(&session_key);
-            (targets.len() == 1).then(|| targets[0].terminal_id)
-        });
-        let Some(target) = target else {
-            let count = self.sidebar.running_work_targets(&session_key).len();
-            if count == 0 {
-                self.flash_hint("review not sent — this workspace has no running agent");
+            .filter(|terminal| agent_terminal_ids.contains(terminal));
+        let terminal_id =
+            active.or_else(|| (agent_terminal_ids.len() == 1).then(|| agent_terminal_ids[0]));
+        let Some(terminal_id) = terminal_id else {
+            let checkout = match target {
+                lazybox_ipc::WorkspaceDiffTarget::Session(_) => "worktree",
+                lazybox_ipc::WorkspaceDiffTarget::LinkedCheckout => "linked checkout",
+            };
+            if agent_terminal_ids.is_empty() {
+                self.flash_hint(format!(
+                    "review not sent — this {checkout} has no running agent"
+                ));
             } else {
                 self.flash_hint(
-                    "review not sent — several agents are running; focus the target and retry",
+                    "review not sent — several agents run in this checkout; focus the target and retry",
                 );
             }
             return Vec::new();
@@ -51,7 +55,7 @@ impl<T: TerminalAdapter> Model<T> {
         let prompt = format_diff_review_prompt(&comments);
         let mut commands = Vec::new();
         self.deliver_prompt(
-            target,
+            terminal_id,
             true,
             &prompt,
             lazybox_ipc::PromptSource::Typed,

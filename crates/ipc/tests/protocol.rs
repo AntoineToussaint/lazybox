@@ -389,7 +389,7 @@ fn all_commands() -> Vec<Command> {
         },
         Command::InspectWorkspaceDiff {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
-            session_id: sample_session_id(21),
+            target: lazybox_ipc::WorkspaceDiffTarget::Session(sample_session_id(21)),
         },
         Command::KeepMergedWorkspace { session_key: key },
         Command::FetchScrollback {
@@ -780,10 +780,12 @@ fn all_events() -> Vec<Event> {
         },
         Event::WorkspaceDiffInspected {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
-            session_id: sample_session_id(21),
+            target: lazybox_ipc::WorkspaceDiffTarget::Session(sample_session_id(21)),
+            agent_terminal_ids: vec![TerminalId(12)],
             diff: Some(lazybox_ipc::WorkspaceDiffDto {
                 status: vec![" M src/lib.rs".into()],
                 stat: vec![" src/lib.rs | 1 +".into()],
+                truncated: false,
                 files: vec![lazybox_ipc::DiffFileDto {
                     old_path: Some("src/lib.rs".into()),
                     path: "src/lib.rs".into(),

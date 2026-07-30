@@ -713,6 +713,8 @@ pub enum Msg {
     MessagesCleared,
     DiffReviewSubmitted {
         workspace_key: lazybox_core::WorkspaceKey,
+        target: lazybox_ipc::WorkspaceDiffTarget,
+        agent_terminal_ids: Vec<lazybox_ipc::TerminalId>,
         comments: Vec<crate::realm::components::diff_review::DiffReviewComment>,
     },
     /// Sidebar / Right / Terminals routes — kept in case a future
@@ -1150,8 +1152,8 @@ pub struct Model<T: TerminalAdapter> {
     /// (the reply then disarms it), so it stays out of [`ModalFlow`].
     /// Cleared on mount / submit / dismiss / fetch-failure.
     awaiting_repo_labels: Option<lazybox_core::WorkspaceKey>,
-    /// Workspace whose diff response this client is waiting for.
-    pending_diff_session: Option<(lazybox_core::WorkspaceKey, lazybox_core::SessionId)>,
+    /// Exact checkout whose diff response this client is waiting for.
+    pending_diff_session: Option<(lazybox_core::WorkspaceKey, lazybox_ipc::WorkspaceDiffTarget)>,
     /// Optimistic mutations applied locally and awaiting the daemon's
     /// echo (#476). Each carries the prior rows so a rejected
     /// round-trip rolls back; the success echo drops the entry. See
@@ -4258,9 +4260,12 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Msg::DiffReviewSubmitted {
                 workspace_key,
+                target,
+                agent_terminal_ids,
                 comments,
             } => {
-                let commands = self.dispatch_diff_review(workspace_key, comments);
+                let commands =
+                    self.dispatch_diff_review(workspace_key, target, agent_terminal_ids, comments);
                 self.dispatch_cmds(commands);
             }
             Msg::OpenSnippetsFile => {

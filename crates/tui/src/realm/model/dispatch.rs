@@ -588,18 +588,25 @@ impl<T: TerminalAdapter> Model<T> {
                 self.open_editor();
             }
             Action::ViewDiff => {
-                if let Some((workspace_key, target_session_id)) =
+                if let Some((workspace_key, target)) =
                     self.sidebar.selected_workspace().and_then(|workspace| {
-                        let target_session_id = session_id
-                            .or_else(|| workspace.sessions.first().map(|session| session.id))?;
-                        Some((workspace.key.clone(), target_session_id))
+                        let target = session_id
+                            .or_else(|| workspace.default_session().map(|session| session.id))
+                            .map(lazybox_ipc::WorkspaceDiffTarget::Session)
+                            .or_else(|| {
+                                workspace
+                                    .linked_checkout
+                                    .as_ref()
+                                    .map(|_| lazybox_ipc::WorkspaceDiffTarget::LinkedCheckout)
+                            })?;
+                        Some((workspace.key.clone(), target))
                     })
                 {
-                    self.pending_diff_session = Some((workspace_key.clone(), target_session_id));
+                    self.pending_diff_session = Some((workspace_key.clone(), target.clone()));
                     self.flash_hint("reading worktree diff…");
                     cmds.push(IpcCommand::InspectWorkspaceDiff {
                         workspace_key,
-                        session_id: target_session_id,
+                        target,
                     });
                 } else {
                     self.flash_hint("this workspace has no worktree to review");

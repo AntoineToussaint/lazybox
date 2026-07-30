@@ -130,6 +130,8 @@ mod effects_tests {
 
         let commands = model.dispatch_diff_review(
             workspace_key,
+            lazybox_ipc::WorkspaceDiffTarget::Session(lazybox_core::SessionId::new()),
+            vec![lazybox_ipc::TerminalId(7)],
             vec![DiffReviewComment {
                 path: "src/lib.rs".into(),
                 old_line: None,
@@ -163,6 +165,54 @@ mod effects_tests {
             ),
             "unexpected review commands: {commands:#?}"
         );
+    }
+
+    #[test]
+    fn diff_review_targets_the_agent_resolved_for_the_inspected_session() {
+        use crate::realm::components::diff_review::DiffReviewComment;
+        use lazybox_core::Workspace;
+        use lazybox_ipc::{TerminalKind, WorkspaceDiffTarget};
+
+        let mut model = build_model();
+        let workspace_key = WorkspaceKey::new("github:o/r#1");
+        let session_key: SessionKey = (&workspace_key).into();
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(Box::new(
+            Workspace::empty(workspace_key.clone(), "review", chrono::Utc::now()),
+        )));
+        for terminal_id in [8, 7] {
+            model.handle_daemon_event(lazybox_ipc::Event::TerminalSpawned {
+                terminal_id: lazybox_ipc::TerminalId(terminal_id),
+                session_key: session_key.clone(),
+                kind: TerminalKind::Agent("codex".into()),
+                no_permission: false,
+                on_main: false,
+                model_label: None,
+            });
+        }
+
+        let commands = model.dispatch_diff_review(
+            workspace_key,
+            WorkspaceDiffTarget::Session(lazybox_core::SessionId::new()),
+            vec![lazybox_ipc::TerminalId(8)],
+            vec![DiffReviewComment {
+                path: "src/lib.rs".into(),
+                old_line: None,
+                new_line: Some(11),
+                hunk_header: "@@ -10 +10,2 @@ fn run()".into(),
+                referenced_line: "+fix();".into(),
+                context: vec!["+fix();".into()],
+                body: "fix this".into(),
+                anchor_row: 3,
+            }],
+        );
+
+        assert!(commands.iter().all(|command| match command {
+            IpcCommand::RecordUserMessage { terminal_id, .. }
+            | IpcCommand::InjectPrompt { terminal_id, .. } =>
+                *terminal_id == lazybox_ipc::TerminalId(8),
+            _ => true,
+        }));
+        assert_eq!(commands.len(), 2);
     }
 
     #[test]
@@ -200,26 +250,94 @@ mod effects_tests {
             commands.as_slice(),
             [IpcCommand::InspectWorkspaceDiff {
                 workspace_key: target,
-                session_id: target_session,
+                target: lazybox_ipc::WorkspaceDiffTarget::Session(target_session),
             }] if target == &workspace_key && target_session == &session_id
         ));
         assert_eq!(
             model.pending_diff_session.as_ref(),
-            Some(&(workspace_key.clone(), session_id))
+            Some(&(
+                workspace_key.clone(),
+                lazybox_ipc::WorkspaceDiffTarget::Session(session_id)
+            ))
         );
 
         model.handle_daemon_event(lazybox_ipc::Event::WorkspaceDiffInspected {
             workspace_key,
-            session_id,
+            target: lazybox_ipc::WorkspaceDiffTarget::Session(session_id),
+            agent_terminal_ids: vec![lazybox_ipc::TerminalId(7)],
             diff: Some(WorkspaceDiffDto {
                 status: Vec::new(),
                 stat: Vec::new(),
                 files: Vec::new(),
+                truncated: false,
             }),
             error: None,
         });
         assert_eq!(model.modal_stack.last(), Some(&Id::DiffReview));
         assert!(model.pending_diff_session.is_none());
+    }
+
+    #[test]
+    fn view_diff_uses_the_workspace_default_session_when_no_session_row_is_selected() {
+        use lazybox_core::{SessionKind, Workspace, WorkspaceSession};
+        use lazybox_tui_core::action::Action;
+
+        let mut model = build_model();
+        let workspace_key = WorkspaceKey::new("github:o/r#1");
+        let now = chrono::Utc::now();
+        let mut workspace = Workspace::empty(workspace_key.clone(), "review", now);
+        let older = WorkspaceSession::new(
+            workspace_key.clone(),
+            SessionKind::Shell,
+            "/tmp/review-older".into(),
+            now - chrono::Duration::minutes(1),
+        );
+        let newer = WorkspaceSession::new(
+            workspace_key.clone(),
+            SessionKind::Shell,
+            "/tmp/review-newer".into(),
+            now,
+        );
+        let newer_id = newer.id;
+        workspace.sessions.extend([older, newer]);
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(Box::new(workspace)));
+        let session_key: SessionKey = (&workspace_key).into();
+        assert!(model.sidebar.focus_workspace_key(&session_key));
+
+        let commands = model.dispatch_action(&Action::ViewDiff);
+
+        assert!(matches!(
+            commands.as_slice(),
+            [IpcCommand::InspectWorkspaceDiff {
+                target: lazybox_ipc::WorkspaceDiffTarget::Session(session_id),
+                ..
+            }] if *session_id == newer_id
+        ));
+    }
+
+    #[test]
+    fn view_diff_targets_a_linked_checkout_without_sessions() {
+        use lazybox_core::Workspace;
+        use lazybox_tui_core::action::Action;
+
+        let mut model = build_model();
+        let workspace_key = WorkspaceKey::new("github:o/r#1");
+        let mut workspace =
+            Workspace::empty(workspace_key.clone(), "linked review", chrono::Utc::now());
+        workspace.linked_checkout = Some("/tmp/linked-review".into());
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(Box::new(workspace)));
+        let session_key: SessionKey = (&workspace_key).into();
+        assert!(model.sidebar.focus_workspace_key(&session_key));
+
+        let commands = model.dispatch_action(&Action::ViewDiff);
+
+        assert!(matches!(
+            commands.as_slice(),
+            [IpcCommand::InspectWorkspaceDiff {
+                workspace_key: target,
+                target: lazybox_ipc::WorkspaceDiffTarget::LinkedCheckout,
+            }] if target == &workspace_key
+        ));
     }
 
     /// Reply submission with a non-empty body + a pending reply

@@ -2376,7 +2376,9 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
             intent::Intent::OpenEditor,
         ),
         ActionKind::ViewDiff => workspace
-            .map(|workspace| !workspace.sessions.is_empty())
+            .map(|workspace| {
+                !workspace.sessions.is_empty() || workspace.linked_checkout.is_some()
+            })
             .unwrap_or(false),
         ActionKind::AdoptSessions => matches!(
             intent::resolve_adopt(workspace),
@@ -3357,6 +3359,18 @@ mod tests {
 
         // No workspace → not offered.
         assert!(!availability(ActionKind::UpdateBranch, None));
+    }
+
+    #[test]
+    fn diff_review_is_available_for_a_linked_checkout_without_sessions() {
+        let mut workspace = lazybox_core::Workspace::empty(
+            lazybox_core::WorkspaceKey::new("linked"),
+            "linked",
+            chrono::Utc::now(),
+        );
+        workspace.linked_checkout = Some("/tmp/linked".into());
+
+        assert!(availability(ActionKind::ViewDiff, Some(&workspace)));
     }
 
     #[test]

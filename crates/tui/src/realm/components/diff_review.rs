@@ -2,7 +2,8 @@ use crate::components::scrollbar;
 use crate::realm::components::scrollable::{centered_rect, draw_frame};
 use crate::realm::{Msg, UserEvent};
 use lazybox_core::WorkspaceKey;
-use lazybox_ipc::{DiffLineKindDto, WorkspaceDiffDto};
+use lazybox_ipc::{DiffLineKindDto, TerminalId, WorkspaceDiffDto, WorkspaceDiffTarget};
+use std::borrow::Cow;
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
 use tuirealm::event::{Event, Key, KeyModifiers, MouseEventKind};
@@ -29,8 +30,15 @@ pub struct DiffReviewComment {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RowKind {
-    Other,
-    File,
+    StatusHeader,
+    Status(usize),
+    Clean,
+    Truncated,
+    Spacer,
+    StatHeader,
+    Stat(usize),
+    File(usize),
+    Header(usize, usize),
     Hunk(usize, usize),
     DiffLine(usize, usize, usize),
 }
@@ -45,13 +53,6 @@ enum VisualKind {
     Deletion,
 }
 
-#[derive(Debug, Clone)]
-struct ReviewRow {
-    text: String,
-    kind: RowKind,
-    visual: VisualKind,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum InputMode {
     Normal,
@@ -61,10 +62,13 @@ enum InputMode {
 
 pub struct DiffReview {
     workspace_key: WorkspaceKey,
+    target: WorkspaceDiffTarget,
+    agent_terminal_ids: Vec<TerminalId>,
     diff: WorkspaceDiffDto,
-    rows: Vec<ReviewRow>,
+    rows: Vec<RowKind>,
     cursor: usize,
     scroll: usize,
+    horizontal_scroll: u16,
     body_height: usize,
     comments: Vec<DiffReviewComment>,
     search: String,
@@ -72,14 +76,22 @@ pub struct DiffReview {
 }
 
 impl DiffReview {
-    pub fn new(workspace_key: WorkspaceKey, diff: WorkspaceDiffDto) -> Self {
+    pub fn new(
+        workspace_key: WorkspaceKey,
+        target: WorkspaceDiffTarget,
+        agent_terminal_ids: Vec<TerminalId>,
+        diff: WorkspaceDiffDto,
+    ) -> Self {
         let rows = build_rows(&diff);
         Self {
             workspace_key,
+            target,
+            agent_terminal_ids,
             diff,
             rows,
             cursor: 0,
             scroll: 0,
+            horizontal_scroll: 0,
             body_height: 1,
             comments: Vec::new(),
             search: String::new(),
@@ -108,7 +120,7 @@ impl DiffReview {
         };
         if let Some(index) = indices
             .into_iter()
-            .find(|index| predicate(self.rows[*index].kind))
+            .find(|index| predicate(self.rows[*index]))
         {
             self.cursor = index;
         }
@@ -126,7 +138,7 @@ impl DiffReview {
             } else {
                 (self.cursor + len - (step % len)) % len
             };
-            if self.rows[index].text.to_lowercase().contains(&needle) {
+            if self.row_text(index).to_lowercase().contains(&needle) {
                 self.cursor = index;
                 return;
             }
@@ -135,7 +147,7 @@ impl DiffReview {
 
     fn begin_comment(&mut self) {
         if matches!(
-            self.rows.get(self.cursor).map(|row| row.kind),
+            self.rows.get(self.cursor),
             Some(RowKind::Hunk(..) | RowKind::DiffLine(..))
         ) {
             self.mode = InputMode::Comment(String::new());
@@ -153,7 +165,7 @@ impl DiffReview {
         let Some(row) = self.rows.get(self.cursor) else {
             return;
         };
-        let (file_index, hunk_index, line_index) = match row.kind {
+        let (file_index, hunk_index, line_index) = match *row {
             RowKind::Hunk(file, hunk) => (file, hunk, None),
             RowKind::DiffLine(file, hunk, line) => (file, hunk, Some(line)),
             _ => return,
@@ -163,7 +175,10 @@ impl DiffReview {
         let line = line_index.map(|index| &hunk.lines[index]);
         let (old_line, new_line) = match line {
             Some(line) => (line.old_line, line.new_line),
-            None => (Some(hunk.old_start), Some(hunk.new_start)),
+            None => (
+                hunk.lines.iter().find_map(|line| line.old_line),
+                hunk.lines.iter().find_map(|line| line.new_line),
+            ),
         };
         let context = match line_index {
             Some(index) => {
@@ -209,6 +224,54 @@ impl DiffReview {
         }
         let max = self.rows.len().saturating_sub(self.body_height);
         self.scroll = self.scroll.min(max);
+    }
+
+    fn row_text(&self, index: usize) -> Cow<'_, str> {
+        match self.rows[index] {
+            RowKind::StatusHeader => Cow::Borrowed("STATUS"),
+            RowKind::Status(index) => Cow::Borrowed(&self.diff.status[index]),
+            RowKind::Clean => Cow::Borrowed("clean worktree"),
+            RowKind::Truncated => Cow::Borrowed(
+                "diff output was truncated; review the checkout directly for omitted changes",
+            ),
+            RowKind::Spacer => Cow::Borrowed(""),
+            RowKind::StatHeader => Cow::Borrowed("STAT"),
+            RowKind::Stat(index) => Cow::Borrowed(&self.diff.stat[index]),
+            RowKind::File(index) => Cow::Owned(format!("FILE {}", self.diff.files[index].path)),
+            RowKind::Header(file, header) => Cow::Borrowed(&self.diff.files[file].headers[header]),
+            RowKind::Hunk(file, hunk) => Cow::Borrowed(&self.diff.files[file].hunks[hunk].header),
+            RowKind::DiffLine(file, hunk, line) => {
+                let line = &self.diff.files[file].hunks[hunk].lines[line];
+                let old = line
+                    .old_line
+                    .map(|line| line.to_string())
+                    .unwrap_or_default();
+                let new = line
+                    .new_line
+                    .map(|line| line.to_string())
+                    .unwrap_or_default();
+                Cow::Owned(format!("{old:>5} {new:>5} │ {}", line.text))
+            }
+        }
+    }
+
+    fn row_visual(&self, kind: RowKind) -> VisualKind {
+        match kind {
+            RowKind::StatusHeader | RowKind::StatHeader | RowKind::File(_) => VisualKind::File,
+            RowKind::Status(_) => VisualKind::Context,
+            RowKind::Truncated => VisualKind::Deletion,
+            RowKind::Clean | RowKind::Spacer | RowKind::Stat(_) | RowKind::Header(..) => {
+                VisualKind::Dim
+            }
+            RowKind::Hunk(..) => VisualKind::Hunk,
+            RowKind::DiffLine(file, hunk, line) => {
+                match self.diff.files[file].hunks[hunk].lines[line].kind {
+                    DiffLineKindDto::Context | DiffLineKindDto::Meta => VisualKind::Context,
+                    DiffLineKindDto::Addition => VisualKind::Addition,
+                    DiffLineKindDto::Deletion => VisualKind::Deletion,
+                }
+            }
+        }
     }
 
     fn handle_input(&mut self, event: &Event<UserEvent>) -> bool {
@@ -297,14 +360,15 @@ impl Component for DiffReview {
         let lines = self.rows[self.scroll..end]
             .iter()
             .enumerate()
-            .map(|(visible_index, row)| {
+            .map(|(visible_index, kind)| {
                 let index = self.scroll + visible_index;
                 let selected = index == self.cursor;
                 let has_comment = self
                     .comments
                     .iter()
                     .any(|comment| comment.anchor_row == index);
-                let color = match row.visual {
+                let visual = self.row_visual(*kind);
+                let color = match visual {
                     VisualKind::Dim => theme.text_dim,
                     VisualKind::File | VisualKind::Hunk => theme.accent,
                     VisualKind::Context => theme.text_strong,
@@ -321,18 +385,24 @@ impl Component for DiffReview {
                 if selected {
                     style = style.bg(theme.fill);
                 }
-                if matches!(row.visual, VisualKind::File) {
+                if matches!(visual, VisualKind::File) {
                     style = style.add_modifier(Modifier::BOLD);
                 }
-                Line::from(Span::styled(format!("{marker} {}", row.text), style))
+                Line::from(Span::styled(
+                    format!("{marker} {}", self.row_text(index)),
+                    style,
+                ))
             })
             .collect::<Vec<_>>();
-        frame.render_widget(Paragraph::new(lines), body_area);
+        frame.render_widget(
+            Paragraph::new(lines).scroll((0, self.horizontal_scroll)),
+            body_area,
+        );
         scrollbar::render_vertical(frame, gutter, self.rows.len(), body_height, self.scroll);
 
         let input = match &self.mode {
             InputMode::Normal if self.comments.is_empty() => {
-                "c comment · / search · [/] hunks · {/} files".to_string()
+                "c comment · / search · [/] hunks · {/} files · h/l horizontal".to_string()
             }
             InputMode::Normal => format!(
                 "{} comment{} drafted · Shift-S send · x remove here",
@@ -387,6 +457,12 @@ impl AppComponent<Msg, UserEvent> for DiffReview {
                     Key::End | Key::Char('G') => {
                         self.cursor = self.rows.len().saturating_sub(1);
                     }
+                    Key::Left | Key::Char('h') => {
+                        self.horizontal_scroll = self.horizontal_scroll.saturating_sub(4);
+                    }
+                    Key::Right | Key::Char('l') => {
+                        self.horizontal_scroll = self.horizontal_scroll.saturating_add(4);
+                    }
                     Key::Char(']') => {
                         self.jump_to(true, |kind| matches!(kind, RowKind::Hunk(..)));
                     }
@@ -394,10 +470,10 @@ impl AppComponent<Msg, UserEvent> for DiffReview {
                         self.jump_to(false, |kind| matches!(kind, RowKind::Hunk(..)));
                     }
                     Key::Char('}') => {
-                        self.jump_to(true, |kind| matches!(kind, RowKind::File));
+                        self.jump_to(true, |kind| matches!(kind, RowKind::File(_)));
                     }
                     Key::Char('{') => {
-                        self.jump_to(false, |kind| matches!(kind, RowKind::File));
+                        self.jump_to(false, |kind| matches!(kind, RowKind::File(_)));
                     }
                     Key::Char('/') => self.mode = InputMode::Search(String::new()),
                     Key::Char('n') => self.find_match(true),
@@ -407,6 +483,8 @@ impl AppComponent<Msg, UserEvent> for DiffReview {
                     Key::Char('S') if !self.comments.is_empty() => {
                         return Some(Msg::DiffReviewSubmitted {
                             workspace_key: self.workspace_key.clone(),
+                            target: self.target.clone(),
+                            agent_terminal_ids: self.agent_terminal_ids.clone(),
                             comments: self.comments.clone(),
                         });
                     }
@@ -431,82 +509,29 @@ impl AppComponent<Msg, UserEvent> for DiffReview {
     }
 }
 
-fn build_rows(diff: &WorkspaceDiffDto) -> Vec<ReviewRow> {
-    let mut rows = vec![ReviewRow {
-        text: "STATUS".to_string(),
-        kind: RowKind::Other,
-        visual: VisualKind::File,
-    }];
+fn build_rows(diff: &WorkspaceDiffDto) -> Vec<RowKind> {
+    let mut rows = vec![RowKind::StatusHeader];
+    if diff.truncated {
+        rows.push(RowKind::Truncated);
+    }
     if diff.status.is_empty() {
-        rows.push(ReviewRow {
-            text: "clean worktree".to_string(),
-            kind: RowKind::Other,
-            visual: VisualKind::Dim,
-        });
+        rows.push(RowKind::Clean);
     } else {
-        rows.extend(diff.status.iter().cloned().map(|text| ReviewRow {
-            text,
-            kind: RowKind::Other,
-            visual: VisualKind::Context,
-        }));
+        rows.extend((0..diff.status.len()).map(RowKind::Status));
     }
     if !diff.stat.is_empty() {
-        rows.push(ReviewRow {
-            text: String::new(),
-            kind: RowKind::Other,
-            visual: VisualKind::Dim,
-        });
-        rows.push(ReviewRow {
-            text: "STAT".to_string(),
-            kind: RowKind::Other,
-            visual: VisualKind::File,
-        });
-        rows.extend(diff.stat.iter().cloned().map(|text| ReviewRow {
-            text,
-            kind: RowKind::Other,
-            visual: VisualKind::Dim,
-        }));
+        rows.push(RowKind::Spacer);
+        rows.push(RowKind::StatHeader);
+        rows.extend((0..diff.stat.len()).map(RowKind::Stat));
     }
     for (file_index, file) in diff.files.iter().enumerate() {
-        rows.push(ReviewRow {
-            text: String::new(),
-            kind: RowKind::Other,
-            visual: VisualKind::Dim,
-        });
-        rows.push(ReviewRow {
-            text: format!("FILE {}", file.path),
-            kind: RowKind::File,
-            visual: VisualKind::File,
-        });
-        rows.extend(file.headers.iter().cloned().map(|text| ReviewRow {
-            text,
-            kind: RowKind::Other,
-            visual: VisualKind::Dim,
-        }));
+        rows.push(RowKind::Spacer);
+        rows.push(RowKind::File(file_index));
+        rows.extend((0..file.headers.len()).map(|header| RowKind::Header(file_index, header)));
         for (hunk_index, hunk) in file.hunks.iter().enumerate() {
-            rows.push(ReviewRow {
-                text: hunk.header.clone(),
-                kind: RowKind::Hunk(file_index, hunk_index),
-                visual: VisualKind::Hunk,
-            });
-            for (line_index, line) in hunk.lines.iter().enumerate() {
-                let old = line
-                    .old_line
-                    .map(|line| line.to_string())
-                    .unwrap_or_default();
-                let new = line
-                    .new_line
-                    .map(|line| line.to_string())
-                    .unwrap_or_default();
-                rows.push(ReviewRow {
-                    text: format!("{old:>5} {new:>5} │ {}", line.text),
-                    kind: RowKind::DiffLine(file_index, hunk_index, line_index),
-                    visual: match line.kind {
-                        DiffLineKindDto::Context | DiffLineKindDto::Meta => VisualKind::Context,
-                        DiffLineKindDto::Addition => VisualKind::Addition,
-                        DiffLineKindDto::Deletion => VisualKind::Deletion,
-                    },
-                });
+            rows.push(RowKind::Hunk(file_index, hunk_index));
+            for line_index in 0..hunk.lines.len() {
+                rows.push(RowKind::DiffLine(file_index, hunk_index, line_index));
             }
         }
     }
@@ -523,6 +548,7 @@ mod tests {
         WorkspaceDiffDto {
             status: vec![" M src/lib.rs".into()],
             stat: vec![" src/lib.rs | 2 +".into()],
+            truncated: false,
             files: vec![DiffFileDto {
                 old_path: Some("src/lib.rs".into()),
                 path: "src/lib.rs".into(),
@@ -548,6 +574,15 @@ mod tests {
                 }],
             }],
         }
+    }
+
+    fn review(diff: WorkspaceDiffDto) -> DiffReview {
+        DiffReview::new(
+            WorkspaceKey::new("w"),
+            WorkspaceDiffTarget::Session(lazybox_core::SessionId::new()),
+            vec![TerminalId(7)],
+            diff,
+        )
     }
 
     fn key(code: Key) -> Event<UserEvent> {
@@ -579,7 +614,7 @@ mod tests {
 
     #[test]
     fn renders_status_colored_diff_and_navigation_help() {
-        let mut review = DiffReview::new(WorkspaceKey::new("w"), sample());
+        let mut review = review(sample());
         let output = render(&mut review);
         assert!(output.contains("Diff review · 1 file"));
         assert!(output.contains("STATUS"));
@@ -590,24 +625,22 @@ mod tests {
 
     #[test]
     fn search_wraps_and_hunk_navigation_moves_the_cursor() {
-        let mut review = DiffReview::new(WorkspaceKey::new("w"), sample());
+        let mut review = review(sample());
         review.cursor = review.rows.len() - 1;
         review.mode = InputMode::Search("fix".into());
         review.handle_input(&key(Key::Enter));
-        assert!(review.rows[review.cursor].text.contains("fix"));
+        assert!(review.row_text(review.cursor).contains("fix"));
         let line = review.cursor;
         review.on(&key(Key::Char('[')));
-        assert!(matches!(review.rows[review.cursor].kind, RowKind::Hunk(..)));
+        assert!(matches!(review.rows[review.cursor], RowKind::Hunk(..)));
         assert!(review.cursor < line);
     }
 
     #[test]
     fn line_comment_captures_location_and_context_for_submission() {
-        let mut review = DiffReview::new(WorkspaceKey::new("w"), sample());
-        review.cursor = review
-            .rows
-            .iter()
-            .position(|row| row.text.contains("+fix();"))
+        let mut review = review(sample());
+        review.cursor = (0..review.rows.len())
+            .position(|index| review.row_text(index).contains("+fix();"))
             .expect("addition row");
         review.on(&key(Key::Char('c')));
         review.on(&key(Key::Char('r')));
@@ -628,5 +661,57 @@ mod tests {
         assert_eq!(comments[0].referenced_line, "+fix();");
         assert_eq!(comments[0].body, "rename");
         assert_eq!(comments[0].context, vec![" keep();", "+fix();"]);
+    }
+
+    #[test]
+    fn horizontal_navigation_reveals_the_end_of_long_diff_lines() {
+        let mut diff = sample();
+        diff.files[0].hunks[0].lines[1].text = format!("+{}END-OF-LONG-LINE", "x".repeat(180));
+        let mut review = review(diff);
+        review.cursor = (0..review.rows.len())
+            .position(|index| review.row_text(index).contains("END-OF-LONG-LINE"))
+            .expect("long line");
+
+        for _ in 0..30 {
+            review.on(&key(Key::Char('l')));
+        }
+
+        assert!(render(&mut review).contains("END-OF-LONG-LINE"));
+    }
+
+    #[test]
+    fn deletion_hunk_comment_anchors_to_an_existing_old_line() {
+        let mut diff = sample();
+        diff.files[0].hunks[0] = DiffHunkDto {
+            header: "@@ -10,1 +10,0 @@".into(),
+            old_start: 10,
+            new_start: 10,
+            lines: vec![DiffLineDto {
+                kind: DiffLineKindDto::Deletion,
+                text: "-remove();".into(),
+                old_line: Some(10),
+                new_line: None,
+            }],
+        };
+        let mut review = review(diff);
+        review.cursor = review
+            .rows
+            .iter()
+            .position(|row| matches!(row, RowKind::Hunk(..)))
+            .expect("hunk");
+        review.mode = InputMode::Comment("remove this concern".into());
+        review.save_comment();
+
+        assert_eq!(review.comments[0].old_line, Some(10));
+        assert_eq!(review.comments[0].new_line, None);
+    }
+
+    #[test]
+    fn truncated_diff_is_disclosed_in_the_viewer() {
+        let mut diff = sample();
+        diff.truncated = true;
+        let mut review = review(diff);
+
+        assert!(render(&mut review).contains("diff output was truncated"));
     }
 }

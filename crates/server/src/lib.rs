@@ -1716,9 +1716,9 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::InspectWorkspaceDiff {
             workspace_key,
-            session_id,
+            target,
         } => {
-            polling::handle_inspect_workspace_diff(config, workspace_key, session_id).await;
+            polling::handle_inspect_workspace_diff(config, workspace_key, target).await;
         }
         lazybox_ipc::Command::ScanCheckouts { roots } => {
             polling::handle_scan_checkouts(config, roots).await;

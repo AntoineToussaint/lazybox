@@ -12,7 +12,7 @@ use super::{
     load_workspace,
 };
 use crate::ServerConfig;
-use lazybox_core::{CiStatus, ReviewStatus, SessionId, Task, Workspace, WorkspaceKey};
+use lazybox_core::{CiStatus, ReviewStatus, Task, Workspace, WorkspaceKey};
 use lazybox_gh::GhClient;
 use lazybox_ipc::Event;
 use lazybox_linear::LinearClient;
@@ -1312,6 +1312,7 @@ fn diff_to_dto(diff: lazybox_git_ops::WorktreeDiff) -> lazybox_ipc::WorkspaceDif
     lazybox_ipc::WorkspaceDiffDto {
         status: diff.status,
         stat: diff.stat,
+        truncated: diff.truncated,
         files: diff
             .files
             .into_iter()
@@ -1356,22 +1357,35 @@ fn diff_to_dto(diff: lazybox_git_ops::WorktreeDiff) -> lazybox_ipc::WorkspaceDif
     }
 }
 
-/// Read one workspace session's worktree diff and emit it to clients.
+/// Read one workspace checkout's worktree diff and emit it to clients.
 pub async fn handle_inspect_workspace_diff(
     config: &ServerConfig,
     workspace_key: WorkspaceKey,
-    session_id: SessionId,
+    target: lazybox_ipc::WorkspaceDiffTarget,
 ) {
     let result = load_workspace(config, &workspace_key)
         .ok_or_else(|| "workspace not found".to_string())
-        .and_then(|workspace| {
-            workspace
+        .and_then(|workspace| match &target {
+            lazybox_ipc::WorkspaceDiffTarget::Session(session_id) => workspace
                 .sessions
                 .iter()
-                .find(|session| session.id == session_id)
+                .find(|session| session.id == *session_id)
                 .map(|session| session.worktree_path.clone())
-                .ok_or_else(|| "session worktree not found".to_string())
+                .ok_or_else(|| "session worktree not found".to_string()),
+            lazybox_ipc::WorkspaceDiffTarget::LinkedCheckout => workspace
+                .linked_checkout
+                .clone()
+                .ok_or_else(|| "linked checkout not found".to_string()),
         });
+    let session_key: lazybox_core::SessionKey = workspace_key.as_str().into();
+    let session_id = match &target {
+        lazybox_ipc::WorkspaceDiffTarget::Session(session_id) => Some(*session_id),
+        lazybox_ipc::WorkspaceDiffTarget::LinkedCheckout => None,
+    };
+    let agent_terminal_ids = config
+        .terminal
+        .agent_terminals_for_review(&session_key, session_id)
+        .await;
     let (diff, error) = match result {
         Ok(path) => match lazybox_git_ops::inspect_worktree_diff(&path).await {
             Ok(diff) => (Some(diff_to_dto(diff)), None),
@@ -1384,7 +1398,8 @@ pub async fn handle_inspect_workspace_diff(
     };
     let _ = config.bus.send(Event::WorkspaceDiffInspected {
         workspace_key,
-        session_id,
+        target,
+        agent_terminal_ids,
         diff,
         error,
     });
@@ -2435,7 +2450,7 @@ mod inspect_tests {
     use super::*;
     use crate::ServerConfig;
     use lazybox_core::{SessionId, SessionKind, SessionRunState, WorkspaceSession};
-    use lazybox_ipc::Event;
+    use lazybox_ipc::{Event, TerminalId, TerminalKind, WorkspaceDiffTarget};
     use lazybox_store::{MemoryStore, Store, WorkspaceRecord};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -2668,8 +2683,50 @@ mod inspect_tests {
         let config = fresh_config(store);
         let mut rx = config.bus.subscribe();
         let key = WorkspaceKey::new("github:o/r#1");
+        let session_key: lazybox_core::SessionKey = key.as_str().into();
+        config
+            .terminal
+            .register_terminal(
+                TerminalId(7),
+                "review-agent".into(),
+                session_key.clone(),
+                TerminalKind::Agent("codex".into()),
+            )
+            .await;
+        config
+            .terminal
+            .associate_session(TerminalId(7), session_id)
+            .await;
+        let other_session = SessionId::new();
+        config
+            .terminal
+            .register_terminal(
+                TerminalId(8),
+                "other-agent".into(),
+                session_key.clone(),
+                TerminalKind::Agent("codex".into()),
+            )
+            .await;
+        config
+            .terminal
+            .associate_session(TerminalId(8), other_session)
+            .await;
+        config
+            .terminal
+            .register_terminal(
+                TerminalId(9),
+                "review-shell".into(),
+                session_key,
+                TerminalKind::Shell,
+            )
+            .await;
 
-        handle_inspect_workspace_diff(&config, key.clone(), session_id).await;
+        handle_inspect_workspace_diff(
+            &config,
+            key.clone(),
+            WorkspaceDiffTarget::Session(session_id),
+        )
+        .await;
 
         let event = drain_until(&mut rx, |event| {
             matches!(event, Event::WorkspaceDiffInspected { .. })
@@ -2677,7 +2734,8 @@ mod inspect_tests {
         .await;
         let Event::WorkspaceDiffInspected {
             workspace_key,
-            session_id: inspected_session_id,
+            target,
+            agent_terminal_ids,
             diff: Some(diff),
             error,
         } = event
@@ -2685,10 +2743,70 @@ mod inspect_tests {
             panic!("expected successful workspace diff event");
         };
         assert_eq!(workspace_key, key);
-        assert_eq!(inspected_session_id, session_id);
+        assert_eq!(target, WorkspaceDiffTarget::Session(session_id));
+        assert_eq!(agent_terminal_ids, vec![TerminalId(7)]);
         assert!(error.is_none());
         assert!(diff.files.iter().any(|file| file.path == "README.md"));
         assert!(diff.files.iter().any(|file| file.path == "new.txt"));
+    }
+
+    #[tokio::test]
+    async fn workspace_diff_handler_reads_a_linked_checkout_without_a_session() {
+        let fx = setup_fixture().await;
+        let checkout = add_wt(&fx, "linked-diff", "feat").await;
+        std::fs::write(checkout.join("linked.txt"), "linked\n").unwrap();
+        let store = Arc::new(MemoryStore::new());
+        seed_workspace(&store, checkout.clone(), false);
+        let key = WorkspaceKey::new("github:o/r#1");
+        let mut record = store
+            .get_workspace(&key)
+            .expect("read workspace")
+            .expect("workspace");
+        let mut workspace: lazybox_core::Workspace =
+            serde_json::from_str(record.workspace_json.as_deref().expect("workspace json"))
+                .expect("deserialize workspace");
+        workspace.sessions.clear();
+        workspace.linked_checkout = Some(checkout);
+        record.workspace_json = Some(serde_json::to_string(&workspace).expect("serialize"));
+        store
+            .save_workspace(&record)
+            .expect("save linked workspace");
+
+        let config = fresh_config(store);
+        let session_key: lazybox_core::SessionKey = key.as_str().into();
+        config
+            .terminal
+            .register_terminal(
+                TerminalId(11),
+                "linked-agent".into(),
+                session_key,
+                TerminalKind::Agent("codex".into()),
+            )
+            .await;
+        let mut rx = config.bus.subscribe();
+
+        handle_inspect_workspace_diff(&config, key.clone(), WorkspaceDiffTarget::LinkedCheckout)
+            .await;
+
+        let event = drain_until(&mut rx, |event| {
+            matches!(event, Event::WorkspaceDiffInspected { .. })
+        })
+        .await;
+        let Event::WorkspaceDiffInspected {
+            workspace_key,
+            target,
+            agent_terminal_ids,
+            diff: Some(diff),
+            error,
+        } = event
+        else {
+            panic!("expected successful linked-checkout diff event");
+        };
+        assert_eq!(workspace_key, key);
+        assert_eq!(target, WorkspaceDiffTarget::LinkedCheckout);
+        assert_eq!(agent_terminal_ids, vec![TerminalId(11)]);
+        assert!(error.is_none());
+        assert!(diff.files.iter().any(|file| file.path == "linked.txt"));
     }
 
     /// Healthy inspector path: one bare clone + one tracked active

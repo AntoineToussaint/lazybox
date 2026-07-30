@@ -544,6 +544,15 @@ pub struct WorkspaceDiffDto {
     pub status: Vec<String>,
     pub stat: Vec<String>,
     pub files: Vec<DiffFileDto>,
+    pub truncated: bool,
+}
+
+/// Exact checkout whose local changes should be reviewed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum WorkspaceDiffTarget {
+    Session(lazybox_core::SessionId),
+    LinkedCheckout,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1071,11 +1080,11 @@ pub enum Command {
     /// Read-only — no deletes happen until the TUI follows up with
     /// per-row `DeleteOrphanedWorktree` calls.
     InspectWorktrees,
-    /// Read the focused session's worktree and reply
+    /// Read the focused checkout and reply
     /// with `Event::WorkspaceDiffInspected`.
     InspectWorkspaceDiff {
         workspace_key: lazybox_core::WorkspaceKey,
-        session_id: lazybox_core::SessionId,
+        target: WorkspaceDiffTarget,
     },
     /// Walk the configured dev roots (`scan.roots`, or `roots` when the
     /// user pointed the scan at an explicit folder) and reply with
@@ -1828,10 +1837,12 @@ pub enum Event {
         inspections: Vec<WorktreeInspectionDto>,
     },
     /// `Command::InspectWorkspaceDiff` finished. `diff` is absent when
-    /// the workspace/session disappeared or git could not read it.
+    /// the workspace/target disappeared or git could not read it.
     WorkspaceDiffInspected {
         workspace_key: lazybox_core::WorkspaceKey,
-        session_id: lazybox_core::SessionId,
+        target: WorkspaceDiffTarget,
+        /// Live agent terminals rooted in the inspected checkout.
+        agent_terminal_ids: Vec<TerminalId>,
         diff: Option<WorkspaceDiffDto>,
         error: Option<String>,
     },

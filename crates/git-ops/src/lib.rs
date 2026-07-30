@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Output;
 use std::sync::{Arc, Mutex, OnceLock};
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 mod inspect;
@@ -112,6 +113,9 @@ pub enum GitError {
     },
 }
 
+/// Boxed async result returned by [`GitRunner`] operations.
+pub type GitRunFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, GitError>> + Send + 'a>>;
+
 /// Executes one bounded git command. A non-zero exit is returned in
 /// [`Output`]; runner failures are reserved for spawn, wait, and timeout
 /// errors so callers can interpret git's exit status for probes.
@@ -122,7 +126,24 @@ pub trait GitRunner: Send + Sync {
         cwd: Option<&'a Path>,
         args: &'a [&'a str],
         env: &'a [(String, String)],
-    ) -> Pin<Box<dyn Future<Output = Result<Output, GitError>> + Send + 'a>>;
+    ) -> GitRunFuture<'a, Output>;
+
+    /// Run `git` while retaining at most `stdout_limit` bytes of stdout.
+    /// The boolean reports that the command produced additional bytes.
+    fn run_with_stdout_limit<'a>(
+        &'a self,
+        cwd: Option<&'a Path>,
+        args: &'a [&'a str],
+        env: &'a [(String, String)],
+        stdout_limit: usize,
+    ) -> GitRunFuture<'a, (Output, bool)> {
+        Box::pin(async move {
+            let mut output = self.run(cwd, args, env).await?;
+            let truncated = output.stdout.len() > stdout_limit;
+            output.stdout.truncate(stdout_limit);
+            Ok((output, truncated))
+        })
+    }
 
     /// Run a network-heavy git command, optionally streaming progress.
     /// The default delegates to [`Self::run`]; runners that can stream
@@ -133,7 +154,7 @@ pub trait GitRunner: Send + Sync {
         args: &'a [&'a str],
         env: &'a [(String, String)],
         _on_progress: Option<&'a (dyn Fn(&str) + Sync)>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), GitError>> + Send + 'a>> {
+    ) -> GitRunFuture<'a, ()> {
         Box::pin(async move {
             let output = self.run(Some(cwd), args, env).await?;
             if output.status.success() {
@@ -155,7 +176,7 @@ impl GitRunner for BoundedGitRunner {
         cwd: Option<&'a Path>,
         args: &'a [&'a str],
         env: &'a [(String, String)],
-    ) -> Pin<Box<dyn Future<Output = Result<Output, GitError>> + Send + 'a>> {
+    ) -> GitRunFuture<'a, Output> {
         let timeout = if cwd.is_some() {
             GIT_TIMEOUT
         } else {
@@ -164,13 +185,34 @@ impl GitRunner for BoundedGitRunner {
         Box::pin(exec_git_bounded(cwd, args, env, timeout))
     }
 
+    fn run_with_stdout_limit<'a>(
+        &'a self,
+        cwd: Option<&'a Path>,
+        args: &'a [&'a str],
+        env: &'a [(String, String)],
+        stdout_limit: usize,
+    ) -> GitRunFuture<'a, (Output, bool)> {
+        let timeout = if cwd.is_some() {
+            GIT_TIMEOUT
+        } else {
+            GIT_NO_CWD_TIMEOUT
+        };
+        Box::pin(exec_git_bounded_with_stdout_limit(
+            cwd,
+            args,
+            env,
+            timeout,
+            stdout_limit,
+        ))
+    }
+
     fn run_transfer<'a>(
         &'a self,
         cwd: &'a Path,
         args: &'a [&'a str],
         env: &'a [(String, String)],
         on_progress: Option<&'a (dyn Fn(&str) + Sync)>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), GitError>> + Send + 'a>> {
+    ) -> GitRunFuture<'a, ()> {
         Box::pin(run_git_transfer(cwd, args, env, on_progress))
     }
 }
@@ -2964,6 +3006,110 @@ async fn exec_git_bounded(
         tracing::error!("{label} failed ({elapsed:?}): {}", stderr.trim());
     }
     Ok(output)
+}
+
+async fn exec_git_bounded_with_stdout_limit(
+    cwd: Option<&Path>,
+    args: &[&str],
+    envs: &[(String, String)],
+    timeout: std::time::Duration,
+    stdout_limit: usize,
+) -> Result<(Output, bool), GitError> {
+    let label = match cwd {
+        Some(cwd) => format!("git (in {}) {}", cwd.display(), args.join(" ")),
+        None => format!("git {}", args.join(" ")),
+    };
+    let started = std::time::Instant::now();
+    tracing::info!("{label}");
+    let mut cmd = Command::new("git");
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
+    apply_git_env(cmd.args(args))
+        .envs(envs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let fut = async {
+        let mut child = cmd.spawn()?;
+        let mut group = KillGroupOnDrop(child.id().map(|id| id as i32));
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| std::io::Error::other("git stdout was not piped"))?;
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| std::io::Error::other("git stderr was not piped"))?;
+        let read_stderr = async {
+            let mut bytes = Vec::new();
+            stderr.read_to_end(&mut bytes).await?;
+            Ok::<_, std::io::Error>(bytes)
+        };
+        let (status, stdout, stderr) = tokio::join!(
+            child.wait(),
+            read_stdout_limited(stdout, stdout_limit),
+            read_stderr
+        );
+        let (stdout, truncated) = stdout?;
+        let output = Output {
+            status: status?,
+            stdout,
+            stderr: stderr?,
+        };
+        if output.status.success() {
+            group.0 = None;
+        }
+        Ok::<_, GitError>((output, truncated))
+    };
+    let (output, truncated) = match tokio::time::timeout(timeout, fut).await {
+        Ok(result) => result?,
+        Err(_) => {
+            let elapsed = started.elapsed();
+            tracing::error!("{label} TIMED OUT after {elapsed:?}");
+            return Err(GitError::Command(format!(
+                "`git {}` exceeded {}s wall-clock",
+                args.join(" "),
+                timeout.as_secs()
+            )));
+        }
+    };
+    let elapsed = started.elapsed();
+    if output.status.success() || truncated {
+        tracing::info!("{label} ok ({elapsed:?})");
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::error!("{label} failed ({elapsed:?}): {}", stderr.trim());
+    }
+    Ok((output, truncated))
+}
+
+async fn read_stdout_limited(
+    mut stdout: tokio::process::ChildStdout,
+    limit: usize,
+) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut bytes = Vec::with_capacity(limit.min(64 * 1024));
+    let mut chunk = [0u8; 8192];
+    loop {
+        let read = stdout.read(&mut chunk).await?;
+        if read == 0 {
+            return Ok((bytes, false));
+        }
+        let remaining = limit.saturating_sub(bytes.len());
+        if read > remaining {
+            bytes.extend_from_slice(&chunk[..remaining]);
+            return Ok((bytes, true));
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+        if bytes.len() == limit {
+            let mut probe = [0u8; 1];
+            let truncated = stdout.read(&mut probe).await? != 0;
+            return Ok((bytes, truncated));
+        }
+    }
 }
 
 /// Reject script names that would escape `_lazybox/scripts/`, name a

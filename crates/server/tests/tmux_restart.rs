@@ -70,17 +70,16 @@ struct PromptCase {
 }
 
 async fn register_prompt_cases(config: &ServerConfig, cases: &[PromptCase]) {
-    let mut terminals = config.terminal.terminals.lock().await;
-    let mut terminal_meta = config.terminal.terminal_meta.lock().await;
     for case in cases {
-        terminals.insert(case.terminal_id, case.backend_key.clone());
-        terminal_meta.insert(
-            case.terminal_id,
-            (
+        config
+            .terminal
+            .register_terminal(
+                case.terminal_id,
+                case.backend_key.clone(),
                 case.session_key.clone(),
                 TerminalKind::Agent(case.agent.clone()),
-            ),
-        );
+            )
+            .await;
     }
 }
 
@@ -223,11 +222,8 @@ async fn snapshot_and_resync_via_client(
             Event::TerminalResyncUnavailable { terminal_id } => {
                 let backend_key = inspection_config
                     .terminal
-                    .terminals
-                    .lock()
-                    .await
-                    .get(&terminal_id)
-                    .cloned();
+                    .backend_key_for(terminal_id)
+                    .await;
                 let direct = match backend_key.as_deref() {
                     Some(key) => inspection_config.backend.snapshot(key).await,
                     None => panic!("terminal map missing {terminal_id:?}"),

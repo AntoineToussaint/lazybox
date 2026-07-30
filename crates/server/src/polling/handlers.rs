@@ -804,7 +804,7 @@ pub async fn handle_fetch_repo_labels(config: &ServerConfig, workspace_key: Work
 /// never contends with a running poll tick. `None` means credentials
 /// or client init failed — the caller skips the user-triggered fetch.
 pub(super) async fn resolve_gh_client(config: &ServerConfig) -> Option<GhClient> {
-    if let Some(client) = config.poll.gh_client_cache.lock().clone() {
+    if let Some(client) = config.poll.cached_gh_client() {
         return Some(client);
     }
     let cred = match lazybox_gh::credential_chain()
@@ -819,7 +819,7 @@ pub(super) async fn resolve_gh_client(config: &ServerConfig) -> Option<GhClient>
     };
     match GhClient::from_credential(cred).await {
         Ok(client) => {
-            *config.poll.gh_client_cache.lock() = Some(client.clone());
+            config.poll.cache_gh_client(client.clone());
             Some(client)
         }
         Err(e) => {
@@ -2058,7 +2058,7 @@ pub async fn prefetch_top_pr_details(
 
     // Reuse the persistent GhClient cache. If absent (linear-only
     // setup, or auth failed earlier), prefetch is a no-op.
-    let Some(client) = config.poll.gh_client_cache.lock().clone() else {
+    let Some(client) = config.poll.cached_gh_client() else {
         return;
     };
 
@@ -2066,7 +2066,7 @@ pub async fn prefetch_top_pr_details(
     // PR. `polled` is the key list from the just-completed tick; load
     // each via the store path the rest of the handler module uses so
     // the scoring sees the post-upsert state.
-    let engagement = config.poll.engagement.read().snapshot();
+    let engagement = config.poll.engagement_snapshot();
     let mut scored: Vec<(i32, String, WorkspaceKey)> = Vec::new();
     let mut seen_node_ids = std::collections::HashSet::new();
     for key in polled {

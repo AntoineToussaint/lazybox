@@ -1205,14 +1205,14 @@ pub async fn handle_spawn(
     // delayed metadata write, then the old spawn payload would resurrect the
     // source ownership in the restart record.
     {
-        let mut terminals = config.terminal.terminals.lock().await;
-        let mut terminal_meta = config.terminal.terminal_meta.lock().await;
-        let mut agent_state_generations = config.terminal.agent_state_generations.lock().await;
-        terminal_meta.insert(terminal_id, (session_key.clone(), kind.clone()));
-        terminals.insert(terminal_id, backend_key.clone());
-        if let Some(generation) = agent_state_generation {
-            agent_state_generations.insert(terminal_id, generation);
-        }
+        let mut registration = config.terminal.lock_registration().await;
+        registration.register(
+            terminal_id,
+            backend_key.clone(),
+            session_key.clone(),
+            kind.clone(),
+            agent_state_generation,
+        );
         persist_terminal_meta(config, &backend_key, &session_key, &kind).await;
         if let Some(agent) = agent_for_env.as_deref() {
             persist_pty_launch_generation(config, &backend_key, agent.pty_launch_generation())
@@ -5106,11 +5106,7 @@ struct SubmitConfirmation {
     terminal_id: TerminalId,
     signal: std::sync::Arc<tokio::sync::Notify>,
     events: tokio::sync::broadcast::Receiver<Event>,
-    signals_map: std::sync::Arc<
-        tokio::sync::Mutex<
-            std::collections::HashMap<TerminalId, std::sync::Arc<tokio::sync::Notify>>,
-        >,
-    >,
+    coordinator: SpawnCoordinator,
     bus: tokio::sync::broadcast::Sender<Event>,
 }
 
@@ -5124,18 +5120,12 @@ async fn prepare_submit_confirmation(
     config: &ServerConfig,
     terminal_id: TerminalId,
 ) -> SubmitConfirmation {
-    let signal = std::sync::Arc::new(tokio::sync::Notify::new());
-    config
-        .spawn
-        .prompt_submit_signals
-        .lock()
-        .await
-        .insert(terminal_id, signal.clone());
+    let signal = config.spawn.register_prompt_confirmation(terminal_id).await;
     SubmitConfirmation {
         terminal_id,
         signal,
         events: config.bus.subscribe(),
-        signals_map: config.spawn.prompt_submit_signals.clone(),
+        coordinator: config.spawn.clone(),
         bus: config.bus.clone(),
     }
 }
@@ -5231,15 +5221,10 @@ async fn confirm_prompt_submission(
     // own `Notify`; removing blindly here would delete THAT signal,
     // orphan its waiter, and trigger a spurious Enter resend into the
     // agent.
-    {
-        let mut signals = confirm.signals_map.lock().await;
-        if signals
-            .get(&confirm.terminal_id)
-            .is_some_and(|s| std::sync::Arc::ptr_eq(s, &confirm.signal))
-        {
-            signals.remove(&confirm.terminal_id);
-        }
-    }
+    confirm
+        .coordinator
+        .remove_prompt_confirmation(confirm.terminal_id, &confirm.signal)
+        .await;
     if confirmed {
         return true;
     }
@@ -6262,23 +6247,25 @@ pub async fn recover_sessions(config: &ServerConfig) {
         // or workspace-rebadge readers from observing a backend id without
         // its durable workspace owner (or vice versa).
         {
-            let mut terminals = config.terminal.terminals.lock().await;
-            let mut terminal_meta = config.terminal.terminal_meta.lock().await;
-            let mut agent_state_generations = config.terminal.agent_state_generations.lock().await;
-            let mut agent_states = config.terminal.agent_states.lock().await;
-            terminal_meta.insert(terminal_id, (session_key.clone(), kind.clone()));
-            terminals.insert(terminal_id, key.clone());
+            let mut registration = config.terminal.lock_recovered_registration().await;
+            let previous = registration.register(
+                terminal_id,
+                key.clone(),
+                session_key.clone(),
+                kind.clone(),
+                recovered_agent
+                    .as_ref()
+                    .map(|(durability, state)| (durability.generation, *state)),
+            );
+            if previous.is_some() {
+                tracing::error!(
+                    ?terminal_id,
+                    %key,
+                    ?previous,
+                    "agent state invariant: recovery replaced an existing hydrated state"
+                );
+            }
             if let Some((durability, state)) = &recovered_agent {
-                agent_state_generations.insert(terminal_id, durability.generation);
-                let previous = agent_states.insert(terminal_id, *state);
-                if previous.is_some() {
-                    tracing::error!(
-                        ?terminal_id,
-                        %key,
-                        ?previous,
-                        "agent state invariant: recovery replaced an existing hydrated state"
-                    );
-                }
                 tracing::info!(
                     ?terminal_id,
                     backend_key = %key,
@@ -6500,16 +6487,19 @@ async fn reconcile_missing_recovered_sessions(
             None
         };
         {
-            let mut terminals = config.terminal.terminals.lock().await;
-            let mut terminal_meta = config.terminal.terminal_meta.lock().await;
-            let mut generations = config.terminal.agent_state_generations.lock().await;
-            let mut states = config.terminal.agent_states.lock().await;
-            terminals.insert(terminal_id, backend_key.to_string());
-            terminal_meta.insert(terminal_id, (session_key, kind));
-            if let Some((durability, state)) = &recovered_agent {
-                generations.insert(terminal_id, durability.generation);
-                states.insert(terminal_id, *state);
-            }
+            config
+                .terminal
+                .lock_recovered_registration()
+                .await
+                .register(
+                    terminal_id,
+                    backend_key.to_string(),
+                    session_key,
+                    kind,
+                    recovered_agent
+                        .as_ref()
+                        .map(|(durability, state)| (durability.generation, *state)),
+                );
         }
         tracing::warn!(
             %backend_key,
@@ -7493,7 +7483,7 @@ mod tests {
         assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(10),
-                config.poll.wake_signal.notified(),
+                config.poll.wait_for_wake(),
             )
             .await
             .is_err()
@@ -7502,7 +7492,7 @@ mod tests {
         wake_poll_for_terminal_kind(&config, &TerminalKind::Agent("codex".into()));
         tokio::time::timeout(
             std::time::Duration::from_millis(50),
-            config.poll.wake_signal.notified(),
+            config.poll.wait_for_wake(),
         )
         .await
         .expect("agent registration did not wake polling");

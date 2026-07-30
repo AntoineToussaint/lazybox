@@ -43,20 +43,17 @@ async fn seed_persisted_state(
     let terminal_id = TerminalId(10_000 + ordinal);
     config
         .terminal
-        .terminals
-        .lock()
-        .await
-        .insert(terminal_id, backend_key.clone());
-    config.terminal.terminal_meta.lock().await.insert(
-        terminal_id,
-        (session_key.clone(), TerminalKind::Agent("codex".into())),
-    );
+        .register_terminal(
+            terminal_id,
+            backend_key.clone(),
+            session_key.clone(),
+            TerminalKind::Agent("codex".into()),
+        )
+        .await;
     config
         .terminal
-        .agent_state_generations
-        .lock()
-        .await
-        .insert(terminal_id, terminal_id.0);
+        .record_agent_state_generation(terminal_id, terminal_id.0)
+        .await;
 
     handle_ingest_hook(
         &config,
@@ -133,12 +130,11 @@ async fn sqlite_restart_hydrates_working_done_and_input_needed_before_snapshot()
             backend.as_backend(),
         );
         recover_sessions(&restarted).await;
-        let terminal_id = *restarted
+        let terminal_id = restarted
             .terminal
-            .terminals
-            .lock()
+            .terminal_ids()
             .await
-            .keys()
+            .into_iter()
             .next()
             .expect("recovered terminal");
         assert_eq!(
@@ -362,7 +358,7 @@ async fn recovered_dead_process_exits_and_fresh_spawn_has_no_old_state() {
     assert_eq!(exited, AgentState::Exited { code: Some(9) });
 
     tokio::time::timeout(Duration::from_secs(2), async {
-        while !restarted.terminal.terminals.lock().await.is_empty() {
+        while !restarted.terminal.is_empty().await {
             tokio::task::yield_now().await;
         }
     })

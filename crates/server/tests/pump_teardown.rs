@@ -220,10 +220,8 @@ async fn exiting_agent_broadcasts_exited_not_stuck_working() {
         // The agent is mid-turn: its pill is `Working`.
         config
             .terminal
-            .agent_states
-            .lock()
-            .await
-            .insert(terminal_id, lazybox_ipc::AgentState::Working);
+            .record_agent_state(terminal_id, lazybox_ipc::AgentState::Working)
+            .await;
 
         // The process crashes (non-zero exit), nobody calls Close/kill.
         mock.finish(&key, 1).await;
@@ -592,28 +590,17 @@ async fn recovered_session_teardown_matches_main_pump() {
         // none of these.
         config
             .terminal
-            .agent_states
-            .lock()
-            .await
-            .insert(terminal_id, lazybox_ipc::AgentState::Working);
+            .record_agent_state(terminal_id, lazybox_ipc::AgentState::Working)
+            .await;
         config
             .terminal
-            .hook_driven_terminals
-            .lock()
-            .await
-            .insert(terminal_id, std::time::Instant::now());
+            .record_hook_activity(terminal_id, std::time::Instant::now())
+            .await;
         config
             .terminal
-            .input_needed_shapes
-            .lock()
-            .await
-            .insert(terminal_id, lazybox_agents::PromptShape::Chooser);
-        config
-            .spawn
-            .prompt_submit_signals
-            .lock()
-            .await
-            .insert(terminal_id, std::sync::Arc::new(tokio::sync::Notify::new()));
+            .record_input_needed_shape(terminal_id, lazybox_agents::PromptShape::Chooser)
+            .await;
+        config.spawn.register_prompt_confirmation(terminal_id).await;
 
         // The survivor exits on its own.
         mock.finish(&key, 0).await;
@@ -634,23 +621,8 @@ async fn recovered_session_teardown_matches_main_pump() {
             move || {
                 let config = config_probe.clone();
                 async move {
-                    config.terminal.agent_states.lock().await.is_empty()
-                        && config
-                            .terminal
-                            .hook_driven_terminals
-                            .lock()
-                            .await
-                            .is_empty()
-                        && config.terminal.input_needed_shapes.lock().await.is_empty()
-                        && config.spawn.prompt_submit_signals.lock().await.is_empty()
-                        && config.terminal.terminals.lock().await.is_empty()
-                        && config.terminal.terminal_meta.lock().await.is_empty()
-                        && config
-                            .terminal
-                            .no_permission_terminals
-                            .lock()
-                            .await
-                            .is_empty()
+                    config.terminal.bookkeeping_is_empty().await
+                        && config.spawn.prompt_confirmations_are_empty().await
                 }
             },
             Duration::from_secs(2),

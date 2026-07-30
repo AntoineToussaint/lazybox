@@ -497,7 +497,7 @@ async fn prepare_upsert(
         } else {
             observation_window_ms
         };
-        let tier = config.poll.engagement.read().tier_for(key);
+        let tier = config.poll.engagement_tier_for(key);
         if let Some(age_ms) = age_ms {
             match tier {
                 EngagementTier::Hot => config.event_metrics.record_hot_sync_latency(age_ms),

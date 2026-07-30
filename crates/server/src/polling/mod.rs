@@ -363,11 +363,11 @@ pub async fn refresh_github_engagement(config: &ServerConfig) -> EngagementSnaps
         Ok(Ok(records)) => records,
         Ok(Err(error)) => {
             tracing::warn!("engagement: list_workspaces failed: {error}");
-            return config.poll.engagement.read().snapshot();
+            return config.poll.engagement_snapshot();
         }
         Err(error) => {
             tracing::warn!("engagement: workspace scan task failed: {error}");
-            return config.poll.engagement.read().snapshot();
+            return config.poll.engagement_snapshot();
         }
     };
 
@@ -1160,7 +1160,7 @@ pub async fn tick_with_state(
                 // automatically as the user's involvement set grows.
                 let now = std::time::Instant::now();
                 if source.name() == lazybox_gh::SOURCE {
-                    let engagement = config.poll.engagement.read().snapshot();
+                    let engagement = config.poll.engagement_snapshot();
                     let mut seen_repos: std::collections::HashSet<&str> =
                         std::collections::HashSet::new();
                     for task in &tasks {
@@ -1298,7 +1298,7 @@ pub async fn tick_with_state(
                 // Clone the cached GitHub client (Arc-backed, cheap) so
                 // the auto-fix arm can post its PR comment. Read from the
                 // dedicated cache lock, not `poll_state` (issue #92).
-                let gh = config.poll.gh_client_cache.lock().clone();
+                let gh = config.poll.cached_gh_client();
                 for action in actions {
                     dispatch_action(config, source.name(), gh.as_ref(), action).await;
                 }
@@ -1318,7 +1318,7 @@ pub async fn tick_with_state(
                 // this, the cache-reuse filter could keep handing back
                 // the bricked client until daemon restart.
                 if e.is_auth() && source.name() == lazybox_gh::SOURCE {
-                    *config.poll.gh_client_cache.lock() = None;
+                    config.poll.clear_cached_gh_client();
                     tracing::info!(
                         "cleared cached GitHub client after auth failure — \
                          next tick rebuilds from the credential chain"
@@ -1803,7 +1803,7 @@ pub fn spawn(config: ServerConfig, interval: Duration) -> tokio::task::JoinHandl
     //    a new client connecting, or "GitHub returned `mergeable:
     //    UNKNOWN`, please re-query in a few seconds" all want a
     //    fast wake instead of waiting out the rest of a 60s sleep.
-    //    `config.poll.wake_signal.notified()` is selected against the
+    //    `config.poll.wait_for_wake()` is selected against the
     //    chunked sleep — pinging the Notify forces an immediate
     //    re-check of the wall-clock condition.
     tokio::spawn(async move {
@@ -1866,7 +1866,7 @@ pub fn spawn(config: ServerConfig, interval: Duration) -> tokio::task::JoinHandl
                 let chunk = remaining.min(CHUNK);
                 tokio::select! {
                     _ = tokio::time::sleep(chunk) => {}
-                    _ = config.poll.wake_signal.notified() => {
+                    _ = config.poll.wait_for_wake() => {
                         tracing::info!("polling: woken (Refresh / Subscribe / UNKNOWN retry)");
                         break;
                     }
@@ -1999,7 +1999,7 @@ pub fn spawn_with_sources(
                 let nap = remaining.min(chunk);
                 tokio::select! {
                     _ = tokio::time::sleep(nap) => {}
-                    _ = config.poll.wake_signal.notified() => { break; }
+                    _ = config.poll.wait_for_wake() => { break; }
                 }
             }
             let outcome = tick_with_state(&config, &sources, &mut state).await;

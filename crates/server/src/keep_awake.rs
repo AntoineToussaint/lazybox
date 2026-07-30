@@ -17,14 +17,12 @@
 //! is logged (once), and sleep behavior is unchanged — there is no
 //! portable fallback worth shipping.
 
-use std::collections::HashMap;
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
 
-use lazybox_ipc::{AgentState, Event, TerminalId};
-use tokio::sync::{Mutex, broadcast};
+use lazybox_ipc::Event;
+use tokio::sync::broadcast;
 
-use crate::ServerConfig;
+use crate::{ServerConfig, TerminalRegistry};
 
 /// Spawn the keep-awake watcher. `None` only on platforms with no
 /// known inhibitor — the task itself is cheap and re-reads
@@ -41,9 +39,9 @@ pub fn spawn(config: &ServerConfig) -> Option<tokio::task::JoinHandle<()>> {
     // this call returning and the task's first poll must queue, not
     // vanish.
     let rx = config.bus.subscribe();
-    let states = config.terminal.agent_states.clone();
+    let terminals = config.terminal.clone();
     Some(tokio::spawn(async move {
-        run(rx, states, argv, keep_awake_enabled).await;
+        run(rx, terminals, argv, keep_awake_enabled).await;
     }))
 }
 
@@ -67,7 +65,7 @@ fn keep_awake_enabled() -> bool {
 /// pid tether in [`inhibit_argv`].
 async fn run(
     mut rx: broadcast::Receiver<Event>,
-    states: Arc<Mutex<HashMap<TerminalId, AgentState>>>,
+    terminals: TerminalRegistry,
     argv: Vec<String>,
     enabled: impl Fn() -> bool,
 ) -> Inhibitor {
@@ -76,7 +74,7 @@ async fn run(
     // broadcasts its state once, possibly before this task subscribed,
     // and the state owner's dedup means no further event may arrive
     // for the rest of that run.
-    inhibitor.set_active(enabled() && any_working(&states).await);
+    inhibitor.set_active(enabled() && terminals.any_agent_working().await);
     loop {
         match rx.recv().await {
             Ok(Event::AgentState { .. } | Event::TerminalExited { .. })
@@ -84,17 +82,9 @@ async fn run(
             Ok(_) => continue,
             Err(broadcast::error::RecvError::Closed) => break,
         }
-        inhibitor.set_active(enabled() && any_working(&states).await);
+        inhibitor.set_active(enabled() && terminals.any_agent_working().await);
     }
     inhibitor
-}
-
-async fn any_working(states: &Mutex<HashMap<TerminalId, AgentState>>) -> bool {
-    states
-        .lock()
-        .await
-        .values()
-        .any(|s| matches!(s, AgentState::Working))
 }
 
 /// The platform's inhibitor command line, or `None` when the platform
@@ -236,6 +226,7 @@ impl Drop for Inhibitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lazybox_ipc::{AgentState, TerminalId};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn alive(pid: u32) -> bool {
@@ -247,10 +238,12 @@ mod tests {
         vec!["sleep".into(), "300".into()]
     }
 
-    fn working_states() -> Arc<Mutex<HashMap<TerminalId, AgentState>>> {
-        let mut map = HashMap::new();
-        map.insert(TerminalId(1), AgentState::Working);
-        Arc::new(Mutex::new(map))
+    async fn working_terminals() -> TerminalRegistry {
+        let terminals = TerminalRegistry::default();
+        terminals
+            .record_agent_state(TerminalId(1), AgentState::Working)
+            .await;
+        terminals
     }
 
     #[cfg(target_os = "macos")]
@@ -278,7 +271,7 @@ mod tests {
     async fn primes_from_state_recovered_before_subscribe() {
         let (tx, rx) = broadcast::channel(8);
         drop(tx);
-        let inhibitor = run(rx, working_states(), sleep_argv(), || true).await;
+        let inhibitor = run(rx, working_terminals().await, sleep_argv(), || true).await;
         assert!(
             inhibitor.holding(),
             "priming pass must acquire without any event"
@@ -300,7 +293,7 @@ mod tests {
         // First read (priming) sees the flag on; the second (the
         // queued event) sees it off.
         let reads = AtomicUsize::new(0);
-        let inhibitor = run(rx, working_states(), sleep_argv(), move || {
+        let inhibitor = run(rx, working_terminals().await, sleep_argv(), move || {
             reads.fetch_add(1, Ordering::SeqCst) == 0
         })
         .await;
@@ -316,7 +309,7 @@ mod tests {
     async fn disabled_flag_never_holds() {
         let (tx, rx) = broadcast::channel(8);
         drop(tx);
-        let inhibitor = run(rx, working_states(), sleep_argv(), || false).await;
+        let inhibitor = run(rx, working_terminals().await, sleep_argv(), || false).await;
         assert!(!inhibitor.holding());
     }
 

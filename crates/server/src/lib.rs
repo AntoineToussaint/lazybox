@@ -1266,7 +1266,7 @@ pub async fn dispatch_command(
             config.poll.wake(true);
             // Replay cached viewer identities so a reconnecting TUI can
             // render `@me` without waiting for the next poll cycle.
-            let logins = config.poll.viewer_identities.lock().clone();
+            let logins = config.poll.viewer_identities();
             if !logins.is_empty() {
                 let _ = tx.send(Event::ViewerIdentities { logins });
             }
@@ -1595,7 +1595,7 @@ pub async fn dispatch_command(
             // issue appears now instead of next scheduled sweep (issue
             // #180), then wake the long-lived poll loop — the single
             // source of truth for ticks.
-            if let Some(client) = config.poll.gh_client_cache.lock().as_ref() {
+            if let Some(client) = config.poll.cached_gh_client() {
                 client.force_full_sweep();
             }
             config.poll.wake(true);

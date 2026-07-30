@@ -175,8 +175,8 @@ const steps = [
             <span class="title">lazybox — reactive inbox</span>
           </div>
           <video
-            src="/demo/lazybox.mp4"
-            poster="/demo/lazybox.png"
+            src="/demo/01-inbox.mp4"
+            poster="/demo/01-inbox.png"
             aria-label="lazybox inbox with workspaces, CI status, activity, and embedded agent terminals"
             data-demo
             autoplay
@@ -189,6 +189,36 @@ const steps = [
         </div>
       </div>
     </header>
+
+    <section id="demos" class="demos">
+      <div class="container">
+        <p class="kicker" style="text-align:center">Real terminal, real workload</p>
+        <h2 style="text-align:center">A few of the workflows I run all day.</h2>
+        <div class="demos-grid">
+          <figure class="demo-item" data-reveal>
+            <div class="term">
+              <div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">snippets</span></div>
+              <video src="/demo/02-snippets.mp4" poster="/demo/02-snippets.png" aria-label="Firing reusable snippets into an agent" autoplay loop muted playsinline preload="metadata" controls></video>
+            </div>
+            <figcaption><b>Snippets</b> — reusable prompts fired into any agent, most-recently-used first.</figcaption>
+          </figure>
+          <figure class="demo-item" data-reveal>
+            <div class="term">
+              <div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">worktree + agent</span></div>
+              <video src="/demo/03-spawn.mp4" poster="/demo/03-spawn.png" aria-label="Spawning a git worktree and a live agent for one task" autoplay loop muted playsinline preload="metadata" controls></video>
+            </div>
+            <figcaption><b>Transparent worktrees</b> — every task gets its own git worktree and a live agent, managed for you.</figcaption>
+          </figure>
+          <figure class="demo-item" data-reveal>
+            <div class="term">
+              <div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">github auto-work</span></div>
+              <video src="/demo/04-autowork.mp4" poster="/demo/04-autowork.png" aria-label="Tagging a GitHub issue and an agent picking it up" autoplay loop muted playsinline preload="metadata" controls></video>
+            </div>
+            <figcaption><b>GitHub-driven work</b> — CI failures, reviews and issues surface in the inbox; tag one and an agent picks it up.</figcaption>
+          </figure>
+        </div>
+      </div>
+    </section>
 
     <div class="strip">
       <div class="container">

@@ -205,18 +205,28 @@ impl<T: TerminalAdapter> Model<T> {
     /// feeding the shared `help_convo` the `HelpAsk` modal renders.
     /// Returns `true` when the event was help-run traffic so
     /// `dispatch_daemon_event` skips the pane fan-out for it. The run
-    /// is recognized by the sentinel session key on `AgentRunStarted`;
+    /// is recognized by the request id generated for `StartAgentRun`;
     /// everything after correlates on the captured run id.
     fn handle_help_agent_event(&mut self, event: &IpcEvent) -> bool {
-        use lazybox_tui_core::help::HELP_SESSION_KEY;
         match event {
             IpcEvent::AgentRunStarted {
-                run_id,
-                session_key,
-                ..
-            } if session_key.as_str() == HELP_SESSION_KEY => {
+                request_id, run_id, ..
+            } if self.help_start_request.as_ref() == Some(request_id) => {
+                self.help_start_request = None;
+                if self.help_interrupt_on_start {
+                    self.help_interrupt_on_start = false;
+                    self.send_cmd(lazybox_ipc::Command::InterruptAgentRun { run_id: *run_id });
+                    if let Some(question) = self.help_restart_question.take() {
+                        if let Some(cmd) = self.start_help_run_command(&question) {
+                            self.send_cmd(cmd);
+                        }
+                    } else {
+                        self.help_pending_questions.clear();
+                    }
+                    self.redraw = true;
+                    return true;
+                }
                 self.help_run = Some(*run_id);
-                self.help_run_starting = false;
                 // Questions that raced the run start ride in now, in
                 // submission order.
                 for question in std::mem::take(&mut self.help_pending_questions) {
@@ -294,9 +304,10 @@ impl<T: TerminalAdapter> Model<T> {
                 // dead with it, including follow-ups queued behind the
                 // one that was streaming.
                 self.help_run = None;
-                self.help_run_starting = false;
+                self.help_start_request = None;
                 let mut convo = self.help_convo_mut();
                 let unanswered = convo.close_open_turns();
+                convo.deactivate_thread();
                 if let Some(error) = error {
                     convo.notice = Some(format!("help assistant exited: {error}"));
                 } else if unanswered {
@@ -308,20 +319,27 @@ impl<T: TerminalAdapter> Model<T> {
                 self.redraw = true;
                 true
             }
-            // Spawn failures arrive as generic provider errors with an
-            // `agent_run*` source and no run id (see
-            // `handle_start_agent_run`), so they're only attributable
-            // to the help run while OUR start is in flight. Once the
-            // run is live its death arrives run-scoped as
-            // `AgentRunFinished`; a live-window `agent_run` error
-            // belongs to some other client's run and must fall through.
-            IpcEvent::ProviderError {
-                source, message, ..
-            } if source.starts_with("agent_run") && self.help_run_starting => {
-                self.help_run_starting = false;
+            IpcEvent::AgentRunStartFailed {
+                request_id,
+                message,
+            } if self.help_start_request.as_ref() == Some(request_id) => {
+                self.help_start_request = None;
+                if self.help_interrupt_on_start {
+                    self.help_interrupt_on_start = false;
+                    if let Some(question) = self.help_restart_question.take() {
+                        if let Some(cmd) = self.start_help_run_command(&question) {
+                            self.send_cmd(cmd);
+                        }
+                    } else {
+                        self.help_pending_questions.clear();
+                    }
+                    self.redraw = true;
+                    return true;
+                }
                 self.help_pending_questions.clear();
                 let mut convo = self.help_convo_mut();
                 convo.close_open_turns();
+                convo.deactivate_thread();
                 convo.notice = Some(format!("help assistant unavailable — {message}"));
                 drop(convo);
                 self.redraw = true;
@@ -458,6 +476,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::CheckoutsDiscovered { .. }
                 | IpcEvent::OrphanedWorktreeDeleted { .. }
                 | IpcEvent::AgentRunStarted { .. }
+                | IpcEvent::AgentRunStartFailed { .. }
                 | IpcEvent::AgentRawJson { .. }
                 | IpcEvent::AgentDebug { .. }
                 | IpcEvent::AgentAssistantTextDelta { .. }
@@ -1098,6 +1117,7 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::CheckoutsDiscovered { .. }
             | IpcEvent::OrphanedWorktreeDeleted { .. }
             | IpcEvent::AgentRunStarted { .. }
+            | IpcEvent::AgentRunStartFailed { .. }
             | IpcEvent::AgentRawJson { .. }
             | IpcEvent::AgentDebug { .. }
             | IpcEvent::AgentAssistantTextDelta { .. }
@@ -1311,6 +1331,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::CheckoutsDiscovered { .. }
                 | IpcEvent::OrphanedWorktreeDeleted { .. }
                 | IpcEvent::AgentRunStarted { .. }
+                | IpcEvent::AgentRunStartFailed { .. }
                 | IpcEvent::AgentRawJson { .. }
                 | IpcEvent::AgentDebug { .. }
                 | IpcEvent::AgentAssistantTextDelta { .. }

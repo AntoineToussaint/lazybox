@@ -358,10 +358,11 @@ impl Id {
     ///
     /// True for the read-only / progress overlays that shouldn't trap
     /// the user — the worktree-provisioning checklist, sync status,
-    /// help, and the snippet picker/browser. Deliberately false for the
-    /// destructive confirms (archive, merged-workspace removal, orphan
-    /// deletes, …): a stray click must never dismiss or trigger data
-    /// loss, so those keep owning input until the user answers.
+    /// and the snippet picker/browser. Help holds a conversation, so it
+    /// also requires an explicit keyboard exit. Deliberately false for
+    /// the destructive confirms (archive, merged-workspace removal,
+    /// orphan deletes, …): a stray click must never dismiss or trigger
+    /// data loss, so those keep owning input until the user answers.
     pub(crate) fn dismissable_by_outside_click(&self) -> bool {
         matches!(
             self,
@@ -369,8 +370,6 @@ impl Id {
                 | Id::SyncStatus
                 | Id::Messages
                 | Id::Error
-                | Id::Help
-                | Id::HelpAsk
                 | Id::SnippetPicker
                 | Id::SnippetBrowser
         )
@@ -595,6 +594,29 @@ pub(crate) enum ModalFlow {
     },
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HelpQuestionKind {
+    FollowUp,
+    #[default]
+    NewQuestion,
+}
+
+impl HelpQuestionKind {
+    pub(crate) fn toggled(self) -> Self {
+        match self {
+            Self::FollowUp => Self::NewQuestion,
+            Self::NewQuestion => Self::FollowUp,
+        }
+    }
+
+    pub(crate) fn input_label(self) -> &'static str {
+        match self {
+            Self::FollowUp => "Follow-up",
+            Self::NewQuestion => "New question",
+        }
+    }
+}
+
 /// App-level message vocabulary for modals + globals.
 #[derive(Debug, PartialEq, Clone)]
 pub enum Msg {
@@ -624,7 +646,9 @@ pub enum Msg {
     HelpIndexOpen,
     /// Question submitted from the `HelpAsk` modal. The modal stays
     /// mounted; the answer streams back into `Model::help_convo`.
-    HelpAsked(String),
+    HelpAsked(String, HelpQuestionKind),
+    /// Spinner heartbeat from the `HelpAsk` modal.
+    HelpSpinnerTick,
     /// `e` pressed in the snippets browser — close it and open the
     /// global snippets YAML in the user's editor (#237).
     OpenSnippetsFile,
@@ -1280,22 +1304,27 @@ pub struct Model<T: TerminalAdapter> {
     /// Help-assistant conversation (#302), shared with a mounted
     /// `HelpAsk` modal via `Arc` so the daemon-event handlers can
     /// stream an answer into it without remounting (which would drop
-    /// the user's in-flight typing). Persists across modal open/close
-    /// — the help run stays alive for the app's lifetime so follow-up
-    /// questions reuse the prompt-cached context.
+    /// the user's in-flight typing). Persists while Help is open so
+    /// switching between Ask and the shortcut index keeps the thread.
     pub(crate) help_convo: crate::realm::components::help_ask::SharedHelpConvo,
     /// Run id of the live help-agent run, captured from the
-    /// `AgentRunStarted` carrying the help sentinel session key.
+    /// `AgentRunStarted` carrying the current help start request id.
     /// `None` before the first question (the run starts lazily) and
     /// again after `AgentRunFinished` — the next question then starts
     /// a fresh run (with fresh context).
     help_run: Option<lazybox_ipc::AgentRunId>,
-    /// True between dispatching `StartAgentRun` and its
-    /// `AgentRunStarted` landing. Questions submitted in that window
-    /// queue in `help_pending_questions` rather than double-starting
-    /// the run.
-    help_run_starting: bool,
+    /// Request id between dispatching `StartAgentRun` and its correlated
+    /// success or failure event. Questions submitted in that window queue
+    /// in `help_pending_questions` rather than double-starting the run.
+    help_start_request: Option<lazybox_ipc::AgentRunRequestId>,
     help_pending_questions: Vec<String>,
+    /// An explicit exit can race `AgentRunStarted`. Interrupt that run
+    /// as soon as its id arrives instead of adopting a conversation the
+    /// user already closed.
+    help_interrupt_on_start: bool,
+    /// Fresh-thread question waiting for the old in-flight start to
+    /// reveal its run id so it can be interrupted first.
+    help_restart_question: Option<String>,
     /// Agent id the active `DefaultModelPicker` persists against —
     /// stashed at mount so a pick can't land on a drifted default.
     pub(crate) default_model_agent: Option<String>,
@@ -1562,8 +1591,10 @@ impl<T: TerminalAdapter> Model<T> {
             theme_picker_prev: None,
             help_convo: Default::default(),
             help_run: None,
-            help_run_starting: false,
+            help_start_request: None,
             help_pending_questions: Vec::new(),
+            help_interrupt_on_start: false,
+            help_restart_question: None,
             default_model_agent: None,
             auto_tour_pending: false,
             tips_enabled: false,
@@ -4179,12 +4210,13 @@ impl<T: TerminalAdapter> Model<T> {
                 }
                 self.mount_help();
             }
-            Msg::HelpAsked(question) => {
+            Msg::HelpAsked(question, kind) => {
                 // The HelpAsk modal stays mounted — the answer streams
                 // back into `help_convo`.
-                let cmds = self.handle_help_asked(question);
+                let cmds = self.handle_help_question(question, kind);
                 self.dispatch_cmds(cmds);
             }
+            Msg::HelpSpinnerTick => {}
             // Polling outcomes — surface as footer notices, never
             // as full-screen modals. Permanent + auth errors are
             // sticky; retryable ones (which shouldn't reach here)

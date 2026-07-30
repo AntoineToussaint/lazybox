@@ -25,7 +25,14 @@ name: string, kind: SessionKind, state: SessionRunState,
  * manager when the session is first spawned and reused on
  * subsequent agent runs in the same session.
  */
-worktree_path: string, created_at: string,
+worktree_path: string,
+/**
+ * Branch this managed worktree was provisioned on. Persisted with the
+ * session because workspace metadata can change independently during
+ * issue-to-PR transfer. `None` for legacy and externally supplied
+ * sessions whose branch was never recorded.
+ */
+worktree_branch: string | null, created_at: string,
 /**
  * When the daemon last saw output from this session's PTY. None
  * for compare/log sessions whose state model is different.

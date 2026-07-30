@@ -237,11 +237,13 @@ impl From<DesktopCommand> for Command {
             DesktopCommand::SpawnAgent { session_key, agent } => Command::Spawn {
                 session_key,
                 session_id: None,
+                client_request_id: None,
                 kind: lazybox_ipc::TerminalKind::Agent(agent),
                 cwd: None,
                 initial_prompt: None,
                 on_main: false,
                 model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
             },
             DesktopCommand::FocusWorkspace { session_key } => {
                 Command::FocusWorkspace { session_key }
@@ -984,7 +986,10 @@ pub fn encode_terminal_command(command: &Command) -> Option<Vec<u8>> {
             *terminal_id,
             required_seq.to_be_bytes().to_vec(),
         ),
-        Command::Close { terminal_id } => (TERMINAL_CLIENT_COMMAND_CLOSE, *terminal_id, Vec::new()),
+        Command::Close {
+            terminal_id,
+            client_request_id: None,
+        } => (TERMINAL_CLIENT_COMMAND_CLOSE, *terminal_id, Vec::new()),
         Command::FetchScrollback { terminal_id } => (
             TERMINAL_CLIENT_COMMAND_FETCH_SCROLLBACK,
             *terminal_id,
@@ -1110,7 +1115,10 @@ pub(crate) fn decode_terminal_command(body: &[u8]) -> Result<Command, &'static s
                 ),
             })
         }
-        TERMINAL_CLIENT_COMMAND_CLOSE if tail.is_empty() => Ok(Command::Close { terminal_id }),
+        TERMINAL_CLIENT_COMMAND_CLOSE if tail.is_empty() => Ok(Command::Close {
+            terminal_id,
+            client_request_id: None,
+        }),
         TERMINAL_CLIENT_COMMAND_FETCH_SCROLLBACK if tail.is_empty() => {
             Ok(Command::FetchScrollback { terminal_id })
         }

@@ -638,6 +638,7 @@ fn every_terminal_command_round_trips_the_binary_codec() {
         },
         Command::Close {
             terminal_id: lazybox_ipc::TerminalId(2),
+            client_request_id: None,
         },
         Command::FetchScrollback {
             terminal_id: lazybox_ipc::TerminalId(2),
@@ -651,6 +652,17 @@ fn every_terminal_command_round_trips_the_binary_codec() {
             .expect("decode terminal command");
         assert_eq!(format!("{decoded:?}"), format!("{command:?}"));
     }
+}
+
+#[test]
+fn binary_codec_rejects_a_correlated_close_it_cannot_preserve() {
+    assert!(
+        api_gateway::encode_terminal_command(&Command::Close {
+            terminal_id: TerminalId(2),
+            client_request_id: Some("close-1".into()),
+        })
+        .is_none()
+    );
 }
 
 #[tokio::test]
@@ -806,11 +818,13 @@ async fn desktop_runtime_real_pty_handles_backpressure_reconnect_replay_and_resy
     let spawn = JsonClientFrame::Command(Command::Spawn {
         session_key: "desktop:real-pty".into(),
         session_id: None,
+        client_request_id: None,
         kind: TerminalKind::Agent("fake-api-pty".into()),
         cwd: Some(temp.path().to_string_lossy().into_owned()),
         initial_prompt: None,
         on_main: false,
         model_alias: None,
+        access: lazybox_ipc::AgentRunAccess::Default,
     });
     let request = Request::builder()
         .method(Method::POST)
@@ -1128,6 +1142,7 @@ async fn json_command_route_rejects_every_binary_terminal_command() {
         },
         Command::Close {
             terminal_id: TerminalId(1),
+            client_request_id: None,
         },
         Command::FetchScrollback {
             terminal_id: TerminalId(1),

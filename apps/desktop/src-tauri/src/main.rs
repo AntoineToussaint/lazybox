@@ -583,6 +583,8 @@ mod tests {
                 initial_prompt: None,
                 on_main: false,
                 model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
+                client_request_id: None,
                 ..
             } if agent == "codex"
         ));

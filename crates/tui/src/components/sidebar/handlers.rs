@@ -296,7 +296,7 @@ impl Sidebar {
                 self.agents.remove(&session_key);
                 self.agent_terminal_states
                     .retain(|_, (key, _)| key != &session_key);
-                self.recompute_visible();
+                self.recompute_after_workspace_removed(&session_key);
             }
             Event::SessionCreated(session) => {
                 let key: SessionKey = (&session.workspace_key).into();

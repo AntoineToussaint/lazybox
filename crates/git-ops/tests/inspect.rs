@@ -17,7 +17,10 @@
 //! inside `WorktreeManager` paths that are already bounded by the
 //! 30s per-call timeout in `lib.rs`. No additional wrapper required.
 
-use lazybox_git_ops::{OrphanReason, TrackedSession, WorktreeInspection, WorktreeManager};
+use lazybox_git_ops::{
+    OrphanReason, TrackedSession, WorktreeInspection, WorktreeManager, WorktreeReclaimBlocker,
+    WorktreeReclaimOutcome,
+};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
@@ -746,6 +749,62 @@ async fn bulk_safe_skips_unsafe_entries() {
 
     assert!(!safe.exists(), "safe wt removed");
     assert!(dirty.exists(), "dirty wt preserved");
+}
+
+#[tokio::test]
+async fn reclaim_managed_holder_removes_only_safe_sessionless_checkout() {
+    let fx = setup_fixture().await;
+    let safe = add_wt(&fx, "old-workspace-name", "feature", "main").await;
+    let manager = mgr(&fx);
+
+    assert_eq!(
+        manager
+            .reclaim_managed_worktree_if_safe("o", "r", "feature", &safe)
+            .await
+            .unwrap(),
+        WorktreeReclaimOutcome::Reclaimed,
+        "a clean managed holder is reclaimable",
+    );
+    assert!(!safe.exists(), "the stale checkout is removed");
+    assert!(
+        local_branch_exists(&fx, "feature").await,
+        "reclaim keeps the branch available for the replacement checkout"
+    );
+
+    let dirty = add_wt(&fx, "another-old-name", "dirty", "main").await;
+    std::fs::write(dirty.join("wip.txt"), "preserve me").unwrap();
+    assert_eq!(
+        manager
+            .reclaim_managed_worktree_if_safe("o", "r", "dirty", &dirty)
+            .await
+            .unwrap(),
+        WorktreeReclaimOutcome::Blocked(WorktreeReclaimBlocker::UncommittedChanges),
+        "a holder with local work is not reclaimed",
+    );
+    assert_eq!(
+        std::fs::read_to_string(dirty.join("wip.txt")).unwrap(),
+        "preserve me"
+    );
+
+    let ignored = add_wt(&fx, "ignored-old-name", "ignored", "main").await;
+    std::fs::write(ignored.join(".gitignore"), "local/\n").unwrap();
+    run(&ignored, &["add", ".gitignore"]).await;
+    run(&ignored, &["commit", "-q", "-m", "ignore local state"]).await;
+    run(&ignored, &["push", "-q", "-u", "origin", "ignored"]).await;
+    std::fs::create_dir(ignored.join("local")).unwrap();
+    std::fs::write(ignored.join("local/state.db"), "keep ignored state").unwrap();
+    assert_eq!(
+        manager
+            .reclaim_managed_worktree_if_safe("o", "r", "ignored", &ignored)
+            .await
+            .unwrap(),
+        WorktreeReclaimOutcome::Blocked(WorktreeReclaimBlocker::IgnoredFiles),
+        "ignored local files are data, not proof that a holder is disposable",
+    );
+    assert_eq!(
+        std::fs::read_to_string(ignored.join("local/state.db")).unwrap(),
+        "keep ignored state"
+    );
 }
 
 /// `worktree_is_pristine` — true only when a checkout carries nothing

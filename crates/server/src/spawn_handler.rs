@@ -1885,7 +1885,7 @@ async fn resolve_or_create_session(
         // the terminal opened in a non-git folder and the agent's
         // first `git` command was the only thing that noticed.
         if let Err(e) =
-            provision_worktree(config, &workspace, &path, session_key, true, origin).await
+            provision_worktree(config, &workspace, &path, session_key, true, None, origin).await
         {
             tracing::warn!("main-checkout worktree provisioning failed: {e}");
             // Land the ✗ on the checklist row that actually aborted
@@ -1913,6 +1913,7 @@ async fn resolve_or_create_session(
             config,
             &workspace,
             &session.worktree_path,
+            session.worktree_branch.as_deref(),
             session_key,
             origin,
         )
@@ -1924,6 +1925,7 @@ async fn resolve_or_create_session(
             config,
             &workspace,
             &session.worktree_path,
+            session.worktree_branch.as_deref(),
             session_key,
             origin,
         )
@@ -1940,7 +1942,8 @@ async fn resolve_or_create_session(
     // only the path is human-friendly.
     let kind_for_session = session_kind_from_terminal(kind);
     let path = worktree_path_for_session(&workspace, 0);
-    if let Some((adopted_path, session_id)) = adopt_untracked_pr_worktree(
+    let ownership_guard = config.worktree_ownership_lock.lock().await;
+    if let Some((adopted_path, session_id)) = recover_untracked_pr_worktree_locked(
         config,
         &workspace_key,
         &kind_for_session,
@@ -1952,50 +1955,55 @@ async fn resolve_or_create_session(
     {
         return Ok((adopted_path, session_id, false));
     }
+    let _provisioning_claim = ProvisioningWorktreeClaim::new(config, path.clone());
+    drop(ownership_guard);
 
     let prov_start = std::time::Instant::now();
     let provisioned =
-        provision_worktree(config, &workspace, &path, session_key, false, origin).await;
+        provision_worktree(config, &workspace, &path, session_key, false, None, origin).await;
     tracing::info!(
         elapsed_ms = prov_start.elapsed().as_millis(),
         ok = provisioned.is_ok(),
         worktree = %path.display(),
         "provision_worktree complete",
     );
-    if let Err(e) = provisioned {
-        // Real-checkout failed (no GH access, branch missing, network
-        // hiccup) — FAIL THE SPAWN. The old fallback persisted the
-        // session anyway and `mkdir`'d an empty dir "so spawn works",
-        // which pinned the session to a non-git directory forever:
-        // every later spawn saw the path existed and never re-ran the
-        // repair machinery. No session is persisted here, so the next
-        // `w` press retries the full provision from scratch.
-        tracing::warn!("worktree provisioning failed: {e}");
-        // Surface the failure in the progress modal too, so a cold
-        // clone that can't reach GitHub shows the error instead of the
-        // checklist hanging on a forever spinner. The checkout sub-phases
-        // (clone/fetch/worktree-add) are the only ones that abort
-        // provisioning; mounts/scripts are best-effort. The modal freezes
-        // on whichever step is on screen, so the exact variant here only
-        // names where in the checklist the ✗ lands. The returned error
-        // additionally lands as a `spawn:session` provider error via
-        // `handle_spawn`'s resolve arm.
-        // Classify the failure so the ✗ lands on the phase that actually
-        // aborted (clone/fetch/worktree-add) instead of always "Cloning"
-        // (issue #557 B, acceptance #2). The modal re-derives the same
-        // class from this message to render its recovery affordance.
-        let message = e.to_string();
-        emit_worktree_progress(
-            config,
-            session_key,
-            lazybox_ipc::WorktreeRecovery::classify(&message).failed_step(),
-            WorktreeStepStatus::Failed(message),
-            origin,
-        );
-        return Err(crate::ServerError::Worktree(format!(
-            "git worktree setup failed — spawn aborted, retry once the cause is fixed: {e}"
-        )));
-    }
+    let provisioned_branch = match provisioned {
+        Ok(branch) => branch,
+        Err(e) => {
+            // Real-checkout failed (no GH access, branch missing, network
+            // hiccup) — FAIL THE SPAWN. The old fallback persisted the
+            // session anyway and `mkdir`'d an empty dir "so spawn works",
+            // which pinned the session to a non-git directory forever:
+            // every later spawn saw the path existed and never re-ran the
+            // repair machinery. No session is persisted here, so the next
+            // `w` press retries the full provision from scratch.
+            tracing::warn!("worktree provisioning failed: {e}");
+            // Surface the failure in the progress modal too, so a cold
+            // clone that can't reach GitHub shows the error instead of the
+            // checklist hanging on a forever spinner. The checkout sub-phases
+            // (clone/fetch/worktree-add) are the only ones that abort
+            // provisioning; mounts/scripts are best-effort. The modal freezes
+            // on whichever step is on screen, so the exact variant here only
+            // names where in the checklist the ✗ lands. The returned error
+            // additionally lands as a `spawn:session` provider error via
+            // `handle_spawn`'s resolve arm.
+            // Classify the failure so the ✗ lands on the phase that actually
+            // aborted (clone/fetch/worktree-add) instead of always "Cloning"
+            // (issue #557 B, acceptance #2). The modal re-derives the same
+            // class from this message to render its recovery affordance.
+            let message = e.to_string();
+            emit_worktree_progress(
+                config,
+                session_key,
+                lazybox_ipc::WorktreeRecovery::classify(&message).failed_step(),
+                WorktreeStepStatus::Failed(message),
+                origin,
+            );
+            return Err(crate::ServerError::Worktree(format!(
+                "git worktree setup failed — spawn aborted, retry once the cause is fixed: {e}"
+            )));
+        }
+    };
 
     // Provisioning above intentionally runs without the workspace lock. Once
     // it finishes, serialize the fresh load→session insert→commit so a
@@ -2006,12 +2014,13 @@ async fn resolve_or_create_session(
     if let Some(session) = workspace.default_session() {
         return Ok((session.worktree_path.clone(), session.id, false));
     }
-    let session = Session::new(
+    let mut session = Session::new(
         workspace_key.clone(),
         kind_for_session,
         path.clone(),
         Utc::now(),
     );
+    session.worktree_branch = Some(provisioned_branch);
     let new_session_id = session.id;
     workspace.add_session(session.clone());
     persist_and_broadcast(config, &workspace).await?;
@@ -2019,7 +2028,7 @@ async fn resolve_or_create_session(
     Ok((path, new_session_id, false))
 }
 
-async fn adopt_untracked_pr_worktree(
+async fn recover_untracked_pr_worktree_locked(
     config: &ServerConfig,
     workspace_key: &WorkspaceKey,
     kind: &SessionKind,
@@ -2027,7 +2036,6 @@ async fn adopt_untracked_pr_worktree(
     session_key: &SessionKey,
     origin: lazybox_ipc::SpawnOrigin,
 ) -> Result<Option<(PathBuf, SessionId)>, crate::ServerError> {
-    let _ownership_guard = config.worktree_ownership_lock.lock().await;
     let _workspace_guard = config.lock_workspace(workspace_key.as_str()).await;
     let mut workspace = load_workspace(config, workspace_key)?;
     if let Some(session) = workspace.default_session() {
@@ -2065,6 +2073,8 @@ async fn adopt_untracked_pr_worktree(
     };
     if paths_match(candidate, intended_path)
         || managed_worktree_has_session_owner(config, candidate)
+        || provisioning_worktree_is_claimed(config, candidate)
+        || managed_worktree_has_live_main_owner(config, candidate).await
     {
         return Ok(None);
     }
@@ -2084,12 +2094,13 @@ async fn adopt_untracked_pr_worktree(
     )
     .await;
 
-    let session = Session::new(
+    let mut session = Session::new(
         workspace_key.clone(),
         kind.clone(),
         candidate.clone(),
         Utc::now(),
     );
+    session.worktree_branch = Some(branch.clone());
     let session_id = session.id;
     workspace.add_session(session.clone());
     persist_and_broadcast(config, &workspace).await?;
@@ -2161,6 +2172,146 @@ fn paths_match(left: &Path, right: &Path) -> bool {
     let canonical =
         |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     canonical(left) == canonical(right)
+}
+
+struct ProvisioningWorktreeClaim {
+    claims: std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<PathBuf, usize>>>,
+    path: PathBuf,
+}
+
+impl ProvisioningWorktreeClaim {
+    fn new(config: &ServerConfig, path: PathBuf) -> Self {
+        *config
+            .provisioning_worktree_claims
+            .lock()
+            .entry(path.clone())
+            .or_default() += 1;
+        Self {
+            claims: config.provisioning_worktree_claims.clone(),
+            path,
+        }
+    }
+}
+
+impl Drop for ProvisioningWorktreeClaim {
+    fn drop(&mut self) {
+        let mut claims = self.claims.lock();
+        let Some(count) = claims.get_mut(&self.path) else {
+            return;
+        };
+        *count -= 1;
+        if *count == 0 {
+            claims.remove(&self.path);
+        }
+    }
+}
+
+fn provisioning_worktree_is_claimed(config: &ServerConfig, candidate: &Path) -> bool {
+    config
+        .provisioning_worktree_claims
+        .lock()
+        .keys()
+        .any(|path| paths_match(path, candidate))
+}
+
+async fn reclaim_non_live_managed_holder(
+    config: &ServerConfig,
+    mgr: &lazybox_git_ops::WorktreeManager,
+    owner: &str,
+    repo: &str,
+    branch: &str,
+    holder: &Path,
+    intended_path: &Path,
+) -> BranchHolderReclaim {
+    let _ownership_guard = config.worktree_ownership_lock.lock().await;
+    reclaim_non_live_managed_holder_locked(config, mgr, owner, repo, branch, holder, intended_path)
+        .await
+}
+
+async fn reclaim_non_live_managed_holder_locked(
+    config: &ServerConfig,
+    mgr: &lazybox_git_ops::WorktreeManager,
+    owner: &str,
+    repo: &str,
+    branch: &str,
+    holder: &Path,
+    intended_path: &Path,
+) -> BranchHolderReclaim {
+    if managed_worktree_has_live_session_owner(config, holder)
+        || provisioning_worktree_is_claimed(config, holder)
+        || managed_worktree_has_live_main_owner(config, holder).await
+    {
+        return BranchHolderReclaim::Preserved;
+    }
+
+    match mgr
+        .reclaim_managed_worktree_if_safe(owner, repo, branch, holder)
+        .await
+    {
+        Ok(lazybox_git_ops::WorktreeReclaimOutcome::Reclaimed) => {
+            tracing::info!(
+                repo = %format!("{owner}/{repo}"),
+                branch,
+                holder = %holder.display(),
+                intended = %intended_path.display(),
+                "reclaimed non-live branch holder before provisioning"
+            );
+            BranchHolderReclaim::Reclaimed
+        }
+        Ok(lazybox_git_ops::WorktreeReclaimOutcome::Blocked(blocker)) => {
+            BranchHolderReclaim::Blocked(blocker)
+        }
+        Ok(lazybox_git_ops::WorktreeReclaimOutcome::NotManaged) => BranchHolderReclaim::Preserved,
+        Err(error) => {
+            tracing::warn!(
+                repo = %format!("{owner}/{repo}"),
+                branch,
+                holder = %holder.display(),
+                "could not reclaim non-live branch holder: {error}"
+            );
+            BranchHolderReclaim::Blocked(lazybox_git_ops::WorktreeReclaimBlocker::SafetyCheckFailed)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BranchHolderReclaim {
+    Reclaimed,
+    Preserved,
+    Blocked(lazybox_git_ops::WorktreeReclaimBlocker),
+}
+
+async fn managed_worktree_has_live_main_owner(config: &ServerConfig, candidate: &Path) -> bool {
+    let inflight_main_workspaces: Vec<String> = config
+        .spawn
+        .inflight_spawns
+        .lock()
+        .iter()
+        .filter(|(_, (_, on_main))| *on_main)
+        .map(|((workspace, _), _)| workspace.clone())
+        .collect();
+    if inflight_main_workspaces.into_iter().any(|workspace_key| {
+        load_workspace(config, &WorkspaceKey::new(workspace_key))
+            .ok()
+            .and_then(|workspace| main_worktree_path(&workspace))
+            .is_some_and(|path| paths_match(&path, candidate))
+    }) {
+        return true;
+    }
+
+    let on_main = config.terminal.on_main_terminals.lock().await.clone();
+    if on_main.is_empty() {
+        return false;
+    }
+    let meta = config.terminal.terminal_meta.lock().await.clone();
+    on_main.into_iter().any(|terminal_id| {
+        meta.get(&terminal_id)
+            .and_then(|(session_key, _)| {
+                load_workspace(config, &WorkspaceKey::new(session_key.as_str())).ok()
+            })
+            .and_then(|workspace| main_worktree_path(&workspace))
+            .is_some_and(|path| paths_match(&path, candidate))
+    })
 }
 
 /// Build a deterministic branch name for a task that has no upstream
@@ -2254,6 +2405,45 @@ fn sanitize_branch_component(raw: &str) -> String {
     sanitized.trim_matches('-').to_string()
 }
 
+fn isolated_branch_for_workspace(
+    workspace: &Workspace,
+    cfg: &lazybox_config::Config,
+    repo_key: Option<&str>,
+) -> String {
+    if let Some(branch) = workspace
+        .primary_task()
+        .and_then(|task| task.branch.as_deref())
+    {
+        return branch.to_string();
+    }
+    let prefix = resolve_branch_prefix(cfg, repo_key);
+    match workspace.primary_task() {
+        Some(task) => derive_branch_for_branchless(prefix, task),
+        None => derive_branch_for_workspace(prefix, workspace),
+    }
+}
+
+fn repo_for_workspace_provision(
+    config: &ServerConfig,
+    workspace: &Workspace,
+    cfg: &lazybox_config::Config,
+) -> Result<Option<String>, crate::ServerError> {
+    match workspace.primary_task() {
+        Some(task) => Ok(task.repo.clone()),
+        None if lazybox_core::workspace_project_key(workspace)
+            .is_some_and(|key| key.source_prefix() == "github") =>
+        {
+            let github_scopes = crate::polling::github_scopes_from_config(cfg);
+            Ok(Some(clonable_repo_from_project(
+                config,
+                workspace,
+                Some(&github_scopes),
+            )?))
+        }
+        None => Ok(None),
+    }
+}
+
 /// `owner/repo` for a workspace with no linked task, recovered from its
 /// project. Only `github-` keys carry a clonable repo — `local-`
 /// projects legitimately have none and are routed to standalone
@@ -2327,8 +2517,9 @@ async fn provision_worktree(
     target: &std::path::Path,
     session_key: &SessionKey,
     on_main: bool,
+    existing_branch: Option<&str>,
     origin: lazybox_ipc::SpawnOrigin,
-) -> Result<(), crate::ServerError> {
+) -> Result<String, crate::ServerError> {
     use crate::ServerError;
     use lazybox_git_ops::CheckoutPhase;
 
@@ -2407,20 +2598,7 @@ async fn provision_worktree(
     // from a source with no repo (Slack, some Linear tickets), or a
     // blank workspace under a local project — which get a standalone
     // `git init` worktree below instead of an empty, non-git directory.
-    let repo = match task {
-        Some(task) => task.repo.clone(),
-        None if lazybox_core::workspace_project_key(workspace)
-            .is_some_and(|key| key.source_prefix() == "github") =>
-        {
-            let github_scopes = crate::polling::github_scopes_from_config(&cfg);
-            Some(clonable_repo_from_project(
-                config,
-                workspace,
-                Some(&github_scopes),
-            )?)
-        }
-        None => None,
-    };
+    let repo = repo_for_workspace_provision(config, workspace, &cfg)?;
 
     let (worktree, repo_key) = match repo {
         Some(repo) => {
@@ -2442,6 +2620,7 @@ async fn provision_worktree(
             };
             let worktree = match on_main_branch
                 .as_deref()
+                .or(existing_branch)
                 .or(task.and_then(|t| t.branch.as_deref()))
             {
                 Some(branch) => {
@@ -2450,10 +2629,39 @@ async fn provision_worktree(
                     // on `origin` — a fork PR or a deleted head branch
                     // (issue #550). `None` on-main (that branch is always a
                     // plain origin branch) and for non-PR tasks.
-                    let pr_number = (!on_main).then(|| task.and_then(Task::pr_number)).flatten();
-                    mgr.checkout_at(target, owner, name, branch, pr_number)
-                        .await
-                        .map_err(|e| ServerError::Worktree(format!("checkout_at: {e}")))?
+                    let pr_number = (!on_main
+                        && task.is_some_and(|task| task.branch.as_deref() == Some(branch)))
+                    .then(|| task.and_then(Task::pr_number))
+                    .flatten();
+                    let mut checkout = mgr
+                        .checkout_at(target, owner, name, branch, pr_number)
+                        .await;
+                    let reclaim = match &checkout {
+                        Err(lazybox_git_ops::GitError::BranchHeldLive { holder, .. }) => Some((
+                            holder.clone(),
+                            reclaim_non_live_managed_holder(
+                                config, &mgr, owner, name, branch, holder, target,
+                            )
+                            .await,
+                        )),
+                        _ => None,
+                    };
+                    match reclaim {
+                        Some((_, BranchHolderReclaim::Reclaimed)) => {
+                            checkout = mgr
+                                .checkout_at(target, owner, name, branch, pr_number)
+                                .await;
+                        }
+                        Some((holder, BranchHolderReclaim::Blocked(blocker))) => {
+                            checkout = Err(lazybox_git_ops::GitError::BranchHeldManaged {
+                                branch: branch.to_string(),
+                                holder,
+                                blocker,
+                            });
+                        }
+                        _ => {}
+                    }
+                    checkout.map_err(|e| ServerError::Worktree(format!("checkout_at: {e}")))?
                 }
                 None => {
                     // Issue (or other branchless task, or blank workspace):
@@ -2464,19 +2672,49 @@ async fn provision_worktree(
                     // that, pressing `c` twice on issue #42 would create
                     // `issue-42-…` and `issue-42-…-2`, neither of which
                     // corresponds to a PR the user can push.
-                    let prefix = resolve_branch_prefix(&cfg, Some(&format!("{owner}/{name}")));
-                    let new_branch = match task {
-                        Some(task) => derive_branch_for_branchless(prefix, task),
-                        None => derive_branch_for_workspace(prefix, workspace),
-                    };
+                    let repo_key = format!("{owner}/{name}");
+                    let new_branch =
+                        isolated_branch_for_workspace(workspace, &cfg, Some(&repo_key));
                     let base = mgr.default_branch(owner, name).await.map_err(|e| {
                         ServerError::Worktree(format!("default_branch lookup: {e}"))
                     })?;
-                    mgr.checkout_new_branch_at(target, owner, name, &new_branch, &base)
-                        .await
-                        .map_err(|e| {
-                            ServerError::Worktree(format!("checkout_new_branch_at: {e}"))
-                        })?
+                    let mut checkout = mgr
+                        .checkout_new_branch_at(target, owner, name, &new_branch, &base)
+                        .await;
+                    let reclaim = match &checkout {
+                        Err(lazybox_git_ops::GitError::BranchHeldLive { holder, .. }) => Some((
+                            holder.clone(),
+                            reclaim_non_live_managed_holder(
+                                config,
+                                &mgr,
+                                owner,
+                                name,
+                                &new_branch,
+                                holder,
+                                target,
+                            )
+                            .await,
+                        )),
+                        _ => None,
+                    };
+                    match reclaim {
+                        Some((_, BranchHolderReclaim::Reclaimed)) => {
+                            checkout = mgr
+                                .checkout_new_branch_at(target, owner, name, &new_branch, &base)
+                                .await;
+                        }
+                        Some((holder, BranchHolderReclaim::Blocked(blocker))) => {
+                            checkout = Err(lazybox_git_ops::GitError::BranchHeldManaged {
+                                branch: new_branch.clone(),
+                                holder,
+                                blocker,
+                            });
+                        }
+                        _ => {}
+                    }
+                    checkout.map_err(|e| {
+                        ServerError::Worktree(format!("checkout_new_branch_at: {e}"))
+                    })?
                 }
             };
             (worktree, Some(format!("{owner}/{name}")))
@@ -2487,11 +2725,9 @@ async fn provision_worktree(
             // real worktree rather than a bare directory. Branch name is
             // deterministic (same key → same branch) so repeated spawns
             // are idempotent.
-            let prefix = resolve_branch_prefix(&cfg, None);
-            let branch = match task {
-                Some(task) => derive_branch_for_branchless(prefix, task),
-                None => derive_branch_for_workspace(prefix, workspace),
-            };
+            let branch = existing_branch
+                .map(str::to_string)
+                .unwrap_or_else(|| isolated_branch_for_workspace(workspace, &cfg, None));
             let worktree = mgr
                 .init_standalone_at(target, &branch)
                 .await
@@ -2508,7 +2744,7 @@ async fn provision_worktree(
         origin,
     )
     .await;
-    Ok(())
+    Ok(worktree.branch)
 }
 
 async fn apply_worktree_setup(
@@ -2829,20 +3065,36 @@ async fn ensure_worktree_present(
     config: &ServerConfig,
     workspace: &Workspace,
     path: &std::path::Path,
+    expected_branch: Option<&str>,
     session_key: &SessionKey,
     origin: lazybox_ipc::SpawnOrigin,
 ) -> Result<(), crate::ServerError> {
-    if lazybox_git_ops::worktree_dir_ready(path).await {
+    let ready = match expected_branch {
+        Some(branch) => lazybox_git_ops::worktree_dir_ready_on_branch(path, branch).await,
+        None => lazybox_git_ops::worktree_dir_ready(path).await,
+    };
+    if ready {
         return Ok(());
     }
     tracing::info!(
-        "worktree {} missing or not a completed checkout — re-provisioning",
-        path.display()
+        worktree = %path.display(),
+        ?expected_branch,
+        "worktree missing, incomplete, or on the wrong branch — re-provisioning"
     );
     // Re-provisioning a persisted session's worktree — always an
     // isolated per-session tree (main-checkout terminals aren't
     // persisted as sessions).
-    if let Err(e) = provision_worktree(config, workspace, path, session_key, false, origin).await {
+    if let Err(e) = provision_worktree(
+        config,
+        workspace,
+        path,
+        session_key,
+        false,
+        expected_branch,
+        origin,
+    )
+    .await
+    {
         tracing::warn!("re-provision failed: {e}");
         emit_worktree_progress(
             config,
@@ -2908,7 +3160,10 @@ pub(crate) async fn find_existing_singleton(
 struct InflightSpawnGuard {
     set: std::sync::Arc<
         parking_lot::Mutex<
-            std::collections::HashMap<(String, String), std::sync::Arc<tokio::sync::Notify>>,
+            std::collections::HashMap<
+                (String, String),
+                (std::sync::Arc<tokio::sync::Notify>, bool),
+            >,
         >,
     >,
     changed: std::sync::Arc<tokio::sync::Notify>,
@@ -2951,7 +3206,7 @@ impl InflightSpawnGuard {
         if exclusive && set.contains_key(&key) {
             return Err(());
         }
-        set.insert(key.clone(), cancel.clone());
+        set.insert(key.clone(), (cancel.clone(), on_main));
         Ok(Self {
             set: coordinator.inflight_spawns.clone(),
             changed: coordinator.inflight_spawn_changed.clone(),
@@ -2981,7 +3236,7 @@ pub(crate) fn handle_cancel_spawn(coordinator: &SpawnCoordinator, session_key: &
         .lock()
         .iter()
         .filter(|((ws, _), _)| ws == session_key.as_str())
-        .map(|(_, cancel)| cancel.clone())
+        .map(|(_, (cancel, _))| cancel.clone())
         .collect();
     tracing::info!(
         %session_key,
@@ -10378,6 +10633,104 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn active_provision_claim_prevents_sessionless_reclaim() {
+        fn git(cwd: &Path, args: &[&str]) {
+            let output = std::process::Command::new("git")
+                .current_dir(cwd)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let upstream = tempfile::tempdir().unwrap();
+        git(upstream.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(upstream.path().join("README.md"), "base\n").unwrap();
+        git(upstream.path(), &["add", "."]);
+        git(upstream.path(), &["commit", "-q", "-m", "base"]);
+
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            std::sync::Arc::new(lazybox_store::MemoryStore::new()),
+            std::sync::Arc::new(crate::backend::MockBackend::new()),
+            root.path().to_path_buf(),
+        );
+        let manager = config.worktree_manager();
+        let bare = manager.bare_path("acme", "core");
+        std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        git(
+            root.path(),
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                &upstream.path().to_string_lossy(),
+                &bare.to_string_lossy(),
+            ],
+        );
+        git(&bare, &["branch", "feature", "main"]);
+        let holder = root.path().join("worktrees").join("in-flight");
+        std::fs::create_dir_all(holder.parent().unwrap()).unwrap();
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-B",
+                "feature",
+                &holder.to_string_lossy(),
+                "refs/heads/feature",
+            ],
+        );
+
+        let claim_a = ProvisioningWorktreeClaim::new(&config, holder.clone());
+        let claim_b = ProvisioningWorktreeClaim::new(&config, holder.clone());
+        drop(claim_a);
+        assert_eq!(
+            reclaim_non_live_managed_holder(
+                &config,
+                &manager,
+                "acme",
+                "core",
+                "feature",
+                &holder,
+                &root.path().join("worktrees").join("other"),
+            )
+            .await,
+            BranchHolderReclaim::Preserved,
+            "one completed concurrent claim must not expose the other spawn's checkout"
+        );
+        assert!(holder.exists());
+
+        drop(claim_b);
+        assert_eq!(
+            reclaim_non_live_managed_holder(
+                &config,
+                &manager,
+                "acme",
+                "core",
+                "feature",
+                &holder,
+                &root.path().join("worktrees").join("other"),
+            )
+            .await,
+            BranchHolderReclaim::Reclaimed
+        );
+        assert!(!holder.exists());
+    }
+
     /// A linked (no-worktree) workspace resolves every spawn straight to
     /// its on-disk checkout: the returned cwd is the linked path, it's
     /// reported as landed-on-main (so it reuses the shared-checkout
@@ -10454,6 +10807,7 @@ mod tests {
             &dir,
             &session_key,
             false,
+            None,
             lazybox_ipc::SpawnOrigin::Autonomous(lazybox_ipc::AutonomousTrigger::Mention),
         )
         .await
@@ -10521,6 +10875,7 @@ mod tests {
             &dir,
             &SessionKey::new("scratch"),
             true,
+            None,
             lazybox_ipc::SpawnOrigin::Interactive,
         )
         .await
@@ -10627,6 +10982,7 @@ mod tests {
             &config,
             &ws,
             &dir,
+            None,
             &session_key,
             lazybox_ipc::SpawnOrigin::Interactive,
         )
@@ -10643,6 +10999,7 @@ mod tests {
             &config,
             &ws,
             &dir,
+            None,
             &session_key,
             lazybox_ipc::SpawnOrigin::Interactive,
         )

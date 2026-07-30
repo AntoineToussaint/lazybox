@@ -12,7 +12,7 @@ use super::{
     load_workspace,
 };
 use crate::ServerConfig;
-use lazybox_core::{CiStatus, ReviewStatus, Task, Workspace, WorkspaceKey};
+use lazybox_core::{CiStatus, ReviewStatus, SessionId, Task, Workspace, WorkspaceKey};
 use lazybox_gh::GhClient;
 use lazybox_ipc::Event;
 use lazybox_linear::LinearClient;
@@ -1308,6 +1308,88 @@ fn to_dto(row: lazybox_git_ops::WorktreeInspection) -> lazybox_ipc::WorktreeInsp
     }
 }
 
+fn diff_to_dto(diff: lazybox_git_ops::WorktreeDiff) -> lazybox_ipc::WorkspaceDiffDto {
+    lazybox_ipc::WorkspaceDiffDto {
+        status: diff.status,
+        stat: diff.stat,
+        files: diff
+            .files
+            .into_iter()
+            .map(|file| lazybox_ipc::DiffFileDto {
+                old_path: file.old_path,
+                path: file.path,
+                headers: file.headers,
+                hunks: file
+                    .hunks
+                    .into_iter()
+                    .map(|hunk| lazybox_ipc::DiffHunkDto {
+                        header: hunk.header,
+                        old_start: hunk.old_start,
+                        new_start: hunk.new_start,
+                        lines: hunk
+                            .lines
+                            .into_iter()
+                            .map(|line| lazybox_ipc::DiffLineDto {
+                                kind: match line.kind {
+                                    lazybox_git_ops::DiffLineKind::Context => {
+                                        lazybox_ipc::DiffLineKindDto::Context
+                                    }
+                                    lazybox_git_ops::DiffLineKind::Addition => {
+                                        lazybox_ipc::DiffLineKindDto::Addition
+                                    }
+                                    lazybox_git_ops::DiffLineKind::Deletion => {
+                                        lazybox_ipc::DiffLineKindDto::Deletion
+                                    }
+                                    lazybox_git_ops::DiffLineKind::Meta => {
+                                        lazybox_ipc::DiffLineKindDto::Meta
+                                    }
+                                },
+                                text: line.text,
+                                old_line: line.old_line,
+                                new_line: line.new_line,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
+/// Read one workspace session's worktree diff and emit it to clients.
+pub async fn handle_inspect_workspace_diff(
+    config: &ServerConfig,
+    workspace_key: WorkspaceKey,
+    session_id: SessionId,
+) {
+    let result = load_workspace(config, &workspace_key)
+        .ok_or_else(|| "workspace not found".to_string())
+        .and_then(|workspace| {
+            workspace
+                .sessions
+                .iter()
+                .find(|session| session.id == session_id)
+                .map(|session| session.worktree_path.clone())
+                .ok_or_else(|| "session worktree not found".to_string())
+        });
+    let (diff, error) = match result {
+        Ok(path) => match lazybox_git_ops::inspect_worktree_diff(&path).await {
+            Ok(diff) => (Some(diff_to_dto(diff)), None),
+            Err(error) => {
+                tracing::warn!(workspace = %workspace_key, "inspect workspace diff failed: {error}");
+                (None, Some(error.to_string()))
+            }
+        },
+        Err(error) => (None, Some(error)),
+    };
+    let _ = config.bus.send(Event::WorkspaceDiffInspected {
+        workspace_key,
+        session_id,
+        diff,
+        error,
+    });
+}
+
 /// Run the worktree inspector and emit the result on the bus.
 /// Read-only — pair with [`handle_delete_orphaned_worktree`] for
 /// destructive follow-up.
@@ -2573,6 +2655,40 @@ mod inspect_tests {
                 Ok(Err(_)) => return,
             }
         }
+    }
+
+    #[tokio::test]
+    async fn workspace_diff_handler_reads_the_persisted_session_worktree() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "diff", "feat").await;
+        std::fs::write(wt.join("README.md"), "changed\n").unwrap();
+        std::fs::write(wt.join("new.txt"), "new\n").unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let session_id = seed_workspace(&store, wt, false);
+        let config = fresh_config(store);
+        let mut rx = config.bus.subscribe();
+        let key = WorkspaceKey::new("github:o/r#1");
+
+        handle_inspect_workspace_diff(&config, key.clone(), session_id).await;
+
+        let event = drain_until(&mut rx, |event| {
+            matches!(event, Event::WorkspaceDiffInspected { .. })
+        })
+        .await;
+        let Event::WorkspaceDiffInspected {
+            workspace_key,
+            session_id: inspected_session_id,
+            diff: Some(diff),
+            error,
+        } = event
+        else {
+            panic!("expected successful workspace diff event");
+        };
+        assert_eq!(workspace_key, key);
+        assert_eq!(inspected_session_id, session_id);
+        assert!(error.is_none());
+        assert!(diff.files.iter().any(|file| file.path == "README.md"));
+        assert!(diff.files.iter().any(|file| file.path == "new.txt"));
     }
 
     /// Healthy inspector path: one bare clone + one tracked active

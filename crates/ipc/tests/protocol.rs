@@ -386,6 +386,10 @@ fn all_commands() -> Vec<Command> {
         Command::SyncWorkspace {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
         },
+        Command::InspectWorkspaceDiff {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            session_id: sample_session_id(21),
+        },
         Command::KeepMergedWorkspace { session_key: key },
         Command::FetchScrollback {
             terminal_id: TerminalId(12),
@@ -773,6 +777,31 @@ fn all_events() -> Vec<Event> {
                 is_safe_to_delete: false,
             }],
         },
+        Event::WorkspaceDiffInspected {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            session_id: sample_session_id(21),
+            diff: Some(lazybox_ipc::WorkspaceDiffDto {
+                status: vec![" M src/lib.rs".into()],
+                stat: vec![" src/lib.rs | 1 +".into()],
+                files: vec![lazybox_ipc::DiffFileDto {
+                    old_path: Some("src/lib.rs".into()),
+                    path: "src/lib.rs".into(),
+                    headers: vec!["diff --git a/src/lib.rs b/src/lib.rs".into()],
+                    hunks: vec![lazybox_ipc::DiffHunkDto {
+                        header: "@@ -1 +1 @@".into(),
+                        old_start: 1,
+                        new_start: 1,
+                        lines: vec![lazybox_ipc::DiffLineDto {
+                            kind: lazybox_ipc::DiffLineKindDto::Addition,
+                            text: "+changed".into(),
+                            old_line: None,
+                            new_line: Some(1),
+                        }],
+                    }],
+                }],
+            }),
+            error: None,
+        },
         Event::CheckoutsDiscovered { checkouts: vec![] },
         Event::CheckoutsDiscovered {
             checkouts: vec![lazybox_ipc::DiscoveredCheckoutDto {
@@ -909,6 +938,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::FetchRepoLabels { .. } => "FetchRepoLabels",
         Command::CleanWorktrees => "CleanWorktrees",
         Command::InspectWorktrees => "InspectWorktrees",
+        Command::InspectWorkspaceDiff { .. } => "InspectWorkspaceDiff",
         Command::ScanCheckouts { .. } => "ScanCheckouts",
         Command::ImportLocalCheckout { .. } => "ImportLocalCheckout",
         Command::DeleteOrphanedWorktree { .. } => "DeleteOrphanedWorktree",
@@ -979,6 +1009,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::Notification { .. } => "Notification",
         Event::CleanWorktreesCompleted { .. } => "CleanWorktreesCompleted",
         Event::WorktreesInspected { .. } => "WorktreesInspected",
+        Event::WorkspaceDiffInspected { .. } => "WorkspaceDiffInspected",
         Event::CheckoutsDiscovered { .. } => "CheckoutsDiscovered",
         Event::OrphanedWorktreeDeleted { .. } => "OrphanedWorktreeDeleted",
         Event::AgentRunStarted { .. } => "AgentRunStarted",
@@ -1019,12 +1050,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        65,
+        66,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(
         event_tags.len(),
-        69,
+        70,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

@@ -587,6 +587,24 @@ impl<T: TerminalAdapter> Model<T> {
                 // picker; none → footer notice).
                 self.open_editor();
             }
+            Action::ViewDiff => {
+                if let Some((workspace_key, target_session_id)) =
+                    self.sidebar.selected_workspace().and_then(|workspace| {
+                        let target_session_id = session_id
+                            .or_else(|| workspace.sessions.first().map(|session| session.id))?;
+                        Some((workspace.key.clone(), target_session_id))
+                    })
+                {
+                    self.pending_diff_session = Some((workspace_key.clone(), target_session_id));
+                    self.flash_hint("reading worktree diff…");
+                    cmds.push(IpcCommand::InspectWorkspaceDiff {
+                        workspace_key,
+                        session_id: target_session_id,
+                    });
+                } else {
+                    self.flash_hint("this workspace has no worktree to review");
+                }
+            }
             Action::NewWorkspace => {
                 let focused = self.sidebar.focused_project_key();
                 // Explicit variant list (no `_` catch-all) so a new

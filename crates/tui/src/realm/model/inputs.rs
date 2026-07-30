@@ -20,6 +20,54 @@ use lazybox_ipc::{Command as IpcCommand, TerminalId};
 use tuirealm::terminal::TerminalAdapter;
 
 impl<T: TerminalAdapter> Model<T> {
+    pub(super) fn dispatch_diff_review(
+        &mut self,
+        workspace_key: lazybox_core::WorkspaceKey,
+        comments: Vec<crate::realm::components::diff_review::DiffReviewComment>,
+    ) -> Vec<IpcCommand> {
+        let session_key: lazybox_core::SessionKey = workspace_key.as_str().into();
+        let active = self
+            .terminals
+            .active_session()
+            .filter(|active| active.as_str() == workspace_key.as_str())
+            .and_then(|_| self.terminals.active_terminal_id())
+            .filter(|terminal| self.terminals.terminal_is_agent(*terminal));
+        let target = active.or_else(|| {
+            let targets = self.sidebar.running_work_targets(&session_key);
+            (targets.len() == 1).then(|| targets[0].terminal_id)
+        });
+        let Some(target) = target else {
+            let count = self.sidebar.running_work_targets(&session_key).len();
+            if count == 0 {
+                self.flash_hint("review not sent — this workspace has no running agent");
+            } else {
+                self.flash_hint(
+                    "review not sent — several agents are running; focus the target and retry",
+                );
+            }
+            return Vec::new();
+        };
+
+        let prompt = format_diff_review_prompt(&comments);
+        let mut commands = Vec::new();
+        self.deliver_prompt(
+            target,
+            true,
+            &prompt,
+            lazybox_ipc::PromptSource::Typed,
+            &mut commands,
+        );
+        if self.modal_stack.last() == Some(&Id::DiffReview) {
+            self.pop_modal();
+        }
+        self.flash_info(format!(
+            "sent {} review comment{} to the agent",
+            comments.len(),
+            if comments.len() == 1 { "" } else { "s" }
+        ));
+        commands
+    }
+
     /// Reply textarea submit. Build a `PostReply` for the
     /// workspace that mounted the textarea. Empty bodies dismiss
     /// without posting; the footer "submitted — fetching" notice +
@@ -1075,6 +1123,38 @@ showing keybinding search only",
         }
         self.redraw = true;
     }
+}
+
+fn format_diff_review_prompt(
+    comments: &[crate::realm::components::diff_review::DiffReviewComment],
+) -> String {
+    let mut prompt = String::from(
+        "Local diff review\n\nPlease address each inline comment below in the current worktree. \
+         Inspect the current diff before editing, preserve unrelated changes, and report how you \
+         resolved each item.\n",
+    );
+    for (index, comment) in comments.iter().enumerate() {
+        let location = match (comment.new_line, comment.old_line) {
+            (Some(line), _) => format!("{}:{line}", comment.path),
+            (None, Some(line)) => format!("{} (old line {line})", comment.path),
+            (None, None) => comment.path.clone(),
+        };
+        prompt.push_str(&format!(
+            "\n{}. {location}\n   Hunk: {}\n   Referenced: {}\n   Context:\n",
+            index + 1,
+            comment.hunk_header,
+            comment.referenced_line
+        ));
+        for line in &comment.context {
+            prompt.push_str("       ");
+            prompt.push_str(line);
+            prompt.push('\n');
+        }
+        prompt.push_str("   Review comment: ");
+        prompt.push_str(&comment.body);
+        prompt.push('\n');
+    }
+    prompt
 }
 
 /// Encode a snippet body for a **non-agent** terminal's PTY (a plain

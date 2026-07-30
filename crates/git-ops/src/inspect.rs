@@ -143,6 +143,49 @@ pub struct DiscoveredCheckout {
     pub has_uncommitted_changes: bool,
 }
 
+/// Combined status and `HEAD` diff for one checkout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeDiff {
+    pub status: Vec<String>,
+    pub stat: Vec<String>,
+    pub files: Vec<DiffFile>,
+}
+
+/// One file in a worktree diff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffFile {
+    pub old_path: Option<String>,
+    pub path: String,
+    pub headers: Vec<String>,
+    pub hunks: Vec<DiffHunk>,
+}
+
+/// One unified-diff hunk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffHunk {
+    pub header: String,
+    pub old_start: u32,
+    pub new_start: u32,
+    pub lines: Vec<DiffLine>,
+}
+
+/// One line inside a unified-diff hunk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffLine {
+    pub kind: DiffLineKind,
+    pub text: String,
+    pub old_line: Option<u32>,
+    pub new_line: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffLineKind {
+    Context,
+    Addition,
+    Deletion,
+    Meta,
+}
+
 /// Internal: one row from `git worktree list --porcelain`. We only
 /// parse the fields that drive orphan detection.
 #[derive(Debug, Default, Clone)]
@@ -905,6 +948,310 @@ pub async fn worktree_is_pristine(worktree: &Path, bare: Option<&Path>) -> bool 
     worktree_is_pristine_with(default_git_runner(), worktree, bare).await
 }
 
+/// Read the checkout's status and combined staged/unstaged diff against
+/// `HEAD`. Untracked files are included as synthetic additions by asking
+/// git to diff each path against `/dev/null`.
+pub async fn inspect_worktree_diff(worktree: &Path) -> Result<WorktreeDiff, GitError> {
+    inspect_worktree_diff_with(default_git_runner(), worktree).await
+}
+
+async fn inspect_worktree_diff_with(
+    git: &dyn GitRunner,
+    worktree: &Path,
+) -> Result<WorktreeDiff, GitError> {
+    let status_output = git
+        .run(
+            Some(worktree),
+            &["status", "--porcelain=v1", "--untracked-files=all", "-z"],
+            &[],
+        )
+        .await?;
+    require_success(status_output.status.success(), &status_output.stderr)?;
+    let (status, untracked, changed_paths) = parse_status_porcelain(&status_output.stdout);
+    let head = git
+        .run(
+            Some(worktree),
+            &["rev-parse", "--verify", "--quiet", "HEAD"],
+            &[],
+        )
+        .await?;
+    let has_head = head.status.success();
+
+    let (mut patch, mut stat, synthetic_paths) = if has_head {
+        let patch_output = git
+            .run(
+                Some(worktree),
+                &[
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-color",
+                    "--find-renames",
+                    "--find-copies",
+                    "HEAD",
+                    "--",
+                ],
+                &[],
+            )
+            .await?;
+        require_success(patch_output.status.success(), &patch_output.stderr)?;
+
+        let stat_output = git
+            .run(
+                Some(worktree),
+                &[
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-color",
+                    "--stat",
+                    "HEAD",
+                    "--",
+                ],
+                &[],
+            )
+            .await?;
+        require_success(stat_output.status.success(), &stat_output.stderr)?;
+        (
+            String::from_utf8_lossy(&patch_output.stdout).into_owned(),
+            text_lines(&stat_output.stdout),
+            untracked,
+        )
+    } else {
+        (String::new(), Vec::new(), changed_paths)
+    };
+
+    for path in synthetic_paths {
+        if tokio::fs::symlink_metadata(worktree.join(&path))
+            .await
+            .is_err()
+        {
+            continue;
+        }
+        let Some(path_arg) = path.to_str() else {
+            continue;
+        };
+        let output = git
+            .run(
+                Some(worktree),
+                &[
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-color",
+                    "--no-index",
+                    "--",
+                    "/dev/null",
+                    path_arg,
+                ],
+                &[],
+            )
+            .await?;
+        if !output.status.success() && output.status.code() != Some(1) {
+            return Err(GitError::Command(
+                String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            ));
+        }
+        if !patch.is_empty() && !patch.ends_with('\n') {
+            patch.push('\n');
+        }
+        patch.push_str(&String::from_utf8_lossy(&output.stdout));
+
+        let output = git
+            .run(
+                Some(worktree),
+                &[
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-color",
+                    "--stat",
+                    "--no-index",
+                    "--",
+                    "/dev/null",
+                    path_arg,
+                ],
+                &[],
+            )
+            .await?;
+        if !output.status.success() && output.status.code() != Some(1) {
+            return Err(GitError::Command(
+                String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            ));
+        }
+        stat.extend(text_lines(&output.stdout));
+    }
+
+    Ok(WorktreeDiff {
+        status,
+        stat,
+        files: parse_unified_diff(&patch),
+    })
+}
+
+fn require_success(success: bool, stderr: &[u8]) -> Result<(), GitError> {
+    if success {
+        Ok(())
+    } else {
+        Err(GitError::Command(
+            String::from_utf8_lossy(stderr).trim().to_string(),
+        ))
+    }
+}
+
+fn text_lines(bytes: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+fn parse_status_porcelain(bytes: &[u8]) -> (Vec<String>, Vec<PathBuf>, Vec<PathBuf>) {
+    let mut fields = bytes
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty());
+    let mut rows = Vec::new();
+    let mut untracked = Vec::new();
+    let mut changed_paths = Vec::new();
+    while let Some(field) = fields.next() {
+        let text = String::from_utf8_lossy(field);
+        if text.len() < 3 {
+            continue;
+        }
+        let code = &text[..2];
+        let path = text[3..].to_string();
+        changed_paths.push(PathBuf::from(&path));
+        if code == "??" {
+            untracked.push(PathBuf::from(&path));
+        }
+        if (code.contains('R') || code.contains('C'))
+            && let Some(old) = fields.next()
+        {
+            rows.push(format!("{code} {} -> {path}", String::from_utf8_lossy(old)));
+            continue;
+        }
+        rows.push(format!("{code} {path}"));
+    }
+    (rows, untracked, changed_paths)
+}
+
+fn parse_unified_diff(source: &str) -> Vec<DiffFile> {
+    let mut files = Vec::new();
+    let mut file: Option<DiffFile> = None;
+    let mut hunk: Option<DiffHunk> = None;
+    let mut old_line = 0u32;
+    let mut new_line = 0u32;
+
+    for line in source.lines() {
+        if line.starts_with("diff --git ") {
+            finish_hunk(&mut file, &mut hunk);
+            if let Some(previous) = file.take() {
+                files.push(previous);
+            }
+            file = Some(DiffFile {
+                old_path: None,
+                path: diff_header_path(line).unwrap_or_default(),
+                headers: vec![line.to_string()],
+                hunks: Vec::new(),
+            });
+            continue;
+        }
+
+        let Some(current_file) = file.as_mut() else {
+            continue;
+        };
+        if line.starts_with("@@ ") {
+            finish_hunk(&mut file, &mut hunk);
+            let (parsed_old, parsed_new) = parse_hunk_starts(line);
+            old_line = parsed_old;
+            new_line = parsed_new;
+            hunk = Some(DiffHunk {
+                header: line.to_string(),
+                old_start: old_line,
+                new_start: new_line,
+                lines: Vec::new(),
+            });
+            continue;
+        }
+        if let Some(current_hunk) = hunk.as_mut() {
+            let (kind, old, new) = match line.as_bytes().first() {
+                Some(b'+') => {
+                    let current = new_line;
+                    new_line = new_line.saturating_add(1);
+                    (DiffLineKind::Addition, None, Some(current))
+                }
+                Some(b'-') => {
+                    let current = old_line;
+                    old_line = old_line.saturating_add(1);
+                    (DiffLineKind::Deletion, Some(current), None)
+                }
+                Some(b' ') => {
+                    let old = old_line;
+                    let new = new_line;
+                    old_line = old_line.saturating_add(1);
+                    new_line = new_line.saturating_add(1);
+                    (DiffLineKind::Context, Some(old), Some(new))
+                }
+                _ => (DiffLineKind::Meta, None, None),
+            };
+            current_hunk.lines.push(DiffLine {
+                kind,
+                text: line.to_string(),
+                old_line: old,
+                new_line: new,
+            });
+            continue;
+        }
+
+        if let Some(path) = line.strip_prefix("--- ") {
+            current_file.old_path = normalize_diff_path(path);
+        } else if let Some(path) = line.strip_prefix("+++ ")
+            && let Some(path) = normalize_diff_path(path)
+        {
+            current_file.path = path;
+        }
+        current_file.headers.push(line.to_string());
+    }
+
+    finish_hunk(&mut file, &mut hunk);
+    if let Some(file) = file {
+        files.push(file);
+    }
+    files
+}
+
+fn finish_hunk(file: &mut Option<DiffFile>, hunk: &mut Option<DiffHunk>) {
+    if let (Some(file), Some(hunk)) = (file.as_mut(), hunk.take()) {
+        file.hunks.push(hunk);
+    }
+}
+
+fn diff_header_path(header: &str) -> Option<String> {
+    header
+        .split_once(" b/")
+        .map(|(_, path)| path.trim_matches('"').to_string())
+}
+
+fn normalize_diff_path(path: &str) -> Option<String> {
+    let path = path.trim_matches('"');
+    if path == "/dev/null" {
+        return None;
+    }
+    Some(
+        path.strip_prefix("a/")
+            .or_else(|| path.strip_prefix("b/"))
+            .unwrap_or(path)
+            .to_string(),
+    )
+}
+
+fn parse_hunk_starts(header: &str) -> (u32, u32) {
+    let mut ranges = header.split_whitespace().skip(1);
+    let old = ranges.next().and_then(parse_range_start).unwrap_or(0);
+    let new = ranges.next().and_then(parse_range_start).unwrap_or(0);
+    (old, new)
+}
+
+fn parse_range_start(range: &str) -> Option<u32> {
+    range.get(1..)?.split(',').next()?.parse::<u32>().ok()
+}
+
 async fn worktree_is_pristine_with(
     git: &dyn GitRunner,
     worktree: &Path,
@@ -1241,5 +1588,118 @@ mod tests {
         assert!(!inspections[0].has_uncommitted_changes);
         assert!(!inspections[0].is_safe_to_delete);
         assert!(!worktree_is_pristine_with(git.as_ref(), &worktree, Some(&bare)).await);
+    }
+
+    #[tokio::test]
+    async fn worktree_diff_combines_staged_unstaged_and_untracked_changes() {
+        fn git(repo: &Path, args: &[&str]) {
+            let output = std::process::Command::new("git")
+                .current_dir(repo)
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        git(tmp.path(), &["init", "-q"]);
+        git(tmp.path(), &["config", "user.name", "Lazybox Test"]);
+        git(
+            tmp.path(),
+            &["config", "user.email", "lazybox@example.invalid"],
+        );
+        std::fs::write(tmp.path().join("tracked.txt"), "one\ntwo\n").expect("seed tracked");
+        git(tmp.path(), &["add", "tracked.txt"]);
+        git(tmp.path(), &["commit", "-qm", "seed"]);
+
+        std::fs::write(tmp.path().join("tracked.txt"), "one\nstaged\n").expect("stage edit");
+        git(tmp.path(), &["add", "tracked.txt"]);
+        std::fs::write(tmp.path().join("tracked.txt"), "one\nworking\n").expect("working edit");
+        std::fs::write(tmp.path().join("new.rs"), "fn added() {}\n").expect("untracked file");
+
+        let diff = inspect_worktree_diff(tmp.path())
+            .await
+            .expect("inspect diff");
+
+        assert!(diff.status.iter().any(|line| line == "MM tracked.txt"));
+        assert!(diff.status.iter().any(|line| line == "?? new.rs"));
+        let tracked = diff
+            .files
+            .iter()
+            .find(|file| file.path == "tracked.txt")
+            .expect("tracked diff");
+        assert!(
+            tracked
+                .hunks
+                .iter()
+                .flat_map(|hunk| &hunk.lines)
+                .any(|line| line.kind == DiffLineKind::Addition && line.text == "+working")
+        );
+        let untracked = diff
+            .files
+            .iter()
+            .find(|file| file.path == "new.rs")
+            .expect("untracked diff");
+        assert!(
+            untracked
+                .hunks
+                .iter()
+                .flat_map(|hunk| &hunk.lines)
+                .any(|line| line.kind == DiffLineKind::Addition && line.text == "+fn added() {}")
+        );
+        assert!(diff.stat.iter().any(|line| line.contains("tracked.txt")));
+        assert!(diff.stat.iter().any(|line| line.contains("new.rs")));
+    }
+
+    #[tokio::test]
+    async fn worktree_diff_reads_files_before_the_first_commit() {
+        fn git(repo: &Path, args: &[&str]) {
+            let output = std::process::Command::new("git")
+                .current_dir(repo)
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        git(tmp.path(), &["init", "-q"]);
+        std::fs::write(tmp.path().join("staged.txt"), "staged\n").expect("staged file");
+        git(tmp.path(), &["add", "staged.txt"]);
+        std::fs::write(tmp.path().join("staged.txt"), "working\n").expect("working edit");
+        std::fs::write(tmp.path().join("new.txt"), "untracked\n").expect("untracked file");
+
+        let diff = inspect_worktree_diff(tmp.path())
+            .await
+            .expect("inspect unborn diff");
+
+        assert!(diff.status.iter().any(|line| line == "AM staged.txt"));
+        assert!(diff.status.iter().any(|line| line == "?? new.txt"));
+        assert!(diff.files.iter().any(|file| {
+            file.path == "staged.txt"
+                && file
+                    .hunks
+                    .iter()
+                    .flat_map(|hunk| &hunk.lines)
+                    .any(|line| line.text == "+working")
+        }));
+        assert!(diff.files.iter().any(|file| {
+            file.path == "new.txt"
+                && file
+                    .hunks
+                    .iter()
+                    .flat_map(|hunk| &hunk.lines)
+                    .any(|line| line.text == "+untracked")
+        }));
     }
 }

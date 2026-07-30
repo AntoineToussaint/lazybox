@@ -13,7 +13,8 @@ use tokio::process::Command;
 
 mod inspect;
 pub use inspect::{
-    DiscoveredCheckout, OrphanReason, TrackedSession, WorktreeInspection, describe_checkout_at,
+    DiffFile, DiffHunk, DiffLine, DiffLineKind, DiscoveredCheckout, OrphanReason, TrackedSession,
+    WorktreeDiff, WorktreeInspection, describe_checkout_at, inspect_worktree_diff,
     scan_external_checkouts, worktree_is_pristine,
 };
 

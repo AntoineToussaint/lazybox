@@ -223,6 +223,13 @@ impl Sidebar {
         self.inner.work_target_for_agent(workspace_key, agent_id)
     }
 
+    pub fn running_work_targets(
+        &self,
+        workspace_key: &lazybox_core::SessionKey,
+    ) -> Vec<crate::components::sidebar::RunningWorkTarget> {
+        self.inner.running_work_targets(workspace_key)
+    }
+
     /// Selected session id, if the cursor is on a session sub-row of
     /// a workspace. `None` when the cursor is on a top-level
     /// workspace row OR when the workspace has no sessions yet.

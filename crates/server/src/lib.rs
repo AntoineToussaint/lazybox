@@ -869,6 +869,9 @@ impl Server {
                         lazybox_ipc::Command::ListProviderCredentials { .. } => "ListProviderCredentials",
                         lazybox_ipc::Command::CleanWorktrees => "CleanWorktrees",
                         lazybox_ipc::Command::InspectWorktrees => "InspectWorktrees",
+                        lazybox_ipc::Command::InspectWorkspaceDiff { .. } => {
+                            "InspectWorkspaceDiff"
+                        }
                         lazybox_ipc::Command::ScanCheckouts { .. } => "ScanCheckouts",
                         lazybox_ipc::Command::ImportLocalCheckout { .. } => "ImportLocalCheckout",
                         lazybox_ipc::Command::DeleteOrphanedWorktree { .. } => "DeleteOrphanedWorktree",
@@ -1706,6 +1709,12 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::InspectWorktrees => {
             polling::handle_inspect_worktrees(config).await;
+        }
+        lazybox_ipc::Command::InspectWorkspaceDiff {
+            workspace_key,
+            session_id,
+        } => {
+            polling::handle_inspect_workspace_diff(config, workspace_key, session_id).await;
         }
         lazybox_ipc::Command::ScanCheckouts { roots } => {
             polling::handle_scan_checkouts(config, roots).await;

@@ -107,6 +107,121 @@ mod effects_tests {
         Model::new_for_test(client, Size::new(120, 40)).expect("model init")
     }
 
+    #[test]
+    fn diff_review_uses_the_settle_gated_agent_injection_path() {
+        use crate::realm::components::diff_review::DiffReviewComment;
+        use lazybox_core::Workspace;
+        use lazybox_ipc::{TerminalKind, UserPrompt};
+
+        let mut model = build_model();
+        let workspace_key = WorkspaceKey::new("github:o/r#1");
+        let session_key: SessionKey = (&workspace_key).into();
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(Box::new(
+            Workspace::empty(workspace_key.clone(), "review", chrono::Utc::now()),
+        )));
+        model.handle_daemon_event(lazybox_ipc::Event::TerminalSpawned {
+            terminal_id: lazybox_ipc::TerminalId(7),
+            session_key,
+            kind: TerminalKind::Agent("codex".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+        });
+
+        let commands = model.dispatch_diff_review(
+            workspace_key,
+            vec![DiffReviewComment {
+                path: "src/lib.rs".into(),
+                old_line: None,
+                new_line: Some(11),
+                hunk_header: "@@ -10 +10,2 @@ fn run()".into(),
+                referenced_line: "+fix();".into(),
+                context: vec![" keep();".into(), "+fix();".into()],
+                body: "rename this helper".into(),
+                anchor_row: 3,
+            }],
+        );
+
+        assert!(
+            matches!(
+                commands.as_slice(),
+                [
+                    IpcCommand::RecordUserMessage {
+                        terminal_id: lazybox_ipc::TerminalId(7),
+                        prompt: UserPrompt { text, .. },
+                    },
+                    IpcCommand::InjectPrompt {
+                        terminal_id: lazybox_ipc::TerminalId(7),
+                        prompt,
+                        submit: true,
+                        fallback_spawn: None,
+                    }
+                ] if text.contains("src/lib.rs:11")
+                    && text.contains("rename this helper")
+                    && prompt.contains("src/lib.rs:11")
+                    && prompt.contains("rename this helper")
+            ),
+            "unexpected review commands: {commands:#?}"
+        );
+    }
+
+    #[test]
+    fn view_diff_requests_the_selected_worktree_and_mounts_its_response() {
+        use lazybox_core::{SessionKind, Workspace, WorkspaceSession};
+        use lazybox_ipc::WorkspaceDiffDto;
+        use lazybox_tui_core::action::Action;
+
+        let mut model = build_model();
+        let workspace_key = WorkspaceKey::new("github:o/r#1");
+        let mut workspace = Workspace::empty(workspace_key.clone(), "review", chrono::Utc::now());
+        workspace.sessions.push(WorkspaceSession::new(
+            workspace_key.clone(),
+            SessionKind::Agent {
+                agent_id: "codex".into(),
+            },
+            "/tmp/review-a".into(),
+            chrono::Utc::now(),
+        ));
+        let session = WorkspaceSession::new(
+            workspace_key.clone(),
+            SessionKind::Agent {
+                agent_id: "codex".into(),
+            },
+            "/tmp/review-b".into(),
+            chrono::Utc::now(),
+        );
+        let session_id = session.id;
+        workspace.sessions.push(session);
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(Box::new(workspace)));
+        assert!(model.sidebar.focus_session_id(session_id));
+
+        let commands = model.dispatch_action(&Action::ViewDiff);
+        assert!(matches!(
+            commands.as_slice(),
+            [IpcCommand::InspectWorkspaceDiff {
+                workspace_key: target,
+                session_id: target_session,
+            }] if target == &workspace_key && target_session == &session_id
+        ));
+        assert_eq!(
+            model.pending_diff_session.as_ref(),
+            Some(&(workspace_key.clone(), session_id))
+        );
+
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceDiffInspected {
+            workspace_key,
+            session_id,
+            diff: Some(WorkspaceDiffDto {
+                status: Vec::new(),
+                stat: Vec::new(),
+                files: Vec::new(),
+            }),
+            error: None,
+        });
+        assert_eq!(model.modal_stack.last(), Some(&Id::DiffReview));
+        assert!(model.pending_diff_session.is_none());
+    }
+
     /// Reply submission with a non-empty body + a pending reply
     /// target produces `PostReply` followed by `Refresh` (in that
     /// order — the Refresh kicks an immediate poll instead of

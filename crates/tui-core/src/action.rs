@@ -82,6 +82,8 @@ pub enum Action {
     SpawnShellOnMain,
     /// Open the workspace's worktree in the user's editor.
     OpenEditor,
+    /// Review the workspace's combined staged/unstaged worktree diff.
+    ViewDiff,
     /// Create a brand-new pre-PR workspace (asks for a name).
     NewWorkspace,
     /// Create a brand-new local Project — a top-level container the
@@ -389,6 +391,7 @@ pub enum ActionKind {
     SpawnAgentOnMain,
     SpawnShellOnMain,
     OpenEditor,
+    ViewDiff,
     NewWorkspace,
     NewProject,
     ImportCheckout,
@@ -505,6 +508,7 @@ impl ActionKind {
         Self::SpawnAgentOnMain,
         Self::SpawnShellOnMain,
         Self::OpenEditor,
+        Self::ViewDiff,
         Self::MarkAllRead,
         Self::ToggleSnooze,
         // Workspace-management menu: creation and movement first,
@@ -616,6 +620,7 @@ impl Action {
             Action::SpawnAgentOnMain(_) => ActionKind::SpawnAgentOnMain,
             Action::SpawnShellOnMain => ActionKind::SpawnShellOnMain,
             Action::OpenEditor => ActionKind::OpenEditor,
+            Action::ViewDiff => ActionKind::ViewDiff,
             Action::NewWorkspace => ActionKind::NewWorkspace,
             Action::NewProject => ActionKind::NewProject,
             Action::ImportCheckout => ActionKind::ImportCheckout,
@@ -932,6 +937,13 @@ impl ActionDef {
                 default_keys: "e",
                 label: "editor",
                 describe: "Open the worktree in the configured editor.",
+                section: Section::Workspace,
+            },
+            ActionKind::ViewDiff => &Self {
+                kind: ActionKind::ViewDiff,
+                default_keys: "Shift-V",
+                label: "review diff",
+                describe: "Review the worktree's staged, unstaged, and untracked changes; search or annotate lines and send the draft to the running agent.",
                 section: Section::Workspace,
             },
             ActionKind::NewWorkspace => &Self {
@@ -1716,6 +1728,7 @@ impl ActionKind {
             ActionKind::SpawnAgentOnMain => "spawn_agent_on_main",
             ActionKind::SpawnShellOnMain => "spawn_shell_on_main",
             ActionKind::OpenEditor => "open_editor",
+            ActionKind::ViewDiff => "view_diff",
             ActionKind::NewWorkspace => "new_workspace",
             ActionKind::NewProject => "new_project",
             ActionKind::ImportCheckout => "import_checkout",
@@ -2362,6 +2375,9 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
             intent::resolve_open_editor(workspace),
             intent::Intent::OpenEditor,
         ),
+        ActionKind::ViewDiff => workspace
+            .map(|workspace| !workspace.sessions.is_empty())
+            .unwrap_or(false),
         ActionKind::AdoptSessions => matches!(
             intent::resolve_adopt(workspace),
             intent::Intent::MountAdoptPicker { .. },

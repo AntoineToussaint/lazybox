@@ -5,8 +5,13 @@ what you need.
 
 ## Questions & help
 
-For "how do I…", setup help, or sharing your configuration, start a
+For "how do I…", setup help, sharing your configuration, or open-ended ideas,
+start a thread in
+[GitHub Discussions](https://github.com/AntoineToussaint/lazybox/discussions),
+or open a
 [question / setup help report](https://github.com/AntoineToussaint/lazybox/issues/new?template=question.yml).
+To reach the author directly, email
+[toussaint.antoine@gmail.com](mailto:toussaint.antoine@gmail.com).
 
 ## Bugs & feature requests
 

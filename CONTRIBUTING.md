@@ -91,7 +91,7 @@ attention:
 
 ## Where to get help
 
-- **Questions, setup help, sharing configs** → [Question / setup help form](https://github.com/AntoineToussaint/lazybox/issues/new?template=question.yml).
+- **Questions, setup help, sharing configs** → [GitHub Discussions](https://github.com/AntoineToussaint/lazybox/discussions) or the [Question / setup help form](https://github.com/AntoineToussaint/lazybox/issues/new?template=question.yml).
 - **Bugs and feature requests** → [Issues](https://github.com/AntoineToussaint/lazybox/issues/new/choose) (use the templates).
 - **Docs & architecture** → the [docs site](https://lazybox.ai/docs/), plus [`CLAUDE.md`](./CLAUDE.md) and `DESIGN.md` for deeper notes.
 

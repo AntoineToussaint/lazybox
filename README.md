@@ -219,6 +219,12 @@ their strict dependency layering). Participation is under our
 [`SUPPORT.md`](SUPPORT.md) points you at
 the [question, bug, and feature templates](https://github.com/AntoineToussaint/lazybox/issues/new/choose).
 
+**Get in touch** — open a thread in
+[GitHub Discussions](https://github.com/AntoineToussaint/lazybox/discussions)
+for open-ended questions and ideas, or email
+[toussaint.antoine@gmail.com](mailto:toussaint.antoine@gmail.com) to reach the
+author directly.
+
 ## License
 
 MIT — see [`LICENSE`](LICENSE).

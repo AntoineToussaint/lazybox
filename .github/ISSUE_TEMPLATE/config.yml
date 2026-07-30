@@ -1,5 +1,8 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Questions & ideas (Discussions)
+    url: https://github.com/AntoineToussaint/lazybox/discussions
+    about: Ask "how do I…", share your setup, or float an open-ended idea.
   - name: Support guide
     url: https://github.com/AntoineToussaint/lazybox/blob/main/SUPPORT.md
     about: See where to ask questions, report bugs, and disclose security issues.

@@ -415,6 +415,10 @@ impl<T: TerminalAdapter> Model<T> {
         if self.handle_help_agent_event(&event) {
             return;
         }
+        if let IpcEvent::WorkspaceFocusRequested { session_key } = &event {
+            self.jump_to_workspace_key(session_key);
+            return;
+        }
         // Enforce the confirmed-merge latch centrally, before any pane
         // sees the workspace. Once GitHub accepted a merge
         // (`Event::PrMerged` latched the key), an incoming
@@ -465,6 +469,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::TerminalScrollback { .. }
                 | IpcEvent::TerminalExited { .. }
                 | IpcEvent::TerminalFocusRequested { .. }
+                | IpcEvent::WorkspaceFocusRequested { .. }
                 | IpcEvent::TerminalsRebadged { .. }
                 | IpcEvent::AgentState { .. }
                 | IpcEvent::ProviderError { .. }
@@ -1141,6 +1146,7 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::TerminalScrollback { .. }
             | IpcEvent::TerminalExited { .. }
             | IpcEvent::TerminalFocusRequested { .. }
+            | IpcEvent::WorkspaceFocusRequested { .. }
             | IpcEvent::TerminalsRebadged { .. }
             | IpcEvent::AgentState { .. }
             | IpcEvent::PollProgress { .. }
@@ -1356,6 +1362,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::TerminalScrollback { .. }
                 | IpcEvent::TerminalExited { .. }
                 | IpcEvent::TerminalFocusRequested { .. }
+                | IpcEvent::WorkspaceFocusRequested { .. }
                 | IpcEvent::TerminalsRebadged { .. }
                 | IpcEvent::AgentState { .. }
                 | IpcEvent::GithubRateLimitWait { .. }

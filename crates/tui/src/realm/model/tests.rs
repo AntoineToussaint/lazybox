@@ -42,6 +42,43 @@ mod prompt_history_format_tests {
 }
 
 #[cfg(test)]
+mod editor_notice_tests {
+    use super::super::opened_file_notice;
+    use crate::editors::OpenFileOutcome;
+    use std::path::Path;
+
+    #[test]
+    fn file_open_notice_reports_an_applied_location() {
+        assert_eq!(
+            opened_file_notice(
+                Path::new("/repo/src/main.rs"),
+                "PyCharm",
+                OpenFileOutcome::OpenedAt {
+                    line: 12,
+                    column: Some(3),
+                },
+            ),
+            "opened /repo/src/main.rs:12:3 in PyCharm"
+        );
+    }
+
+    #[test]
+    fn file_open_notice_discloses_an_unsupported_app_location() {
+        assert_eq!(
+            opened_file_notice(
+                Path::new("/repo/src/main.rs"),
+                "PyCharm",
+                OpenFileOutcome::OpenedWithoutLocation {
+                    line: 12,
+                    column: Some(3),
+                },
+            ),
+            "opened /repo/src/main.rs in PyCharm (line 12:3 unavailable via macOS app launch)"
+        );
+    }
+}
+
+#[cfg(test)]
 mod effects_tests {
     //! Handler effect-contract tests.
     //!
@@ -9825,6 +9862,28 @@ mod jump_to_workspace_tests {
         m.handle_choice_picked(vec![ChoicePayload::Session(bk.clone())]);
         assert!(m.top_modal().is_none(), "modal popped after the pick");
         assert_eq!(m.sidebar.selected_workspace_key(), Some(&bk));
+    }
+
+    #[test]
+    fn notification_focus_request_jumps_to_its_workspace() {
+        let mut m = build_model();
+        let (ak, bk) = seed_two(&mut m);
+        let mut hidden = Workspace::from_task(task("owner/repo#2", Duration::hours(1)), Utc::now());
+        hidden.snoozed_until = Some(Utc::now() + Duration::hours(1));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(hidden)));
+        assert!(
+            !m.sidebar.focus_workspace_key(&bk),
+            "target starts outside the Inbox"
+        );
+        assert!(m.sidebar.focus_workspace_key(&ak));
+        m.sync_panes();
+
+        m.handle_daemon_event(IpcEvent::WorkspaceFocusRequested {
+            session_key: bk.clone(),
+        });
+
+        assert_eq!(m.sidebar.selected_workspace_key(), Some(&bk));
+        assert_eq!(m.focus(), PaneFocus::Sidebar);
     }
 
     /// With nothing tracked the picker refuses to mount (a footer hint

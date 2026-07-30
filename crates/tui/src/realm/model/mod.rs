@@ -1470,6 +1470,31 @@ fn summarize_prompt(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn opened_file_notice(
+    path: &std::path::Path,
+    editor: &str,
+    outcome: crate::editors::OpenFileOutcome,
+) -> String {
+    match outcome {
+        crate::editors::OpenFileOutcome::Opened => {
+            format!("opened {} in {editor}", path.display())
+        }
+        crate::editors::OpenFileOutcome::OpenedAt { line, column } => {
+            let location =
+                column.map_or_else(|| line.to_string(), |column| format!("{line}:{column}"));
+            format!("opened {}:{location} in {editor}", path.display())
+        }
+        crate::editors::OpenFileOutcome::OpenedWithoutLocation { line, column } => {
+            let location =
+                column.map_or_else(|| line.to_string(), |column| format!("{line}:{column}"));
+            format!(
+                "opened {} in {editor} (line {location} unavailable via macOS app launch)",
+                path.display()
+            )
+        }
+    }
+}
+
 /// How long the footer must sit idle (no modal, no notice) after
 /// startup before a feature tip (#115) is allowed to surface. Long
 /// enough that the first-run tour and the initial-poll spinner clear
@@ -2313,7 +2338,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// the screen. Backs both the `` ` `` picker and the `]]` `` ` ``
     /// terminal jump.
     pub(crate) fn jump_to_workspace_key(&mut self, key: &lazybox_core::SessionKey) {
-        if !self.sidebar.focus_workspace_key(key) {
+        if !self.sidebar.reveal_workspace_key(key) {
             self.flash_info("workspace is gone — nothing to jump to");
             return;
         }
@@ -3302,7 +3327,8 @@ impl<T: TerminalAdapter> Model<T> {
     /// Open a clicked file path in the configured editor. With one
     /// detected editor we launch directly; with several we use the
     /// first (the workspace `E` picker remains the place to choose).
-    /// A `line[:col]` suffix is forwarded so the editor jumps there.
+    /// A requested location is surfaced as unsupported when the
+    /// selected macOS app handoff cannot forward it.
     fn open_path_in_editor(&mut self, raw: &str, line: Option<u32>, col: Option<u32>) {
         if self.setup.editors.is_empty() {
             let path = lazybox_core::paths::config_yaml();
@@ -3315,14 +3341,9 @@ impl<T: TerminalAdapter> Model<T> {
         let resolved = self.resolve_clicked_path(raw);
         let editor = self.setup.editors[0].clone();
         match crate::editors::open_file(&editor, &resolved, line, col) {
-            Ok(()) => {
+            Ok(outcome) => {
                 tracing::info!(path = %resolved.display(), editor = %editor.id, "opened file from terminal");
-                let where_ = match (line, col) {
-                    (Some(l), Some(c)) => format!("{}:{l}:{c}", resolved.display()),
-                    (Some(l), None) => format!("{}:{l}", resolved.display()),
-                    _ => resolved.display().to_string(),
-                };
-                self.flash_hint(format!("opened {where_} in {}", editor.display));
+                self.flash_hint(opened_file_notice(&resolved, &editor.display, outcome));
             }
             Err(e) => {
                 tracing::warn!(path = %resolved.display(), "open_file failed: {e}");
@@ -3360,7 +3381,7 @@ impl<T: TerminalAdapter> Model<T> {
         }
         let editor = self.setup.editors[0].clone();
         match crate::editors::open_file(&editor, &path, None, None) {
-            Ok(()) => {
+            Ok(_) => {
                 tracing::info!(path = %path.display(), editor = %editor.id, "opened snippets file");
                 self.flash_info(format!(
                     "editing {} in {} — relaunch lazybox to load changes",

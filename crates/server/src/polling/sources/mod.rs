@@ -1097,23 +1097,13 @@ pub(super) async fn dispatch_action(
                 session_key.clone(),
                 None,
                 lazybox_ipc::TerminalKind::Agent(agent_id),
-                None,
-                prompt,
-                // Autonomous `@lazybox` spawn — launch unattended with
-                // permission prompts disabled (subject to the
-                // `agent.autonomous_skip_permissions` toggle).
-                true,
-                // Autonomous work runs on its own isolated worktree.
-                false,
-                // The tier the trigger asked for (`@lazybox codex xhigh`
-                // / `lazybox:codex/xhigh`); `None` keeps the agent default.
-                model_alias,
-                // Fresh spawn, not a session restore.
-                false,
-                // Label / `@lazybox`-mention auto-spawn — background work
-                // the user didn't initiate, so it reports a footer notice
-                // instead of stealing focus with a progress modal (#645).
-                lazybox_ipc::SpawnOrigin::Autonomous(trigger),
+                crate::spawn_handler::SpawnOptions {
+                    initial_prompt: prompt,
+                    autonomous: true,
+                    model_alias,
+                    origin: lazybox_ipc::SpawnOrigin::Autonomous(trigger),
+                    ..Default::default()
+                },
             )
             .await;
             // Record the label marker only once a live agent session
@@ -1293,25 +1283,14 @@ pub(super) async fn dispatch_action(
                         session_key,
                         None,
                         term_kind,
-                        None,
-                        prompt,
-                        // Unattended auto-fix spawn — the agent has to
-                        // clear the first-run workspace-trust dialog on
-                        // the fresh worktree (else the injected fix
-                        // prompt lands in the trust chooser) and push a
-                        // fix without a human to approve its edits.
-                        true,
-                        // Auto-fix runs on its own isolated worktree.
-                        false,
-                        // Auto-fix uses the agent's default model.
-                        None,
-                        // Fresh spawn, not a session restore.
-                        false,
-                        // Auto-fix is daemon-initiated background work —
-                        // report it, don't interrupt with a modal (#645).
-                        lazybox_ipc::SpawnOrigin::Autonomous(
-                            lazybox_ipc::AutonomousTrigger::AutoFix,
-                        ),
+                        crate::spawn_handler::SpawnOptions {
+                            initial_prompt: prompt,
+                            autonomous: true,
+                            origin: lazybox_ipc::SpawnOrigin::Autonomous(
+                                lazybox_ipc::AutonomousTrigger::AutoFix,
+                            ),
+                            ..Default::default()
+                        },
                     )
                     .await;
                 }

@@ -22,7 +22,8 @@ surface — daemon already broadcasts the data the chip needs (PR's
 ## macOS desktop notifications: ship a .app bundle
 
 **Status.** On macOS lazybox prefers `terminal-notifier` when it's
-on PATH (real icon, verifiable exit status, sane click target).
+on PATH (real icon, verifiable exit status, click-to-focus the
+terminal and jump to the originating workspace).
 When it's missing, `osascript -e 'display notification …'` is still
 the last-resort fallback — it ships with every macOS install, so a
 stock Mac gets a banner rather than silence. The tradeoff stands:
@@ -37,8 +38,8 @@ its own Info.plist + LSUIElement + bundle id so we can call
 `UNUserNotificationCenter` directly via objc bindings. Then:
 
 - The notification carries lazybox's icon (not terminal-notifier's).
-- Click can register a custom URL scheme (`lazybox://workspace/<key>`)
-  to focus the running daemon's TUI on the right row.
+- Click can use a native callback instead of the external
+  `terminal-notifier -execute` helper.
 - Users don't have to `brew install terminal-notifier` first.
 
 Until that bundle exists, recommending `terminal-notifier` is the

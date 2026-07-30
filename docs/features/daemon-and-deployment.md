@@ -291,7 +291,7 @@ Top-level keys (`crates/config/src/lib.rs`):
 | `slack` | `bot_token`, `app_token`, `anchor_channel`, `channel_prefix`, `per_workspace_channels` |
 | `agent` | `autonomous_skip_permissions`, `skip_permissions`, `llm_gateway_url`, nested agent config |
 | `agents.<id>` | Per-agent overrides — today the model-tier menu `models` (`default` + ordered `tiers` of `alias`/`label`/`args`, plus `priority` aliases) |
-| `attention` | Which signals flag a row: `unread`, `ci_failing`, `review_pending`, `agent_asking`, `mentioned`, `desktop_notify`, `notifier` (`auto` \| `osc` \| `subprocess` banner delivery) |
+| `attention` | Which signals flag a row: `unread`, `ci_failing`, `review_pending`, `agent_asking`, `mentioned`, `desktop_notify`, `notifier` (`auto` \| `osc` \| `subprocess` banner delivery), `terminal_bundle_id` (optional macOS click activation override) |
 | `ui` | View/behavior: `auto_mark_delay`, `quit_double_tap_window`, `split_step_percent`, `task_body_max_rows`, `short_snooze`, `long_snooze`, `action_keys` (incl. `spawn_agent.<id>` keys), `keymap_preset`, `theme`, `tour_seen`, `tips_seen` |
 | `display`, `shell`, `hooks`, `terminal`, `mention`, `auto_fix` | Display merging, shell, agent hooks, terminal, mention routing, auto-fix triggers |
 

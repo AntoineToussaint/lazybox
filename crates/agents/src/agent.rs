@@ -620,7 +620,6 @@ pub mod builtins {
     /// `projects."/path".trust_level=...`; replacing the `projects` table
     /// with a one-entry inline table works for paths containing dots too.
     fn codex_trusted_project_override(worktree: &Path) -> String {
-        let worktree = std::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
         let path = serde_json::to_string(&worktree.to_string_lossy())
             .unwrap_or_else(|_| "\"\"".to_string());
         format!("projects={{{path}={{trust_level=\"trusted\"}}}}")

@@ -1016,8 +1016,13 @@ repos:
     .expect("deadline");
 }
 
+/// A branch held by a worktree lazybox can't even parse the ownership of
+/// (a future workspace schema) must never be adopted or reclaimed — but
+/// it must also never dead-end the PR's workspace (#721). The PR gets its
+/// own *detached* checkout of the head, so the un-loadable holder's WIP
+/// is left untouched while the workspace still comes up.
 #[tokio::test]
-async fn e2e_future_workspace_schema_blocks_automatic_worktree_adoption() {
+async fn e2e_future_owned_branch_holder_provisions_a_detached_checkout() {
     let _home = IsolatedConfigHome::new();
     timeout(TEST_DEADLINE, async {
         let root = tempfile::TempDir::new().unwrap();
@@ -1089,36 +1094,48 @@ async fn e2e_future_workspace_schema_blocks_automatic_worktree_adoption() {
         save_workspace(&config, &pr);
 
         let (mut client, _daemon) = subscribed(config.clone()).await;
-        send_spawn(&mut client, &pr_key, TerminalKind::Shell, None);
-        let failure = wait_for(
-            &mut client,
-            |event| {
-                matches!(
-                    event,
-                    Event::WorktreeProgress {
-                        status: lazybox_ipc::WorktreeStepStatus::Failed(message),
-                        ..
-                    } if lazybox_ipc::WorktreeRecovery::classify(message)
-                        == lazybox_ipc::WorktreeRecovery::BranchHeldLive
-                )
-            },
-            Duration::from_secs(30),
-        )
-        .await;
-        assert!(
-            failure.is_some(),
-            "unknown future ownership must keep the explicit conflict flow"
+        let backend =
+            spawn_and_capture(&mut client, &mock, &pr_key, TerminalKind::Shell, None).await;
+        // The PR comes up in its own detached checkout of the branch head,
+        // never adopting the future-owned holder's worktree.
+        let cwd = mock.cwd_for(&backend).await.expect("pr cwd");
+        assert_ne!(
+            cwd.as_path(),
+            candidate.as_path(),
+            "the PR must get its own checkout, never the future-owned holder's"
         );
-        assert!(mock.list().await.unwrap().is_empty());
-        assert!(load_workspace(&config, &pr_key).sessions.is_empty());
+        assert!(
+            !is_on_branch(&cwd, branch),
+            "the PR's checkout is detached, never co-opting the held branch"
+        );
+        assert!(!load_workspace(&config, &pr_key).sessions.is_empty());
+        // The un-loadable holder's branch and WIP are untouched.
         assert_eq!(std::fs::read(candidate.join("WIP.txt")).unwrap(), marker);
     })
     .await
     .expect("deadline");
 }
 
+/// Whether the worktree at `path` has `branch` checked out (vs a detached
+/// HEAD or a different branch).
+fn is_on_branch(path: &Path, branch: &str) -> bool {
+    std::process::Command::new("git")
+        .current_dir(path)
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim() == branch)
+        .unwrap_or(false)
+}
+
+/// A branch already checked out in another workspace's *live* session is
+/// held exclusively, yet the PR sharing it must not dead-end (#721). The
+/// PR comes up in its own detached checkout of the head — beside the live
+/// holder, never adopting it — so the holder's branch and WIP stay
+/// untouched and both sessions coexist.
 #[tokio::test]
-async fn e2e_unrelated_branch_holder_keeps_the_explicit_conflict_flow() {
+async fn e2e_live_branch_holder_provisions_a_detached_checkout() {
     let _home = IsolatedConfigHome::new();
     timeout(TEST_DEADLINE, async {
         let root = tempfile::TempDir::new().unwrap();
@@ -1193,33 +1210,66 @@ async fn e2e_unrelated_branch_holder_keeps_the_explicit_conflict_flow() {
             Some(unrelated.as_path())
         );
 
-        send_spawn(&mut client, &pr_key, TerminalKind::Shell, None);
-        let failure = wait_for(
+        let pr_backend =
+            spawn_and_capture(&mut client, &mock, &pr_key, TerminalKind::Shell, None).await;
+        let pr_cwd = mock.cwd_for(&pr_backend).await.expect("pr cwd");
+        assert_ne!(
+            pr_cwd.as_path(),
+            unrelated.as_path(),
+            "the PR gets its own detached checkout, never the live holder's worktree"
+        );
+        assert!(
+            !is_on_branch(&pr_cwd, branch),
+            "the PR's checkout is detached, never co-opting the held branch"
+        );
+        assert!(!load_workspace(&config, &pr_key).sessions.is_empty());
+        // Both sessions coexist; the holder's branch and WIP stay untouched.
+        let sessions = mock.list().await.unwrap();
+        assert!(
+            sessions.contains(&holder_backend) && sessions.contains(&pr_backend),
+            "the holder and the PR's detached checkout both stay live"
+        );
+        assert!(
+            is_on_branch(&unrelated, branch),
+            "the live holder keeps sole ownership of the branch"
+        );
+        assert_eq!(std::fs::read(unrelated.join("WIP.txt")).unwrap(), marker);
+
+        // A second spawn resolving the PR's persisted session must reuse
+        // the detached worktree in place. A detached HEAD is not a stale
+        // "wrong branch" — so provisioning is NOT re-run, and the Setup
+        // step (mounts / setup scripts, and its "Setting up workspace"
+        // progress) does not fire again on every spawn (#721 regression).
+        send_spawn(
             &mut client,
-            |event| {
-                matches!(
-                    event,
-                    Event::WorktreeProgress {
-                        status: lazybox_ipc::WorktreeStepStatus::Failed(message),
-                        ..
-                    } if lazybox_ipc::WorktreeRecovery::classify(message)
-                        == lazybox_ipc::WorktreeRecovery::BranchHeldLive
-                )
+            &pr_key,
+            TerminalKind::Agent("claude".into()),
+            None,
+        );
+        let mut re_ran_setup = false;
+        let spawned = wait_for(
+            &mut client,
+            |event| match event {
+                Event::WorktreeProgress {
+                    session_key,
+                    step: lazybox_ipc::WorktreeStep::Setup,
+                    status: lazybox_ipc::WorktreeStepStatus::Started,
+                    ..
+                } if session_key.as_str() == pr_key.as_str() => {
+                    re_ran_setup = true;
+                    false
+                }
+                Event::TerminalSpawned { .. } => true,
+                _ => false,
             },
             Duration::from_secs(30),
         )
         .await;
+        assert!(spawned.is_some(), "the reused-worktree spawn completes");
         assert!(
-            failure.is_some(),
-            "an unrelated holder must surface the explicit BranchHeldLive recovery"
+            !re_ran_setup,
+            "reusing a detached worktree must not re-provision or re-run setup (#721)"
         );
-        assert_eq!(
-            mock.list().await.unwrap(),
-            vec![holder_backend],
-            "the PR must not spawn beside the unrelated live session"
-        );
-        assert!(load_workspace(&config, &pr_key).sessions.is_empty());
-        assert_eq!(std::fs::read(unrelated.join("WIP.txt")).unwrap(), marker);
     })
     .await
     .expect("deadline");

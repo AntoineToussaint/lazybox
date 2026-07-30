@@ -102,9 +102,20 @@ fn ci_linux_lane_links_benchmark_targets() {
 #[test]
 fn desktop_dogfood_artifact_preserves_the_app_executable() {
     let workflow = read(".github/workflows/ci.yml");
-    assert!(
-        workflow.contains("test -x target/debug/bundle/macos/lazybox.app/Contents/MacOS/lazybox")
-    );
+    let manifest = read("apps/desktop/src-tauri/Cargo.toml");
+    let binary_name = manifest
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("name = \"")
+                .and_then(|name| name.strip_suffix('"'))
+        })
+        .expect("desktop package name");
+    assert!(workflow.contains(&format!(
+        "test -x target/debug/bundle/macos/lazybox.app/Contents/MacOS/{binary_name}"
+    )));
+    assert!(workflow.contains(&format!(
+        "test -x target/debug/bundle/macos/archive-check/lazybox.app/Contents/MacOS/{binary_name}"
+    )));
     assert!(workflow.contains("tar -czf target/debug/bundle/macos/lazybox-macos-dogfood.tar.gz"));
     assert!(workflow.contains("path: target/debug/bundle/macos/lazybox-macos-dogfood.tar.gz"));
     assert!(!workflow.contains("path: target/debug/bundle/macos/lazybox.app"));

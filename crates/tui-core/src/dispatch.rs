@@ -38,19 +38,23 @@ pub fn plan_spawn_for_terminal(cmd: Command, terminal_id: TerminalId) -> Command
             model_alias,
             session_key,
             session_id,
+            client_request_id,
             kind: TerminalKind::Agent(agent_id),
             cwd,
             initial_prompt: Some(prompt),
             on_main: _,
-        } => Command::InjectPrompt {
+            access,
+        } if access == lazybox_ipc::AgentRunAccess::Default => Command::InjectPrompt {
             terminal_id,
             prompt,
             fallback_spawn: Some(SpawnFallback {
                 model_alias,
                 session_key,
                 session_id,
+                client_request_id,
                 kind: TerminalKind::Agent(agent_id),
                 cwd,
+                access,
             }),
             submit: true,
         },
@@ -82,11 +86,13 @@ mod tests {
         Command::Spawn {
             session_key: SessionKey::new("owner/repo/1"),
             session_id: Some(SessionId::new()),
+            client_request_id: None,
             kind: TerminalKind::Agent("codex".to_string()),
             cwd: Some("/tmp/worktree".to_string()),
             initial_prompt: prompt.map(str::to_string),
             on_main: false,
             model_alias: Some("L".to_string()),
+            access: lazybox_ipc::AgentRunAccess::Default,
         }
     }
 
@@ -143,6 +149,23 @@ mod tests {
                 }),
                 ..
             } if prompt == "continue" && agent == "codex" && cwd == "/tmp/worktree"
+        ));
+    }
+
+    #[test]
+    fn plan_spawn_for_terminal_does_not_rewrite_read_only_agents() {
+        let mut command = spawn(Some("review"));
+        let Command::Spawn { access, .. } = &mut command else {
+            unreachable!("spawn helper returns Spawn");
+        };
+        *access = lazybox_ipc::AgentRunAccess::ReadOnly;
+
+        assert!(matches!(
+            plan_spawn_for_terminal(command, TerminalId(9)),
+            Command::Spawn {
+                access: lazybox_ipc::AgentRunAccess::ReadOnly,
+                ..
+            }
         ));
     }
 }

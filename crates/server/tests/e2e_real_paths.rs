@@ -258,8 +258,10 @@ fn send_spawn(
     client
         .send(Command::Spawn {
             model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
             session_key: key.as_str().into(),
             session_id: None,
+            client_request_id: None,
             kind,
             cwd: None,
             initial_prompt: initial_prompt.map(Into::into),
@@ -358,8 +360,10 @@ async fn e2e_spawn_provisions_a_real_worktree_and_collapse_carries_it_to_the_pr(
         client
             .send(Command::Spawn {
                 model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
                 session_key: issue_key.as_str().into(),
                 session_id: None,
+                client_request_id: None,
                 kind: TerminalKind::Agent("claude".into()),
                 cwd: None,
                 initial_prompt: None,
@@ -917,8 +921,10 @@ async fn e2e_serve_loop_restart_recovers_session_with_deep_scrollback() {
         client
             .send(Command::Spawn {
                 model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
                 session_key: "test:e2e-restart".into(),
                 session_id: None,
+                client_request_id: None,
                 kind: TerminalKind::Shell,
                 cwd: Some(cwd.path().to_string_lossy().into_owned()),
                 initial_prompt: None,
@@ -1068,8 +1074,10 @@ async fn live_agent_boots_to_ready(agent: &str, socket: &str) {
     client
         .send(Command::Spawn {
             model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
             session_key: format!("test:e2e-{agent}").into(),
             session_id: None,
+            client_request_id: None,
             kind: TerminalKind::Agent(agent.into()),
             cwd: Some(cwd.path().to_string_lossy().into_owned()),
             initial_prompt: None,
@@ -1336,8 +1344,10 @@ async fn e2e_live_scroll_fetch_serves_deep_history_without_restart() {
         client
             .send(Command::Spawn {
                 model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
                 session_key: "test:e2e-scroll".into(),
                 session_id: None,
+                client_request_id: None,
                 kind: TerminalKind::Shell,
                 cwd: Some(cwd.path().to_string_lossy().into_owned()),
                 initial_prompt: None,

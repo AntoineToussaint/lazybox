@@ -61,7 +61,7 @@ pub(crate) async fn run_io_router(
         let terminal_id = match &command {
             Command::Write { terminal_id, .. }
             | Command::Resize { terminal_id, .. }
-            | Command::Close { terminal_id }
+            | Command::Close { terminal_id, .. }
             | Command::InjectPrompt { terminal_id, .. }
             | Command::DeliverSnippet { terminal_id, .. } => *terminal_id,
             other => {
@@ -194,12 +194,16 @@ async fn run_io_lane(
                 }
                 spawn_handler::handle_resize(&config, terminal_id, latest_cols, latest_rows).await;
             }
-            Command::Close { .. } => {
+            Command::Close {
+                client_request_id, ..
+            } => {
                 // Close is an ordering barrier: every previously queued byte
                 // reaches the backend first. On successful kill, later input
                 // for this terminal is invalid and is discarded with the
                 // lane; on a failed kill the live session keeps its lane.
-                if spawn_handler::handle_close(&config, terminal_id).await {
+                if spawn_handler::handle_close(&config, terminal_id, client_request_id.as_deref())
+                    .await
+                {
                     break;
                 }
             }

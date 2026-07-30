@@ -101,8 +101,10 @@ impl Sidebar {
                     tracing::info!(%workspace_key, %agent_id, "sidebar: emitting Spawn(Agent) with work prompt");
                     cmds.push(Command::Spawn {
                         model_alias: None,
+                        access: lazybox_ipc::AgentRunAccess::Default,
                         session_key: workspace_key,
                         session_id: self.selected_session_id(),
+                        client_request_id: None,
                         kind: TerminalKind::Agent(agent_id),
                         cwd: None,
                         initial_prompt: prompt,
@@ -125,8 +127,10 @@ impl Sidebar {
                         tracing::info!(%workspace_key, "sidebar: emitting Spawn(Shell)");
                         cmds.push(Command::Spawn {
                             model_alias: None,
+                            access: lazybox_ipc::AgentRunAccess::Default,
                             session_key: workspace_key,
                             session_id: self.selected_session_id(),
+                            client_request_id: None,
                             kind: TerminalKind::Shell,
                             cwd: None,
                             initial_prompt: None,

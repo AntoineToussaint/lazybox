@@ -1,6 +1,6 @@
 use super::{
     AgentStateDurability, cancel_spawn_for_deleted_workspace, hook_backend_key_path, hook_command,
-    hook_exe, initialize_agent_state_generation, persist_no_permission,
+    hook_exe, initialize_agent_state_generation, persist_agent_access, persist_no_permission,
     persist_pty_launch_generation, persist_terminal_meta, wake_poll_for_terminal_kind,
     write_hook_backend_key, write_hook_settings,
 };
@@ -28,6 +28,8 @@ pub(super) enum SpawnExecutionError {
     Backend(#[from] crate::backend::BackendError),
     #[error("agent lifecycle persistence failed: {0}")]
     LifecyclePersistence(String),
+    #[error("agent access policy persistence failed: {0}")]
+    AccessPersistence(String),
 }
 
 pub(super) async fn execute_spawn_plan(
@@ -86,6 +88,7 @@ pub(super) async fn execute_spawn_plan(
         terminal_id,
         hook_settings,
         model_label,
+        access,
         flags,
     } = plan;
     let skip_permissions = flags.no_permission;
@@ -101,6 +104,29 @@ pub(super) async fn execute_spawn_plan(
             let _ = std::fs::remove_file(path);
         }
         return Ok(SpawnExecutionOutcome::Cancelled);
+    }
+    let agent_session_id = matches!(&kind, TerminalKind::Agent(_))
+        .then_some(owning_session)
+        .flatten();
+    if let Err(error) = persist_agent_access(config, &backend_key, agent_session_id, access).await {
+        tracing::error!(
+            %backend_key,
+            ?terminal_id,
+            %error,
+            "agent spawn rolled back because its host-access policy was not durable"
+        );
+        if let Err(kill_error) = config.backend.kill(&backend_key).await {
+            tracing::error!(
+                %backend_key,
+                %kill_error,
+                "failed to roll back agent backend after access-policy persistence failure"
+            );
+        }
+        if let Some(path) = hook_settings {
+            let _ = std::fs::remove_file(path);
+        }
+        let _ = std::fs::remove_file(hook_backend_key_path(terminal_id));
+        return Err(SpawnExecutionError::AccessPersistence(error));
     }
     if hook_settings.is_some()
         && let Some(exe) = hook_exe()
@@ -151,6 +177,7 @@ pub(super) async fn execute_spawn_plan(
         .record_spawn_attributes(
             terminal_id,
             owning_session,
+            access,
             skip_permissions,
             landed_on_main,
             model_label.as_deref(),

@@ -1,6 +1,6 @@
 use lazybox_agents::{Agent, Registry, SpawnCtx};
 use lazybox_core::{SessionId, SessionKey};
-use lazybox_ipc::{SpawnOrigin, TerminalId, TerminalKind};
+use lazybox_ipc::{AgentRunAccess, SpawnOrigin, TerminalId, TerminalKind};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Default)]
@@ -11,6 +11,8 @@ pub struct SpawnOptions {
     pub on_main: bool,
     pub model_alias: Option<String>,
     pub resume: bool,
+    pub access: AgentRunAccess,
+    pub client_request_id: Option<String>,
     pub origin: SpawnOrigin,
 }
 
@@ -31,6 +33,7 @@ pub(crate) struct SpawnPlanInput {
     pub landed_on_main: bool,
     pub model_alias: Option<String>,
     pub resume: bool,
+    pub access: AgentRunAccess,
     pub shell_command: String,
 }
 
@@ -56,6 +59,7 @@ pub(crate) struct SpawnPlan {
     pub terminal_id: TerminalId,
     pub hook_settings: Option<PathBuf>,
     pub model_label: Option<String>,
+    pub access: AgentRunAccess,
     pub flags: SpawnFlags,
 }
 
@@ -86,9 +90,10 @@ pub(crate) fn build_spawn_plan(
         landed_on_main,
         model_alias,
         resume,
+        access,
         shell_command,
     } = input;
-    let no_permission = skip_permissions_for(autonomous, cfg);
+    let no_permission = access != AgentRunAccess::ReadOnly && skip_permissions_for(autonomous, cfg);
     let agent = match &kind {
         TerminalKind::Agent(id) => Some(
             agents
@@ -119,6 +124,7 @@ pub(crate) fn build_spawn_plan(
         hook_command.as_deref(),
         &model_args,
         resume,
+        access,
     )?;
     let uses_argv_hooks = agent
         .as_deref()
@@ -160,6 +166,7 @@ pub(crate) fn build_spawn_plan(
         terminal_id,
         hook_settings,
         model_label,
+        access,
         flags: SpawnFlags {
             autonomous,
             no_permission,
@@ -180,6 +187,7 @@ pub(crate) fn argv_for(
     hook_command: Option<&str>,
     model_args: &[String],
     resume: bool,
+    access: AgentRunAccess,
 ) -> Result<Vec<String>, SpawnPlanError> {
     match kind {
         TerminalKind::Agent(agent_id) => {
@@ -193,6 +201,7 @@ pub(crate) fn argv_for(
                 pr_number: None,
                 env: Default::default(),
                 skip_permissions,
+                access,
                 hook_settings_path,
             };
             let mut argv = if resume {
@@ -302,6 +311,7 @@ mod tests {
             landed_on_main: false,
             model_alias: None,
             resume: false,
+            access: AgentRunAccess::Default,
             shell_command: String::new(),
         }
     }
@@ -432,5 +442,25 @@ mod tests {
         .expect("unknown agent");
 
         assert_eq!(error, SpawnPlanError::UnknownAgent("missing".into()));
+    }
+
+    #[test]
+    fn read_only_agent_plan_never_enables_unattended_bypass() {
+        let mut cfg = lazybox_config::Config::default();
+        cfg.agent.autonomous_skip_permissions = true;
+        let mut input = input(TerminalKind::Agent("codex".into()));
+        input.autonomous = true;
+        input.access = AgentRunAccess::ReadOnly;
+
+        let plan =
+            build_spawn_plan(input, &cfg, &Registry::default_builtins()).expect("valid plan");
+
+        assert!(!plan.flags.no_permission);
+        assert_eq!(plan.access, AgentRunAccess::ReadOnly);
+        assert!(
+            plan.argv
+                .windows(2)
+                .any(|args| args == ["--sandbox", "read-only"])
+        );
     }
 }

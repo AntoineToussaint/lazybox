@@ -1,7 +1,7 @@
 //! The `Agent` trait and built-in implementations.
 
 use crate::pty::{EncodedPrompt, PromptIntent, PtyProtocol};
-use lazybox_ipc::AgentState;
+use lazybox_ipc::{AgentRunAccess, AgentState};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,6 +22,10 @@ pub struct SpawnCtx {
     /// Codex → `--dangerously-bypass-approvals-and-sandbox`).
     /// Agents without one ignore it.
     pub skip_permissions: bool,
+    /// Host access policy for this launch. Read-only is enforced by the
+    /// built-in agents' CLI flags and takes precedence over
+    /// `skip_permissions`.
+    pub access: AgentRunAccess,
     /// Path to a lazybox-generated settings file the agent should launch
     /// with, when the daemon has wired up structured lifecycle hooks
     /// for this spawn. Claude appends `--settings <path>`; agents
@@ -494,13 +498,28 @@ pub mod builtins {
         }
     }
 
+    fn push_read_only_flags(argv: &mut Vec<String>, ctx: &SpawnCtx) {
+        if ctx.access == AgentRunAccess::ReadOnly {
+            argv.extend([
+                "--safe-mode".into(),
+                "--strict-mcp-config".into(),
+                "--tools".into(),
+                "Read,Glob,Grep".into(),
+                "--permission-mode".into(),
+                "dontAsk".into(),
+            ]);
+        }
+    }
+
     /// Append `--settings <path>` when the daemon generated a hooks
     /// settings file for this spawn. Claude's `--settings` accepts a
     /// file path and takes precedence over user/project settings — the
     /// daemon has already merged the user's hooks into that file (see
     /// [`crate::hook_settings`]), so nothing is clobbered.
     fn push_settings_flag(argv: &mut Vec<String>, ctx: &SpawnCtx) {
-        if let Some(path) = &ctx.hook_settings_path {
+        if ctx.access == AgentRunAccess::Default
+            && let Some(path) = &ctx.hook_settings_path
+        {
             argv.push("--settings".into());
             argv.push(path.to_string_lossy().into_owned());
         }
@@ -530,13 +549,21 @@ pub mod builtins {
         }
         fn spawn(&self, ctx: &SpawnCtx) -> Vec<String> {
             let mut argv = vec!["claude".into()];
-            push_unattended_flags(&mut argv, ctx);
+            if ctx.access == AgentRunAccess::ReadOnly {
+                push_read_only_flags(&mut argv, ctx);
+            } else {
+                push_unattended_flags(&mut argv, ctx);
+            }
             push_settings_flag(&mut argv, ctx);
             argv
         }
         fn resume(&self, ctx: &SpawnCtx) -> Vec<String> {
             let mut argv = vec!["claude".into(), "--continue".into()];
-            push_unattended_flags(&mut argv, ctx);
+            if ctx.access == AgentRunAccess::ReadOnly {
+                push_read_only_flags(&mut argv, ctx);
+            } else {
+                push_unattended_flags(&mut argv, ctx);
+            }
             push_settings_flag(&mut argv, ctx);
             argv
         }
@@ -647,6 +674,22 @@ pub mod builtins {
         ]
     }
 
+    fn codex_read_only_flags(ctx: &SpawnCtx) -> Vec<String> {
+        if ctx.access != AgentRunAccess::ReadOnly {
+            return Vec::new();
+        }
+        vec![
+            "--sandbox".into(),
+            "read-only".into(),
+            "--ask-for-approval".into(),
+            "never".into(),
+            "-c".into(),
+            "mcp_servers={}".into(),
+            "-c".into(),
+            "hooks={}".into(),
+        ]
+    }
+
     /// Escape a string for a TOML basic (`"…"`) string. Codex's `-c`
     /// overrides are parsed as TOML, and the hook command embeds the
     /// lazybox binary path plus quoted arguments, so its inner `"` and
@@ -688,7 +731,11 @@ pub mod builtins {
         }
         fn spawn(&self, ctx: &SpawnCtx) -> Vec<String> {
             let mut argv = vec!["codex".into()];
-            argv.extend(codex_unattended_flags(ctx));
+            if ctx.access == AgentRunAccess::ReadOnly {
+                argv.extend(codex_read_only_flags(ctx));
+            } else {
+                argv.extend(codex_unattended_flags(ctx));
+            }
             argv
         }
 
@@ -699,7 +746,11 @@ pub mod builtins {
         /// instead of starting blank.
         fn resume(&self, ctx: &SpawnCtx) -> Vec<String> {
             let mut argv = vec!["codex".into(), "resume".into(), "--last".into()];
-            argv.extend(codex_unattended_flags(ctx));
+            if ctx.access == AgentRunAccess::ReadOnly {
+                argv.extend(codex_read_only_flags(ctx));
+            } else {
+                argv.extend(codex_unattended_flags(ctx));
+            }
             argv
         }
 
@@ -892,6 +943,7 @@ pub mod builtins {
 mod tests {
     use super::builtins::Claude;
     use super::{Agent, LlmProvider, SpawnCtx, StructuredAgentProtocol};
+    use lazybox_ipc::AgentRunAccess;
 
     const SKIP_FLAG: &str = "--dangerously-skip-permissions";
     const STRICT_MCP_FLAG: &str = "--strict-mcp-config";
@@ -1068,6 +1120,32 @@ mod tests {
     }
 
     #[test]
+    fn claude_read_only_launch_disables_mutating_and_ambient_tools() {
+        let claude = Claude;
+        let ctx = SpawnCtx {
+            skip_permissions: true,
+            access: AgentRunAccess::ReadOnly,
+            hook_settings_path: Some("/run/hooks/settings-7.json".into()),
+            ..Default::default()
+        };
+
+        for argv in [claude.spawn(&ctx), claude.resume(&ctx)] {
+            assert!(
+                argv.windows(2)
+                    .any(|args| args == ["--tools", "Read,Glob,Grep"])
+            );
+            assert!(
+                argv.windows(2)
+                    .any(|args| args == ["--permission-mode", "dontAsk"])
+            );
+            assert!(argv.iter().any(|arg| arg == "--safe-mode"));
+            assert!(argv.iter().any(|arg| arg == "--strict-mcp-config"));
+            assert!(!argv.iter().any(|arg| arg == SKIP_FLAG));
+            assert!(!argv.iter().any(|arg| arg == "--settings"));
+        }
+    }
+
+    #[test]
     fn claude_build_hook_settings_wires_command() {
         let claude = Claude;
         let settings = claude
@@ -1117,6 +1195,34 @@ mod tests {
         assert!(!resumed.contains(&"--dangerously-bypass-hook-trust".to_string()));
         // The unattended tail matches spawn's exactly.
         assert_eq!(resumed[3..], codex.spawn(&on)[1..]);
+    }
+
+    #[test]
+    fn codex_read_only_launch_enforces_sandbox_without_bypass() {
+        let codex = super::builtins::Codex;
+        let ctx = SpawnCtx {
+            skip_permissions: true,
+            access: AgentRunAccess::ReadOnly,
+            ..Default::default()
+        };
+
+        for argv in [codex.spawn(&ctx), codex.resume(&ctx)] {
+            assert!(
+                argv.windows(2)
+                    .any(|args| args == ["--sandbox", "read-only"])
+            );
+            assert!(
+                argv.windows(2)
+                    .any(|args| args == ["--ask-for-approval", "never"])
+            );
+            assert!(argv.windows(2).any(|args| args == ["-c", "mcp_servers={}"]));
+            assert!(argv.windows(2).any(|args| args == ["-c", "hooks={}"]));
+            assert!(
+                !argv
+                    .iter()
+                    .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox")
+            );
+        }
     }
 
     #[test]

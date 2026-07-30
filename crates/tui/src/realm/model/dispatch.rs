@@ -339,8 +339,10 @@ impl<T: TerminalAdapter> Model<T> {
                     // shared checkout, so `session_id` is None.
                     Action::SpawnAgentOnMain(agent_id) => vec![IpcCommand::Spawn {
                         model_alias: None,
+                        access: lazybox_ipc::AgentRunAccess::Default,
                         session_key: session_key.clone(),
                         session_id: None,
+                        client_request_id: None,
                         kind: lazybox_ipc::TerminalKind::Agent(agent_id.clone()),
                         cwd: None,
                         initial_prompt: None,
@@ -348,8 +350,10 @@ impl<T: TerminalAdapter> Model<T> {
                     }],
                     Action::SpawnShellOnMain => vec![IpcCommand::Spawn {
                         model_alias: None,
+                        access: lazybox_ipc::AgentRunAccess::Default,
                         session_key: session_key.clone(),
                         session_id: None,
+                        client_request_id: None,
                         kind: lazybox_ipc::TerminalKind::Shell,
                         cwd: None,
                         initial_prompt: None,
@@ -475,8 +479,10 @@ impl<T: TerminalAdapter> Model<T> {
                 if let Some(sk) = session_key {
                     cmds.push(IpcCommand::Spawn {
                         model_alias: None,
+                        access: lazybox_ipc::AgentRunAccess::Default,
                         session_key: sk,
                         session_id,
+                        client_request_id: None,
                         kind: lazybox_ipc::TerminalKind::Shell,
                         cwd: None,
                         initial_prompt: None,
@@ -488,8 +494,10 @@ impl<T: TerminalAdapter> Model<T> {
                 if let Some(sk) = session_key {
                     cmds.push(IpcCommand::Spawn {
                         model_alias: None,
+                        access: lazybox_ipc::AgentRunAccess::Default,
                         session_key: sk,
                         session_id,
+                        client_request_id: None,
                         kind: lazybox_ipc::TerminalKind::Agent(agent_id.clone()),
                         cwd: None,
                         initial_prompt: None,
@@ -507,8 +515,10 @@ impl<T: TerminalAdapter> Model<T> {
                 if let Some(sk) = session_key {
                     cmds.push(IpcCommand::Spawn {
                         model_alias: None,
+                        access: lazybox_ipc::AgentRunAccess::Default,
                         session_key: sk,
                         session_id: None,
+                        client_request_id: None,
                         kind: lazybox_ipc::TerminalKind::Agent(agent_id.clone()),
                         cwd: None,
                         initial_prompt: None,
@@ -520,8 +530,10 @@ impl<T: TerminalAdapter> Model<T> {
                 if let Some(sk) = session_key {
                     cmds.push(IpcCommand::Spawn {
                         model_alias: None,
+                        access: lazybox_ipc::AgentRunAccess::Default,
                         session_key: sk,
                         session_id: None,
+                        client_request_id: None,
                         kind: lazybox_ipc::TerminalKind::Shell,
                         cwd: None,
                         initial_prompt: None,
@@ -556,6 +568,7 @@ impl<T: TerminalAdapter> Model<T> {
                     cmds.push(IpcCommand::Spawn {
                         session_key: sk,
                         session_id,
+                        client_request_id: None,
                         kind: lazybox_ipc::TerminalKind::Agent(
                             self.sidebar.default_agent().to_string(),
                         ),
@@ -563,6 +576,7 @@ impl<T: TerminalAdapter> Model<T> {
                         initial_prompt: None,
                         on_main: false,
                         model_alias: Some(alias.clone()),
+                        access: lazybox_ipc::AgentRunAccess::Default,
                     });
                 }
             }
@@ -1186,7 +1200,6 @@ impl<T: TerminalAdapter> Model<T> {
                 self.mount_conversion_role_picker(super::ConversionDraft {
                     source_terminal,
                     source: source_key,
-                    session_id,
                     source_name,
                     agent,
                 });
@@ -1310,11 +1323,13 @@ impl<T: TerminalAdapter> Model<T> {
                 let spawn = IpcCommand::Spawn {
                     session_key: (&workspace_key).into(),
                     session_id,
+                    client_request_id: None,
                     kind: lazybox_ipc::TerminalKind::Agent(agent_id),
                     cwd: None,
                     initial_prompt: prompt,
                     on_main: false,
                     model_alias,
+                    access: lazybox_ipc::AgentRunAccess::Default,
                 };
                 let command = match terminal_id {
                     Some(terminal_id) => self.rewrite_spawn_to_terminal(spawn, terminal_id),

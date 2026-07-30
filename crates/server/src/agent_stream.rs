@@ -119,9 +119,20 @@ impl AgentStreamConfig {
             argv.extend([
                 "--ignore-user-config".to_string(),
                 "--ignore-rules".to_string(),
+                "-c".to_string(),
+                "mcp_servers={}".to_string(),
+                "-c".to_string(),
+                "hooks={}".to_string(),
             ]);
+            if resuming {
+                argv.extend([
+                    "-c".to_string(),
+                    "sandbox_mode=\"read-only\"".to_string(),
+                    "-c".to_string(),
+                    "approval_policy=\"never\"".to_string(),
+                ]);
+            }
         }
-        // The initial turn establishes the thread's sandbox policy.
         if !resuming {
             argv.extend(["--sandbox".to_string(), "read-only".to_string()]);
         }

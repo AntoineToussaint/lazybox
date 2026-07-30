@@ -1482,6 +1482,7 @@ impl TerminalStack {
     pub(crate) fn prepare_agent_replacement(
         &mut self,
         id: TerminalId,
+        client_request_id: &str,
         cmds: &mut Vec<Command>,
     ) -> bool {
         let Some(slot) = self.terminals.get(&id) else {
@@ -1492,8 +1493,15 @@ impl TerminalStack {
             return false;
         }
         self.closing.insert(id);
-        cmds.push(Command::Close { terminal_id: id });
+        cmds.push(Command::Close {
+            terminal_id: id,
+            client_request_id: Some(client_request_id.into()),
+        });
         true
+    }
+
+    pub(crate) fn cancel_agent_replacement(&mut self, id: TerminalId) {
+        self.closing.remove(&id);
     }
 
     /// The session a tracked terminal belongs to. Used by the spawn-
@@ -3625,8 +3633,10 @@ impl TerminalStack {
         self.pending_split = Some((direction, std::time::Instant::now()));
         cmds.push(Command::Spawn {
             model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
             session_key,
             session_id: None,
+            client_request_id: None,
             kind: TerminalKind::Shell,
             cwd: None,
             initial_prompt: None,
@@ -3755,8 +3765,10 @@ impl TerminalStack {
         }
         cmds.push(Command::Spawn {
             model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
             session_key: slot.session_key.clone(),
             session_id: None,
+            client_request_id: None,
             kind: slot.kind.clone(),
             cwd: None,
             initial_prompt: None,
@@ -3782,7 +3794,10 @@ impl TerminalStack {
                     // `TerminalExited` tears the pane down instead of
                     // keeping it as an exited agent pane (#356).
                     self.closing.insert(id);
-                    cmds.push(Command::Close { terminal_id: id });
+                    cmds.push(Command::Close {
+                        terminal_id: id,
+                        client_request_id: None,
+                    });
                 }
             }
             return;
@@ -3820,7 +3835,10 @@ impl TerminalStack {
                     self.terminals.remove(&tid);
                 } else {
                     self.closing.insert(tid);
-                    cmds.push(Command::Close { terminal_id: tid });
+                    cmds.push(Command::Close {
+                        terminal_id: tid,
+                        client_request_id: None,
+                    });
                 }
             }
             self.persist_layout(cmds);
@@ -5469,12 +5487,14 @@ mod selection_offset_tests {
         assert!(stack.terminal_is_on_main(TerminalId(1)));
 
         let mut commands = Vec::new();
-        assert!(stack.prepare_agent_replacement(TerminalId(1), &mut commands));
+        assert!(stack.prepare_agent_replacement(TerminalId(1), "conversion-1", &mut commands));
         assert!(matches!(
             commands.as_slice(),
             [Command::Close {
-                terminal_id: TerminalId(1)
+                terminal_id: TerminalId(1),
+                client_request_id: Some(request_id),
             }]
+            if request_id == "conversion-1"
         ));
         stack.on_event(&Event::TerminalExited {
             terminal_id: TerminalId(1),
@@ -5494,7 +5514,7 @@ mod selection_offset_tests {
         });
         let mut commands = Vec::new();
 
-        assert!(!stack.prepare_agent_replacement(TerminalId(1), &mut commands));
+        assert!(!stack.prepare_agent_replacement(TerminalId(1), "conversion-1", &mut commands));
         assert!(commands.is_empty());
         assert!(!stack.terminals.contains_key(&TerminalId(1)));
     }
@@ -8366,7 +8386,8 @@ mod agent_crash_tests {
             matches!(
                 cmds.as_slice(),
                 [Command::Close {
-                    terminal_id: TerminalId(1)
+                    terminal_id: TerminalId(1),
+                    ..
                 }]
             ),
             "close pushes a daemon-side kill",

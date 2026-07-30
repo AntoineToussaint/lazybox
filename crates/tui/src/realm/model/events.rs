@@ -307,15 +307,29 @@ impl<T: TerminalAdapter> Model<T> {
         let Some(prompt) = conversion.target_prompt.clone() else {
             return;
         };
+        let Some(session_id) = conversion.source_session_id else {
+            self.conversion = None;
+            self.flash_info("session conversion stopped — source session ownership was lost");
+            return;
+        };
         conversion.phase = super::ConversionPhase::Spawning;
         let command = IpcCommand::Spawn {
             session_key: conversion.draft.source.clone(),
-            session_id: conversion.draft.session_id,
+            session_id: Some(session_id),
+            client_request_id: Some(conversion.request_id.0.clone()),
             kind: lazybox_ipc::TerminalKind::Agent(conversion.draft.agent.clone()),
             cwd: None,
             initial_prompt: Some(prompt),
             on_main: false,
             model_alias: None,
+            access: match conversion.role {
+                lazybox_core::prompts::AgentHandoffRole::Continue => {
+                    lazybox_ipc::AgentRunAccess::Default
+                }
+                lazybox_core::prompts::AgentHandoffRole::Critic => {
+                    lazybox_ipc::AgentRunAccess::ReadOnly
+                }
+            },
         };
         self.spawn_follow_to = Some(conversion.draft.source.clone());
         self.last_spawn = Some(command.clone());
@@ -334,6 +348,8 @@ impl<T: TerminalAdapter> Model<T> {
             IpcEvent::AgentRunStarted {
                 request_id,
                 run_id,
+                session_key,
+                session_id,
                 ..
             } if self.conversion.as_ref().is_some_and(|conversion| {
                 conversion.phase == super::ConversionPhase::Starting
@@ -341,7 +357,17 @@ impl<T: TerminalAdapter> Model<T> {
             }) =>
             {
                 if let Some(conversion) = self.conversion.as_mut() {
+                    let Some(session_id) = session_id else {
+                        self.send_cmd(IpcCommand::InterruptAgentRun { run_id: *run_id });
+                        self.conversion = None;
+                        self.flash_info(
+                            "session conversion stopped — source terminal has no owning session",
+                        );
+                        return true;
+                    };
                     conversion.run_id = Some(*run_id);
+                    conversion.draft.source = session_key.clone();
+                    conversion.source_session_id = Some(*session_id);
                     conversion.phase = super::ConversionPhase::Capturing;
                 }
                 true
@@ -352,7 +378,15 @@ impl<T: TerminalAdapter> Model<T> {
                     .as_ref()
                     .is_some_and(|conversion| conversion.run_id == Some(*run_id)) =>
             {
-                if let Some(conversion) = self.conversion.as_mut() {
+                const MAX_HANDOFF_BYTES: usize = 128 * 1024;
+                let too_large = self.conversion.as_ref().is_some_and(|conversion| {
+                    conversion.response.len().saturating_add(delta.len()) > MAX_HANDOFF_BYTES
+                });
+                if too_large {
+                    self.conversion = None;
+                    self.send_cmd(IpcCommand::InterruptAgentRun { run_id: *run_id });
+                    self.flash_info("session conversion stopped — agent handoff exceeded 128 KiB");
+                } else if let Some(conversion) = self.conversion.as_mut() {
                     conversion.response.push_str(delta);
                 }
                 true
@@ -381,21 +415,28 @@ impl<T: TerminalAdapter> Model<T> {
                     .as_deref()
                     .filter(|text| !text.trim().is_empty())
                     .unwrap_or(&conversion.response)
-                    .trim();
+                    .trim()
+                    .to_string();
                 if handoff.is_empty() {
                     self.flash_info(
                         "session conversion stopped — the agent returned an empty handoff",
                     );
                     return true;
                 }
+                if handoff.len() > 128 * 1024 {
+                    self.flash_info("session conversion stopped — agent handoff exceeded 128 KiB");
+                    return true;
+                }
                 conversion.target_prompt = Some(lazybox_core::prompts::build_handoff_role_prompt(
                     conversion.role,
-                    handoff,
+                    &handoff,
                 ));
                 let mut commands = Vec::new();
-                let awaiting_exit = self
-                    .terminals
-                    .prepare_agent_replacement(conversion.draft.source_terminal, &mut commands);
+                let awaiting_exit = self.terminals.prepare_agent_replacement(
+                    conversion.draft.source_terminal,
+                    &conversion.request_id.0,
+                    &mut commands,
+                );
                 conversion.phase = if awaiting_exit {
                     super::ConversionPhase::AwaitingSourceExit
                 } else {
@@ -457,15 +498,11 @@ impl<T: TerminalAdapter> Model<T> {
                 self.start_conversion_target();
                 false
             }
-            IpcEvent::TerminalSpawned {
-                session_key,
-                kind: lazybox_ipc::TerminalKind::Agent(agent),
-                ..
-            } if self.conversion.as_ref().is_some_and(|conversion| {
-                conversion.phase == super::ConversionPhase::Spawning
-                    && conversion.draft.source == *session_key
-                    && conversion.draft.agent == *agent
-            }) =>
+            IpcEvent::CommandCompleted { client_request_id }
+                if self.conversion.as_ref().is_some_and(|conversion| {
+                    conversion.phase == super::ConversionPhase::Spawning
+                        && conversion.request_id.0.as_str() == client_request_id
+                }) =>
             {
                 if let Some(conversion) = self.conversion.take() {
                     self.flash_info(format!(
@@ -475,15 +512,36 @@ impl<T: TerminalAdapter> Model<T> {
                         conversion.draft.agent,
                     ));
                 }
-                false
+                true
             }
-            IpcEvent::ProviderError { source, .. }
-                if source.starts_with("spawn")
-                    && self.conversion.as_ref().is_some_and(|conversion| {
-                        conversion.phase == super::ConversionPhase::Spawning
-                    }) =>
+            IpcEvent::CommandFailed {
+                client_request_id,
+                message,
+            } if self.conversion.as_ref().is_some_and(|conversion| {
+                conversion.request_id.0.as_str() == client_request_id
+                    && matches!(
+                        conversion.phase,
+                        super::ConversionPhase::AwaitingSourceExit
+                            | super::ConversionPhase::Spawning
+                    )
+            }) =>
             {
-                self.conversion = None;
+                if let Some(conversion) = self.conversion.take() {
+                    self.terminals
+                        .cancel_agent_replacement(conversion.draft.source_terminal);
+                }
+                self.flash_info(format!("session conversion stopped — {message}"));
+                true
+            }
+            IpcEvent::TerminalsRebadged { from, to }
+                if self
+                    .conversion
+                    .as_ref()
+                    .is_some_and(|conversion| conversion.draft.source == *from) =>
+            {
+                if let Some(conversion) = self.conversion.as_mut() {
+                    conversion.draft.source = to.clone();
+                }
                 false
             }
             _ => false,
@@ -791,6 +849,8 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::ProviderCredentialsListed { .. }
                 | IpcEvent::TerminalInputRejected { .. }
                 | IpcEvent::CommandRejected { .. }
+                | IpcEvent::CommandCompleted { .. }
+                | IpcEvent::CommandFailed { .. }
                 | IpcEvent::AgentCliUpdatesChecked { .. }
                 | IpcEvent::AgentCliUpdateFinished { .. }
                 | IpcEvent::SnippetDelivered { .. }
@@ -1465,6 +1525,8 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::ProviderCredentialsListed { .. }
             | IpcEvent::TerminalInputRejected { .. }
             | IpcEvent::CommandRejected { .. }
+            | IpcEvent::CommandCompleted { .. }
+            | IpcEvent::CommandFailed { .. }
             | IpcEvent::AgentCliUpdatesChecked { .. }
             | IpcEvent::AgentCliUpdateFinished { .. }
             | IpcEvent::SnippetDelivered { .. }
@@ -1681,6 +1743,8 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::ProviderCredentialsListed { .. }
                 | IpcEvent::TerminalInputRejected { .. }
                 | IpcEvent::CommandRejected { .. }
+                | IpcEvent::CommandCompleted { .. }
+                | IpcEvent::CommandFailed { .. }
                 | IpcEvent::AgentCliUpdatesChecked { .. }
                 | IpcEvent::AgentCliUpdateFinished { .. }
                 | IpcEvent::SnippetDelivered { .. }

@@ -19,6 +19,7 @@ fn sample_ctx() -> SpawnCtx {
         pr_number: Some("1".into()),
         env: HashMap::new(),
         skip_permissions: false,
+        access: lazybox_ipc::AgentRunAccess::Default,
         hook_settings_path: None,
     }
 }

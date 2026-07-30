@@ -483,10 +483,12 @@ pub fn resolve_pick<P: PickPayload>(picks: &[P], flow: PickFlow) -> PickOutcome<
                     model_alias: None,
                     session_key: workspace_key.clone(),
                     session_id: None,
+                    client_request_id: None,
                     kind: TerminalKind::Shell,
                     cwd: None,
                     initial_prompt: None,
                     on_main: false,
+                    access: lazybox_ipc::AgentRunAccess::Default,
                 };
                 let notice = format!(
                     "Provisioning worktree for {workspace_key} — opening in {} when ready…",

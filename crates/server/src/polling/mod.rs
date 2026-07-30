@@ -1397,10 +1397,12 @@ pub async fn tick_with_state(
                 });
                 if source.name() == lazybox_gh::SOURCE {
                     let now = Utc::now();
-                    let rate_limit_wait =
-                        config.gh_client_cache.lock().as_ref().and_then(|client| {
-                            github_rate_limit_wait(&client.rate_snapshot(), now)
-                        });
+                    let rate_limit_wait = config
+                        .poll
+                        .gh_client_cache
+                        .lock()
+                        .as_ref()
+                        .and_then(|client| github_rate_limit_wait(&client.rate_snapshot(), now));
                     if let Some(wait) = rate_limit_wait {
                         let secs = wait.retry_after_secs(now);
                         max_retry_after_secs =
@@ -1476,6 +1478,7 @@ pub async fn tick_with_state(
                 let now = Utc::now();
                 let rate_limit_wait = if source.name() == lazybox_gh::SOURCE {
                     config
+                        .poll
                         .gh_client_cache
                         .lock()
                         .as_ref()
@@ -5503,7 +5506,7 @@ mod tick_noop_skip_tests {
         reset_at: chrono::DateTime<Utc>,
     ) -> (ServerConfig, tokio::sync::broadcast::Receiver<Event>) {
         let config = ServerConfig::with_store(Arc::new(lazybox_store::MemoryStore::new()));
-        *config.gh_client_cache.lock() = Some(
+        *config.poll.gh_client_cache.lock() = Some(
             lazybox_gh::GhClient::stub_with_rate_limit_for_tests(
                 "test",
                 "fingerprint",

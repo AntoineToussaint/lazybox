@@ -154,6 +154,22 @@ fn read_only_codex_run_ignores_ambient_extensions() {
     for flag in ["--ignore-user-config", "--ignore-rules"] {
         assert!(resume.iter().any(|arg| arg == flag), "missing {flag}");
     }
+    for override_value in [
+        "mcp_servers={}",
+        "hooks={}",
+        "sandbox_mode=\"read-only\"",
+        "approval_policy=\"never\"",
+    ] {
+        assert!(
+            resume.windows(2).any(|args| args == ["-c", override_value]),
+            "missing read-only resume override {override_value}: {resume:?}"
+        );
+    }
+    assert!(
+        !resume
+            .iter()
+            .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox")
+    );
 }
 
 #[test]

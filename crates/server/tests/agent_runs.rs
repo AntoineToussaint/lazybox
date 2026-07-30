@@ -156,6 +156,7 @@ async fn stream_json_agent_run_emits_normalized_events_until_process_exit() {
             request_id: AgentRunRequestId("stream-request".into()),
             session_key: "test:stream".into(),
             session_id: None,
+            source_terminal_id: None,
             agent: "fake-stream".into(),
             mode: AgentRuntimeMode::StreamJson,
             cwd: None,
@@ -385,6 +386,7 @@ async fn codex_turn_processes_resume_as_one_logical_run() {
             request_id: AgentRunRequestId("codex-request".into()),
             session_key: "lazybox:help".into(),
             session_id: None,
+            source_terminal_id: None,
             agent: "fake-codex".into(),
             mode: AgentRuntimeMode::StreamJson,
             cwd: None,
@@ -517,6 +519,7 @@ async fn workspace_less_run_resolves_to_neutral_cwd() {
             request_id: AgentRunRequestId("workspace-less-request".into()),
             session_key: "lazybox:help".into(),
             session_id: None,
+            source_terminal_id: None,
             agent: "fake-stream".into(),
             mode: AgentRuntimeMode::StreamJson,
             cwd: None,
@@ -539,6 +542,103 @@ async fn workspace_less_run_resolves_to_neutral_cwd() {
     // FakeStreamAgent has no LLM provider, so no gateway env applies —
     // regardless of the host's YAML.
     assert!(config.env.is_empty());
+}
+
+#[tokio::test]
+async fn source_terminal_ownership_selects_the_exact_session_worktree() {
+    let captured = Arc::new(std::sync::Mutex::new(None));
+    let mut config = ServerConfig::in_memory();
+    config.agents.register(Arc::new(FakeStreamAgent));
+    config.agent_stream_spawner = Arc::new(CapturingSpawner {
+        captured: captured.clone(),
+    });
+
+    let workspace_key = lazybox_core::WorkspaceKey::new("github:o/r#649");
+    let session_key: lazybox_core::SessionKey = (&workspace_key).into();
+    let first_dir = tempfile::tempdir().unwrap();
+    let second_dir = tempfile::tempdir().unwrap();
+    let mut workspace =
+        lazybox_core::Workspace::empty(workspace_key.clone(), "main", chrono::Utc::now());
+    let first = lazybox_core::WorkspaceSession::new(
+        workspace_key.clone(),
+        lazybox_core::SessionKind::Agent {
+            agent_id: "fake-stream".into(),
+        },
+        first_dir.path().to_path_buf(),
+        chrono::Utc::now(),
+    );
+    let first_id = first.id;
+    workspace.add_session(first);
+    let second = lazybox_core::WorkspaceSession::new(
+        workspace_key.clone(),
+        lazybox_core::SessionKind::Shell,
+        second_dir.path().to_path_buf(),
+        chrono::Utc::now() + chrono::Duration::seconds(1),
+    );
+    let second_id = second.id;
+    workspace.add_session(second);
+    config
+        .store
+        .save_workspace(&lazybox_store::WorkspaceRecord {
+            key: workspace_key.as_str().into(),
+            created_at: workspace.created_at,
+            workspace_json: Some(serde_json::to_string(&workspace).unwrap()),
+        })
+        .unwrap();
+
+    let source_terminal = lazybox_ipc::TerminalId(77);
+    config
+        .terminal
+        .register_terminal(
+            source_terminal,
+            "fake-backend".into(),
+            session_key.clone(),
+            lazybox_ipc::TerminalKind::Agent("fake-stream".into()),
+        )
+        .await;
+    config
+        .terminal
+        .associate_session(source_terminal, first_id)
+        .await;
+
+    let (mut client, server) = channel::pair();
+    tokio::spawn(async move {
+        Server::new(config).serve(server).await.unwrap();
+    });
+    client
+        .send(Command::StartAgentRun {
+            request_id: AgentRunRequestId("exact-source".into()),
+            session_key: "github:o/r#stale".into(),
+            session_id: Some(second_id),
+            source_terminal_id: Some(source_terminal),
+            agent: "fake-stream".into(),
+            mode: AgentRuntimeMode::StreamJson,
+            cwd: None,
+            initial_input: None,
+            resume_latest: true,
+            access: lazybox_ipc::AgentRunAccess::ReadOnly,
+        })
+        .unwrap();
+
+    loop {
+        match recv_agent_event(&mut client).await {
+            Event::AgentRunStarted {
+                request_id,
+                session_key: resolved_session_key,
+                session_id,
+                ..
+            } => {
+                assert_eq!(request_id, AgentRunRequestId("exact-source".into()));
+                assert_eq!(session_id, Some(first_id));
+                assert_eq!(resolved_session_key, session_key);
+                break;
+            }
+            Event::AutoFixPolicyConfig { .. } | Event::ShellCommandConfig { .. } => {}
+            other => panic!("expected AgentRunStarted, got {other:?}"),
+        }
+    }
+    let stream = captured.lock().unwrap().take().expect("spawner invoked");
+    assert_eq!(stream.cwd.as_deref(), Some(first_dir.path()));
 }
 
 /// stdout dying mid-run — always an error before this fix's coverage.
@@ -590,6 +690,7 @@ async fn stdout_error_emits_run_finished_with_error() {
             request_id: AgentRunRequestId("stdout-error-request".into()),
             session_key: "test:stream-err".into(),
             session_id: None,
+            source_terminal_id: None,
             agent: "fake-stream".into(),
             mode: AgentRuntimeMode::StreamJson,
             cwd: None,
@@ -636,6 +737,7 @@ async fn terminal_mode_agent_run_reports_that_spawn_should_be_used() {
             request_id: AgentRunRequestId("terminal-request".into()),
             session_key: "test:terminal".into(),
             session_id: None,
+            source_terminal_id: None,
             agent: "claude".into(),
             mode: AgentRuntimeMode::Terminal,
             cwd: None,

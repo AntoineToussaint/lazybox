@@ -641,6 +641,7 @@ async fn stream_route_can_start_structured_agent_run() {
         request_id: AgentRunRequestId("api-stream-request".into()),
         session_key: "api:stream".into(),
         session_id: None,
+        source_terminal_id: None,
         agent: "fake-api-stream".into(),
         mode: AgentRuntimeMode::StreamJson,
         cwd: None,

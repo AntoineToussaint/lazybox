@@ -262,8 +262,10 @@ async fn spawn_and_capture(
     client
         .send(Command::Spawn {
             model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
             session_key: issue_key.as_str().into(),
             session_id: None,
+            client_request_id: None,
             kind,
             cwd: None,
             initial_prompt: None,
@@ -815,8 +817,10 @@ async fn silent_absorb_moves_dead_session_and_real_worktree_to_the_pr() {
         client
             .send(Command::Spawn {
                 model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
                 session_key: pr_key.as_str().into(),
                 session_id: None,
+                client_request_id: None,
                 kind: TerminalKind::Agent("codex".into()),
                 cwd: None,
                 initial_prompt: None,
@@ -957,8 +961,10 @@ async fn collapse_retires_pristine_pr_stub_and_carries_wip_worktree() {
         client
             .send(Command::Spawn {
                 model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
                 session_key: pr_key.as_str().into(),
                 session_id: None,
+                client_request_id: None,
                 kind: TerminalKind::Agent("codex".into()),
                 cwd: None,
                 initial_prompt: None,

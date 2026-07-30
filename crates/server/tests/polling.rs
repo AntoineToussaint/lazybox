@@ -5521,8 +5521,10 @@ mod live_collapse_e2e {
         client
             .send(Command::Spawn {
                 model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
                 session_key: issue_sk.clone(),
                 session_id: None,
+                client_request_id: None,
                 kind: TerminalKind::Agent(agent_id.into()),
                 cwd: Some(tmp.path().to_string_lossy().into_owned()),
                 initial_prompt: None,

@@ -117,9 +117,15 @@ impl Terminals {
     pub(crate) fn prepare_agent_replacement(
         &mut self,
         id: TerminalId,
+        client_request_id: &str,
         cmds: &mut Vec<IpcCommand>,
     ) -> bool {
-        self.inner.prepare_agent_replacement(id, cmds)
+        self.inner
+            .prepare_agent_replacement(id, client_request_id, cmds)
+    }
+
+    pub(crate) fn cancel_agent_replacement(&mut self, id: TerminalId) {
+        self.inner.cancel_agent_replacement(id);
     }
 
     /// The session a tracked terminal belongs to. Used by the spawn-

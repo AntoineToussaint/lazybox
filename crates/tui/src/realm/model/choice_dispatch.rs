@@ -337,12 +337,12 @@ impl<T: TerminalAdapter> Model<T> {
                 if let Some(ModalFlow::ConvertSession { draft }) = self.modal_flow.take() {
                     let request_id =
                         lazybox_ipc::AgentRunRequestId(uuid::Uuid::new_v4().to_string());
-                    let prompt =
-                        lazybox_core::prompts::build_agent_handoff_request_prompt(role);
+                    let prompt = lazybox_core::prompts::build_agent_handoff_request_prompt(role);
                     cmds.push(IpcCommand::StartAgentRun {
                         request_id: request_id.clone(),
                         session_key: draft.source.clone(),
-                        session_id: draft.session_id,
+                        session_id: None,
+                        source_terminal_id: Some(draft.source_terminal),
                         agent: draft.agent.clone(),
                         mode: lazybox_ipc::AgentRuntimeMode::StreamJson,
                         cwd: None,
@@ -363,6 +363,7 @@ impl<T: TerminalAdapter> Model<T> {
                         role,
                         request_id,
                         run_id: None,
+                        source_session_id: None,
                         response: String::new(),
                         target_prompt: None,
                         phase: super::ConversionPhase::Starting,

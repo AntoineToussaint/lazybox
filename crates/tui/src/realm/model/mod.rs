@@ -473,7 +473,6 @@ pub(crate) struct HandoffDraft {
 pub(crate) struct ConversionDraft {
     pub(crate) source_terminal: lazybox_ipc::TerminalId,
     pub(crate) source: lazybox_core::SessionKey,
-    pub(crate) session_id: Option<lazybox_core::SessionId>,
     pub(crate) source_name: String,
     pub(crate) agent: String,
 }
@@ -492,6 +491,7 @@ pub(crate) struct PendingConversion {
     pub(crate) role: lazybox_core::prompts::AgentHandoffRole,
     pub(crate) request_id: lazybox_ipc::AgentRunRequestId,
     pub(crate) run_id: Option<lazybox_ipc::AgentRunId>,
+    pub(crate) source_session_id: Option<lazybox_core::SessionId>,
     pub(crate) response: String,
     pub(crate) target_prompt: Option<String>,
     pub(crate) phase: ConversionPhase,
@@ -3218,8 +3218,10 @@ impl<T: TerminalAdapter> Model<T> {
                     Some((workspace_key.clone(), self.setup.editors[0].clone()));
                 self.send_cmd(IpcCommand::Spawn {
                     model_alias: None,
+                    access: lazybox_ipc::AgentRunAccess::Default,
                     session_key: workspace_key.clone(),
                     session_id: None,
+                    client_request_id: None,
                     kind: lazybox_ipc::TerminalKind::Shell,
                     cwd: None,
                     initial_prompt: None,

@@ -71,24 +71,29 @@ fn all_commands() -> Vec<Command> {
         Command::Spawn {
             session_key: key.clone(),
             session_id: None,
+            client_request_id: Some("spawn-1".into()),
             kind: TerminalKind::Agent("claude".into()),
             cwd: Some("/tmp".into()),
             initial_prompt: None,
             on_main: false,
             model_alias: Some("L".into()),
+            access: lazybox_ipc::AgentRunAccess::ReadOnly,
         },
         Command::Spawn {
             session_key: key.clone(),
             session_id: Some(lazybox_core::SessionId::new()),
+            client_request_id: None,
             kind: TerminalKind::Shell,
             cwd: None,
             initial_prompt: None,
             on_main: true,
             model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
         },
         Command::Spawn {
             session_key: key.clone(),
             session_id: None,
+            client_request_id: None,
             kind: TerminalKind::LogTail {
                 path: "/var/log/x.log".into(),
             },
@@ -96,6 +101,7 @@ fn all_commands() -> Vec<Command> {
             initial_prompt: Some("fix the failing CI".into()),
             on_main: false,
             model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
         },
         Command::CancelSpawn {
             session_key: key.clone(),
@@ -120,11 +126,13 @@ fn all_commands() -> Vec<Command> {
         },
         Command::Close {
             terminal_id: TerminalId(7),
+            client_request_id: Some("close-1".into()),
         },
         Command::StartAgentRun {
             request_id: AgentRunRequestId("request-1".into()),
             session_key: key.clone(),
             session_id: Some(lazybox_core::SessionId::new()),
+            source_terminal_id: Some(TerminalId(7)),
             agent: "claude".into(),
             mode: AgentRuntimeMode::StreamJson,
             cwd: Some("/tmp/worktree".into()),
@@ -139,6 +147,7 @@ fn all_commands() -> Vec<Command> {
             request_id: AgentRunRequestId("request-2".into()),
             session_key: key.clone(),
             session_id: None,
+            source_terminal_id: None,
             agent: "claude".into(),
             mode: AgentRuntimeMode::Terminal,
             cwd: None,
@@ -209,9 +218,11 @@ fn all_commands() -> Vec<Command> {
             fallback_spawn: Some(SpawnFallback {
                 session_key: key.clone(),
                 session_id: None,
+                client_request_id: Some("fallback-1".into()),
                 kind: TerminalKind::Agent("codex".into()),
                 cwd: Some("/tmp/worktree".into()),
                 model_alias: Some("L".into()),
+                access: lazybox_ipc::AgentRunAccess::ReadOnly,
             }),
             submit: false,
         },
@@ -825,6 +836,13 @@ fn all_events() -> Vec<Event> {
                 },
             }),
         },
+        Event::CommandCompleted {
+            client_request_id: "spawn-1".into(),
+        },
+        Event::CommandFailed {
+            client_request_id: "close-1".into(),
+            message: "backend kill failed".into(),
+        },
     ]
 }
 
@@ -974,6 +992,8 @@ fn event_tag(event: &Event) -> &'static str {
         Event::BranchUpdated { .. } => "BranchUpdated",
         Event::BranchUpdateFailed { .. } => "BranchUpdateFailed",
         Event::SnippetDelivered { .. } => "SnippetDelivered",
+        Event::CommandCompleted { .. } => "CommandCompleted",
+        Event::CommandFailed { .. } => "CommandFailed",
     }
 }
 
@@ -990,7 +1010,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
     );
     assert_eq!(
         event_tags.len(),
-        67,
+        69,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

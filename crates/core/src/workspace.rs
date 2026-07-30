@@ -158,7 +158,8 @@ pub enum CleanupPrompt {
 /// - 0: every record written before the field existed (reads back via
 ///   `#[serde(default)]`).
 /// - 1: the `schema` field itself.
-pub const WORKSPACE_SCHEMA_VERSION: u32 = 1;
+/// - 2: `Session::worktree_branch`.
+pub const WORKSPACE_SCHEMA_VERSION: u32 = 2;
 
 /// Serialize hook for [`Workspace::schema`]: always stamp the CURRENT
 /// version on save, regardless of what version the row was loaded at.
@@ -1560,6 +1561,12 @@ pub struct Session {
     /// manager when the session is first spawned and reused on
     /// subsequent agent runs in the same session.
     pub worktree_path: PathBuf,
+    /// Branch this managed worktree was provisioned on. Persisted with the
+    /// session because workspace metadata can change independently during
+    /// issue-to-PR transfer. `None` for legacy and externally supplied
+    /// sessions whose branch was never recorded.
+    #[serde(default)]
+    pub worktree_branch: Option<String>,
     pub created_at: DateTime<Utc>,
     /// When the daemon last saw output from this session's PTY. None
     /// for compare/log sessions whose state model is different.
@@ -1586,6 +1593,7 @@ impl Session {
             kind,
             state: SessionRunState::Active,
             worktree_path,
+            worktree_branch: None,
             created_at: now,
             last_output_at: None,
             layout: SessionLayout::default(),
@@ -2690,6 +2698,7 @@ mod tests {
             },
             state: SessionRunState::Idle,
             worktree_path: "/tmp/wt".into(),
+            worktree_branch: None,
             created_at: chrono::Utc::now(),
             last_output_at: None,
             layout: SessionLayout::default(),

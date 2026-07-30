@@ -825,10 +825,10 @@ mod tests {
     }
 
     /// A live branch holder needs a user decision before provisioning
-    /// can succeed, so the modal points at the adoption flow without
+    /// can succeed, so the modal points at the existing session without
     /// advertising or binding an impossible retry.
     #[test]
-    fn branch_holder_modal_offers_adoption_instead_of_retry() {
+    fn branch_holder_modal_offers_join_instead_of_retry() {
         let mut st = state();
         st.apply(WorktreeStep::WorktreeAdd, WorktreeStepStatus::Started);
         st.apply(
@@ -842,7 +842,11 @@ mod tests {
         assert_eq!(st.recovery(), Some(WorktreeRecovery::BranchHeldLive));
         let out = render(&mut WorktreeProgress::from_state(&st), 70, 20);
         assert!(out.contains('✗'), "{out}");
-        assert!(out.contains("x a"), "adoption guidance: {out}");
+        assert!(
+            out.contains("join the live session"),
+            "join guidance: {out}"
+        );
+        assert!(!out.contains("x a"), "adopt cannot release a branch: {out}");
         assert!(!out.contains("r retry"), "invalid retry affordance: {out}");
         assert!(out.contains("Esc dismiss"), "{out}");
         let mut failed = WorktreeProgress::from_state(&st);
@@ -852,6 +856,27 @@ mod tests {
                 .is_none(),
             "r must not retry while another live checkout holds the branch"
         );
+    }
+
+    #[test]
+    fn managed_branch_holder_names_the_preservation_recovery() {
+        let mut st = state();
+        st.apply(WorktreeStep::WorktreeAdd, WorktreeStepStatus::Started);
+        st.apply(
+            WorktreeStep::WorktreeAdd,
+            WorktreeStepStatus::Failed(
+                "branch 'feat' is held by the non-live managed worktree at /tmp/other \
+                 — automatic reclaim blocked because the checkout contains ignored local files"
+                    .into(),
+            ),
+        );
+        assert_eq!(st.recovery(), Some(WorktreeRecovery::BranchHeldManaged));
+        let out = render(&mut WorktreeProgress::from_state(&st), 70, 20);
+        assert!(out.contains("ignored local files"), "{out}");
+        assert!(out.contains("managed holder has local state"), "{out}");
+        assert!(out.contains("or remove it"), "{out}");
+        assert!(!out.contains("join the live session"), "{out}");
+        assert!(!out.contains("r retry"), "{out}");
     }
 
     /// The `r` key only fires for a retryable failure — a stray `r`

@@ -359,10 +359,16 @@ pub struct ServerConfig {
     /// bounded by the number of distinct workspace keys seen in this
     /// process (inbox-sized), and a `Mutex<()>` is a few dozen bytes.
     pub workspace_locks: Arc<parking_lot::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
-    /// Serializes ownership changes for managed worktrees. Claims and
-    /// orphan deletion both hold this across discovery, validation, and
-    /// persistence/removal so neither can act on the other's stale view.
+    /// Serializes ownership changes for managed worktrees. Provisioning
+    /// establishes an in-flight claim while holding this lock, then retains
+    /// that claim through persistence; adoption and reclaim validate under
+    /// the same lock so neither can act on a stale ownership view.
     pub(crate) worktree_ownership_lock: Arc<Mutex<()>>,
+    /// Managed paths being provisioned but not yet represented by a
+    /// persisted session. Counts, rather than a set, let concurrent shell
+    /// spawns claim the same first-session path independently without one
+    /// drop making the other invisible to reclaimers.
+    pub(crate) provisioning_worktree_claims: Arc<parking_lot::Mutex<HashMap<PathBuf, usize>>>,
 }
 
 impl ServerConfig {
@@ -479,6 +485,7 @@ impl ServerConfig {
             event_metrics: Arc::new(metrics::EventMetrics::default()),
             workspace_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             worktree_ownership_lock: Arc::new(Mutex::new(())),
+            provisioning_worktree_claims: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         }
     }
 

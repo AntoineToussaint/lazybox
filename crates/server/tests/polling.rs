@@ -2945,6 +2945,7 @@ async fn seed_issue_with_session(
         },
         state: lazybox_core::SessionRunState::Active,
         worktree_path: std::path::PathBuf::from("/tmp/lazybox-test"),
+        worktree_branch: None,
         created_at: Utc::now(),
         last_output_at: None,
         layout: lazybox_core::SessionLayout::default(),
@@ -5192,6 +5193,7 @@ async fn seed_issue_with_n_sessions(
                 "/tmp/lazybox-test/{}-{i}",
                 issue_key.as_str()
             )),
+            worktree_branch: None,
             created_at: Utc::now() + chrono::Duration::seconds(i as i64),
             last_output_at: None,
             layout: lazybox_core::SessionLayout::default(),

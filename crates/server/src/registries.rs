@@ -459,7 +459,10 @@ pub struct SpawnCoordinator {
     /// Enforces one readiness-gated injection per terminal.
     pub(crate) pending_prompt_injections: Arc<parking_lot::Mutex<HashSet<TerminalId>>>,
     /// Closes the provisioning gap before terminal maps can enforce singleton spawns.
-    pub(crate) inflight_spawns: Arc<parking_lot::Mutex<HashMap<(String, String), Arc<Notify>>>>,
+    /// Each claim carries its cancellation signal and whether it targets
+    /// the shared main checkout.
+    pub(crate) inflight_spawns:
+        Arc<parking_lot::Mutex<HashMap<(String, String), (Arc<Notify>, bool)>>>,
     /// Wakes duplicate spawns and teardown without busy-polling.
     pub(crate) inflight_spawn_changed: Arc<Notify>,
 }

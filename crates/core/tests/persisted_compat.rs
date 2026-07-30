@@ -28,7 +28,7 @@ use std::path::PathBuf;
 
 const FIXTURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/workspace_schema_v1.json"
+    "/tests/fixtures/workspace_schema_v2.json"
 );
 
 fn at(h: u32, m: u32) -> DateTime<Utc> {
@@ -176,6 +176,7 @@ fn maximal_workspace() -> Workspace {
             },
             state: SessionRunState::Asking,
             worktree_path: PathBuf::from("/tmp/worktrees/acme-widget/PR-7-add-the-frobnicator"),
+            worktree_branch: Some("feat/frobnicator".into()),
             created_at: at(8, 30),
             last_output_at: Some(at(12, 30)),
             layout: SessionLayout::Splits {
@@ -198,6 +199,7 @@ fn maximal_workspace() -> Workspace {
             kind: SessionKind::Shell,
             state: SessionRunState::Stopped,
             worktree_path: PathBuf::from("/tmp/worktrees/acme-widget/PR-7-add-the-frobnicator-b"),
+            worktree_branch: None,
             created_at: at(9, 0),
             last_output_at: None,
             layout: SessionLayout::Tabs { active: 0 },
@@ -246,6 +248,28 @@ fn v0_legacy_minimal_blob_deserializes() {
     assert!(ws.read_indices.is_empty());
     assert!(ws.snoozed_until.is_none());
     assert_eq!(ws.cleanup_prompt, CleanupPrompt::Unresolved);
+}
+
+/// Schema v1 sessions predate the persisted worktree branch. They remain
+/// readable with an unknown branch, so a current daemon can preserve their
+/// established checkout without inventing intent from mutable workspace data.
+#[test]
+fn v1_sessions_without_worktree_branch_deserialize() {
+    let mut legacy = serde_json::to_value(maximal_workspace()).expect("serialize fixture");
+    legacy["schema"] = serde_json::json!(1);
+    for session in legacy["sessions"].as_array_mut().expect("sessions array") {
+        session
+            .as_object_mut()
+            .expect("session object")
+            .remove("worktree_branch");
+    }
+    let ws = Workspace::decode_persisted(&serde_json::to_string(&legacy).unwrap())
+        .expect("v1 workspace remains readable");
+    assert!(
+        ws.sessions
+            .iter()
+            .all(|session| session.worktree_branch.is_none())
+    );
 }
 
 /// The checked-in current-schema fixture must keep deserializing, and

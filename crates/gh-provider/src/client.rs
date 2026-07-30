@@ -142,7 +142,7 @@ fn is_server_error(e: &GhError) -> bool {
 
 /// Rate-limit hints parsed off a non-success GitHub response. All
 /// three headers are optional on the wire; `parse` never fails.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct RateLimitHeaders {
     /// `Retry-After` in seconds (GitHub only uses the delta-seconds
     /// form, never the HTTP-date form, per its rate-limit docs).
@@ -151,14 +151,28 @@ struct RateLimitHeaders {
     remaining: Option<u32>,
     /// `x-ratelimit-reset` — epoch seconds when the window reopens.
     reset_epoch_secs: Option<u64>,
+    /// `x-ratelimit-resource` (`core`, `search`, `graphql`, ...).
+    resource: Option<String>,
+    limit: Option<u32>,
+    used: Option<u32>,
 }
 
 impl RateLimitHeaders {
-    fn parse(retry_after: Option<&str>, remaining: Option<&str>, reset: Option<&str>) -> Self {
+    fn parse(
+        retry_after: Option<&str>,
+        remaining: Option<&str>,
+        reset: Option<&str>,
+        resource: Option<&str>,
+        limit: Option<&str>,
+        used: Option<&str>,
+    ) -> Self {
         Self {
             retry_after_secs: retry_after.and_then(|v| v.trim().parse().ok()),
             remaining: remaining.and_then(|v| v.trim().parse().ok()),
             reset_epoch_secs: reset.and_then(|v| v.trim().parse().ok()),
+            resource: resource.map(str::to_string),
+            limit: limit.and_then(|v| v.trim().parse().ok()),
+            used: used.and_then(|v| v.trim().parse().ok()),
         }
     }
 
@@ -166,6 +180,7 @@ impl RateLimitHeaders {
     /// explicit `Retry-After`, falling back to the reset timestamp,
     /// then to a conservative 60s default. Clamped to >= 1 so a
     /// clock-skewed reset in the past never produces a hot loop.
+    #[cfg(test)]
     fn wait_secs(&self, now_epoch_secs: u64) -> u64 {
         if let Some(secs) = self.retry_after_secs {
             return secs.max(1);
@@ -263,6 +278,35 @@ pub struct SelectedFetchOutcome {
     pub mentions: Vec<crate::LazyboxMention>,
     pub coverage: FetchCoverage,
     pub pr_coverage: FetchCoverage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackgroundSweepForecast {
+    pub global_points: u32,
+    pub repo_base_points: u32,
+    pub per_repo_points: u32,
+}
+
+impl BackgroundSweepForecast {
+    pub fn required_points(self, run_global: bool, want_prs: bool) -> u32 {
+        if run_global {
+            self.global_points
+        } else if want_prs {
+            self.repo_base_points.saturating_add(self.per_repo_points)
+        } else {
+            self.repo_base_points
+        }
+    }
+
+    pub fn repo_capacity(self, allowance: u32, run_global: bool, limit: usize) -> usize {
+        if run_global || self.per_repo_points == 0 {
+            return 0;
+        }
+        (allowance.saturating_sub(self.repo_base_points) / self.per_repo_points)
+            .try_into()
+            .unwrap_or(usize::MAX)
+            .min(limit)
+    }
 }
 
 #[derive(Debug)]
@@ -574,6 +618,33 @@ fn watched_repo_query(repo: &str, user: &str) -> String {
     format!("is:open is:pr repo:{repo} archived:false -involves:{user}")
 }
 
+fn request_profile(
+    operation: &str,
+) -> (
+    crate::rate_budget::ApiResource,
+    crate::rate_budget::RequestPriority,
+) {
+    use crate::rate_budget::{ApiResource, RequestPriority};
+    match operation {
+        "notifications heartbeat" => (ApiResource::rest("core"), RequestPriority::Recent),
+        "budget-bootstrap" => (ApiResource::Graphql, RequestPriority::Recent),
+        "hot-target batch query" => (ApiResource::Graphql, RequestPriority::Focused),
+        "single-PR notification deep-fetch"
+        | "single-issue notification deep-fetch"
+        | "PR details background prefetch"
+        | "PR search"
+        | "issues search"
+        | "review-requested"
+        | "merged-sweep"
+        | "watched-repo"
+        | "round-robin-repo" => (ApiResource::Graphql, RequestPriority::Recent),
+        operation if operation.starts_with("list ") || operation == "post issue comment" => {
+            (ApiResource::rest("core"), RequestPriority::Interactive)
+        }
+        _ => (ApiResource::Graphql, RequestPriority::Interactive),
+    }
+}
+
 /// Short, non-reversible fingerprint of a credential token. Lets the
 /// polling layer's client cache detect "the token material changed"
 /// (rotation via `gh auth refresh`, a new `GH_TOKEN`, …) without
@@ -611,6 +682,11 @@ pub struct GhClient {
     /// (currently we only construct one, but cheap insurance against
     /// future "spawn a worker pool" ideas).
     budget: std::sync::Arc<parking_lot::Mutex<crate::rate_budget::RateBudget>>,
+    /// GitHub's secondary limits apply across REST and GraphQL. All
+    /// client clones therefore share one concurrency gate, and all
+    /// mutations additionally share a serial lane.
+    request_gate: std::sync::Arc<tokio::sync::Semaphore>,
+    mutation_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
     /// Notifications heartbeat state — `Last-Modified` echo + slow-sweep
     /// timer. Shared across clones so `with_filters` doesn't reset the
     /// 304-conditional or trigger a redundant full sweep.
@@ -699,6 +775,8 @@ impl GhClient {
             budget: std::sync::Arc::new(parking_lot::Mutex::new(
                 crate::rate_budget::RateBudget::default_for_lazybox(),
             )),
+            request_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
+            mutation_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             notifications_state: NotificationsState::shared(),
         })
     }
@@ -723,6 +801,8 @@ impl GhClient {
             budget: std::sync::Arc::new(parking_lot::Mutex::new(
                 crate::rate_budget::RateBudget::default_for_lazybox(),
             )),
+            request_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
+            mutation_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             notifications_state: NotificationsState::shared(),
         })
     }
@@ -756,6 +836,95 @@ impl GhClient {
         self.budget.lock().snapshot()
     }
 
+    pub fn with_background_share(self, share: f64) -> Self {
+        self.budget.lock().set_background_share(share);
+        self
+    }
+
+    pub fn begin_background_tick(
+        &self,
+        interval: std::time::Duration,
+    ) -> crate::rate_budget::BackgroundPlan {
+        self.budget.lock().begin_background_tick(
+            interval,
+            chrono::Utc::now(),
+            std::time::Instant::now(),
+        )
+    }
+
+    pub fn governor_summary(&self) -> String {
+        self.rate_snapshot().compact()
+    }
+
+    pub async fn bootstrap_graphql_budget(&self) -> Result<(), GhError> {
+        self.acquire_or_block("budget-bootstrap")?;
+        let response: graphql::GqlRateBudgetResponse = self
+            .post_graphql_with_retry("budget-bootstrap", &graphql::rate_budget_body())
+            .await?;
+        if let Some(errors) = response.errors {
+            let joined = errors
+                .iter()
+                .map(graphql::GqlError::full)
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(GhError::Graphql(format!(
+                "GraphQL budget bootstrap: {joined}"
+            )));
+        }
+        let data = response
+            .data
+            .ok_or_else(|| GhError::Graphql("GraphQL budget bootstrap returned no data".into()))?;
+        if data.viewer.login != self.user {
+            return Err(GhError::Graphql(
+                "GraphQL budget bootstrap returned a different viewer".into(),
+            ));
+        }
+        tracing::debug!(
+            remaining = data.rate_limit.remaining,
+            limit = data.rate_limit.limit,
+            "GraphQL budget bootstrapped"
+        );
+        Ok(())
+    }
+
+    pub fn background_sweep_forecast(
+        &self,
+        want_prs: bool,
+        scan_issues: bool,
+    ) -> BackgroundSweepForecast {
+        let budget = self.budget.lock();
+        let issue_points = if scan_issues {
+            budget.unit_forecast("issues search", 1)
+        } else {
+            0
+        };
+        if !want_prs {
+            return BackgroundSweepForecast {
+                global_points: issue_points,
+                repo_base_points: issue_points,
+                per_repo_points: 0,
+            };
+        }
+
+        let reviewer_points = budget.unit_forecast("review-requested", 1);
+        let merged_points = budget.unit_forecast("merged-sweep", 1);
+        let watched_points = budget
+            .unit_forecast("watched-repo", 1)
+            .saturating_mul(self.watch_repos.len() as u32);
+        BackgroundSweepForecast {
+            global_points: budget
+                .unit_forecast("PR search", 1)
+                .saturating_add(reviewer_points)
+                .saturating_add(merged_points)
+                .saturating_add(watched_points)
+                .saturating_add(issue_points),
+            repo_base_points: reviewer_points
+                .saturating_add(merged_points)
+                .saturating_add(issue_points),
+            per_repo_points: budget.unit_forecast("round-robin-repo", 1),
+        }
+    }
+
     /// The exact GraphQL search string `fetch_all_prs` will issue.
     /// Exposed so the polling layer / TUI can show the user what
     /// query is actually running — invaluable when debugging "why
@@ -781,14 +950,6 @@ impl GhClient {
         graphql::build_query(&quals)
     }
 
-    /// Try to spend one rate-budget token. Caller must NOT make a
-    /// GraphQL request on `Err` — that's the whole point of the
-    /// budget. Caller should propagate the `AcquireError` so the
-    /// polling layer can surface it as a `Retryable` ProviderError.
-    fn try_acquire(&self) -> Result<(), crate::rate_budget::AcquireError> {
-        self.budget.lock().try_acquire()
-    }
-
     /// POST to `/graphql` with bounded exponential backoff on
     /// transient errors.
     ///
@@ -806,9 +967,8 @@ impl GhClient {
     /// SAME body bytes go out on every attempt — no risk of the
     /// body-clone bug that made us disable octocrab's built-in
     /// retry. The caller has already spent a rate-budget token via
-    /// `acquire_or_block`; we do NOT re-acquire per retry (a
-    /// single 502-then-retry-success is one logical call from
-    /// GitHub's perspective).
+    /// `acquire_or_block`; each retry re-enters admission because
+    /// GitHub charges every HTTP attempt.
     ///
     /// Retry policy:
     /// - Transport variants (Hyper, Service, Http, Json, Io) →
@@ -826,11 +986,15 @@ impl GhClient {
     /// initial attempt = 3 attempts total. Tight enough that a
     /// 60s poll cycle still has headroom; long enough that the
     /// usual <1s blip resolves itself.
-    async fn post_graphql_with_retry<T>(&self, body: &serde_json::Value) -> Result<T, GhError>
+    async fn post_graphql_with_retry<T>(
+        &self,
+        operation: &'static str,
+        body: &serde_json::Value,
+    ) -> Result<T, GhError>
     where
         T: serde::de::DeserializeOwned,
     {
-        self.post_graphql_with_retry_measured(body)
+        self.post_graphql_with_retry_measured(operation, body)
             .await
             .map(|(parsed, _bytes)| parsed)
     }
@@ -840,6 +1004,7 @@ impl GhClient {
     /// path to record per-branch response size for sync profiling.
     async fn post_graphql_with_retry_measured<T>(
         &self,
+        operation: &'static str,
         body: &serde_json::Value,
     ) -> Result<(T, usize), GhError>
     where
@@ -864,14 +1029,24 @@ impl GhClient {
             reason = "the index is the attempt count; see comment above"
         )]
         for attempt in 0..=DELAYS_MS.len() {
+            if attempt > 0 {
+                self.acquire_or_block(operation)?;
+            }
             let outcome = match tokio::time::timeout(
                 REQUEST_TIMEOUT,
-                self.post_graphql_once::<T>(body),
+                self.post_graphql_once::<T>(operation, body),
             )
             .await
             {
                 Ok(r) => r,
                 Err(_elapsed) => {
+                    self.budget.lock().observe_failed_response(
+                        operation,
+                        crate::rate_budget::ApiResource::Graphql,
+                        0,
+                        0,
+                        REQUEST_TIMEOUT,
+                    );
                     tracing::warn!(
                         "graphql request exceeded {}s wall-clock; \
                              attempt {}/{} will retry",
@@ -949,15 +1124,42 @@ impl GhClient {
     /// count to attribute response size per branch in
     /// `gh_sync_metrics`. Callers that don't care wrap this via
     /// `post_graphql_with_retry` and drop the size.
-    async fn post_graphql_once<T>(&self, body: &serde_json::Value) -> Result<(T, usize), GhError>
+    async fn post_graphql_once<T>(
+        &self,
+        operation: &'static str,
+        body: &serde_json::Value,
+    ) -> Result<(T, usize), GhError>
     where
         T: serde::de::DeserializeOwned,
     {
-        let response = self
-            .inner
-            ._post("/graphql", Some(body))
+        let started = std::time::Instant::now();
+        let _permit = self
+            .request_gate
+            .acquire()
             .await
-            .map_err(GhError::Api)?;
+            .map_err(|_| GhError::Graphql("GitHub request gate closed".to_string()))?;
+        let query = body
+            .get("query")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let _mutation_guard = if query.trim_start().starts_with("mutation") {
+            Some(self.mutation_gate.lock().await)
+        } else {
+            None
+        };
+        let response = match self.inner._post("/graphql", Some(body)).await {
+            Ok(response) => response,
+            Err(error) => {
+                self.budget.lock().observe_failed_response(
+                    operation,
+                    crate::rate_budget::ApiResource::Graphql,
+                    0,
+                    0,
+                    started.elapsed(),
+                );
+                return Err(GhError::Api(error));
+            }
+        };
         let status = response.status().as_u16();
         // `HeaderMap::get` is case-insensitive, so lowercase here is
         // both the canonical form and what octocrab uses internally.
@@ -976,13 +1178,25 @@ impl GhClient {
             header("retry-after").as_deref(),
             header("x-ratelimit-remaining").as_deref(),
             header("x-ratelimit-reset").as_deref(),
+            header("x-ratelimit-resource").as_deref(),
+            header("x-ratelimit-limit").as_deref(),
+            header("x-ratelimit-used").as_deref(),
         );
-        let raw_body = self
-            .inner
-            .body_to_string(response)
-            .await
-            .map_err(GhError::Api)?;
+        let raw_body = match self.inner.body_to_string(response).await {
+            Ok(body) => body,
+            Err(error) => {
+                self.budget.lock().observe_failed_response(
+                    operation,
+                    crate::rate_budget::ApiResource::Graphql,
+                    status,
+                    0,
+                    started.elapsed(),
+                );
+                return Err(GhError::Api(error));
+            }
+        };
         let byte_len = raw_body.len();
+        let elapsed = started.elapsed();
         // Non-2xx or non-JSON: never attempt to parse — the body is
         // an HTML page / login redirect / GitHub error JSON we'd
         // rather surface verbatim than mis-deserialise.
@@ -995,24 +1209,20 @@ impl GhClient {
             // sleeps out the real window instead of its base cadence.
             if is_rate_limit_response(status, &raw_body, rate_headers.retry_after_secs.is_some()) {
                 let now = chrono::Utc::now();
-                let retry_after_secs = rate_headers.wait_secs(now.timestamp().max(0) as u64);
-                // Feed the observation into the shared budget so
-                // admission control stops admitting until the window
-                // reopens. `remaining` is recorded as 0 regardless of
-                // the header: GitHub is actively refusing requests
-                // (secondary limits fire with primary quota left), so
-                // the *effective* remaining is zero until reset.
-                self.budget
-                    .lock()
-                    .observe(crate::rate_budget::RemoteRateLimit {
-                        remaining: 0,
-                        limit: 0,
-                        reset_at: now
-                            + chrono::Duration::seconds(
-                                retry_after_secs.min(i64::MAX as u64) as i64
-                            ),
-                        observed_at: std::time::Instant::now(),
-                    });
+                let retry_at = self.observe_limit_response(&rate_headers, status, "graphql");
+                self.budget.lock().observe_failed_response(
+                    operation,
+                    crate::rate_budget::ApiResource::Graphql,
+                    status,
+                    byte_len,
+                    elapsed,
+                );
+                let retry_after_secs = retry_at
+                    .signed_duration_since(now)
+                    .to_std()
+                    .unwrap_or_default()
+                    .as_secs()
+                    .max(1);
                 return Err(GhError::RateLimited {
                     retry_after_secs,
                     reason: format!(
@@ -1021,6 +1231,13 @@ impl GhClient {
                     ),
                 });
             }
+            self.budget.lock().observe_failed_response(
+                operation,
+                crate::rate_budget::ApiResource::Graphql,
+                status,
+                byte_len,
+                elapsed,
+            );
             return Err(http_status_error(status, &content_type, &raw_body));
         }
         // 2xx + JSON content-type: this is the success path. A parse
@@ -1030,7 +1247,45 @@ impl GhClient {
         // goes to `tracing` only: it can carry the full GraphQL
         // response (node payloads, JSON braces) which must never reach
         // a user-facing footer notice (issue #305).
-        serde_json::from_str::<T>(&raw_body)
+        serde_json::from_str::<serde_json::Value>(&raw_body)
+            .and_then(|value| {
+                let rate_limit = value
+                    .get("data")
+                    .and_then(|data| data.get("rateLimit"))
+                    .cloned()
+                    .and_then(|rate_limit| {
+                        serde_json::from_value::<graphql::GqlRateLimit>(rate_limit).ok()
+                    });
+                if let Some((rate_limit, reset_at)) = rate_limit.as_ref().and_then(|rate_limit| {
+                    chrono::DateTime::parse_from_rfc3339(&rate_limit.reset_at)
+                        .ok()
+                        .map(|reset_at| (rate_limit, reset_at))
+                }) {
+                    self.budget.lock().observe_graphql_response(
+                        operation,
+                        crate::rate_budget::RemoteRateLimit {
+                            remaining: rate_limit.remaining,
+                            limit: rate_limit.limit,
+                            reset_at: reset_at.with_timezone(&chrono::Utc),
+                            observed_at: std::time::Instant::now(),
+                        },
+                        rate_limit.used,
+                        rate_limit.cost.unwrap_or(1),
+                        status,
+                        byte_len,
+                        elapsed,
+                    );
+                } else {
+                    self.budget.lock().observe_failed_response(
+                        operation,
+                        crate::rate_budget::ApiResource::Graphql,
+                        status,
+                        byte_len,
+                        elapsed,
+                    );
+                }
+                serde_json::from_value::<T>(value)
+            })
             .map(|parsed| (parsed, byte_len))
             .map_err(|e| {
                 tracing::warn!(
@@ -1059,20 +1314,13 @@ impl GhClient {
     /// underlying `AcquireError` Display already describes the
     /// situation.
     fn acquire_or_block(&self, op: &str) -> Result<(), GhError> {
-        if let Err(reason) = self.try_acquire() {
+        let (resource, mut priority) = request_profile(op);
+        if self.notifications_state.lock().force_full_sweep {
+            priority = crate::rate_budget::RequestPriority::Interactive;
+        }
+        if let Err(reason) = self.budget.lock().admit(resource, op, priority, 1) {
             tracing::warn!("{op} blocked by rate budget: {reason}");
-            let retry_after_secs = match &reason {
-                crate::rate_budget::AcquireError::LocalBudgetExhausted { wait_secs } => *wait_secs,
-                crate::rate_budget::AcquireError::RemoteLow { reset_at, .. } => {
-                    // `reset_at` is in the future when this fires (the
-                    // budget check is `reset_at > now`); clamp to >=1
-                    // so we always sleep at least a second instead of
-                    // tight-looping if the wall clock is slewing.
-                    let now = chrono::Utc::now();
-                    let secs = (*reset_at - now).num_seconds();
-                    secs.max(1) as u64
-                }
-            };
+            let retry_after_secs = reason.retry_after_secs(chrono::Utc::now());
             return Err(GhError::RateLimited {
                 retry_after_secs,
                 reason: reason.to_string(),
@@ -1081,21 +1329,72 @@ impl GhClient {
         Ok(())
     }
 
-    /// Record GitHub's reported rate-limit. Wired into every
-    /// successful GraphQL response that includes the `rateLimit`
-    /// field.
-    fn observe_rate_limit(&self, ratelimit: &graphql::GqlRateLimit) {
-        let reset_at = chrono::DateTime::parse_from_rfc3339(&ratelimit.reset_at)
-            .map(|dt| dt.with_timezone(&chrono::Utc))
-            .ok();
-        let Some(reset_at) = reset_at else { return };
-        let observed = crate::rate_budget::RemoteRateLimit {
-            remaining: ratelimit.remaining,
-            limit: ratelimit.limit,
-            reset_at,
-            observed_at: std::time::Instant::now(),
-        };
-        self.budget.lock().observe(observed);
+    async fn request_permit(&self) -> Result<tokio::sync::SemaphorePermit<'_>, GhError> {
+        self.request_gate
+            .acquire()
+            .await
+            .map_err(|_| GhError::Graphql("GitHub request gate closed".to_string()))
+    }
+
+    fn observe_unreported_response(
+        &self,
+        operation: &str,
+        resource: crate::rate_budget::ApiResource,
+        started: std::time::Instant,
+        succeeded: bool,
+    ) {
+        self.budget.lock().observe_unreported_response(
+            operation,
+            resource,
+            if succeeded { 200 } else { 0 },
+            started.elapsed(),
+        );
+    }
+
+    pub fn note_items_changed(&self, items: usize) {
+        self.budget.lock().note_items_changed(items);
+    }
+
+    fn observe_limit_response(
+        &self,
+        headers: &RateLimitHeaders,
+        status: u16,
+        default_resource: &str,
+    ) -> chrono::DateTime<chrono::Utc> {
+        let now = chrono::Utc::now();
+        let resource = headers.resource.as_deref().unwrap_or(default_resource);
+        let mut budget = self.budget.lock();
+        if let Some(seconds) = headers.retry_after_secs {
+            let retry_at =
+                now + chrono::Duration::seconds(seconds.min(i64::MAX as u64).max(1) as i64);
+            if headers.remaining == Some(0) {
+                budget.observe_primary_limit(
+                    resource,
+                    retry_at,
+                    format!("HTTP {status} primary rate limit"),
+                );
+            } else {
+                budget.observe_secondary_limit(
+                    Some(std::time::Duration::from_secs(seconds.max(1))),
+                    now,
+                );
+            }
+            return retry_at;
+        }
+        if headers.remaining == Some(0) {
+            let retry_at = headers
+                .reset_epoch_secs
+                .and_then(|epoch| chrono::DateTime::from_timestamp(epoch as i64, 0))
+                .unwrap_or_else(|| now + chrono::Duration::seconds(60))
+                + chrono::Duration::seconds(1);
+            budget.observe_primary_limit(
+                resource,
+                retry_at,
+                format!("HTTP {status} primary rate limit"),
+            );
+            return retry_at;
+        }
+        budget.observe_secondary_limit(None, now)
     }
 
     /// Set both PR and Issue search qualifiers. Polling builds these
@@ -1131,17 +1430,25 @@ impl GhClient {
             });
         }
 
-        // Orgs the user belongs to. REST endpoint; counts against the
-        // same budget. Setup-wizard call so cost-per-poll impact is
-        // zero, but gating keeps the invariant ("every GitHub HTTP
-        // request goes through the budget") clean.
+        // Orgs the user belongs to. This is a setup-wizard REST call,
+        // so its steady-state poll cost is zero, but it still enters
+        // the shared governor and concurrency gate.
         self.acquire_or_block("list org memberships")?;
-        let orgs: Vec<octocrab::models::orgs::Organization> = self
+        let started = std::time::Instant::now();
+        let _permit = self.request_permit().await?;
+        let result = self
             .inner
             .current()
             .list_org_memberships_for_authenticated_user()
             .send()
-            .await
+            .await;
+        self.observe_unreported_response(
+            "list org memberships",
+            crate::rate_budget::ApiResource::rest("core"),
+            started,
+            result.is_ok(),
+        );
+        let orgs: Vec<octocrab::models::orgs::Organization> = result
             .map_err(GhError::Api)?
             .items
             .into_iter()
@@ -1182,15 +1489,25 @@ impl GhClient {
         // hourly quota — gate every page, not just the first.
         if owner == self.user {
             self.acquire_or_block("list own repos page 1")?;
-            let mut page = self
-                .inner
-                .current()
-                .list_repos_for_authenticated_user()
-                .type_("owner")
-                .per_page(100)
-                .send()
-                .await
-                .map_err(GhError::Api)?;
+            let started = std::time::Instant::now();
+            let mut page = {
+                let _permit = self.request_permit().await?;
+                let result = self
+                    .inner
+                    .current()
+                    .list_repos_for_authenticated_user()
+                    .type_("owner")
+                    .per_page(100)
+                    .send()
+                    .await;
+                self.observe_unreported_response(
+                    "list own repos page 1",
+                    crate::rate_budget::ApiResource::rest("core"),
+                    started,
+                    result.is_ok(),
+                );
+                result.map_err(GhError::Api)?
+            };
             loop {
                 for repo in &page.items {
                     let full = repo
@@ -1204,27 +1521,50 @@ impl GhClient {
                         kind: ScopeKind::Repo,
                     });
                 }
+                if page.next.is_none() {
+                    break;
+                }
                 self.acquire_or_block("list own repos next page")?;
-                page = match self
-                    .inner
-                    .get_page::<octocrab::models::Repository>(&page.next)
-                    .await
-                    .map_err(GhError::Api)?
-                {
+                let started = std::time::Instant::now();
+                let next = {
+                    let _permit = self.request_permit().await?;
+                    let result = self
+                        .inner
+                        .get_page::<octocrab::models::Repository>(&page.next)
+                        .await;
+                    self.observe_unreported_response(
+                        "list own repos next page",
+                        crate::rate_budget::ApiResource::rest("core"),
+                        started,
+                        result.is_ok(),
+                    );
+                    result.map_err(GhError::Api)?
+                };
+                page = match next {
                     Some(next) => next,
                     None => break,
                 };
             }
         } else {
             self.acquire_or_block("list org repos page 1")?;
-            let mut page = self
-                .inner
-                .orgs(owner)
-                .list_repos()
-                .per_page(100)
-                .send()
-                .await
-                .map_err(GhError::Api)?;
+            let started = std::time::Instant::now();
+            let mut page = {
+                let _permit = self.request_permit().await?;
+                let result = self
+                    .inner
+                    .orgs(owner)
+                    .list_repos()
+                    .per_page(100)
+                    .send()
+                    .await;
+                self.observe_unreported_response(
+                    "list org repos page 1",
+                    crate::rate_budget::ApiResource::rest("core"),
+                    started,
+                    result.is_ok(),
+                );
+                result.map_err(GhError::Api)?
+            };
             loop {
                 for repo in &page.items {
                     let full = repo
@@ -1238,13 +1578,26 @@ impl GhClient {
                         kind: ScopeKind::Repo,
                     });
                 }
+                if page.next.is_none() {
+                    break;
+                }
                 self.acquire_or_block("list org repos next page")?;
-                page = match self
-                    .inner
-                    .get_page::<octocrab::models::Repository>(&page.next)
-                    .await
-                    .map_err(GhError::Api)?
-                {
+                let started = std::time::Instant::now();
+                let next = {
+                    let _permit = self.request_permit().await?;
+                    let result = self
+                        .inner
+                        .get_page::<octocrab::models::Repository>(&page.next)
+                        .await;
+                    self.observe_unreported_response(
+                        "list org repos next page",
+                        crate::rate_budget::ApiResource::rest("core"),
+                        started,
+                        result.is_ok(),
+                    );
+                    result.map_err(GhError::Api)?
+                };
+                page = match next {
                     Some(next) => next,
                     None => break,
                 };
@@ -1282,12 +1635,12 @@ impl GhClient {
 
     /// Default cadence for the slow full-sweep. The notifications
     /// heartbeat runs every poll tick (cheap); the heavy `involves:USER`
-    /// search runs at most once every `FULL_SWEEP_INTERVAL`. Picks the
-    /// 10-minute number from #19 — long enough to keep GraphQL cost
-    /// down by an order of magnitude, short enough that the long-tail
-    /// gap (a PR notifications didn't tell us about, e.g. a silent
-    /// `closed` with no comment) closes within a coffee break.
-    pub const FULL_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
+    /// search runs at most once every `FULL_SWEEP_INTERVAL`. The
+    /// conditional notifications heartbeat and targeted hot-row reads
+    /// carry normal freshness. This slower discovery sweep closes
+    /// notification coverage gaps without repeating the broad fan-out
+    /// on every one-minute poll.
+    pub const FULL_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
     /// Cadence for the UNWINDOWED reconcile sweep (issue #14). Most
     /// global sweeps narrow the `involves:` search to
@@ -1302,7 +1655,8 @@ impl GhClient {
     /// reports exhaustive coverage, i.e. the only one allowed to drive
     /// rescope deletion. An hour balances "delete stale rows promptly"
     /// against "pay the heavy 143 KB download rarely."
-    pub const FULL_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+    pub const FULL_RECONCILE_INTERVAL: std::time::Duration =
+        std::time::Duration::from_secs(60 * 60);
 
     /// Should the next sync cycle run a heavy full sweep, or is the
     /// notifications-driven incremental path safe to use? Returns true
@@ -1333,7 +1687,7 @@ impl GhClient {
     /// heartbeat already covered).
     pub fn mark_full_sweep_done(&self) {
         let mut state = self.notifications_state.lock();
-        state.last_full_sweep_at = Some(std::time::Instant::now());
+        state.last_full_sweep_at = Some(chrono::Utc::now());
         state.force_full_sweep = false;
         if state.last_modified.is_none() {
             state.last_modified = Some(notifications::format_http_date(chrono::Utc::now()));
@@ -1376,7 +1730,7 @@ impl GhClient {
         let mut state = self.notifications_state.lock();
         state.last_pr_sweep_at_utc = Some(sweep_started);
         if was_reconcile {
-            state.last_full_reconcile_at = Some(std::time::Instant::now());
+            state.last_full_reconcile_at = Some(chrono::Utc::now());
         }
     }
 
@@ -1401,12 +1755,16 @@ impl GhClient {
     /// Arm the next tick to run a full sweep, bypassing the
     /// `FULL_SWEEP_INTERVAL` gate. Used by the manual `Command::Refresh`
     /// path so a freshly created issue/PR surfaces immediately rather
-    /// than waiting up to 10 min for the next scheduled sweep — the
+    /// than waiting up to 30 min for the next scheduled sweep — the
     /// incremental notifications path never sees an issue the user
     /// created themselves (no self-notification). The flag is one-shot:
     /// `mark_full_sweep_done` clears it once the sweep completes.
     pub fn force_full_sweep(&self) {
         self.notifications_state.lock().force_full_sweep = true;
+    }
+
+    pub fn manual_refresh_pending(&self) -> bool {
+        self.notifications_state.lock().force_full_sweep
     }
 
     /// Snapshot of the current notifications heartbeat state. Read-only;
@@ -1416,18 +1774,26 @@ impl GhClient {
         let s = self.notifications_state.lock();
         NotificationsSnapshot {
             has_last_modified: s.last_modified.is_some(),
-            last_full_sweep_elapsed: s.last_full_sweep_at.map(|i| i.elapsed()),
+            last_full_sweep_elapsed: s
+                .last_full_sweep_at
+                .and_then(|at| chrono::Utc::now().signed_duration_since(at).to_std().ok()),
             heartbeat_backed_off: s.heartbeat_backed_off(),
         }
     }
 
-    /// How long to skip the notifications heartbeat after a failure.
-    /// Matched to [`Self::FULL_SWEEP_INTERVAL`] so a single chronic
-    /// auth/rate-limit problem costs at most one extra round-trip per
-    /// sweep cycle — and clears itself the moment the user fixes
-    /// their token. Shorter would re-fire the broken heartbeat
-    /// repeatedly during an outage; longer would mask a transient
-    /// blip.
+    pub fn sync_cursors(&self) -> crate::SyncCursors {
+        self.notifications_state.lock().cursors()
+    }
+
+    pub fn restore_sync_cursors(&self, cursors: crate::SyncCursors) {
+        self.notifications_state
+            .lock()
+            .restore_cursors(cursors, chrono::Utc::now());
+    }
+
+    /// How long to use the full-sweep fallback after a heartbeat
+    /// failure. The governor still admits each fallback unit; this
+    /// window prevents retrying the broken REST heartbeat every tick.
     const HEARTBEAT_BACK_OFF: std::time::Duration = std::time::Duration::from_secs(600);
 
     /// Record a heartbeat success — clears any prior back-off so the
@@ -1473,6 +1839,13 @@ impl GhClient {
     /// its own 5000-req/hr quota), but we still gate through the local
     /// bucket so a runaway loop can't hammer this endpoint either.
     pub async fn fetch_notifications(&self) -> Result<NotificationsPoll, GhError> {
+        let now = std::time::Instant::now();
+        {
+            let state = self.notifications_state.lock();
+            if !state.heartbeat_due(now) {
+                return Ok(NotificationsPoll::NotModified);
+            }
+        }
         // Bookkeeping wrapper: on success, clear any prior back-off
         // window so the next tick uses the heartbeat again; on failure,
         // arm the back-off so chronic auth/rate-limit problems don't
@@ -1497,6 +1870,13 @@ impl GhClient {
         use http::header::{HeaderMap, HeaderValue, IF_MODIFIED_SINCE, LAST_MODIFIED};
 
         self.acquire_or_block("notifications heartbeat")?;
+        let started = std::time::Instant::now();
+        let _permit = self
+            .request_gate
+            .acquire()
+            .await
+            .map_err(|_| GhError::Graphql("GitHub request gate closed".to_string()))?;
+        self.notifications_state.lock().last_poll_at = Some(std::time::Instant::now());
 
         // Capture the saved header BEFORE the request, so the lock is
         // released before we await the network call. The Mutex is a
@@ -1530,16 +1910,80 @@ impl GhClient {
         // `all=false` (default) — only unread items. Read notifications
         // wouldn't add information since we already saw them.
         let uri = "/notifications?participating=false";
-        let response = self
-            .inner
-            ._get_with_headers(uri, Some(headers))
-            .await
-            .map_err(GhError::Api)?;
+        let response = match self.inner._get_with_headers(uri, Some(headers)).await {
+            Ok(response) => response,
+            Err(error) => {
+                self.budget.lock().observe_failed_response(
+                    "notifications heartbeat",
+                    crate::rate_budget::ApiResource::rest("core"),
+                    0,
+                    0,
+                    started.elapsed(),
+                );
+                return Err(GhError::Api(error));
+            }
+        };
 
         let status = response.status();
+        let response_header = |name: &str| -> Option<String> {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+        };
+        let rate_headers = RateLimitHeaders::parse(
+            response_header("retry-after").as_deref(),
+            response_header("x-ratelimit-remaining").as_deref(),
+            response_header("x-ratelimit-reset").as_deref(),
+            response_header("x-ratelimit-resource").as_deref(),
+            response_header("x-ratelimit-limit").as_deref(),
+            response_header("x-ratelimit-used").as_deref(),
+        );
+        if let Some(seconds) =
+            response_header("x-poll-interval").and_then(|value| value.parse::<u64>().ok())
+        {
+            self.notifications_state.lock().poll_interval =
+                Some(std::time::Duration::from_secs(seconds.max(1)));
+        }
+        let observe_rest = |byte_len: usize, conditional_hit: bool| {
+            let reset_at = rate_headers
+                .reset_epoch_secs
+                .and_then(|epoch| chrono::DateTime::from_timestamp(epoch as i64, 0));
+            if let (Some(limit), Some(remaining), Some(used), Some(reset_at)) = (
+                rate_headers.limit,
+                rate_headers.remaining,
+                rate_headers.used,
+                reset_at,
+            ) {
+                self.budget.lock().observe_rest_response(
+                    rate_headers.resource.as_deref().unwrap_or("core"),
+                    "notifications heartbeat",
+                    limit,
+                    remaining,
+                    used,
+                    reset_at,
+                    status.as_u16(),
+                    conditional_hit,
+                    byte_len,
+                    started.elapsed(),
+                );
+            } else {
+                self.budget.lock().observe_failed_response(
+                    "notifications heartbeat",
+                    crate::rate_budget::ApiResource::rest(
+                        rate_headers.resource.as_deref().unwrap_or("core"),
+                    ),
+                    status.as_u16(),
+                    byte_len,
+                    started.elapsed(),
+                );
+            }
+        };
         // 304 = nothing new since If-Modified-Since. The endpoint also
         // sends an empty body in that case; don't try to deserialize.
         if status == StatusCode::NOT_MODIFIED {
+            observe_rest(0, true);
             tracing::debug!("notifications: 304 Not Modified");
             return Ok(NotificationsPoll::NotModified);
         }
@@ -1571,18 +2015,47 @@ impl GhClient {
                 .body_to_string(response)
                 .await
                 .unwrap_or_else(|_| "<unreadable body>".to_string());
+            observe_rest(body.len(), false);
             let snippet = body_prefix_bytes(&body, 512);
+            if is_rate_limit_response(
+                status.as_u16(),
+                &body,
+                rate_headers.retry_after_secs.is_some(),
+            ) {
+                let now = chrono::Utc::now();
+                let retry_at = self.observe_limit_response(&rate_headers, status.as_u16(), "core");
+                return Err(GhError::RateLimited {
+                    retry_after_secs: retry_at
+                        .signed_duration_since(now)
+                        .to_std()
+                        .unwrap_or_default()
+                        .as_secs()
+                        .max(1),
+                    reason: format!("notifications HTTP {}", status.as_u16()),
+                });
+            }
             return Err(GhError::Graphql(format!(
                 "notifications HTTP {}: {snippet}",
                 status.as_u16(),
             )));
         }
 
-        let body = self
-            .inner
-            .body_to_string(response)
-            .await
-            .map_err(GhError::Api)?;
+        let body = match self.inner.body_to_string(response).await {
+            Ok(body) => body,
+            Err(error) => {
+                self.budget.lock().observe_failed_response(
+                    "notifications heartbeat",
+                    crate::rate_budget::ApiResource::rest(
+                        rate_headers.resource.as_deref().unwrap_or("core"),
+                    ),
+                    status.as_u16(),
+                    0,
+                    started.elapsed(),
+                );
+                return Err(GhError::Api(error));
+            }
+        };
+        observe_rest(body.len(), false);
         let entries: Vec<NotificationEntry> = serde_json::from_str(&body).map_err(|e| {
             GhError::Graphql(format!(
                 "notifications response did not match schema: {e}; body prefix: {}",
@@ -1636,8 +2109,9 @@ impl GhClient {
         let mut metrics = BranchMetrics::new("hot-targets");
         self.acquire_or_block("hot-target batch query")?;
         let body = graphql::hot_tasks_body(node_ids);
-        let (response, bytes): (graphql::GqlHotTasksResponse, usize) =
-            self.post_graphql_with_retry_measured(&body).await?;
+        let (response, bytes): (graphql::GqlHotTasksResponse, usize) = self
+            .post_graphql_with_retry_measured("hot-target batch query", &body)
+            .await?;
         metrics.requests = 1;
         metrics.resp_bytes = bytes;
 
@@ -1666,7 +2140,6 @@ impl GhClient {
         }
         if let Some(rate_limit) = &data.rate_limit {
             metrics.graphql_cost = rate_limit.cost.unwrap_or(0);
-            self.observe_rate_limit(rate_limit);
         }
 
         let tasks = data
@@ -1720,7 +2193,9 @@ impl GhClient {
     ) -> Result<Option<(Task, Option<String>)>, GhError> {
         self.acquire_or_block("single-PR notification deep-fetch")?;
         let body = graphql::single_pr_body(owner, repo, number);
-        let response: graphql::GqlSinglePrResponse = self.post_graphql_with_retry(&body).await?;
+        let response: graphql::GqlSinglePrResponse = self
+            .post_graphql_with_retry("single-PR notification deep-fetch", &body)
+            .await?;
         if let Some(errors) = response.errors {
             // A definitive "not visible" answer (NOT_FOUND / FORBIDDEN:
             // deleted, transferred, private, scope revoked) is NOT a
@@ -1747,9 +2222,6 @@ impl GhClient {
         let Some(data) = response.data else {
             return Ok(None);
         };
-        if let Some(rl) = &data.rate_limit {
-            self.observe_rate_limit(rl);
-        }
         let pr = data.repository.and_then(|r| r.pull_request);
         Ok(pr.map(|pr| {
             let head = pr.head_ref_oid.clone();
@@ -1767,7 +2239,9 @@ impl GhClient {
     ) -> Result<Option<Task>, GhError> {
         self.acquire_or_block("single-issue notification deep-fetch")?;
         let body = graphql::single_issue_body(owner, repo, number);
-        let response: graphql::GqlSingleIssueResponse = self.post_graphql_with_retry(&body).await?;
+        let response: graphql::GqlSingleIssueResponse = self
+            .post_graphql_with_retry("single-issue notification deep-fetch", &body)
+            .await?;
         if let Some(errors) = response.errors {
             // See `fetch_single_pr`: a definitive NOT_FOUND / FORBIDDEN
             // is "not visible" (`Ok(None)`), never a cursor-holding
@@ -1789,9 +2263,6 @@ impl GhClient {
         let Some(data) = response.data else {
             return Ok(None);
         };
-        if let Some(rl) = &data.rate_limit {
-            self.observe_rate_limit(rl);
-        }
         let issue = data.repository.and_then(|r| r.issue);
         Ok(issue.map(|i| graphql::issue_to_task(&i, &self.user)))
     }
@@ -2004,6 +2475,7 @@ impl GhClient {
         let total_fetched = main_fetched + reviewer_fetched + merged_fetched + watched_fetched;
         let unique = tasks.len();
         let duplicates = total_fetched.saturating_sub(unique);
+        self.budget.lock().note_dedup(total_fetched, unique);
         let dedup_pct = if total_fetched > 0 {
             duplicates as f64 / total_fetched as f64 * 100.0
         } else {
@@ -2234,7 +2706,7 @@ impl GhClient {
                         serde_json::to_string(&body).unwrap_or_default()
                     );
                     let (raw, page_bytes): (serde_json::Value, usize) = self
-                        .post_graphql_with_retry_measured(&body)
+                        .post_graphql_with_retry_measured("PR search", &body)
                         .await
                         .map_err(|e| {
                             tracing::error!("GraphQL HTTP error (page {page}): {e}\n{e:?}");
@@ -2280,8 +2752,11 @@ impl GhClient {
                             rl.reset_at
                         );
                         metrics.lock().graphql_cost += rl.cost.unwrap_or(0);
-                        self.observe_rate_limit(rl);
                     }
+                    self.budget.lock().note_expected_pages(
+                        "PR search",
+                        graphql::pr_page_count(data.search.issue_count),
+                    );
                     Ok(FetchPage {
                         items: data
                             .search
@@ -2342,16 +2817,13 @@ impl GhClient {
                 let metrics = &metrics;
                 let query = &query;
                 async move {
-                    if let Err(reason) = self.try_acquire() {
-                        tracing::error!("{op} budget error (page {page}): {reason}");
-                        return Err(GhError::RateLimited {
-                            retry_after_secs: 1,
-                            reason: format!("{op} blocked: {reason}"),
-                        });
-                    }
+                    self.acquire_or_block(op).map_err(|error| {
+                        tracing::error!("{op} budget error (page {page}): {error}");
+                        error
+                    })?;
                     let body = graphql::query_body_after(query, cursor.as_deref());
                     let (resp, bytes): (graphql::GqlResponse, usize) = self
-                        .post_graphql_with_retry_measured(&body)
+                        .post_graphql_with_retry_measured(op, &body)
                         .await
                         .map_err(|error| {
                             tracing::error!("{op} HTTP error (page {page}): {error}");
@@ -2382,8 +2854,10 @@ impl GhClient {
                     };
                     if let Some(rl) = &data.rate_limit {
                         metrics.lock().graphql_cost += rl.cost.unwrap_or(0);
-                        self.observe_rate_limit(rl);
                     }
+                    self.budget
+                        .lock()
+                        .note_expected_pages(op, graphql::pr_page_count(data.search.issue_count));
                     Ok(FetchPage {
                         items: data
                             .search
@@ -2467,8 +2941,10 @@ impl GhClient {
                         error
                     })?;
                     let body = graphql::issues_query_body(search_query, cursor.as_deref());
-                    let response: graphql::GqlIssueResponse =
-                        self.post_graphql_with_retry(&body).await.map_err(|e| {
+                    let response: graphql::GqlIssueResponse = self
+                        .post_graphql_with_retry("issues search", &body)
+                        .await
+                        .map_err(|e| {
                             tracing::error!("Issues HTTP error (page {page}): {e}\n{e:?}");
                             e
                         })?;
@@ -2494,8 +2970,11 @@ impl GhClient {
                             rl.remaining,
                             rl.limit
                         );
-                        self.observe_rate_limit(rl);
                     }
+                    self.budget.lock().note_expected_pages(
+                        "issues search",
+                        graphql::issue_page_count(data.search.issue_count),
+                    );
 
                     Ok(FetchPage {
                         items: data
@@ -2793,15 +3272,25 @@ impl GhClient {
         let (owner, name) = repo
             .split_once('/')
             .ok_or_else(|| GhError::Graphql(format!("repo '{repo}' not owner/name")))?;
-        // REST endpoint, but it counts against the same hourly budget
-        // as GraphQL — gate it. No rate-limit headers are exposed by
-        // octocrab on this call, so we don't `observe` after.
+        // No rate-limit headers are exposed by octocrab on this call,
+        // but it still enters the shared admission and concurrency
+        // gate.
         self.acquire_or_block("post issue comment")?;
-        self.inner
+        let started = std::time::Instant::now();
+        let _permit = self.request_permit().await?;
+        let _mutation_guard = self.mutation_gate.lock().await;
+        let result = self
+            .inner
             .issues(owner, name)
             .create_comment(issue_or_pr_number, body)
-            .await
-            .map_err(GhError::Api)?;
+            .await;
+        self.observe_unreported_response(
+            "post issue comment",
+            crate::rate_budget::ApiResource::rest("core"),
+            started,
+            result.is_ok(),
+        );
+        result.map_err(GhError::Api)?;
         Ok(())
     }
 
@@ -2817,7 +3306,9 @@ impl GhClient {
     pub async fn react_eyes(&self, reactable_node_id: &str) -> Result<(), GhError> {
         self.acquire_or_block("addReaction(EYES) mutation")?;
         let body = graphql::add_reaction_eyes_body(reactable_node_id);
-        let response: graphql::GqlMutationResponse = self.post_graphql_with_retry(&body).await?;
+        let response: graphql::GqlMutationResponse = self
+            .post_graphql_with_retry("addReaction(EYES) mutation", &body)
+            .await?;
         if let Some(errors) = response.errors {
             let joined = errors
                 .iter()
@@ -2835,7 +3326,9 @@ impl GhClient {
     pub async fn update_branch(&self, pull_request_node_id: &str) -> Result<(), GhError> {
         self.acquire_or_block("updatePullRequestBranch mutation")?;
         let body = graphql::update_branch_body(pull_request_node_id);
-        let response: graphql::GqlMutationResponse = self.post_graphql_with_retry(&body).await?;
+        let response: graphql::GqlMutationResponse = self
+            .post_graphql_with_retry("updatePullRequestBranch mutation", &body)
+            .await?;
         if let Some(errors) = response.errors {
             // Same idempotence guard as `merge_pr`: a timeout-retried
             // update whose first attempt landed comes back "no new
@@ -2872,12 +3365,30 @@ impl GhClient {
         &self,
         pull_request_node_id: &str,
     ) -> Result<Option<graphql::PrDetails>, GhError> {
+        self.fetch_pr_details_for_operation("PR details lazy-fetch", pull_request_node_id)
+            .await
+    }
+
+    pub async fn prefetch_pr_details(
+        &self,
+        pull_request_node_id: &str,
+    ) -> Result<Option<graphql::PrDetails>, GhError> {
+        self.fetch_pr_details_for_operation("PR details background prefetch", pull_request_node_id)
+            .await
+    }
+
+    async fn fetch_pr_details_for_operation(
+        &self,
+        operation: &'static str,
+        pull_request_node_id: &str,
+    ) -> Result<Option<graphql::PrDetails>, GhError> {
         let started = std::time::Instant::now();
         let mut metrics = BranchMetrics::new("pr-details");
-        self.acquire_or_block("PR details lazy-fetch")?;
+        self.acquire_or_block(operation)?;
         let body = graphql::pr_details_body(pull_request_node_id);
-        let (response, bytes): (graphql::GqlPrDetailsResponse, usize) =
-            self.post_graphql_with_retry_measured(&body).await?;
+        let (response, bytes): (graphql::GqlPrDetailsResponse, usize) = self
+            .post_graphql_with_retry_measured(operation, &body)
+            .await?;
         metrics.requests = 1;
         metrics.resp_bytes = bytes;
         if let Some(errors) = response.errors {
@@ -2894,7 +3405,6 @@ impl GhClient {
             .ok_or_else(|| GhError::Graphql("fetch_pr_details: no data".into()))?;
         if let Some(rl) = &data.rate_limit {
             metrics.graphql_cost = rl.cost.unwrap_or(0);
-            self.observe_rate_limit(rl);
         }
         metrics.elapsed_ms = started.elapsed().as_millis();
         metrics.emit();
@@ -2914,7 +3424,9 @@ impl GhClient {
     pub async fn lookup_user_id(&self, login: &str) -> Result<String, GhError> {
         self.acquire_or_block("user lookup query")?;
         let body = graphql::user_id_body(login);
-        let response: graphql::GqlUserIdResponse = self.post_graphql_with_retry(&body).await?;
+        let response: graphql::GqlUserIdResponse = self
+            .post_graphql_with_retry("user lookup query", &body)
+            .await?;
         if let Some(errors) = response.errors {
             let joined = errors
                 .iter()
@@ -2948,7 +3460,9 @@ impl GhClient {
         }
         self.acquire_or_block("requestReviews mutation")?;
         let body = graphql::request_reviews_body(pull_request_node_id, &user_ids);
-        let response: graphql::GqlMutationResponse = self.post_graphql_with_retry(&body).await?;
+        let response: graphql::GqlMutationResponse = self
+            .post_graphql_with_retry("requestReviews mutation", &body)
+            .await?;
         if let Some(errors) = response.errors {
             let joined = errors
                 .iter()
@@ -2977,7 +3491,9 @@ impl GhClient {
         }
         self.acquire_or_block("addAssigneesToAssignable mutation")?;
         let body = graphql::add_assignees_body(assignable_node_id, &user_ids);
-        let response: graphql::GqlMutationResponse = self.post_graphql_with_retry(&body).await?;
+        let response: graphql::GqlMutationResponse = self
+            .post_graphql_with_retry("addAssigneesToAssignable mutation", &body)
+            .await?;
         if let Some(errors) = response.errors {
             let joined = errors
                 .iter()
@@ -3008,7 +3524,9 @@ impl GhClient {
         }
         self.acquire_or_block("removeAssigneesFromAssignable mutation")?;
         let body = graphql::remove_assignees_body(assignable_node_id, &user_ids);
-        let response: graphql::GqlMutationResponse = self.post_graphql_with_retry(&body).await?;
+        let response: graphql::GqlMutationResponse = self
+            .post_graphql_with_retry("removeAssigneesFromAssignable mutation", &body)
+            .await?;
         if let Some(errors) = response.errors {
             let joined = errors
                 .iter()
@@ -3036,7 +3554,9 @@ impl GhClient {
     ) -> Result<Vec<graphql::GqlRepoLabelNode>, GhError> {
         self.acquire_or_block("repository.labels query")?;
         let body = graphql::repo_labels_body(owner, name);
-        let response: graphql::GqlRepoLabelsResponse = self.post_graphql_with_retry(&body).await?;
+        let response: graphql::GqlRepoLabelsResponse = self
+            .post_graphql_with_retry("repository.labels query", &body)
+            .await?;
         if let Some(errors) = response.errors {
             let joined = errors
                 .iter()
@@ -3048,9 +3568,6 @@ impl GhClient {
         let data = response
             .data
             .ok_or_else(|| GhError::Graphql("list_repo_labels: no data".into()))?;
-        if let Some(rl) = &data.rate_limit {
-            self.observe_rate_limit(rl);
-        }
         let nodes = data.repository.map(|r| r.labels.nodes).unwrap_or_default();
         Ok(nodes)
     }
@@ -3067,7 +3584,9 @@ impl GhClient {
         }
         self.acquire_or_block("addLabelsToLabelable mutation")?;
         let body = graphql::add_labels_body(labelable_node_id, label_ids);
-        let response: graphql::GqlMutationResponse = self.post_graphql_with_retry(&body).await?;
+        let response: graphql::GqlMutationResponse = self
+            .post_graphql_with_retry("addLabelsToLabelable mutation", &body)
+            .await?;
         if let Some(errors) = response.errors {
             let joined = errors
                 .iter()
@@ -3094,7 +3613,9 @@ impl GhClient {
         }
         self.acquire_or_block("removeLabelsFromLabelable mutation")?;
         let body = graphql::remove_labels_body(labelable_node_id, label_ids);
-        let response: graphql::GqlMutationResponse = self.post_graphql_with_retry(&body).await?;
+        let response: graphql::GqlMutationResponse = self
+            .post_graphql_with_retry("removeLabelsFromLabelable mutation", &body)
+            .await?;
         if let Some(errors) = response.errors {
             let joined = errors
                 .iter()
@@ -3114,7 +3635,9 @@ impl GhClient {
     pub async fn pr_merge_method(&self, pull_request_node_id: &str) -> Result<String, GhError> {
         self.acquire_or_block("pr merge-method query")?;
         let body = graphql::pr_merge_method_body(pull_request_node_id);
-        let response: graphql::GqlMergeMethodResponse = self.post_graphql_with_retry(&body).await?;
+        let response: graphql::GqlMergeMethodResponse = self
+            .post_graphql_with_retry("pr merge-method query", &body)
+            .await?;
         if let Some(errors) = response.errors {
             let joined = errors
                 .iter()
@@ -3144,7 +3667,9 @@ impl GhClient {
         let merge_method = self.pr_merge_method(pull_request_node_id).await?;
         self.acquire_or_block("mergePullRequest mutation")?;
         let body = graphql::merge_pr_body(pull_request_node_id, &merge_method, expected_head_oid);
-        let response: graphql::GqlMutationResponse = self.post_graphql_with_retry(&body).await?;
+        let response: graphql::GqlMutationResponse = self
+            .post_graphql_with_retry("mergePullRequest mutation", &body)
+            .await?;
         if let Some(errors) = response.errors {
             // Idempotence guard: `post_graphql_with_retry` re-sends the
             // mutation after a client-side timeout even when the first
@@ -3176,7 +3701,9 @@ impl GhClient {
     pub async fn close_issue_node(&self, issue_node_id: &str) -> Result<(), GhError> {
         self.acquire_or_block("closeIssue mutation")?;
         let body = graphql::close_issue_body(issue_node_id);
-        let response: graphql::GqlMutationResponse = self.post_graphql_with_retry(&body).await?;
+        let response: graphql::GqlMutationResponse = self
+            .post_graphql_with_retry("closeIssue mutation", &body)
+            .await?;
         if let Some(errors) = response.errors {
             let joined = errors
                 .iter()
@@ -3192,7 +3719,9 @@ impl GhClient {
     pub async fn close_pr_node(&self, pull_request_node_id: &str) -> Result<(), GhError> {
         self.acquire_or_block("closePullRequest mutation")?;
         let body = graphql::close_pr_body(pull_request_node_id);
-        let response: graphql::GqlMutationResponse = self.post_graphql_with_retry(&body).await?;
+        let response: graphql::GqlMutationResponse = self
+            .post_graphql_with_retry("closePullRequest mutation", &body)
+            .await?;
         if let Some(errors) = response.errors {
             let joined = errors
                 .iter()
@@ -3208,7 +3737,9 @@ impl GhClient {
     pub async fn delete_issue_node(&self, issue_node_id: &str) -> Result<(), GhError> {
         self.acquire_or_block("deleteIssue mutation")?;
         let body = graphql::delete_issue_body(issue_node_id);
-        let response: graphql::GqlMutationResponse = self.post_graphql_with_retry(&body).await?;
+        let response: graphql::GqlMutationResponse = self
+            .post_graphql_with_retry("deleteIssue mutation", &body)
+            .await?;
         if let Some(errors) = response.errors {
             let joined = errors
                 .iter()
@@ -4001,6 +4532,20 @@ mod tests {
     }
 
     #[test]
+    fn pr_detail_prefetch_is_scheduled_while_user_fetch_stays_interactive() {
+        let (_, user_priority) = request_profile("PR details lazy-fetch");
+        let (_, prefetch_priority) = request_profile("PR details background prefetch");
+        assert_eq!(
+            user_priority,
+            crate::rate_budget::RequestPriority::Interactive
+        );
+        assert_eq!(
+            prefetch_priority,
+            crate::rate_budget::RequestPriority::Recent
+        );
+    }
+
+    #[test]
     fn issue_query_runs_when_issues_displayed() {
         assert!(should_query_issues(true, &logins(&[])));
         assert!(should_query_issues(true, &logins(&["alice"])));
@@ -4171,7 +4716,7 @@ mod tests {
 
         let body = serde_json::json!({"query": "{}"});
         let err = client
-            .post_graphql_with_retry::<serde_json::Value>(&body)
+            .post_graphql_with_retry::<serde_json::Value>("test", &body)
             .await
             .expect_err("429 must fail");
         match &err {
@@ -4196,9 +4741,7 @@ mod tests {
         assert_eq!(pe.retry_after_secs(), Some(7));
         // Budget fed: the next acquire is refused until the window.
         match client.budget.lock().try_acquire() {
-            Err(crate::rate_budget::AcquireError::RemoteLow { remaining, .. }) => {
-                assert_eq!(remaining, 0, "throttle observation records 0 remaining");
-            }
+            Err(crate::rate_budget::AcquireError::CircuitOpen { .. }) => {}
             other => panic!("budget must refuse admission after a 429, got {other:?}"),
         }
     }
@@ -4213,7 +4756,7 @@ mod tests {
             "403 Forbidden",
             "application/json",
             "Retry-After: 30\r\n",
-            r#"{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}"#,
+            include_str!("../tests/fixtures/secondary_limit.json"),
             hits.clone(),
         )
         .await;
@@ -4221,7 +4764,7 @@ mod tests {
 
         let body = serde_json::json!({"query": "{}"});
         let err = client
-            .post_graphql_with_retry::<serde_json::Value>(&body)
+            .post_graphql_with_retry::<serde_json::Value>("test", &body)
             .await
             .expect_err("403 secondary limit must fail");
         match &err {
@@ -4256,7 +4799,7 @@ mod tests {
 
         let body = serde_json::json!({"query": "{}"});
         let err = client
-            .post_graphql_with_retry::<serde_json::Value>(&body)
+            .post_graphql_with_retry::<serde_json::Value>("test", &body)
             .await
             .expect_err("plain 403 must fail");
         assert!(
@@ -4284,7 +4827,7 @@ mod tests {
 
         let body = serde_json::json!({"query": "{}"});
         let err = client
-            .post_graphql_with_retry::<serde_json::Value>(&body)
+            .post_graphql_with_retry::<serde_json::Value>("test", &body)
             .await
             .expect_err("500 must fail");
         assert!(
@@ -4303,21 +4846,22 @@ mod tests {
 
     #[test]
     fn rate_limit_headers_prefer_retry_after() {
-        let h = RateLimitHeaders::parse(Some("120"), Some("0"), Some("1750000000"));
+        let h =
+            RateLimitHeaders::parse(Some("120"), Some("0"), Some("1750000000"), None, None, None);
         assert_eq!(h.wait_secs(1749999000), 120);
     }
 
     #[test]
     fn rate_limit_headers_fall_back_to_reset_epoch() {
-        let h = RateLimitHeaders::parse(None, Some("0"), Some("1750000090"));
+        let h = RateLimitHeaders::parse(None, Some("0"), Some("1750000090"), None, None, None);
         assert_eq!(h.wait_secs(1750000000), 90);
     }
 
     #[test]
     fn rate_limit_headers_default_when_absent_and_clamp_past_reset() {
-        let none = RateLimitHeaders::parse(None, None, None);
+        let none = RateLimitHeaders::parse(None, None, None, None, None, None);
         assert_eq!(none.wait_secs(1750000000), 60, "no hints → 60s default");
-        let past = RateLimitHeaders::parse(None, None, Some("1749999000"));
+        let past = RateLimitHeaders::parse(None, None, Some("1749999000"), None, None, None);
         assert_eq!(
             past.wait_secs(1750000000),
             1,
@@ -4514,6 +5058,8 @@ mod tests {
             budget: std::sync::Arc::new(parking_lot::Mutex::new(
                 crate::rate_budget::RateBudget::default_for_lazybox(),
             )),
+            request_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
+            mutation_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             notifications_state: NotificationsState::shared(),
         }
     }
@@ -4831,6 +5377,17 @@ mod tests {
     async fn partial_repo_fanout_reports_non_authoritative_pr_coverage() {
         let base_uri = spawn_repo_routing_server().await;
         let client = make_client(&base_uri);
+        let wall_now = chrono::Utc::now();
+        client
+            .budget
+            .lock()
+            .observe(crate::rate_budget::RemoteRateLimit {
+                remaining: 5000,
+                limit: 5000,
+                reset_at: wall_now + chrono::Duration::hours(1),
+                observed_at: std::time::Instant::now(),
+            });
+        client.begin_background_tick(std::time::Duration::from_secs(60));
 
         let outcome = client
             .fetch_round_robin_with_status_and_mentions(
@@ -4974,7 +5531,7 @@ mod tests {
         let client = make_client(&base_uri);
         let body = serde_json::json!({"query": "{}"});
         let err = client
-            .post_graphql_with_retry::<serde_json::Value>(&body)
+            .post_graphql_with_retry::<serde_json::Value>("test", &body)
             .await
             .expect_err("502 response should produce an error");
         let msg = err.to_string();
@@ -5008,7 +5565,7 @@ mod tests {
         let client = make_client(&base_uri);
         let body = serde_json::json!({"query": "{}"});
         let err = client
-            .post_graphql_with_retry::<serde_json::Value>(&body)
+            .post_graphql_with_retry::<serde_json::Value>("test", &body)
             .await
             .expect_err("401 should produce an error");
         assert!(
@@ -5032,7 +5589,7 @@ mod tests {
         let client = make_client(&base_uri);
         let body = serde_json::json!({"query": "{}"});
         let err = client
-            .post_graphql_with_retry::<serde_json::Value>(&body)
+            .post_graphql_with_retry::<serde_json::Value>("test", &body)
             .await
             .expect_err("unparseable 2xx body should fail");
         let msg = err.to_string();
@@ -5056,7 +5613,7 @@ mod tests {
         let client = make_client(&base_uri);
         let body = serde_json::json!({"query": "{}"});
         let (value, bytes) = client
-            .post_graphql_with_retry_measured::<serde_json::Value>(&body)
+            .post_graphql_with_retry_measured::<serde_json::Value>("test", &body)
             .await
             .expect("canned 2xx JSON should parse");
         assert_eq!(
@@ -5065,6 +5622,116 @@ mod tests {
             "reported byte length must equal the raw response body length"
         );
         assert_eq!(value["data"]["hello"], "world");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn budget_bootstrap_turns_an_unknown_graphql_budget_into_a_current_observation() {
+        const BODY: &str = r#"{
+          "data": {
+            "viewer": { "login": "test-user" },
+            "rateLimit": {
+              "cost": 1,
+              "limit": 5000,
+              "remaining": 4321,
+              "resetAt": "2026-08-01T12:00:00Z",
+              "used": 679
+            }
+          }
+        }"#;
+        let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
+        let client = make_client(&base_uri);
+        assert!(client.rate_snapshot().remote.is_none());
+
+        client
+            .bootstrap_graphql_budget()
+            .await
+            .expect("budget bootstrap");
+
+        let remote = client
+            .rate_snapshot()
+            .remote
+            .expect("GraphQL budget observation");
+        assert_eq!(remote.remaining, 4321);
+        assert_eq!(remote.limit, 5000);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn captured_graphql_fixture_reconciles_forecast_and_actual_cost() {
+        let response_body = include_str!("../tests/fixtures/graphql_rate_limit.json");
+        let base_uri =
+            spawn_canned_response_server("200 OK", "application/json", response_body).await;
+        let client = make_client(&base_uri);
+        let body = serde_json::json!({"query": "query { rateLimit { cost } }"});
+
+        let _: serde_json::Value = client
+            .post_graphql_with_retry("fixture-query", &body)
+            .await
+            .expect("fixture response");
+        let snapshot = client.rate_snapshot();
+        let operation = snapshot
+            .operations
+            .iter()
+            .find(|operation| operation.class == "fixture-query")
+            .expect("fixture operation accounted");
+        assert_eq!(operation.last_actual, Some(3));
+        assert_eq!(operation.forecast, 3);
+        assert_eq!(snapshot.total.graphql_points, 3);
+        assert_eq!(snapshot.total.requests, 1);
+        assert_eq!(snapshot.resources[0].resource, "graphql");
+    }
+
+    #[tokio::test]
+    async fn background_sweep_forecast_uses_observed_operation_costs() {
+        let client = make_client("http://127.0.0.1:1")
+            .with_watch_repos(vec!["owner/one".to_string(), "owner/two".to_string()]);
+        let wall_now = chrono::Utc::now();
+        let mono_now = std::time::Instant::now();
+        client.budget.lock().observe_graphql_response(
+            "watched-repo",
+            crate::rate_budget::RemoteRateLimit {
+                remaining: 4998,
+                limit: 5000,
+                reset_at: wall_now + chrono::Duration::hours(1),
+                observed_at: mono_now,
+            },
+            2,
+            2,
+            200,
+            0,
+            std::time::Duration::ZERO,
+        );
+
+        assert_eq!(
+            client.background_sweep_forecast(true, true),
+            BackgroundSweepForecast {
+                global_points: 8,
+                repo_base_points: 3,
+                per_repo_points: 1,
+            }
+        );
+        assert_eq!(
+            client.background_sweep_forecast(false, true),
+            BackgroundSweepForecast {
+                global_points: 1,
+                repo_base_points: 1,
+                per_repo_points: 0,
+            }
+        );
+
+        client.budget.lock().note_expected_pages("watched-repo", 3);
+        let forecast = client.background_sweep_forecast(true, false);
+        assert_eq!(
+            forecast,
+            BackgroundSweepForecast {
+                global_points: 15,
+                repo_base_points: 2,
+                per_repo_points: 1,
+            }
+        );
+        assert_eq!(forecast.required_points(true, true), 15);
+        assert_eq!(forecast.required_points(false, true), 3);
+        assert_eq!(forecast.repo_capacity(5, false, 3), 3);
+        assert_eq!(forecast.repo_capacity(5, true, 3), 0);
     }
 
     /// Issue #305: the real `mergePullRequest` success reply has no
@@ -5218,7 +5885,7 @@ mod tests {
         let client = make_client(&base_uri);
         let body = serde_json::json!({"query": "{}"});
         let err = client
-            .post_graphql_with_retry::<graphql::GqlResponse>(&body)
+            .post_graphql_with_retry::<graphql::GqlResponse>("test", &body)
             .await
             .expect_err("wrong-shaped 2xx body should fail to parse");
         let msg = err.to_string();
@@ -5274,14 +5941,29 @@ mod tests {
                                     && val.trim() == last_modified
                             });
                     let response = if ims_matches {
-                        "HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n".to_string()
+                        format!(
+                            "HTTP/1.1 304 Not Modified\r\n\
+                         X-RateLimit-Resource: core\r\n\
+                         X-RateLimit-Limit: 5000\r\n\
+                         X-RateLimit-Remaining: 4999\r\n\
+                         X-RateLimit-Used: 1\r\n\
+                         X-RateLimit-Reset: {}\r\n\
+                         Connection: close\r\n\r\n",
+                            (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp()
+                        )
                     } else {
                         format!(
                             "HTTP/1.1 200 OK\r\n\
                              Content-Type: application/json\r\n\
                              Last-Modified: {last_modified}\r\n\
+                             X-RateLimit-Resource: core\r\n\
+                             X-RateLimit-Limit: 5000\r\n\
+                             X-RateLimit-Remaining: 4999\r\n\
+                             X-RateLimit-Used: 1\r\n\
+                             X-RateLimit-Reset: {}\r\n\
                              Content-Length: {}\r\n\
                              Connection: close\r\n\r\n{body}",
+                            (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp(),
                             body.len(),
                         )
                     };
@@ -5291,6 +5973,35 @@ mod tests {
             }
         });
         format!("http://{addr}")
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn notifications_transport_failure_is_accounted() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind unused port");
+        let addr = listener.local_addr().expect("listener address");
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("accept heartbeat");
+            drop(socket);
+        });
+        let client = make_client(&format!("http://{addr}"));
+        client.begin_background_tick(std::time::Duration::from_secs(60));
+
+        client
+            .fetch_notifications()
+            .await
+            .expect_err("closed port must fail");
+
+        let snapshot = client.rate_snapshot();
+        assert_eq!(snapshot.total.requests, 1);
+        assert_eq!(snapshot.total.rest_points, 1);
+        let operation = snapshot
+            .operations
+            .iter()
+            .find(|operation| operation.class == "notifications heartbeat")
+            .expect("failed heartbeat accounted by operation");
+        assert_eq!(operation.last_actual, Some(1));
     }
 
     /// #512 regression: parsing the notification LIST must NOT advance
@@ -5304,20 +6015,11 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn notifications_list_does_not_advance_cursor_until_committed() {
         const LAST_MODIFIED: &str = "Sun, 06 Nov 2026 08:49:37 GMT";
-        const BODY: &str = r#"[{
-            "reason": "ci_activity",
-            "updated_at": "2026-05-28T12:00:00Z",
-            "subject": {
-                "title": "PR 123",
-                "url": "https://api.github.com/repos/o/r/pulls/123",
-                "type": "PullRequest"
-            },
-            "repository": { "full_name": "o/r" }
-        }]"#;
+        const BODY: &str = include_str!("../tests/fixtures/notifications.json");
         let base_uri = spawn_conditional_notifications_server(LAST_MODIFIED, BODY).await;
         let client = make_client(&base_uri);
 
-        // Tick 1: a fresh 200 lists PR #123 and hands the pending cursor
+        // Tick 1: a fresh 200 lists PR #700 and hands the pending cursor
         // BACK to the caller instead of committing it.
         let poll = client.fetch_notifications().await.expect("first poll ok");
         let pending = match poll {
@@ -5339,11 +6041,19 @@ mod tests {
             !client.notifications_snapshot().has_last_modified,
             "listing alone must NOT commit the cursor (#512)",
         );
+        let snapshot = client.rate_snapshot();
+        let core = snapshot
+            .resources
+            .iter()
+            .find(|resource| resource.resource == "core")
+            .expect("notification REST bucket accounted");
+        assert_eq!((core.remaining, core.limit, core.used), (4999, 5000, 1));
 
         // Tick 2 WITHOUT committing — this is the un-fetched entry's
         // retry. The heartbeat still sends no `If-Modified-Since`, so
-        // GitHub re-serves the 200 and PR #123 re-lists rather than being
+        // GitHub re-serves the 200 and PR #700 re-lists rather than being
         // lost to a premature 304.
+        client.begin_background_tick(std::time::Duration::from_secs(60));
         let poll2 = client.fetch_notifications().await.expect("second poll ok");
         assert!(
             matches!(poll2, NotificationsPoll::Modified { ref entries, .. } if entries.len() == 1),
@@ -5360,6 +6070,7 @@ mod tests {
 
         // Tick 3: the committed cursor is echoed as `If-Modified-Since`,
         // so the server answers the cheap steady-state 304.
+        client.begin_background_tick(std::time::Duration::from_secs(60));
         let poll3 = client.fetch_notifications().await.expect("third poll ok");
         assert!(
             matches!(poll3, NotificationsPoll::NotModified),

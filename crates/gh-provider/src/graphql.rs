@@ -61,6 +61,7 @@ use serde::Deserialize;
 const SEARCH_QUERY: &str = r#"
 query($query: String!, $first: Int!, $after: String) {
   search(query: $query, type: ISSUE, first: $first, after: $after) {
+    issueCount
     pageInfo { hasNextPage endCursor }
     nodes {
       ... on PullRequest {
@@ -132,6 +133,7 @@ query($query: String!, $first: Int!, $after: String) {
     limit
     remaining
     resetAt
+    used
   }
 }
 "#;
@@ -157,6 +159,35 @@ pub struct GqlResponse {
 #[derive(Deserialize, Debug)]
 pub struct GqlMutationResponse {
     pub errors: Option<Vec<GqlError>>,
+}
+
+const RATE_BUDGET_QUERY: &str = r#"
+query {
+  viewer { login }
+  rateLimit { cost limit remaining resetAt used }
+}
+"#;
+
+pub fn rate_budget_body() -> serde_json::Value {
+    serde_json::json!({ "query": RATE_BUDGET_QUERY })
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlRateBudgetResponse {
+    pub data: Option<GqlRateBudgetData>,
+    pub errors: Option<Vec<GqlError>>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlRateBudgetData {
+    pub viewer: GqlRateBudgetViewer,
+    #[serde(rename = "rateLimit")]
+    pub rate_limit: GqlRateLimit,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlRateBudgetViewer {
+    pub login: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -248,6 +279,11 @@ pub struct GqlRateLimit {
     /// don't, and GitHub omits it unless asked.
     #[serde(default)]
     pub cost: Option<u32>,
+    /// Total GraphQL points consumed in the current primary window.
+    /// Comparing this with the prior useful response exposes spending
+    /// by `gh` and spawned agents that share the user's pool.
+    #[serde(default)]
+    pub used: u32,
 }
 
 fn default_limit() -> u32 {
@@ -257,6 +293,8 @@ fn default_limit() -> u32 {
 #[derive(Deserialize, Debug)]
 pub struct GqlSearch {
     pub nodes: Vec<GqlPr>,
+    #[serde(rename = "issueCount", default)]
+    pub issue_count: u32,
     #[serde(rename = "pageInfo", default)]
     pub page_info: Option<GqlPageInfo>,
 }
@@ -660,6 +698,10 @@ pub fn merged_sweep_query(
 /// side, so smaller pages win.
 const PR_PAGE_SIZE: u32 = 25;
 
+pub fn pr_page_count(issue_count: u32) -> u32 {
+    issue_count.div_ceil(PR_PAGE_SIZE).max(1)
+}
+
 pub fn query_body_after(search_query: &str, after: Option<&str>) -> serde_json::Value {
     // Omit `after` entirely when None — sending `"after": null` in the
     // variables block trips GitHub's GraphQL with a misleading
@@ -691,6 +733,7 @@ mutation($id: ID!) {
   updatePullRequestBranch(input: { pullRequestId: $id }) {
     pullRequest { id }
   }
+  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -712,6 +755,7 @@ query($id: ID!) {
       repository { viewerDefaultMergeMethod }
     }
   }
+  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -763,6 +807,7 @@ mutation($id: ID!, $method: PullRequestMergeMethod!, $expectedHeadOid: GitObject
   mergePullRequest(input: { pullRequestId: $id, mergeMethod: $method, expectedHeadOid: $expectedHeadOid }) {
     pullRequest { id state merged }
   }
+  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -775,6 +820,7 @@ mutation($id: ID!, $method: PullRequestMergeMethod!, $expectedHeadOid: GitObject
 const USER_ID_QUERY: &str = r#"
 query($login: String!) {
   user(login: $login) { id }
+  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -811,6 +857,7 @@ mutation($id: ID!, $userIds: [ID!]) {
   requestReviews(input: { pullRequestId: $id, userIds: $userIds, union: true }) {
     pullRequest { id }
   }
+  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -834,6 +881,7 @@ mutation($id: ID!, $userIds: [ID!]!) {
   addAssigneesToAssignable(input: { assignableId: $id, assigneeIds: $userIds }) {
     assignable { __typename }
   }
+  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -856,6 +904,7 @@ mutation($id: ID!, $userIds: [ID!]!) {
   removeAssigneesFromAssignable(input: { assignableId: $id, assigneeIds: $userIds }) {
     assignable { __typename }
   }
+  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -900,6 +949,7 @@ mutation($id: ID!) {
   closeIssue(input: { issueId: $id, stateReason: NOT_PLANNED }) {
     issue { id state stateReason }
   }
+  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -917,6 +967,7 @@ mutation($id: ID!) {
   closePullRequest(input: { pullRequestId: $id }) {
     pullRequest { id state }
   }
+  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -935,6 +986,7 @@ mutation($id: ID!) {
   deleteIssue(input: { issueId: $id }) {
     clientMutationId
   }
+  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -956,6 +1008,7 @@ mutation($id: ID!) {
   addReaction(input: { subjectId: $id, content: EYES }) {
     reaction { content }
   }
+  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -975,6 +1028,7 @@ mutation($id: ID!, $labelIds: [ID!]!) {
   addLabelsToLabelable(input: { labelableId: $id, labelIds: $labelIds }) {
     labelable { __typename }
   }
+  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -993,6 +1047,7 @@ mutation($id: ID!, $labelIds: [ID!]!) {
   removeLabelsFromLabelable(input: { labelableId: $id, labelIds: $labelIds }) {
     labelable { __typename }
   }
+  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -1018,9 +1073,11 @@ query($owner: String!, $name: String!) {
     }
   }
   rateLimit {
+    cost
     limit
     remaining
     resetAt
+    used
   }
 }
 "#;
@@ -1041,8 +1098,6 @@ pub struct GqlRepoLabelsResponse {
 #[derive(Debug, Deserialize)]
 pub struct GqlRepoLabelsData {
     pub repository: Option<GqlRepoLabels>,
-    #[serde(rename = "rateLimit", default)]
-    pub rate_limit: Option<GqlRateLimit>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1167,6 +1222,7 @@ query($id: ID!) {
     limit
     remaining
     resetAt
+    used
   }
 }
 "#;
@@ -1502,9 +1558,11 @@ query($owner: String!, $name: String!, $number: Int!) {
     }
   }
   rateLimit {
+    cost
     limit
     remaining
     resetAt
+    used
   }
 }
 "#;
@@ -1530,8 +1588,6 @@ pub struct GqlSinglePrResponse {
 #[derive(Deserialize, Debug)]
 pub struct GqlSinglePrData {
     pub repository: Option<GqlSinglePrRepository>,
-    #[serde(rename = "rateLimit")]
-    pub rate_limit: Option<GqlRateLimit>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -1571,9 +1627,11 @@ query($owner: String!, $name: String!, $number: Int!) {
     }
   }
   rateLimit {
+    cost
     limit
     remaining
     resetAt
+    used
   }
 }
 "#;
@@ -1598,8 +1656,6 @@ pub struct GqlSingleIssueResponse {
 #[derive(Deserialize, Debug)]
 pub struct GqlSingleIssueData {
     pub repository: Option<GqlSingleIssueRepository>,
-    #[serde(rename = "rateLimit")]
-    pub rate_limit: Option<GqlRateLimit>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -1745,6 +1801,7 @@ query($ids: [ID!]!) {
     limit
     remaining
     resetAt
+    used
   }
 }
 "#;
@@ -2680,6 +2737,7 @@ fn extract_repo_from_url(url: &str) -> String {
 const ISSUES_QUERY: &str = r#"
 query($query: String!, $first: Int!, $after: String) {
   search(query: $query, type: ISSUE, first: $first, after: $after) {
+    issueCount
     pageInfo { hasNextPage endCursor }
     nodes {
       ... on Issue {
@@ -2712,9 +2770,11 @@ query($query: String!, $first: Int!, $after: String) {
     }
   }
   rateLimit {
+    cost
     limit
     remaining
     resetAt
+    used
   }
 }
 "#;
@@ -2763,6 +2823,8 @@ pub struct GqlIssueRepo {
 #[derive(Deserialize, Debug)]
 pub struct GqlIssueSearch {
     pub nodes: Vec<GqlIssue>,
+    #[serde(rename = "issueCount", default)]
+    pub issue_count: u32,
     #[serde(rename = "pageInfo", default)]
     pub page_info: Option<GqlPageInfo>,
 }
@@ -2798,16 +2860,22 @@ pub fn default_issues_qualifiers() -> Vec<String> {
     ]
 }
 
+const ISSUE_PAGE_SIZE: u32 = 100;
+
+pub fn issue_page_count(issue_count: u32) -> u32 {
+    issue_count.div_ceil(ISSUE_PAGE_SIZE).max(1)
+}
+
 pub fn issues_query_body(search_query: &str, after: Option<&str>) -> serde_json::Value {
     let variables = match after {
         Some(cursor) => serde_json::json!({
             "query": search_query,
-            "first": 100,
+            "first": ISSUE_PAGE_SIZE,
             "after": cursor,
         }),
         None => serde_json::json!({
             "query": search_query,
-            "first": 100,
+            "first": ISSUE_PAGE_SIZE,
         }),
     };
     serde_json::json!({
@@ -3722,6 +3790,10 @@ mod tests {
             SEARCH_QUERY.contains("totalCount"),
             "comments.totalCount disappeared — `unread_count` would collapse to 0 on inbox-scan",
         );
+        assert!(
+            SEARCH_QUERY.contains("issueCount"),
+            "the governor needs the total result count to price every page",
+        );
         // Hard guards: previous bloated numbers (both pre-trim AND
         // the intermediate #17 band-aid trim) must NOT come back.
         // The band-aid (`comments(first: 5)` etc.) was superseded
@@ -3749,6 +3821,10 @@ mod tests {
 
     #[test]
     fn issues_query_connection_sizes_are_pinned_low() {
+        assert!(ISSUES_QUERY.contains("issueCount"));
+        assert_eq!(pr_page_count(0), 1);
+        assert_eq!(pr_page_count(26), 2);
+        assert_eq!(issue_page_count(101), 2);
         assert!(
             ISSUES_QUERY.contains("comments(first: 15)"),
             "issue comments cap drifted",

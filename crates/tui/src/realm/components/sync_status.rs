@@ -36,6 +36,7 @@ pub(crate) struct SyncStatus {
     summary: Vec<SyncEntry>,
     /// Every retained attempt, most-recent-first.
     recent: Vec<SyncEntry>,
+    governor: Option<String>,
     /// Reference instant for relative-time rendering, captured at
     /// mount so ages stay stable while the window is open.
     now: DateTime<Utc>,
@@ -52,10 +53,16 @@ impl SyncStatus {
         Self {
             summary,
             recent,
+            governor: None,
             now,
             scroll: 0,
             body_height: 0,
         }
+    }
+
+    pub(crate) fn with_governor(mut self, governor: Option<String>) -> Self {
+        self.governor = governor;
+        self
     }
 
     /// The scrollable body, as styled lines. Re-derived each render so
@@ -64,17 +71,33 @@ impl SyncStatus {
         let mut lines: Vec<Line<'static>> = Vec::new();
 
         if self.summary.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "No sync activity yet — lazybox hasn't completed a poll.",
-                Style::default().fg(theme.text_dim),
-            )));
-            return lines;
+            if self.governor.is_none() {
+                lines.push(Line::from(Span::styled(
+                    "No sync activity yet — lazybox hasn't completed a poll.",
+                    Style::default().fg(theme.text_dim),
+                )));
+                return lines;
+            }
         }
 
-        lines.push(Line::from(Span::styled(
-            "Last sync per source",
-            theme.section_heading(),
-        )));
+        if let Some(governor) = &self.governor {
+            lines.push(Line::from(Span::styled(
+                "GitHub budget governor",
+                theme.section_heading(),
+            )));
+            lines.push(Line::from(Span::styled(
+                governor.clone(),
+                Style::default().fg(theme.text_dim),
+            )));
+            lines.push(Line::raw(""));
+        }
+
+        if !self.summary.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "Last sync per source",
+                theme.section_heading(),
+            )));
+        }
         for e in &self.summary {
             lines.push(self.summary_line(e, theme));
         }
@@ -216,7 +239,11 @@ impl Component for SyncStatus {
         };
         self.body_height = body_area.height.max(1);
 
-        let lines = self.body_lines(theme);
+        let lines = self
+            .body_lines(theme)
+            .into_iter()
+            .flat_map(|line| crate::components::comment_render::wrap_one(line, body_area.width))
+            .collect::<Vec<_>>();
         // Clamp scroll so a short log can't leave blank rows scrolled
         // off the top.
         let max = max_scroll(lines.len(), self.body_height);
@@ -351,6 +378,35 @@ mod tests {
         assert!(out.contains("auth: bad credentials"), "{out}");
         assert!(out.contains("4 tasks"), "{out}");
         assert!(out.contains("12 tasks"), "{out}");
+    }
+
+    #[test]
+    fn renders_governor_snapshot_before_sync_history() {
+        let n = now();
+        let mut comp = SyncStatus::new(vec![ok("github", 4, 5, n)], vec![ok("github", 4, 5, n)], n)
+            .with_governor(Some(
+                "share=55% · graphql 4300/5000 reserve=2250 allowance=4/9".into(),
+            ));
+        let out = render(&mut comp, 100, 16);
+        assert!(out.contains("GitHub budget governor"), "{out}");
+        assert!(out.contains("share=55%"), "{out}");
+        assert!(
+            out.find("GitHub budget governor") < out.find("Last sync per source"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn narrow_modal_wraps_the_complete_governor_snapshot() {
+        let n = now();
+        let mut comp = SyncStatus::new(Vec::new(), Vec::new(), n).with_governor(Some(
+            "share=55% · graphql 4300/5000 reset=2026-04-01T13:00:00Z reserve=2250 \
+             allowance=4/9 · next=global reconcile"
+                .into(),
+        ));
+        let out = render(&mut comp, 50, 16);
+        assert!(out.contains("share=55%"), "{out}");
+        assert!(out.contains("next=global reconcile"), "{out}");
     }
 
     #[test]

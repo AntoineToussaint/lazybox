@@ -1,0 +1,11 @@
+{
+  "data": {
+    "rateLimit": {
+      "cost": 3,
+      "limit": 5000,
+      "remaining": 4312,
+      "resetAt": "2026-07-30T12:00:00Z",
+      "used": 688
+    }
+  }
+}

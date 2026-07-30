@@ -33,7 +33,8 @@ mod upsert;
 pub use auto_merge::AutoMergeMemory;
 pub use scheduler::{
     CURSOR_TTL, DEFAULT_ROUND_ROBIN_N, RoundRobinPick, RoundRobinState, pick_repos_for_tick,
-    plan_round_robin_tick,
+    pick_repos_for_tick_budgeted, plan_round_robin_tick, plan_round_robin_tick_budgeted,
+    will_run_global,
 };
 
 pub use handlers::{
@@ -899,6 +900,8 @@ pub trait TaskSource: Send + Sync + 'static {
     fn retry_after_secs(&self) -> Option<u64> {
         None
     }
+
+    fn record_items_changed(&self, _count: usize) {}
 }
 
 /// What a [`TaskSource`] authoritatively covered in its most recent
@@ -1100,6 +1103,16 @@ fn github_rate_limit_wait(
     snapshot: &lazybox_gh::RateSnapshot,
     now: chrono::DateTime<Utc>,
 ) -> Option<GithubRateLimitWait> {
+    if let Some(retry_at) = snapshot.retry_at
+        && retry_at > now
+    {
+        let remote = snapshot.remote.as_ref();
+        return Some(GithubRateLimitWait {
+            remaining: remote.map_or(0, |limit| limit.remaining),
+            limit: remote.map_or(0, |limit| limit.limit),
+            reset_at: retry_at,
+        });
+    }
     let remote = snapshot.remote.as_ref()?;
     (remote.remaining <= lazybox_gh::rate_budget::LOW_THRESHOLD && remote.reset_at > now).then_some(
         GithubRateLimitWait {
@@ -1128,6 +1141,16 @@ mod rate_limit_wait_tests {
                 reset_at,
                 observed_at: std::time::Instant::now(),
             }),
+            background_share: lazybox_gh::rate_budget::DEFAULT_BACKGROUND_SHARE,
+            resources: Vec::new(),
+            tick: lazybox_gh::rate_budget::AccountingSnapshot::default(),
+            total: lazybox_gh::rate_budget::AccountingSnapshot::default(),
+            request_p50_ms: None,
+            request_p95_ms: None,
+            request_p99_ms: None,
+            circuit_reason: None,
+            retry_at: None,
+            operations: Vec::new(),
         }
     }
 
@@ -1303,6 +1326,7 @@ pub async fn tick_with_state(
                 // KV read + full workspace-list deserialize per task
                 // — see `UpsertContext`.
                 let mut upsert_ctx = UpsertContext::build(config);
+                let mut changed_items = 0usize;
                 for (i, task) in tasks.into_iter().enumerate() {
                     let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
                     let task_id = task.id.to_string();
@@ -1353,7 +1377,8 @@ pub async fn tick_with_state(
                     )
                     .await
                     {
-                        Ok(()) => {
+                        Ok(outcome) => {
+                            changed_items += usize::from(outcome == CommitOutcome::Changed);
                             let one_ms = one_started.elapsed().as_millis();
                             if one_ms > 500 {
                                 tracing::warn!(
@@ -1380,6 +1405,7 @@ pub async fn tick_with_state(
                         }
                     }
                 }
+                source.record_items_changed(changed_items);
                 tracing::info!(
                     "tick: upserted {total} tasks in {}ms",
                     upsert_started.elapsed().as_millis()
@@ -2203,11 +2229,7 @@ pub fn next_tick_delay_with_hot(
     unknown_retry: Duration,
     hot_count: usize,
 ) -> Duration {
-    let engagement_interval = if hot_count > 0 {
-        interval.min(HOT_POLL_INTERVAL)
-    } else {
-        interval
-    };
+    let engagement_interval = background_tick_interval(interval, hot_count);
     let base = if saw_unknown_mergeable {
         engagement_interval.min(unknown_retry)
     } else {
@@ -2216,6 +2238,14 @@ pub fn next_tick_delay_with_hot(
     match retry_after_secs {
         Some(secs) => base.max(Duration::from_secs(secs)),
         None => base,
+    }
+}
+
+pub fn background_tick_interval(interval: Duration, hot_count: usize) -> Duration {
+    if hot_count > 0 {
+        interval.min(HOT_POLL_INTERVAL)
+    } else {
+        interval
     }
 }
 
@@ -2349,6 +2379,7 @@ async fn run_tick_inner(
         config.poll.gh_client_cache.clone(),
         &engagement,
         poll_notifications,
+        Some(config.store.clone()),
     )
     .await;
     if sources.is_empty() {
@@ -5317,6 +5348,7 @@ mod tick_noop_skip_tests {
     /// observes only the upsert broadcasts.
     struct FixtureSource {
         tasks: Mutex<Vec<Task>>,
+        changed_counts: Mutex<Vec<usize>>,
     }
 
     struct RateLimitFixtureSource {
@@ -5328,6 +5360,7 @@ mod tick_noop_skip_tests {
         fn new(tasks: Vec<Task>) -> Self {
             Self {
                 tasks: Mutex::new(tasks),
+                changed_counts: Mutex::new(Vec::new()),
             }
         }
         fn set(&self, tasks: Vec<Task>) {
@@ -5350,6 +5383,10 @@ mod tick_noop_skip_tests {
         > {
             let tasks = self.tasks.lock().clone();
             Box::pin(async move { Ok(tasks) })
+        }
+
+        fn record_items_changed(&self, count: usize) {
+            self.changed_counts.lock().push(count);
         }
     }
 
@@ -5448,8 +5485,8 @@ mod tick_noop_skip_tests {
     async fn unchanged_task_skips_write_and_broadcast() {
         let store = Arc::new(lazybox_store::MemoryStore::new());
         let config = ServerConfig::with_store(store.clone());
-        let sources: Vec<Box<dyn TaskSource>> =
-            vec![Box::new(FixtureSource::new(vec![issue("o/r#1", "first")]))];
+        let source = Arc::new(FixtureSource::new(vec![issue("o/r#1", "first")]));
+        let sources: Vec<Box<dyn TaskSource>> = vec![Box::new(FixtureSourceRef(source.clone()))];
 
         let key = lazybox_core::workspace_key_for(&issue("o/r#1", "first"));
         let mut rx = config.bus.subscribe();
@@ -5469,6 +5506,11 @@ mod tick_noop_skip_tests {
             upserted_keys(&second).is_empty(),
             "a byte-identical re-poll must not re-broadcast WorkspaceUpserted, got {:?}",
             upserted_keys(&second),
+        );
+        assert_eq!(
+            *source.changed_counts.lock(),
+            vec![1, 0],
+            "the accounting hook must report durable changes, not fetched rows"
         );
     }
 
@@ -5613,6 +5655,10 @@ mod tick_noop_skip_tests {
             >,
         > {
             self.0.fetch()
+        }
+
+        fn record_items_changed(&self, count: usize) {
+            self.0.record_items_changed(count);
         }
     }
 }

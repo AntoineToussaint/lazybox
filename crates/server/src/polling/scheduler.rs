@@ -158,6 +158,17 @@ pub fn plan_round_robin_tick(
     n: usize,
     now: Instant,
 ) -> RoundRobinPick {
+    plan_round_robin_tick_budgeted(state, forced, will_full_sweep, n, usize::MAX, now)
+}
+
+pub fn plan_round_robin_tick_budgeted(
+    state: &mut RoundRobinState,
+    forced: &HashSet<String>,
+    will_full_sweep: bool,
+    n: usize,
+    max_repos: usize,
+    now: Instant,
+) -> RoundRobinPick {
     if !will_full_sweep {
         return RoundRobinPick {
             repos: Vec::new(),
@@ -165,12 +176,13 @@ pub fn plan_round_robin_tick(
         };
     }
     state.prune(now);
-    let pick = pick_repos_for_tick(
+    let pick = pick_repos_for_tick_budgeted(
         &state.cursor,
         state.focused_repo.as_deref(),
         forced,
         state.tick,
         n,
+        max_repos,
     );
     // Bump the cursor for repos we're about to query (even a
     // 0-result query advances the rotation — without it, an empty
@@ -196,22 +208,14 @@ pub fn plan_round_robin_tick(
 ///   cursor or suspended cold — so a manual `Shift-R` while sitting on
 ///   a starved repo always re-fetches it. Never causes `run_global` on
 ///   its own.
-/// - `forced` — repos that must be in EVERY pick regardless of the
-///   round-robin budget (the session-anchored Tier 0: every repo
-///   backing a workspace with a persisted session). Uncapped — bounded
-///   naturally by how many worktrees the user has open. Each forced
-///   repo costs one `repo:`-scoped PR search per full-sweep tick, so at
-///   an extreme worktree count a single sweep's fan-out grows with the
-///   session set; at the daily-driver scale (tens of worktrees) it
-///   stays well inside the tick budget.
+/// - `forced` — session-bearing repos added ahead of the normal
+///   round-robin tier.
 /// - `tick` — monotonic counter incremented per `sources_for` call.
 ///   Used to determine the K-th refresh tick.
 /// - `n` — round-robin fan-out budget for the NON-forced tier. `0` is
 ///   treated as [`DEFAULT_ROUND_ROBIN_N`] so a misconfigured caller
-///   still gets something sensible. `forced` repos are added on top of
-///   these `n` slots; the `focused` repo instead RIDES one of them (it
-///   is force-included, but consumes a round-robin slot rather than
-///   adding to the fan-out).
+///   still gets something sensible. Forced repos are added on top of
+///   these slots; focused repos ride one of them.
 ///
 /// Output rules:
 /// 1. **Cold start** (`known` empty AND nothing forced/focused):
@@ -235,33 +239,52 @@ pub fn pick_repos_for_tick(
     tick: u64,
     n: usize,
 ) -> RoundRobinPick {
+    pick_repos_for_tick_budgeted(known, focused, forced, tick, n, usize::MAX)
+}
+
+/// Cost-bounded variant used by the GitHub governor. `max_repos` is
+/// the hard cap across focused, session-bearing, and normal rotation
+/// members. Session-bearing repositories that do not fit retain their
+/// old cursor age and therefore rotate ahead of selected members on a
+/// later tick.
+pub fn pick_repos_for_tick_budgeted(
+    known: &HashMap<String, Instant>,
+    focused: Option<&str>,
+    forced: &HashSet<String>,
+    tick: u64,
+    n: usize,
+    max_repos: usize,
+) -> RoundRobinPick {
     let n = if n == 0 { DEFAULT_ROUND_ROBIN_N } else { n };
 
     let mut repos: Vec<String> = Vec::new();
     let mut included: HashSet<&str> = HashSet::new();
 
-    // Tier 0 — forced (sessioned) repos. Uncapped: every repo backing a
-    // workspace with a persisted session is in every pick, bounded only
-    // by how many worktrees the user has open. Emitted in name order so
-    // the pick stays deterministic.
-    let mut forced_sorted: Vec<&String> = forced.iter().collect();
-    forced_sorted.sort();
-    for repo in forced_sorted {
-        if included.insert(repo.as_str()) {
-            repos.push(repo.clone());
-        }
-    }
-
-    // The focused repo is force-included even when it's absent from the
-    // cursor (starved / suspended cold), so a manual Shift-R while
-    // sitting on it always re-fetches. It rides the round-robin budget
-    // rather than adding to it.
+    // Focus preempts every scheduled tier.
     let mut round_robin_budget = n;
-    if let Some(focus) = focused
+    if repos.len() < max_repos
+        && let Some(focus) = focused
         && included.insert(focus)
     {
         repos.push(focus.to_string());
-        round_robin_budget = round_robin_budget.saturating_sub(1);
+        if !forced.contains(focus) {
+            round_robin_budget = round_robin_budget.saturating_sub(1);
+        }
+    }
+
+    // Session-bearing repositories are a fair stale-first rotation
+    // when the allowance cannot cover all of them. Repositories absent
+    // from the cursor sort first; once selected they are stamped by the
+    // caller, so the remaining members advance on the next tick.
+    let mut forced_sorted: Vec<&String> = forced.iter().collect();
+    forced_sorted.sort_by(|a, b| known.get(*a).cmp(&known.get(*b)).then_with(|| a.cmp(b)));
+    for repo in forced_sorted {
+        if repos.len() >= max_repos {
+            break;
+        }
+        if included.insert(repo.as_str()) {
+            repos.push(repo.clone());
+        }
     }
 
     if known.is_empty() {
@@ -278,7 +301,7 @@ pub fn pick_repos_for_tick(
 
     let mut round_robin = 0usize;
     for (repo, _) in sorted {
-        if round_robin >= round_robin_budget {
+        if round_robin >= round_robin_budget || repos.len() >= max_repos {
             break;
         }
         if included.contains(repo.as_str()) {
@@ -289,14 +312,21 @@ pub fn pick_repos_for_tick(
         round_robin += 1;
     }
 
-    let run_global = if known.len() <= n {
-        tick.is_multiple_of(2)
-    } else {
-        let k = known.len().div_ceil(n).max(2) as u64;
-        tick.is_multiple_of(k)
-    };
+    let run_global = will_run_global(known.len(), tick, n);
 
     RoundRobinPick { repos, run_global }
+}
+
+pub fn will_run_global(known_repos: usize, tick: u64, n: usize) -> bool {
+    let n = if n == 0 { DEFAULT_ROUND_ROBIN_N } else { n };
+    if known_repos == 0 {
+        true
+    } else if known_repos <= n {
+        tick.is_multiple_of(2)
+    } else {
+        let k = known_repos.div_ceil(n).max(2) as u64;
+        tick.is_multiple_of(k)
+    }
 }
 
 #[cfg(test)]
@@ -710,5 +740,56 @@ mod tests {
             .insert("b/b".to_string(), now - Duration::from_secs(60));
         state.prune(now);
         assert_eq!(state.cursor.len(), 2);
+    }
+
+    #[test]
+    fn budgeted_session_rotation_never_starves_members() {
+        let now = Instant::now();
+        let mut state = RoundRobinState::default();
+        let sessioned = forced(&["s/1", "s/2", "s/3", "s/4", "s/5"]);
+        let mut seen = HashSet::new();
+
+        for tick in 0..3 {
+            let pick = plan_round_robin_tick_budgeted(
+                &mut state,
+                &sessioned,
+                true,
+                DEFAULT_ROUND_ROBIN_N,
+                2,
+                now + Duration::from_secs(tick),
+            );
+            assert_eq!(pick.repos.len(), 2);
+            seen.extend(pick.repos);
+        }
+
+        assert_eq!(seen, sessioned);
+    }
+
+    #[test]
+    fn budgeted_focus_preempts_session_rotation() {
+        let known = cursor(&[("session/a", 1), ("session/b", 2)]);
+        let pick = pick_repos_for_tick_budgeted(
+            &known,
+            Some("focus/repo"),
+            &forced(&["session/a", "session/b"]),
+            1,
+            3,
+            2,
+        );
+        assert_eq!(pick.repos[0], "focus/repo");
+        assert_eq!(pick.repos.len(), 2);
+    }
+
+    #[test]
+    fn global_cadence_matches_small_large_and_cold_rotations() {
+        assert!(will_run_global(0, 1, 3));
+        assert!(will_run_global(3, 2, 3));
+        assert!(!will_run_global(3, 3, 3));
+        assert!(will_run_global(10, 4, 3));
+        assert!(!will_run_global(10, 3, 3));
+        assert_eq!(
+            will_run_global(10, 4, 0),
+            will_run_global(10, 4, DEFAULT_ROUND_ROBIN_N)
+        );
     }
 }

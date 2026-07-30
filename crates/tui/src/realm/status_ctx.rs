@@ -396,6 +396,9 @@ pub(crate) struct StatusCtx {
     /// GitHub is not syncing or failed: it is deliberately sleeping
     /// until the observed API window resets.
     pub github_rate_limit_wait: Option<GithubRateLimitWait>,
+    /// Latest compact budget-governor snapshot received through the
+    /// GitHub poll progress stream. Shift-D renders it above history.
+    pub github_governor: Option<String>,
     /// Animated spawn indicator — lit when a `Spawn` command is sent,
     /// cleared when the matching `TerminalSpawned` /
     /// `TerminalFocusRequested` lands (or a spawn `ProviderError`, or
@@ -421,6 +424,7 @@ impl StatusCtx {
             polling_last_tick: Instant::now(),
             bg_poll: None,
             github_rate_limit_wait: None,
+            github_governor: None,
             spawning: None,
             sync: SyncLog::default(),
             messages: MessageLog::default(),
@@ -466,6 +470,9 @@ impl StatusCtx {
         let now = Instant::now();
         if source == "github" {
             self.github_rate_limit_wait = None;
+            if let Some(snapshot) = message.strip_prefix("Governor: ") {
+                self.github_governor = Some(snapshot.to_string());
+            }
         }
         match &mut self.bg_poll {
             Some(bg) if bg.source == source => {
@@ -832,6 +839,24 @@ mod tests {
 
         s.note_poll_completed("github");
         assert!(s.bg_poll.is_none(), "PollCompleted clears the indicator");
+    }
+
+    #[test]
+    fn governor_progress_is_retained_for_sync_status() {
+        let mut s = StatusCtx::new();
+        s.note_poll_progress(
+            "github",
+            "Governor: share=55% · graphql 4300/5000 reserve=2250 allowance=4/9",
+        );
+        assert_eq!(
+            s.github_governor.as_deref(),
+            Some("share=55% · graphql 4300/5000 reserve=2250 allowance=4/9")
+        );
+        s.note_poll_completed("github");
+        assert!(
+            s.github_governor.is_some(),
+            "completion clears the spinner but retains the last budget snapshot"
+        );
     }
 
     #[test]

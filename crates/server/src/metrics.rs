@@ -36,13 +36,14 @@ impl LatencySamples {
         self.values.push_back(value_ms);
     }
 
-    fn summary(&self) -> (u64, Option<u64>, Option<u64>) {
+    fn summary(&self) -> (u64, Option<u64>, Option<u64>, Option<u64>) {
         let mut sorted: Vec<u64> = self.values.iter().copied().collect();
         sorted.sort_unstable();
         (
             sorted.len() as u64,
             percentile(&sorted, 50),
             percentile(&sorted, 95),
+            percentile(&sorted, 99),
         )
     }
 }
@@ -104,6 +105,7 @@ pub struct EventMetrics {
     /// handlers can't contribute: they return to `select!` in µs.
     inline_budget_violations: AtomicU64,
     hot_sync_latency_ms: parking_lot::Mutex<LatencySamples>,
+    warm_sync_latency_ms: parking_lot::Mutex<LatencySamples>,
     cold_sync_latency_ms: parking_lot::Mutex<LatencySamples>,
     sync_observations: parking_lot::Mutex<SyncObservations>,
 }
@@ -145,6 +147,10 @@ impl EventMetrics {
         self.cold_sync_latency_ms.lock().record(age_ms);
     }
 
+    pub fn record_warm_sync_latency(&self, age_ms: u64) {
+        self.warm_sync_latency_ms.lock().record(age_ms);
+    }
+
     /// Return the elapsed time since this workspace's previous sync
     /// observation, establishing the baseline on first sight.
     pub fn observe_sync(&self, workspace_key: &str) -> Option<u64> {
@@ -153,9 +159,11 @@ impl EventMetrics {
 
     /// Point-in-time copy of every counter.
     pub fn snapshot(&self) -> EventMetricsSnapshot {
-        let (hot_sync_samples, hot_sync_p50_ms, hot_sync_p95_ms) =
+        let (hot_sync_samples, hot_sync_p50_ms, hot_sync_p95_ms, hot_sync_p99_ms) =
             self.hot_sync_latency_ms.lock().summary();
-        let (cold_sync_samples, cold_sync_p50_ms, cold_sync_p95_ms) =
+        let (warm_sync_samples, warm_sync_p50_ms, warm_sync_p95_ms, warm_sync_p99_ms) =
+            self.warm_sync_latency_ms.lock().summary();
+        let (cold_sync_samples, cold_sync_p50_ms, cold_sync_p95_ms, cold_sync_p99_ms) =
             self.cold_sync_latency_ms.lock().summary();
         EventMetricsSnapshot {
             terminal_output_dropped: self.terminal_output_dropped.load(Ordering::Relaxed),
@@ -166,9 +174,15 @@ impl EventMetrics {
             hot_sync_samples,
             hot_sync_p50_ms,
             hot_sync_p95_ms,
+            hot_sync_p99_ms,
+            warm_sync_samples,
+            warm_sync_p50_ms,
+            warm_sync_p95_ms,
+            warm_sync_p99_ms,
             cold_sync_samples,
             cold_sync_p50_ms,
             cold_sync_p95_ms,
+            cold_sync_p99_ms,
         }
     }
 }
@@ -189,11 +203,23 @@ pub struct EventMetricsSnapshot {
     #[serde(default)]
     pub hot_sync_p95_ms: Option<u64>,
     #[serde(default)]
+    pub hot_sync_p99_ms: Option<u64>,
+    #[serde(default)]
+    pub warm_sync_samples: u64,
+    #[serde(default)]
+    pub warm_sync_p50_ms: Option<u64>,
+    #[serde(default)]
+    pub warm_sync_p95_ms: Option<u64>,
+    #[serde(default)]
+    pub warm_sync_p99_ms: Option<u64>,
+    #[serde(default)]
     pub cold_sync_samples: u64,
     #[serde(default)]
     pub cold_sync_p50_ms: Option<u64>,
     #[serde(default)]
     pub cold_sync_p95_ms: Option<u64>,
+    #[serde(default)]
+    pub cold_sync_p99_ms: Option<u64>,
 }
 
 #[cfg(test)]
@@ -214,6 +240,7 @@ mod tests {
         for age_ms in [10, 20, 30, 100] {
             m.record_hot_sync_latency(age_ms);
         }
+        m.record_warm_sync_latency(2_000);
         m.record_cold_sync_latency(600_000);
         assert_eq!(m.observe_sync("github:o/r#1"), None);
         assert!(m.observe_sync("github:o/r#1").is_some());
@@ -227,9 +254,15 @@ mod tests {
         assert_eq!(snap.hot_sync_samples, 4);
         assert_eq!(snap.hot_sync_p50_ms, Some(20));
         assert_eq!(snap.hot_sync_p95_ms, Some(100));
+        assert_eq!(snap.hot_sync_p99_ms, Some(100));
+        assert_eq!(snap.warm_sync_samples, 1);
+        assert_eq!(snap.warm_sync_p50_ms, Some(2_000));
+        assert_eq!(snap.warm_sync_p95_ms, Some(2_000));
+        assert_eq!(snap.warm_sync_p99_ms, Some(2_000));
         assert_eq!(snap.cold_sync_samples, 1);
         assert_eq!(snap.cold_sync_p50_ms, Some(600_000));
         assert_eq!(snap.cold_sync_p95_ms, Some(600_000));
+        assert_eq!(snap.cold_sync_p99_ms, Some(600_000));
     }
 
     #[test]

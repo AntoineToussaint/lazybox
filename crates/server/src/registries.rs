@@ -402,6 +402,30 @@ impl TerminalRegistry {
     }
 }
 
+#[derive(Clone, Default)]
+pub struct GithubClientCache {
+    client: Arc<parking_lot::Mutex<Option<lazybox_gh::GhClient>>>,
+    initialization: Arc<Mutex<()>>,
+}
+
+impl GithubClientCache {
+    pub(crate) fn cached(&self) -> Option<lazybox_gh::GhClient> {
+        self.client.lock().clone()
+    }
+
+    pub(crate) fn store(&self, client: lazybox_gh::GhClient) {
+        *self.client.lock() = Some(client);
+    }
+
+    pub(crate) fn clear(&self) {
+        *self.client.lock() = None;
+    }
+
+    pub(crate) async fn lock_initialization(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.initialization.clone().lock_owned().await
+    }
+}
+
 /// Cross-tick polling state and caches.
 ///
 /// The fields keep their separate lock domains because the upsert path must
@@ -414,7 +438,7 @@ pub struct PollState {
     /// Bounded engagement set written by focus changes and read by poll scheduling.
     pub(crate) engagement: Arc<parking_lot::RwLock<polling::PollEngagement>>,
     /// Long-lived GitHub client whose shared rate budget must survive across ticks.
-    pub(crate) gh_client_cache: Arc<parking_lot::Mutex<Option<lazybox_gh::GhClient>>>,
+    pub(crate) gh_client_cache: GithubClientCache,
     /// Issue-to-PR prompt dedupe kept outside `tick_state` to avoid upsert re-entry.
     pub(crate) merge_prompts: Arc<Mutex<polling::MergePromptMemory>>,
     /// Auto-merge latches kept outside `tick_state` because commit paths update them.
@@ -467,22 +491,22 @@ impl PollState {
 
     /// Snapshot the cached GitHub client without exposing its lock.
     pub fn cached_gh_client(&self) -> Option<lazybox_gh::GhClient> {
-        self.gh_client_cache.lock().clone()
+        self.gh_client_cache.cached()
     }
 
     /// Replace the cached GitHub client used across polling ticks.
     pub fn cache_gh_client(&self, client: lazybox_gh::GhClient) {
-        *self.gh_client_cache.lock() = Some(client);
+        self.gh_client_cache.store(client);
     }
 
     /// Report whether a reusable GitHub client is currently cached.
     pub fn has_cached_gh_client(&self) -> bool {
-        self.gh_client_cache.lock().is_some()
+        self.gh_client_cache.cached().is_some()
     }
 
     /// Drop the cached GitHub client after an authentication failure.
     pub fn clear_cached_gh_client(&self) {
-        *self.gh_client_cache.lock() = None;
+        self.gh_client_cache.clear();
     }
 
     /// Report whether the tick-state lock is currently available.

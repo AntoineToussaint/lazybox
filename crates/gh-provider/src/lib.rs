@@ -9,14 +9,17 @@ pub mod mentions;
 mod notifications;
 pub mod rate_budget;
 
-pub use client::{GhClient, SelectedFetchOutcome, credential_fingerprint};
+pub use client::{BackgroundSweepForecast, GhClient, SelectedFetchOutcome, credential_fingerprint};
 pub use graphql::PrDetails;
 pub use mentions::{LazyboxMention, MentionSource, parse_label_directive, scan_issue};
 pub use notifications::{
     NotificationEntry, NotificationTarget, NotificationTargetKind, NotificationsPoll,
-    NotificationsSnapshot,
+    NotificationsSnapshot, SyncCursors,
 };
-pub use rate_budget::{AcquireError, RateBudget, RemoteRateLimit, Snapshot as RateSnapshot};
+pub use rate_budget::{
+    AcquireError, ApiResource, BackgroundPlan, RateBudget, RemoteRateLimit, RequestPriority,
+    Snapshot as RateSnapshot,
+};
 
 use lazybox_auth::{CommandProvider, CredentialChain, EnvProvider};
 use lazybox_core::{ProviderError, Scope, ScopeSource};

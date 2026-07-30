@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use bytes::Bytes;
+use lazybox_core::ProviderConfig;
 use lazybox_server::ServerConfig;
 use lazybox_server::api_gateway::{
     CommandResponse, DESKTOP_PROTOCOL_FINGERPRINT, DESKTOP_PROTOCOL_VERSION,
@@ -11,14 +12,18 @@ use lazybox_server::api_gateway::{
 };
 use lazybox_server::client_runtime::{ClientRuntime, ClientRuntimeOptions};
 use reqwest::{Client, Response};
-use serde::de::DeserializeOwned;
-use std::io;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use std::collections::BTreeSet;
+use std::fs::OpenOptions;
+use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::Path;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::ipc::{Channel, InvokeBody, Request};
-use tauri::{Manager, State};
+use tauri::{AppHandle, Manager, State};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, mpsc};
 
@@ -37,7 +42,9 @@ struct GatewayClient {
 struct DesktopState {
     gateway: GatewayClient,
     agents: Vec<String>,
+    agent_options: Vec<DesktopAgentOption>,
     default_agent: String,
+    analytics_enabled: bool,
     terminal_commands: mpsc::Sender<Bytes>,
     terminal_command_rx: Arc<Mutex<mpsc::Receiver<Bytes>>>,
     terminal_rx: Mutex<mpsc::Receiver<TerminalStreamItem>>,
@@ -45,6 +52,55 @@ struct DesktopState {
     streams_started: AtomicBool,
     client_runtime: Mutex<Option<ClientRuntime>>,
     gateway_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct DesktopAgentOption {
+    id: String,
+    label: String,
+    available: bool,
+}
+
+#[derive(Serialize)]
+struct DesktopSetupState {
+    first_run: bool,
+    selected_repositories: Vec<String>,
+    agents: Vec<DesktopAgentOption>,
+    default_agent: String,
+    analytics_enabled: bool,
+    diagnostics_path: String,
+}
+
+#[derive(Serialize)]
+struct GithubAuthStatus {
+    authenticated: bool,
+    account: Option<String>,
+    message: String,
+}
+
+#[derive(Serialize)]
+struct GithubRepositoryOption {
+    id: String,
+    label: String,
+    owner: String,
+}
+
+#[derive(Deserialize)]
+struct SaveDesktopSettings {
+    repositories: Vec<String>,
+    default_agent: String,
+    analytics_enabled: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AnalyticsEvent {
+    AppOpened,
+    OnboardingCompleted,
+    WorkspaceOpened,
+    AgentStarted,
+    ShellStarted,
+    ReplyPosted,
 }
 
 #[tauri::command]
@@ -56,6 +112,144 @@ fn desktop_info(state: State<'_, DesktopState>) -> DesktopInfo {
         agents: state.agents.clone(),
         default_agent: state.default_agent.clone(),
     }
+}
+
+#[tauri::command]
+fn desktop_setup_state(state: State<'_, DesktopState>) -> Result<DesktopSetupState, String> {
+    let config = lazybox_config::Config::load()
+        .map_err(|error| format!("load lazybox configuration: {error}"))?;
+    let mut selected_repositories = config
+        .setup
+        .scopes
+        .get("github")
+        .into_iter()
+        .flatten()
+        .filter(|scope| {
+            scope
+                .strip_prefix("github:")
+                .is_some_and(|repository| repository.contains('/'))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    selected_repositories.sort();
+    let first_run = !config.setup.wizard_completed
+        || !config.setup.providers.contains("github")
+        || selected_repositories.is_empty();
+    Ok(DesktopSetupState {
+        first_run,
+        selected_repositories,
+        agents: state.agent_options.clone(),
+        default_agent: state.default_agent.clone(),
+        analytics_enabled: config.desktop.analytics_enabled,
+        diagnostics_path: diagnostics_dir().display().to_string(),
+    })
+}
+
+#[tauri::command]
+async fn github_auth_status() -> GithubAuthStatus {
+    match authenticated_github_client().await {
+        Ok(client) => GithubAuthStatus {
+            authenticated: true,
+            account: Some(client.authenticated_user().to_string()),
+            message: "GitHub credential verified".to_string(),
+        },
+        Err(error) => GithubAuthStatus {
+            authenticated: false,
+            account: None,
+            message: error,
+        },
+    }
+}
+
+#[tauri::command]
+async fn begin_github_login() -> Result<(), String> {
+    which::which("gh").map_err(|_| "GitHub CLI is not installed; run `brew install gh`")?;
+    tokio::process::Command::new("gh")
+        .args([
+            "auth",
+            "login",
+            "--web",
+            "--clipboard",
+            "--hostname",
+            "github.com",
+            "--git-protocol",
+            "https",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("start GitHub sign-in: {error}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn list_github_repositories() -> Result<Vec<GithubRepositoryOption>, String> {
+    let client = authenticated_github_client().await?;
+    let parents = tokio::time::timeout(Duration::from_secs(20), client.list_scopes())
+        .await
+        .map_err(|_| "GitHub repository discovery timed out".to_string())?
+        .map_err(|error| format!("discover GitHub accounts: {error}"))?;
+    let mut repositories = Vec::new();
+    for parent in parents {
+        let scopes = tokio::time::timeout(
+            Duration::from_secs(30),
+            client.list_repos_in_org(&parent.id),
+        )
+        .await
+        .map_err(|_| format!("GitHub repository discovery timed out for {}", parent.label))?
+        .map_err(|error| format!("discover GitHub repositories for {}: {error}", parent.label))?;
+        repositories.extend(scopes.into_iter().map(|scope| GithubRepositoryOption {
+            id: scope.id,
+            label: scope.label,
+            owner: parent.label.clone(),
+        }));
+    }
+    repositories.sort_by(|left, right| left.label.cmp(&right.label));
+    repositories.dedup_by(|left, right| left.id == right.id);
+    Ok(repositories)
+}
+
+#[tauri::command]
+fn save_desktop_settings(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+    settings: SaveDesktopSettings,
+) -> Result<(), String> {
+    let repositories = validate_repository_scopes(settings.repositories)?;
+    if !state
+        .agent_options
+        .iter()
+        .any(|agent| agent.id == settings.default_agent && agent.available)
+    {
+        return Err("select an installed agent".to_string());
+    }
+    let default_agent = settings.default_agent;
+    let analytics_enabled = settings.analytics_enabled;
+    lazybox_config::Config::save_with(move |config| {
+        apply_desktop_settings(config, repositories, default_agent, analytics_enabled);
+    })
+    .map_err(|error| format!("save lazybox configuration: {error}"))?;
+    if analytics_enabled
+        && let Err(error) =
+            append_analytics_event(&analytics_path(), AnalyticsEvent::OnboardingCompleted)
+    {
+        eprintln!("lazybox desktop could not record onboarding analytics: {error}");
+    }
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        app.request_restart();
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn record_analytics(state: State<'_, DesktopState>, event: AnalyticsEvent) -> Result<(), String> {
+    if !state.analytics_enabled {
+        return Ok(());
+    }
+    append_analytics_event(&analytics_path(), event)
+        .map_err(|error| format!("record desktop analytics: {error}"))
 }
 
 #[tauri::command]
@@ -367,9 +561,205 @@ impl NdjsonDecoder {
     }
 }
 
+async fn authenticated_github_client() -> Result<lazybox_gh::GhClient, String> {
+    let credential = tokio::time::timeout(
+        Duration::from_secs(5),
+        lazybox_gh::credential_chain().resolve(lazybox_gh::SOURCE),
+    )
+    .await
+    .map_err(|_| "GitHub credential lookup timed out".to_string())?
+    .map_err(|_| "No GitHub credential found. Sign in with GitHub CLI.".to_string())?;
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        lazybox_gh::GhClient::from_credential(credential),
+    )
+    .await
+    .map_err(|_| "GitHub credential verification timed out".to_string())?
+    .map_err(|error| format!("GitHub credential verification failed: {error}"))
+}
+
+fn validate_repository_scopes(scopes: Vec<String>) -> Result<BTreeSet<String>, String> {
+    let repositories = scopes
+        .into_iter()
+        .map(|scope| scope.trim().to_string())
+        .collect::<BTreeSet<_>>();
+    if repositories.is_empty() {
+        return Err("select at least one GitHub repository".to_string());
+    }
+    if repositories.iter().any(|scope| {
+        !scope.strip_prefix("github:").is_some_and(|repository| {
+            let mut parts = repository.split('/');
+            parts.next().is_some_and(|part| !part.is_empty())
+                && parts.next().is_some_and(|part| !part.is_empty())
+                && parts.next().is_none()
+        })
+    }) {
+        return Err("GitHub repository scopes must use github:owner/repository".to_string());
+    }
+    Ok(repositories)
+}
+
+fn apply_desktop_settings(
+    config: &mut lazybox_config::Config,
+    repositories: BTreeSet<String>,
+    default_agent: String,
+    analytics_enabled: bool,
+) {
+    config.setup.providers.insert("github".to_string());
+    config.setup.agents.insert(default_agent.clone());
+    config
+        .setup
+        .filters
+        .entry("github".to_string())
+        .or_insert_with(|| ProviderConfig::default_for("github").enabled_keys);
+    config
+        .setup
+        .scopes
+        .insert("github".to_string(), repositories);
+    config.setup.default_agent = Some(default_agent);
+    config.setup.wizard_completed = true;
+    config.desktop.analytics_enabled = analytics_enabled;
+}
+
+fn detect_agent_options(config: &lazybox_config::Config) -> Vec<DesktopAgentOption> {
+    let mut ids = ["claude", "codex", "cursor"]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+    ids.extend(config.agents.keys().cloned());
+    ids.into_iter()
+        .map(|id| {
+            let configured = config.agents.get(&id);
+            let command = configured
+                .and_then(|entry| entry.command.clone())
+                .unwrap_or_else(|| match id.as_str() {
+                    "claude" => "claude".to_string(),
+                    "codex" => "codex".to_string(),
+                    "cursor" => "cursor-agent".to_string(),
+                    _ => id.clone(),
+                });
+            let label = configured
+                .and_then(|entry| entry.name.clone())
+                .unwrap_or_else(|| match id.as_str() {
+                    "claude" => "Claude Code".to_string(),
+                    "codex" => "Codex".to_string(),
+                    "cursor" => "Cursor Agent".to_string(),
+                    _ => id.clone(),
+                });
+            DesktopAgentOption {
+                id,
+                label,
+                available: which::which(&command).is_ok(),
+            }
+        })
+        .collect()
+}
+
+fn diagnostics_dir() -> std::path::PathBuf {
+    lazybox_core::paths::state_root().join("desktop-crashes")
+}
+
+fn analytics_path() -> std::path::PathBuf {
+    lazybox_core::paths::state_root().join("desktop-analytics.ndjson")
+}
+
+fn append_analytics_event(path: &Path, event: AnalyticsEvent) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let line = serde_json::json!({ "event": event, "timestamp": timestamp });
+    writeln!(file, "{line}")
+}
+
+fn diagnostic_body(location: Option<&std::panic::Location<'_>>) -> String {
+    let location = location
+        .map(|location| format!("{}:{}", location.file(), location.line()))
+        .unwrap_or_else(|| "unknown".to_string());
+    format!(
+        "lazybox desktop crash\nversion={}\nplatform={}-{}\nlocation={location}\n",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    )
+}
+
+fn install_crash_diagnostics() {
+    let original = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let directory = diagnostics_dir();
+        if std::fs::create_dir_all(&directory).is_ok() {
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            let path = directory.join(format!("crash-{timestamp}.txt"));
+            let _ = std::fs::write(path, diagnostic_body(panic_info.location()));
+        }
+        original(panic_info);
+    }));
+}
+
+#[cfg(target_os = "macos")]
+fn import_login_shell_path() {
+    let shell = lazybox_config::ShellSection::default().resolved_command();
+    let Ok(mut child) = std::process::Command::new(shell)
+        .args(["-l", "-c", "printf '\\n__LAZYBOX_PATH__%s\\n' \"$PATH\""])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return;
+            }
+        }
+    }
+    let Ok(output) = child.wait_with_output() else {
+        return;
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let Some(path) = extract_login_shell_path(&stdout) else {
+        return;
+    };
+    // This is main's first process mutation, before Tauri or Tokio starts
+    // threads that can read the environment.
+    unsafe {
+        std::env::set_var("PATH", path);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn import_login_shell_path() {}
+
+fn extract_login_shell_path(output: &str) -> Option<&str> {
+    output
+        .lines()
+        .rev()
+        .find_map(|line| line.strip_prefix("__LAZYBOX_PATH__"))
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+}
+
 async fn start_desktop_state() -> Result<DesktopState, String> {
     let user_config = lazybox_config::Config::load()
         .map_err(|error| format!("load lazybox configuration: {error}"))?;
+    let agent_options = detect_agent_options(&user_config);
     let config = ServerConfig::from_user_config()
         .map_err(|error| format!("start lazybox daemon: {error}"))?;
     let client_runtime = ClientRuntime::start(
@@ -445,7 +835,9 @@ async fn start_desktop_state() -> Result<DesktopState, String> {
     Ok(DesktopState {
         gateway,
         agents,
+        agent_options,
         default_agent,
+        analytics_enabled: user_config.desktop.analytics_enabled,
         terminal_commands,
         terminal_command_rx: Arc::new(Mutex::new(terminal_command_rx)),
         terminal_rx: Mutex::new(terminal_rx),
@@ -479,6 +871,8 @@ fn validate_protocol(protocol: &ProtocolResponse) -> Result<(), String> {
 }
 
 fn main() {
+    install_crash_diagnostics();
+    import_login_shell_path();
     let state = match tauri::async_runtime::block_on(start_desktop_state()) {
         Ok(state) => state,
         Err(error) => {
@@ -496,6 +890,12 @@ fn main() {
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             desktop_info,
+            desktop_setup_state,
+            github_auth_status,
+            begin_github_login,
+            list_github_repositories,
+            save_desktop_settings,
+            record_analytics,
             list_workspaces,
             send_command,
             send_terminal_frame,
@@ -559,6 +959,21 @@ mod tests {
     }
 
     #[test]
+    fn github_auth_status_cannot_serialize_credential_material() {
+        let status = GithubAuthStatus {
+            authenticated: true,
+            account: Some("octocat".to_string()),
+            message: "GitHub credential verified".to_string(),
+        };
+
+        let value = serde_json::to_value(status).expect("serialize status");
+
+        assert_eq!(value["account"], "octocat");
+        assert!(value.get("token").is_none());
+        assert!(value.get("credential").is_none());
+    }
+
+    #[test]
     fn desktop_rejects_a_daemon_with_a_different_contract_fingerprint() {
         let mut protocol = lazybox_server::api_gateway::protocol_response();
         protocol.protocol_fingerprint = DESKTOP_PROTOCOL_FINGERPRINT.wrapping_add(1);
@@ -570,8 +985,9 @@ mod tests {
 
     #[test]
     fn desktop_command_translation_exposes_only_the_supported_control_shape() {
+        let session_key = lazybox_core::SessionKey::from("github:o/r#1");
         let command = Command::from(DesktopCommand::SpawnAgent {
-            session_key: "github:o/r#1".into(),
+            session_key: session_key.clone(),
             agent: "codex".to_string(),
         });
 
@@ -588,6 +1004,112 @@ mod tests {
                 ..
             } if agent == "codex"
         ));
+        assert!(matches!(
+            Command::from(DesktopCommand::SpawnShell {
+                session_key: session_key.clone(),
+            }),
+            Command::Spawn {
+                kind: lazybox_ipc::TerminalKind::Shell,
+                cwd: None,
+                initial_prompt: None,
+                on_main: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            Command::from(DesktopCommand::MarkRead {
+                session_key: session_key.clone(),
+            }),
+            Command::MarkRead { session_key: key } if key == session_key
+        ));
+        assert!(matches!(
+            Command::from(DesktopCommand::PostReply {
+                session_key: session_key.clone(),
+                body: "reply".to_string(),
+            }),
+            Command::PostReply { session_key: key, body }
+                if key == session_key && body == "reply"
+        ));
+    }
+
+    #[test]
+    fn desktop_settings_round_trip_through_the_shared_config_model() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("config.yaml");
+        let mut config = lazybox_config::Config::default();
+        config.setup.providers.insert("linear".to_string());
+        config.save_to(&path).expect("seed config");
+
+        let repositories = validate_repository_scopes(vec![
+            " github:acme/widget ".to_string(),
+            "github:acme/api".to_string(),
+        ])
+        .expect("valid repository scopes");
+        let mut config = lazybox_config::Config::load_from(&path).expect("load seeded config");
+        apply_desktop_settings(&mut config, repositories, "codex".to_string(), true);
+        config.save_to(&path).expect("persist desktop setup");
+
+        let saved = lazybox_config::Config::load_from(&path).expect("reload desktop setup");
+        assert!(saved.setup.providers.contains("linear"));
+        assert!(saved.setup.providers.contains("github"));
+        assert_eq!(saved.setup.default_agent.as_deref(), Some("codex"));
+        assert!(saved.setup.agents.contains("codex"));
+        assert!(saved.setup.wizard_completed);
+        assert!(saved.desktop.analytics_enabled);
+        assert_eq!(
+            saved.setup.scopes.get("github"),
+            Some(&BTreeSet::from([
+                "github:acme/api".to_string(),
+                "github:acme/widget".to_string(),
+            ]))
+        );
+        assert!(
+            saved
+                .setup
+                .filters
+                .get("github")
+                .is_some_and(|filters| !filters.is_empty())
+        );
+    }
+
+    #[test]
+    fn desktop_settings_reject_non_repository_scopes() {
+        assert!(validate_repository_scopes(Vec::new()).is_err());
+        assert!(validate_repository_scopes(vec!["github:acme".to_string()]).is_err());
+        assert!(validate_repository_scopes(vec!["linear:acme/widget".to_string()]).is_err());
+    }
+
+    #[test]
+    fn analytics_records_only_the_fixed_event_and_timestamp() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("events.ndjson");
+
+        append_analytics_event(&path, AnalyticsEvent::ReplyPosted).expect("record analytics");
+
+        let line = std::fs::read_to_string(path).expect("read analytics");
+        let value: serde_json::Value = serde_json::from_str(line.trim()).expect("parse analytics");
+        assert_eq!(value["event"], "reply_posted");
+        assert!(value["timestamp"].is_u64());
+        assert_eq!(value.as_object().map(serde_json::Map::len), Some(2));
+    }
+
+    #[test]
+    fn crash_diagnostic_has_no_runtime_or_provider_content() {
+        let body = diagnostic_body(None);
+
+        assert!(body.contains("lazybox desktop crash"));
+        assert!(body.contains("location=unknown"));
+        assert!(!body.contains("token"));
+        assert!(!body.contains("terminal"));
+    }
+
+    #[test]
+    fn login_shell_path_uses_the_marker_after_shell_startup_output() {
+        assert_eq!(
+            extract_login_shell_path("startup noise\n__LAZYBOX_PATH__/opt/homebrew/bin:/usr/bin\n"),
+            Some("/opt/homebrew/bin:/usr/bin")
+        );
+        assert_eq!(extract_login_shell_path("startup noise\n"), None);
     }
 
     #[tokio::test]

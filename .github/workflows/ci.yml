@@ -63,7 +63,9 @@ jobs:
               - "Cargo.lock"
               - "Cargo.toml"
               - "apps/desktop/**"
+              - "crates/config/**"
               - "crates/core/**"
+              - "crates/gh-provider/**"
               - "crates/ipc/**"
               - "crates/server/**"
               - "docs/desktop-spike.md"
@@ -204,7 +206,7 @@ jobs:
         run: cargo nextest run -p lazybox-tui --profile ci --test web_docs --test keymap_docs
 
   desktop:
-    name: desktop boundary (macos-14)
+    name: desktop MVP (macos-14)
     needs: changes
     if: needs.changes.outputs.desktop == 'true'
     runs-on: macos-14
@@ -237,6 +239,14 @@ jobs:
           cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
           cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --locked -- -D warnings
           cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
+      - name: Build internal macOS app
+        working-directory: apps/desktop
+        run: npm run tauri build -- --debug --bundles app
+      - uses: actions/upload-artifact@v6
+        with:
+          name: lazybox-macos-dogfood
+          path: target/debug/bundle/macos/lazybox.app
+          if-no-files-found: error
 
   rustdoc:
     name: rustdoc

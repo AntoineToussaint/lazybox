@@ -230,8 +230,18 @@ pub enum DesktopCommand {
         session_key: lazybox_core::SessionKey,
         agent: String,
     },
+    SpawnShell {
+        session_key: lazybox_core::SessionKey,
+    },
     FocusWorkspace {
         session_key: lazybox_core::SessionKey,
+    },
+    MarkRead {
+        session_key: lazybox_core::SessionKey,
+    },
+    PostReply {
+        session_key: lazybox_core::SessionKey,
+        body: String,
     },
     Refresh,
 }
@@ -250,8 +260,23 @@ impl From<DesktopCommand> for Command {
                 model_alias: None,
                 access: lazybox_ipc::AgentRunAccess::Default,
             },
+            DesktopCommand::SpawnShell { session_key } => Command::Spawn {
+                session_key,
+                session_id: None,
+                client_request_id: None,
+                kind: lazybox_ipc::TerminalKind::Shell,
+                cwd: None,
+                initial_prompt: None,
+                on_main: false,
+                model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
+            },
             DesktopCommand::FocusWorkspace { session_key } => {
                 Command::FocusWorkspace { session_key }
+            }
+            DesktopCommand::MarkRead { session_key } => Command::MarkRead { session_key },
+            DesktopCommand::PostReply { session_key, body } => {
+                Command::PostReply { session_key, body }
             }
             DesktopCommand::Refresh => Command::Refresh,
         }

@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { Task, Workspace } from "./protocol";
 import {
+  CommandOutcomeTracker,
   applyWorkspaceEvent,
+  filteredWorkspaces,
   primaryTask,
   sortedWorkspaces,
   unreadCount,
@@ -88,6 +90,16 @@ function activity(author: string, body: string) {
 }
 
 describe("workspace model", () => {
+  it("does not report command success over a live failure event", () => {
+    const outcomes = new CommandOutcomeTracker();
+    const checkpoint = outcomes.checkpoint();
+
+    outcomes.recordFailure();
+
+    expect(outcomes.succeededSince(checkpoint)).toBe(false);
+    expect(outcomes.succeededSince(outcomes.checkpoint())).toBe(true);
+  });
+
   it("prefers the pull request as the primary task", () => {
     const item = workspace("one", task("PR"));
     item.gh_issues.push(task("issue"));
@@ -112,6 +124,32 @@ describe("workspace model", () => {
     ];
     item.seen_count = 1;
     expect(unreadCount(item)).toBe(2);
+  });
+
+  it("searches metadata and filters unread and attention work", () => {
+    const failing = workspace("failing", task("Broken release", 0));
+    failing.pr!.ci = "Failure";
+    const unread = workspace("unread", task("Provider labels", 2));
+    const quiet = workspace("quiet", task("Documentation", 0));
+
+    expect(
+      filteredWorkspaces([quiet, failing, unread], {
+        query: "labels",
+        filter: "all",
+      }).map((item) => item.key),
+    ).toEqual(["unread"]);
+    expect(
+      filteredWorkspaces([quiet, failing, unread], {
+        query: "",
+        filter: "unread",
+      }).map((item) => item.key),
+    ).toEqual(["unread"]);
+    expect(
+      filteredWorkspaces([quiet, failing, unread], {
+        query: "",
+        filter: "attention",
+      }).map((item) => item.key),
+    ).toEqual(["failing"]);
   });
 
   it("replaces the baseline and then applies live upserts and removals", () => {

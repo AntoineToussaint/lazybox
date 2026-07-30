@@ -1,9 +1,9 @@
 # GitHub sync performance
 
 This documents the per-poll cost instrumentation added for issue #12
-and the first measured trace from a real account. The goal was to
-replace gut feel ("polls still feel slow") with numbers, then decide
-what to change.
+and the first measured trace from a real account. The resource-aware
+budget policy and reproducible four-scenario after report live in
+[github-api-governor.md](github-api-governor.md).
 
 ## Capturing a trace
 
@@ -85,10 +85,11 @@ the **slowest** branch, not the sum.
 
 ## What the numbers say
 
-**1. GraphQL cost is a non-issue.** Every query costs 1–2 points; a
-whole poll is ~10 points against a 5000/hr GraphQL budget and the
-local 30 req/min bucket. The rate-budget work is sound — cost is not
-why polls feel slow. **Wall-clock is the entire story.**
+**1. Individual GraphQL operations are cheap, but cadence still
+matters.** Every query costs 1–2 points. Repeating a cheap fan-out too
+often can still crowd out `gh` and agents, so the governor budgets the
+reported points and protects a reserve. For one poll's perceived
+latency, wall-clock remains the dominant factor.
 
 **2. `involves-main` is the poll.** It alone takes 13.8–16.2 s and
 every other branch finishes while it is still running, so it sets the
@@ -136,8 +137,12 @@ authoritative and can extend either cadence.
 The `/v1/metrics` response reports delivery-age samples for observable
 GitHub surface changes that replace an existing task:
 
-- `hot_sync_samples`, `hot_sync_p50_ms`, `hot_sync_p95_ms`
-- `cold_sync_samples`, `cold_sync_p50_ms`, `cold_sync_p95_ms`
+- `hot_sync_samples`, `hot_sync_p50_ms`, `hot_sync_p95_ms`,
+  `hot_sync_p99_ms`
+- `warm_sync_samples`, `warm_sync_p50_ms`, `warm_sync_p95_ms`,
+  `warm_sync_p99_ms`
+- `cold_sync_samples`, `cold_sync_p50_ms`, `cold_sync_p95_ms`,
+  `cold_sync_p99_ms`
 
 Each histogram retains the latest 1,024 samples. When `updatedAt`
 advances, the sample is the upstream event's age. GitHub does not

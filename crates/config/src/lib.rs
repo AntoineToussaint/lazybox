@@ -1436,6 +1436,10 @@ pub struct GithubConfig {
     /// When disabled, fetched tasks are kept but their `needs_reply`
     /// flag is suppressed.
     pub detect_needs_reply: bool,
+    /// Maximum share of each observed GitHub primary budget that
+    /// scheduled polling may consume. The remainder stays available
+    /// to interactive `gh`, agents, and bursts.
+    pub background_budget_share: f64,
 }
 
 impl Default for GithubConfig {
@@ -1450,6 +1454,7 @@ impl Default for GithubConfig {
             poll_interval: Duration::from_secs(60),
             filters: vec![],
             detect_needs_reply: true,
+            background_budget_share: 0.55,
         }
     }
 }

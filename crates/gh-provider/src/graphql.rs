@@ -132,6 +132,7 @@ query($query: String!, $first: Int!, $after: String) {
     limit
     remaining
     resetAt
+    used
   }
 }
 "#;
@@ -248,6 +249,11 @@ pub struct GqlRateLimit {
     /// don't, and GitHub omits it unless asked.
     #[serde(default)]
     pub cost: Option<u32>,
+    /// Total GraphQL points consumed in the current primary window.
+    /// Comparing this with the prior useful response exposes spending
+    /// by `gh` and spawned agents that share the user's pool.
+    #[serde(default)]
+    pub used: u32,
 }
 
 fn default_limit() -> u32 {
@@ -691,6 +697,7 @@ mutation($id: ID!) {
   updatePullRequestBranch(input: { pullRequestId: $id }) {
     pullRequest { id }
   }
+  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -712,6 +719,7 @@ query($id: ID!) {
       repository { viewerDefaultMergeMethod }
     }
   }
+  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -763,6 +771,7 @@ mutation($id: ID!, $method: PullRequestMergeMethod!, $expectedHeadOid: GitObject
   mergePullRequest(input: { pullRequestId: $id, mergeMethod: $method, expectedHeadOid: $expectedHeadOid }) {
     pullRequest { id state merged }
   }
+  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -775,6 +784,7 @@ mutation($id: ID!, $method: PullRequestMergeMethod!, $expectedHeadOid: GitObject
 const USER_ID_QUERY: &str = r#"
 query($login: String!) {
   user(login: $login) { id }
+  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -811,6 +821,7 @@ mutation($id: ID!, $userIds: [ID!]) {
   requestReviews(input: { pullRequestId: $id, userIds: $userIds, union: true }) {
     pullRequest { id }
   }
+  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -834,6 +845,7 @@ mutation($id: ID!, $userIds: [ID!]!) {
   addAssigneesToAssignable(input: { assignableId: $id, assigneeIds: $userIds }) {
     assignable { __typename }
   }
+  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -856,6 +868,7 @@ mutation($id: ID!, $userIds: [ID!]!) {
   removeAssigneesFromAssignable(input: { assignableId: $id, assigneeIds: $userIds }) {
     assignable { __typename }
   }
+  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -900,6 +913,7 @@ mutation($id: ID!) {
   closeIssue(input: { issueId: $id, stateReason: NOT_PLANNED }) {
     issue { id state stateReason }
   }
+  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -917,6 +931,7 @@ mutation($id: ID!) {
   closePullRequest(input: { pullRequestId: $id }) {
     pullRequest { id state }
   }
+  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -935,6 +950,7 @@ mutation($id: ID!) {
   deleteIssue(input: { issueId: $id }) {
     clientMutationId
   }
+  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -956,6 +972,7 @@ mutation($id: ID!) {
   addReaction(input: { subjectId: $id, content: EYES }) {
     reaction { content }
   }
+  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -975,6 +992,7 @@ mutation($id: ID!, $labelIds: [ID!]!) {
   addLabelsToLabelable(input: { labelableId: $id, labelIds: $labelIds }) {
     labelable { __typename }
   }
+  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -993,6 +1011,7 @@ mutation($id: ID!, $labelIds: [ID!]!) {
   removeLabelsFromLabelable(input: { labelableId: $id, labelIds: $labelIds }) {
     labelable { __typename }
   }
+  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -1018,9 +1037,11 @@ query($owner: String!, $name: String!) {
     }
   }
   rateLimit {
+    cost
     limit
     remaining
     resetAt
+    used
   }
 }
 "#;
@@ -1041,8 +1062,6 @@ pub struct GqlRepoLabelsResponse {
 #[derive(Debug, Deserialize)]
 pub struct GqlRepoLabelsData {
     pub repository: Option<GqlRepoLabels>,
-    #[serde(rename = "rateLimit", default)]
-    pub rate_limit: Option<GqlRateLimit>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1167,6 +1186,7 @@ query($id: ID!) {
     limit
     remaining
     resetAt
+    used
   }
 }
 "#;
@@ -1502,9 +1522,11 @@ query($owner: String!, $name: String!, $number: Int!) {
     }
   }
   rateLimit {
+    cost
     limit
     remaining
     resetAt
+    used
   }
 }
 "#;
@@ -1530,8 +1552,6 @@ pub struct GqlSinglePrResponse {
 #[derive(Deserialize, Debug)]
 pub struct GqlSinglePrData {
     pub repository: Option<GqlSinglePrRepository>,
-    #[serde(rename = "rateLimit")]
-    pub rate_limit: Option<GqlRateLimit>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -1571,9 +1591,11 @@ query($owner: String!, $name: String!, $number: Int!) {
     }
   }
   rateLimit {
+    cost
     limit
     remaining
     resetAt
+    used
   }
 }
 "#;
@@ -1598,8 +1620,6 @@ pub struct GqlSingleIssueResponse {
 #[derive(Deserialize, Debug)]
 pub struct GqlSingleIssueData {
     pub repository: Option<GqlSingleIssueRepository>,
-    #[serde(rename = "rateLimit")]
-    pub rate_limit: Option<GqlRateLimit>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -1745,6 +1765,7 @@ query($ids: [ID!]!) {
     limit
     remaining
     resetAt
+    used
   }
 }
 "#;
@@ -2712,9 +2733,11 @@ query($query: String!, $first: Int!, $after: String) {
     }
   }
   rateLimit {
+    cost
     limit
     remaining
     resetAt
+    used
   }
 }
 "#;

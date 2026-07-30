@@ -189,6 +189,9 @@ pub(crate) struct NotificationsState {
     /// byte-for-byte consistent — GitHub matches on the literal value
     /// when deciding 304 vs 200.
     pub(crate) last_modified: Option<String>,
+    /// Server-directed minimum cadence from `X-Poll-Interval`.
+    pub(crate) poll_interval: Option<std::time::Duration>,
+    pub(crate) last_poll_at: Option<std::time::Instant>,
     /// When the last full sweep completed. `None` means "never" — the
     /// first tick after daemon start always runs a full sweep to
     /// bootstrap the inbox.
@@ -261,6 +264,15 @@ impl NotificationsState {
         }
     }
 
+    pub fn heartbeat_due(&self, now: std::time::Instant) -> bool {
+        match (self.last_poll_at, self.poll_interval) {
+            (Some(last), Some(interval)) => now
+                .checked_duration_since(last)
+                .is_none_or(|elapsed| elapsed >= interval),
+            _ => true,
+        }
+    }
+
     /// Is an UNWINDOWED reconcile sweep due? Distinct from
     /// [`is_full_sweep_due`](Self::is_full_sweep_due): that routes
     /// full-vs-notifications every tick; this decides, once we're
@@ -307,6 +319,44 @@ impl NotificationsState {
 /// because only `GhClient` and its module construct or hold one;
 /// callers observe state via [`NotificationsSnapshot`].
 pub(crate) type SharedNotificationsState = std::sync::Arc<Mutex<NotificationsState>>;
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct SyncCursors {
+    pub last_modified: Option<String>,
+    pub last_full_sweep_at: Option<DateTime<Utc>>,
+    pub last_pr_sweep_at: Option<DateTime<Utc>>,
+    pub last_merged_sweep_at: Option<DateTime<Utc>>,
+    pub last_full_reconcile_at: Option<DateTime<Utc>>,
+}
+
+impl NotificationsState {
+    pub(crate) fn cursors(&self, now: DateTime<Utc>) -> SyncCursors {
+        let to_wall = |instant: std::time::Instant| {
+            now - chrono::Duration::from_std(instant.elapsed()).unwrap_or_default()
+        };
+        SyncCursors {
+            last_modified: self.last_modified.clone(),
+            last_full_sweep_at: self.last_full_sweep_at.map(to_wall),
+            last_pr_sweep_at: self.last_pr_sweep_at_utc,
+            last_merged_sweep_at: self.last_merged_sweep_at_utc,
+            last_full_reconcile_at: self.last_full_reconcile_at.map(to_wall),
+        }
+    }
+
+    pub(crate) fn restore_cursors(&mut self, cursors: SyncCursors, now: DateTime<Utc>) {
+        let to_mono = |wall: DateTime<Utc>| {
+            let age = now.signed_duration_since(wall).to_std().unwrap_or_default();
+            std::time::Instant::now()
+                .checked_sub(age)
+                .unwrap_or_else(std::time::Instant::now)
+        };
+        self.last_modified = cursors.last_modified;
+        self.last_full_sweep_at = cursors.last_full_sweep_at.map(to_mono);
+        self.last_pr_sweep_at_utc = cursors.last_pr_sweep_at;
+        self.last_merged_sweep_at_utc = cursors.last_merged_sweep_at;
+        self.last_full_reconcile_at = cursors.last_full_reconcile_at.map(to_mono);
+    }
+}
 
 /// Read-only view of the notifications heartbeat state, returned by
 /// [`super::client::GhClient::notifications_snapshot`]. Tests and a
@@ -375,6 +425,48 @@ mod tests {
         // so the number parse doesn't trip over `1?foo=bar`.
         let t = parse_subject_url("https://api.github.com/repos/o/r/pulls/1?foo=bar").unwrap();
         assert_eq!(t.number, 1);
+    }
+
+    #[test]
+    fn server_poll_interval_is_a_hard_minimum() {
+        let now = std::time::Instant::now();
+        let state = NotificationsState {
+            poll_interval: Some(std::time::Duration::from_secs(60)),
+            last_poll_at: Some(now),
+            ..NotificationsState::default()
+        };
+        assert!(!state.heartbeat_due(now + std::time::Duration::from_secs(59)));
+        assert!(state.heartbeat_due(now + std::time::Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn successful_branch_cursors_survive_restart_round_trip() {
+        let now = Utc::now();
+        let state = NotificationsState {
+            last_modified: Some("Wed, 30 Jul 2026 10:00:00 GMT".to_string()),
+            last_full_sweep_at: Some(
+                std::time::Instant::now() - std::time::Duration::from_secs(120),
+            ),
+            last_pr_sweep_at_utc: Some(now - chrono::Duration::minutes(2)),
+            last_merged_sweep_at_utc: Some(now - chrono::Duration::minutes(3)),
+            last_full_reconcile_at: Some(
+                std::time::Instant::now() - std::time::Duration::from_secs(1800),
+            ),
+            ..NotificationsState::default()
+        };
+        let encoded = serde_json::to_string(&state.cursors(now)).expect("serialize cursors");
+        let cursors: SyncCursors = serde_json::from_str(&encoded).expect("deserialize cursors");
+        let mut restored = NotificationsState::default();
+        restored.restore_cursors(cursors, now);
+
+        assert_eq!(restored.last_modified, state.last_modified);
+        assert_eq!(restored.last_pr_sweep_at_utc, state.last_pr_sweep_at_utc);
+        assert_eq!(
+            restored.last_merged_sweep_at_utc,
+            state.last_merged_sweep_at_utc
+        );
+        assert!(restored.last_full_sweep_at.is_some());
+        assert!(restored.last_full_reconcile_at.is_some());
     }
 
     #[test]

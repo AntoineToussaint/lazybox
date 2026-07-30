@@ -1,0 +1,14 @@
+[
+  {
+    "reason": "review_requested",
+    "updated_at": "2026-07-30T10:15:00Z",
+    "subject": {
+      "title": "Budget-aware polling",
+      "url": "https://api.github.com/repos/acme/widget/pulls/700",
+      "type": "PullRequest"
+    },
+    "repository": {
+      "full_name": "acme/widget"
+    }
+  }
+]

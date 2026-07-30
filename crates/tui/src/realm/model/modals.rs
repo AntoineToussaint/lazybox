@@ -990,7 +990,8 @@ impl<T: TerminalAdapter> Model<T> {
         let recent: Vec<_> = self.status.sync.recent().cloned().collect();
         self.mount_modal(
             Id::SyncStatus,
-            SyncStatus::new(summary, recent, chrono::Utc::now()),
+            SyncStatus::new(summary, recent, chrono::Utc::now())
+                .with_governor(self.status.github_governor.clone()),
         );
     }
 

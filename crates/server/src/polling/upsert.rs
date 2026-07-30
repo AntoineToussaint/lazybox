@@ -502,7 +502,7 @@ async fn prepare_upsert(
             match tier {
                 EngagementTier::Hot => config.event_metrics.record_hot_sync_latency(age_ms),
                 EngagementTier::Cold => config.event_metrics.record_cold_sync_latency(age_ms),
-                EngagementTier::Warm => {}
+                EngagementTier::Warm => config.event_metrics.record_warm_sync_latency(age_ms),
             }
         }
         tracing::info!(

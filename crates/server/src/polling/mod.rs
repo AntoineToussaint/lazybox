@@ -33,7 +33,8 @@ mod upsert;
 pub use auto_merge::AutoMergeMemory;
 pub use scheduler::{
     CURSOR_TTL, DEFAULT_ROUND_ROBIN_N, RoundRobinPick, RoundRobinState, pick_repos_for_tick,
-    plan_round_robin_tick,
+    pick_repos_for_tick_budgeted, plan_round_robin_tick, plan_round_robin_tick_budgeted,
+    will_run_global,
 };
 
 pub use handlers::{
@@ -1100,6 +1101,16 @@ fn github_rate_limit_wait(
     snapshot: &lazybox_gh::RateSnapshot,
     now: chrono::DateTime<Utc>,
 ) -> Option<GithubRateLimitWait> {
+    if let Some(retry_at) = snapshot.retry_at
+        && retry_at > now
+    {
+        let remote = snapshot.remote.as_ref();
+        return Some(GithubRateLimitWait {
+            remaining: remote.map_or(0, |limit| limit.remaining),
+            limit: remote.map_or(0, |limit| limit.limit),
+            reset_at: retry_at,
+        });
+    }
     let remote = snapshot.remote.as_ref()?;
     (remote.remaining <= lazybox_gh::rate_budget::LOW_THRESHOLD && remote.reset_at > now).then_some(
         GithubRateLimitWait {
@@ -1128,6 +1139,16 @@ mod rate_limit_wait_tests {
                 reset_at,
                 observed_at: std::time::Instant::now(),
             }),
+            background_share: lazybox_gh::rate_budget::DEFAULT_BACKGROUND_SHARE,
+            resources: Vec::new(),
+            tick: lazybox_gh::rate_budget::AccountingSnapshot::default(),
+            total: lazybox_gh::rate_budget::AccountingSnapshot::default(),
+            request_p50_ms: None,
+            request_p95_ms: None,
+            request_p99_ms: None,
+            circuit_reason: None,
+            retry_at: None,
+            operations: Vec::new(),
         }
     }
 
@@ -2349,6 +2370,7 @@ async fn run_tick_inner(
         config.poll.gh_client_cache.clone(),
         &engagement,
         poll_notifications,
+        Some(config.store.clone()),
     )
     .await;
     if sources.is_empty() {

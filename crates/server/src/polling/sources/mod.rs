@@ -1,6 +1,8 @@
 //! Provider adapters and source construction for polling.
 
-use super::scheduler::{DEFAULT_ROUND_ROBIN_N, RoundRobinPick, plan_round_robin_tick};
+use super::scheduler::{
+    DEFAULT_ROUND_ROBIN_N, RoundRobinPick, plan_round_robin_tick_budgeted, will_run_global,
+};
 use super::upsert::load_workspace_offloaded;
 use super::{
     EngagementSnapshot, FetchMode, GithubEngagementTarget, PolledScope, TaskSource, TickState,
@@ -104,6 +106,8 @@ pub struct GhSource {
     /// to fire the global sweep. Held by value (not Arc) — each
     /// `sources_for` call produces a fresh source.
     scheduling: RoundRobinPick,
+    governor_plan: lazybox_gh::BackgroundPlan,
+    cursor_store: Option<std::sync::Arc<dyn lazybox_store::Store>>,
     /// Mode of the last successful fetch — read after `fetch` resolves
     /// by [`TaskSource::last_fetch_kind`]. `parking_lot::Mutex` is fine:
     /// trait methods take `&self` and the polling driver writes/reads
@@ -315,6 +319,7 @@ impl GhSource {
         auto_fix: lazybox_core::AutoFixSettings,
         scheduling: RoundRobinPick,
     ) -> Self {
+        let governor_plan = client.begin_background_tick(Duration::from_secs(60));
         Self {
             client,
             filter,
@@ -326,6 +331,8 @@ impl GhSource {
             auto_fix,
             pending_actions: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
             scheduling,
+            governor_plan,
+            cursor_store: None,
             // Default to Full so a never-fetched source doesn't
             // accidentally block rescope.
             last_kind: parking_lot::Mutex::new(FetchMode::Full),
@@ -340,6 +347,59 @@ impl GhSource {
 
     fn set_last_kind(&self, kind: FetchMode) {
         *self.last_kind.lock() = kind;
+    }
+
+    fn required_sweep_points(&self) -> u32 {
+        let forecast = self.client.background_sweep_forecast(
+            self.filter.pr_enabled(),
+            self.filter.issue_enabled() || !self.mention_allowed_logins.is_empty(),
+        );
+        if self.scheduling.run_global {
+            forecast.global_points
+        } else if self.filter.pr_enabled() {
+            forecast
+                .repo_base_points
+                .saturating_add(forecast.per_repo_points)
+        } else {
+            forecast.repo_base_points
+        }
+    }
+
+    fn governor_status(&self) -> String {
+        let next = if let Some(at) = self.governor_plan.next_eligible_at {
+            at.to_rfc3339()
+        } else if !self.client.should_full_sweep() {
+            "notification heartbeat / hot targets".to_string()
+        } else if self.scheduling.run_global {
+            "global reconcile".to_string()
+        } else if self.scheduling.repos.is_empty() {
+            "notification heartbeat / hot targets".to_string()
+        } else {
+            format!("repos {}", self.scheduling.repos.join(","))
+        };
+        format!(
+            "{} · cadence hot={}s sweep={}m cold≤{}m · next={next}",
+            self.client.governor_summary(),
+            self.governor_plan.tick_interval.as_secs(),
+            GhClient::FULL_SWEEP_INTERVAL.as_secs() / 60,
+            GhClient::FULL_RECONCILE_INTERVAL.as_secs() / 60,
+        )
+    }
+
+    async fn persist_sync_cursors(&self) {
+        let Some(store) = self.cursor_store.clone() else {
+            return;
+        };
+        let key = format!("github:sync-cursors:v1:{}", self.client.username());
+        let cursors = self.client.sync_cursors();
+        let Ok(payload) = serde_json::to_string(&cursors) else {
+            return;
+        };
+        match tokio::task::spawn_blocking(move || store.set_kv(&key, &payload)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!("persist GitHub sync cursors failed: {error}"),
+            Err(error) => tracing::warn!("persist GitHub sync cursors task failed: {error}"),
+        }
     }
 
     fn set_retry_after_secs(&self, retry_after_secs: Option<u64>) {
@@ -435,7 +495,7 @@ impl GhSource {
 
     /// Heavy `involves:USER` GraphQL sweep — the historical fetch path,
     /// extracted from `TaskSource::fetch` so the new tick logic can
-    /// fire it conditionally (every ~10 minutes, when notifications
+    /// fire it conditionally (every ~30 minutes, when notifications
     /// haven't given us a fast path, or as fallback on heartbeat
     /// failure).
     ///
@@ -443,7 +503,7 @@ impl GhSource {
     /// because the scan walks the full `involves:USER` response — the
     /// targeted single-PR/issue queries on the incremental path don't
     /// surface fresh issue bodies/comments anyway. A `@lazybox` mention
-    /// will surface within the slow-sweep cadence (≤10 min default).
+    /// will surface within the slow-sweep cadence (≤30 min default).
     async fn fetch_full(&self) -> Result<Vec<Task>, lazybox_core::ProviderError> {
         let want_prs = self.filter.pr_enabled();
         let want_issues = self.filter.issue_enabled();
@@ -947,18 +1007,13 @@ impl GhSource {
     }
 }
 
-fn log_rate_budget(client: &GhClient) {
-    let snap = client.rate_snapshot();
-    if let Some(remote) = snap.remote {
-        tracing::info!(
-            source = "github",
-            remote_remaining = remote.remaining,
-            remote_limit = remote.limit,
-            local_available = snap.local_available,
-            local_capacity = snap.local_capacity,
-            "rate budget snapshot"
-        );
-    }
+fn log_rate_budget(summary: &str) {
+    tracing::info!(
+        target: "gh_governor",
+        source = "github",
+        snapshot = summary,
+        "GitHub governor snapshot"
+    );
 }
 
 /// Default agent id the auto-spawn flow uses when no override is
@@ -1328,7 +1383,7 @@ impl TaskSource for GhSource {
     /// 1. **Hot targets** — bounded focus/live/recent-own workspaces,
     ///    refreshed every tick and ranked ahead of notification rows.
     /// 2. **Slow full sweep** — heavy `involves:USER` GraphQL search,
-    ///    fires every [`GhClient::FULL_SWEEP_INTERVAL`] (default 10 min)
+    ///    fires every [`GhClient::FULL_SWEEP_INTERVAL`] (default 30 min)
     ///    and on the first tick after daemon start. Rescope runs.
     ///    `@lazybox` mention scanning ONLY happens on this path (the
     ///    full search response is what mention scanning walks).
@@ -1345,40 +1400,61 @@ impl TaskSource for GhSource {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, lazybox_core::ProviderError>> + Send + 'a>>
     {
         Box::pin(async move {
-            self.set_retry_after_secs(None);
-            let (mut tasks, kind) =
-                match gh_fetch_plan(self.client.should_full_sweep(), self.poll_notifications) {
-                    GhFetchPlan::Full => (self.fetch_full().await?, FetchMode::Full),
-                    GhFetchPlan::Hot => (self.fetch_hot_only().await?, FetchMode::Hot),
-                    GhFetchPlan::Warm => match self.fetch_incremental().await? {
-                        Some(tasks) => (tasks, FetchMode::Incremental),
-                        None => {
-                            tracing::info!("incremental returned None; promoting to full sweep");
-                            (self.fetch_full().await?, FetchMode::Full)
-                        }
-                    },
-                };
+            let result = async {
+                self.set_retry_after_secs(None);
+                let required_sweep_points = self.required_sweep_points();
+                let full_sweep_admitted = self.client.should_full_sweep()
+                    && (self.client.manual_refresh_pending()
+                        || self.governor_plan.graphql_points >= required_sweep_points);
+                let (mut tasks, kind) =
+                    match gh_fetch_plan(full_sweep_admitted, self.poll_notifications) {
+                        GhFetchPlan::Full => (self.fetch_full().await?, FetchMode::Full),
+                        GhFetchPlan::Hot => (self.fetch_hot_only().await?, FetchMode::Hot),
+                        GhFetchPlan::Warm => match self.fetch_incremental().await? {
+                            Some(tasks) => (tasks, FetchMode::Incremental),
+                            None => {
+                                if self.governor_plan.graphql_points >= required_sweep_points {
+                                    tracing::info!(
+                                        "incremental returned None; promoting to full sweep"
+                                    );
+                                    (self.fetch_full().await?, FetchMode::Full)
+                                } else {
+                                    tracing::info!(
+                                        allowance = self.governor_plan.graphql_points,
+                                        "incremental failed; full sweep deferred by governor"
+                                    );
+                                    (Vec::new(), FetchMode::Incremental)
+                                }
+                            }
+                        },
+                    };
 
-            if kind == FetchMode::Full && !self.hot_targets.is_empty() {
-                let hot_targets = self.hot_notification_targets();
-                let requests = rank_targeted_requests(&hot_targets, &[], &self.cold_targets);
-                let targeted = self.fetch_targeted(requests).await?;
-                let hot_tasks = apply_needs_reply_toggle(
-                    filter_github_tasks_with_watches(
-                        targeted.tasks,
-                        &self.filter,
-                        &self.scopes,
-                        &self.watch_repos,
-                    ),
-                    self.detect_needs_reply,
-                );
-                merge_targeted_tasks(&mut tasks, hot_tasks);
+                if kind == FetchMode::Full && !self.hot_targets.is_empty() {
+                    let hot_targets = self.hot_notification_targets();
+                    let requests = rank_targeted_requests(&hot_targets, &[], &self.cold_targets);
+                    let targeted = self.fetch_targeted(requests).await?;
+                    let hot_tasks = apply_needs_reply_toggle(
+                        filter_github_tasks_with_watches(
+                            targeted.tasks,
+                            &self.filter,
+                            &self.scopes,
+                            &self.watch_repos,
+                        ),
+                        self.detect_needs_reply,
+                    );
+                    merge_targeted_tasks(&mut tasks, hot_tasks);
+                }
+
+                self.queue_auto_fix_actions(&tasks);
+                self.set_last_kind(kind);
+                Ok::<_, lazybox_core::ProviderError>(tasks)
             }
-
-            self.queue_auto_fix_actions(&tasks);
-            log_rate_budget(&self.client);
-            self.set_last_kind(kind);
-            Ok(tasks)
+            .await;
+            let governor = self.governor_status();
+            log_rate_budget(&governor);
+            self.emit_progress(format!("Governor: {governor}"));
+            self.persist_sync_cursors().await;
+            result
         })
     }
     fn last_fetch_kind(&self) -> FetchMode {
@@ -1842,6 +1918,7 @@ pub async fn sources_for(
         gh_client_cache,
         &EngagementSnapshot::default(),
         true,
+        None,
     )
     .await
 }
@@ -1926,6 +2003,7 @@ pub(super) async fn sources_for_with_engagement(
     gh_client_cache: std::sync::Arc<parking_lot::Mutex<Option<GhClient>>>,
     engagement: &EngagementSnapshot,
     poll_notifications: bool,
+    cursor_store: Option<std::sync::Arc<dyn lazybox_store::Store>>,
 ) -> Vec<Box<dyn TaskSource>> {
     let mut sources: Vec<Box<dyn TaskSource>> = Vec::new();
 
@@ -1961,6 +2039,7 @@ pub(super) async fn sources_for_with_engagement(
                         &cred_fingerprint,
                     )
                 });
+                let restore_sync_cursors = cached.is_none();
                 // Cap the cold-cache client build. `from_credential`
                 // makes an untimed `/user` REST call, and this runs
                 // OUTSIDE the 180s tick timeout — without a cap a
@@ -2009,6 +2088,12 @@ pub(super) async fn sources_for_with_engagement(
                             .unwrap_or_default();
                         let detect_needs_reply =
                             github_cfg.map(|g| g.detect_needs_reply).unwrap_or(true);
+                        let poll_interval = github_cfg
+                            .map(|g| g.poll_interval)
+                            .unwrap_or(Duration::from_secs(60));
+                        let background_budget_share = github_cfg
+                            .map(|g| g.background_budget_share)
+                            .unwrap_or(lazybox_gh::rate_budget::DEFAULT_BACKGROUND_SHARE);
                         let mut scopes = setup
                             .selected_scopes
                             .get("github")
@@ -2024,9 +2109,31 @@ pub(super) async fn sources_for_with_engagement(
                         // the result is cheap and keeps the cache in
                         // sync with what GhSource holds.
                         let client = client
+                            .with_background_share(background_budget_share)
                             .with_filters(pr_qualifiers, issue_qualifiers)
                             .with_watch_repos(watch_repos.iter().cloned().collect())
                             .with_needs_reply(detect_needs_reply);
+                        if restore_sync_cursors && let Some(store) = cursor_store.clone() {
+                            let key = format!("github:sync-cursors:v1:{}", client.username());
+                            match tokio::task::spawn_blocking(move || store.get_kv(&key)).await {
+                                Ok(Ok(Some(payload))) => {
+                                    match serde_json::from_str::<lazybox_gh::SyncCursors>(&payload)
+                                    {
+                                        Ok(cursors) => client.restore_sync_cursors(cursors),
+                                        Err(error) => tracing::warn!(
+                                            "parse persisted GitHub sync cursors failed: {error}"
+                                        ),
+                                    }
+                                }
+                                Ok(Ok(None)) => {}
+                                Ok(Err(error)) => {
+                                    tracing::warn!("load GitHub sync cursors failed: {error}")
+                                }
+                                Err(error) => {
+                                    tracing::warn!("load GitHub sync cursors task failed: {error}")
+                                }
+                            }
+                        }
                         // Cache + announce the authenticated viewer
                         // login so the TUI can render `@me` for the
                         // local user's bylines. Diffs the cache so we
@@ -2093,11 +2200,45 @@ pub(super) async fn sources_for_with_engagement(
                         let will_full_sweep = client.should_full_sweep();
                         let now = std::time::Instant::now();
                         let sessioned_repos = engagement.sessioned_repos();
-                        let scheduling = plan_round_robin_tick(
+                        let governor_plan = client.begin_background_tick(poll_interval);
+                        let want_prs = filter.pr_enabled();
+                        let scan_issues = filter.issue_enabled() || !mention_allowed.is_empty();
+                        let forecast = client.background_sweep_forecast(want_prs, scan_issues);
+                        state.round_robin.prune(now);
+                        let global_due = will_run_global(
+                            state.round_robin.cursor.len(),
+                            state.round_robin.tick,
+                            DEFAULT_ROUND_ROBIN_N,
+                        );
+                        let required_sweep_points = if global_due {
+                            forecast.global_points
+                        } else if want_prs {
+                            forecast
+                                .repo_base_points
+                                .saturating_add(forecast.per_repo_points)
+                        } else {
+                            forecast.repo_base_points
+                        };
+                        let max_repos = if client.manual_refresh_pending() {
+                            usize::MAX
+                        } else if global_due || forecast.per_repo_points == 0 {
+                            0
+                        } else {
+                            ((governor_plan
+                                .graphql_points
+                                .saturating_sub(forecast.repo_base_points)
+                                / forecast.per_repo_points) as usize)
+                                .min(DEFAULT_ROUND_ROBIN_N)
+                        };
+                        let full_sweep_admitted = will_full_sweep
+                            && (client.manual_refresh_pending()
+                                || governor_plan.graphql_points >= required_sweep_points);
+                        let scheduling = plan_round_robin_tick_budgeted(
                             &mut state.round_robin,
                             sessioned_repos,
-                            will_full_sweep,
+                            full_sweep_admitted,
                             DEFAULT_ROUND_ROBIN_N,
+                            max_repos,
                             now,
                         );
                         if will_full_sweep {
@@ -2109,6 +2250,11 @@ pub(super) async fn sources_for_with_engagement(
                                 sessioned = sessioned_repos.len(),
                                 known_repos = state.round_robin.cursor.len(),
                                 focused = state.round_robin.focused_repo.as_deref().unwrap_or(""),
+                                allowance = governor_plan.graphql_points,
+                                required = required_sweep_points,
+                                reserve_share = background_budget_share,
+                                pressure = governor_plan.pressure,
+                                admitted = full_sweep_admitted,
                                 "round-robin scheduling decision"
                             );
                         }
@@ -2125,6 +2271,8 @@ pub(super) async fn sources_for_with_engagement(
                                 Vec::new(),
                             )),
                             scheduling,
+                            governor_plan,
+                            cursor_store: cursor_store.clone(),
                             // Default to Full so a never-fetched
                             // source doesn't accidentally block rescope.
                             last_kind: parking_lot::Mutex::new(FetchMode::Full),

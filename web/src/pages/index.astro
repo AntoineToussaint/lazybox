@@ -117,8 +117,8 @@ const steps = [
 ---
 
 <Layout
-  title="lazybox — one reactive workflow for GitHub and coding agents"
-  description="lazybox keeps tasks, managed worktrees, coding agents, GitHub activity, and live terminals together across every repository."
+  title="lazybox — a terminal TUI for GitHub and coding agents"
+  description="A keyboard-driven terminal TUI that brings GitHub activity, managed worktrees, coding agents, and live terminals into one reactive inbox."
 >
   <a href="#main" class="skip-link">Skip to content</a>
 
@@ -153,20 +153,48 @@ const steps = [
 
   <main id="main">
     <header class="hero">
-      <div class="container">
-        <span class="eyebrow"><span class="dot"></span> many repositories · one continuous workflow</span>
-        <h1>Let the work come to you.<br /><span class="grad">Keep its context all the way to done.</span></h1>
-        <p class="lead">
-          lazybox keeps GitHub tasks, coding agents, managed worktrees, and live terminals
-          together. Run work across many repositories, then jump straight to the one agent,
-          check, review, or comment that needs you.
-        </p>
+      <div class="container hero-grid">
+        <div class="hero-copy">
+          <p class="terminal-command"><span aria-hidden="true">$</span> lazybox --about</p>
+          <p class="terminal-declaration">
+            A terminal TUI — reactive GitHub inbox + agent fleet, keyboard-driven.
+          </p>
+          <h1>Let the work come to you.<br /><span>Stay in the terminal.</span></h1>
+          <p class="lead">
+            Events surface across your repositories while coding agents work in parallel,
+            each in its own managed worktree and embedded terminal.
+          </p>
+          <p class="terminal-proof">Runs in your terminal. No Electron. No tab farm.</p>
 
-        <div class="cta-row">
-          <a class="btn btn-primary" href={workflows}>Explore the core workflows →</a>
-          <a class="btn btn-ghost" href={repo}>★ Star on GitHub</a>
+          <div class="cta-row">
+            <a class="btn btn-primary" href={workflows}>Explore workflows →</a>
+            <a class="btn btn-ghost" href={repo}>★ Star on GitHub</a>
+          </div>
         </div>
 
+        <figure class="term" aria-labelledby="demo-caption">
+          <div class="terminal-bar" aria-hidden="true">
+            <span>tty://lazybox</span>
+            <span>real TUI capture · inbox at scale</span>
+          </div>
+          <video
+            src="/demo/01-inbox.mp4"
+            poster="/demo/01-inbox.jpg"
+            aria-label="lazybox inbox with workspaces, CI status, activity, and embedded agent terminals"
+            data-demo
+            loop
+            muted
+            playsinline
+            preload="none"
+            controls
+          ></video>
+          <figcaption id="demo-caption">
+            <span aria-hidden="true">└─</span> GitHub workspaces on the left; live agent terminals on the right.
+          </figcaption>
+        </figure>
+      </div>
+
+      <div class="container">
         <div class="install-options">
           <div class="install-option install-option-primary">
             <p class="install-label">Homebrew <span>Prebuilt · recommended</span></p>
@@ -213,24 +241,6 @@ const steps = [
           <p class="install-guide">
             <a href="/docs/tutorials/quickstart/#1-install">See every install method and platform.</a>
           </p>
-        </div>
-
-        <div class="term" data-reveal aria-label="lazybox managing several agents in a terminal">
-          <div class="bar">
-            <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
-            <span class="title">lazybox — reactive inbox</span>
-          </div>
-          <video
-            src="/demo/01-inbox.mp4"
-            poster="/demo/01-inbox.jpg"
-            aria-label="lazybox inbox with workspaces, CI status, activity, and embedded agent terminals"
-            data-demo
-            loop
-            muted
-            playsinline
-            preload="none"
-            controls
-          ></video>
         </div>
       </div>
     </header>

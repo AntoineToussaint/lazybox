@@ -69,10 +69,13 @@ from `gh auth token` if you've run `gh auth login`. PRs and issues you author,
 review, are assigned, or are mentioned on appear in the inbox. Act on them with
 the GitHub action group (`g` leader); its which-key popup shows every continuation.
 
-GitHub's rate budget belongs to the token, so the default token is shared by
-lazybox, interactive `gh`, and spawned agents. Set `LAZYBOX_GITHUB_TOKEN` when
-starting lazybox to give its daemon a dedicated token; `gh` does not consume
-that lazybox-specific variable.
+GitHub's GraphQL budget belongs to the authenticated user, so lazybox,
+interactive `gh`, and spawned agents share that user's quota even when they use
+separate personal access tokens. `LAZYBOX_GITHUB_TOKEN` is a lazybox credential
+override, not a way to create another same-user quota; `gh` does not
+automatically read that variable. A token for a different GitHub account has
+that account's quota, but it also changes the viewer identity and therefore
+which PRs, issues, and review requests lazybox fetches.
 
 ### How it works (brief)
 `GhClient` (`crates/gh-provider/src/client.rs`) fetches PRs and issues via
@@ -93,7 +96,7 @@ events (state change, CI change, review change, new activity). CI is a
 - [ ] `g r` / `g a` / `g l` mutate reviewers / assignees / labels and the change reflects on next poll.
 - [ ] `g o` opens the PR/issue in the browser.
 - [ ] With no GitHub token environment variable, creds fall back to `gh auth token`.
-- [ ] `LAZYBOX_GITHUB_TOKEN` takes precedence over the shared `gh` token.
+- [ ] `LAZYBOX_GITHUB_TOKEN` takes precedence over `GH_TOKEN` without being described as a separate same-user quota.
 
 ### Known sharp edges
 - `mergeable: UNKNOWN` from GitHub triggers a fast re-poll (~5s) to resolve; brief flicker is expected.

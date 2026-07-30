@@ -80,11 +80,11 @@ impl SyncStatus {
         }
         if self.summary.iter().any(SyncEntry::is_rate_limited) {
             lines.push(Line::from(Span::styled(
-                "      GitHub budget is shared by lazybox + gh + agents.",
+                "      GitHub user quota is shared by lazybox + gh + agents.",
                 Style::default().fg(theme.text_dim),
             )));
             lines.push(Line::from(Span::styled(
-                "      Set LAZYBOX_GITHUB_TOKEN to give lazybox a dedicated token.",
+                "      Separate PATs for the same user do not create a new quota.",
                 Style::default().fg(theme.text_dim),
             )));
         }
@@ -363,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_rate_limit_budget_reset_and_contention_guidance() {
+    fn renders_rate_limit_budget_reset_and_per_user_contention_guidance() {
         let n = now();
         let entry = rate_limited(n);
         let mut comp = SyncStatus::new(vec![entry.clone()], vec![entry], n);
@@ -373,8 +373,36 @@ mod tests {
             out.contains("rate-limited · ~7m · 12:07 UTC · 98/5000 left"),
             "{out}"
         );
-        assert!(out.contains("shared by lazybox + gh + agents"), "{out}");
-        assert!(out.contains("LAZYBOX_GITHUB_TOKEN"), "{out}");
+        assert!(
+            out.contains("user quota is shared by lazybox + gh + agents"),
+            "{out}"
+        );
+        assert!(
+            out.contains("Separate PATs for the same user do not create a new quota"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn historical_rate_limit_attempt_shows_its_reset_instead_of_now() {
+        let n = now();
+        let entry = SyncEntry {
+            source: "github".into(),
+            at: n - chrono::Duration::minutes(2),
+            outcome: SyncOutcome::RateLimited {
+                remaining: 98,
+                limit: 5000,
+                reset_at: n - chrono::Duration::minutes(1),
+            },
+        };
+        let mut comp = SyncStatus::new(vec![entry.clone()], vec![entry], n);
+        let out = render(&mut comp, 100, 16);
+
+        assert!(
+            out.contains("rate-limited · reset 11:59 UTC · 98/5000 left"),
+            "{out}"
+        );
+        assert!(!out.contains("rate-limited · now"), "{out}");
     }
 
     #[test]

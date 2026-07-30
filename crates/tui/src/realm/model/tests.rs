@@ -12747,10 +12747,10 @@ mod mutation_failure_notice_tests {
         }
     }
 
-    /// Non-mutation provider sources keep their quiet handling, but a
-    /// failed cycle must stop looking in-flight and land in Shift-D.
+    /// A failed provider cycle replaces its in-flight spinner with a
+    /// named error and also lands in Shift-D.
     #[test]
-    fn poll_cycle_failures_clear_the_spinner_and_stay_in_sync_status() {
+    fn poll_cycle_failures_replace_the_spinner_with_an_explicit_error() {
         let mut m = build_model();
         m.status.polling = None;
         m.handle_daemon_event(IpcEvent::PollProgress {
@@ -12761,13 +12761,17 @@ mod mutation_failure_notice_tests {
 
         m.handle_daemon_event(provider_error("github", "request failed"));
         assert!(
-            m.status.notice.is_none(),
-            "an auto-cycle poll failure must not flash (sync log only)"
-        );
-        assert!(
             m.status.bg_poll.is_none(),
             "a failed poll must not retain its in-flight spinner"
         );
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .expect("failed poll must replace the spinner with an error");
+        assert_eq!(notice.severity, NoticeSeverity::Permanent);
+        assert!(notice.message.contains("sync failed"));
+        assert!(notice.message.contains("request failed"));
         assert!(matches!(
             m.status
                 .sync

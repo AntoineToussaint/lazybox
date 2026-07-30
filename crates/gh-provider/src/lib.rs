@@ -33,48 +33,17 @@ pub const SOURCE: &str = "github";
 
 /// Credential chain GitHub uses. Tried in order:
 /// `LAZYBOX_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, `gh auth
-/// token`. The lazybox-specific variable gives the daemon a token
-/// that spawned agents and interactive `gh` do not automatically
-/// consume. The polling poller, mutation router, setup wizard's scope
-/// source, and fetch-PR-details handler all build clients from this
-/// chain.
+/// token`. The lazybox-specific variable is a credential override:
+/// spawned agents and interactive `gh` do not automatically read it,
+/// but same-user tokens still share GitHub's per-user API quota. The
+/// polling poller, mutation router, setup wizard's scope source, and
+/// fetch-PR-details handler all build clients from this chain.
 pub fn credential_chain() -> CredentialChain {
     CredentialChain::new()
         .with(EnvProvider::new("LAZYBOX_GITHUB_TOKEN"))
         .with(EnvProvider::new("GH_TOKEN"))
         .with(EnvProvider::new("GITHUB_TOKEN"))
         .with(CommandProvider::new("gh", &["auth", "token"]))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn dedicated_daemon_token_precedes_standard_gh_token() {
-        let dedicated_before = std::env::var_os("LAZYBOX_GITHUB_TOKEN");
-        let gh_before = std::env::var_os("GH_TOKEN");
-        unsafe {
-            std::env::set_var("LAZYBOX_GITHUB_TOKEN", "dedicated-test-token");
-            std::env::set_var("GH_TOKEN", "shared-test-token");
-        }
-
-        let result = credential_chain().resolve(SOURCE).await;
-
-        unsafe {
-            match dedicated_before {
-                Some(value) => std::env::set_var("LAZYBOX_GITHUB_TOKEN", value),
-                None => std::env::remove_var("LAZYBOX_GITHUB_TOKEN"),
-            }
-            match gh_before {
-                Some(value) => std::env::set_var("GH_TOKEN", value),
-                None => std::env::remove_var("GH_TOKEN"),
-            }
-        }
-        let credential = result.expect("dedicated token resolves");
-        assert_eq!(credential.token(), "dedicated-test-token");
-        assert_eq!(credential.source, "env:LAZYBOX_GITHUB_TOKEN");
-    }
 }
 
 /// `ScopeSource` adapter over [`GhClient`]. Lets the setup screen
@@ -115,5 +84,41 @@ impl ScopeSource for GhScopes {
                 .await
                 .map_err(Into::into)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lazybox_credential_override_precedes_standard_gh_token() {
+        const CHILD: &str = "LAZYBOX_CREDENTIAL_CHAIN_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(
+                std::env::current_exe().expect("current test executable"),
+            )
+            .args([
+                "--exact",
+                "tests::lazybox_credential_override_precedes_standard_gh_token",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("LAZYBOX_GITHUB_TOKEN", "lazybox-test-token")
+            .env("GH_TOKEN", "shared-test-token")
+            .status()
+            .expect("spawn isolated credential-chain test");
+            assert!(status.success(), "isolated credential-chain test failed");
+            return;
+        }
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("test runtime");
+        let credential = runtime
+            .block_on(credential_chain().resolve(SOURCE))
+            .expect("lazybox credential override resolves");
+        assert_eq!(credential.token(), "lazybox-test-token");
+        assert_eq!(credential.source, "env:LAZYBOX_GITHUB_TOKEN");
     }
 }

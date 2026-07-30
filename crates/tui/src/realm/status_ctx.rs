@@ -300,20 +300,26 @@ pub(crate) fn rate_limit_wait_detail(
     reset_at: DateTime<Utc>,
     now: DateTime<Utc>,
 ) -> String {
-    let seconds = reset_at.signed_duration_since(now).num_seconds().max(0) as u64;
-    let wait = if seconds == 0 {
-        "now".to_string()
-    } else if seconds < 60 {
+    let budget = if limit == 0 {
+        format!("{remaining} left")
+    } else {
+        format!("{remaining}/{limit} left")
+    };
+    if reset_at <= now {
+        return format!("reset {} · {budget}", reset_at.format("%H:%M UTC"));
+    }
+
+    let millis = reset_at
+        .signed_duration_since(now)
+        .num_milliseconds()
+        .max(1) as u64;
+    let seconds = millis.div_ceil(1000);
+    let wait = if seconds < 60 {
         format!("~{seconds}s")
     } else if seconds < 60 * 60 {
         format!("~{}m", seconds.div_ceil(60))
     } else {
         format!("~{}h", seconds.div_ceil(60 * 60))
-    };
-    let budget = if limit == 0 {
-        format!("{remaining} left")
-    } else {
-        format!("{remaining}/{limit} left")
     };
     format!("{wait} · {} · {budget}", reset_at.format("%H:%M UTC"))
 }
@@ -514,17 +520,30 @@ impl StatusCtx {
         });
     }
 
-    pub fn note_poll_failed(&mut self, source: &str) {
-        if self
+    pub fn note_poll_failed(&mut self, source: &str) -> bool {
+        let background_active = self
             .bg_poll
             .as_ref()
-            .is_some_and(|poll| poll.source == source)
-        {
+            .is_some_and(|poll| poll.source == source);
+        let wait_active = source == "github" && self.github_rate_limit_wait.is_some();
+        if background_active {
             self.bg_poll = None;
         }
         if source == "github" {
             self.github_rate_limit_wait = None;
         }
+        background_active || wait_active
+    }
+
+    pub fn tick_github_rate_limit_wait(&mut self, now: DateTime<Utc>) -> bool {
+        let expired = self
+            .github_rate_limit_wait
+            .as_ref()
+            .is_some_and(|wait| wait.reset_at <= now);
+        if expired {
+            self.github_rate_limit_wait = None;
+        }
+        expired
     }
 
     /// Background-poll guard: if the last `note_poll_progress` is
@@ -637,7 +656,9 @@ impl StatusCtx {
             sp.spinner_idx = sp.spinner_idx.wrapping_add(1);
             advanced = true;
         }
-        if let Some(wait) = self.github_rate_limit_wait.as_mut()
+        if self.tick_github_rate_limit_wait(Utc::now()) {
+            advanced = true;
+        } else if let Some(wait) = self.github_rate_limit_wait.as_mut()
             && wait.last_tick.elapsed() >= Duration::from_secs(1)
         {
             wait.last_tick = Instant::now();
@@ -859,11 +880,23 @@ mod tests {
     fn failed_poll_clears_in_flight_and_waiting_states() {
         let mut s = StatusCtx::new();
         s.note_poll_progress("github", "Fetching issues");
-        s.note_poll_failed("github");
+        assert!(s.note_poll_failed("github"));
         assert!(s.bg_poll.is_none());
 
         s.note_github_rate_limit_wait(98, 5000, Utc::now() + chrono::Duration::minutes(7));
-        s.note_poll_failed("github");
+        assert!(s.note_poll_failed("github"));
+        assert!(s.github_rate_limit_wait.is_none());
+    }
+
+    #[test]
+    fn rate_limit_wait_expires_without_a_follow_up_daemon_event() {
+        let mut s = StatusCtx::new();
+        let reset_at = Utc::now() + chrono::Duration::minutes(7);
+        s.note_github_rate_limit_wait(98, 5000, reset_at);
+
+        assert!(!s.tick_github_rate_limit_wait(reset_at - chrono::Duration::seconds(1)));
+        assert!(s.github_rate_limit_wait.is_some());
+        assert!(s.tick_github_rate_limit_wait(reset_at));
         assert!(s.github_rate_limit_wait.is_none());
     }
 

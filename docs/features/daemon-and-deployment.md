@@ -241,9 +241,13 @@ the Slack tokens for the mirror. No lazybox-specific credential setup.
 `CredentialProvider` (`crates/auth`) has `name()` + `async resolve(scope)`. The
 GitHub chain is `LAZYBOX_GITHUB_TOKEN` env → `GH_TOKEN` env →
 `GITHUB_TOKEN` env → `gh auth token` command
-(`crates/gh-provider/src/lib.rs`). Each provider builds its own chain. To add an
-auth source, implement the trait and add it to the chain in `crates/server/`
-(see [`CLAUDE.md`](../../CLAUDE.md)).
+(`crates/gh-provider/src/lib.rs`). The lazybox-specific variable overrides
+credential selection only; GitHub still combines personal-token usage into the
+authenticated user's quota. Using a different account changes the viewer
+identity and the work GitHub returns, so it is not a drop-in quota-isolation
+mechanism. Each provider builds its own chain. To add an auth source, implement
+the trait and add it to the chain in `crates/server/` (see
+[`CLAUDE.md`](../../CLAUDE.md)).
 
 ### Test checklist
 - [ ] With no GitHub token environment variable, creds resolve from `gh auth token`.

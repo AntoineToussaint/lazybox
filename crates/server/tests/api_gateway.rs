@@ -16,7 +16,7 @@ use hyper::header::{AUTHORIZATION, HeaderValue};
 use hyper::{Method, Request, StatusCode};
 use lazybox_agents::{Agent, SpawnCtx, StructuredAgentProtocol};
 use lazybox_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace};
-use lazybox_ipc::{AgentInputMessage, AgentRuntimeMode, Command, Event};
+use lazybox_ipc::{AgentInputMessage, AgentRunRequestId, AgentRuntimeMode, Command, Event};
 use lazybox_server::ServerError;
 use lazybox_server::agent_stream::{AgentStreamConfig, AgentStreamIo, AgentStreamSpawner};
 use lazybox_store::WorkspaceRecord;
@@ -558,6 +558,7 @@ async fn stream_route_can_start_structured_agent_run() {
     });
 
     let command = Command::StartAgentRun {
+        request_id: AgentRunRequestId("api-stream-request".into()),
         session_key: "api:stream".into(),
         session_id: None,
         agent: "fake-api-stream".into(),

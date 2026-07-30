@@ -210,10 +210,7 @@ impl Terminals {
         self.inner.visible_terminals().len()
     }
 
-    /// State-aware short list for the footer hint bar — the `]]` leave,
-    /// `]]f` focus-mode and `]]|` split leader chords plus the
-    /// hand-curated `Ctrl-c` interrupt hint. See
-    /// `TerminalStack::contextual_bindings` for the per-row rationale.
+    /// The terminal command leader shown in the footer hint bar.
     pub fn contextual_bindings(&self, escape_char: char) -> Vec<crate::pane::Binding> {
         crate::components::terminal_stack::TerminalStack::contextual_bindings(escape_char)
     }

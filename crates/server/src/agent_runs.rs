@@ -14,7 +14,7 @@ use crate::agent_stream::{
 use lazybox_agents::{SpawnCtx, StructuredAgentProtocol};
 use lazybox_ipc::{
     AgentApprovalDecision, AgentInputMessage, AgentQuestionAnswer, AgentRunAccess, AgentRunId,
-    AgentRuntimeMode, AgentUsage, Event,
+    AgentRunRequestId, AgentRuntimeMode, AgentUsage, Event,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -38,6 +38,7 @@ pub const AGENT_INPUT_CHANNEL_CAPACITY: usize = 64;
 
 pub async fn handle_start_agent_run(
     config: &ServerConfig,
+    request_id: AgentRunRequestId,
     session_key: lazybox_core::SessionKey,
     session_id: Option<lazybox_core::SessionId>,
     agent: String,
@@ -47,25 +48,27 @@ pub async fn handle_start_agent_run(
     access: AgentRunAccess,
 ) {
     if mode != AgentRuntimeMode::StreamJson {
-        let _ = config.bus.send(Event::provider_error_permanent(
-            "agent_run",
-            "only StreamJson agent runs are wired; use Spawn for terminal mode",
-        ));
+        let _ = config.bus.send(Event::AgentRunStartFailed {
+            request_id,
+            message: "only StreamJson agent runs are wired; use Spawn for terminal mode".into(),
+        });
         return;
     }
 
     let Some(agent_impl) = config.agents.get(&agent) else {
-        let _ = config.bus.send(Event::provider_error_permanent(
-            &format!("agent_run:{agent}"),
-            "no agent registered for this id",
-        ));
+        let _ = config.bus.send(Event::AgentRunStartFailed {
+            request_id,
+            message: format!("no agent registered for id {agent}"),
+        });
         return;
     };
     let Some(protocol) = agent_impl.structured_protocol() else {
-        let _ = config.bus.send(Event::provider_error_permanent(
-            &format!("agent_run:{agent}"),
-            "this agent supports interactive terminals but has no structured runtime adapter",
-        ));
+        let _ = config.bus.send(Event::AgentRunStartFailed {
+            request_id,
+            message: format!(
+                "{agent} supports interactive terminals but has no structured runtime adapter"
+            ),
+        });
         return;
     };
 
@@ -86,10 +89,10 @@ pub async fn handle_start_agent_run(
     };
     let argv = agent_impl.spawn(&spawn_ctx);
     let Some((program, extra_args)) = argv.split_first() else {
-        let _ = config.bus.send(Event::provider_error_permanent(
-            &format!("agent_run:{agent}"),
-            "agent returned an empty argv",
-        ));
+        let _ = config.bus.send(Event::AgentRunStartFailed {
+            request_id,
+            message: format!("{agent} returned an empty argv"),
+        });
         return;
     };
 
@@ -114,10 +117,10 @@ pub async fn handle_start_agent_run(
     {
         Ok(io) => io,
         Err(e) => {
-            let _ = config.bus.send(Event::provider_error_permanent(
-                &format!("agent_run:{agent}"),
-                e.to_string(),
-            ));
+            let _ = config.bus.send(Event::AgentRunStartFailed {
+                request_id,
+                message: e.to_string(),
+            });
             return;
         }
     };
@@ -171,6 +174,7 @@ pub async fn handle_start_agent_run(
         },
     );
     let _ = config.bus.send(Event::AgentRunStarted {
+        request_id,
         run_id,
         session_key: session_key_for_task,
         session_id,

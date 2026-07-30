@@ -661,6 +661,19 @@ mod auto_mark_fingerprint_tests {
         );
         assert!(ws.is_activity_unread(1), "only the cursor row flips");
     }
+
+    #[test]
+    fn planned_mark_helpers_expose_and_apply_the_cursor_target() {
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws_with(vec![activity_with("n-A", "alpha")])));
+
+        assert_eq!(pane.activity_cursor_target(), Some(0));
+        pane.mark_activity_read_locally(0);
+
+        let workspace = pane.workspace.as_ref().expect("workspace");
+        assert!(!workspace.is_activity_unread(0));
+        assert!(pane.last_marked_read.is_some(), "the mark remains undoable");
+    }
 }
 
 #[cfg(test)]

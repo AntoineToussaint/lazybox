@@ -23,6 +23,7 @@
 //! `app.tick(...)` and `Model::update` decides what to do.
 
 mod activity_pane;
+mod choice_dispatch;
 mod dispatch;
 mod events;
 mod helpers;
@@ -358,10 +359,11 @@ impl Id {
     ///
     /// True for the read-only / progress overlays that shouldn't trap
     /// the user — the worktree-provisioning checklist, sync status,
-    /// help, and the snippet picker/browser. Deliberately false for the
-    /// destructive confirms (archive, merged-workspace removal, orphan
-    /// deletes, …): a stray click must never dismiss or trigger data
-    /// loss, so those keep owning input until the user answers.
+    /// and the snippet picker/browser. Help holds a conversation, so it
+    /// also requires an explicit keyboard exit. Deliberately false for
+    /// the destructive confirms (archive, merged-workspace removal,
+    /// orphan deletes, …): a stray click must never dismiss or trigger
+    /// data loss, so those keep owning input until the user answers.
     pub(crate) fn dismissable_by_outside_click(&self) -> bool {
         matches!(
             self,
@@ -369,8 +371,6 @@ impl Id {
                 | Id::SyncStatus
                 | Id::Messages
                 | Id::Error
-                | Id::Help
-                | Id::HelpAsk
                 | Id::SnippetPicker
                 | Id::SnippetBrowser
         )
@@ -595,6 +595,29 @@ pub(crate) enum ModalFlow {
     },
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HelpQuestionKind {
+    FollowUp,
+    #[default]
+    NewQuestion,
+}
+
+impl HelpQuestionKind {
+    pub(crate) fn toggled(self) -> Self {
+        match self {
+            Self::FollowUp => Self::NewQuestion,
+            Self::NewQuestion => Self::FollowUp,
+        }
+    }
+
+    pub(crate) fn input_label(self) -> &'static str {
+        match self {
+            Self::FollowUp => "Follow-up",
+            Self::NewQuestion => "New question",
+        }
+    }
+}
+
 /// App-level message vocabulary for modals + globals.
 #[derive(Debug, PartialEq, Clone)]
 pub enum Msg {
@@ -624,7 +647,9 @@ pub enum Msg {
     HelpIndexOpen,
     /// Question submitted from the `HelpAsk` modal. The modal stays
     /// mounted; the answer streams back into `Model::help_convo`.
-    HelpAsked(String),
+    HelpAsked(String, HelpQuestionKind),
+    /// Spinner heartbeat from the `HelpAsk` modal.
+    HelpSpinnerTick,
     /// `e` pressed in the snippets browser — close it and open the
     /// global snippets YAML in the user's editor (#237).
     OpenSnippetsFile,
@@ -732,76 +757,81 @@ pub enum ChoicePayload {
     Session(lazybox_core::SessionKey),
 }
 
-impl ChoicePayload {
-    /// The positional index for an [`Self::Index`] row.
-    pub(crate) fn as_index(&self) -> Option<usize> {
+impl lazybox_tui_core::choice::PickPayload for ChoicePayload {
+    type Filter = crate::components::sidebar::Filter;
+
+    fn as_index(&self) -> Option<usize> {
         match self {
-            Self::Index(i) => Some(*i),
+            Self::Index(index) => Some(*index),
             _ => None,
         }
     }
 
-    /// The string value for a [`Self::Text`] row.
-    pub(crate) fn as_text(&self) -> Option<&str> {
+    fn as_text(&self) -> Option<&str> {
         match self {
-            Self::Text(s) => Some(s.as_str()),
+            Self::Text(text) => Some(text),
             _ => None,
         }
     }
 
-    /// The optional-string value for a [`Self::OptText`] row (the outer
-    /// `Option` reports whether the payload was an `OptText` at all).
-    pub(crate) fn into_opt_text(self) -> Option<Option<String>> {
+    fn opt_text(&self) -> Option<Option<String>> {
         match self {
-            Self::OptText(v) => Some(v),
+            Self::OptText(value) => Some(value.clone()),
             _ => None,
         }
     }
 
-    /// The duration for a [`Self::Duration`] row.
-    pub(crate) fn as_duration(&self) -> Option<std::time::Duration> {
+    fn as_duration(&self) -> Option<std::time::Duration> {
         match self {
-            Self::Duration(d) => Some(*d),
+            Self::Duration(duration) => Some(*duration),
             _ => None,
         }
     }
 
-    /// The filter for a [`Self::Filter`] row.
-    pub(crate) fn as_filter(&self) -> Option<crate::components::sidebar::Filter> {
+    fn filter(&self) -> Option<<Self as lazybox_tui_core::choice::PickPayload>::Filter> {
         match self {
-            Self::Filter(f) => Some(*f),
+            Self::Filter(filter) => Some(*filter),
             _ => None,
         }
     }
 
-    /// The policy toggle for a [`Self::Policy`] row.
-    pub(crate) fn into_policy(self) -> Option<crate::realm::model::modals::PolicyToggle> {
+    fn policy(&self) -> Option<lazybox_tui_core::choice::PolicyPick> {
+        use crate::realm::model::modals::PolicyToggle;
         match self {
-            Self::Policy(p) => Some(p),
+            Self::Policy(PolicyToggle::MergeOnGreen) => {
+                Some(lazybox_tui_core::choice::PolicyPick::MergeOnGreen)
+            }
+            Self::Policy(PolicyToggle::AutoFix(kind)) => {
+                Some(lazybox_tui_core::choice::PolicyPick::AutoFix(*kind))
+            }
+            Self::Policy(PolicyToggle::Info(message)) => {
+                Some(lazybox_tui_core::choice::PolicyPick::Info(message.clone()))
+            }
             _ => None,
         }
     }
 
-    /// The workspace key for a [`Self::Workspace`] row.
-    pub(crate) fn into_workspace(self) -> Option<lazybox_core::WorkspaceKey> {
+    fn workspace(&self) -> Option<lazybox_core::WorkspaceKey> {
         match self {
-            Self::Workspace(k) => Some(k),
+            Self::Workspace(key) => Some(key.clone()),
             _ => None,
         }
     }
 
-    /// The project key for a [`Self::Project`] row.
-    pub(crate) fn into_project(self) -> Option<lazybox_core::ProjectKey> {
+    fn project(&self) -> Option<lazybox_core::ProjectKey> {
         match self {
-            Self::Project(k) => Some(k),
+            Self::Project(key) => Some(key.clone()),
             _ => None,
         }
     }
 
-    /// The session key for a [`Self::Session`] row.
-    pub(crate) fn into_session(self) -> Option<lazybox_core::SessionKey> {
+    fn is_new_local_project(&self) -> bool {
+        matches!(self, Self::NewLocalProject)
+    }
+
+    fn session(&self) -> Option<lazybox_core::SessionKey> {
         match self {
-            Self::Session(k) => Some(k),
+            Self::Session(key) => Some(key.clone()),
             _ => None,
         }
     }
@@ -1280,22 +1310,27 @@ pub struct Model<T: TerminalAdapter> {
     /// Help-assistant conversation (#302), shared with a mounted
     /// `HelpAsk` modal via `Arc` so the daemon-event handlers can
     /// stream an answer into it without remounting (which would drop
-    /// the user's in-flight typing). Persists across modal open/close
-    /// — the help run stays alive for the app's lifetime so follow-up
-    /// questions reuse the prompt-cached context.
+    /// the user's in-flight typing). Persists while Help is open so
+    /// switching between Ask and the shortcut index keeps the thread.
     pub(crate) help_convo: crate::realm::components::help_ask::SharedHelpConvo,
     /// Run id of the live help-agent run, captured from the
-    /// `AgentRunStarted` carrying the help sentinel session key.
+    /// `AgentRunStarted` carrying the current help start request id.
     /// `None` before the first question (the run starts lazily) and
     /// again after `AgentRunFinished` — the next question then starts
     /// a fresh run (with fresh context).
     help_run: Option<lazybox_ipc::AgentRunId>,
-    /// True between dispatching `StartAgentRun` and its
-    /// `AgentRunStarted` landing. Questions submitted in that window
-    /// queue in `help_pending_questions` rather than double-starting
-    /// the run.
-    help_run_starting: bool,
+    /// Request id between dispatching `StartAgentRun` and its correlated
+    /// success or failure event. Questions submitted in that window queue
+    /// in `help_pending_questions` rather than double-starting the run.
+    help_start_request: Option<lazybox_ipc::AgentRunRequestId>,
     help_pending_questions: Vec<String>,
+    /// An explicit exit can race `AgentRunStarted`. Interrupt that run
+    /// as soon as its id arrives instead of adopting a conversation the
+    /// user already closed.
+    help_interrupt_on_start: bool,
+    /// Fresh-thread question waiting for the old in-flight start to
+    /// reveal its run id so it can be interrupted first.
+    help_restart_question: Option<String>,
     /// Agent id the active `DefaultModelPicker` persists against —
     /// stashed at mount so a pick can't land on a drifted default.
     pub(crate) default_model_agent: Option<String>,
@@ -1562,8 +1597,10 @@ impl<T: TerminalAdapter> Model<T> {
             theme_picker_prev: None,
             help_convo: Default::default(),
             help_run: None,
-            help_run_starting: false,
+            help_start_request: None,
             help_pending_questions: Vec::new(),
+            help_interrupt_on_start: false,
+            help_restart_question: None,
             default_model_agent: None,
             auto_tour_pending: false,
             tips_enabled: false,
@@ -1898,7 +1935,12 @@ impl<T: TerminalAdapter> Model<T> {
             failing_ci: self.sidebar.has_failing_ci(),
             in_terminal: self.focus == PaneFocus::Terminals,
         };
-        lazybox_tui_core::tips::next_tip(&ctx, &self.tips_seen, &self.action_key_overrides)
+        lazybox_tui_core::tips::next_tip(
+            &ctx,
+            &self.tips_seen,
+            &self.action_key_overrides,
+            self.ui_defaults.terminal_escape_char,
+        )
     }
 
     /// Append `id` to `ui.tips_seen` so the tip never resurfaces.
@@ -3746,51 +3788,20 @@ impl<T: TerminalAdapter> Model<T> {
                 .terminals
                 .contextual_bindings(self.ui_defaults.terminal_escape_char),
         };
-        // Universal hints appended to every pane's footer (issue #100):
-        // the orientation + escape shortcuts a lost first-time user
-        // always needs in view. `quit` last so it's the rightmost,
-        // most-findable hint.
-        //
-        // But in a focused terminal the PTY eats every key, so those
-        // globals don't fire — advertising `q q` / `?` there is a lie
-        // (issue #114). The catalog's `available_in_terminal` is the
-        // single source of truth for this; when nothing universal
-        // survives terminal focus we advertise the `]]` gateway that
-        // unlocks them instead, so the footer never claims a shortcut
-        // the focused pane won't dispatch.
+        // Universal hints appended to panes where their shortcuts are
+        // available. A live terminal owns its keys, so its command
+        // leader above is the only steady-state gateway hint.
         let globals: Vec<crate::pane::Binding> = {
             use lazybox_tui_core::action::{ActionDef, ActionKind};
-            // Footer's curated short tail of `universal_shortcuts()` —
-            // kept to three so a narrow line never truncates `quit`
-            // off the right edge.
             let tail = [ActionKind::OpenHelp, ActionKind::OpenTour, ActionKind::Quit]
                 .map(ActionDef::for_kind);
-            if self.focus == PaneFocus::Terminals
-                && tail.iter().all(|def| !def.available_in_terminal())
-            {
-                let help = ActionDef::for_kind(ActionKind::OpenHelp);
-                let quit = ActionDef::for_kind(ActionKind::Quit);
-                // The way back out is `terminal.escape_char` doubled,
-                // owned by the escape-char latch — not a remappable
-                // catalog chord (#188). Render it from the configured
-                // char so the hint matches what the dispatcher matches.
-                let esc = self.ui_defaults.terminal_escape_char;
-                vec![crate::pane::Binding {
-                    keys: std::borrow::Cow::Owned(format!("{esc}{esc}")),
-                    label: std::borrow::Cow::Owned(format!(
-                        "exit for {} · {}",
-                        help.effective_keys_display(&self.action_key_overrides),
-                        quit.effective_keys_display(&self.action_key_overrides),
-                    )),
-                }]
-            } else {
-                tail.iter()
-                    .map(|def| crate::pane::Binding {
-                        keys: def.effective_keys_display(&self.action_key_overrides),
-                        label: std::borrow::Cow::Borrowed(def.label),
-                    })
-                    .collect()
-            }
+            tail.iter()
+                .filter(|def| self.focus != PaneFocus::Terminals || def.available_in_terminal())
+                .map(|def| crate::pane::Binding {
+                    keys: def.effective_keys_display(&self.action_key_overrides),
+                    label: std::borrow::Cow::Borrowed(def.label),
+                })
+                .collect()
         };
         // While a sticky error is pinned, advertise how to inspect its
         // full text and dismiss it right in the hint bar (#453). Inserted
@@ -3798,20 +3809,14 @@ impl<T: TerminalAdapter> Model<T> {
         // widths while the error's own actions still out-rank the
         // tour/help hints.
         let mut globals = globals;
-        if self.focus == PaneFocus::Terminals {
+        if self.focus == PaneFocus::Terminals && !self.mouse_capture_on {
             use lazybox_tui_core::action::{ActionDef, ActionKind};
             let toggle = ActionDef::for_kind(ActionKind::ToggleMouseCapture);
-            let label = if self.mouse_capture_on {
-                let esc = self.ui_defaults.terminal_escape_char;
-                std::borrow::Cow::Owned(format!("mouse on · {esc}{esc}u if links fail"))
-            } else {
-                std::borrow::Cow::Borrowed("links off · enable")
-            };
             globals.insert(
                 0,
                 crate::pane::Binding {
                     keys: toggle.effective_keys_display(&self.action_key_overrides),
-                    label,
+                    label: std::borrow::Cow::Borrowed("links off · enable"),
                 },
             );
         }
@@ -4179,12 +4184,13 @@ impl<T: TerminalAdapter> Model<T> {
                 }
                 self.mount_help();
             }
-            Msg::HelpAsked(question) => {
+            Msg::HelpAsked(question, kind) => {
                 // The HelpAsk modal stays mounted — the answer streams
                 // back into `help_convo`.
-                let cmds = self.handle_help_asked(question);
+                let cmds = self.handle_help_question(question, kind);
                 self.dispatch_cmds(cmds);
             }
+            Msg::HelpSpinnerTick => {}
             // Polling outcomes — surface as footer notices, never
             // as full-screen modals. Permanent + auth errors are
             // sticky; retryable ones (which shouldn't reach here)

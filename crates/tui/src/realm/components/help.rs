@@ -518,10 +518,16 @@ impl AppComponent<Msg, UserEvent> for Help {
         // Scroll keys navigate the (possibly overflowing) panel instead
         // of dismissing it — vim + arrows + paging, mirroring the ask
         // modal. `view` clamps the offset to the real overflow, so an
-        // over-scroll on a panel that fits is a harmless no-op. Any
-        // OTHER key still closes, keeping the which-key "press a key to
-        // continue" feel.
+        // over-scroll on a panel that fits is a harmless no-op.
         match key.code {
+            Key::Esc => Some(Msg::ModalDismissed),
+            Key::Char('c')
+                if key
+                    .modifiers
+                    .contains(tuirealm::event::KeyModifiers::CONTROL) =>
+            {
+                Some(Msg::ModalDismissed)
+            }
             Key::Down | Key::Char('j') => {
                 self.scroll = self.scroll.saturating_add(1);
                 None
@@ -546,7 +552,7 @@ impl AppComponent<Msg, UserEvent> for Help {
                 self.scroll = u16::MAX;
                 None
             }
-            _ => Some(Msg::ModalDismissed),
+            _ => None,
         }
     }
 }
@@ -863,7 +869,7 @@ mod tests {
         );
     }
 
-    /// Scroll keys move the offset; a non-scroll key still dismisses and
+    /// Scroll keys move the offset; only an explicit exit dismisses and
     /// a second `?` opens the ask modal (#338 follow-up).
     #[test]
     fn scroll_keys_drive_the_offset() {
@@ -890,7 +896,7 @@ mod tests {
         assert_eq!(help.scroll, u16::MAX);
         help.on(&press(Key::Home));
         assert_eq!(help.scroll, 0);
-        // `?` swaps to ask; any non-scroll key dismisses.
+        // `?` swaps to ask; Esc dismisses and unrelated keys do not.
         assert!(matches!(
             help.on(&press(Key::Char('?'))),
             Some(Msg::HelpAskOpen),
@@ -899,6 +905,7 @@ mod tests {
             help.on(&press(Key::Esc)),
             Some(Msg::ModalDismissed),
         ));
+        assert!(help.on(&press(Key::Char('x'))).is_none());
     }
 
     /// On a short terminal the panel overflows: the scroll hint appears

@@ -82,8 +82,9 @@ The documentation is split into four sections, following the
   [CLI](/docs/reference/cli/), every [keybinding](/docs/reference/keybindings/),
   and the full [configuration schema](/docs/reference/configuration/).
 - **[Explanation](/docs/explanation/)** — the "why": the
-  [mental model](/docs/explanation/mental-model/) and the
-  [architecture](/docs/explanation/architecture/).
+  [mental model](/docs/explanation/mental-model/), [how lazybox
+  compares](/docs/explanation/comparison/) to other parallel-agent tools, and
+  the [architecture](/docs/explanation/architecture/).
 
 ## Fastest path
 

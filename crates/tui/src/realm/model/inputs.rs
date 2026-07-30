@@ -14,7 +14,7 @@
 //! `mount_setup_modal`, `unmount_setup_modal`) co-locates here
 //! since it's the same modal-state-mutation shape.
 
-use super::{ChoicePayload, Id, ModalFlow, Model, Msg};
+use super::{ChoicePayload, HelpQuestionKind, Id, ModalFlow, Model, Msg};
 use crate::realm::UserEvent;
 use lazybox_ipc::{Command as IpcCommand, TerminalId};
 use tuirealm::terminal::TerminalAdapter;
@@ -106,7 +106,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// shell has no paste debounce, so the encoded direct write submits
     /// cleanly. Shared by free-text broadcast and handoff paths so the
     /// #246 invariant lives in one place.
-    fn deliver_prompt(
+    pub(super) fn deliver_prompt(
         &mut self,
         terminal_id: TerminalId,
         is_agent: bool,
@@ -425,23 +425,25 @@ impl<T: TerminalAdapter> Model<T> {
         cmds
     }
 
-    /// A question submitted from the `HelpAsk` modal (#302). Records
-    /// the turn in the shared conversation and routes it to the help
-    /// agent: the first question starts a headless structured run
-    /// with the generated catalog + docs context as its opening
-    /// message; follow-ups ride the same run so the context stays
-    /// prompt-cached. Questions racing the run start are queued and
-    /// flushed by the `AgentRunStarted` handler.
-    ///
-    /// **Effects**: returns commands as a `Vec` for testability.
-    pub fn handle_help_asked(&mut self, question: String) -> Vec<IpcCommand> {
-        use lazybox_ipc::{AgentInputMessage, AgentRunAccess, AgentRuntimeMode};
-        use lazybox_tui_core::help::{HELP_AGENT_PREFERENCE, HELP_SESSION_KEY, select_help_agent};
+    /// A question submitted from the `HelpAsk` modal. Follow-ups ride
+    /// the current run; new questions interrupt it and start with fresh
+    /// context.
+    pub fn handle_help_question(
+        &mut self,
+        question: String,
+        kind: HelpQuestionKind,
+    ) -> Vec<IpcCommand> {
+        use lazybox_ipc::AgentInputMessage;
 
         let question = question.trim().to_string();
         if question.is_empty() {
             return Vec::new();
         }
+        let mut cmds = if kind == HelpQuestionKind::NewQuestion {
+            self.reset_help_session()
+        } else {
+            Vec::new()
+        };
         {
             let mut convo = self.help_convo_mut();
             convo.notice = None;
@@ -451,40 +453,63 @@ impl<T: TerminalAdapter> Model<T> {
                     question: question.clone(),
                     ..Default::default()
                 });
+            convo.activate_thread();
         }
         self.redraw = true;
-        let Some(help_agent) = select_help_agent(&self.agents, Some(self.sidebar.default_agent()))
-        else {
-            let mut convo = self.help_convo_mut();
-            convo.notice = Some(format!(
-                "the help assistant needs a structured agent ({}) enabled — \
-showing keybinding search only",
-                HELP_AGENT_PREFERENCE.join(" or ")
-            ));
-            if let Some(turn) = convo.streaming_turn_mut() {
-                turn.done = true;
+        if self.help_interrupt_on_start {
+            if self.help_restart_question.is_none() {
+                self.help_restart_question = Some(question);
+            } else {
+                self.help_pending_questions.push(question);
             }
-            return Vec::new();
-        };
+            return cmds;
+        }
         if let Some(run_id) = self.help_run {
-            return vec![IpcCommand::SendAgentInput {
+            cmds.push(IpcCommand::SendAgentInput {
                 run_id,
                 message: AgentInputMessage {
                     text: Some(question),
                     json: None,
                 },
-            }];
+            });
+            return cmds;
         }
-        if self.help_run_starting {
+        if self.help_start_request.is_some() {
             self.help_pending_questions.push(question);
-            return Vec::new();
+            return cmds;
         }
-        self.help_run_starting = true;
+        if let Some(cmd) = self.start_help_run_command(&question) {
+            cmds.push(cmd);
+        }
+        cmds
+    }
+
+    pub(super) fn start_help_run_command(&mut self, question: &str) -> Option<IpcCommand> {
+        use lazybox_ipc::{AgentInputMessage, AgentRunAccess, AgentRuntimeMode};
+        use lazybox_tui_core::help::{HELP_AGENT_PREFERENCE, HELP_SESSION_KEY, select_help_agent};
+
+        let Some(help_agent) = select_help_agent(&self.agents, Some(self.sidebar.default_agent()))
+        else {
+            self.help_pending_questions.clear();
+            let mut convo = self.help_convo_mut();
+            convo.close_open_turns();
+            convo.deactivate_thread();
+            convo.notice = Some(format!(
+                "the help assistant needs a structured agent ({}) enabled — \
+showing keybinding search only",
+                HELP_AGENT_PREFERENCE.join(" or ")
+            ));
+            return None;
+        };
+        let request_id =
+            lazybox_ipc::AgentRunRequestId(uuid::Uuid::new_v4().hyphenated().to_string());
+        self.help_start_request = Some(request_id.clone());
         let context = lazybox_tui_core::help::agent_context(
             &self.catalog,
             self.ui_defaults.terminal_escape_char,
         );
-        vec![IpcCommand::StartAgentRun {
+        Some(IpcCommand::StartAgentRun {
+            request_id,
             session_key: lazybox_core::SessionKey::new(HELP_SESSION_KEY),
             session_id: None,
             agent: help_agent.to_string(),
@@ -499,20 +524,33 @@ showing keybinding search only",
                 json: None,
             }),
             access: AgentRunAccess::ReadOnly,
-        }]
+        })
     }
 
-    /// Route a Choice modal pick to the right handler. Five
-    /// distinct flows share the same `Msg::ChoicePicked` envelope
-    /// (Adopt target, Editor picker, Settings palette, runner-
-    /// driven flows, plain pop-on-pick) — this fn fans out by
-    /// inspecting the top modal id + setup state.
+    fn reset_help_session(&mut self) -> Vec<IpcCommand> {
+        let interrupt = self
+            .help_run
+            .take()
+            .map(|run_id| IpcCommand::InterruptAgentRun { run_id });
+        self.help_pending_questions.clear();
+        self.help_restart_question = None;
+        if interrupt.is_some() {
+            self.help_start_request = None;
+            self.help_interrupt_on_start = false;
+        } else {
+            self.help_interrupt_on_start = self.help_start_request.is_some();
+        }
+        *self.help_convo_mut() = Default::default();
+        interrupt.into_iter().collect()
+    }
+
+    /// Route a Choice modal pick through the pure tui-core resolver,
+    /// then apply its typed outcome.
     ///
     /// **Effects**: returns commands as a `Vec` for testability.
-    /// The Editor / Settings / runner branches may still emit
-    /// commands internally via helper methods (`launch_editor`,
-    /// `dispatch_settings_action`, `handle_runner_step`); only
-    /// the directly-visible IPC commands land in the Vec.
+    /// Editor / Settings / runner outcomes may still emit commands
+    /// internally through their effect helpers; directly-visible IPC
+    /// commands land in the Vec.
     pub fn handle_choice_picked(&mut self, picks: Vec<ChoicePayload>) -> Vec<IpcCommand> {
         let cmds = self.choice_picked_inner(picks);
         // The inner handler has many early-return arms; drain queued
@@ -520,727 +558,6 @@ showing keybinding search only",
         // stack may have just emptied" treatment. (No-op while any
         // modal — including one the pick itself mounted — is up.)
         self.drain_queued_daemon_prompts();
-        cmds
-    }
-
-    fn choice_picked_inner(&mut self, picks: Vec<ChoicePayload>) -> Vec<IpcCommand> {
-        let mut cmds = Vec::new();
-        // Broadcast snippet step — the pick doesn't send anything yet:
-        // it seeds the compose textarea with the snippet's body. An
-        // empty pick is the picker's `Ctrl-F` "free text only" escape,
-        // which skips straight to an empty compose buffer.
-        if matches!(self.modal_stack.last(), Some(Id::BroadcastSnippet)) {
-            let key = picks.first().and_then(|p| p.as_text()).map(str::to_string);
-            self.pop_modal();
-            if !matches!(self.modal_flow, Some(ModalFlow::Broadcast { .. })) {
-                return cmds;
-            }
-            let body = key
-                .as_ref()
-                .and_then(|k| self.snippets.get(k))
-                .map(|s| s.body.clone());
-            if let Some(ModalFlow::Broadcast { draft }) = self.modal_flow.as_mut() {
-                // Only remember the key when it resolved to a body —
-                // the MRU must not record a snippet that wasn't sent.
-                draft.snippet_key = key.filter(|_| body.is_some());
-            }
-            self.mount_broadcast_textarea(body);
-            return cmds;
-        }
-        // Snippet picker — pick → send the snippet body to the active
-        // terminal AND submit it in one shot. The "expand AND submit"
-        // combo is the whole point of the feature: the user gets the
-        // prompt to the agent's input in a single keystroke chord, no
-        // intermediate "review then send" step. How the submit lands
-        // depends on the terminal — see the agent vs shell split below.
-        if matches!(self.modal_stack.last(), Some(Id::SnippetPicker)) {
-            let key = picks.first().and_then(|p| p.as_text()).map(str::to_string);
-            self.pop_modal();
-            let Some(key) = key else {
-                return cmds;
-            };
-            let Some(snippet) = self.snippets.get(&key) else {
-                // Picker resolved to a key the live snippet set
-                // doesn't recognise — possible only if the
-                // collection was swapped between mount and submit
-                // (no in-process path does that today).
-                tracing::warn!(
-                    "snippet picker: picked key {key:?} but no entry in snippets — stale modal?",
-                );
-                return cmds;
-            };
-            let Some(terminal_id) = self.terminals.active_terminal_id() else {
-                self.flash_info("no active terminal — open a session first");
-                return cmds;
-            };
-            // Clone the body + category out so the `self.snippets` borrow
-            // ends before appending the command.
-            let body = snippet.body.clone();
-            cmds.push(IpcCommand::DeliverSnippet {
-                terminal_id,
-                snippet_key: key,
-                category: snippet.category.clone(),
-                body,
-            });
-            return cmds;
-        }
-        // Prompt-history picker (Id::PromptHistoryPicker, #523) — pick →
-        // re-send the chosen past prompt into the session it was opened
-        // over. A resend is a fresh `Typed` submit (the original snippet
-        // provenance stays on the historical entry). Empty / Esc drops
-        // the stash without sending.
-        if matches!(self.modal_stack.last(), Some(Id::PromptHistoryPicker)) {
-            let text = picks.first().and_then(|p| p.as_text()).map(str::to_string);
-            let target = match self.modal_flow.take() {
-                Some(ModalFlow::PromptHistory { terminal }) => Some(terminal),
-                _ => None,
-            };
-            self.pop_modal();
-            // The target is always an agent at mount (history is
-            // agent-only); if it exited while the picker was open, don't
-            // claim a resend that would land on nothing.
-            if let (Some(text), Some(terminal_id)) = (text, target) {
-                if self.terminals.terminal_is_agent(terminal_id) {
-                    self.deliver_prompt(
-                        terminal_id,
-                        true,
-                        &text,
-                        lazybox_ipc::PromptSource::Typed,
-                        &mut cmds,
-                    );
-                    self.flash_info("re-sent prompt");
-                } else {
-                    self.flash_info("session ended — nothing re-sent");
-                }
-            }
-            return cmds;
-        }
-        // Jump picker (Id::JumpPicker) — pick → land the cursor on the
-        // chosen workspace (and follow it into its terminal when it has
-        // one). Empty / Esc pick drops the stash without moving.
-        if matches!(self.modal_stack.last(), Some(Id::JumpPicker)) {
-            let target = picks
-                .into_iter()
-                .next()
-                .and_then(ChoicePayload::into_session);
-            self.pop_modal();
-            if let Some(key) = target {
-                self.jump_to_workspace_key(&key);
-            }
-            return cmds;
-        }
-        // URL picker (Id::UrlPicker, #596) — pick → open the chosen
-        // terminal URL in the browser. Empty / Esc opens nothing.
-        if matches!(self.modal_stack.last(), Some(Id::UrlPicker)) {
-            let url = picks.first().and_then(|p| p.as_text()).map(str::to_string);
-            self.pop_modal();
-            if let Some(url) = url {
-                self.open_external_url(&url);
-            }
-            return cmds;
-        }
-        // Theme picker — the highlighted palette is already live (the
-        // on_highlight preview applied it as the cursor moved). Pick →
-        // keep it and persist to `ui.theme`; the prev-theme stash is
-        // dropped so a later Esc on another modal can't revert it.
-        if matches!(self.modal_stack.last(), Some(Id::ThemePicker)) {
-            let name = picks.first().and_then(|p| p.as_text()).map(str::to_string);
-            self.theme_picker_prev = None;
-            self.pop_modal();
-            if let Some(name) = name {
-                crate::theme::set_by_name(&name);
-                match lazybox_config::Config::save_with(|c| c.ui.theme = Some(name.clone())) {
-                    Ok(()) => self.flash_info(format!("theme: {name}")),
-                    Err(e) => self.flash_info(format!("couldn't save theme: {e}")),
-                }
-                self.redraw = true;
-            }
-            return cmds;
-        }
-        // Default-agent picker — pick → persist `setup.default_agent`,
-        // update both panes live (no restart), then chain into the
-        // default-model picker when the agent declares tiers. Empty /
-        // Esc drops the stash without changing anything.
-        if matches!(self.modal_stack.last(), Some(Id::DefaultAgentPicker)) {
-            let agent = picks.first().and_then(|p| p.as_text()).map(str::to_string);
-            self.pop_modal();
-            if let Some(agent) = agent {
-                // Persist first; only apply live once the write lands so
-                // a save failure never leaves the panes ahead of disk.
-                match lazybox_config::Config::save_with(|c| {
-                    c.setup.default_agent = Some(agent.clone());
-                }) {
-                    Ok(()) => {
-                        self.set_default_agent(&agent);
-                        self.flash_info(format!("default agent: {agent}"));
-                        self.redraw = true;
-                        self.mount_default_model_picker(&agent);
-                    }
-                    Err(e) => self.flash_info(format!("couldn't save config: {e}")),
-                }
-            }
-            return cmds;
-        }
-        // Default-model picker (second step of the default-agent flow)
-        // — pick → persist `agents.<id>.models.default` so bare spawns
-        // use that tier; the `None` row unpins it (agent's own default
-        // model). Empty / Esc keeps the current tier.
-        if matches!(self.modal_stack.last(), Some(Id::DefaultModelPicker)) {
-            let alias = picks
-                .into_iter()
-                .next()
-                .and_then(ChoicePayload::into_opt_text);
-            let agent = self.default_model_agent.take();
-            self.pop_modal();
-            if let (Some(agent), Some(alias)) = (agent, alias) {
-                match lazybox_config::Config::save_with(|c| {
-                    // Unpinning an agent with no YAML block is already
-                    // a no-op — skip the insert so a dead `agents.<id>`
-                    // stanza isn't serialized.
-                    if alias.is_some() || c.agents.contains_key(&agent) {
-                        c.agents.entry(agent.clone()).or_default().models.default = alias.clone();
-                    }
-                }) {
-                    Ok(()) => {
-                        // Mirror the write into the in-memory menu so
-                        // the Settings row badge and the next picker
-                        // open reflect it without a restart. Re-derive
-                        // the merged menu from disk rather than storing
-                        // the raw pick: unpinning falls back to the
-                        // built-in default (Opus for Claude), and that
-                        // fallback must apply live too — a bare spawn
-                        // never runs without an explicit model in
-                        // between.
-                        let merged = lazybox_config::Config::load()
-                            .unwrap_or_default()
-                            .agent_models(&agent);
-                        let label = merged
-                            .default
-                            .as_deref()
-                            .and_then(|a| merged.tier(a))
-                            .map(|t| t.label.clone());
-                        self.agent_models.insert(agent.clone(), merged);
-                        self.flash_info(match label {
-                            Some(label) => format!("default model: {label}"),
-                            None => "default model: agent default".to_string(),
-                        });
-                        self.redraw = true;
-                    }
-                    Err(e) => self.flash_info(format!("couldn't save config: {e}")),
-                }
-            }
-            return cmds;
-        }
-        // Sidebar right-click context menu. Pick → route through
-        // `dispatch_action`, the same single fan-out the keyboard
-        // shortcut uses. That keeps the destructive gate intact:
-        // MergePr / Archive mount the unified ActionConfirm modal
-        // instead of firing straight at the daemon (a mis-click on
-        // "merge" must not merge a PR with no confirmation). Empty
-        // pick (Esc) clears the stash silently.
-        if matches!(self.modal_stack.last(), Some(Id::SidebarContext)) {
-            let stash = match self.modal_flow.take() {
-                Some(ModalFlow::SidebarContext {
-                    session_key,
-                    actions,
-                }) => Some((session_key, actions)),
-                _ => None,
-            };
-            self.pop_modal();
-            let idx = picks.first().and_then(|p| p.as_index());
-            if let (Some((session_key, actions)), Some(idx)) = (stash.as_ref(), idx)
-                && let Some(action) = actions.get(idx).cloned()
-            {
-                // Re-aim the sidebar at the row the menu was raised
-                // over. The right-click hit-test already moved the
-                // selection there, but a daemon event (re-sort,
-                // removal) could have shifted the cursor while the
-                // menu was up — `dispatch_action` reads the live
-                // selection, so pin it back to the menu's row first.
-                if self.sidebar.focus_workspace_key(session_key) {
-                    cmds.extend(self.dispatch_action(&action));
-                } else {
-                    self.flash_info("workspace is gone — action dropped");
-                }
-                self.redraw = true;
-            }
-            return cmds;
-        }
-        // Adopt picker (Id::AdoptTarget) — pick → send the
-        // `Command::AdoptSessions` mapping source→target. Empty
-        // pick (Esc → no Msg, but cover the defensive case) drops
-        // the stash without firing.
-        if matches!(self.modal_stack.last(), Some(Id::AdoptTarget)) {
-            let target = picks
-                .into_iter()
-                .next()
-                .and_then(ChoicePayload::into_workspace);
-            self.pop_modal();
-            let source = match self.modal_flow.take() {
-                Some(ModalFlow::AdoptSource { source }) => Some(source),
-                _ => None,
-            };
-            if let (Some(source_key), Some(target_key)) = (source, target) {
-                cmds.push(IpcCommand::AdoptSessions {
-                    source_workspace_key: source_key.clone(),
-                    target_workspace_key: target_key.clone(),
-                });
-                self.flash_info(format!("adopted sessions: {source_key} → {target_key}"));
-            }
-            return cmds;
-        }
-        // Handoff target picker (Id::HandoffTarget, issue #431) — the
-        // pick doesn't send yet: it resolves the target session and
-        // funnels into the compose textarea seeded with the source
-        // agent's captured output. Empty pick (Esc) drops the stash.
-        if matches!(self.modal_stack.last(), Some(Id::HandoffTarget)) {
-            let target = picks
-                .into_iter()
-                .next()
-                .and_then(ChoicePayload::into_session);
-            self.pop_modal();
-            match (target, self.modal_flow.as_mut()) {
-                (Some(target), Some(ModalFlow::Handoff { draft })) => {
-                    draft.target = Some(target);
-                    self.mount_handoff_textarea();
-                }
-                _ => {
-                    self.modal_flow = None;
-                }
-            }
-            return cmds;
-        }
-        // Start-agent project picker (Id::StartAgentProject) — pick a
-        // project, then funnel into the new-workspace name input. That
-        // input's submit auto-spawns the default agent, so this is the
-        // first leg of "create workspace + start agent". Empty / Esc
-        // pick drops the stash without advancing.
-        if matches!(self.modal_stack.last(), Some(Id::StartAgentProject)) {
-            let project = picks
-                .into_iter()
-                .next()
-                .and_then(ChoicePayload::into_project);
-            self.pop_modal();
-            if let Some(project_key) = project {
-                self.mount_new_workspace_input(project_key);
-            }
-            return cmds;
-        }
-        // New-workspace repo picker (Id::NewWorkspaceRepo) — the
-        // `x p` entry point. A pick that indexes into the repo
-        // list funnels into the new-workspace name input under that
-        // repo; the trailing escape-hatch row (index == list length)
-        // falls back to creating a new local project. Empty / Esc
-        // pick drops the stash without advancing.
-        if matches!(self.modal_stack.last(), Some(Id::NewWorkspaceRepo)) {
-            // A picked repo → name input; the trailing escape-hatch row
-            // (`NewLocalProject`) → new-project input. An empty pick
-            // (Esc) just closes the picker.
-            let picked = picks.into_iter().next();
-            self.pop_modal();
-            match picked {
-                Some(ChoicePayload::Project(project_key)) => {
-                    self.mount_new_workspace_input(project_key)
-                }
-                Some(ChoicePayload::NewLocalProject) => self.mount_new_project_input(),
-                _ => {}
-            }
-            return cmds;
-        }
-        // Reviewer picker (Id::RequestReviewers) — each pick carries its
-        // chosen login as a `ChoicePayload::Text`. Empty pick drops the
-        // slot.
-        if matches!(self.modal_stack.last(), Some(Id::RequestReviewers)) {
-            let logins: Vec<String> = picks
-                .iter()
-                .filter_map(|p| p.as_text().map(str::to_string))
-                .collect();
-            self.pop_modal();
-            let workspace_key = match self.modal_flow.take() {
-                Some(ModalFlow::ReviewRequest { workspace }) => Some(workspace),
-                _ => None,
-            };
-            if let (Some(workspace_key), false) = (workspace_key, logins.is_empty()) {
-                let count = logins.len();
-                // Optimistic: union the picked logins onto the PR's
-                // reviewer chips now (the mutation uses `union: true`),
-                // reconciled by the next poll's `WorkspaceUpserted` and
-                // rolled back if GitHub rejects it (#476).
-                self.optimistic_chip_edit(&workspace_key, "reviewers", |ws| {
-                    if let Some(pr) = ws.pr.as_mut() {
-                        for login in &logins {
-                            if !pr.reviewers.contains(login) {
-                                pr.reviewers.push(login.clone());
-                            }
-                        }
-                    }
-                });
-                cmds.push(IpcCommand::RequestReviewers {
-                    workspace_key,
-                    logins,
-                });
-                self.flash_info(format!("requested {count} reviewer(s)"));
-            }
-            return cmds;
-        }
-        // Automation-policies menu (Id::PolicyPicker, issue #363) —
-        // single-pick. Resolve the picked row's `PolicyToggle` against
-        // the *live* workspace so the toggle acts on current state, then
-        // dispatch the matching command and close. `Info` rows are
-        // read-only — re-inform and close.
-        if matches!(self.modal_stack.last(), Some(Id::PolicyPicker)) {
-            use crate::realm::model::modals::PolicyToggle;
-            let toggle = picks
-                .into_iter()
-                .next()
-                .and_then(ChoicePayload::into_policy);
-            let workspace_key = match self.modal_flow.take() {
-                Some(ModalFlow::PolicyWorkspace { workspace }) => Some(workspace),
-                _ => None,
-            };
-            self.pop_modal();
-            let (Some(toggle), Some(workspace_key)) = (toggle, workspace_key) else {
-                return cmds;
-            };
-            let session_key = lazybox_core::SessionKey::from(&workspace_key);
-            let ws = self
-                .sidebar
-                .workspace_iter()
-                .find(|(k, _)| k.as_str() == workspace_key.as_str())
-                .map(|(_, w)| w);
-            let Some(ws) = ws else {
-                return cmds;
-            };
-            match toggle {
-                PolicyToggle::MergeOnGreen => {
-                    let enabled = !ws.auto_merge_on_green;
-                    cmds.push(IpcCommand::SetAutoMergeOnGreen {
-                        session_key,
-                        enabled,
-                    });
-                    self.flash_info(if enabled {
-                        "merge on green: armed"
-                    } else {
-                        "merge on green: off"
-                    });
-                }
-                PolicyToggle::AutoFix(kind) => {
-                    // Label-agnostic cycle (Default → Disarm → Arm): the
-                    // next state depends only on the current arm, so the
-                    // daemon's authoritative opt-out set — which this
-                    // client may not share in remote mode — never changes
-                    // the outcome.
-                    let next = lazybox_core::toggled_arm(ws.policies.arm(kind));
-                    cmds.push(IpcCommand::SetAutoFixPolicy {
-                        session_key,
-                        kind,
-                        arm: next,
-                    });
-                    let name = match kind {
-                        lazybox_core::AutoFixKind::CiFailure => "auto-fix CI",
-                        lazybox_core::AutoFixKind::MergeConflict => "auto-fix conflict",
-                    };
-                    let state = match next {
-                        lazybox_core::PolicyArm::Default => "follows config",
-                        lazybox_core::PolicyArm::Arm => "armed",
-                        lazybox_core::PolicyArm::Disarm => "disarmed",
-                    };
-                    self.flash_info(format!("{name}: {state}"));
-                }
-                PolicyToggle::Info(msg) => {
-                    self.flash_info(msg);
-                }
-            }
-            return cmds;
-        }
-        // `w` multi-conversation chooser (Id::WorkAgentPicker, #418) —
-        // pick → build the same contextual work command, targeted at the
-        // exact running terminal. Empty / Esc drops the stash.
-        if matches!(self.modal_stack.last(), Some(Id::WorkAgentPicker)) {
-            let stash = match self.modal_flow.take() {
-                Some(ModalFlow::WorkPicker { picker }) => Some(picker),
-                _ => None,
-            };
-            self.pop_modal();
-            let idx = picks.first().and_then(|p| p.as_index());
-            if let (Some(picker), Some(idx)) = (stash, idx)
-                && let Some(target) = picker.targets.get(idx).cloned()
-            {
-                self.push_work_command(
-                    &target.agent_id,
-                    Some(target.terminal_id),
-                    picker.session_id,
-                    picker.model_alias,
-                    &mut cmds,
-                );
-            }
-            return cmds;
-        }
-        // Snooze duration picker (Id::SnoozeDuration) — single-pick.
-        // Translate the chosen row's `ChoicePayload::Duration` into a
-        // snooze deadline. Empty / Esc dismisses without snoozing.
-        if matches!(self.modal_stack.last(), Some(Id::SnoozeDuration)) {
-            let duration = picks.first().and_then(|p| p.as_duration());
-            let workspace_key = match self.modal_flow.take() {
-                Some(ModalFlow::Snooze { workspace }) => Some(workspace),
-                _ => None,
-            };
-            self.pop_modal();
-            if let (Some(session_key), Some(duration)) = (workspace_key, duration) {
-                let until = chrono::Utc::now()
-                    + chrono::Duration::from_std(duration).unwrap_or(chrono::Duration::hours(4));
-                cmds.push(IpcCommand::Snooze { session_key, until });
-                let mins = duration.as_secs() / 60;
-                let label = if mins < 60 {
-                    format!("{mins}m")
-                } else if mins < 60 * 24 {
-                    format!("{}h", mins / 60)
-                } else {
-                    format!("{}d", mins / 60 / 24)
-                };
-                self.flash_info(format!("snoozed for {label}"));
-            }
-            return cmds;
-        }
-        // Labels picker (Id::ManageLabels) — picker is pre-checked
-        // with the currently-applied labels, so submitting the
-        // current selection is the *full desired set*. Empty pick
-        // is meaningful ("clear all labels") — don't drop it.
-        if matches!(self.modal_stack.last(), Some(Id::ManageLabels)) {
-            let names: Vec<String> = picks
-                .iter()
-                .filter_map(|p| p.as_text().map(str::to_string))
-                .collect();
-            self.pop_modal();
-            if let Some(workspace_key) = self.awaiting_repo_labels.take() {
-                let count = names.len();
-                let msg = if count == 0 {
-                    "cleared labels".to_string()
-                } else {
-                    format!("set labels ({count})")
-                };
-                // Optimistic: replace the task's label chips now. Keep
-                // any color already known for a name so the chips don't
-                // flash colorless; the next poll fills the rest.
-                // Reconciled by `WorkspaceUpserted`, rolled back on
-                // failure (#476).
-                self.optimistic_chip_edit(&workspace_key, "labels", |ws| {
-                    let known: std::collections::HashMap<String, String> = ws
-                        .pr
-                        .iter()
-                        .flat_map(|p| p.labels.iter())
-                        .chain(
-                            ws.gh_issues
-                                .first()
-                                .into_iter()
-                                .flat_map(|i| i.labels.iter()),
-                        )
-                        .map(|l| (l.name.clone(), l.color.clone()))
-                        .collect();
-                    let next: Vec<lazybox_core::Label> = names
-                        .iter()
-                        .map(|name| lazybox_core::Label {
-                            name: name.clone(),
-                            color: known.get(name).cloned().unwrap_or_default(),
-                        })
-                        .collect();
-                    if let Some(pr) = ws.pr.as_mut() {
-                        pr.labels = next;
-                    } else if let Some(issue) = ws.gh_issues.first_mut() {
-                        issue.labels = next;
-                    }
-                });
-                cmds.push(IpcCommand::SetLabels {
-                    workspace_key,
-                    names,
-                });
-                self.flash_info(msg);
-            }
-            return cmds;
-        }
-        // Assignees picker (Id::AddAssignees) — picker is pre-
-        // checked with existing assignees, so submitting the current
-        // selection is the *full desired set*. Fire SetAssignees;
-        // the daemon diffs against the persisted task and runs
-        // add + remove mutations as needed. Empty pick is meaningful
-        // here ("clear all assignees") — don't drop it.
-        if matches!(self.modal_stack.last(), Some(Id::AddAssignees)) {
-            let logins: Vec<String> = picks
-                .iter()
-                .filter_map(|p| p.as_text().map(str::to_string))
-                .collect();
-            self.pop_modal();
-            if let Some(workspace_key) = match self.modal_flow.take() {
-                Some(ModalFlow::AssigneesRequest { workspace }) => Some(workspace),
-                _ => None,
-            } {
-                let count = logins.len();
-                let msg = if count == 0 {
-                    "cleared assignees".to_string()
-                } else {
-                    format!("set assignees ({count})")
-                };
-                // Optimistic: replace the task's assignee chips now,
-                // reconciled by `WorkspaceUpserted` and rolled back on
-                // failure (#476).
-                self.optimistic_chip_edit(&workspace_key, "assignees", |ws| {
-                    if let Some(pr) = ws.pr.as_mut() {
-                        pr.assignees = logins.clone();
-                    } else if let Some(issue) = ws.gh_issues.first_mut() {
-                        issue.assignees = logins.clone();
-                    }
-                });
-                cmds.push(IpcCommand::SetAssignees {
-                    workspace_key,
-                    logins,
-                });
-                self.flash_info(msg);
-            }
-            return cmds;
-        }
-        // Import picker (Id::ImportCheckoutList) — pick a discovered
-        // checkout, then mount the real-checkout warning confirm.
-        if matches!(self.modal_stack.last(), Some(Id::ImportCheckoutList)) {
-            self.pop_modal();
-            let rows = match self.modal_flow.take() {
-                Some(ModalFlow::ImportList { rows }) => rows,
-                _ => Vec::new(),
-            };
-            if let Some(target) = picks
-                .first()
-                .and_then(|p| p.as_index())
-                .and_then(|i| rows.get(i).cloned())
-            {
-                self.mount_import_checkout_confirm(target);
-            }
-            return cmds;
-        }
-        // Filter menu (Id::FilterMenu) — picker is pre-checked with
-        // the active filters, so the submitted selection IS the new
-        // full set. An empty pick is meaningful ("clear all filters").
-        if matches!(self.modal_stack.last(), Some(Id::FilterMenu)) {
-            let filters: Vec<crate::components::sidebar::Filter> =
-                picks.iter().filter_map(|p| p.as_filter()).collect();
-            self.pop_modal();
-            let count = filters.len();
-            self.sidebar.set_filters(filters);
-            if count == 0 {
-                self.flash_info("filters cleared");
-            } else {
-                self.flash_info(format!("{count} filter(s) active"));
-            }
-            return cmds;
-        }
-        // Worktree inspector (Id::InspectList) — pick a row, then
-        // either fire the bulk shortcut or mount a per-row confirm.
-        if matches!(self.modal_stack.last(), Some(Id::InspectList)) {
-            // Drop the picker first so the confirm modal lands on
-            // top of a clean stack.
-            self.pop_modal();
-            let rows = match self.modal_flow.take() {
-                Some(ModalFlow::InspectList { rows }) => rows,
-                _ => Vec::new(),
-            };
-            let Some(idx) = picks.first().and_then(|p| p.as_index()) else {
-                return cmds;
-            };
-            // Rebuild the same logical index space the picker used:
-            // sentinel at slot 0 when any safe rows exist, real
-            // rows after that. Picker indices map 1:1.
-            let safe_first = rows
-                .iter()
-                .filter(|r| !r.reasons.is_empty() && r.is_safe_to_delete)
-                .count()
-                > 0;
-            if safe_first && idx == 0 {
-                // Bulk shortcut — dispatch a delete per safe row,
-                // skip the rest. Daemon re-checks safety per call;
-                // a row whose state went stale (new uncommitted
-                // change since inspection) gets a "no, refused"
-                // event back and the modal will refresh.
-                for row in &rows {
-                    if !row.reasons.is_empty() && row.is_safe_to_delete {
-                        cmds.push(IpcCommand::DeleteOrphanedWorktree {
-                            path: row.path.clone(),
-                            force: false,
-                        });
-                    }
-                }
-                let n = cmds.len();
-                self.flash_info(format!("deleting {n} clearly-safe worktrees…"));
-                return cmds;
-            }
-            let row_idx = if safe_first { idx - 1 } else { idx };
-            if let Some(row) = rows.get(row_idx).cloned() {
-                self.mount_inspect_confirm(row);
-            }
-            return cmds;
-        }
-        // Editor picker (Id::Editor) — pick → launch (or defer
-        // behind a session-spawn when the workspace has no
-        // worktree yet).
-        if matches!(self.modal_stack.last(), Some(Id::Editor)) {
-            let editor = picks
-                .first()
-                .and_then(|p| p.as_index())
-                .and_then(|i| self.setup.editor_choices.get(i).cloned());
-            self.setup.editor_choices.clear();
-            self.pop_modal();
-            let Some(editor) = editor else { return cmds };
-            if let Some(workspace_key) = self.setup.pending_editor_workspace.take() {
-                self.setup.pending_editor_launch = Some((workspace_key.clone(), editor.clone()));
-                cmds.push(IpcCommand::Spawn {
-                    model_alias: None,
-                    session_key: workspace_key.clone(),
-                    session_id: None,
-                    kind: lazybox_ipc::TerminalKind::Shell,
-                    cwd: None,
-                    initial_prompt: None,
-                    on_main: false,
-                });
-                self.flash_info(format!(
-                    "Provisioning worktree for {workspace_key} — opening in {} when ready…",
-                    editor.display
-                ));
-                return cmds;
-            }
-            // Worktree already on disk — launch directly.
-            let worktree = self
-                .sidebar
-                .selected_workspace()
-                .and_then(|w| w.sessions.first().map(|s| s.worktree_path.clone()));
-            if let Some(worktree) = worktree {
-                self.launch_editor(&editor, &worktree);
-            }
-            return cmds;
-        }
-        // Settings palette is a non-runner Choice modal — if the
-        // user just picked an action, route into a partial wizard
-        // flow before falling through.
-        if !self.setup.settings_actions.is_empty()
-            && matches!(self.modal_stack.last(), Some(Id::Setup))
-            && self.setup.runner.is_none()
-        {
-            let action = picks
-                .first()
-                .and_then(|p| p.as_index())
-                .and_then(|i| self.setup.settings_actions.get(i).cloned());
-            self.setup.settings_actions.clear();
-            self.pop_modal();
-            if let Some(action) = action {
-                self.dispatch_settings_action(action);
-            }
-            return cmds;
-        }
-        if let Some(mut runner) = self.setup.runner.take() {
-            // The setup wizard resolves positionally into the runner's
-            // own stashed item list — keep passing plain indices.
-            let indices = picks.iter().filter_map(|p| p.as_index()).collect();
-            let step = runner.step_choice_picked(indices);
-            self.handle_runner_step(runner, step);
-        } else {
-            self.pop_modal();
-        }
         cmds
     }
 
@@ -1302,6 +619,9 @@ showing keybinding search only",
         // A few modals carry cancel state that is NOT part of the flow
         // enum — release it here.
         match top {
+            Some(Id::Help) | Some(Id::HelpAsk) => {
+                cmds.extend(self.reset_help_session());
+            }
             Some(Id::ManageLabels) => {
                 // The label picker's target lives in `awaiting_repo_labels`
                 // (armed before the modal, coexists with others), not in

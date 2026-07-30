@@ -24,7 +24,7 @@
 //!    `Event::TerminalExited`, drop the map entry.
 //! 5. Broadcast `Event::TerminalSpawned` to every subscriber.
 
-use crate::{ServerConfig, client_kv, polling, terminal_io};
+use crate::{ServerConfig, client_kv, terminal_io};
 use chrono::Utc;
 use futures::{StreamExt, stream};
 use lazybox_agents::SpawnCtx;
@@ -5803,7 +5803,7 @@ async fn record_confirmed_snippet(
     }
     client_kv::record_recent_snippet(config, snippet_key.clone()).await;
     let workspace_key = WorkspaceKey::new(session_key.as_str().to_string());
-    polling::record_sent_snippet(config, &workspace_key, snippet_key.clone()).await;
+    crate::workspace::record_sent_snippet(config, &workspace_key, snippet_key.clone()).await;
     let _ = config.bus.send(Event::SnippetDelivered {
         terminal_id,
         session_key,
@@ -8459,7 +8459,7 @@ mod tests {
             .expect("save workspace");
 
         assert!(
-            crate::polling::delete_workspace(&config, &key)
+            crate::workspace::delete_workspace(&config, &key)
                 .await
                 .is_some()
         );
@@ -8510,7 +8510,7 @@ mod tests {
         // under paused time) and proceeds anyway — the wedged-spawn
         // shape.
         assert!(
-            crate::polling::delete_workspace(&config, &key)
+            crate::workspace::delete_workspace(&config, &key)
                 .await
                 .is_some()
         );
@@ -10438,7 +10438,7 @@ mod tests {
     fn last_output_tail_keeps_only_content_after_carriage_return() {
         // Progress bars overwrite in place with a bare `\r`; only the
         // last-written state should survive.
-        let raw = b"Downloading 10%\rDownloading 100%\n";
+        let raw = b"\x1b[33mDownloading 10%\x1b[0m\r\x1b[32mDownloading 100%\x1b[0m\n";
         assert_eq!(last_output_tail(raw).as_deref(), Some("Downloading 100%"));
     }
 

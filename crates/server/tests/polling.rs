@@ -25,6 +25,7 @@ use lazybox_core::{
 use lazybox_ipc::{Command, Event, channel};
 use lazybox_server::backend::{MockBackend, SessionBackend};
 use lazybox_server::polling::{self, FetchMode, TaskSource};
+use lazybox_server::workspace;
 use lazybox_server::{Server, ServerConfig};
 use lazybox_store::{MemoryStore, Store, StoreError, StoreMutation, WorkspaceRecord};
 use std::future::Future;
@@ -615,7 +616,7 @@ async fn mark_workspace_read_persists_seen_count() {
     assert_eq!(before.activity.len(), 3);
     assert_eq!(before.unread_count(), 3, "everything unread initially");
 
-    polling::mark_workspace_read(&config, &key).await;
+    workspace::mark_workspace_read(&config, &key).await;
 
     let after: lazybox_core::Workspace = serde_json::from_str(
         &config
@@ -653,7 +654,7 @@ async fn mark_workspace_read_broadcasts_upsert() {
 
     let key =
         lazybox_core::WorkspaceKey::new(lazybox_core::workspace_key_for(&make_task("o/r#22")));
-    polling::mark_workspace_read(&config, &key).await;
+    workspace::mark_workspace_read(&config, &key).await;
 
     let evt = recv_workspace_upsert(&mut client).await;
     match evt {
@@ -675,7 +676,7 @@ async fn mark_workspace_read_is_independent_of_provider_state() {
 
     let key =
         lazybox_core::WorkspaceKey::new(lazybox_core::workspace_key_for(&make_task("o/r#33")));
-    polling::mark_workspace_read(&config, &key).await;
+    workspace::mark_workspace_read(&config, &key).await;
 
     // Re-poll the same task — seen state survives.
     polling::upsert(&config, task).await;
@@ -698,7 +699,7 @@ async fn mark_workspace_read_no_op_when_workspace_missing() {
     // (race: TUI saw a stale snapshot) must not panic.
     let config = ServerConfig::in_memory();
     let key = lazybox_core::WorkspaceKey::new("github:o/r#nope");
-    polling::mark_workspace_read(&config, &key).await;
+    workspace::mark_workspace_read(&config, &key).await;
     assert!(config.store.get_workspace(&key).unwrap().is_none());
 }
 // ── PR-attach migration ──────────────────────────────────────────────
@@ -994,7 +995,7 @@ async fn migrate_reuses_both_worktrees_when_pr_absorbs_an_issue_session() {
 #[tokio::test]
 async fn create_empty_workspace_persists_with_user_name() {
     let config = ServerConfig::in_memory();
-    let key = polling::create_empty_workspace(
+    let key = workspace::create_empty_workspace(
         &config,
         "fix login flow",
         lazybox_core::ProjectKey::local("test"),
@@ -1020,17 +1021,17 @@ async fn create_empty_workspace_persists_with_user_name() {
 #[tokio::test]
 async fn create_empty_workspace_disambiguates_collisions() {
     let config = ServerConfig::in_memory();
-    let k1 = polling::create_empty_workspace(
+    let k1 = workspace::create_empty_workspace(
         &config,
         "Refactor auth",
         lazybox_core::ProjectKey::local("test"),
     );
-    let k2 = polling::create_empty_workspace(
+    let k2 = workspace::create_empty_workspace(
         &config,
         "Refactor auth",
         lazybox_core::ProjectKey::local("test"),
     );
-    let k3 = polling::create_empty_workspace(
+    let k3 = workspace::create_empty_workspace(
         &config,
         "Refactor auth",
         lazybox_core::ProjectKey::local("test"),
@@ -1043,7 +1044,7 @@ async fn create_empty_workspace_disambiguates_collisions() {
 async fn create_empty_workspace_falls_back_when_name_is_unsluggable() {
     let config = ServerConfig::in_memory();
     let k =
-        polling::create_empty_workspace(&config, "🚀✨", lazybox_core::ProjectKey::local("test"));
+        workspace::create_empty_workspace(&config, "🚀✨", lazybox_core::ProjectKey::local("test"));
     assert_eq!(
         k.as_str(),
         "workspace",
@@ -1063,7 +1064,7 @@ async fn create_empty_workspace_broadcasts_upserted() {
         .await
         .unwrap();
 
-    polling::create_empty_workspace(
+    workspace::create_empty_workspace(
         &config,
         "side experiment",
         lazybox_core::ProjectKey::local("test"),
@@ -1118,7 +1119,7 @@ async fn import_local_checkout_creates_linked_workspace_mapped_to_repo() {
     let checkout = tmp.path().join("acme").join("widget");
     init_checkout(&checkout, "feature-x", "git@github.com:acme/widget.git");
 
-    let key = polling::import_local_checkout(&config, checkout.clone())
+    let key = workspace::import_local_checkout(&config, checkout.clone())
         .await
         .expect("import succeeds for a real checkout");
 
@@ -1152,7 +1153,7 @@ async fn import_local_checkout_rejects_a_non_checkout() {
     let plain = tmp.path().join("not-a-repo");
     std::fs::create_dir_all(&plain).unwrap();
     assert!(
-        polling::import_local_checkout(&config, plain)
+        workspace::import_local_checkout(&config, plain)
             .await
             .is_none(),
         "a path that isn't a git checkout can't be imported",
@@ -1176,7 +1177,7 @@ async fn migrate_legacy_sandbox_stamps_project_key() {
     };
     config.store.save_workspace(&record).unwrap();
 
-    polling::migrate_legacy_sandbox(&config);
+    workspace::migrate_legacy_sandbox(&config);
 
     // Workspace now carries the local-sandbox project key.
     let migrated: lazybox_core::Workspace = serde_json::from_str(
@@ -1204,8 +1205,8 @@ async fn migrate_legacy_sandbox_is_idempotent() {
     // No legacy workspace at all → first call is a no-op, second
     // call is also a no-op. Daemon startup runs unconditionally, so
     // we exercise the empty-store path explicitly.
-    polling::migrate_legacy_sandbox(&config);
-    polling::migrate_legacy_sandbox(&config);
+    workspace::migrate_legacy_sandbox(&config);
+    workspace::migrate_legacy_sandbox(&config);
     assert!(config.store.list_projects().unwrap().is_empty());
 }
 
@@ -1225,7 +1226,7 @@ async fn migrate_legacy_sandbox_skips_already_migrated_workspaces() {
     };
     config.store.save_workspace(&record).unwrap();
 
-    polling::migrate_legacy_sandbox(&config);
+    workspace::migrate_legacy_sandbox(&config);
 
     let after: lazybox_core::Workspace = serde_json::from_str(
         &config
@@ -1281,7 +1282,7 @@ async fn set_session_layout_persists_and_broadcasts() {
         },
         focused: vec![0],
     };
-    polling::set_session_layout(&config, &ws_key, session_id, layout.clone()).await;
+    workspace::set_session_layout(&config, &ws_key, session_id, layout.clone()).await;
 
     // Reload + verify.
     let stored: lazybox_core::Workspace = serde_json::from_str(
@@ -1306,7 +1307,7 @@ async fn set_session_layout_no_op_for_missing_session() {
     let config = ServerConfig::in_memory();
     let key = lazybox_core::WorkspaceKey::new("github:none");
     // Should not panic when neither workspace nor session exist.
-    polling::set_session_layout(
+    workspace::set_session_layout(
         &config,
         &key,
         lazybox_core::SessionId::new(),
@@ -2200,17 +2201,18 @@ async fn rescope_with_exhaustive_scope_still_deletes_stale() {
 
 #[test]
 fn gh_polled_scope_downgrades_to_preserve_all_on_partial_sweep() {
+    use lazybox_core::FetchCoverage;
     use polling::{PolledScope, gh_polled_scope};
     // Clean, unwindowed (reconcile) global sweep → Exhaustive (rescope
     // may delete stale rows).
     assert_eq!(
-        gh_polled_scope(true, &[], false, false),
+        gh_polled_scope(true, &[], FetchCoverage::Complete, false),
         PolledScope::Exhaustive,
         "a clean reconcile global sweep authoritatively covers everything",
     );
     // Clean round-robin tick → only the queried repos are authoritative.
     assert_eq!(
-        gh_polled_scope(false, &["owner/a".into()], false, false),
+        gh_polled_scope(false, &["owner/a".into()], FetchCoverage::Complete, false),
         PolledScope::Repos(vec!["owner/a".into()]),
     );
     // PARTIAL sweep (e.g. PR query errored, issues OK) → empty
@@ -2219,12 +2221,12 @@ fn gh_polled_scope_downgrades_to_preserve_all_on_partial_sweep() {
     // hiccupped rather than because it merged/closed. The `run_global`
     // flag is irrelevant once the sweep is partial.
     assert_eq!(
-        gh_polled_scope(true, &[], true, false),
+        gh_polled_scope(true, &[], FetchCoverage::Partial, false),
         PolledScope::Repos(Vec::new()),
         "a partial global sweep must NOT claim exhaustive coverage",
     );
     assert_eq!(
-        gh_polled_scope(false, &["owner/a".into()], true, false),
+        gh_polled_scope(false, &["owner/a".into()], FetchCoverage::Partial, false),
         PolledScope::Repos(Vec::new()),
         "a partial round-robin tick must preserve all, not just unqueried repos",
     );
@@ -2233,7 +2235,7 @@ fn gh_polled_scope_downgrades_to_preserve_all_on_partial_sweep() {
     // partial sweep. Must preserve all; only the periodic reconcile
     // sweep (windowed=false) drives deletion.
     assert_eq!(
-        gh_polled_scope(true, &[], false, true),
+        gh_polled_scope(true, &[], FetchCoverage::Complete, true),
         PolledScope::Repos(Vec::new()),
         "a windowed global sweep must NOT claim exhaustive coverage",
     );
@@ -2255,9 +2257,9 @@ async fn rescope_preserves_prs_when_pr_fetch_partially_failed() {
     // source reported `Exhaustive`, rescope would read every stored
     // PR as "fell out of scope" and delete it. The partial-sweep
     // guard makes the source report empty coverage
-    // (`gh_polled_scope(.., partial=true)` → `Repos([])`), so the PR
+    // (`gh_polled_scope(.., FetchCoverage::Partial)` → `Repos([])`), so the PR
     // survives until a clean sweep can speak to its real state.
-    use lazybox_core::{TaskId, WorkspaceKey};
+    use lazybox_core::{FetchCoverage, TaskId, WorkspaceKey};
     let config = ServerConfig::in_memory();
 
     let mut pr_task = make_task("owner/repo#7");
@@ -2281,7 +2283,7 @@ async fn rescope_preserves_prs_when_pr_fetch_partially_failed() {
 
     // The partial sweep returned only the issue; the PR query failed.
     // The source reports the downgraded scope it would compute via
-    // `gh_polled_scope(run_global=true, repos=[], partial=true)`.
+    // `gh_polled_scope(run_global=true, repos=[], FetchCoverage::Partial)`.
     let outcome = polling::TickOutcome {
         polled: vec![WorkspaceKey::new(lazybox_core::workspace_key_for(
             &issue_task,
@@ -2291,7 +2293,7 @@ async fn rescope_preserves_prs_when_pr_fetch_partially_failed() {
         saw_unknown_mergeable: false,
         source_scopes: std::collections::HashMap::from([(
             "github".into(),
-            polling::gh_polled_scope(true, &[], true, false),
+            polling::gh_polled_scope(true, &[], FetchCoverage::Partial, false),
         )]),
         all_full: true,
     };
@@ -2490,7 +2492,7 @@ async fn delete_workspace_kills_terminals_via_terminal_meta() {
         .insert(TerminalId(42), lazybox_ipc::AgentState::Working);
 
     assert!(
-        polling::delete_workspace(&config, &workspace_key)
+        workspace::delete_workspace(&config, &workspace_key)
             .await
             .is_some()
     );
@@ -2592,7 +2594,7 @@ async fn delete_workspace_kills_every_owned_session_and_spares_other_workspaces(
     }
 
     assert!(
-        polling::delete_workspace(&config, &target_key)
+        workspace::delete_workspace(&config, &target_key)
             .await
             .is_some()
     );
@@ -2648,7 +2650,7 @@ async fn failed_terminal_kill_preserves_workspace_and_retryable_mappings() {
     let mut bus = config.bus.subscribe();
 
     assert!(
-        polling::delete_workspace(&config, &workspace_key)
+        workspace::delete_workspace(&config, &workspace_key)
             .await
             .is_none()
     );
@@ -2667,7 +2669,7 @@ async fn failed_terminal_kill_preserves_workspace_and_retryable_mappings() {
         "the retryable terminal mapping must not be orphaned"
     );
     assert!(
-        !polling::load_archived_set(&config).contains(workspace_key.as_str()),
+        !workspace::load_archived_set(&config).contains(workspace_key.as_str()),
         "a failed delete must not poison future upserts via the archive set"
     );
     assert!(
@@ -2786,7 +2788,7 @@ async fn collapse_preserves_issue_activity_and_read_state() {
     // The user reads the middle row (index 1, newest-first) through
     // the production mark path.
     let issue_key = lazybox_core::WorkspaceKey::new(lazybox_core::workspace_key_for(&issue));
-    polling::mark_activity_read(&config, &issue_key, 1, None).await;
+    workspace::mark_activity_read(&config, &issue_key, 1, None).await;
 
     // The claiming PR arrives with its own comment → silent collapse.
     let mut pr = make_pr_closing("o/r#141", &["o/r#71"]);
@@ -2845,7 +2847,7 @@ async fn mark_activity_read_fingerprint_survives_list_shift() {
         .push(activity_at_secs("carol", "fresh", 30));
     polling::upsert(&config, task.clone()).await;
 
-    polling::mark_activity_read(&config, &key, 1, Some(&fingerprint)).await;
+    workspace::mark_activity_read(&config, &key, 1, Some(&fingerprint)).await;
 
     let records = config.store.list_workspaces().unwrap();
     let ws: lazybox_core::Workspace =
@@ -2874,7 +2876,7 @@ async fn mark_activity_read_vanished_fingerprint_is_a_noop() {
     let key = lazybox_core::WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
 
     let gone = lazybox_core::ActivityFingerprint::of(&activity_at_secs("alice", "deleted", 10));
-    polling::mark_activity_read(&config, &key, 0, Some(&gone)).await;
+    workspace::mark_activity_read(&config, &key, 0, Some(&gone)).await;
 
     let records = config.store.list_workspaces().unwrap();
     let ws: lazybox_core::Workspace =
@@ -3594,7 +3596,7 @@ async fn user_delete_archives_and_blocks_resurrection() {
     polling::upsert(&config, make_task("o/r#1")).await;
     let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_task("o/r#1")));
 
-    assert!(polling::delete_workspace(&config, &key).await.is_some());
+    assert!(workspace::delete_workspace(&config, &key).await.is_some());
     polling::upsert(&config, make_task("o/r#1")).await;
 
     assert!(
@@ -3611,8 +3613,8 @@ async fn unarchive_clears_persisted_and_live_spawn_tombstones() {
     let task = make_task("o/r#restore");
     polling::upsert(&config, task.clone()).await;
     let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
-    assert!(polling::delete_workspace(&config, &key).await.is_some());
-    assert!(polling::load_archived_set(&config).contains(key.as_str()));
+    assert!(workspace::delete_workspace(&config, &key).await.is_some());
+    assert!(workspace::load_archived_set(&config).contains(key.as_str()));
     // A settled delete releases its own spawn tombstone (a recreated
     // same-key workspace must not have its spawns silently killed).
     assert!(!config.deleted_workspaces.lock().contains(key.as_str()));
@@ -3624,8 +3626,8 @@ async fn unarchive_clears_persisted_and_live_spawn_tombstones() {
         .deleted_workspaces
         .lock()
         .insert(key.as_str().to_string());
-    assert!(polling::unarchive_workspace_key(&config, key.as_str()));
-    assert!(!polling::load_archived_set(&config).contains(key.as_str()));
+    assert!(workspace::unarchive_workspace_key(&config, key.as_str()));
+    assert!(!workspace::load_archived_set(&config).contains(key.as_str()));
     assert!(!config.deleted_workspaces.lock().contains(key.as_str()));
 
     polling::upsert(&config, task).await;
@@ -4894,7 +4896,7 @@ async fn delete_project_cascades_through_workspaces() {
         .unwrap();
 
     let mut bus = config.bus.subscribe();
-    polling::delete_project(&config, &project_key).await;
+    workspace::delete_project(&config, &project_key).await;
 
     // The two child workspaces are gone, the orphan is not.
     let key_a = WorkspaceKey::new(ws_a.key.as_str());
@@ -4999,7 +5001,7 @@ async fn delete_project_preserves_parent_when_a_child_cannot_stop() {
     );
     backend.fail_kill(&backend_key, "tmux timed out").await;
 
-    polling::delete_project(&config, &project_key).await;
+    workspace::delete_project(&config, &project_key).await;
 
     assert!(
         config
@@ -5044,7 +5046,7 @@ async fn delete_project_refuses_to_skip_a_corrupt_workspace_record() {
         .unwrap();
     let mut bus = config.bus.subscribe();
 
-    polling::delete_project(&config, &project_key).await;
+    workspace::delete_project(&config, &project_key).await;
 
     assert!(
         config
@@ -6100,7 +6102,7 @@ async fn delete_project_with_no_workspaces_still_removes_project() {
         .unwrap();
 
     let mut bus = config.bus.subscribe();
-    polling::delete_project(&config, &project_key).await;
+    workspace::delete_project(&config, &project_key).await;
 
     assert!(
         !config
@@ -6632,7 +6634,7 @@ async fn empty_workspace_registers_project_with_pretty_name() {
 
     let config = ServerConfig::in_memory();
     let project_key = ProjectKey::github("AntoineToussaint", "lazybox");
-    polling::create_empty_workspace(&config, "scratch", project_key.clone());
+    workspace::create_empty_workspace(&config, "scratch", project_key.clone());
 
     let record = config
         .store
@@ -6867,7 +6869,7 @@ fn refresh_outcome(polled_key: &str) -> polling::TickOutcome {
 #[tokio::test]
 async fn create_empty_workspace_marks_local() {
     let config = ServerConfig::in_memory();
-    let key = polling::create_empty_workspace(
+    let key = workspace::create_empty_workspace(
         &config,
         "my sandbox",
         lazybox_core::ProjectKey::local("test"),
@@ -6891,7 +6893,7 @@ async fn rescope_preserves_manual_workspace(/* issue #87 */) {
     // A provider workspace that the poll DOES return.
     polling::upsert(&config, make_task("o/r#current")).await;
     // A hand-created workspace (`n` key) — no PR/issue, never polled.
-    let manual = polling::create_empty_workspace(
+    let manual = workspace::create_empty_workspace(
         &config,
         "my sandbox",
         lazybox_core::ProjectKey::local("test"),
@@ -6919,7 +6921,7 @@ async fn rescope_preserves_manual_workspace_that_gained_a_pr(/* issue #87 */) {
     // Hand-created workspace that later gained a PR (e.g. an agent
     // opened one). The fragile task-shape heuristic would no longer
     // recognise it as local; the explicit `local` flag still does.
-    let manual = polling::create_empty_workspace(
+    let manual = workspace::create_empty_workspace(
         &config,
         "my sandbox",
         lazybox_core::ProjectKey::local("test"),

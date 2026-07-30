@@ -28,7 +28,36 @@ pass `--allow-insecure-http` — use that acknowledgement only behind an
 authenticated TLS reverse proxy, an SSH tunnel, or a trusted private overlay
 network. See [`SECURITY.md`](https://github.com/AntoineToussaint/lazybox/blob/main/SECURITY.md).
 
+## Browser and mobile PoC
+
+The gateway serves a responsive, read-only client at `/`. Open the gateway URL,
+enter its bearer token, and the page loads the current workspaces and streams
+live daemon events. Leave the token blank only when the gateway was explicitly
+started with `--insecure-no-auth`. A submitted token is cleared from the form,
+retained only in page memory, and reused when reconnecting.
+
+The static page is intentionally available without authentication so a browser
+can load it. When a token is configured, every `/v1/*` request it makes is
+still bearer-authenticated. The client is served by the gateway itself, so the
+PoC does not need a permissive cross-origin policy.
+
+For a phone on a trusted private network, or behind a TLS reverse proxy:
+
+```sh
+export LAZYBOX_API_TOKEN="$(openssl rand -hex 32)"
+lazybox server api 0.0.0.0:8787 --allow-insecure-http
+```
+
+Then open `http://HOST:8787/`. The `--allow-insecure-http` flag only
+acknowledges the risk; it does not add encryption. Never expose that plaintext
+listener directly to the public internet.
+
 ## Endpoints
+
+### `GET /`
+
+Returns the static thin-client shell. It is the only unauthenticated route when
+a bearer token is configured.
 
 ### `POST /v1/commands`
 

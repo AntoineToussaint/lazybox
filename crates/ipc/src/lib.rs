@@ -2634,8 +2634,8 @@ impl WorktreeRecovery {
         match self {
             Self::Transient => "Looks transient — press r to retry.",
             Self::BranchHeldLive => {
-                "Press Esc; join the live session holding this branch, or free the \
-                 external checkout."
+                "Lazybox holder: select it, press Shift-A, and choose this PR. External \
+                 holder: inspect it, then detach it from the branch."
             }
             Self::BranchHeldManaged => {
                 "The managed holder has local state, is locked, or could not be verified. \
@@ -2664,6 +2664,48 @@ impl WorktreeRecovery {
             Self::Unknown => "Press r to retry, or Esc to dismiss.",
         }
     }
+
+    /// Concrete recovery text for a particular failure message.
+    ///
+    /// `hint()` stays path-free because some callers only retain the
+    /// classification. The provisioning modal still has the original error,
+    /// so branch-holder failures can include copyable commands using the
+    /// exact checkout path instead of making the user reconstruct it from a
+    /// wrapped paragraph.
+    pub fn remediation(&self, message: &str) -> String {
+        match self {
+            Self::BranchHeldLive => branch_holder_commands(
+                message,
+                "already checked out at ",
+                "Lazybox: select its workspace, Shift-A, choose this PR.",
+                self.hint(),
+            ),
+            Self::BranchHeldManaged => branch_holder_commands(
+                message,
+                "managed worktree at ",
+                "Managed checkout:",
+                self.hint(),
+            ),
+            _ => self.hint().to_string(),
+        }
+    }
+}
+
+fn branch_holder_commands(message: &str, marker: &str, prefix: &str, fallback: &str) -> String {
+    let Some(path) = message
+        .split_once(marker)
+        .map(|(_, tail)| tail)
+        .and_then(|tail| tail.split_once(" —").map(|(path, _)| path.trim()))
+        .filter(|path| !path.is_empty())
+    else {
+        return fallback.to_string();
+    };
+    let quoted = shell_quote(path);
+    format!("{prefix} External: git -C {quoted} status; then git -C {quoted} switch --detach.")
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 impl Event {
@@ -3257,15 +3299,19 @@ mod worktree_recovery_tests {
         ] {
             assert!(c.retryable(), "{c:?} is retryable on its own");
         }
-        assert!(
-            WorktreeRecovery::BranchHeldLive
-                .hint()
-                .contains("join the live session")
-        );
+        assert!(WorktreeRecovery::BranchHeldLive.hint().contains("Shift-A"));
         assert!(
             !WorktreeRecovery::BranchHeldLive.hint().contains("x a"),
             "session adoption cannot release a branch checkout"
         );
+        let remediation = WorktreeRecovery::BranchHeldLive.remediation(
+            "branch 'feat' is already checked out at /tmp/path with spaces — refusing to take it",
+        );
+        assert!(
+            remediation.contains("git -C '/tmp/path with spaces' status"),
+            "{remediation}"
+        );
+        assert!(remediation.contains("switch --detach"), "{remediation}");
     }
 
     /// Issue #787: the non-retryable classes split into ones lazybox can

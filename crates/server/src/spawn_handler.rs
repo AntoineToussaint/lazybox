@@ -1092,6 +1092,30 @@ async fn handle_spawn_inner(
             }
         }
     };
+    // Session resolution can atomically rebadge an already-running managed
+    // branch owner onto this PR workspace. The first singleton check ran
+    // before that transfer, when the terminal still belonged to the old
+    // workspace key, so re-check now. Without this, `w` correctly preserved
+    // the old agent but immediately launched a duplicate beside it.
+    if let Some(existing) =
+        find_existing_singleton(config, &session_key, &kind, Some(landed_on_main)).await
+    {
+        if terminal_access_for(config, existing).await != access {
+            let _ = config.bus.send(Event::provider_error_permanent(
+                "spawn",
+                "an agent with a different host-access policy is already running in this checkout",
+            ));
+            return None;
+        }
+        if let Some(prompt) = initial_prompt.as_deref() {
+            Box::pin(handle_inject_prompt(config, existing, prompt, None, true)).await;
+        }
+        let _ = config.bus.send(Event::TerminalFocusRequested {
+            terminal_id: existing,
+        });
+        outcome.complete();
+        return Some(existing);
+    }
     // Session + worktree are resolved here — for a fresh issue this is
     // where a cold clone / `git fetch` / setup script gets paid
     // synchronously, so surfacing the elapsed time makes the otherwise-
@@ -2349,7 +2373,7 @@ async fn recover_untracked_pr_worktree_locked(
     session_key: &SessionKey,
     origin: lazybox_ipc::SpawnOrigin,
 ) -> Result<Option<(PathBuf, SessionId)>, crate::ServerError> {
-    let _workspace_guard = config.lock_workspace(workspace_key.as_str()).await;
+    let workspace_guard = config.lock_workspace(workspace_key.as_str()).await;
     let mut workspace = load_workspace(config, workspace_key)?;
     if let Some(session) = workspace.default_session() {
         return Ok(Some((session.worktree_path.clone(), session.id)));
@@ -2384,11 +2408,60 @@ async fn recover_untracked_pr_worktree_locked(
     let [candidate] = candidates.as_slice() else {
         return Ok(None);
     };
-    if paths_match(candidate, intended_path)
-        || managed_worktree_has_session_owner(config, candidate)
-        || provisioning_worktree_is_claimed(config, candidate)
+    if provisioning_worktree_is_claimed(config, candidate)
         || managed_worktree_has_live_main_owner(config, candidate).await
     {
+        return Ok(None);
+    }
+
+    // A uniquely-owned managed checkout is not an external git conflict.
+    // It is the same durable Lazybox session wearing an obsolete workspace
+    // badge (most commonly an issue badge after its PR appeared). Move that
+    // session record and rebadge its live terminal atomically instead of
+    // trying to create a second checkout for the already-held branch.
+    //
+    // The persisted `worktree_branch` is the proof that Lazybox provisioned
+    // this exact branch. Legacy/foreign records without that proof retain the
+    // explicit conflict flow rather than being adopted speculatively.
+    if let Some(owner) =
+        unique_transferable_managed_session_owner(config, candidate, &branch, workspace_key)
+    {
+        drop(workspace_guard);
+        let transferred = crate::polling::transfer_owned_worktree_session(
+            config,
+            &owner.workspace_key,
+            workspace_key,
+            owner.session_id,
+            candidate,
+            &branch,
+        )
+        .await
+        .map_err(|error| {
+            crate::ServerError::Store(format!(
+                "transfer managed session onto PR workspace: {error}"
+            ))
+        })?;
+        if let Some(session) = transferred {
+            tracing::info!(
+                source_workspace = %owner.workspace_key,
+                target_workspace = %workspace_key,
+                session_id = %session.id,
+                branch,
+                worktree = %session.worktree_path.display(),
+                "transferred managed branch owner onto PR workspace"
+            );
+            return Ok(Some((session.worktree_path, session.id)));
+        }
+        // Ownership changed while the two workspace locks were acquired.
+        // Fall through to provisioning, which will either see the newly
+        // established owner or surface the normal safe conflict.
+        return Ok(None);
+    }
+
+    if managed_worktree_has_session_owner(config, candidate) {
+        return Ok(None);
+    }
+    if paths_match(candidate, intended_path) {
         return Ok(None);
     }
 
@@ -2426,6 +2499,54 @@ async fn recover_untracked_pr_worktree_locked(
         "adopted untracked managed worktree for PR"
     );
     Ok(Some((candidate.clone(), session_id)))
+}
+
+#[derive(Debug)]
+struct TransferableManagedSessionOwner {
+    workspace_key: WorkspaceKey,
+    session_id: SessionId,
+}
+
+/// Find the sole daemon-provisioned session that owns `candidate`.
+///
+/// Automatic rebadging is deliberately narrower than generic path matching:
+/// the source must contain exactly one session and that session must persist
+/// the exact requested branch. `TerminalsRebadged` is workspace-scoped, so
+/// moving a source with sibling sessions would incorrectly move their client
+/// tabs too; those ambiguous cases keep the manual recovery flow.
+fn unique_transferable_managed_session_owner(
+    config: &ServerConfig,
+    candidate: &Path,
+    branch: &str,
+    target_workspace_key: &WorkspaceKey,
+) -> Option<TransferableManagedSessionOwner> {
+    let records = config.store.list_workspaces().ok()?;
+    let mut owner = None;
+    for record in records {
+        let json = record.workspace_json?;
+        let workspace = Workspace::decode_persisted(&json).ok()?;
+        let matching = workspace
+            .sessions
+            .iter()
+            .filter(|session| paths_match(&session.worktree_path, candidate))
+            .collect::<Vec<_>>();
+        if matching.is_empty() {
+            continue;
+        }
+        if matching.len() != 1
+            || workspace.sessions.len() != 1
+            || workspace.key == *target_workspace_key
+            || matching[0].worktree_branch.as_deref() != Some(branch)
+            || owner.is_some()
+        {
+            return None;
+        }
+        owner = Some(TransferableManagedSessionOwner {
+            workspace_key: workspace.key,
+            session_id: matching[0].id,
+        });
+    }
+    owner
 }
 
 pub(crate) fn managed_worktree_has_session_owner(config: &ServerConfig, candidate: &Path) -> bool {
@@ -2485,6 +2606,10 @@ fn paths_match(left: &Path, right: &Path) -> bool {
     let canonical =
         |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     canonical(left) == canonical(right)
+}
+
+pub(crate) fn session_paths_match(left: &Path, right: &Path) -> bool {
+    paths_match(left, right)
 }
 
 struct ProvisioningWorktreeClaim {

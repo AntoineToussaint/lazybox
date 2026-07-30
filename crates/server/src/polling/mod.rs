@@ -3720,6 +3720,90 @@ pub async fn handle_adopt_sessions(
     }
 }
 
+/// Move the one daemon-provisioned session that owns an exact PR head
+/// worktree onto the PR workspace.
+///
+/// This is the automatic counterpart of `Shift-A`, used only after spawn
+/// resolution finds the PR's exact branch already checked out by Lazybox.
+/// Both workspaces and live terminal metadata commit as one transaction, so a
+/// reload can never observe the session missing from both rows or still
+/// routed under the obsolete workspace key.
+pub(crate) async fn transfer_owned_worktree_session(
+    config: &ServerConfig,
+    source_key: &WorkspaceKey,
+    target_key: &WorkspaceKey,
+    session_id: lazybox_core::SessionId,
+    expected_path: &std::path::Path,
+    expected_branch: &str,
+) -> Result<Option<lazybox_core::WorkspaceSession>, CommitError> {
+    if source_key == target_key {
+        return Ok(None);
+    }
+    let workspace_guards = config
+        .lock_workspaces([
+            source_key.as_str().to_string(),
+            target_key.as_str().to_string(),
+        ])
+        .await;
+    let (Some(mut source_ws), Some(mut target_ws)) = (
+        load_workspace(config, source_key),
+        load_workspace(config, target_key),
+    ) else {
+        return Ok(None);
+    };
+    if !target_ws.sessions.is_empty() || source_ws.sessions.len() != 1 {
+        return Ok(None);
+    }
+    let Some(source_session) = source_ws.sessions.first() else {
+        return Ok(None);
+    };
+    if source_session.id != session_id
+        || source_session.worktree_branch.as_deref() != Some(expected_branch)
+        || !crate::spawn_handler::session_paths_match(&source_session.worktree_path, expected_path)
+    {
+        return Ok(None);
+    }
+    // `TerminalsRebadged` is intentionally workspace-scoped. Prove that
+    // every terminal currently wearing the source badge belongs to this
+    // one persisted session; a shared-main terminal or an unknown/sibling
+    // owner would otherwise be dragged onto the PR as collateral.
+    let source_session_key: lazybox_core::SessionKey = source_key.into();
+    let terminal_meta = config.terminal.terminal_meta.lock().await.clone();
+    let terminal_sessions = config.terminal.terminal_sessions.lock().await.clone();
+    let on_main_terminals = config.terminal.on_main_terminals.lock().await.clone();
+    if terminal_meta
+        .iter()
+        .filter(|(_, (owner, _))| owner == &source_session_key)
+        .any(|(terminal_id, _)| {
+            on_main_terminals.contains(terminal_id)
+                || terminal_sessions.get(terminal_id) != Some(&session_id)
+        })
+    {
+        return Ok(None);
+    }
+
+    target_ws.absorb_activity_from(&source_ws);
+    target_ws.absorb_user_state_from(&source_ws);
+    let mut session = source_ws.sessions.remove(0);
+    session.workspace_key = target_key.clone();
+    target_ws.add_session(session.clone());
+
+    let target_session_key: lazybox_core::SessionKey = target_key.into();
+    commit_workspace_move(
+        config,
+        vec![
+            (source_ws.key.clone(), source_ws),
+            (target_ws.key.clone(), target_ws),
+        ],
+        Vec::new(),
+        vec![(source_session_key, target_session_key)],
+        Vec::new(),
+        workspace_guards,
+    )
+    .await?;
+    Ok(Some(session))
+}
+
 /// Move `issue_ws`'s sessions and linked tasks onto `pr_workspace`,
 /// returning the moved session ids.
 /// Terminal metadata is planned and committed later by `commit_merge`, in

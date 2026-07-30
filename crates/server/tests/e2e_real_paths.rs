@@ -1277,6 +1277,205 @@ async fn e2e_live_branch_holder_provisions_a_detached_checkout() {
     .expect("deadline");
 }
 
+#[tokio::test]
+async fn e2e_pr_spawn_transfers_its_live_managed_branch_owner() {
+    let _home = IsolatedConfigHome::new();
+    timeout(TEST_DEADLINE, async {
+        let root = tempfile::TempDir::new().unwrap();
+        let upstream = seed_local_upstream(root.path(), "acme", "core");
+        let manager = lazybox_git_ops::WorktreeManager::new(root.path().to_path_buf());
+        let bare = manager.bare_path("acme", "core");
+        let branch = "codex/issue-648-live-session";
+        publish_branch(upstream.path(), &bare, branch);
+        let existing = root
+            .path()
+            .join("worktrees/github-acme-core")
+            .join("issue-648-live-session");
+        std::fs::create_dir_all(existing.parent().unwrap()).unwrap();
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-B",
+                branch,
+                &existing.to_string_lossy(),
+                &format!("refs/heads/{branch}"),
+            ],
+        );
+        let existing = std::fs::canonicalize(existing).unwrap();
+        let mock = lazybox_server::backend::MockBackend::new();
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            Arc::new(MemoryStore::new()),
+            Arc::new(mock.clone()),
+            root.path().to_path_buf(),
+        );
+
+        // Reproduce the real failure: work began from an issue, so its live
+        // agent owns a managed checkout. A PR later appears with that exact
+        // head branch, but under a different workspace key.
+        let issue_task = task(
+            "acme/core#648",
+            "https://github.com/acme/core/issues/648",
+            None,
+            vec![],
+        );
+        let mut issue = lazybox_core::Workspace::from_task(issue_task, chrono::Utc::now());
+        let issue_key = issue.key.clone();
+        let mut persisted_session = lazybox_core::WorkspaceSession::new(
+            issue_key.clone(),
+            lazybox_core::SessionKind::Agent {
+                agent_id: "codex".into(),
+            },
+            existing,
+            chrono::Utc::now(),
+        );
+        persisted_session.worktree_branch = Some(branch.into());
+        issue.add_session(persisted_session);
+        issue.record_sent_snippet("review".into());
+        save_workspace(&config, &issue);
+
+        let (mut client, _daemon) = subscribed(config.clone()).await;
+        let backend = spawn_and_capture(
+            &mut client,
+            &mock,
+            &issue_key,
+            TerminalKind::Agent("codex".into()),
+            None,
+        )
+        .await;
+        let issue_ws = load_workspace(&config, &issue_key);
+        let source_session = issue_ws.sessions.first().unwrap().clone();
+        assert_eq!(source_session.worktree_branch.as_deref(), Some(branch));
+        std::fs::write(
+            source_session.worktree_path.join("live-session-marker"),
+            "preserve me",
+        )
+        .unwrap();
+        let remembered_prompt = lazybox_ipc::UserPrompt {
+            text: "do not lose this input".into(),
+            timestamp_ms: 42,
+            source: lazybox_ipc::PromptSource::Typed,
+        };
+        config
+            .store
+            .set_kv(
+                &format!("terminal-msgs:{backend}"),
+                &serde_json::to_string(&vec![remembered_prompt.clone()]).unwrap(),
+            )
+            .unwrap();
+        config
+            .store
+            .set_kv(&format!("terminal-draft:{backend}"), "half-typed draft")
+            .unwrap();
+
+        // Two PRs claim #647, matching the production ambiguity that routed
+        // closing-reference reconciliation elsewhere. Exact managed branch
+        // ownership must still put this session on #715.
+        let closed_issue_id = lazybox_core::TaskId {
+            source: "github".into(),
+            key: "acme/core#647".into(),
+        };
+        let alternate_pr = lazybox_core::Workspace::from_task(
+            task(
+                "acme/core#712",
+                "https://github.com/acme/core/pull/712",
+                Some("issue-647-other-pr"),
+                vec![closed_issue_id.clone()],
+            ),
+            chrono::Utc::now(),
+        );
+        save_workspace(&config, &alternate_pr);
+        let pr = lazybox_core::Workspace::from_task(
+            task(
+                "acme/core#715",
+                "https://github.com/acme/core/pull/715",
+                Some(branch),
+                vec![closed_issue_id],
+            ),
+            chrono::Utc::now(),
+        );
+        let pr_key = pr.key.clone();
+        save_workspace(&config, &pr);
+
+        send_spawn(
+            &mut client,
+            &pr_key,
+            TerminalKind::Agent("codex".into()),
+            None,
+        );
+        let issue_session_key: lazybox_core::SessionKey = (&issue_key).into();
+        let pr_session_key: lazybox_core::SessionKey = (&pr_key).into();
+        let rebadged = wait_for(
+            &mut client,
+            |event| matches!(
+                event,
+                Event::TerminalsRebadged { from, to }
+                    if *from == issue_session_key && *to == pr_session_key
+            ),
+            Duration::from_secs(30),
+        )
+        .await;
+        assert!(
+            rebadged.is_some(),
+            "the existing terminal must be rebadged onto the PR; issue={:?}, pr={:?}, backends={:?}",
+            load_workspace(&config, &issue_key).sessions,
+            load_workspace(&config, &pr_key).sessions,
+            mock.list().await.unwrap(),
+        );
+        assert!(
+            wait_for(
+                &mut client,
+                |event| matches!(event, Event::TerminalFocusRequested { .. }),
+                Duration::from_secs(30),
+            )
+            .await
+            .is_some(),
+            "the PR spawn must focus the transferred singleton"
+        );
+
+        assert!(
+            load_workspace(&config, &issue_key).sessions.is_empty(),
+            "the obsolete issue badge must no longer own the session"
+        );
+        let pr_ws = load_workspace(&config, &pr_key);
+        assert_eq!(pr_ws.sessions.len(), 1);
+        assert_eq!(pr_ws.sessions[0].id, source_session.id);
+        assert_eq!(
+            pr_ws.sent_snippets,
+            vec!["review"],
+            "workspace snippet history moves with the live session"
+        );
+        assert_eq!(
+            pr_ws.sessions[0].worktree_path,
+            source_session.worktree_path
+        );
+        assert_eq!(
+            std::fs::read_to_string(pr_ws.sessions[0].worktree_path.join("live-session-marker"))
+                .unwrap(),
+            "preserve me",
+            "the checkout and its in-progress files survive the transfer"
+        );
+        assert_eq!(
+            mock.list().await.unwrap(),
+            vec![backend],
+            "the transfer must not launch a duplicate Codex process"
+        );
+        let snapshots = lazybox_server::spawn_handler::snapshot_terminals(&config).await;
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].session_key, pr_session_key);
+        assert_eq!(snapshots[0].prompt_history, vec![remembered_prompt]);
+        assert_eq!(
+            snapshots[0].composing_buffer.as_deref(),
+            Some("half-typed draft"),
+            "reload snapshot keeps both submitted input history and the draft"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
 /// #306/#393 through the FULL serve loop: a session outlives a daemon
 /// restart and the reattached client still has deep scrollback. The
 /// backend-only variant lives in `tmux_restart.rs`; this one drives the

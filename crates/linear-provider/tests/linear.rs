@@ -440,7 +440,7 @@ async fn mid_pagination_failure_marks_result_partial() {
 
     let client = LinearClient::with_key("k").with_endpoint(mock.url());
     let outcome = client.fetch_all_with_coverage().await.unwrap();
-    assert_eq!(outcome.tasks.len(), 1, "prefix preserved");
+    assert_eq!(outcome.items.len(), 1, "prefix preserved");
     assert!(
         outcome.is_partial(),
         "a truncated pagination is non-authoritative"
@@ -471,7 +471,7 @@ async fn full_pagination_marks_result_complete() {
     let client = LinearClient::with_key("k").with_endpoint(mock.url());
     let outcome = client.fetch_all_with_coverage().await.unwrap();
     assert!(!outcome.is_partial());
-    assert_eq!(outcome.tasks.len(), 1);
+    assert_eq!(outcome.items.len(), 1);
 
     mock.shutdown().await;
 }
@@ -496,7 +496,7 @@ async fn missing_next_page_cursor_marks_result_partial() {
 
     let client = LinearClient::with_key("k").with_endpoint(mock.url());
     let outcome = client.fetch_all_with_coverage().await.unwrap();
-    assert_eq!(outcome.tasks.len(), 1, "the fetched prefix is preserved");
+    assert_eq!(outcome.items.len(), 1, "the fetched prefix is preserved");
     assert!(
         outcome.is_partial(),
         "missing cursor means the fetch did not cover every page"

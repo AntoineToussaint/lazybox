@@ -47,6 +47,7 @@ pub mod spawn_handler;
 mod spawn_plan;
 mod terminal_commands;
 mod terminal_io;
+pub mod workspace;
 
 use crate::backend::{RawPtyBackend, SessionBackend, TmuxBackend};
 use lazybox_agents::Registry;
@@ -1796,7 +1797,7 @@ pub async fn dispatch_command(
             // bumps even when the TUI doesn't fire a separate
             // `FocusWorkspace`.
             polling::set_focused_workspace(config, &key).await;
-            polling::mark_workspace_read(config, &key).await;
+            workspace::mark_workspace_read(config, &key).await;
         }
         lazybox_ipc::Command::FocusWorkspace { session_key } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
@@ -1808,11 +1809,11 @@ pub async fn dispatch_command(
             fingerprint,
         } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
-            polling::mark_activity_read(config, &key, index, fingerprint.as_ref()).await;
+            workspace::mark_activity_read(config, &key, index, fingerprint.as_ref()).await;
         }
         lazybox_ipc::Command::UnmarkActivityRead { session_key, index } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
-            polling::unmark_activity_read(config, &key, index).await;
+            workspace::unmark_activity_read(config, &key, index).await;
         }
         lazybox_ipc::Command::CreateWorkspace {
             name,
@@ -1824,7 +1825,7 @@ pub async fn dispatch_command(
             // chain any requested spawn off it here rather than
             // round-tripping through the client. Bare interactive spawn
             // (no prompt) keeps the human-in-the-loop approval gate.
-            let key = polling::create_empty_workspace(config, &name, project_key);
+            let key = workspace::create_empty_workspace(config, &name, project_key);
             if let Some(agent_id) = spawn_agent {
                 let session_key: lazybox_core::SessionKey = (&key).into();
                 spawn_handler::handle_spawn(
@@ -1838,19 +1839,19 @@ pub async fn dispatch_command(
             }
         }
         lazybox_ipc::Command::CreateProject { name } => {
-            polling::create_local_project(config, &name);
+            workspace::create_local_project(config, &name);
         }
         lazybox_ipc::Command::Snooze { session_key, until } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
-            polling::set_snooze(config, &key, Some(until)).await;
+            workspace::set_snooze(config, &key, Some(until)).await;
         }
         lazybox_ipc::Command::Unsnooze { session_key } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
-            polling::set_snooze(config, &key, None).await;
+            workspace::set_snooze(config, &key, None).await;
         }
         lazybox_ipc::Command::SetNotes { session_key, notes } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
-            polling::set_notes(config, &key, notes).await;
+            workspace::set_notes(config, &key, notes).await;
         }
         lazybox_ipc::Command::SetUpdateDismissal { target } => {
             client_kv::set_update_dismissal(config, target).await;
@@ -1860,14 +1861,14 @@ pub async fn dispatch_command(
             enabled,
         } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
-            polling::set_auto_merge_on_green(config, &key, enabled).await;
+            workspace::set_auto_merge_on_green(config, &key, enabled).await;
         }
         lazybox_ipc::Command::SetTrackMain {
             session_key,
             enabled,
         } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
-            polling::set_track_main(config, &key, enabled).await;
+            workspace::set_track_main(config, &key, enabled).await;
         }
         lazybox_ipc::Command::SetAutoFixPolicy {
             session_key,
@@ -1875,12 +1876,12 @@ pub async fn dispatch_command(
             arm,
         } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
-            polling::set_auto_fix_policy(config, &key, kind, arm).await;
+            workspace::set_auto_fix_policy(config, &key, kind, arm).await;
         }
         lazybox_ipc::Command::Kill { session_key } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
-            if let Some(reclaimed) = polling::delete_workspace(config, &key).await {
-                polling::notify_reclaimed(config, "Workspace removed", reclaimed);
+            if let Some(reclaimed) = workspace::delete_workspace(config, &key).await {
+                workspace::notify_reclaimed(config, "Workspace removed", reclaimed);
             }
         }
         lazybox_ipc::Command::KeepMergedWorkspace { session_key } => {
@@ -1890,11 +1891,11 @@ pub async fn dispatch_command(
         lazybox_ipc::Command::RemoveMergedWorkspace { session_key } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
             if let Some(reclaimed) = polling::remove_merged_workspace(config, &key).await {
-                polling::notify_reclaimed(config, "Workspace removed", reclaimed);
+                workspace::notify_reclaimed(config, "Workspace removed", reclaimed);
             }
         }
         lazybox_ipc::Command::DeleteProject { project_key } => {
-            polling::delete_project(config, &project_key).await;
+            workspace::delete_project(config, &project_key).await;
         }
         lazybox_ipc::Command::CollapseIntoPr {
             issue_workspace_key,
@@ -1927,7 +1928,7 @@ pub async fn dispatch_command(
             let layout: Option<lazybox_core::SessionLayout> =
                 serde_json::from_str(&layout_json).ok();
             if let (Some(sid), Some(lay)) = (session_id, layout) {
-                polling::set_session_layout(config, &key, sid, lay).await;
+                workspace::set_session_layout(config, &key, sid, lay).await;
             } else {
                 tracing::warn!("SetSessionLayout: bad payload (id={:?})", session_id_raw);
             }
@@ -2002,7 +2003,7 @@ pub async fn dispatch_command(
             polling::handle_scan_checkouts(config, roots).await;
         }
         lazybox_ipc::Command::ImportLocalCheckout { path, spawn_agent } => {
-            let key = polling::import_local_checkout(config, path).await;
+            let key = workspace::import_local_checkout(config, path).await;
             if let (Some(key), Some(agent_id)) = (key, spawn_agent) {
                 let session_key: lazybox_core::SessionKey = (&key).into();
                 spawn_handler::handle_spawn(

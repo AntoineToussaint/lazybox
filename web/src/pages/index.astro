@@ -2,6 +2,7 @@
 import Layout from '../layouts/Layout.astro';
 
 const repo = 'https://github.com/AntoineToussaint/lazybox';
+const sponsors = 'https://github.com/sponsors/AntoineToussaint';
 const docs = '/docs/';
 const workflows = '/docs/tutorials/core-workflows/';
 const orchestrationGuide = '/docs/how-to/orchestrate-multiple-agents/';
@@ -246,6 +247,21 @@ const steps = [
         </div>
       </div>
     </div>
+
+    <aside class="founder-note" aria-labelledby="founder-note-title">
+      <div class="container">
+        <div class="founder-note-inner" data-reveal>
+          <p class="founder-note-title" id="founder-note-title">A note on where this is.</p>
+          <p>
+            We’re in the stone age of agent coding. lazybox is <strong>not the solution</strong> —
+            it’s the scaffolding I built to survive the mess while I work on the real thing.
+            But it’s <strong>by far the most productive I can be right now</strong>; nothing else
+            I’ve tried is close. Use it, break it, tell me what’s missing. It’s a stopgap, and
+            I’m building past it.
+          </p>
+        </div>
+      </div>
+    </aside>
 
     <section id="snippets" class="snippets-section">
       <div class="container">
@@ -1016,6 +1032,23 @@ const steps = [
         </div>
       </div>
     </section>
+
+    <section id="support" class="support-section">
+      <div class="container">
+        <div class="support-card" data-reveal>
+          <div>
+            <p class="kicker">Open source, built in public</p>
+            <h2>Support lazybox.</h2>
+            <p>
+              If lazybox saves you time, a sponsorship helps fund maintenance,
+              releases, and the infrastructure behind the project. The
+              open-source TUI and daemon remain available to everyone.
+            </p>
+          </div>
+          <a class="btn btn-ghost" href={sponsors}>♡ Sponsor on GitHub</a>
+        </div>
+      </div>
+    </section>
   </main>
 
   <footer>
@@ -1024,6 +1057,7 @@ const steps = [
       <div class="links">
         <a href={docs}>Docs</a>
         <a href={repo}>GitHub</a>
+        <a href={sponsors}>Sponsor</a>
         <a href={`${repo}/blob/main/LICENSE`}>License</a>
       </div>
     </div>

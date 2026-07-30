@@ -4,10 +4,8 @@
 //! These functions are the read-modify-write side of the polling
 //! module: they look up the workspace, dispatch to the right provider
 //! (via [`ProviderHandle`]), and emit events back to the bus. The
-//! actual polling loop + workspace-store machinery lives in the
-//! parent module ([`crate::polling`]); only the cross-cutting
-//! helpers (`commit_upsert`, `load_workspace`) leak across via
-//! `pub(super)`.
+//! polling loop lives in the parent module ([`crate::polling`]), while
+//! workspace-store machinery lives in `polling::upsert`.
 
 use super::{
     EngagementSignals, EngagementTier, TickState, apply_and_commit, commit_upsert_reported,
@@ -1602,7 +1600,7 @@ pub(crate) async fn prompt_merged_pr_removal_with(
         };
         if let Some(reclaimed) = removed {
             let mut body = format!("Removed workspace for closed {label}");
-            if let Some(space) = super::reclaimed_notice_body(reclaimed) {
+            if let Some(space) = crate::workspace::reclaimed_notice_body(reclaimed) {
                 body.push_str(" · ");
                 body.push_str(&space);
             }
@@ -1655,13 +1653,13 @@ pub(crate) async fn prompt_merged_pr_removal_with(
 /// Handle `Command::RemoveMergedWorkspace`: the user confirmed the
 /// merged-PR removal modal. Kills the sessions, drops the row, and
 /// reclaims the now-idle worktree directories via
-/// [`super::delete_workspace_with_archive`]. A confirmed removal
+/// [`crate::workspace::delete_workspace_with_archive`]. A confirmed removal
 /// archives, so the next poll doesn't resurrect the row. Returns the
 /// reclaimed worktree space, or `None` if the removal was preserved.
 pub async fn remove_merged_workspace(
     config: &ServerConfig,
     key: &WorkspaceKey,
-) -> Option<super::Reclaimed> {
+) -> Option<crate::workspace::Reclaimed> {
     remove_merged_workspace_with(config, key, /*archive=*/ true).await
 }
 
@@ -1675,13 +1673,13 @@ pub(crate) async fn remove_merged_workspace_with(
     config: &ServerConfig,
     key: &WorkspaceKey,
     archive: bool,
-) -> Option<super::Reclaimed> {
+) -> Option<crate::workspace::Reclaimed> {
     // Kills backing terminals, removes the row, and reclaims each
     // session's worktree dir; `archive` decides whether the next poll
     // may resurrect it. `None` means a prerequisite failed and the
     // lifecycle/store path already emitted a precise error — keep the
     // removal-prompt memory intact so the user can retry.
-    let reclaimed = super::delete_workspace_with_archive(config, key, archive).await?;
+    let reclaimed = crate::workspace::delete_workspace_with_archive(config, key, archive).await?;
 
     // The row is actually gone — now drop its reprompt bookkeeping. On a
     // failed prerequisite it must remain so the level-triggered prompt can
@@ -3420,7 +3418,7 @@ mod inspect_tests {
 
         assert!(load_workspace(&config, &key).is_none(), "row must be gone");
         assert!(
-            !crate::polling::load_archived_set(&config).contains(key.as_str()),
+            !crate::workspace::load_archived_set(&config).contains(key.as_str()),
             "auto-remove must not archive — a reopen should resurface it"
         );
     }
@@ -3901,14 +3899,14 @@ mod inspect_tests {
         let key = lazybox_core::WorkspaceKey::new("github:o/r#1".to_string());
 
         assert!(
-            crate::polling::delete_workspace(&config, &key)
+            crate::workspace::delete_workspace(&config, &key)
                 .await
                 .is_some()
         );
         drain_until(&mut rx, |e| matches!(e, Event::WorkspaceRemoved(_))).await;
         assert!(load_workspace(&config, &key).is_none(), "store row removed");
         assert!(
-            crate::polling::load_archived_set(&config).contains(key.as_str()),
+            crate::workspace::load_archived_set(&config).contains(key.as_str()),
             "archive tombstone recorded so the next poll won't resurrect it",
         );
     }
@@ -3928,7 +3926,7 @@ mod inspect_tests {
         let config = fresh_config(store);
         let key = lazybox_core::WorkspaceKey::new("github:o/r#1".to_string());
 
-        let reclaimed = crate::polling::delete_workspace(&config, &key)
+        let reclaimed = crate::workspace::delete_workspace(&config, &key)
             .await
             .expect("delete should succeed");
 
@@ -3942,7 +3940,7 @@ mod inspect_tests {
             "reclaimed byte total: {}",
             reclaimed.bytes
         );
-        let body = crate::polling::reclaimed_notice_body(reclaimed)
+        let body = crate::workspace::reclaimed_notice_body(reclaimed)
             .expect("non-empty reclaim produces a notice body");
         assert!(
             body.contains("reclaimed") && body.contains("worktree"),
@@ -3955,7 +3953,7 @@ mod inspect_tests {
     /// reclaim reports the size; the count pluralizes.
     #[test]
     fn reclaimed_notice_body_formats() {
-        use crate::polling::{Reclaimed, reclaimed_notice_body};
+        use crate::workspace::{Reclaimed, reclaimed_notice_body};
         assert_eq!(reclaimed_notice_body(Reclaimed::default()), None);
         assert_eq!(
             reclaimed_notice_body(Reclaimed {

@@ -20,7 +20,10 @@
 pub mod graphql;
 
 use lazybox_auth::{CredentialChain, EnvProvider};
-use lazybox_core::{ProviderError, Task, TaskProvider};
+use lazybox_core::{
+    DEFAULT_MAX_PAGES, FetchOutcome, FetchPage, FetchPageInfo, ProviderError, Task, TaskProvider,
+    paginate,
+};
 use serde::Serialize;
 
 const LINEAR_GRAPHQL: &str = "https://api.linear.app/graphql";
@@ -210,7 +213,7 @@ impl LinearClient {
     /// that drops the coverage marker. Prefer the marker-carrying
     /// variant anywhere the result drives workspace *removal*.
     pub async fn fetch_all(&self) -> Result<Vec<Task>, LinearError> {
-        self.fetch_all_with_coverage().await.map(|o| o.tasks)
+        self.fetch_all_with_coverage().await.map(|o| o.items)
     }
 
     /// Like [`Self::fetch_all`], but reports whether the result is
@@ -222,7 +225,7 @@ impl LinearClient {
     /// `crates/server/src/polling/mod.rs` records this coverage and
     /// downgrades `polled_scope()` to `PolledScope::Repos(vec![])` on
     /// a partial fetch (mirroring `GhSource::last_coverage_partial`).
-    pub async fn fetch_all_with_coverage(&self) -> Result<FetchOutcome, LinearError> {
+    pub async fn fetch_all_with_coverage(&self) -> Result<FetchOutcome<Vec<Task>>, LinearError> {
         // 1. Identify the viewer so we can assign TaskRole correctly.
         let viewer_body = serde_json::json!({
             "query": graphql::VIEWER_QUERY,
@@ -234,104 +237,54 @@ impl LinearClient {
             .viewer
             .id;
 
-        // 2. Page through issues. If page 1 fails outright we
-        //    surface the error; if a later page fails we return
-        //    what we have plus a warning log — losing pages N+1..
-        //    silently was the prior behavior and easy to miss.
-        let mut tasks = Vec::new();
-        let mut cursor: Option<String> = None;
-        let mut page = 0usize;
-        let mut partial = false;
-        loop {
-            let body = graphql::build_issues_body(cursor.as_deref());
-            let resp: graphql::IssuesResponse = match self.graphql(&body).await {
-                Ok(r) => r,
-                Err(e) if page > 0 => {
-                    tracing::error!(
-                        "Linear page {page} failed mid-pagination; \
-                         returning {} partial issues. error: {e}",
-                        tasks.len()
-                    );
-                    partial = true;
-                    break;
+        let outcome = paginate(
+            |cursor, page| {
+                let viewer_id = &viewer_id;
+                async move {
+                    let body = graphql::build_issues_body(cursor.as_deref());
+                    let resp: graphql::IssuesResponse =
+                        self.graphql(&body).await.map_err(|error| {
+                            tracing::error!("Linear page {page} failed: {error}");
+                            error
+                        })?;
+                    if let Some(errors) = resp.errors {
+                        let joined = errors
+                            .iter()
+                            .map(|e| e.message.as_str())
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        tracing::error!("Linear GraphQL errors at page {page}: {joined}");
+                        return Err(LinearError::Graphql(joined));
+                    }
+                    let data = resp
+                        .data
+                        .ok_or_else(|| LinearError::Graphql("no data in issues response".into()))?;
+                    let page_info = data.issues.page_info;
+                    Ok(FetchPage {
+                        items: data
+                            .issues
+                            .nodes
+                            .iter()
+                            .map(|issue| graphql::issue_to_task(issue, viewer_id))
+                            .collect(),
+                        page_info: Some(FetchPageInfo {
+                            has_next_page: page_info.has_next_page,
+                            end_cursor: page_info.end_cursor,
+                        }),
+                    })
                 }
-                Err(e) => return Err(e),
-            };
-            if let Some(errors) = resp.errors {
-                let joined = errors
-                    .iter()
-                    .map(|e| e.message.as_str())
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                if page > 0 {
-                    tracing::error!(
-                        "Linear GraphQL errors at page {page}; returning {} partial issues. errors: {joined}",
-                        tasks.len()
-                    );
-                    partial = true;
-                    break;
-                }
-                return Err(LinearError::Graphql(joined));
-            }
-            let data = resp
-                .data
-                .ok_or_else(|| LinearError::Graphql("no data in issues response".into()))?;
-            for issue in &data.issues.nodes {
-                tasks.push(graphql::issue_to_task(issue, &viewer_id));
-            }
-            let page_info = data.issues.page_info;
-            if !page_info.has_next_page {
-                break;
-            }
-            cursor = page_info.end_cursor;
-            if cursor.is_none() {
-                tracing::error!(
-                    "Linear paged: hasNextPage=true but endCursor=null; returning {} partial issues",
-                    tasks.len()
-                );
-                partial = true;
-                break;
-            }
-            page += 1;
-            if page >= 20 {
-                tracing::error!(
-                    "Linear paged: bailing after {page} pages (safety cap; tail truncated)"
-                );
-                partial = true;
-                break;
-            }
+            },
+            DEFAULT_MAX_PAGES,
+        )
+        .await?;
+        let outcome = outcome.into_fetch_outcome();
+        if outcome.is_partial() {
+            tracing::error!(
+                "Linear pagination stopped before completion; returning {} partial issues",
+                outcome.items.len()
+            );
         }
-        let coverage = if partial {
-            FetchCoverage::Partial
-        } else {
-            FetchCoverage::Complete
-        };
-        Ok(FetchOutcome { tasks, coverage })
-    }
-}
-
-/// Result of a paginated fetch plus how much of the upstream set it
-/// actually covered.
-#[derive(Debug, Clone)]
-pub struct FetchOutcome {
-    pub tasks: Vec<Task>,
-    pub coverage: FetchCoverage,
-}
-
-/// Whether a fetch walked the entire upstream set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FetchCoverage {
-    /// Every page was consumed — the result is authoritative and may
-    /// drive rescope deletion.
-    Complete,
-    /// A later page failed or the safety cap truncated the tail —
-    /// non-authoritative; rescope must preserve everything this tick.
-    Partial,
-}
-
-impl FetchOutcome {
-    pub fn is_partial(&self) -> bool {
-        self.coverage == FetchCoverage::Partial
+        Ok(outcome)
     }
 }
 

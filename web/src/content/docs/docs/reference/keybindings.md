@@ -61,6 +61,7 @@ Act on the focused workspace. Available from the sidebar **and** the activity pa
 | `Shift-V` | review diff | Review the worktree's staged, unstaged, and untracked changes; search or annotate lines and send the draft to the running agent. |
 | `m` | mark read | Mark every activity row on the focused workspace read. |
 | `z` | snooze | Snooze the workspace for ~4h (toggle). |
+| `Shift-A` | toggle auto-fix | Arm or disarm auto-fix for the focused PR. |
 | `r` | reply | Open the reply textarea targeted at this workspace. |
 | `n` | notes | Edit this workspace's local scratchpad — a private note that never syncs to a provider. |
 

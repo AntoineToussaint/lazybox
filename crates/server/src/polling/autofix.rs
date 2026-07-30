@@ -50,11 +50,10 @@ struct AttemptRecord {
     exhausted_notified: bool,
 }
 
-/// Outcome of consulting (and possibly updating) the attempt record.
+/// Outcome of consulting the attempt record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttemptDecision {
-    /// Go ahead — this is attempt `attempt` of `max`. The record has
-    /// already been incremented + persisted.
+    /// Go ahead — a delivered repair would be attempt `attempt` of `max`.
     Proceed { attempt: u32, max: u32 },
     /// Within the cooldown gap since the last attempt — skip silently.
     Cooldown,
@@ -100,10 +99,10 @@ fn persist(store: &dyn Store, key: &str, rec: &AttemptRecord) {
     }
 }
 
-/// Consult the cooldown + max-attempts guard for `(session_key, kind)`
-/// and, when it returns [`AttemptDecision::Proceed`], record the
-/// attempt. `now` is injected so this is deterministically testable.
-pub fn check_and_record(
+/// Consult the cooldown + max-attempts guard for `(session_key, kind)`.
+/// A caller records only after the repair prompt has been accepted for
+/// delivery, so waiting for a busy agent never consumes the budget.
+pub fn check(
     store: &dyn Store,
     session_key: &str,
     kind: AutoFixKind,
@@ -148,17 +147,35 @@ pub fn check_and_record(
         return AttemptDecision::Cooldown;
     }
 
-    // Proceed — record the attempt.
+    AttemptDecision::Proceed {
+        attempt: rec.attempts + 1,
+        max: settings.max_attempts,
+    }
+}
+
+/// Record a repair prompt that was accepted for delivery.
+pub fn record_attempt(
+    store: &dyn Store,
+    session_key: &str,
+    kind: AutoFixKind,
+    settings: &AutoFixSettings,
+    now: DateTime<Utc>,
+) {
+    let key = record_key(session_key, kind);
+    let mut rec = load(store, &key);
+    let window = to_chrono(settings.window);
+    if rec
+        .window_start
+        .is_none_or(|start| now.signed_duration_since(start) >= window)
+    {
+        rec = AttemptRecord::default();
+    }
     if rec.window_start.is_none() {
         rec.window_start = Some(now);
     }
     rec.attempts += 1;
     rec.last_attempt = Some(now);
     persist(store, &key, &rec);
-    AttemptDecision::Proceed {
-        attempt: rec.attempts,
-        max: settings.max_attempts,
-    }
 }
 
 #[cfg(test)]
@@ -179,6 +196,20 @@ mod tests {
 
     fn t0() -> DateTime<Utc> {
         "2026-05-28T00:00:00Z".parse().unwrap()
+    }
+
+    fn check_and_record(
+        store: &dyn Store,
+        session_key: &str,
+        kind: AutoFixKind,
+        settings: &AutoFixSettings,
+        now: DateTime<Utc>,
+    ) -> AttemptDecision {
+        let decision = check(store, session_key, kind, settings, now);
+        if matches!(decision, AttemptDecision::Proceed { .. }) {
+            record_attempt(store, session_key, kind, settings, now);
+        }
+        decision
     }
 
     #[test]

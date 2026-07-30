@@ -27,12 +27,34 @@
 //!
 //! ## Spawning
 //!
-//! The editor process is detached from lazybox — closing lazybox
-//! shouldn't take the editor with it, via the
-//! `crate::platform::detach_child_process` helper.
+//! Editor CLIs are detached from lazybox so closing lazybox doesn't
+//! take the editor with it. macOS app bundles are handed to Launch
+//! Services without detaching the short-lived `open` process.
 
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EditorLauncher {
+    Command { program: String, args: Vec<String> },
+    MacosApplication { bundle_path: PathBuf },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileLocationStyle {
+    PathSuffix,
+    VsCodeGoto,
+    JetBrains,
+}
+
+fn location_style_for_id(id: &str) -> FileLocationStyle {
+    match id {
+        "code" | "cursor" | "windsurf" | "codium" | "vscodium" => FileLocationStyle::VsCodeGoto,
+        "idea" | "pycharm" | "webstorm" | "goland" | "clion" | "rubymine" | "phpstorm"
+        | "rider" | "datagrip" | "android-studio" => FileLocationStyle::JetBrains,
+        _ => FileLocationStyle::PathSuffix,
+    }
+}
 
 /// One launchable editor. Builtins are static; user additions are
 /// loaded from config and merged at startup.
@@ -42,13 +64,9 @@ pub struct EditorTemplate {
     pub id: String,
     /// User-visible name shown in the picker.
     pub display: String,
-    /// Executable to spawn. Looked up via `which::which` at
-    /// detection time so we know whether it's actually installed.
-    pub command: String,
-    /// Argv. `{path}` is replaced with the worktree dir at launch.
-    pub args: Vec<String>,
-    /// macOS app-bundle name, used when the CLI is not on PATH.
-    pub macos_app_name: Option<String>,
+    launcher: EditorLauncher,
+    macos_app_name: Option<String>,
+    location_style: FileLocationStyle,
 }
 
 /// Built-in editor list. **GUI editors only** — vim/neovim/helix
@@ -58,9 +76,12 @@ fn builtin_editors() -> Vec<EditorTemplate> {
     let template = |id: &str, display: &str, command: &str, macos_app_name: &str| EditorTemplate {
         id: id.to_string(),
         display: display.to_string(),
-        command: command.to_string(),
-        args: vec!["{path}".to_string()],
+        launcher: EditorLauncher::Command {
+            program: command.to_string(),
+            args: vec!["{path}".to_string()],
+        },
         macos_app_name: Some(macos_app_name.to_string()),
+        location_style: location_style_for_id(id),
     };
     vec![
         template("zed", "Zed", "zed", "Zed"),
@@ -113,6 +134,7 @@ pub struct UserEditorEntry {
 
 impl From<UserEditorEntry> for EditorTemplate {
     fn from(u: UserEditorEntry) -> Self {
+        let location_style = location_style_for_id(&u.id);
         let display = u.display.unwrap_or_else(|| {
             // Crude titlecase: "my-editor" → "My-editor". Users can
             // always set `display:` explicitly for nicer labels.
@@ -125,9 +147,12 @@ impl From<UserEditorEntry> for EditorTemplate {
         Self {
             id: u.id,
             display,
-            command: u.command,
-            args: u.args.unwrap_or_else(|| vec!["{path}".to_string()]),
+            launcher: EditorLauncher::Command {
+                program: u.command,
+                args: u.args.unwrap_or_else(|| vec!["{path}".to_string()]),
+            },
             macos_app_name: None,
+            location_style,
         }
     }
 }
@@ -163,34 +188,71 @@ fn macos_application_dirs() -> Vec<PathBuf> {
     }
 }
 
-fn find_macos_app_name(app_name: &str, application_dirs: &[PathBuf]) -> Option<String> {
-    for dir in application_dirs {
-        if dir.join(format!("{app_name}.app")).is_dir() {
-            return Some(app_name.to_string());
-        }
+#[derive(Debug)]
+struct MacosAppCandidate {
+    bundle_path: PathBuf,
+    version: Vec<u64>,
+    modified: Option<std::time::SystemTime>,
+}
 
+fn numeric_components(value: &str) -> Vec<u64> {
+    value
+        .split(|ch: char| !ch.is_ascii_digit())
+        .filter(|component| !component.is_empty())
+        .filter_map(|component| component.parse().ok())
+        .collect()
+}
+
+fn find_macos_app_bundle(app_name: &str, application_dirs: &[PathBuf]) -> Option<PathBuf> {
+    for dir in application_dirs {
+        let exact = dir.join(format!("{app_name}.app"));
+        if exact.is_dir() {
+            return Some(exact);
+        }
+    }
+
+    let mut matches = Vec::new();
+    for dir in application_dirs {
         let Ok(entries) = std::fs::read_dir(dir) else {
             continue;
         };
-        let mut matches = entries
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                let path = entry.path();
-                if !path.is_dir() || path.extension().and_then(|ext| ext.to_str()) != Some("app") {
-                    return None;
-                }
-                let name = path.file_stem()?.to_str()?;
-                name.strip_prefix(app_name)
-                    .is_some_and(|suffix| suffix.starts_with(' '))
-                    .then(|| name.to_string())
-            })
-            .collect::<Vec<_>>();
-        matches.sort_unstable();
-        if let Some(name) = matches.pop() {
-            return Some(name);
+        for entry in entries.filter_map(Result::ok) {
+            let bundle_path = entry.path();
+            if !bundle_path.is_dir()
+                || bundle_path.extension().and_then(|ext| ext.to_str()) != Some("app")
+            {
+                continue;
+            }
+            let Some(name) = bundle_path.file_stem().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let Some(suffix) = name
+                .strip_prefix(app_name)
+                .filter(|suffix| suffix.starts_with(' '))
+            else {
+                continue;
+            };
+            let version = numeric_components(suffix);
+            let modified = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok();
+            matches.push(MacosAppCandidate {
+                bundle_path,
+                version,
+                modified,
+            });
         }
     }
-    None
+    matches
+        .into_iter()
+        .max_by(|left, right| {
+            left.version
+                .cmp(&right.version)
+                .then_with(|| left.modified.cmp(&right.modified))
+                .then_with(|| left.bundle_path.cmp(&right.bundle_path))
+        })
+        .map(|candidate| candidate.bundle_path)
 }
 
 fn detect_available_with(
@@ -201,15 +263,18 @@ fn detect_available_with(
     templates
         .iter()
         .filter_map(|template| {
-            if command_available(&template.command) {
-                return Some(template.clone());
+            match &template.launcher {
+                EditorLauncher::Command { program, .. } if command_available(program) => {
+                    return Some(template.clone());
+                }
+                EditorLauncher::MacosApplication { .. } => return Some(template.clone()),
+                EditorLauncher::Command { .. } => {}
             }
 
-            let app_name =
-                find_macos_app_name(template.macos_app_name.as_deref()?, application_dirs)?;
+            let bundle_path =
+                find_macos_app_bundle(template.macos_app_name.as_deref()?, application_dirs)?;
             let mut detected = template.clone();
-            detected.command = "open".to_string();
-            detected.args = vec!["-a".to_string(), app_name, "{path}".to_string()];
+            detected.launcher = EditorLauncher::MacosApplication { bundle_path };
             Some(detected)
         })
         .collect()
@@ -340,111 +405,169 @@ fn spawn_url_reaper(
         })
 }
 
-/// Build the argv (everything after the command) for opening `file`
-/// at an optional `line[:col]` in `template`. Pure so it can be
-/// tested without spawning a process.
-///
-/// The target is `file`, with `:line` / `:line:col` appended when
-/// present. VS Code-family editors only honor that suffix after a
-/// `--goto` flag, so we prepend it for them. macOS app launchers open
-/// the file without a location because `open -a` cannot interpret
-/// editor-specific line arguments. The target is then substituted
-/// into the template's `{path}` placeholder (matching [`launch`]);
-/// templates with no placeholder get the target appended as a
-/// trailing positional argument.
-fn open_file_args(
+/// What an editor launch did with a requested file location.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenFileOutcome {
+    Opened,
+    OpenedAt { line: u32, column: Option<u32> },
+    OpenedWithoutLocation { line: u32, column: Option<u32> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessHandling {
+    DetachedEditor,
+    MacosApplicationHandoff,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EditorLaunch {
+    program: String,
+    args: Vec<String>,
+    process_handling: ProcessHandling,
+}
+
+fn substitute_path(args: &[String], target: &str, append_when_missing: bool) -> Vec<String> {
+    let mut substituted = false;
+    let mut resolved = args
+        .iter()
+        .map(|arg| {
+            if arg.contains("{path}") {
+                substituted = true;
+                arg.replace("{path}", target)
+            } else {
+                arg.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    if append_when_missing && !substituted {
+        resolved.push(target.to_string());
+    }
+    resolved
+}
+
+fn open_file_launch(
     template: &EditorTemplate,
     file: &str,
     line: Option<u32>,
     col: Option<u32>,
-) -> Vec<String> {
-    let uses_macos_app =
-        template.command == "open" && template.args.first().map(String::as_str) == Some("-a");
-    let mut target = file.to_string();
-    if let Some(l) = line.filter(|_| !uses_macos_app) {
-        target.push(':');
-        target.push_str(&l.to_string());
-        if let Some(c) = col {
-            target.push(':');
-            target.push_str(&c.to_string());
+) -> (EditorLaunch, OpenFileOutcome) {
+    let requested_location = line.map(|line| OpenFileOutcome::OpenedAt { line, column: col });
+    match &template.launcher {
+        EditorLauncher::MacosApplication { bundle_path } => {
+            let outcome = line.map_or(OpenFileOutcome::Opened, |line| {
+                OpenFileOutcome::OpenedWithoutLocation { line, column: col }
+            });
+            (
+                EditorLaunch {
+                    program: "open".to_string(),
+                    args: vec![
+                        "-a".to_string(),
+                        bundle_path.to_string_lossy().into_owned(),
+                        file.to_string(),
+                    ],
+                    process_handling: ProcessHandling::MacosApplicationHandoff,
+                },
+                outcome,
+            )
+        }
+        EditorLauncher::Command { program, args } => {
+            let mut target = file.to_string();
+            let mut location_args = Vec::new();
+            if let Some(line) = line {
+                match template.location_style {
+                    FileLocationStyle::PathSuffix => {
+                        target.push(':');
+                        target.push_str(&line.to_string());
+                        if let Some(col) = col {
+                            target.push(':');
+                            target.push_str(&col.to_string());
+                        }
+                    }
+                    FileLocationStyle::VsCodeGoto => {
+                        location_args.push("--goto".to_string());
+                        target.push(':');
+                        target.push_str(&line.to_string());
+                        if let Some(col) = col {
+                            target.push(':');
+                            target.push_str(&col.to_string());
+                        }
+                    }
+                    FileLocationStyle::JetBrains => {
+                        location_args.extend(["--line".to_string(), line.to_string()]);
+                        if let Some(col) = col {
+                            location_args.extend(["--column".to_string(), col.to_string()]);
+                        }
+                    }
+                }
+            }
+            location_args.extend(substitute_path(args, &target, true));
+            (
+                EditorLaunch {
+                    program: program.clone(),
+                    args: location_args,
+                    process_handling: ProcessHandling::DetachedEditor,
+                },
+                requested_location.unwrap_or(OpenFileOutcome::Opened),
+            )
         }
     }
+}
 
-    let mut out = Vec::new();
-    let vscode_family = matches!(
-        template.id.as_str(),
-        "code" | "cursor" | "windsurf" | "codium" | "vscodium"
-    );
-    if line.is_some() && vscode_family && !uses_macos_app {
-        out.push("--goto".to_string());
+fn worktree_launch(template: &EditorTemplate, worktree: &Path) -> EditorLaunch {
+    let path = worktree.to_string_lossy();
+    match &template.launcher {
+        EditorLauncher::Command { program, args } => EditorLaunch {
+            program: program.clone(),
+            args: substitute_path(args, &path, false),
+            process_handling: ProcessHandling::DetachedEditor,
+        },
+        EditorLauncher::MacosApplication { bundle_path } => EditorLaunch {
+            program: "open".to_string(),
+            args: vec![
+                "-a".to_string(),
+                bundle_path.to_string_lossy().into_owned(),
+                path.into_owned(),
+            ],
+            process_handling: ProcessHandling::MacosApplicationHandoff,
+        },
     }
+}
 
-    let mut substituted = false;
-    for arg in &template.args {
-        if arg.contains("{path}") {
-            out.push(arg.replace("{path}", &target));
-            substituted = true;
-        } else {
-            out.push(arg.clone());
-        }
+fn spawn_editor(launch: EditorLaunch, current_dir: Option<&Path>) -> std::io::Result<()> {
+    let mut command = std::process::Command::new(&launch.program);
+    command.args(&launch.args);
+    if let Some(current_dir) = current_dir {
+        command.current_dir(current_dir);
     }
-    if !substituted {
-        out.push(target);
+    if launch.process_handling == ProcessHandling::DetachedEditor {
+        crate::platform::detach_child_process(&mut command);
     }
-    out
+    command.stdin(std::process::Stdio::null());
+    command.stdout(std::process::Stdio::null());
+    command.stderr(std::process::Stdio::null());
+    command.spawn().map(|_| ())
 }
 
 /// Open a single `file` in `template`, optionally jumping to
 /// `line[:col]`. Used by the terminal right-click handler when the
 /// user clicks a file path in the agent transcript.
 ///
-/// Most modern editors accept a positional `file:line:col` argument;
-/// the VS Code family needs a `--goto` flag to interpret it, so we
-/// special-case those by `id`. The file target is substituted into
-/// the template's `{path}` placeholder (or appended when the template
-/// has none), reusing the same argv shape as [`launch`]. Detached so
-/// the editor outlives lazybox.
+/// The result reports whether the selected launch mechanism can honor
+/// the requested location. macOS app handoffs open the file but cannot
+/// pass editor-specific line arguments through Launch Services.
 pub fn open_file(
     template: &EditorTemplate,
     file: &Path,
     line: Option<u32>,
     col: Option<u32>,
-) -> std::io::Result<()> {
-    let mut cmd = std::process::Command::new(&template.command);
-    cmd.args(open_file_args(template, &file.to_string_lossy(), line, col));
-
-    // Run from the file's directory when it exists so editors that
-    // infer a project root from cwd land somewhere sensible.
-    if let Some(parent) = file.parent()
-        && parent.is_dir()
-    {
-        cmd.current_dir(parent);
-    }
-    crate::platform::detach_child_process(&mut cmd);
-    cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(std::process::Stdio::null());
-    cmd.stderr(std::process::Stdio::null());
-    cmd.spawn().map(|_| ())
+) -> std::io::Result<OpenFileOutcome> {
+    let (launch, outcome) = open_file_launch(template, &file.to_string_lossy(), line, col);
+    let current_dir = file.parent().filter(|parent| parent.is_dir());
+    spawn_editor(launch, current_dir).map(|()| outcome)
 }
 
 pub fn launch(template: &EditorTemplate, worktree: &Path) -> std::io::Result<()> {
-    let path_str = worktree.to_string_lossy().into_owned();
-    let mut cmd = std::process::Command::new(&template.command);
-    for arg in &template.args {
-        if arg == "{path}" {
-            cmd.arg(&path_str);
-        } else if arg.contains("{path}") {
-            cmd.arg(arg.replace("{path}", &path_str));
-        } else {
-            cmd.arg(arg);
-        }
-    }
-    cmd.current_dir(worktree);
-    crate::platform::detach_child_process(&mut cmd);
-    cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(std::process::Stdio::null());
-    cmd.stderr(std::process::Stdio::null());
-    cmd.spawn().map(|_| ())
+    spawn_editor(worktree_launch(template, worktree), Some(worktree))
 }
 
 #[cfg(test)]
@@ -485,13 +608,22 @@ mod tests {
         let user = vec![EditorTemplate {
             id: "zed".to_string(),
             display: "Zed (custom)".to_string(),
-            command: "/opt/zed/zed".to_string(),
-            args: vec!["{path}".into()],
+            launcher: EditorLauncher::Command {
+                program: "/opt/zed/zed".to_string(),
+                args: vec!["{path}".into()],
+            },
             macos_app_name: None,
+            location_style: FileLocationStyle::PathSuffix,
         }];
         let merged = merge(builtin_editors(), user);
         let zed = merged.iter().find(|e| e.id == "zed").expect("zed present");
-        assert_eq!(zed.command, "/opt/zed/zed");
+        assert_eq!(
+            zed.launcher,
+            EditorLauncher::Command {
+                program: "/opt/zed/zed".to_string(),
+                args: vec!["{path}".into()],
+            }
+        );
         assert_eq!(zed.display, "Zed (custom)");
     }
 
@@ -500,9 +632,12 @@ mod tests {
         let user = vec![EditorTemplate {
             id: "myedit".to_string(),
             display: "My".to_string(),
-            command: "myedit".to_string(),
-            args: vec!["{path}".into()],
+            launcher: EditorLauncher::Command {
+                program: "myedit".to_string(),
+                args: vec!["{path}".into()],
+            },
             macos_app_name: None,
+            location_style: FileLocationStyle::PathSuffix,
         }];
         let merged = merge(builtin_editors(), user);
         assert!(merged.iter().any(|e| e.id == "myedit"));
@@ -518,17 +653,64 @@ mod tests {
             args: None,
         };
         let t: EditorTemplate = raw.into();
-        assert_eq!(t.args, vec!["{path}".to_string()]);
+        assert_eq!(
+            t.launcher,
+            EditorLauncher::Command {
+                program: "x".to_string(),
+                args: vec!["{path}".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn user_override_keeps_the_known_editors_location_contract() {
+        let pycharm: EditorTemplate = UserEditorEntry {
+            id: "pycharm".into(),
+            display: None,
+            command: "/custom/pycharm".into(),
+            args: None,
+        }
+        .into();
+        let codium: EditorTemplate = UserEditorEntry {
+            id: "codium".into(),
+            display: None,
+            command: "/custom/codium".into(),
+            args: None,
+        }
+        .into();
+
+        assert_eq!(
+            open_file_launch(&pycharm, "/a/b.rs", Some(12), Some(3))
+                .0
+                .args,
+            vec!["--line", "12", "--column", "3", "/a/b.rs"]
+        );
+        assert_eq!(
+            open_file_launch(&codium, "/a/b.rs", Some(12), Some(3))
+                .0
+                .args,
+            vec!["--goto", "/a/b.rs:12:3"]
+        );
     }
 
     fn tpl(id: &str, args: &[&str]) -> EditorTemplate {
         EditorTemplate {
             id: id.into(),
             display: id.into(),
-            command: id.into(),
-            args: args.iter().map(|s| s.to_string()).collect(),
+            launcher: EditorLauncher::Command {
+                program: id.into(),
+                args: args.iter().map(|s| s.to_string()).collect(),
+            },
             macos_app_name: None,
+            location_style: FileLocationStyle::PathSuffix,
         }
+    }
+
+    fn builtin(id: &str) -> EditorTemplate {
+        builtin_editors()
+            .into_iter()
+            .find(|editor| editor.id == id)
+            .unwrap_or_else(|| panic!("{id} builtin present"))
     }
 
     #[test]
@@ -570,8 +752,13 @@ mod tests {
                 .find(|editor| editor.id == id)
                 .unwrap_or_else(|| panic!("{id} builtin present"));
             assert_eq!(editor.display, display);
-            assert_eq!(editor.command, command);
-            assert_eq!(editor.args, vec!["{path}"]);
+            assert_eq!(
+                editor.launcher,
+                EditorLauncher::Command {
+                    program: command.to_string(),
+                    args: vec!["{path}".to_string()],
+                }
+            );
             assert_eq!(editor.macos_app_name.as_deref(), Some(app_name));
         }
     }
@@ -588,8 +775,13 @@ mod tests {
         });
 
         assert_eq!(detected.len(), 1);
-        assert_eq!(detected[0].command, "zed");
-        assert_eq!(detected[0].args, vec!["{path}"]);
+        assert_eq!(
+            detected[0].launcher,
+            EditorLauncher::Command {
+                program: "zed".to_string(),
+                args: vec!["{path}".to_string()],
+            }
+        );
     }
 
     #[test]
@@ -602,8 +794,12 @@ mod tests {
         let detected = detect_available_with(&[sublime], &[apps.path().to_path_buf()], |_| false);
 
         assert_eq!(detected.len(), 1);
-        assert_eq!(detected[0].command, "open");
-        assert_eq!(detected[0].args, vec!["-a", "Sublime Text", "{path}"]);
+        assert_eq!(
+            detected[0].launcher,
+            EditorLauncher::MacosApplication {
+                bundle_path: apps.path().join("Sublime Text.app"),
+            }
+        );
     }
 
     #[test]
@@ -625,10 +821,39 @@ mod tests {
         );
 
         assert_eq!(detected.len(), 1);
-        assert_eq!(detected[0].command, "open");
         assert_eq!(
-            detected[0].args,
-            vec!["-a", "PyCharm Professional 2026.1", "{path}"]
+            detected[0].launcher,
+            EditorLauncher::MacosApplication {
+                bundle_path: user_apps.path().join("PyCharm Professional 2026.1.app"),
+            }
+        );
+    }
+
+    #[test]
+    fn detection_selects_the_newest_toolbox_version_across_editions_and_directories() {
+        let system_apps = tempfile::tempdir().expect("system tempdir");
+        let user_apps = tempfile::tempdir().expect("user tempdir");
+        std::fs::create_dir(system_apps.path().join("PyCharm Professional 2026.9.app"))
+            .expect("create older professional bundle");
+        let newest = user_apps.path().join("PyCharm Community 2026.10.app");
+        std::fs::create_dir(&newest).expect("create newer community bundle");
+        let mut pycharm = tpl("pycharm", &["{path}"]);
+        pycharm.macos_app_name = Some("PyCharm".into());
+
+        let detected = detect_available_with(
+            &[pycharm],
+            &[
+                system_apps.path().to_path_buf(),
+                user_apps.path().to_path_buf(),
+            ],
+            |_| false,
+        );
+
+        assert_eq!(
+            detected[0].launcher,
+            EditorLauncher::MacosApplication {
+                bundle_path: newest,
+            }
         );
     }
 
@@ -642,42 +867,126 @@ mod tests {
     }
 
     #[test]
-    fn open_file_args_substitutes_plain_path() {
+    fn open_file_launch_substitutes_plain_path() {
         let t = tpl("zed", &["{path}"]);
-        assert_eq!(open_file_args(&t, "/a/b.rs", None, None), vec!["/a/b.rs"]);
+        let (launch, outcome) = open_file_launch(&t, "/a/b.rs", None, None);
+        assert_eq!(launch.args, vec!["/a/b.rs"]);
+        assert_eq!(outcome, OpenFileOutcome::Opened);
     }
 
     #[test]
-    fn open_file_args_appends_line_col_suffix() {
+    fn open_file_launch_appends_line_col_suffix() {
         let t = tpl("zed", &["{path}"]);
+        let (with_column, outcome) = open_file_launch(&t, "/a/b.rs", Some(12), Some(3));
+        assert_eq!(with_column.args, vec!["/a/b.rs:12:3"]);
         assert_eq!(
-            open_file_args(&t, "/a/b.rs", Some(12), Some(3)),
-            vec!["/a/b.rs:12:3"]
+            outcome,
+            OpenFileOutcome::OpenedAt {
+                line: 12,
+                column: Some(3),
+            }
         );
+        let (without_column, outcome) = open_file_launch(&t, "/a/b.rs", Some(12), None);
+        assert_eq!(without_column.args, vec!["/a/b.rs:12"]);
         assert_eq!(
-            open_file_args(&t, "/a/b.rs", Some(12), None),
-            vec!["/a/b.rs:12"]
+            outcome,
+            OpenFileOutcome::OpenedAt {
+                line: 12,
+                column: None,
+            }
         );
     }
 
     #[test]
-    fn open_file_args_prepends_goto_for_vscode_family() {
-        let t = tpl("code", &["{path}"]);
-        assert_eq!(
-            open_file_args(&t, "/a/b.rs", Some(7), None),
-            vec!["--goto", "/a/b.rs:7"]
-        );
-        // No line → no --goto (a plain open).
-        assert_eq!(open_file_args(&t, "/a/b.rs", None, None), vec!["/a/b.rs"]);
+    fn open_file_launch_prepends_goto_for_vscode_family() {
+        let t = builtin("code");
+        let (with_line, _) = open_file_launch(&t, "/a/b.rs", Some(7), None);
+        assert_eq!(with_line.args, vec!["--goto", "/a/b.rs:7"]);
+        let (without_line, _) = open_file_launch(&t, "/a/b.rs", None, None);
+        assert_eq!(without_line.args, vec!["/a/b.rs"]);
     }
 
     #[test]
-    fn open_file_args_for_a_macos_app_ignores_the_line_location() {
-        let mut t = tpl("code", &["-a", "Visual Studio Code", "{path}"]);
-        t.command = "open".into();
+    fn open_file_launch_uses_jetbrains_line_and_column_flags() {
+        for id in [
+            "idea",
+            "pycharm",
+            "webstorm",
+            "goland",
+            "clion",
+            "rubymine",
+            "phpstorm",
+            "rider",
+            "datagrip",
+            "android-studio",
+        ] {
+            let (launch, outcome) = open_file_launch(&builtin(id), "/a/b.rs", Some(12), Some(3));
+            assert_eq!(
+                launch.args,
+                vec!["--line", "12", "--column", "3", "/a/b.rs"],
+                "{id}"
+            );
+            assert_eq!(
+                outcome,
+                OpenFileOutcome::OpenedAt {
+                    line: 12,
+                    column: Some(3),
+                },
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn open_file_launch_reports_unsupported_location_for_a_macos_app() {
+        let t = EditorTemplate {
+            launcher: EditorLauncher::MacosApplication {
+                bundle_path: PathBuf::from("/Applications/Visual Studio Code.app"),
+            },
+            ..builtin("code")
+        };
+        let (launch, outcome) = open_file_launch(&t, "/a/b.rs", Some(7), Some(3));
         assert_eq!(
-            open_file_args(&t, "/a/b.rs", Some(7), Some(3)),
-            vec!["-a", "Visual Studio Code", "/a/b.rs"]
+            launch,
+            EditorLaunch {
+                program: "open".to_string(),
+                args: vec![
+                    "-a".to_string(),
+                    "/Applications/Visual Studio Code.app".to_string(),
+                    "/a/b.rs".to_string(),
+                ],
+                process_handling: ProcessHandling::MacosApplicationHandoff,
+            }
+        );
+        assert_eq!(
+            outcome,
+            OpenFileOutcome::OpenedWithoutLocation {
+                line: 7,
+                column: Some(3),
+            }
+        );
+    }
+
+    #[test]
+    fn worktree_launch_hands_an_exact_macos_bundle_to_launch_services() {
+        let t = EditorTemplate {
+            launcher: EditorLauncher::MacosApplication {
+                bundle_path: PathBuf::from("/Applications/PyCharm 2026.1.app"),
+            },
+            ..builtin("pycharm")
+        };
+
+        assert_eq!(
+            worktree_launch(&t, Path::new("/repo/worktree")),
+            EditorLaunch {
+                program: "open".to_string(),
+                args: vec![
+                    "-a".to_string(),
+                    "/Applications/PyCharm 2026.1.app".to_string(),
+                    "/repo/worktree".to_string(),
+                ],
+                process_handling: ProcessHandling::MacosApplicationHandoff,
+            }
         );
     }
 
@@ -689,8 +998,13 @@ mod tests {
             .find(|e| e.id == "gram")
             .expect("gram builtin present");
         assert_eq!(gram.display, "Gram");
-        assert_eq!(gram.command, "gram");
-        assert_eq!(gram.args, vec!["{path}"]);
+        assert_eq!(
+            gram.launcher,
+            EditorLauncher::Command {
+                program: "gram".to_string(),
+                args: vec!["{path}".to_string()],
+            }
+        );
         assert_eq!(gram.macos_app_name.as_deref(), Some("Gram"));
         // "Glam" is a mishearing of Gram (the Zed fork); there is no
         // separate `glam` editor, so the builtin stays a single entry.
@@ -752,6 +1066,63 @@ mod tests {
         assert!(output.contains("https://trace.example.test"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn editor_session_probe() {
+        let current_dir = std::env::current_dir().expect("current directory");
+        let is_probe = current_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("lazybox-handoff-probe"));
+        if is_probe {
+            // Safety: getsid with pid 0 only reads the calling process's
+            // session id and does not dereference memory.
+            let session = unsafe { libc::getsid(0) };
+            std::fs::write(current_dir.join("session"), session.to_string())
+                .expect("write session id");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn macos_application_handoff_preserves_the_callers_session() {
+        let dir = tempfile::Builder::new()
+            .prefix("lazybox-handoff-probe")
+            .tempdir()
+            .expect("tempdir");
+        let session_file = dir.path().join("session");
+        let launch = EditorLaunch {
+            program: std::env::current_exe()
+                .expect("current test executable")
+                .to_string_lossy()
+                .into_owned(),
+            args: vec![
+                "--exact".to_string(),
+                "editors::tests::editor_session_probe".to_string(),
+            ],
+            process_handling: ProcessHandling::MacosApplicationHandoff,
+        };
+
+        spawn_editor(launch, Some(dir.path())).expect("spawn handoff probe");
+
+        let mut child_session = None;
+        for _ in 0..100 {
+            child_session = std::fs::read_to_string(&session_file)
+                .ok()
+                .and_then(|value| value.trim().parse::<libc::pid_t>().ok());
+            if child_session.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let child_session = child_session.expect("handoff probe writes a numeric session id");
+        // Safety: getsid with pid 0 only reads the calling process's
+        // session id and does not dereference memory.
+        let parent_session = unsafe { libc::getsid(0) };
+
+        assert_eq!(child_session, parent_session);
+    }
+
     /// On Linux a configured browser is exec'd directly, so a missing
     /// binary must surface as a spawn error — the ONLY error the
     /// detached launch still reports (a launcher that starts and then
@@ -798,13 +1169,9 @@ mod tests {
     }
 
     #[test]
-    fn open_file_args_appends_target_when_no_placeholder() {
-        // A template whose args don't mention {path} still gets the
-        // file appended so the editor receives something to open.
+    fn open_file_launch_appends_target_when_no_placeholder() {
         let t = tpl("myedit", &["--flag"]);
-        assert_eq!(
-            open_file_args(&t, "/a/b.rs", None, None),
-            vec!["--flag", "/a/b.rs"]
-        );
+        let (launch, _) = open_file_launch(&t, "/a/b.rs", None, None);
+        assert_eq!(launch.args, vec!["--flag", "/a/b.rs"]);
     }
 }

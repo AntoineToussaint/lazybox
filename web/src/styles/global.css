@@ -452,6 +452,7 @@ img, video { max-width: 100%; display: block; }
   line-height: 1.5;
 }
 .demo-item figcaption b { color: var(--fg); }
+.demo-item figcaption code { font-family: var(--mono); color: var(--accent-2); }
 
 /* ── strip ───────────────────────────────────────────────── */
 .strip {

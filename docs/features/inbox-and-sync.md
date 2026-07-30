@@ -78,6 +78,10 @@ front of rotation on `Command::FocusWorkspace`. Errors become
 each tick, so `config.yaml` edits take effect within one interval without a
 restart.
 
+When GitHub's observed budget reaches the safety threshold, polling becomes an
+explicit rate-limit wait until the reset time. The footer and `Shift-D` show the
+countdown, reset time, and remaining budget instead of an in-flight spinner.
+
 ### Test checklist
 - [ ] With several repos configured, each is polled in rotation (check `/tmp/lazybox.log` with `RUST_LOG=lazybox=debug`).
 - [ ] Editing `poll_interval` in `config.yaml` changes cadence without restarting.

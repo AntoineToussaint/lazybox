@@ -225,7 +225,7 @@ worktrees, daemon socket, config) derives from it.
 
 **Status:** stable
 **Crate(s):** `auth` (`CredentialProvider` trait + chain), `gh-provider`, `linear-provider`, `slack-provider`
-**Config / flags:** `GH_TOKEN` / `GITHUB_TOKEN` / `gh auth token`; `LINEAR_API_KEY`; `slack.bot_token`/`app_token` (or `SLACK_BOT_TOKEN`/`SLACK_APP_TOKEN`)
+**Config / flags:** `LAZYBOX_GITHUB_TOKEN` / `GH_TOKEN` / `GITHUB_TOKEN` / `gh auth token`; `LINEAR_API_KEY`; `slack.bot_token`/`app_token` (or `SLACK_BOT_TOKEN`/`SLACK_APP_TOKEN`)
 **Key bindings:** —
 
 ### What it does
@@ -239,14 +239,16 @@ the Slack tokens for the mirror. No lazybox-specific credential setup.
 
 ### How it works (brief)
 `CredentialProvider` (`crates/auth`) has `name()` + `async resolve(scope)`. The
-GitHub chain is `GH_TOKEN` env → `GITHUB_TOKEN` env → `gh auth token` command
+GitHub chain is `LAZYBOX_GITHUB_TOKEN` env → `GH_TOKEN` env →
+`GITHUB_TOKEN` env → `gh auth token` command
 (`crates/gh-provider/src/lib.rs`). Each provider builds its own chain. To add an
 auth source, implement the trait and add it to the chain in `crates/server/`
 (see [`CLAUDE.md`](../../CLAUDE.md)).
 
 ### Test checklist
-- [ ] With no `GH_TOKEN`/`GITHUB_TOKEN`, creds resolve from `gh auth token`.
+- [ ] With no GitHub token environment variable, creds resolve from `gh auth token`.
 - [ ] Setting `GH_TOKEN` takes precedence over `gh auth token`.
+- [ ] Setting `LAZYBOX_GITHUB_TOKEN` takes precedence over `GH_TOKEN`.
 - [ ] `LINEAR_API_KEY` enables the Linear provider.
 - [ ] Slack tokens from env or `slack:` config both work.
 - [ ] A missing required credential surfaces a clear error, not a crash.

@@ -21,6 +21,12 @@ const SYNC_LOG_CAP: usize = 200;
 pub(crate) enum SyncOutcome {
     /// Poll finished; `count` tasks matched the source's filter.
     Ok { count: usize },
+    /// GitHub deliberately paused until the observed API budget resets.
+    RateLimited {
+        remaining: u32,
+        limit: u32,
+        reset_at: DateTime<Utc>,
+    },
     /// Poll failed. `kind` is the `ProviderErrorKind` string
     /// ("retryable" / "auth" / "permanent" / ""), `message` the
     /// one-line summary, `detail` the full diagnostic (may be empty).
@@ -42,6 +48,10 @@ pub(crate) struct SyncEntry {
 impl SyncEntry {
     pub fn is_ok(&self) -> bool {
         matches!(self.outcome, SyncOutcome::Ok { .. })
+    }
+
+    pub fn is_rate_limited(&self) -> bool {
+        matches!(self.outcome, SyncOutcome::RateLimited { .. })
     }
 }
 
@@ -69,6 +79,18 @@ impl SyncLog {
 
     pub fn note_completed(&mut self, source: &str, count: usize) {
         self.record(source, Utc::now(), SyncOutcome::Ok { count });
+    }
+
+    pub fn note_rate_limited(&mut self, remaining: u32, limit: u32, reset_at: DateTime<Utc>) {
+        self.record(
+            "github",
+            Utc::now(),
+            SyncOutcome::RateLimited {
+                remaining,
+                limit,
+                reset_at,
+            },
+        );
     }
 
     pub fn note_error(&mut self, source: &str, kind: &str, message: &str, detail: &str) {
@@ -247,6 +269,55 @@ impl BackgroundPoll {
     }
 }
 
+pub(crate) struct GithubRateLimitWait {
+    pub remaining: u32,
+    pub limit: u32,
+    pub reset_at: DateTime<Utc>,
+    last_tick: Instant,
+}
+
+impl GithubRateLimitWait {
+    pub fn label(&self) -> String {
+        rate_limit_wait_label(self.remaining, self.limit, self.reset_at, Utc::now())
+    }
+}
+
+pub(crate) fn rate_limit_wait_label(
+    remaining: u32,
+    limit: u32,
+    reset_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> String {
+    format!(
+        "GitHub rate-limited · {}",
+        rate_limit_wait_detail(remaining, limit, reset_at, now)
+    )
+}
+
+pub(crate) fn rate_limit_wait_detail(
+    remaining: u32,
+    limit: u32,
+    reset_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> String {
+    let seconds = reset_at.signed_duration_since(now).num_seconds().max(0) as u64;
+    let wait = if seconds == 0 {
+        "now".to_string()
+    } else if seconds < 60 {
+        format!("~{seconds}s")
+    } else if seconds < 60 * 60 {
+        format!("~{}m", seconds.div_ceil(60))
+    } else {
+        format!("~{}h", seconds.div_ceil(60 * 60))
+    };
+    let budget = if limit == 0 {
+        format!("{remaining} left")
+    } else {
+        format!("{remaining}/{limit} left")
+    };
+    format!("{wait} · {} · {budget}", reset_at.format("%H:%M UTC"))
+}
+
 /// Animated "spawning…" indicator shown in the footer between a
 /// `Spawn` command leaving the TUI and the matching `TerminalSpawned`
 /// arriving. Worktree provisioning (bare clone → per-task worktree)
@@ -316,6 +387,9 @@ pub(crate) struct StatusCtx {
     /// went silent after the first cycle and an assignment made on
     /// GitHub gave no signal until the row appeared (or didn't).
     pub bg_poll: Option<BackgroundPoll>,
+    /// GitHub is not syncing or failed: it is deliberately sleeping
+    /// until the observed API window resets.
+    pub github_rate_limit_wait: Option<GithubRateLimitWait>,
     /// Animated spawn indicator — lit when a `Spawn` command is sent,
     /// cleared when the matching `TerminalSpawned` /
     /// `TerminalFocusRequested` lands (or a spawn `ProviderError`, or
@@ -340,6 +414,7 @@ impl StatusCtx {
             polling: None,
             polling_last_tick: Instant::now(),
             bg_poll: None,
+            github_rate_limit_wait: None,
             spawning: None,
             sync: SyncLog::default(),
             messages: MessageLog::default(),
@@ -383,6 +458,9 @@ impl StatusCtx {
     /// that takes 8s of progress still keeps the spinner lit.
     pub fn note_poll_progress(&mut self, source: &str, message: &str) {
         let now = Instant::now();
+        if source == "github" {
+            self.github_rate_limit_wait = None;
+        }
         match &mut self.bg_poll {
             Some(bg) if bg.source == source => {
                 bg.message = message.into();
@@ -409,6 +487,43 @@ impl StatusCtx {
             && bg.source == source
         {
             self.bg_poll = None;
+        }
+        if source == "github" {
+            self.github_rate_limit_wait = None;
+        }
+    }
+
+    pub fn note_github_rate_limit_wait(
+        &mut self,
+        remaining: u32,
+        limit: u32,
+        reset_at: DateTime<Utc>,
+    ) {
+        if self
+            .bg_poll
+            .as_ref()
+            .is_some_and(|poll| poll.source == "github")
+        {
+            self.bg_poll = None;
+        }
+        self.github_rate_limit_wait = Some(GithubRateLimitWait {
+            remaining,
+            limit,
+            reset_at,
+            last_tick: Instant::now(),
+        });
+    }
+
+    pub fn note_poll_failed(&mut self, source: &str) {
+        if self
+            .bg_poll
+            .as_ref()
+            .is_some_and(|poll| poll.source == source)
+        {
+            self.bg_poll = None;
+        }
+        if source == "github" {
+            self.github_rate_limit_wait = None;
         }
     }
 
@@ -520,6 +635,12 @@ impl StatusCtx {
         // wait, defeating the "something is happening" reassurance.
         if let Some(sp) = self.spawning.as_mut() {
             sp.spinner_idx = sp.spinner_idx.wrapping_add(1);
+            advanced = true;
+        }
+        if let Some(wait) = self.github_rate_limit_wait.as_mut()
+            && wait.last_tick.elapsed() >= Duration::from_secs(1)
+        {
+            wait.last_tick = Instant::now();
             advanced = true;
         }
         // Also gc a stale bg_poll (dropped PollCompleted) + a stale
@@ -703,6 +824,47 @@ mod tests {
             s.bg_poll.as_ref().map(|b| b.source.as_str()) == Some("linear"),
             "linear's spinner survived github's PollCompleted",
         );
+    }
+
+    #[test]
+    fn rate_limit_wait_replaces_syncing_and_clears_on_resume() {
+        let mut s = StatusCtx::new();
+        let reset_at = Utc::now() + chrono::Duration::minutes(7);
+        s.note_poll_progress("github", "Fetching issues");
+        assert!(s.bg_poll.is_some());
+
+        s.note_github_rate_limit_wait(98, 5000, reset_at);
+        assert!(s.bg_poll.is_none());
+        assert!(s.github_rate_limit_wait.is_some());
+
+        s.note_poll_progress("github", "Fetching issues");
+        assert!(s.github_rate_limit_wait.is_none());
+        assert!(s.bg_poll.is_some());
+    }
+
+    #[test]
+    fn rate_limit_label_surfaces_countdown_reset_and_budget() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 7, 30, 7, 16, 28).unwrap();
+        let reset_at = Utc.with_ymd_and_hms(2026, 7, 30, 7, 23, 22).unwrap();
+
+        assert_eq!(
+            rate_limit_wait_label(98, 5000, reset_at, now),
+            "GitHub rate-limited · ~7m · 07:23 UTC · 98/5000 left"
+        );
+    }
+
+    #[test]
+    fn failed_poll_clears_in_flight_and_waiting_states() {
+        let mut s = StatusCtx::new();
+        s.note_poll_progress("github", "Fetching issues");
+        s.note_poll_failed("github");
+        assert!(s.bg_poll.is_none());
+
+        s.note_github_rate_limit_wait(98, 5000, Utc::now() + chrono::Duration::minutes(7));
+        s.note_poll_failed("github");
+        assert!(s.github_rate_limit_wait.is_none());
     }
 
     #[test]

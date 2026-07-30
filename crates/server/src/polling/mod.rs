@@ -1867,6 +1867,79 @@ fn log_rate_budget(client: &GhClient) {
     }
 }
 
+fn github_rate_limit_wait_event(
+    snapshot: &lazybox_gh::RateSnapshot,
+    now: chrono::DateTime<Utc>,
+) -> Option<Event> {
+    let remote = snapshot.remote.as_ref()?;
+    (remote.remaining <= lazybox_gh::rate_budget::LOW_THRESHOLD && remote.reset_at > now).then(
+        || Event::GithubRateLimitWait {
+            remaining: remote.remaining,
+            limit: remote.limit,
+            reset_at: remote.reset_at,
+        },
+    )
+}
+
+#[cfg(test)]
+mod rate_limit_wait_tests {
+    use super::*;
+
+    fn snapshot(
+        remaining: u32,
+        limit: u32,
+        reset_at: chrono::DateTime<Utc>,
+    ) -> lazybox_gh::RateSnapshot {
+        lazybox_gh::RateSnapshot {
+            local_available: 30.0,
+            local_capacity: 30,
+            remote: Some(lazybox_gh::RemoteRateLimit {
+                remaining,
+                limit,
+                reset_at,
+                observed_at: std::time::Instant::now(),
+            }),
+        }
+    }
+
+    #[test]
+    fn remote_low_budget_becomes_an_explicit_wait_event() {
+        let now = Utc::now();
+        let event = github_rate_limit_wait_event(
+            &snapshot(98, 5000, now + chrono::Duration::minutes(7)),
+            now,
+        );
+
+        assert!(matches!(
+            event,
+            Some(Event::GithubRateLimitWait {
+                remaining: 98,
+                limit: 5000,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn healthy_or_reset_budget_is_not_a_wait() {
+        let now = Utc::now();
+        assert!(
+            github_rate_limit_wait_event(
+                &snapshot(101, 5000, now + chrono::Duration::minutes(7)),
+                now,
+            )
+            .is_none()
+        );
+        assert!(
+            github_rate_limit_wait_event(
+                &snapshot(98, 5000, now - chrono::Duration::seconds(1)),
+                now,
+            )
+            .is_none()
+        );
+    }
+}
+
 /// Default agent id the auto-spawn flow uses when no override is
 /// configured. Mirrors the historical `lazybox-tui` fallback so the
 /// user gets the same agent whether they press `w w` or `@lazybox`-tag
@@ -3461,22 +3534,33 @@ pub async fn tick_with_state(
                     max_retry_after_secs =
                         Some(max_retry_after_secs.map_or(secs, |existing| existing.max(secs)));
                 }
-                // Debounce: only emit a ProviderError if the message
-                // changed since the last failure for this source.
-                // Same rate-limit error every minute → one event,
-                // not 60/hour.
                 let msg = e.user_message();
-                let prev = state.last_error.get(source.name());
-                if prev.map(String::as_str) != Some(msg.as_str()) {
-                    state
-                        .last_error
-                        .insert(source.name().to_string(), msg.clone());
-                    let _ = config.bus.send(Event::ProviderError {
-                        source: e.source().to_string(),
-                        message: msg,
-                        detail: e.diagnostic(),
-                        kind: kind.to_string(),
-                    });
+                let rate_limit_wait =
+                    if source.name() == lazybox_gh::SOURCE && e.retry_after_secs().is_some() {
+                        config.gh_client_cache.lock().as_ref().and_then(|client| {
+                            github_rate_limit_wait_event(&client.rate_snapshot(), Utc::now())
+                        })
+                    } else {
+                        None
+                    };
+                if let Some(wait) = rate_limit_wait {
+                    state.last_error.remove(source.name());
+                    let _ = config.bus.send(wait);
+                } else {
+                    // Debounce: only emit a ProviderError if the message
+                    // changed since the last failure for this source.
+                    let prev = state.last_error.get(source.name());
+                    if prev.map(String::as_str) != Some(msg.as_str()) {
+                        state
+                            .last_error
+                            .insert(source.name().to_string(), msg.clone());
+                        let _ = config.bus.send(Event::ProviderError {
+                            source: e.source().to_string(),
+                            message: msg,
+                            detail: e.diagnostic(),
+                            kind: kind.to_string(),
+                        });
+                    }
                 }
             }
         }

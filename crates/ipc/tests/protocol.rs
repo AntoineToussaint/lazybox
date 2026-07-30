@@ -700,6 +700,13 @@ fn all_events() -> Vec<Event> {
             detail: String::new(),
             kind: String::new(),
         },
+        Event::GithubRateLimitWait {
+            remaining: 98,
+            limit: 5000,
+            reset_at: chrono::DateTime::parse_from_rfc3339("2026-07-30T07:23:22Z")
+                .expect("valid fixture")
+                .with_timezone(&chrono::Utc),
+        },
         Event::PollCompleted {
             source: "github".into(),
             count: 3,
@@ -924,6 +931,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::TerminalsRebadged { .. } => "TerminalsRebadged",
         Event::AgentState { .. } => "AgentState",
         Event::ProviderError { .. } => "ProviderError",
+        Event::GithubRateLimitWait { .. } => "GithubRateLimitWait",
         Event::PollCompleted { .. } => "PollCompleted",
         Event::PollProgress { .. } => "PollProgress",
         Event::Notification { .. } => "Notification",
@@ -972,7 +980,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
     );
     assert_eq!(
         event_tags.len(),
-        65,
+        66,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

@@ -31,17 +31,50 @@ use std::sync::Arc;
 /// router AND the credential resolve scope read it from here.
 pub const SOURCE: &str = "github";
 
-/// Credential chain GitHub uses. Tried in order: `GH_TOKEN` env,
-/// `GITHUB_TOKEN` env, `gh auth token`. The polling poller, the
-/// mutation router, the setup wizard's scope source, and the
-/// fetch-PR-details handler all build clients from this chain — keep
-/// it in one place so a future addition (Keychain, Vault) lands
-/// everywhere at once.
+/// Credential chain GitHub uses. Tried in order:
+/// `LAZYBOX_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, `gh auth
+/// token`. The lazybox-specific variable gives the daemon a token
+/// that spawned agents and interactive `gh` do not automatically
+/// consume. The polling poller, mutation router, setup wizard's scope
+/// source, and fetch-PR-details handler all build clients from this
+/// chain.
 pub fn credential_chain() -> CredentialChain {
     CredentialChain::new()
+        .with(EnvProvider::new("LAZYBOX_GITHUB_TOKEN"))
         .with(EnvProvider::new("GH_TOKEN"))
         .with(EnvProvider::new("GITHUB_TOKEN"))
         .with(CommandProvider::new("gh", &["auth", "token"]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dedicated_daemon_token_precedes_standard_gh_token() {
+        let dedicated_before = std::env::var_os("LAZYBOX_GITHUB_TOKEN");
+        let gh_before = std::env::var_os("GH_TOKEN");
+        unsafe {
+            std::env::set_var("LAZYBOX_GITHUB_TOKEN", "dedicated-test-token");
+            std::env::set_var("GH_TOKEN", "shared-test-token");
+        }
+
+        let result = credential_chain().resolve(SOURCE).await;
+
+        unsafe {
+            match dedicated_before {
+                Some(value) => std::env::set_var("LAZYBOX_GITHUB_TOKEN", value),
+                None => std::env::remove_var("LAZYBOX_GITHUB_TOKEN"),
+            }
+            match gh_before {
+                Some(value) => std::env::set_var("GH_TOKEN", value),
+                None => std::env::remove_var("GH_TOKEN"),
+            }
+        }
+        let credential = result.expect("dedicated token resolves");
+        assert_eq!(credential.token(), "dedicated-test-token");
+        assert_eq!(credential.source, "env:LAZYBOX_GITHUB_TOKEN");
+    }
 }
 
 /// `ScopeSource` adapter over [`GhClient`]. Lets the setup screen

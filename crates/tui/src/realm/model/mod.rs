@@ -3769,6 +3769,8 @@ impl<T: TerminalAdapter> Model<T> {
                 Some((p.spinner_glyph(), p.status_label()))
             } else if let Some(sp) = self.status.spawning.as_ref() {
                 Some((sp.spinner_glyph(), sp.label()))
+            } else if let Some(wait) = self.status.github_rate_limit_wait.as_ref() {
+                Some(("◷", wait.label()))
             } else {
                 self.status
                     .bg_poll

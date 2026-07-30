@@ -115,6 +115,21 @@ impl Polling {
                     ));
                 }
             }
+            IpcEvent::GithubRateLimitWait {
+                remaining,
+                limit,
+                reset_at,
+            } => {
+                self.last_progress = Some((
+                    "github".into(),
+                    crate::realm::status_ctx::rate_limit_wait_label(
+                        *remaining,
+                        *limit,
+                        *reset_at,
+                        chrono::Utc::now(),
+                    ),
+                ));
+            }
             _ => {}
         }
     }
@@ -156,6 +171,7 @@ impl Polling {
     /// progress message, joined into a single line.
     pub fn status_label(&self) -> String {
         match (&self.last_progress, self.sources.is_empty()) {
+            (Some((_, msg)), _) if msg.starts_with("GitHub rate-limited") => msg.clone(),
             (Some((source, msg)), _) => {
                 format!("Pulling from {source} · {msg}")
             }
@@ -270,41 +286,30 @@ impl AppComponent<Msg, UserEvent> for Polling {
             }
             // Daemon events drive the inner state.
             Event::User(UserEvent::Daemon(evt)) => {
-                match evt.as_ref() {
-                    IpcEvent::WorkspaceUpserted(_) => {
-                        self.saw_workspace = true;
-                    }
-                    IpcEvent::PollCompleted { source, .. } => {
-                        self.polls_completed.insert(source.clone());
-                    }
-                    IpcEvent::PollProgress { source, message } => {
-                        self.last_progress = Some((source.clone(), message.clone()));
-                        if message.starts_with("PR query:") || message.starts_with("Issue query:") {
-                            self.queries_seen.push(format!("[{source}] {message}"));
-                        }
-                    }
-                    IpcEvent::ProviderError {
-                        source,
-                        message,
-                        detail,
-                        kind,
-                    } => {
-                        if kind == "retryable" {
-                            self.last_progress = Some((source.clone(), message.clone()));
-                        } else if self.error.is_none() {
-                            self.error = Some((
-                                source.clone(),
-                                kind.clone(),
-                                detail.clone(),
-                                message.clone(),
-                            ));
-                        }
-                    }
-                    _ => {}
-                }
+                self.feed_daemon_event(evt.as_ref());
                 None
             }
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+
+    #[test]
+    fn rate_limit_wait_replaces_initial_poll_progress_label() {
+        let mut polling = Polling::new(vec!["github".into()]);
+        polling.feed_daemon_event(&IpcEvent::GithubRateLimitWait {
+            remaining: 98,
+            limit: 5000,
+            reset_at: Utc.with_ymd_and_hms(2026, 7, 30, 7, 23, 22).unwrap(),
+        });
+
+        assert!(polling.status_label().starts_with("GitHub rate-limited"));
+        assert!(!polling.status_label().contains("Pulling from"));
+        assert!(polling.status_label().contains("98/5000 left"));
     }
 }

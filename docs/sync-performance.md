@@ -16,7 +16,7 @@ To capture a clean, isolated trace without the full TUI, run the
 ignored integration harness against your own account:
 
 ```sh
-# token resolves from $GH_TOKEN, $GITHUB_TOKEN, or `gh auth token`
+# token resolves from $LAZYBOX_GITHUB_TOKEN, $GH_TOKEN, $GITHUB_TOKEN, or `gh auth token`
 LAZYBOX_WATCH=owner/repo-a,owner/repo-b \
   cargo test -p lazybox-gh --test sync_trace capture_fetch_all_prs_trace \
     -- --ignored --nocapture

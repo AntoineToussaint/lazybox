@@ -468,6 +468,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::TerminalsRebadged { .. }
                 | IpcEvent::AgentState { .. }
                 | IpcEvent::ProviderError { .. }
+                | IpcEvent::GithubRateLimitWait { .. }
                 | IpcEvent::PollCompleted { .. }
                 | IpcEvent::PollProgress { .. }
                 | IpcEvent::Notification { .. }
@@ -1051,6 +1052,25 @@ impl<T: TerminalAdapter> Model<T> {
         if let Some(p) = self.status.polling.as_mut() {
             p.feed_daemon_event(&event);
         }
+        if let IpcEvent::GithubRateLimitWait {
+            remaining,
+            limit,
+            reset_at,
+        } = &event
+        {
+            self.status
+                .note_github_rate_limit_wait(*remaining, *limit, *reset_at);
+            self.pending_refresh_ack = false;
+            self.redraw = true;
+        } else if let IpcEvent::ProviderError { source, .. } = &event {
+            self.status.note_poll_failed(source);
+        } else if matches!(
+            &event,
+            IpcEvent::PollProgress { source, .. } | IpcEvent::PollCompleted { source, .. }
+                if source == "github"
+        ) {
+            self.status.github_rate_limit_wait = None;
+        }
         // Durable sync-attempt log feeding the sync-status window.
         // Recorded for every cycle regardless of whether the polling
         // modal / footer spinner is up — those are transient, this is
@@ -1060,6 +1080,15 @@ impl<T: TerminalAdapter> Model<T> {
         match &event {
             IpcEvent::PollCompleted { source, count } => {
                 self.status.sync.note_completed(source, *count);
+            }
+            IpcEvent::GithubRateLimitWait {
+                remaining,
+                limit,
+                reset_at,
+            } => {
+                self.status
+                    .sync
+                    .note_rate_limited(*remaining, *limit, *reset_at);
             }
             IpcEvent::ProviderError {
                 source,
@@ -1325,6 +1354,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::TerminalFocusRequested { .. }
                 | IpcEvent::TerminalsRebadged { .. }
                 | IpcEvent::AgentState { .. }
+                | IpcEvent::GithubRateLimitWait { .. }
                 | IpcEvent::Notification { .. }
                 | IpcEvent::CleanWorktreesCompleted { .. }
                 | IpcEvent::WorktreesInspected { .. }

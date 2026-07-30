@@ -190,7 +190,7 @@ pub(crate) fn on_workspace_committed(
     changed: bool,
 ) {
     let ticket = {
-        let mut memory = config.auto_merge.lock();
+        let mut memory = config.poll.auto_merge.lock();
         plan(&mut memory, key, signal, changed)
     };
     let Some(ticket) = ticket else {
@@ -265,7 +265,7 @@ async fn run_real_attempt_with_resolver<F, Fut>(
 {
     let key = &ticket.workspace_key;
     let settle = |latch: Option<Latch>| {
-        config.auto_merge.lock().settle(key, latch);
+        config.poll.auto_merge.lock().settle(key, latch);
     };
     let Some(ws) = load_workspace(config, key) else {
         settle(None);
@@ -294,6 +294,7 @@ async fn run_real_attempt_with_resolver<F, Fut>(
             );
             let prior = ticket.skip_if_head.clone();
             config
+                .poll
                 .auto_merge
                 .lock()
                 .settle(&ticket.workspace_key, Some(Latch::Blocked(prior)));
@@ -310,7 +311,7 @@ async fn run_real_attempt_with_resolver<F, Fut>(
 pub async fn run_attempt<B: MergeBackend>(config: &ServerConfig, ticket: AttemptPlan, backend: &B) {
     let key = &ticket.workspace_key;
     let settle = |latch: Option<Latch>| {
-        config.auto_merge.lock().settle(key, latch);
+        config.poll.auto_merge.lock().settle(key, latch);
     };
 
     let Some(ws) = load_workspace(config, key) else {
@@ -402,7 +403,7 @@ pub async fn run_attempt<B: MergeBackend>(config: &ServerConfig, ticket: Attempt
                 workspace_key: key.clone(),
                 pr_label,
             });
-            config.wake_poll(true);
+            config.poll.wake(true);
         }
         Err(e) => {
             tracing::warn!(workspace = %key, "auto-merge failed: {e}");
@@ -666,7 +667,7 @@ mod tests {
             "the merge must be pinned to the head the fresh fetch verified"
         );
         assert_eq!(
-            config.auto_merge.lock().latch(&ws.key),
+            config.poll.auto_merge.lock().latch(&ws.key),
             Some(&Latch::Done(Some("abc123".into())))
         );
         let evt = rx.try_recv().expect("PrMerged must be broadcast");
@@ -694,7 +695,7 @@ mod tests {
 
         assert!(backend.merges.lock().is_empty(), "must not merge");
         assert_eq!(
-            config.auto_merge.lock().latch(&ws.key),
+            config.poll.auto_merge.lock().latch(&ws.key),
             Some(&Latch::Blocked(Some("abc123".into())))
         );
         let evt = rx.try_recv().expect("stand-down notice");
@@ -734,7 +735,7 @@ mod tests {
             "an unchanged head must not merge twice"
         );
         assert_eq!(
-            config.auto_merge.lock().latch(&ws.key),
+            config.poll.auto_merge.lock().latch(&ws.key),
             Some(&Latch::Blocked(Some("abc123".into())))
         );
         // Silent apart from the fresh-state commit's own broadcasts
@@ -768,7 +769,7 @@ mod tests {
             &[Some("def456".to_string())]
         );
         assert_eq!(
-            config.auto_merge.lock().latch(&ws.key),
+            config.poll.auto_merge.lock().latch(&ws.key),
             Some(&Latch::Done(Some("def456".into())))
         );
     }
@@ -790,7 +791,7 @@ mod tests {
         run_attempt(&config, ticket(&ws, None), &backend).await;
 
         assert_eq!(
-            config.auto_merge.lock().latch(&ws.key),
+            config.poll.auto_merge.lock().latch(&ws.key),
             Some(&Latch::Blocked(Some("abc123".into())))
         );
         let evt = rx.try_recv().expect("PrMergeFailed");
@@ -814,7 +815,7 @@ mod tests {
         run_attempt(&config, ticket(&ws, None), &backend).await;
 
         assert!(backend.merges.lock().is_empty());
-        assert_eq!(config.auto_merge.lock().latch(&ws.key), None);
+        assert_eq!(config.poll.auto_merge.lock().latch(&ws.key), None);
     }
 
     /// A transient fetch failure restores the pre-attempt latch so a
@@ -831,14 +832,14 @@ mod tests {
 
         run_attempt(&config, ticket(&ws, None), &backend).await;
         assert_eq!(
-            config.auto_merge.lock().latch(&ws.key),
+            config.poll.auto_merge.lock().latch(&ws.key),
             None,
             "a first attempt that never fetched releases for a clean retry"
         );
 
         run_attempt(&config, ticket(&ws, Some("abc123")), &backend).await;
         assert_eq!(
-            config.auto_merge.lock().latch(&ws.key),
+            config.poll.auto_merge.lock().latch(&ws.key),
             Some(&Latch::Blocked(Some("abc123".into()))),
             "a re-probe that never fetched keeps its blocked head"
         );
@@ -862,11 +863,11 @@ mod tests {
         super::super::upsert(&config, task.clone()).await;
         let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
         crate::workspace::set_auto_merge_on_green(&config, &key, true).await;
-        assert_eq!(config.auto_merge.lock().attempts_started, 0);
+        assert_eq!(config.poll.auto_merge.lock().attempts_started, 0);
 
         // A re-poll of the armed green workspace dispatches once …
         super::super::upsert(&config, task.clone()).await;
-        assert_eq!(config.auto_merge.lock().attempts_started, 1);
+        assert_eq!(config.poll.auto_merge.lock().attempts_started, 1);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -874,8 +875,13 @@ mod tests {
         let mut ws = armed_ws("o/r#1");
         ws.pr.as_mut().unwrap().repo = None;
         let config = config_with(&ws);
-        let ticket = plan(&mut config.auto_merge.lock(), &ws.key, Signal::Fire, true)
-            .expect("armed green workspace dispatches");
+        let ticket = plan(
+            &mut config.poll.auto_merge.lock(),
+            &ws.key,
+            Signal::Fire,
+            true,
+        )
+        .expect("armed green workspace dispatches");
         let resolver_called = std::cell::Cell::new(false);
 
         run_real_attempt_with_resolver(&config, ticket, || {
@@ -886,7 +892,7 @@ mod tests {
 
         assert!(!resolver_called.get(), "credential lookup must not run");
         assert!(matches!(
-            config.auto_merge.lock().latch(&ws.key),
+            config.poll.auto_merge.lock().latch(&ws.key),
             Some(Latch::Blocked(_))
         ));
     }

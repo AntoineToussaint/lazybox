@@ -114,17 +114,14 @@ async fn client_kv_recorded_by_one_connection_replays_to_another() {
         .expect("spawn shell");
     let terminal_id = TerminalId(611);
     config
-        .terminals
-        .lock()
-        .await
-        .insert(terminal_id, backend_key.clone());
-    config.terminal_meta.lock().await.insert(
-        terminal_id,
-        (
+        .terminal
+        .register_terminal(
+            terminal_id,
+            backend_key.clone(),
             lazybox_core::SessionKey::new("github:o/r#611"),
             TerminalKind::Shell,
-        ),
-    );
+        )
+        .await;
     let server_config = config.clone();
     let (mut server_client, server_conn) = channel::pair();
     tokio::spawn(async move {
@@ -954,10 +951,14 @@ async fn a_wedged_terminal_write_does_not_block_the_bus_or_other_terminals() {
     let (config, mock) = ServerConfig::in_memory_with_mock();
     let key_a = mock.spawn(&[], None, &[], "a").await.expect("spawn a");
     let key_b = mock.spawn(&[], None, &[], "b").await.expect("spawn b");
-    config.terminals.lock().await.extend([
-        (TerminalId(41), key_a.clone()),
-        (TerminalId(42), key_b.clone()),
-    ]);
+    config
+        .terminal
+        .bind_backend(TerminalId(41), key_a.clone())
+        .await;
+    config
+        .terminal
+        .bind_backend(TerminalId(42), key_b.clone())
+        .await;
     mock.wedge_write(&key_a).await;
 
     let bus = config.bus.clone();
@@ -1035,10 +1036,9 @@ async fn terminal_write_bursts_are_coalesced_without_reordering_bytes() {
     let (config, mock) = ServerConfig::in_memory_with_mock();
     let key = mock.spawn(&[], None, &[], "burst").await.expect("spawn");
     config
-        .terminals
-        .lock()
-        .await
-        .insert(TerminalId(51), key.clone());
+        .terminal
+        .bind_backend(TerminalId(51), key.clone())
+        .await;
     mock.set_write_delay(&key, Duration::from_millis(75)).await;
 
     let (client, server) = channel::pair();
@@ -1113,10 +1113,9 @@ async fn terminal_resize_storm_collapses_to_latest_before_next_write() {
         .await
         .expect("spawn");
     config
-        .terminals
-        .lock()
-        .await
-        .insert(TerminalId(52), key.clone());
+        .terminal
+        .bind_backend(TerminalId(52), key.clone())
+        .await;
     // Hold the worker in its first command while the resize storm queues.
     mock.set_write_delay(&key, Duration::from_millis(75)).await;
 
@@ -1196,10 +1195,14 @@ async fn a_wedged_terminal_resize_does_not_block_other_terminals() {
         .spawn(&[], None, &[], "resize-b")
         .await
         .expect("spawn b");
-    config.terminals.lock().await.extend([
-        (TerminalId(53), key_a.clone()),
-        (TerminalId(54), key_b.clone()),
-    ]);
+    config
+        .terminal
+        .bind_backend(TerminalId(53), key_a.clone())
+        .await;
+    config
+        .terminal
+        .bind_backend(TerminalId(54), key_b.clone())
+        .await;
     mock.wedge_resize(&key_a).await;
 
     let (client, server) = channel::pair();
@@ -1252,10 +1255,9 @@ async fn failed_terminal_close_keeps_the_io_lane_alive() {
         .await
         .expect("spawn");
     config
-        .terminals
-        .lock()
-        .await
-        .insert(TerminalId(55), key.clone());
+        .terminal
+        .bind_backend(TerminalId(55), key.clone())
+        .await;
     mock.fail_kill(&key, "backend transport timed out").await;
 
     let (client, server) = channel::pair();
@@ -1302,10 +1304,9 @@ async fn composing_burst_persists_the_latest_ordered_revision() {
     let (config, mock) = ServerConfig::in_memory_with_mock();
     let key = mock.spawn(&[], None, &[], "draft").await.expect("spawn");
     config
-        .terminals
-        .lock()
-        .await
-        .insert(TerminalId(61), key.clone());
+        .terminal
+        .bind_backend(TerminalId(61), key.clone())
+        .await;
     let (client, server) = channel::pair();
     let handle = tokio::spawn({
         let config = config.clone();
@@ -1348,10 +1349,9 @@ async fn multiple_clients_never_write_one_terminal_concurrently() {
         .await
         .expect("spawn");
     config
-        .terminals
-        .lock()
-        .await
-        .insert(TerminalId(71), key.clone());
+        .terminal
+        .bind_backend(TerminalId(71), key.clone())
+        .await;
     mock.set_write_delay(&key, Duration::from_millis(100)).await;
 
     let (client_a, server_a) = channel::pair();
@@ -1416,17 +1416,14 @@ async fn prompt_injection_cannot_overtake_prior_terminal_input() {
         .expect("spawn");
     let terminal_id = TerminalId(72);
     config
-        .terminals
-        .lock()
-        .await
-        .insert(terminal_id, key.clone());
-    config.terminal_meta.lock().await.insert(
-        terminal_id,
-        (
+        .terminal
+        .register_terminal(
+            terminal_id,
+            key.clone(),
             lazybox_core::SessionKey::new("inject-order"),
             TerminalKind::Agent("claude".into()),
-        ),
-    );
+        )
+        .await;
     mock.set_write_delay(&key, Duration::from_millis(75)).await;
 
     let (client, server) = channel::pair();
@@ -1487,14 +1484,14 @@ async fn injected_paste_and_submit_are_atomic_against_user_input() {
     let terminal_id = TerminalId(73);
     let session_key = lazybox_core::SessionKey::new("inject-atomic");
     config
-        .terminals
-        .lock()
-        .await
-        .insert(terminal_id, key.clone());
-    config.terminal_meta.lock().await.insert(
-        terminal_id,
-        (session_key.clone(), TerminalKind::Agent("claude".into())),
-    );
+        .terminal
+        .register_terminal(
+            terminal_id,
+            key.clone(),
+            session_key.clone(),
+            TerminalKind::Agent("claude".into()),
+        )
+        .await;
     mock.set_write_delay(&key, Duration::from_millis(75)).await;
 
     let (client, server) = channel::pair();

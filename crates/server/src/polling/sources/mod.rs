@@ -1001,7 +1001,7 @@ async fn has_live_agent_session(
     config: &ServerConfig,
     session_key: &lazybox_core::SessionKey,
 ) -> bool {
-    let terminal_meta = config.terminal_meta.lock().await;
+    let terminal_meta = config.terminal.terminal_meta.lock().await;
     terminal_meta.values().any(|(sk, kind)| {
         sk.as_str() == session_key.as_str() && matches!(kind, lazybox_ipc::TerminalKind::Agent(_))
     })
@@ -1862,7 +1862,7 @@ mod auto_spawn_dedup_tests {
             "no terminals → no live session (spawn failed) → label may retry"
         );
 
-        config.terminal_meta.lock().await.insert(
+        config.terminal.terminal_meta.lock().await.insert(
             lazybox_ipc::TerminalId(1),
             (
                 sk.clone(),
@@ -1873,7 +1873,7 @@ mod auto_spawn_dedup_tests {
 
         // A shell on a different workspace doesn't count as an agent.
         let sk2 = lazybox_core::SessionKey::new("github:o/r#10");
-        config.terminal_meta.lock().await.insert(
+        config.terminal.terminal_meta.lock().await.insert(
             lazybox_ipc::TerminalId(2),
             (sk2.clone(), lazybox_ipc::TerminalKind::Shell),
         );

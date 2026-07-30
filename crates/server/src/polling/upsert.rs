@@ -497,7 +497,7 @@ async fn prepare_upsert(
         } else {
             observation_window_ms
         };
-        let tier = config.poll_engagement.read().tier_for(key);
+        let tier = config.poll.engagement_tier_for(key);
         if let Some(age_ms) = age_ms {
             match tier {
                 EngagementTier::Hot => config.event_metrics.record_hot_sync_latency(age_ms),
@@ -810,8 +810,8 @@ pub(super) async fn commit_workspace_move(
     let terminal_guards = if terminal_moves.is_empty() {
         None
     } else {
-        let terminals = config.terminals.clone().lock_owned().await;
-        let terminal_meta = config.terminal_meta.clone().lock_owned().await;
+        let terminals = config.terminal.terminals.clone().lock_owned().await;
+        let terminal_meta = config.terminal.terminal_meta.clone().lock_owned().await;
         Some((terminals, terminal_meta))
     };
     let config_owned = config.clone();

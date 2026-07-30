@@ -394,7 +394,13 @@ async fn resync_replay(
     terminal_id: TerminalId,
     required_seq: u64,
 ) -> Option<crate::backend::ReplaySnapshot> {
-    let key = config.terminals.lock().await.get(&terminal_id).cloned();
+    let key = config
+        .terminal
+        .terminals
+        .lock()
+        .await
+        .get(&terminal_id)
+        .cloned();
     let Some(key) = key else {
         return None;
     };
@@ -530,7 +536,12 @@ mod tests {
             mock.emit(&key, bytes).await;
         }
         let tid = TerminalId(1);
-        config.terminals.lock().await.insert(tid, key.clone());
+        config
+            .terminal
+            .terminals
+            .lock()
+            .await
+            .insert(tid, key.clone());
 
         // Tiny channel so a short flood forces overflow.
         let (client_tx, client_rx) = mpsc::channel(2);
@@ -616,7 +627,12 @@ mod tests {
             .expect("spawn");
         mock.emit(&key, b"RING").await; // ring last_seq → 1
         let tid = TerminalId(1);
-        config.terminals.lock().await.insert(tid, key.clone());
+        config
+            .terminal
+            .terminals
+            .lock()
+            .await
+            .insert(tid, key.clone());
 
         let mut state = ForwardState::new(config.event_metrics.clone());
         // A dropped chunk schedules the resync; materializing it records
@@ -682,7 +698,12 @@ mod tests {
         // incomplete, exactly as a >2 MiB agent's ring does.
         mock.mark_snapshot_incomplete(&key).await;
         let tid = TerminalId(1);
-        config.terminals.lock().await.insert(tid, key.clone());
+        config
+            .terminal
+            .terminals
+            .lock()
+            .await
+            .insert(tid, key.clone());
 
         let mut state = ForwardState::new(config.event_metrics.clone());
         let (tx, mut rx) = mpsc::channel(8);
@@ -717,7 +738,12 @@ mod tests {
         mock.emit(&key, b"A").await;
         mock.fail_next_snapshots(&key, 1).await;
         let tid = TerminalId(1);
-        config.terminals.lock().await.insert(tid, key.clone());
+        config
+            .terminal
+            .terminals
+            .lock()
+            .await
+            .insert(tid, key.clone());
 
         let mut state = ForwardState::new(config.event_metrics.clone());
         let (tx, mut rx) = mpsc::channel(8);

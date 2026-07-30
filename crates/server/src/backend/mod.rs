@@ -20,7 +20,7 @@
 //! Each backend assigns a stable string key per session (e.g. tmux
 //! uses the session name `lazybox-claude-…`). The dispatcher allocates
 //! a numeric `TerminalId` for the wire, and keeps a
-//! `(TerminalId ↔ backend_key)` map in `ServerConfig.terminals`. On
+//! `(TerminalId ↔ backend_key)` map in `ServerConfig.terminal.terminals`. On
 //! restart the server reads `backend.list()` to re-bind to existing
 //! sessions and re-allocates fresh `TerminalId`s for them.
 

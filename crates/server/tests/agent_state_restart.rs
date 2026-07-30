@@ -42,19 +42,18 @@ async fn seed_persisted_state(
     let config = ServerConfig::with_store_and_backend(store, backend.as_backend());
     let terminal_id = TerminalId(10_000 + ordinal);
     config
-        .terminals
-        .lock()
-        .await
-        .insert(terminal_id, backend_key.clone());
-    config.terminal_meta.lock().await.insert(
-        terminal_id,
-        (session_key.clone(), TerminalKind::Agent("codex".into())),
-    );
+        .terminal
+        .register_terminal(
+            terminal_id,
+            backend_key.clone(),
+            session_key.clone(),
+            TerminalKind::Agent("codex".into()),
+        )
+        .await;
     config
-        .agent_state_generations
-        .lock()
-        .await
-        .insert(terminal_id, terminal_id.0);
+        .terminal
+        .record_agent_state_generation(terminal_id, terminal_id.0)
+        .await;
 
     handle_ingest_hook(
         &config,
@@ -88,7 +87,7 @@ async fn seed_persisted_state(
         }
     }
     assert_eq!(
-        config.agent_state_for(terminal_id).await,
+        config.terminal.agent_state_for(terminal_id).await,
         Some(state),
         "seed transition must commit before restart"
     );
@@ -131,15 +130,15 @@ async fn sqlite_restart_hydrates_working_done_and_input_needed_before_snapshot()
             backend.as_backend(),
         );
         recover_sessions(&restarted).await;
-        let terminal_id = *restarted
-            .terminals
-            .lock()
+        let terminal_id = restarted
+            .terminal
+            .terminal_ids()
             .await
-            .keys()
+            .into_iter()
             .next()
             .expect("recovered terminal");
         assert_eq!(
-            restarted.agent_state_for(terminal_id).await,
+            restarted.terminal.agent_state_for(terminal_id).await,
             Some(state),
             "{state:?} must hydrate into the daemon cache"
         );
@@ -182,7 +181,7 @@ async fn sqlite_restart_hydrates_working_done_and_input_needed_before_snapshot()
             )
             .await;
             assert_eq!(
-                restarted.agent_state_for(terminal_id).await,
+                restarted.terminal.agent_state_for(terminal_id).await,
                 Some(state),
                 "{state:?} must reject a restart-era Idle candidate"
             );
@@ -359,7 +358,7 @@ async fn recovered_dead_process_exits_and_fresh_spawn_has_no_old_state() {
     assert_eq!(exited, AgentState::Exited { code: Some(9) });
 
     tokio::time::timeout(Duration::from_secs(2), async {
-        while !restarted.terminals.lock().await.is_empty() {
+        while !restarted.terminal.is_empty().await {
             tokio::task::yield_now().await;
         }
     })
@@ -384,6 +383,7 @@ async fn recovered_dead_process_exits_and_fresh_spawn_has_no_old_state() {
         .expect("fresh terminal snapshot");
     assert_ne!(
         restarted
+            .terminal
             .backend_key_for(fresh.terminal_id)
             .await
             .as_deref(),

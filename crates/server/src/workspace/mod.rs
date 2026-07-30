@@ -628,7 +628,7 @@ pub async fn delete_workspace_with_archive(
         .deleted_workspaces
         .lock()
         .insert(key.as_str().to_string());
-    crate::spawn_handler::await_inflight_spawns(config, key.as_str()).await;
+    crate::spawn_handler::await_inflight_spawns(&config.spawn, key.as_str()).await;
     let _workspace_guard = config.lock_workspace(key.as_str()).await;
     let reclaimed = delete_workspace_internal(config, key, archive).await;
     // The tombstone must not outlive the delete it guarded: a
@@ -671,14 +671,14 @@ pub(crate) async fn delete_workspace_internal(
     // `lazybox-{repo}-{kind}-{pid}-{n}`); the meta map is. Locks are
     // taken + dropped before async backend.kill() calls.
     let to_kill_ids: Vec<lazybox_ipc::TerminalId> = {
-        let meta = config.terminal_meta.lock().await;
+        let meta = config.terminal.terminal_meta.lock().await;
         meta.iter()
             .filter(|(_, (sk, _))| sk.as_str() == key_str)
             .map(|(tid, _)| *tid)
             .collect()
     };
     let to_kill: Vec<(lazybox_ipc::TerminalId, String)> = {
-        let terminals = config.terminals.lock().await;
+        let terminals = config.terminal.terminals.lock().await;
         to_kill_ids
             .into_iter()
             .filter_map(|tid| terminals.get(&tid).map(|k| (tid, k.clone())))

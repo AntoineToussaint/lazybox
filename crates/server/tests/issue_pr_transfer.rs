@@ -459,12 +459,13 @@ async fn run_case(case: Case) {
     }
 
     // (c) every live terminal is re-keyed to the PR.
-    {
-        let meta = config.terminal_meta.lock().await;
-        for tid in &terminal_ids {
-            let (sk, _) = meta.get(tid).expect("terminal still tracked");
-            assert_eq!(sk, &pr_sk, "terminal_meta must rebadge onto the PR");
-        }
+    for tid in &terminal_ids {
+        let (sk, _) = config
+            .terminal
+            .terminal_meta_for(*tid)
+            .await
+            .expect("terminal still tracked");
+        assert_eq!(sk, pr_sk, "terminal_meta must rebadge onto the PR");
     }
 
     // The store: issue row gone, PR row carries the session at its
@@ -497,19 +498,17 @@ async fn run_case(case: Case) {
     let config2 =
         ServerConfig::with_store_and_backend(config.store.clone(), config.backend.clone());
     lazybox_server::spawn_handler::recover_sessions(&config2).await;
-    {
-        let meta2 = config2.terminal_meta.lock().await;
+    let recovered = config2.terminal.terminal_metadata().await;
+    assert_eq!(
+        recovered.len(),
+        terminal_ids.len(),
+        "every surviving backend session must be recovered",
+    );
+    for (_, sk, _) in recovered {
         assert_eq!(
-            meta2.len(),
-            terminal_ids.len(),
-            "every surviving backend session must be recovered",
+            sk, pr_sk,
+            "recovery must reattach the session to the PR workspace",
         );
-        for (sk, _) in meta2.values() {
-            assert_eq!(
-                sk, &pr_sk,
-                "recovery must reattach the session to the PR workspace",
-            );
-        }
     }
     for key in &backend_keys {
         let sub = config2.backend.subscribe(key).await.unwrap();
@@ -700,12 +699,13 @@ async fn collapse_with_distinct_issue_and_pr_worktrees_keeps_both_sessions() {
             2,
             "neither backend session may be killed by the collapse",
         );
-        {
-            let meta = config.terminal_meta.lock().await;
-            for tid in [issue_tid, pr_tid] {
-                let (sk, _) = meta.get(&tid).expect("terminal still tracked");
-                assert_eq!(sk, &pr_sk);
-            }
+        for tid in [issue_tid, pr_tid] {
+            let (sk, _) = config
+                .terminal
+                .terminal_meta_for(tid)
+                .await
+                .expect("terminal still tracked");
+            assert_eq!(sk, pr_sk);
         }
         let pr_ws = load_workspace(&config, &pr_key).expect("PR row present");
         assert_eq!(

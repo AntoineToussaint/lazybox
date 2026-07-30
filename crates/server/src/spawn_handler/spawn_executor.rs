@@ -146,39 +146,25 @@ pub(super) async fn execute_spawn_plan(
         .as_ref()
         .map(|durability| durability.generation);
 
-    if let Some(sid) = owning_session {
-        config
-            .terminal_sessions
-            .lock()
-            .await
-            .insert(terminal_id, sid);
-    }
-    if skip_permissions {
-        config
-            .no_permission_terminals
-            .lock()
-            .await
-            .insert(terminal_id);
-    }
-    if landed_on_main {
-        config.on_main_terminals.lock().await.insert(terminal_id);
-    }
-    if let Some(label) = &model_label {
-        config
-            .terminal_models
-            .lock()
-            .await
-            .insert(terminal_id, label.clone());
-    }
+    config
+        .terminal
+        .record_spawn_attributes(
+            terminal_id,
+            owning_session,
+            skip_permissions,
+            landed_on_main,
+            model_label.as_deref(),
+        )
+        .await;
     {
-        let mut terminals = config.terminals.lock().await;
-        let mut terminal_meta = config.terminal_meta.lock().await;
-        let mut agent_state_generations = config.agent_state_generations.lock().await;
-        terminal_meta.insert(terminal_id, (session_key.clone(), kind.clone()));
-        terminals.insert(terminal_id, backend_key.clone());
-        if let Some(generation) = agent_state_generation {
-            agent_state_generations.insert(terminal_id, generation);
-        }
+        let mut registration = config.terminal.lock_registration().await;
+        registration.register(
+            terminal_id,
+            backend_key.clone(),
+            session_key.clone(),
+            kind.clone(),
+            agent_state_generation,
+        );
         persist_terminal_meta(config, &backend_key, &session_key, &kind).await;
         if let Some(agent) = agent.as_deref() {
             persist_pty_launch_generation(config, &backend_key, agent.pty_launch_generation())

@@ -319,7 +319,7 @@ pub async fn handle_merge_pr(config: &ServerConfig, workspace_key: WorkspaceKey)
     }
     // Wake the poll loop so MERGED state lands in <5s instead of
     // waiting out the full interval.
-    config.wake_poll(true);
+    config.poll.wake(true);
 
     // Fire the workspace-cleanup prompt directly off this successful
     // merge (issue #573). A merged PR drops out of the incremental
@@ -390,7 +390,7 @@ pub async fn handle_update_branch(config: &ServerConfig, workspace_key: Workspac
     });
     // Wake the poll loop so the refreshed state lands in <5s instead of
     // waiting out the full interval.
-    config.wake_poll(true);
+    config.poll.wake(true);
 }
 
 /// Handle `Command::CloseIssue`: load the workspace, recover the
@@ -448,7 +448,7 @@ pub async fn handle_close_issue(config: &ServerConfig, workspace_key: WorkspaceK
     });
     // Wake the poll loop so CLOSED state (and the removal prompt) lands
     // in <5s instead of waiting out the full interval.
-    config.wake_poll(true);
+    config.poll.wake(true);
 
     // Route this successful close directly into the terminal-cleanup
     // path (issue #573). A self-initiated close won't necessarily
@@ -586,7 +586,7 @@ pub async fn handle_delete_or_close(config: &ServerConfig, workspace_key: Worksp
     }
     // Wake the poll loop so the vanished/closed state (and the rescope
     // removal) lands in <5s instead of waiting out the full interval.
-    config.wake_poll(true);
+    config.poll.wake(true);
 }
 
 /// Handle `Command::RequestReviewers`: add the given GitHub logins
@@ -631,7 +631,7 @@ pub async fn handle_request_reviewers(
         tracing::info!("requested reviewers {logins:?} on workspace {workspace_key}");
         // Wake the poll loop so the reviewer chip on the row
         // updates immediately. Without this the sidebar lags 60s.
-        config.wake_poll(true);
+        config.poll.wake(true);
     }
 }
 
@@ -671,7 +671,7 @@ pub async fn handle_add_assignees(
         emit_err(&format!("add assignees failed: {e}"));
     } else {
         tracing::info!("added assignees {logins:?} on workspace {workspace_key}");
-        config.wake_poll(true);
+        config.poll.wake(true);
     }
 }
 
@@ -713,7 +713,7 @@ pub async fn handle_set_assignees(
     // Wake the poll loop so the task row picks up the new assignee
     // set immediately — without this the row stays stale for up to
     // a full interval (60s default).
-    config.wake_poll(true);
+    config.poll.wake(true);
 }
 
 /// Handle `Command::SetLabels`: replace the workspace's label set
@@ -749,7 +749,7 @@ pub async fn handle_set_labels(
         return;
     }
     tracing::info!("set labels to {names:?} on workspace {workspace_key}");
-    config.wake_poll(true);
+    config.poll.wake(true);
 }
 
 /// Handle `Command::FetchRepoLabels`: pull the workspace repo's full
@@ -804,7 +804,7 @@ pub async fn handle_fetch_repo_labels(config: &ServerConfig, workspace_key: Work
 /// never contends with a running poll tick. `None` means credentials
 /// or client init failed — the caller skips the user-triggered fetch.
 pub(super) async fn resolve_gh_client(config: &ServerConfig) -> Option<GhClient> {
-    if let Some(client) = config.gh_client_cache.lock().clone() {
+    if let Some(client) = config.poll.cached_gh_client() {
         return Some(client);
     }
     let cred = match lazybox_gh::credential_chain()
@@ -819,7 +819,7 @@ pub(super) async fn resolve_gh_client(config: &ServerConfig) -> Option<GhClient>
     };
     match GhClient::from_credential(cred).await {
         Ok(client) => {
-            *config.gh_client_cache.lock() = Some(client.clone());
+            config.poll.cache_gh_client(client.clone());
             Some(client)
         }
         Err(e) => {
@@ -1171,7 +1171,7 @@ pub async fn handle_clean_worktrees(config: &ServerConfig) {
     // also honor `terminal_meta`'s workspace-key view — see
     // `live_workspace_keys`.
     let live_sessions: std::collections::HashSet<lazybox_core::SessionId> = {
-        let map = config.terminal_sessions.lock().await;
+        let map = config.terminal.terminal_sessions.lock().await;
         map.values().copied().collect()
     };
     let live_keys = live_workspace_keys(config).await;
@@ -1615,7 +1615,7 @@ pub(crate) async fn prompt_merged_pr_removal_with(
     }
 
     {
-        let mut prompts = config.removal_prompts.lock().await;
+        let mut prompts = config.poll.removal_prompts.lock().await;
         let now = std::time::Instant::now();
         let stale = prompts
             .prompted
@@ -1685,6 +1685,7 @@ pub(crate) async fn remove_merged_workspace_with(
     // failed prerequisite it must remain so the level-triggered prompt can
     // offer the destructive action again.
     config
+        .poll
         .removal_prompts
         .lock()
         .await
@@ -1748,6 +1749,7 @@ async fn workspace_local_work(
 /// reopens before its removal was acted on.
 pub(crate) async fn cancel_pending_removal(config: &ServerConfig, key: &WorkspaceKey) {
     config
+        .poll
         .removal_prompts
         .lock()
         .await
@@ -1761,7 +1763,7 @@ pub(crate) async fn cancel_pending_removal(config: &ServerConfig, key: &Workspac
 /// Count live terminals (PTY/tmux sessions) bound to a workspace key,
 /// via the authoritative `terminal_meta` map.
 pub(super) async fn count_live_terminals(config: &ServerConfig, key: &WorkspaceKey) -> usize {
-    let meta = config.terminal_meta.lock().await;
+    let meta = config.terminal.terminal_meta.lock().await;
     meta.values()
         .filter(|(sk, _)| sk.as_str() == key.as_str())
         .count()
@@ -1777,7 +1779,7 @@ pub(super) async fn count_live_terminals(config: &ServerConfig, key: &WorkspaceK
 /// key-level set is coarser (it pins every session in the workspace)
 /// but errs on the safe side.
 async fn live_workspace_keys(config: &ServerConfig) -> std::collections::HashSet<String> {
-    let meta = config.terminal_meta.lock().await;
+    let meta = config.terminal.terminal_meta.lock().await;
     meta.values()
         .map(|(sk, _)| sk.as_str().to_string())
         .collect()
@@ -1814,7 +1816,7 @@ pub(crate) async fn cleanup_merged_worktrees_with(
     // terminals recovered after a daemon restart (which never
     // repopulate `terminal_sessions`) still count as live.
     let live: std::collections::HashSet<lazybox_core::SessionId> = {
-        let map = config.terminal_sessions.lock().await;
+        let map = config.terminal.terminal_sessions.lock().await;
         map.values().copied().collect()
     };
     let live_keys = live_workspace_keys(config).await;
@@ -1926,7 +1928,7 @@ pub(crate) async fn reap_safe_workspace_worktrees_with(
     // spawn-time session ids plus the recovered-terminal workspace
     // keys from `terminal_meta`.
     let live: std::collections::HashSet<lazybox_core::SessionId> = {
-        let map = config.terminal_sessions.lock().await;
+        let map = config.terminal.terminal_sessions.lock().await;
         map.values().copied().collect()
     };
     let live_keys = live_workspace_keys(config).await;
@@ -2056,7 +2058,7 @@ pub async fn prefetch_top_pr_details(
 
     // Reuse the persistent GhClient cache. If absent (linear-only
     // setup, or auth failed earlier), prefetch is a no-op.
-    let Some(client) = config.gh_client_cache.lock().clone() else {
+    let Some(client) = config.poll.cached_gh_client() else {
         return;
     };
 
@@ -2064,7 +2066,7 @@ pub async fn prefetch_top_pr_details(
     // PR. `polled` is the key list from the just-completed tick; load
     // each via the store path the rest of the handler module uses so
     // the scoring sees the post-upsert state.
-    let engagement = config.poll_engagement.read().snapshot();
+    let engagement = config.poll.engagement_snapshot();
     let mut scored: Vec<(i32, String, WorkspaceKey)> = Vec::new();
     let mut seen_node_ids = std::collections::HashSet::new();
     for key in polled {
@@ -3106,7 +3108,7 @@ mod inspect_tests {
         let config = fresh_config(store);
         // Recovered terminal: terminal_meta only, no terminal_sessions.
         let session_key: lazybox_core::SessionKey = (&key).into();
-        config.terminal_meta.lock().await.insert(
+        config.terminal.terminal_meta.lock().await.insert(
             lazybox_ipc::TerminalId(1),
             (session_key, lazybox_ipc::TerminalKind::Shell),
         );
@@ -3181,7 +3183,7 @@ mod inspect_tests {
 
         let config = fresh_config(store);
         let session_key: lazybox_core::SessionKey = (&key).into();
-        config.terminal_meta.lock().await.insert(
+        config.terminal.terminal_meta.lock().await.insert(
             lazybox_ipc::TerminalId(2),
             (session_key, lazybox_ipc::TerminalKind::Shell),
         );
@@ -3207,6 +3209,7 @@ mod inspect_tests {
         let config = fresh_config(store);
         // Pretend a terminal is attached to this session.
         config
+            .terminal
             .terminal_sessions
             .lock()
             .await
@@ -3435,7 +3438,7 @@ mod inspect_tests {
 
         let config = fresh_config(store);
         let session_key: lazybox_core::SessionKey = (&key).into();
-        config.terminal_meta.lock().await.insert(
+        config.terminal.terminal_meta.lock().await.insert(
             lazybox_ipc::TerminalId(1),
             (session_key, lazybox_ipc::TerminalKind::Shell),
         );
@@ -3561,6 +3564,7 @@ mod inspect_tests {
         let key = seed_closed_issue_no_session(&store, 11);
         let config = fresh_config(store);
         config
+            .poll
             .removal_prompts
             .lock()
             .await
@@ -3572,6 +3576,7 @@ mod inspect_tests {
 
         assert!(
             !config
+                .poll
                 .removal_prompts
                 .lock()
                 .await
@@ -3617,7 +3622,7 @@ mod inspect_tests {
             // return None on a host whose uptime is under the interval
             // (fresh CI VM) — dropping the stamp exercises the same
             // "no fresh emit on record" outcome.
-            let mut prompts = config.removal_prompts.lock().await;
+            let mut prompts = config.poll.removal_prompts.lock().await;
             match std::time::Instant::now().checked_sub(crate::polling::REMOVAL_REPROMPT_AFTER) {
                 Some(past) => {
                     prompts.prompted.insert(key.as_str().to_string(), past);

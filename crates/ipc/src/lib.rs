@@ -2072,11 +2072,19 @@ pub enum WorktreeRecovery {
     /// more specific matches but the text smells like network.
     Transient,
     /// B1: the branch is checked out in another *live* worktree; git
-    /// refuses to co-opt it. Session-less safe managed holders are
+    /// refuses to co-opt it. Safe managed holders without a live owner are
     /// reclaimed by the daemon before this reaches the client, so the
     /// remaining cases require joining a real session or freeing an
     /// external checkout.
     BranchHeldLive,
+    /// B1 managed-holder edge: the checkout has no live owner but holds
+    /// local state, is locked, or could not be verified safely, so automatic
+    /// reclaim deliberately stopped.
+    BranchHeldManaged,
+    /// A completed worktree exists at the intended session path but is on
+    /// another branch. Reusing it would silently put the session on the
+    /// wrong work; switching it automatically could discard local work.
+    BranchMismatch,
     /// B3: a leftover directory holds real uncommitted work, so the
     /// provisioner refuses to reuse or overwrite it. Manual `mv` aside.
     DirtyLeftover,
@@ -2110,6 +2118,12 @@ impl WorktreeRecovery {
     /// marker below is an exact substring the daemon emits — see
     /// `crates/git-ops/src/lib.rs` and `spawn_handler.rs`.
     pub fn classify(message: &str) -> Self {
+        if message.contains("automatic reclaim blocked") {
+            return Self::BranchHeldManaged;
+        }
+        if message.contains("not the requested branch") {
+            return Self::BranchMismatch;
+        }
         // B1 — the collision refusal names the holding worktree.
         if message.contains("another live worktree") {
             return Self::BranchHeldLive;
@@ -2170,9 +2184,12 @@ impl WorktreeRecovery {
             | Self::DefaultBranchUnresolved
             | Self::BranchMissing
             | Self::Transient => WorktreeStep::Fetch,
-            Self::BranchHeldLive | Self::DirtyLeftover | Self::Offline | Self::Disk => {
-                WorktreeStep::WorktreeAdd
-            }
+            Self::BranchHeldLive
+            | Self::BranchHeldManaged
+            | Self::BranchMismatch
+            | Self::DirtyLeftover
+            | Self::Offline
+            | Self::Disk => WorktreeStep::WorktreeAdd,
             // Unknown: keep it on whatever row the display is showing —
             // the modal's `fail_current` treats `Fetch` as "use the
             // current frontier", so an unclassified failure doesn't jump.
@@ -2204,6 +2221,13 @@ impl WorktreeRecovery {
             Self::BranchHeldLive => {
                 "Press Esc; join the live session holding this branch, or free the \
                  external checkout."
+            }
+            Self::BranchHeldManaged => {
+                "The managed holder has local state, is locked, or could not be verified. \
+                 Preserve or remove it, then start again."
+            }
+            Self::BranchMismatch => {
+                "This worktree is on another branch. Preserve or switch it, then start again."
             }
             Self::DirtyLeftover => {
                 "A leftover folder holds uncommitted work. Move it aside, then start again."
@@ -2633,6 +2657,18 @@ mod worktree_recovery_tests {
                 WorktreeStep::WorktreeAdd,
             ),
             (
+                "branch 'feat' is held by the non-live managed worktree at /tmp/w — \
+                 automatic reclaim blocked because the checkout contains ignored local files",
+                WorktreeRecovery::BranchHeldManaged,
+                WorktreeStep::WorktreeAdd,
+            ),
+            (
+                "worktree /tmp/w is checked out on branch 'old', not the requested branch \
+                 'feat' — refusing to reuse it",
+                WorktreeRecovery::BranchMismatch,
+                WorktreeStep::WorktreeAdd,
+            ),
+            (
                 "/tmp/w exists but is not a worktree of /bare and holds uncommitted \
                  work — refusing to reuse or overwrite it; move the directory aside and retry",
                 WorktreeRecovery::DirtyLeftover,
@@ -2724,6 +2760,8 @@ mod worktree_recovery_tests {
     fn retryability_splits_manual_from_transient() {
         for c in [
             WorktreeRecovery::BranchHeldLive,
+            WorktreeRecovery::BranchHeldManaged,
+            WorktreeRecovery::BranchMismatch,
             WorktreeRecovery::DirtyLeftover,
             WorktreeRecovery::BranchMissing,
             WorktreeRecovery::BadRepo,

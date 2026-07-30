@@ -1669,6 +1669,7 @@ fn agent_workspace(repo: &str, key: &str, now: DateTime<Utc>) -> Workspace {
         },
         state: lazybox_core::SessionRunState::Active,
         worktree_path: PathBuf::from("/tmp/x"),
+        worktree_branch: None,
         created_at: now,
         last_output_at: None,
         layout: Default::default(),

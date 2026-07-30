@@ -858,6 +858,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn managed_branch_holder_names_the_preservation_recovery() {
+        let mut st = state();
+        st.apply(WorktreeStep::WorktreeAdd, WorktreeStepStatus::Started);
+        st.apply(
+            WorktreeStep::WorktreeAdd,
+            WorktreeStepStatus::Failed(
+                "branch 'feat' is held by the non-live managed worktree at /tmp/other \
+                 — automatic reclaim blocked because the checkout contains ignored local files"
+                    .into(),
+            ),
+        );
+        assert_eq!(st.recovery(), Some(WorktreeRecovery::BranchHeldManaged));
+        let out = render(&mut WorktreeProgress::from_state(&st), 70, 20);
+        assert!(out.contains("ignored local files"), "{out}");
+        assert!(out.contains("managed holder has local state"), "{out}");
+        assert!(out.contains("or remove it"), "{out}");
+        assert!(!out.contains("join the live session"), "{out}");
+        assert!(!out.contains("r retry"), "{out}");
+    }
+
     /// The `r` key only fires for a retryable failure — a stray `r`
     /// mid-provision must not intercept.
     #[test]

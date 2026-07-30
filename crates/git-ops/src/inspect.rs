@@ -12,7 +12,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::{GitError, GitRunner, WorktreeManager, default_git_runner};
+use crate::{
+    GitError, GitRunner, WorktreeManager, WorktreeReclaimBlocker, WorktreeReclaimOutcome,
+    default_git_runner,
+};
 
 // `base_dir` is reachable via a crate-private accessor on
 // `WorktreeManager`; see `crates/git-ops/src/lib.rs`. Inspector code
@@ -191,7 +194,7 @@ impl WorktreeManager {
         Ok(paths)
     }
 
-    /// Remove a session-less managed holder only when it has no local
+    /// Remove a non-live managed holder only when it has no local
     /// work to preserve. The caller owns session-liveness validation;
     /// this boundary validates that `path` is a registered worktree for
     /// `branch`, lives under lazybox's managed root, is unlocked, clean,
@@ -205,10 +208,10 @@ impl WorktreeManager {
         repo: &str,
         branch: &str,
         path: &Path,
-    ) -> Result<bool, GitError> {
+    ) -> Result<WorktreeReclaimOutcome, GitError> {
         let bare = self.bare_path(owner, repo);
         if !bare.exists() {
-            return Ok(false);
+            return Ok(WorktreeReclaimOutcome::NotManaged);
         }
 
         let lock = crate::repo_lock(&bare);
@@ -216,25 +219,57 @@ impl WorktreeManager {
         let managed_root = canonical_or_self(&self.base_dir().join("worktrees"));
         let key = canonical_or_self(path);
         if !key.starts_with(&managed_root) {
-            return Ok(false);
+            return Ok(WorktreeReclaimOutcome::NotManaged);
         }
 
-        let entries = list_porcelain(&bare).await?;
+        let entries = list_porcelain(self.git_runner(), &bare).await?;
         let Some(entry) = entries.into_iter().find(|entry| {
             !entry.prunable
                 && entry.branch.as_deref() == Some(branch)
                 && canonical_or_self(&entry.path) == key
         }) else {
-            return Ok(false);
+            return Ok(WorktreeReclaimOutcome::NotManaged);
         };
-        let porcelain = HashMap::from([(key.clone(), (bare.clone(), entry))]);
-        let inspection = inspect_one(path, &key, &porcelain, &HashMap::new()).await;
-        if !inspection.is_safe_to_delete {
-            return Ok(false);
+        if entry.locked {
+            return Ok(WorktreeReclaimOutcome::Blocked(
+                WorktreeReclaimBlocker::Locked,
+            ));
         }
 
-        crate::run_git_in(&bare, &["worktree", "remove", &path.to_string_lossy()]).await?;
-        Ok(true)
+        let status = crate::run_git_in(
+            self.git_runner(),
+            path,
+            &[
+                "status",
+                "--porcelain=v1",
+                "--ignored",
+                "--untracked-files=all",
+            ],
+        )
+        .await?;
+        if status.lines().any(|line| line.starts_with("!! ")) {
+            return Ok(WorktreeReclaimOutcome::Blocked(
+                WorktreeReclaimBlocker::IgnoredFiles,
+            ));
+        }
+        if !status.trim().is_empty() {
+            return Ok(WorktreeReclaimOutcome::Blocked(
+                WorktreeReclaimBlocker::UncommittedChanges,
+            ));
+        }
+        if unpushed(self.git_runner(), path, Some(&bare)).await {
+            return Ok(WorktreeReclaimOutcome::Blocked(
+                WorktreeReclaimBlocker::UnpushedCommits,
+            ));
+        }
+
+        crate::run_git_in(
+            self.git_runner(),
+            &bare,
+            &["worktree", "remove", &path.to_string_lossy()],
+        )
+        .await?;
+        Ok(WorktreeReclaimOutcome::Reclaimed)
     }
 
     /// Scan the worktrees directory + every bare clone under

@@ -460,7 +460,7 @@ async fn e2e_sessionless_branch_holder_is_reclaimed_at_the_current_workspace_pat
         let upstream = seed_local_upstream(root.path(), "acme", "core");
         let manager = lazybox_git_ops::WorktreeManager::new(root.path().to_path_buf());
         let bare = manager.bare_path("acme", "core");
-        let branch = "docs-start-work-by-tagging-issues";
+        let branch = "issue-652-t";
         publish_branch(upstream.path(), &bare, branch);
 
         let leaked = root
@@ -491,8 +491,8 @@ async fn e2e_sessionless_branch_holder_is_reclaimed_at_the_current_workspace_pat
         let workspace = lazybox_core::Workspace::from_task(
             task(
                 "acme/core#652",
-                "https://github.com/acme/core/pull/652",
-                Some(branch),
+                "https://github.com/acme/core/issues/652",
+                None,
                 vec![],
             ),
             chrono::Utc::now(),
@@ -530,6 +530,251 @@ async fn e2e_sessionless_branch_holder_is_reclaimed_at_the_current_workspace_pat
             listed.lines().filter(|line| *line == branch_line).count(),
             1,
             "the branch is checked out exactly once after recovery"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
+#[tokio::test]
+async fn e2e_clean_companion_pr_checkout_is_adopted_in_place() {
+    let _home = IsolatedConfigHome::new();
+    timeout(TEST_DEADLINE, async {
+        let root = tempfile::TempDir::new().unwrap();
+        let upstream = seed_local_upstream(root.path(), "acme", "core");
+        let manager = lazybox_git_ops::WorktreeManager::new(root.path().to_path_buf());
+        let bare = manager.bare_path("acme", "core");
+        let branch = "issue-136-clean-companion";
+        publish_branch(upstream.path(), &bare, branch);
+
+        let companion = root.path().join("worktrees/github-acme-core").join(branch);
+        std::fs::create_dir_all(companion.parent().unwrap()).unwrap();
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-B",
+                branch,
+                &companion.to_string_lossy(),
+                &format!("refs/heads/{branch}"),
+            ],
+        );
+        let companion = std::fs::canonicalize(companion).unwrap();
+        assert!(
+            git(&companion, &["status", "--porcelain"]).is_empty(),
+            "fixture must exercise the clean companion path"
+        );
+
+        let mock = lazybox_server::backend::MockBackend::new();
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            Arc::new(MemoryStore::new()),
+            Arc::new(mock.clone()),
+            root.path().to_path_buf(),
+        );
+        let workspace = lazybox_core::Workspace::from_task(
+            task(
+                "acme/core#96",
+                "https://github.com/acme/core/pull/96",
+                Some(branch),
+                vec![],
+            ),
+            chrono::Utc::now(),
+        );
+        let workspace_key = workspace.key.clone();
+        let derived = lazybox_server::spawn_handler::worktree_path_for_session(&workspace, 0);
+        save_workspace(&config, &workspace);
+
+        let (mut client, _daemon) = subscribed(config.clone()).await;
+        let backend = spawn_and_capture(
+            &mut client,
+            &mock,
+            &workspace_key,
+            TerminalKind::Shell,
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            mock.cwd_for(&backend).await.as_deref(),
+            Some(companion.as_path()),
+            "a clean companion checkout keeps the same adoption contract as one with WIP"
+        );
+        assert!(companion.exists());
+        assert!(!derived.exists(), "adoption must not relocate the checkout");
+        assert_eq!(
+            load_workspace(&config, &workspace_key).sessions[0].worktree_path,
+            companion
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
+#[tokio::test]
+async fn e2e_stopped_session_does_not_make_a_clean_holder_live() {
+    let _home = IsolatedConfigHome::new();
+    timeout(TEST_DEADLINE, async {
+        let root = tempfile::TempDir::new().unwrap();
+        let upstream = seed_local_upstream(root.path(), "acme", "core");
+        let manager = lazybox_git_ops::WorktreeManager::new(root.path().to_path_buf());
+        let bare = manager.bare_path("acme", "core");
+        let branch = "stopped-holder";
+        publish_branch(upstream.path(), &bare, branch);
+
+        let stopped_path = root
+            .path()
+            .join("worktrees/github-acme-core")
+            .join("old-stopped-workspace");
+        std::fs::create_dir_all(stopped_path.parent().unwrap()).unwrap();
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-B",
+                branch,
+                &stopped_path.to_string_lossy(),
+                &format!("refs/heads/{branch}"),
+            ],
+        );
+        let stopped_path = std::fs::canonicalize(stopped_path).unwrap();
+
+        let mock = lazybox_server::backend::MockBackend::new();
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            Arc::new(MemoryStore::new()),
+            Arc::new(mock.clone()),
+            root.path().to_path_buf(),
+        );
+        let mut old_workspace = lazybox_core::Workspace::from_task(
+            task(
+                "acme/core#12",
+                "https://github.com/acme/core/issues/12",
+                None,
+                vec![],
+            ),
+            chrono::Utc::now(),
+        );
+        let old_key = old_workspace.key.clone();
+        let mut stopped_session = lazybox_core::WorkspaceSession::new(
+            old_key,
+            lazybox_core::SessionKind::Shell,
+            stopped_path.clone(),
+            chrono::Utc::now(),
+        );
+        stopped_session.state = lazybox_core::SessionRunState::Stopped;
+        old_workspace.add_session(stopped_session);
+        save_workspace(&config, &old_workspace);
+
+        let target = lazybox_core::Workspace::from_task(
+            task(
+                "acme/core#97",
+                "https://github.com/acme/core/pull/97",
+                Some(branch),
+                vec![],
+            ),
+            chrono::Utc::now(),
+        );
+        let target_key = target.key.clone();
+        let intended = lazybox_server::spawn_handler::worktree_path_for_session(&target, 0);
+        save_workspace(&config, &target);
+
+        let (mut client, _daemon) = subscribed(config.clone()).await;
+        let backend =
+            spawn_and_capture(&mut client, &mock, &target_key, TerminalKind::Shell, None).await;
+
+        assert!(!stopped_path.exists(), "the stopped holder is reclaimed");
+        assert_eq!(
+            mock.cwd_for(&backend).await.as_deref(),
+            Some(intended.as_path())
+        );
+        assert_eq!(
+            load_workspace(&config, &target_key).sessions[0].worktree_path,
+            intended
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
+#[tokio::test]
+async fn e2e_persisted_worktree_on_the_wrong_branch_fails_without_switching() {
+    let _home = IsolatedConfigHome::new();
+    timeout(TEST_DEADLINE, async {
+        let root = tempfile::TempDir::new().unwrap();
+        let upstream = seed_local_upstream(root.path(), "acme", "core");
+        let manager = lazybox_git_ops::WorktreeManager::new(root.path().to_path_buf());
+        let bare = manager.bare_path("acme", "core");
+        publish_branch(upstream.path(), &bare, "expected");
+        publish_branch(upstream.path(), &bare, "actual");
+
+        let mock = lazybox_server::backend::MockBackend::new();
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            Arc::new(MemoryStore::new()),
+            Arc::new(mock.clone()),
+            root.path().to_path_buf(),
+        );
+        let mut workspace = lazybox_core::Workspace::from_task(
+            task(
+                "acme/core#98",
+                "https://github.com/acme/core/pull/98",
+                Some("expected"),
+                vec![],
+            ),
+            chrono::Utc::now(),
+        );
+        let workspace_key = workspace.key.clone();
+        let intended = lazybox_server::spawn_handler::worktree_path_for_session(&workspace, 0);
+        std::fs::create_dir_all(intended.parent().unwrap()).unwrap();
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-B",
+                "actual",
+                &intended.to_string_lossy(),
+                "refs/heads/actual",
+            ],
+        );
+        std::fs::write(intended.join("local-marker"), "preserve mismatch").unwrap();
+        let mut session = lazybox_core::WorkspaceSession::new(
+            workspace_key.clone(),
+            lazybox_core::SessionKind::Shell,
+            intended.clone(),
+            chrono::Utc::now(),
+        );
+        session.worktree_branch = Some("expected".into());
+        workspace.add_session(session);
+        save_workspace(&config, &workspace);
+
+        let (mut client, _daemon) = subscribed(config.clone()).await;
+        send_spawn(&mut client, &workspace_key, TerminalKind::Shell, None);
+        let failure = wait_for(
+            &mut client,
+            |event| {
+                matches!(
+                    event,
+                    Event::WorktreeProgress {
+                        status: lazybox_ipc::WorktreeStepStatus::Failed(message),
+                        ..
+                    } if lazybox_ipc::WorktreeRecovery::classify(message)
+                        == lazybox_ipc::WorktreeRecovery::BranchMismatch
+                )
+            },
+            Duration::from_secs(30),
+        )
+        .await;
+
+        assert!(failure.is_some(), "the mismatch must be surfaced");
+        assert!(mock.list().await.unwrap().is_empty());
+        assert_eq!(git(&intended, &["branch", "--show-current"]), "actual");
+        assert_eq!(
+            std::fs::read_to_string(intended.join("local-marker")).unwrap(),
+            "preserve mismatch"
         );
     })
     .await
@@ -909,8 +1154,8 @@ async fn e2e_unrelated_branch_holder_keeps_the_explicit_conflict_flow() {
         let mut holder = lazybox_core::Workspace::from_task(
             task(
                 "acme/core#12",
-                "https://github.com/acme/core/issues/12",
-                None,
+                "https://github.com/acme/core/pull/12",
+                Some(branch),
                 vec![],
             ),
             chrono::Utc::now(),

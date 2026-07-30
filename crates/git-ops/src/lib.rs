@@ -38,6 +38,44 @@ fn repo_lock(bare_path: &Path) -> Arc<tokio::sync::Mutex<()>> {
         .clone()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Why a managed worktree cannot be reclaimed automatically.
+pub enum WorktreeReclaimBlocker {
+    /// Git marks the worktree as locked.
+    Locked,
+    /// Tracked or untracked files differ from `HEAD`.
+    UncommittedChanges,
+    /// Ignored files would be deleted with the worktree.
+    IgnoredFiles,
+    /// The branch contains commits that are not available remotely.
+    UnpushedCommits,
+    /// A safety probe failed, so the checkout could not be proven disposable.
+    SafetyCheckFailed,
+}
+
+impl std::fmt::Display for WorktreeReclaimBlocker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Locked => "the checkout is locked",
+            Self::UncommittedChanges => "the checkout has uncommitted changes",
+            Self::IgnoredFiles => "the checkout contains ignored local files",
+            Self::UnpushedCommits => "the checkout has unpushed commits",
+            Self::SafetyCheckFailed => "the checkout could not be verified safely",
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Result of attempting to reclaim a non-live branch holder.
+pub enum WorktreeReclaimOutcome {
+    /// Git removed the worktree while retaining its branch.
+    Reclaimed,
+    /// The path is not the exact managed worktree holding the requested branch.
+    NotManaged,
+    /// The worktree is managed but contains state that must be preserved.
+    Blocked(WorktreeReclaimBlocker),
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
     #[error("git command failed: {0}")]
@@ -51,6 +89,26 @@ pub enum GitError {
         .holder.display()
     )]
     BranchHeldLive { branch: String, holder: PathBuf },
+    #[error(
+        "branch '{branch}' is held by the non-live managed worktree at {} — automatic \
+         reclaim blocked because {blocker}; preserve or remove that checkout, then retry",
+        .holder.display()
+    )]
+    BranchHeldManaged {
+        branch: String,
+        holder: PathBuf,
+        blocker: WorktreeReclaimBlocker,
+    },
+    #[error(
+        "worktree {} is checked out on branch '{actual}', not the requested branch '{expected}' — \
+         refusing to reuse it; preserve or switch that checkout, then retry",
+        .path.display()
+    )]
+    WorktreeBranchMismatch {
+        path: PathBuf,
+        expected: String,
+        actual: String,
+    },
 }
 
 /// Executes one bounded git command. A non-zero exit is returned in
@@ -614,6 +672,7 @@ impl WorktreeManager {
             && validate_worktree_dir(self.git_runner(), wt_path, &bare_path).await?
                 == WorktreeDirState::Valid
         {
+            ensure_worktree_branch(wt_path, branch).await?;
             let name = wt_path
                 .file_name()
                 .map(|f| f.to_string_lossy().into_owned())
@@ -838,6 +897,7 @@ impl WorktreeManager {
             && validate_worktree_dir(self.git_runner(), wt_path, &bare_path).await?
                 == WorktreeDirState::Valid
         {
+            ensure_worktree_branch(wt_path, new_branch).await?;
             let name = wt_path
                 .file_name()
                 .map(|f| f.to_string_lossy().into_owned())
@@ -2196,7 +2256,9 @@ fn fetch_failure_reason(err: &GitError, authed: bool) -> String {
     let raw = match err {
         GitError::Command(stderr) => stderr.clone(),
         GitError::Io(e) => e.to_string(),
-        GitError::BranchHeldLive { .. } => err.to_string(),
+        GitError::BranchHeldLive { .. }
+        | GitError::BranchHeldManaged { .. }
+        | GitError::WorktreeBranchMismatch { .. } => err.to_string(),
     };
     let line = raw
         .lines()
@@ -2583,6 +2645,53 @@ pub async fn worktree_dir_ready(wt_path: &Path) -> bool {
         wt_path.join(gitdir)
     };
     tokio::fs::metadata(gitdir.join("index")).await.is_ok()
+}
+
+/// Whether `wt_path` is a completed checkout on `expected_branch`.
+///
+/// This is the branch-aware spawn fast path: structural readiness alone
+/// is insufficient because a valid worktree can have been switched to a
+/// different branch since its session was persisted.
+pub async fn worktree_dir_ready_on_branch(wt_path: &Path, expected_branch: &str) -> bool {
+    worktree_dir_ready(wt_path).await
+        && current_worktree_branch(wt_path)
+            .await
+            .is_ok_and(|branch| branch.as_deref() == Some(expected_branch))
+}
+
+async fn ensure_worktree_branch(wt_path: &Path, expected: &str) -> Result<(), GitError> {
+    let actual = current_worktree_branch(wt_path)
+        .await?
+        .unwrap_or_else(|| "detached HEAD".to_string());
+    if actual == expected {
+        return Ok(());
+    }
+    Err(GitError::WorktreeBranchMismatch {
+        path: wt_path.to_path_buf(),
+        expected: expected.to_string(),
+        actual,
+    })
+}
+
+async fn current_worktree_branch(wt_path: &Path) -> Result<Option<String>, GitError> {
+    let output = apply_git_env(Command::new("git").current_dir(wt_path).args([
+        "symbolic-ref",
+        "--quiet",
+        "--short",
+        "HEAD",
+    ]))
+    .output()
+    .await?;
+    if output.status.success() {
+        let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Ok((!branch.is_empty()).then_some(branch));
+    }
+    if output.status.code() == Some(1) {
+        return Ok(None);
+    }
+    Err(GitError::Command(
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    ))
 }
 
 /// A blobless clone materializes file contents through origin at
@@ -3783,6 +3892,14 @@ mod health_probe_tests {
             ],
         );
         assert!(worktree_dir_ready(&wt).await, "a real worktree is ready");
+        assert!(
+            worktree_dir_ready_on_branch(&wt, "wt-branch").await,
+            "the branch-aware probe accepts the checked-out branch"
+        );
+        assert!(
+            !worktree_dir_ready_on_branch(&wt, "main").await,
+            "structural readiness must not hide a branch mismatch"
+        );
 
         // A standalone repo (`.git` is a directory) is ready too.
         let standalone = tmp.path().join("standalone");

@@ -2035,12 +2035,14 @@ name = "lazybox-desktop"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "chrono",
  "futures-util",
  "lazybox-config",
  "lazybox-core",
  "lazybox-gh",
  "lazybox-ipc",
  "lazybox-server",
+ "lazybox-store",
  "reqwest",
  "serde",
  "serde_json",

@@ -242,10 +242,19 @@ jobs:
       - name: Build internal macOS app
         working-directory: apps/desktop
         run: npm run tauri build -- --debug --bundles app
+      - name: Package executable macOS app
+        run: |
+          test -x target/debug/bundle/macos/lazybox.app/Contents/MacOS/lazybox
+          tar -czf target/debug/bundle/macos/lazybox-macos-dogfood.tar.gz \
+            -C target/debug/bundle/macos lazybox.app
+          mkdir target/debug/bundle/macos/archive-check
+          tar -xzf target/debug/bundle/macos/lazybox-macos-dogfood.tar.gz \
+            -C target/debug/bundle/macos/archive-check
+          test -x target/debug/bundle/macos/archive-check/lazybox.app/Contents/MacOS/lazybox
       - uses: actions/upload-artifact@v6
         with:
           name: lazybox-macos-dogfood
-          path: target/debug/bundle/macos/lazybox.app
+          path: target/debug/bundle/macos/lazybox-macos-dogfood.tar.gz
           if-no-files-found: error
 
   rustdoc:

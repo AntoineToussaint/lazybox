@@ -4,10 +4,14 @@ import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import "./style.css";
 import {
-  CommandOutcomeTracker,
+  InboxConnection,
+  ReplyDrafts,
   applyWorkspaceEvent,
+  canReplyToTask,
   filteredWorkspaces,
+  preferredTerminal,
   primaryTask,
+  shouldHandleWorkspaceEnter,
   taskReference,
   unreadCount,
   type WorkspaceFilter,
@@ -157,8 +161,8 @@ let setupState: DesktopSetupState | null = null;
 let discoveredRepositories: GithubRepositoryOption[] = [];
 let selectedRepositories = new Set<string>();
 let setupRequired = false;
-let lastSubmittedReply: string | null = null;
-const commandOutcomes = new CommandOutcomeTracker();
+const replyDrafts = new ReplyDrafts();
+const pendingLaunches = new Set<string>();
 let focusRequestedSession: string | null = null;
 let activeTerminal: ActiveTerminal | null = null;
 let resizeTimer: number | undefined;
@@ -174,9 +178,24 @@ const encoder = new TextEncoder();
 let terminalDecoder = new TerminalFrameDecoder(2 * 1024 * 1024 + 25);
 let maxTerminalWriteBytes = 128 * 1024;
 const pendingTerminalFrames = new Map<number, TerminalBinaryFrame[]>();
+let desktopMetadataLoaded = false;
+let terminalReaderStarted = false;
+let eventChannel: Channel<DesktopStreamMessage> | null = null;
+const inboxConnection = new InboxConnection(
+  () => invoke<WorkspacesResponse>("list_workspaces"),
+  async () => {
+    eventChannel = new Channel<DesktopStreamMessage>();
+    eventChannel.onmessage = handleStreamMessage;
+    await invoke("subscribe_events", { onEvent: eventChannel });
+    if (!terminalReaderStarted) {
+      terminalReaderStarted = true;
+      void readTerminalData();
+    }
+  },
+);
 
 refreshButton.addEventListener("click", () => {
-  void runCommands(["Refresh"], "Refreshing providers…", "Refresh requested.");
+  void refreshInbox(true);
 });
 
 spawnButton.addEventListener("click", () => {
@@ -235,6 +254,20 @@ async function boot(): Promise<void> {
   }
 
   try {
+    await initializeDesktopMetadata();
+    if (await refreshInbox(false)) {
+      recordAnalytics("app_opened");
+    }
+  } catch (error) {
+    showInboxFailure(error);
+  }
+}
+
+async function initializeDesktopMetadata(): Promise<void> {
+  if (desktopMetadataLoaded) {
+    return;
+  }
+  try {
     setupState = await invoke<DesktopSetupState>("desktop_setup_state");
     applySetupState(setupState);
     if (setupState.first_run) {
@@ -246,7 +279,20 @@ async function boot(): Promise<void> {
     maxTerminalWriteBytes = info.max_terminal_write_bytes;
     defaultAgent = info.default_agent;
     agentLabel.textContent = defaultAgent;
-    const initial = await invoke<WorkspacesResponse>("list_workspaces");
+    desktopMetadataLoaded = true;
+  } catch (error) {
+    desktopMetadataLoaded = false;
+    throw error;
+  }
+}
+
+async function refreshInbox(requestProviderRefresh: boolean): Promise<boolean> {
+  inboxLoading = true;
+  inboxError = null;
+  renderInbox();
+  try {
+    await initializeDesktopMetadata();
+    const initial = await inboxConnection.connect();
     workspaces = new Map(
       initial.workspaces.map((workspace) => [workspace.key, workspace]),
     );
@@ -256,19 +302,27 @@ async function boot(): Promise<void> {
     }
     chooseInitialWorkspace();
     render();
-
-    const events = new Channel<DesktopStreamMessage>();
-    events.onmessage = handleStreamMessage;
-    await invoke("subscribe_events", { onEvent: events });
-    void readTerminalData();
-    recordAnalytics("app_opened");
+    setConnection(true, "Live");
+    if (requestProviderRefresh) {
+      return runCommands(
+        ["Refresh"],
+        "Refreshing providers…",
+        "Refresh requested.",
+      );
+    }
+    return true;
   } catch (error) {
-    inboxLoading = false;
-    inboxError = String(error);
-    renderInbox();
-    setConnection(false, "Daemon unavailable");
-    setStatus(String(error));
+    showInboxFailure(error);
+    return false;
   }
+}
+
+function showInboxFailure(error: unknown): void {
+  inboxLoading = false;
+  inboxError = String(error);
+  renderInbox();
+  setConnection(false, "Daemon unavailable");
+  setStatus(`${String(error)} Select Refresh to retry.`);
 }
 
 function handleStreamMessage(message: DesktopStreamMessage): void {
@@ -297,16 +351,7 @@ function handleEvent(event: LazyboxEvent): void {
   if (workspaceChanged) {
     workspaces = applyWorkspaceEvent(workspaces, event);
     if (selectedKey !== null && !workspaces.has(selectedKey)) {
-      selectedKey = null;
-    }
-    if (
-      lastSubmittedReply !== null &&
-      selectedKey !== null &&
-      workspaces
-        .get(selectedKey)
-        ?.activity.some((activity) => activity.body.trim() === lastSubmittedReply)
-    ) {
-      lastSubmittedReply = null;
+      changeSelectedWorkspace(null);
     }
   }
 
@@ -366,15 +411,8 @@ function handleEvent(event: LazyboxEvent): void {
       setTerminalState(record?.state ?? "running");
     }
   } else if ("ProviderError" in event) {
-    commandOutcomes.recordFailure();
     setStatus(`${event.ProviderError.source}: ${event.ProviderError.message}`);
-    if (event.ProviderError.source === "reply" && lastSubmittedReply !== null) {
-      replyBody.value = lastSubmittedReply;
-      lastSubmittedReply = null;
-      replyBody.focus();
-    }
   } else if ("CommandRejected" in event) {
-    commandOutcomes.recordFailure();
     setStatus(`${event.CommandRejected.command}: ${event.CommandRejected.message}`);
   } else if ("PollProgress" in event) {
     setStatus(event.PollProgress.message);
@@ -385,7 +423,6 @@ function handleEvent(event: LazyboxEvent): void {
   } else if ("WorktreeProgress" in event) {
     const status = event.WorktreeProgress.status;
     if (typeof status === "object" && "Failed" in status) {
-      commandOutcomes.recordFailure();
       setStatus(`Workspace error: ${status.Failed}`);
     } else if (typeof status === "object" && "Warned" in status) {
       setStatus(`Workspace warning: ${status.Warned}`);
@@ -607,7 +644,8 @@ function renderWorkspace(): void {
   taskDescription.textContent =
     task?.body?.trim() || "No description was provided for this workspace.";
   markReadButton.disabled = unreadCount(workspace) === 0;
-  replyBody.disabled = task === null;
+  replyBody.disabled = !canReplyToTask(task);
+  replyForm.classList.toggle("hidden", !canReplyToTask(task));
 
   const agentTerminal = terminalForWorkspace(
     workspace.key,
@@ -627,10 +665,14 @@ function renderWorkspace(): void {
         ? "Resume"
         : "Start";
   spawnButton.querySelector("span")!.textContent = spawnVerb;
+  spawnButton.disabled = pendingLaunches.has(
+    launchKey(workspace.key, "agent", defaultAgent),
+  );
   shellButton.textContent =
     terminalForWorkspace(workspace.key, "shell") === undefined
       ? "Shell"
       : "Open shell";
+  shellButton.disabled = pendingLaunches.has(launchKey(workspace.key, "shell"));
 
   activityList.replaceChildren();
   activityCount.textContent = String(workspace.activity.length);
@@ -684,8 +726,7 @@ function addTaskSignal(
 }
 
 function selectWorkspace(key: string): void {
-  const changed = selectedKey !== key;
-  selectedKey = key;
+  const changed = changeSelectedWorkspace(key);
   render();
   attachSelectedTerminal();
   void sendCommand({ FocusWorkspace: { session_key: key } });
@@ -696,13 +737,26 @@ function selectWorkspace(key: string): void {
   }
 }
 
+function changeSelectedWorkspace(key: string | null): boolean {
+  if (selectedKey === key) {
+    return false;
+  }
+  if (selectedKey !== null) {
+    replyDrafts.save(selectedKey, replyBody.value);
+  }
+  selectedKey = key;
+  replyBody.value = key === null ? "" : replyDrafts.get(key);
+  return true;
+}
+
 function chooseInitialWorkspace(): void {
   if (selectedKey !== null && workspaces.has(selectedKey)) {
     return;
   }
-  selectedKey =
+  changeSelectedWorkspace(
     filteredWorkspaces(workspaces.values(), { query: "", filter: "all" })[0]
-      ?.key ?? null;
+      ?.key ?? null,
+  );
 }
 
 function attachSelectedTerminal(): void {
@@ -792,16 +846,7 @@ function terminalForWorkspace(
   kind: "agent" | "shell",
   agentId?: string,
 ): TerminalRecord | undefined {
-  return [...terminals.values()].find((terminal) => {
-    if (terminal.sessionKey !== sessionKey) {
-      return false;
-    }
-    return kind === "shell"
-      ? terminal.kind === "Shell"
-      : typeof terminal.kind === "object" &&
-          "Agent" in terminal.kind &&
-          (agentId === undefined || terminal.kind.Agent === agentId);
-  });
+  return preferredTerminal(terminals.values(), sessionKey, kind, agentId);
 }
 
 function detachTerminal(): void {
@@ -979,22 +1024,33 @@ async function startAgent(): Promise<void> {
     setStatus(`Opened ${defaultAgent}.`);
     return;
   }
+  const pendingKey = launchKey(selectedKey, "agent", defaultAgent);
+  if (pendingLaunches.has(pendingKey)) {
+    return;
+  }
+  pendingLaunches.add(pendingKey);
+  renderWorkspace();
   focusRequestedSession = selectedKey;
-  const succeeded = await runCommands(
-    [spawnAgentCommand(selectedKey, defaultAgent)],
-    `${
-      existing === undefined
-        ? workspaces.get(selectedKey)?.sessions.length === 0
-          ? "Creating workspace and starting"
-          : "Starting"
-        : "Resuming"
-    } ${defaultAgent}…`,
-    `${defaultAgent} launch requested.`,
-  );
-  if (succeeded) {
-    recordAnalytics("agent_started");
-  } else {
-    focusRequestedSession = null;
+  try {
+    const succeeded = await runCommands(
+      [spawnAgentCommand(selectedKey, defaultAgent)],
+      `${
+        existing === undefined
+          ? workspaces.get(selectedKey)?.sessions.length === 0
+            ? "Creating workspace and starting"
+            : "Starting"
+          : "Resuming"
+      } ${defaultAgent}…`,
+      `${defaultAgent} launch requested.`,
+    );
+    if (succeeded) {
+      recordAnalytics("agent_started");
+    } else {
+      focusRequestedSession = null;
+    }
+  } finally {
+    pendingLaunches.delete(pendingKey);
+    renderWorkspace();
   }
 }
 
@@ -1009,17 +1065,36 @@ async function startShell(): Promise<void> {
     setStatus("Opened shell.");
     return;
   }
-  focusRequestedSession = selectedKey;
-  const succeeded = await runCommands(
-    commandsForWorkspaceIntent(selectedKey, { type: "spawn-shell" }),
-    "Starting workspace shell…",
-    "Shell launch requested.",
-  );
-  if (succeeded) {
-    recordAnalytics("shell_started");
-  } else {
-    focusRequestedSession = null;
+  const pendingKey = launchKey(selectedKey, "shell");
+  if (pendingLaunches.has(pendingKey)) {
+    return;
   }
+  pendingLaunches.add(pendingKey);
+  renderWorkspace();
+  focusRequestedSession = selectedKey;
+  try {
+    const succeeded = await runCommands(
+      commandsForWorkspaceIntent(selectedKey, { type: "spawn-shell" }),
+      "Starting workspace shell…",
+      "Shell launch requested.",
+    );
+    if (succeeded) {
+      recordAnalytics("shell_started");
+    } else {
+      focusRequestedSession = null;
+    }
+  } finally {
+    pendingLaunches.delete(pendingKey);
+    renderWorkspace();
+  }
+}
+
+function launchKey(
+  workspaceKey: string,
+  kind: "agent" | "shell",
+  agent = "",
+): string {
+  return `${workspaceKey}\0${kind}\0${agent}`;
 }
 
 async function markSelectedRead(): Promise<void> {
@@ -1037,6 +1112,13 @@ async function reviewReply(): Promise<void> {
   if (selectedKey === null) {
     return;
   }
+  const workspaceKey = selectedKey;
+  const workspace = workspaces.get(workspaceKey);
+  const task = workspace === undefined ? null : primaryTask(workspace);
+  if (!canReplyToTask(task)) {
+    setStatus("Replies are available for GitHub tasks only.");
+    return;
+  }
   const body = replyBody.value.trim();
   if (body.length === 0) {
     setStatus("Write a reply before submitting.");
@@ -1052,16 +1134,19 @@ async function reviewReply(): Promise<void> {
   if (!accepted) {
     return;
   }
-  lastSubmittedReply = body;
+  replyDrafts.save(workspaceKey, body);
   const succeeded = await runCommands(
-    commandsForWorkspaceIntent(selectedKey, { type: "reply", body }),
+    commandsForWorkspaceIntent(workspaceKey, { type: "reply", body }),
     "Posting reply to GitHub…",
     "Reply posted. Refreshing activity…",
   );
   if (succeeded) {
-    replyBody.value = "";
+    replyDrafts.clear(workspaceKey);
+    if (selectedKey === workspaceKey) {
+      replyBody.value = "";
+    }
     recordAnalytics("reply_posted");
-  } else {
+  } else if (selectedKey === workspaceKey) {
     replyBody.value = body;
     replyBody.focus();
   }
@@ -1072,15 +1157,11 @@ async function runCommands(
   pendingMessage: string,
   successMessage: string,
 ): Promise<boolean> {
-  const checkpoint = commandOutcomes.checkpoint();
   setStatus(pendingMessage);
   for (const command of commands) {
     if (!(await sendCommand(command))) {
       return false;
     }
-  }
-  if (!commandOutcomes.succeededSince(checkpoint)) {
-    return false;
   }
   setStatus(successMessage);
   return true;
@@ -1382,7 +1463,7 @@ function recordAnalytics(event: AnalyticsEvent): void {
     return;
   }
   void invoke("record_analytics", { event }).catch((error) => {
-    setStatus(`Analytics event could not be recorded: ${String(error)}`);
+    console.warn("lazybox desktop analytics write failed", error);
   });
 }
 
@@ -1420,7 +1501,15 @@ function handleKeyboard(event: KeyboardEvent): void {
     navigateWorkspaces(event.key === "ArrowDown" ? 1 : -1);
     return;
   }
-  if (event.key === "Enter" && selectedKey !== null) {
+  if (
+    event.key === "Enter" &&
+    selectedKey !== null &&
+    shouldHandleWorkspaceEnter(
+      true,
+      editable,
+      target instanceof Element && target.closest("button, a") !== null,
+    )
+  ) {
     event.preventDefault();
     selectWorkspace(selectedKey);
     return;
@@ -1439,7 +1528,7 @@ function handleKeyboard(event: KeyboardEvent): void {
     void markSelectedRead();
   } else if (event.key === "R") {
     event.preventDefault();
-    void runCommands(["Refresh"], "Refreshing providers…", "Refresh requested.");
+    void refreshInbox(true);
   }
 }
 

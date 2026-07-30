@@ -1,4 +1,9 @@
-import type { LazyboxEvent, Task, Workspace } from "./protocol";
+import type {
+  LazyboxEvent,
+  Task,
+  TerminalKind,
+  Workspace,
+} from "./protocol";
 
 export type WorkspaceFilter = "all" | "unread" | "attention";
 
@@ -7,19 +12,52 @@ export interface WorkspaceQuery {
   filter: WorkspaceFilter;
 }
 
-export class CommandOutcomeTracker {
-  private failureGeneration = 0;
+export class ReplyDrafts {
+  private readonly drafts = new Map<string, string>();
 
-  checkpoint(): number {
-    return this.failureGeneration;
+  save(workspaceKey: string, body: string): void {
+    if (body.length === 0) {
+      this.drafts.delete(workspaceKey);
+    } else {
+      this.drafts.set(workspaceKey, body);
+    }
   }
 
-  recordFailure(): void {
-    this.failureGeneration += 1;
+  get(workspaceKey: string): string {
+    return this.drafts.get(workspaceKey) ?? "";
   }
 
-  succeededSince(checkpoint: number): boolean {
-    return checkpoint === this.failureGeneration;
+  clear(workspaceKey: string): void {
+    this.drafts.delete(workspaceKey);
+  }
+}
+
+export class InboxConnection<T> {
+  private subscribed = false;
+  private inFlight: Promise<T> | null = null;
+
+  constructor(
+    private readonly load: () => Promise<T>,
+    private readonly subscribe: () => Promise<void>,
+  ) {}
+
+  connect(): Promise<T> {
+    if (this.inFlight !== null) {
+      return this.inFlight;
+    }
+    this.inFlight = this.connectOnce().finally(() => {
+      this.inFlight = null;
+    });
+    return this.inFlight;
+  }
+
+  private async connectOnce(): Promise<T> {
+    const value = await this.load();
+    if (!this.subscribed) {
+      await this.subscribe();
+      this.subscribed = true;
+    }
+    return value;
   }
 }
 
@@ -33,11 +71,64 @@ export function primaryTask(workspace: Workspace): Task | null {
 }
 
 export function unreadCount(workspace: Workspace): number {
-  const taskUnread =
-    (workspace.pr?.unread_count ?? 0) +
-    workspace.gh_issues.reduce((sum, task) => sum + task.unread_count, 0) +
-    workspace.linear_issues.reduce((sum, task) => sum + task.unread_count, 0);
-  return Math.max(taskUnread, workspace.activity.length - workspace.seen_count);
+  const unseenCount = Math.max(
+    0,
+    workspace.activity.length - workspace.seen_count,
+  );
+  const readIndices = new Set(workspace.read_indices);
+  let unread = 0;
+  for (let index = 0; index < unseenCount; index += 1) {
+    if (!readIndices.has(index)) {
+      unread += 1;
+    }
+  }
+  return unread;
+}
+
+interface WorkspaceTerminal {
+  id: number;
+  sessionKey: string;
+  kind: TerminalKind;
+  state: string;
+}
+
+export function preferredTerminal<T extends WorkspaceTerminal>(
+  terminals: Iterable<T>,
+  sessionKey: string,
+  kind: "agent" | "shell",
+  agentId?: string,
+): T | undefined {
+  return [...terminals]
+    .filter((terminal) => {
+      if (terminal.sessionKey !== sessionKey) {
+        return false;
+      }
+      return kind === "shell"
+        ? terminal.kind === "Shell"
+        : typeof terminal.kind === "object" &&
+            "Agent" in terminal.kind &&
+            (agentId === undefined || terminal.kind.Agent === agentId);
+    })
+    .sort((left, right) => {
+      const leftExited = left.state.startsWith("exited");
+      const rightExited = right.state.startsWith("exited");
+      if (leftExited !== rightExited) {
+        return leftExited ? 1 : -1;
+      }
+      return right.id - left.id;
+    })[0];
+}
+
+export function canReplyToTask(task: Task | null): boolean {
+  return task?.id.source === "github";
+}
+
+export function shouldHandleWorkspaceEnter(
+  selectedWorkspace: boolean,
+  editableTarget: boolean,
+  interactiveTarget: boolean,
+): boolean {
+  return selectedWorkspace && !editableTarget && !interactiveTarget;
 }
 
 export function sortedWorkspaces(

@@ -29,11 +29,15 @@ cargo test --manifest-path src-tauri/Cargo.toml --locked
 npm run tauri build -- --debug --bundles app
 ```
 
-The repeatable dogfood artifact is written to:
+The app bundle is written to:
 
 ```text
 target/debug/bundle/macos/lazybox.app
 ```
+
+CI packages that bundle as `lazybox-macos-dogfood.tar.gz` before artifact
+upload so the executable mode inside the `.app` survives download. Extract the
+archive with `tar -xzf lazybox-macos-dogfood.tar.gz`.
 
 Open that app and complete setup in the first-run dialog. GitHub CLI
 browser-based login stores its credential in the existing `gh`/OS credential
@@ -52,9 +56,9 @@ npm run dev
 # open http://localhost:1420/?preview
 ```
 
-The preview data and `dogfood-flow.test.ts` fixture exercise the full
-inbox-to-terminal path without a GitHub credential and are excluded from
-production startup.
+The preview data exercises the interface without a daemon. The native
+credential-free integration test exercises persisted setup, the authenticated
+gateway, inbox mutation, and a real shell PTY without a GitHub credential.
 
 ## Privacy and diagnostics
 

@@ -31,7 +31,6 @@ describe("IPC command JSON", () => {
           body: "Ready for review.",
         },
       },
-      "Refresh",
     ]);
   });
 

@@ -26,10 +26,10 @@ pub async fn post_reply(
     config: &ServerConfig,
     session_key: lazybox_core::SessionKey,
     body: String,
-) {
+) -> Result<(), String> {
     let trimmed = body.trim();
     if trimmed.is_empty() {
-        return;
+        return Err("reply body is empty".to_string());
     }
     let workspace_key = WorkspaceKey::new(session_key.as_str().to_string());
     let workspace = match config
@@ -43,40 +43,43 @@ pub async fn post_reply(
             Ok(w) => w,
             Err(e) => {
                 tracing::warn!("post_reply: bad JSON for {workspace_key}: {e}");
-                emit_reply_error(config, &format!("workspace decode failed: {e}"));
-                return;
+                return Err(emit_reply_error(
+                    config,
+                    &format!("workspace decode failed: {e}"),
+                ));
             }
         },
         None => {
-            emit_reply_error(config, "workspace not found");
-            return;
+            return Err(emit_reply_error(config, "workspace not found"));
         }
     };
     let provider = match build_provider_for_workspace(&workspace_key).await {
         Ok(p) => p,
         Err(e) => {
-            emit_reply_error(config, &e);
-            return;
+            return Err(emit_reply_error(config, &e));
         }
     };
     if let Err(e) = provider.post_reply(&workspace, trimmed).await {
         tracing::warn!("post_reply {workspace_key}: {e:?}");
-        emit_reply_error(config, &format!("post failed: {e}"));
-        return;
+        return Err(emit_reply_error(config, &format!("post failed: {e}")));
     }
     tracing::info!(
         "posted reply to {} ({} chars)",
         workspace_key,
         trimmed.len()
     );
-    // The poller picks up the comment on its next tick and broadcasts
-    // a workspace upsert; nothing else to do here.
+    if let Some(client) = config.poll.cached_gh_client() {
+        client.force_full_sweep();
+    }
+    config.poll.wake(true);
+    Ok(())
 }
 
-fn emit_reply_error(config: &ServerConfig, msg: &str) {
+fn emit_reply_error(config: &ServerConfig, msg: &str) -> String {
     let _ = config
         .bus
         .send(Event::provider_error_retryable("reply", msg));
+    msg.to_string()
 }
 
 /// Runtime-polymorphic wrapper around the workspace's

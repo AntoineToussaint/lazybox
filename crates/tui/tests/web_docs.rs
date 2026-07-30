@@ -100,6 +100,17 @@ fn ci_linux_lane_links_benchmark_targets() {
 }
 
 #[test]
+fn desktop_dogfood_artifact_preserves_the_app_executable() {
+    let workflow = read(".github/workflows/ci.yml");
+    assert!(
+        workflow.contains("test -x target/debug/bundle/macos/lazybox.app/Contents/MacOS/lazybox")
+    );
+    assert!(workflow.contains("tar -czf target/debug/bundle/macos/lazybox-macos-dogfood.tar.gz"));
+    assert!(workflow.contains("path: target/debug/bundle/macos/lazybox-macos-dogfood.tar.gz"));
+    assert!(!workflow.contains("path: target/debug/bundle/macos/lazybox.app"));
+}
+
+#[test]
 fn configuration_reference_lists_every_top_level_section() {
     let page = read("web/src/content/docs/docs/reference/configuration.md");
     let value =

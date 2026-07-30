@@ -195,6 +195,9 @@ pub struct CommandResponse {
     pub ok: bool,
     /// Set only after the daemon-side handler has returned.
     pub completed: bool,
+    /// Human-readable command failure, present when `ok` is false.
+    #[serde(default)]
+    pub error: Option<String>,
     /// Connection-scoped outcomes emitted directly by the command handler.
     pub events: Vec<Event>,
 }
@@ -248,11 +251,17 @@ pub enum DesktopCommand {
 
 impl From<DesktopCommand> for Command {
     fn from(command: DesktopCommand) -> Self {
-        match command {
+        command.into_correlated(None)
+    }
+}
+
+impl DesktopCommand {
+    pub fn into_correlated(self, client_request_id: Option<String>) -> Command {
+        match self {
             DesktopCommand::SpawnAgent { session_key, agent } => Command::Spawn {
                 session_key,
                 session_id: None,
-                client_request_id: None,
+                client_request_id,
                 kind: lazybox_ipc::TerminalKind::Agent(agent),
                 cwd: None,
                 initial_prompt: None,
@@ -263,7 +272,7 @@ impl From<DesktopCommand> for Command {
             DesktopCommand::SpawnShell { session_key } => Command::Spawn {
                 session_key,
                 session_id: None,
-                client_request_id: None,
+                client_request_id,
                 kind: lazybox_ipc::TerminalKind::Shell,
                 cwd: None,
                 initial_prompt: None,
@@ -749,20 +758,21 @@ where
     // the bridge; a slow mutation could be abandoned after the success reply.
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let event_tx = lazybox_ipc::EventSender::from_unbounded(event_tx);
-    let mut task = tokio::spawn(async move {
-        crate::dispatch_command(&config, &event_tx, command).await;
-    });
+    let mut task =
+        tokio::spawn(async move { dispatch_one_shot_command(&config, &event_tx, command).await });
     match tokio::time::timeout(options.command_timeout, &mut task).await {
-        Ok(Ok(())) => {
+        Ok(Ok(outcome)) => {
             let mut events = Vec::new();
             while let Ok(event) = event_rx.try_recv() {
                 events.push(event);
             }
+            let error = outcome.err();
             json_response(
                 StatusCode::OK,
                 &CommandResponse {
-                    ok: true,
+                    ok: error.is_none(),
                     completed: true,
+                    error,
                     events,
                 },
             )
@@ -779,6 +789,73 @@ where
             )
         }
     }
+}
+
+async fn dispatch_one_shot_command(
+    config: &ServerConfig,
+    event_tx: &lazybox_ipc::EventSender,
+    command: Command,
+) -> Result<(), String> {
+    if let Command::PostReply { session_key, body } = command {
+        return crate::polling::post_reply(config, session_key, body).await;
+    }
+
+    let correlated_request = match &command {
+        Command::Spawn {
+            client_request_id: Some(request_id),
+            ..
+        } => Some(request_id.clone()),
+        _ => None,
+    };
+    let marked_workspace = match &command {
+        Command::MarkRead { session_key } => Some(session_key.clone()),
+        _ => None,
+    };
+    let mut outcome_rx = correlated_request.as_ref().map(|_| config.bus.subscribe());
+
+    crate::dispatch_command(config, event_tx, command).await;
+
+    if let (Some(request_id), Some(receiver)) = (correlated_request, outcome_rx.as_mut()) {
+        loop {
+            match receiver.try_recv() {
+                Ok(Event::CommandCompleted { client_request_id })
+                    if client_request_id == request_id =>
+                {
+                    break;
+                }
+                Ok(Event::CommandFailed {
+                    client_request_id,
+                    message,
+                }) if client_request_id == request_id => return Err(message),
+                Ok(_) | Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+                    return Err("daemon returned without a terminal launch outcome".to_string());
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
+                    return Err("daemon command outcome channel closed".to_string());
+                }
+            }
+        }
+    }
+
+    if let Some(session_key) = marked_workspace {
+        let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
+        let workspace = config
+            .store
+            .get_workspace(&key)
+            .map_err(|error| format!("verify marked workspace: {error}"))?
+            .and_then(|record| record.workspace_json)
+            .ok_or_else(|| "workspace not found".to_string())
+            .and_then(|json| {
+                serde_json::from_str::<lazybox_core::Workspace>(&json)
+                    .map_err(|error| format!("decode marked workspace: {error}"))
+            })?;
+        if workspace.unread_count() != 0 {
+            return Err("workspace read state was not persisted".to_string());
+        }
+    }
+
+    Ok(())
 }
 
 const MAX_COMMAND_BODY_BYTES: usize = lazybox_ipc::MAX_COMMAND_FRAME_BYTES as usize;

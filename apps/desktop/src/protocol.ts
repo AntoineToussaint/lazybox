@@ -59,7 +59,7 @@ export function commandsForWorkspaceIntent(
       if (body.length === 0) {
         return [];
       }
-      return [{ PostReply: { session_key: sessionKey, body } }, "Refresh"];
+      return [{ PostReply: { session_key: sessionKey, body } }];
     }
   }
 }

@@ -42,9 +42,7 @@ struct GatewayClient {
 struct DesktopState {
     gateway: GatewayClient,
     agents: Vec<String>,
-    agent_options: Vec<DesktopAgentOption>,
     default_agent: String,
-    analytics_enabled: bool,
     terminal_commands: mpsc::Sender<Bytes>,
     terminal_command_rx: Arc<Mutex<mpsc::Receiver<Bytes>>>,
     terminal_rx: Mutex<mpsc::Receiver<TerminalStreamItem>>,
@@ -115,9 +113,13 @@ fn desktop_info(state: State<'_, DesktopState>) -> DesktopInfo {
 }
 
 #[tauri::command]
-fn desktop_setup_state(state: State<'_, DesktopState>) -> Result<DesktopSetupState, String> {
+fn desktop_setup_state() -> Result<DesktopSetupState, String> {
     let config = lazybox_config::Config::load()
         .map_err(|error| format!("load lazybox configuration: {error}"))?;
+    Ok(desktop_setup_state_from_config(&config))
+}
+
+fn desktop_setup_state_from_config(config: &lazybox_config::Config) -> DesktopSetupState {
     let mut selected_repositories = config
         .setup
         .scopes
@@ -135,14 +137,14 @@ fn desktop_setup_state(state: State<'_, DesktopState>) -> Result<DesktopSetupSta
     let first_run = !config.setup.wizard_completed
         || !config.setup.providers.contains("github")
         || selected_repositories.is_empty();
-    Ok(DesktopSetupState {
+    DesktopSetupState {
         first_run,
         selected_repositories,
-        agents: state.agent_options.clone(),
-        default_agent: state.default_agent.clone(),
+        agents: detect_agent_options(config),
+        default_agent: effective_default_agent(config),
         analytics_enabled: config.desktop.analytics_enabled,
         diagnostics_path: diagnostics_dir().display().to_string(),
-    })
+    }
 }
 
 #[tauri::command]
@@ -211,14 +213,11 @@ async fn list_github_repositories() -> Result<Vec<GithubRepositoryOption>, Strin
 }
 
 #[tauri::command]
-fn save_desktop_settings(
-    app: AppHandle,
-    state: State<'_, DesktopState>,
-    settings: SaveDesktopSettings,
-) -> Result<(), String> {
+fn save_desktop_settings(app: AppHandle, settings: SaveDesktopSettings) -> Result<(), String> {
     let repositories = validate_repository_scopes(settings.repositories)?;
-    if !state
-        .agent_options
+    let config = lazybox_config::Config::load()
+        .map_err(|error| format!("load lazybox configuration: {error}"))?;
+    if !detect_agent_options(&config)
         .iter()
         .any(|agent| agent.id == settings.default_agent && agent.available)
     {
@@ -244,24 +243,27 @@ fn save_desktop_settings(
 }
 
 #[tauri::command]
-fn record_analytics(state: State<'_, DesktopState>, event: AnalyticsEvent) -> Result<(), String> {
-    if !state.analytics_enabled {
-        return Ok(());
+fn record_analytics(event: AnalyticsEvent) {
+    let enabled = lazybox_config::Config::load()
+        .map(|config| config.desktop.analytics_enabled)
+        .unwrap_or(false);
+    record_analytics_best_effort(&analytics_path(), enabled, event);
+}
+
+fn record_analytics_best_effort(path: &Path, enabled: bool, event: AnalyticsEvent) {
+    if enabled && let Err(error) = append_analytics_event(path, event) {
+        eprintln!("lazybox desktop could not record analytics: {error}");
     }
-    append_analytics_event(&analytics_path(), event)
-        .map_err(|error| format!("record desktop analytics: {error}"))
 }
 
 #[tauri::command]
 async fn list_workspaces(state: State<'_, DesktopState>) -> Result<WorkspacesResponse, String> {
-    let response = state
-        .gateway
-        .authorized(
-            state
-                .gateway
-                .client
-                .get(state.gateway.url("/v1/workspaces")),
-        )
+    list_gateway_workspaces(&state.gateway).await
+}
+
+async fn list_gateway_workspaces(gateway: &GatewayClient) -> Result<WorkspacesResponse, String> {
+    let response = gateway
+        .authorized(gateway.client.get(gateway.url("/v1/workspaces")))
         .send()
         .await
         .map_err(|error| format!("list workspaces: {error}"))?;
@@ -273,14 +275,20 @@ async fn send_command(
     state: State<'_, DesktopState>,
     command: DesktopCommand,
 ) -> Result<(), String> {
-    let response = state
-        .gateway
+    send_gateway_command(&state.gateway, command).await
+}
+
+async fn send_gateway_command(
+    gateway: &GatewayClient,
+    command: DesktopCommand,
+) -> Result<(), String> {
+    let command = command.into_correlated(Some(uuid::Uuid::new_v4().simple().to_string()));
+    let response = gateway
         .authorized(
-            state
-                .gateway
+            gateway
                 .client
-                .post(state.gateway.url("/v1/commands"))
-                .json(&JsonClientFrame::Command(command.into()))
+                .post(gateway.url("/v1/commands"))
+                .json(&JsonClientFrame::Command(command))
                 .timeout(Duration::from_secs(5 * 60 + 5)),
         )
         .send()
@@ -290,7 +298,9 @@ async fn send_command(
     if response.ok && response.completed {
         Ok(())
     } else {
-        Err("daemon did not complete the desktop command".to_string())
+        Err(response
+            .error
+            .unwrap_or_else(|| "daemon did not complete the desktop command".to_string()))
     }
 }
 
@@ -655,6 +665,24 @@ fn detect_agent_options(config: &lazybox_config::Config) -> Vec<DesktopAgentOpti
         .collect()
 }
 
+fn effective_default_agent(config: &lazybox_config::Config) -> String {
+    config
+        .setup
+        .default_agent
+        .clone()
+        .filter(|agent| !agent.trim().is_empty())
+        .unwrap_or_else(|| "claude".to_string())
+}
+
+fn configured_agent_ids(config: &lazybox_config::Config) -> Vec<String> {
+    let mut agents = config.setup.agents.iter().cloned().collect::<BTreeSet<_>>();
+    if agents.is_empty() {
+        agents.extend(["claude", "codex", "cursor"].map(str::to_string));
+    }
+    agents.insert(effective_default_agent(config));
+    agents.into_iter().collect()
+}
+
 fn diagnostics_dir() -> std::path::PathBuf {
     lazybox_core::paths::state_root().join("desktop-crashes")
 }
@@ -759,7 +787,6 @@ fn extract_login_shell_path(output: &str) -> Option<&str> {
 async fn start_desktop_state() -> Result<DesktopState, String> {
     let user_config = lazybox_config::Config::load()
         .map_err(|error| format!("load lazybox configuration: {error}"))?;
-    let agent_options = detect_agent_options(&user_config);
     let config = ServerConfig::from_user_config()
         .map_err(|error| format!("start lazybox daemon: {error}"))?;
     let client_runtime = ClientRuntime::start(
@@ -807,37 +834,15 @@ async fn start_desktop_state() -> Result<DesktopState, String> {
     .await?;
     validate_protocol(&protocol)?;
 
-    let mut agents = user_config.setup.agents.iter().cloned().collect::<Vec<_>>();
-    if agents.is_empty() {
-        agents = ["claude", "codex", "cursor"]
-            .into_iter()
-            .map(str::to_string)
-            .collect();
-    }
-    agents.sort();
-    agents.dedup();
-    let configured_default = user_config
-        .setup
-        .default_agent
-        .filter(|agent| agents.contains(agent));
-    let default_agent = configured_default
-        .or_else(|| {
-            agents
-                .iter()
-                .find(|agent| agent.as_str() == "claude")
-                .cloned()
-        })
-        .or_else(|| agents.first().cloned())
-        .ok_or_else(|| "no agent is configured".to_string())?;
+    let agents = configured_agent_ids(&user_config);
+    let default_agent = effective_default_agent(&user_config);
     let (terminal_commands, terminal_command_rx) = mpsc::channel(256);
     let (terminal_tx, terminal_rx) = mpsc::channel(32);
 
     Ok(DesktopState {
         gateway,
         agents,
-        agent_options,
         default_agent,
-        analytics_enabled: user_config.desktop.analytics_enabled,
         terminal_commands,
         terminal_command_rx: Arc::new(Mutex::new(terminal_command_rx)),
         terminal_rx: Mutex::new(terminal_rx),
@@ -915,6 +920,7 @@ fn main() {
 mod tests {
     use super::*;
     use lazybox_ipc::{Command, TerminalId};
+    use lazybox_store::WorkspaceRecord;
 
     #[test]
     fn ndjson_decoder_handles_split_and_batched_frames() {
@@ -1073,6 +1079,21 @@ mod tests {
     }
 
     #[test]
+    fn setup_state_reads_the_current_config_and_defaults_like_the_tui() {
+        let mut config = lazybox_config::Config::default();
+        config.setup.agents.insert("codex".to_string());
+
+        let initial = desktop_setup_state_from_config(&config);
+        assert_eq!(initial.default_agent, "claude");
+        assert!(configured_agent_ids(&config).contains(&"claude".to_string()));
+
+        config.setup.default_agent = Some("cursor".to_string());
+        let changed = desktop_setup_state_from_config(&config);
+        assert_eq!(changed.default_agent, "cursor");
+        assert!(configured_agent_ids(&config).contains(&"cursor".to_string()));
+    }
+
+    #[test]
     fn desktop_settings_reject_non_repository_scopes() {
         assert!(validate_repository_scopes(Vec::new()).is_err());
         assert!(validate_repository_scopes(vec!["github:acme".to_string()]).is_err());
@@ -1091,6 +1112,19 @@ mod tests {
         assert_eq!(value["event"], "reply_posted");
         assert!(value["timestamp"].is_u64());
         assert_eq!(value.as_object().map(serde_json::Map::len), Some(2));
+    }
+
+    #[test]
+    fn analytics_write_failures_never_escape_the_optional_boundary() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let blocking_file = directory.path().join("not-a-directory");
+        std::fs::write(&blocking_file, "block child creation").expect("write blocking file");
+
+        record_analytics_best_effort(
+            &blocking_file.join("events.ndjson"),
+            true,
+            AnalyticsEvent::WorkspaceOpened,
+        );
     }
 
     #[test]
@@ -1133,6 +1167,138 @@ mod tests {
             .expect("second enqueue resumes")
             .expect("enqueue second frame");
         assert_eq!(rx.recv().await.as_deref(), Some(b"second".as_slice()));
+    }
+
+    #[tokio::test]
+    async fn credential_free_dogfood_flow_crosses_config_gateway_and_real_pty() {
+        let directory = tempfile::tempdir().expect("temporary fixture directory");
+        let config_path = directory.path().join("config.yaml");
+        let mut persisted_config = lazybox_config::Config::default();
+        apply_desktop_settings(
+            &mut persisted_config,
+            BTreeSet::from(["github:acme/widget".to_string()]),
+            "claude".to_string(),
+            false,
+        );
+        persisted_config
+            .save_to(&config_path)
+            .expect("persist desktop setup fixture");
+        let reloaded =
+            lazybox_config::Config::load_from(&config_path).expect("reload desktop setup fixture");
+        assert_eq!(
+            desktop_setup_state_from_config(&reloaded).selected_repositories,
+            vec!["github:acme/widget"]
+        );
+
+        let config = ServerConfig::in_memory();
+        let workspace_key = lazybox_core::WorkspaceKey::new("desktop-dogfood");
+        let mut workspace =
+            lazybox_core::Workspace::empty(workspace_key.clone(), "main", chrono::Utc::now());
+        workspace.local = true;
+        workspace.linked_checkout = Some(directory.path().to_path_buf());
+        workspace.activity.push(lazybox_core::Activity {
+            author: "fixture".to_string(),
+            body: "Review the desktop flow".to_string(),
+            created_at: chrono::Utc::now(),
+            kind: lazybox_core::ActivityKind::Comment,
+            node_id: None,
+            path: None,
+            line: None,
+            diff_hunk: None,
+            thread_id: None,
+        });
+        config
+            .store
+            .save_workspace(&WorkspaceRecord {
+                key: workspace_key.as_str().to_string(),
+                created_at: workspace.created_at,
+                workspace_json: Some(serde_json::to_string(&workspace).expect("workspace JSON")),
+            })
+            .expect("seed workspace");
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind dogfood gateway");
+        let address = listener.local_addr().expect("dogfood gateway address");
+        let options = GatewayOptions {
+            bind_addr: address,
+            bearer_token: Some("dogfood-token".to_string()),
+            ..GatewayOptions::default()
+        };
+        let served_config = config.clone();
+        let gateway_task = tokio::spawn(async move {
+            lazybox_server::api_gateway::serve_listener(served_config, options, listener)
+                .await
+                .expect("serve dogfood gateway");
+        });
+        let gateway = GatewayClient {
+            base_url: format!("http://{address}"),
+            bearer_token: "dogfood-token".to_string(),
+            client: Client::new(),
+        };
+
+        let listed = list_gateway_workspaces(&gateway)
+            .await
+            .expect("list fixture inbox");
+        assert_eq!(listed.workspaces.len(), 1);
+        send_gateway_command(
+            &gateway,
+            DesktopCommand::MarkRead {
+                session_key: (&workspace_key).into(),
+            },
+        )
+        .await
+        .expect("mark fixture read");
+        let listed = list_gateway_workspaces(&gateway)
+            .await
+            .expect("reload fixture inbox");
+        assert_eq!(listed.workspaces[0].unread_count(), 0);
+
+        let reply_error = send_gateway_command(
+            &gateway,
+            DesktopCommand::PostReply {
+                session_key: (&workspace_key).into(),
+                body: "Credential-free fixture reply".to_string(),
+            },
+        )
+        .await
+        .expect_err("local workspace cannot silently accept an external reply");
+        assert!(!reply_error.is_empty());
+
+        send_gateway_command(
+            &gateway,
+            DesktopCommand::SpawnShell {
+                session_key: (&workspace_key).into(),
+            },
+        )
+        .await
+        .expect("spawn fixture shell");
+        let terminal_id = config
+            .terminal
+            .terminal_ids()
+            .await
+            .into_iter()
+            .next()
+            .expect("shell registered through gateway");
+        let backend_key = config
+            .terminal
+            .backend_key_for(terminal_id)
+            .await
+            .expect("shell has replay backend");
+        let snapshot = config
+            .backend
+            .snapshot(&backend_key)
+            .await
+            .expect("recover shell replay");
+        assert!(snapshot.complete);
+
+        config
+            .backend
+            .kill(&backend_key)
+            .await
+            .expect("stop fixture shell");
+        gateway_task.abort();
+        let _ = gateway_task.await;
     }
 
     #[test]

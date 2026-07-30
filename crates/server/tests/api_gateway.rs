@@ -1,4 +1,5 @@
 pub use lazybox_server::metrics;
+pub use lazybox_server::polling;
 pub use lazybox_server::pty;
 pub use lazybox_server::{Server, ServerConfig, dispatch_command};
 
@@ -1140,6 +1141,110 @@ async fn command_route_returns_connection_scoped_handler_events() {
         payload.events.as_slice(),
         [Event::ProviderCredentialsListed { credentials, .. }] if credentials.is_empty()
     ));
+}
+
+#[tokio::test]
+async fn command_route_returns_the_correlated_terminal_failure() {
+    let frame = JsonClientFrame::Command(Command::Spawn {
+        session_key: "desktop:missing-agent".into(),
+        session_id: None,
+        client_request_id: Some("desktop-request".into()),
+        kind: TerminalKind::Agent("not-installed".into()),
+        cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
+        initial_prompt: None,
+        on_main: false,
+        model_alias: None,
+        access: lazybox_ipc::AgentRunAccess::Default,
+    });
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/commands")
+        .body(Full::new(Bytes::from(serde_json::to_vec(&frame).unwrap())))
+        .unwrap();
+
+    let response = api_gateway::handle_request(
+        ServerConfig::in_memory(),
+        GatewayOptions::default(),
+        request,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: CommandResponse = read_json(response).await;
+    assert!(!payload.ok);
+    assert!(payload.completed);
+    assert_eq!(payload.error.as_deref(), Some("terminal was not spawned"));
+}
+
+#[tokio::test]
+async fn command_route_returns_reply_failure_to_the_requesting_client() {
+    let frame = JsonClientFrame::Command(Command::PostReply {
+        session_key: "github:missing/repo#1".into(),
+        body: "Ready for review".into(),
+    });
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/commands")
+        .body(Full::new(Bytes::from(serde_json::to_vec(&frame).unwrap())))
+        .unwrap();
+
+    let response = api_gateway::handle_request(
+        ServerConfig::in_memory(),
+        GatewayOptions::default(),
+        request,
+    )
+    .await;
+
+    let payload: CommandResponse = read_json(response).await;
+    assert!(!payload.ok);
+    assert_eq!(payload.error.as_deref(), Some("workspace not found"));
+}
+
+#[tokio::test]
+async fn command_route_verifies_mark_read_reached_durable_state() {
+    let config = ServerConfig::in_memory();
+    let mut workspace = Workspace::from_task(make_task("o/r#42"), Utc::now());
+    workspace.activity.push(lazybox_core::Activity {
+        author: "reviewer".into(),
+        body: "Please update this.".into(),
+        created_at: Utc::now(),
+        kind: lazybox_core::ActivityKind::Comment,
+        node_id: None,
+        path: None,
+        line: None,
+        diff_hunk: None,
+        thread_id: None,
+    });
+    config
+        .store
+        .save_workspace(&WorkspaceRecord {
+            key: workspace.key.as_str().to_string(),
+            created_at: workspace.created_at,
+            workspace_json: Some(serde_json::to_string(&workspace).unwrap()),
+        })
+        .unwrap();
+    let frame = JsonClientFrame::Command(Command::MarkRead {
+        session_key: (&workspace.key).into(),
+    });
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/commands")
+        .body(Full::new(Bytes::from(serde_json::to_vec(&frame).unwrap())))
+        .unwrap();
+
+    let response =
+        api_gateway::handle_request(config.clone(), GatewayOptions::default(), request).await;
+
+    let payload: CommandResponse = read_json(response).await;
+    assert!(payload.ok, "{:?}", payload.error);
+    let saved = config
+        .store
+        .get_workspace(&workspace.key)
+        .unwrap()
+        .and_then(|record| record.workspace_json)
+        .and_then(|json| serde_json::from_str::<Workspace>(&json).ok())
+        .unwrap();
+    assert_eq!(saved.unread_count(), 0);
 }
 
 #[tokio::test]

@@ -13,7 +13,7 @@ import {
   writeTerminalFrame,
 } from "./terminal";
 
-describe("credential-free inbox-to-terminal dogfood fixture", () => {
+describe("desktop inbox-to-terminal workflow mapping", () => {
   it("triages, replies, starts work, and reconnects terminal replay", () => {
     const fixture = loadPreview();
     const [workspace] = filteredWorkspaces(fixture.workspaces.values(), {
@@ -39,7 +39,6 @@ describe("credential-free inbox-to-terminal dogfood fixture", () => {
           body: "Replay is covered by the reconnect fixture.",
         },
       },
-      "Refresh",
     ]);
     expect(
       commandsForWorkspaceIntent(key, {

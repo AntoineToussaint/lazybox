@@ -823,14 +823,18 @@ async fn desktop_runtime_real_pty_handles_backpressure_reconnect_replay_and_resy
         api_gateway::handle_request(config.clone(), GatewayOptions::default(), request).await;
     assert_eq!(response.status(), StatusCode::OK);
 
-    let (terminal_id, backend_key) = config
-        .terminals
-        .lock()
+    let terminal_id = config
+        .terminal
+        .terminal_ids()
         .await
-        .iter()
+        .into_iter()
         .next()
-        .map(|(terminal_id, backend_key)| (*terminal_id, backend_key.clone()))
         .expect("spawn registered a real PTY");
+    let backend_key = config
+        .terminal
+        .backend_key_for(terminal_id)
+        .await
+        .expect("spawned PTY has a backend session");
     let request = Request::builder()
         .method(Method::POST)
         .uri("/v1/terminal")

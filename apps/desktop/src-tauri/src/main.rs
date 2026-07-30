@@ -641,12 +641,7 @@ fn detect_agent_options(config: &lazybox_config::Config) -> Vec<DesktopAgentOpti
             let configured = config.agents.get(&id);
             let command = configured
                 .and_then(|entry| entry.command.clone())
-                .unwrap_or_else(|| match id.as_str() {
-                    "claude" => "claude".to_string(),
-                    "codex" => "codex".to_string(),
-                    "cursor-agent" => "cursor-agent".to_string(),
-                    _ => id.clone(),
-                });
+                .unwrap_or_else(|| id.clone());
             let label = configured
                 .and_then(|entry| entry.name.clone())
                 .unwrap_or_else(|| match id.as_str() {
@@ -1130,6 +1125,16 @@ mod tests {
                 ..Default::default()
             },
         );
+        // No explicit command: availability must resolve from the agent
+        // id itself (`true` is a real binary), not a hardcoded name map.
+        config.agents.insert(
+            "true".to_string(),
+            lazybox_config::AgentEntry {
+                name: Some("Truthy".to_string()),
+                command: None,
+                ..Default::default()
+            },
+        );
 
         let initial = desktop_setup_state_from_config(&config);
         assert_eq!(initial.default_agent, "claude");
@@ -1137,6 +1142,12 @@ mod tests {
         assert!(initial.agents.iter().any(|agent| agent.id == "review-bot"
             && agent.label == "Review Bot"
             && agent.available));
+        assert!(
+            initial
+                .agents
+                .iter()
+                .any(|agent| agent.id == "true" && agent.label == "Truthy" && agent.available)
+        );
 
         config.setup.default_agent = Some("cursor-agent".to_string());
         let changed = desktop_setup_state_from_config(&config);

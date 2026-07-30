@@ -281,7 +281,162 @@ describe("credential-free desktop workflow", () => {
       expect(harness.terminalWrites).toContain("recovered terminal\r\n"),
     );
   });
+
+  it("keeps an in-flight reply on one workspace from disabling another", async () => {
+    let releaseReply: (() => void) | undefined;
+
+    harness.invoke.mockImplementation((command: string, args?: unknown) => {
+      if (command === "desktop_setup_state") {
+        return Promise.resolve({
+          first_run: false,
+          selected_scopes: ["github:acme/widget"],
+          agents: [{ id: "codex", label: "Codex", available: true }],
+          default_agent: "codex",
+          analytics_enabled: false,
+          diagnostics_path: "/tmp/lazybox-crashes",
+        });
+      }
+      if (command === "desktop_info") {
+        return Promise.resolve({
+          protocol_version: 1,
+          max_terminal_frame_bytes: 2048,
+          max_terminal_write_bytes: 1024,
+          agents: ["codex"],
+          default_agent: "codex",
+          repositories: [],
+        });
+      }
+      if (command === "list_workspaces") {
+        return Promise.resolve({ workspaces: [], warnings: [] });
+      }
+      if (command === "read_terminal_data") {
+        return new Promise<Uint8Array>(() => {});
+      }
+      if (command === "send_command") {
+        const payload = args as { command?: { PostReply?: unknown } };
+        if (payload.command?.PostReply !== undefined) {
+          return new Promise<void>((resolve) => {
+            releaseReply = resolve;
+          });
+        }
+        return Promise.resolve();
+      }
+      return Promise.resolve();
+    });
+
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() =>
+      expect(element("workspace-list").textContent).toContain("inbox is empty"),
+    );
+
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: { Snapshot: { workspaces: [pr(42), pr(43)], terminals: [] } },
+    });
+    await vi.waitFor(() =>
+      expect(document.querySelectorAll(".workspace-row").length).toBe(2),
+    );
+
+    selectWorkspaceRow("PR o/r#42");
+    await vi.waitFor(() => expect(element("task-title").textContent).toBe("PR o/r#42"));
+    expect(button("reply-button").disabled).toBe(false);
+
+    input("#reply-body").value = "Shipping now.";
+    form("reply-form").dispatchEvent(submitEvent());
+    await vi.waitFor(() => expect(dialog("confirm-dialog").open).toBe(true));
+    button("confirm-accept").click();
+    await vi.waitFor(() => expect(replyCommands()).toHaveLength(1));
+    expect(button("reply-button").disabled).toBe(true);
+
+    selectWorkspaceRow("PR o/r#43");
+    await vi.waitFor(() => expect(element("task-title").textContent).toBe("PR o/r#43"));
+    expect(button("reply-button").disabled).toBe(false);
+    expect(input("#reply-body").disabled).toBe(false);
+
+    selectWorkspaceRow("PR o/r#42");
+    await vi.waitFor(() => expect(element("task-title").textContent).toBe("PR o/r#42"));
+    expect(button("reply-button").disabled).toBe(true);
+
+    releaseReply?.();
+    await vi.waitFor(() => expect(button("reply-button").disabled).toBe(false));
+  });
+
+  it("disables New workspace when no repository is available", async () => {
+    harness.invoke.mockImplementation((command: string) => {
+      if (command === "desktop_setup_state") {
+        return Promise.resolve({
+          first_run: false,
+          selected_scopes: ["github:acme"],
+          agents: [{ id: "codex", label: "Codex", available: true }],
+          default_agent: "codex",
+          analytics_enabled: false,
+          diagnostics_path: "/tmp/lazybox-crashes",
+        });
+      }
+      if (command === "desktop_info") {
+        return Promise.resolve({
+          protocol_version: 1,
+          max_terminal_frame_bytes: 2048,
+          max_terminal_write_bytes: 1024,
+          agents: ["codex"],
+          default_agent: "codex",
+          repositories: [],
+        });
+      }
+      if (command === "list_workspaces") {
+        return Promise.resolve({ workspaces: [], warnings: [] });
+      }
+      if (command === "read_terminal_data") {
+        return new Promise<Uint8Array>(() => {});
+      }
+      return Promise.resolve();
+    });
+
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() =>
+      expect(harness.invoke).toHaveBeenCalledWith("desktop_info"),
+    );
+    await vi.waitFor(() =>
+      expect(button("new-workspace-button").disabled).toBe(true),
+    );
+    button("new-workspace-button").click();
+    expect(dialog("new-workspace-dialog").open).toBe(false);
+  });
 });
+
+function pr(number: number): Record<string, unknown> {
+  const template = structuredClone(fixture.events[0]) as {
+    Snapshot: { workspaces: Array<Record<string, unknown>> };
+  };
+  const workspace = template.Snapshot.workspaces[0];
+  if (workspace === undefined) {
+    throw new Error("fixture snapshot is missing a template workspace");
+  }
+  workspace.key = `github-o-r-${number}`;
+  workspace.branch = `github-o-r-${number}`;
+  workspace.name = `PR o/r#${number}`;
+  const task = workspace.pr as {
+    id: { key: string };
+    title: string;
+    url: string;
+  };
+  task.id.key = `o/r#${number}`;
+  task.title = `PR o/r#${number}`;
+  task.url = `https://github.com/o/r/pull/${number}`;
+  return workspace;
+}
+
+function selectWorkspaceRow(title: string): void {
+  const row = [...document.querySelectorAll<HTMLButtonElement>(".workspace-row")].find(
+    (candidate) => candidate.textContent?.includes(title),
+  );
+  if (row === undefined) {
+    throw new Error(`missing workspace row for ${title}`);
+  }
+  row.click();
+}
 
 function loadDocument(): void {
   document.open();

@@ -179,7 +179,7 @@ let discoveredRepositories: GithubRepositoryOption[] = [];
 let selectedScopes = new Set<string>();
 let configuredRepositories: DesktopRepository[] = [];
 let setupRequired = false;
-let replySubmitting = false;
+const replySubmitting = new Set<string>();
 const replyDrafts = new ReplyDrafts();
 const pendingLaunches = new Set<string>();
 let focusRequestedSession: string | null = null;
@@ -524,7 +524,12 @@ function applyPendingTerminalFrames(terminalId: number): void {
 function render(): void {
   renderInbox();
   renderWorkspace();
+  updateNewWorkspaceButton();
   agentLabel.textContent = defaultAgent;
+}
+
+function updateNewWorkspaceButton(): void {
+  newWorkspaceButton.disabled = availableRepositories().length === 0;
 }
 
 function renderInbox(): void {
@@ -614,7 +619,6 @@ function renderInbox(): void {
 
 function renderWorkspace(): void {
   const workspace = selectedKey === null ? undefined : workspaces.get(selectedKey);
-  newWorkspaceButton.disabled = availableRepositories().length === 0;
   workspaceEmpty.classList.toggle("hidden", workspace !== undefined);
   workspaceDetail.classList.toggle("hidden", workspace === undefined);
   if (workspace === undefined) {
@@ -673,7 +677,8 @@ function renderWorkspace(): void {
     task?.body?.trim() || "No description was provided for this workspace.";
   markReadButton.disabled = unreadCount(workspace) === 0;
   replyBody.disabled = !canReplyToTask(task);
-  replyButton.disabled = replySubmitting || !canReplyToTask(task);
+  replyButton.disabled =
+    replySubmitting.has(workspace.key) || !canReplyToTask(task);
   replyForm.classList.toggle("hidden", !canReplyToTask(task));
 
   const agentTerminal = terminalForWorkspace(
@@ -1138,7 +1143,7 @@ async function markSelectedRead(): Promise<void> {
 }
 
 async function reviewReply(): Promise<void> {
-  if (replySubmitting || selectedKey === null) {
+  if (selectedKey === null || replySubmitting.has(selectedKey)) {
     return;
   }
   const workspaceKey = selectedKey;
@@ -1154,7 +1159,7 @@ async function reviewReply(): Promise<void> {
     replyBody.focus();
     return;
   }
-  replySubmitting = true;
+  replySubmitting.add(workspaceKey);
   replyButton.disabled = true;
   try {
     const accepted = await confirmUserAction(
@@ -1183,7 +1188,7 @@ async function reviewReply(): Promise<void> {
       replyBody.focus();
     }
   } finally {
-    replySubmitting = false;
+    replySubmitting.delete(workspaceKey);
     renderWorkspace();
   }
 }

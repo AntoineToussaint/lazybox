@@ -1902,6 +1902,40 @@ mod broadcast_select_tests {
         sb
     }
 
+    #[test]
+    fn focused_auto_fix_is_explained_in_the_sidebar_header() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        let key = sb.selected_session_key().expect("workspace row").clone();
+        let workspace = sb.workspaces.get_mut(&key).expect("workspace");
+        workspace.policies.set(
+            lazybox_core::AutoFixKind::CiFailure,
+            lazybox_core::PolicyArm::Arm,
+        );
+        workspace.policies.set(
+            lazybox_core::AutoFixKind::MergeConflict,
+            lazybox_core::PolicyArm::Arm,
+        );
+
+        let backend = TestBackend::new(40, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| sb.render(frame.area(), frame, true))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let header: String = (0..buffer.area.width)
+            .map(|x| buffer[(x, 2)].symbol())
+            .collect();
+        let screen: String = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol()))
+            .collect();
+
+        assert!(header.contains("AUTO-FIX ON · CI+CONFLICT"), "{header:?}");
+        assert!(screen.contains("FIX"), "compact row pill is still visible");
+    }
+
     /// `v` marks the cursor row and the mark survives navigating away
     /// — the selection is keyed by workspace, not row index.
     #[test]

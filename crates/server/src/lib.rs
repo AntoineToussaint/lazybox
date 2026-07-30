@@ -845,6 +845,7 @@ impl Server {
                         lazybox_ipc::Command::SetAutoMergeOnGreen { .. } => "SetAutoMergeOnGreen",
                         lazybox_ipc::Command::SetTrackMain { .. } => "SetTrackMain",
                         lazybox_ipc::Command::SetAutoFixPolicy { .. } => "SetAutoFixPolicy",
+                        lazybox_ipc::Command::SetAutoFixPolicies { .. } => "SetAutoFixPolicies",
                         lazybox_ipc::Command::Kill { .. } => "Kill",
                         lazybox_ipc::Command::RemoveMergedWorkspace { .. } => "RemoveMergedWorkspace",
                         lazybox_ipc::Command::KeepMergedWorkspace { .. } => "KeepMergedWorkspace",
@@ -1589,6 +1590,14 @@ pub async fn dispatch_command(
         } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
             workspace::set_auto_fix_policy(config, &key, kind, arm).await;
+        }
+        lazybox_ipc::Command::SetAutoFixPolicies {
+            session_key,
+            ci,
+            conflict,
+        } => {
+            let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
+            workspace::set_auto_fix_policies(config, &key, ci, conflict).await;
         }
         lazybox_ipc::Command::Kill { session_key } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());

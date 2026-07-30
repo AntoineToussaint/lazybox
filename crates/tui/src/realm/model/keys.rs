@@ -25,6 +25,16 @@ use tuirealm::event::{Event as RealmEvent, Key, KeyEvent as RealmKey, KeyModifie
 use tuirealm::ratatui::layout::Rect;
 use tuirealm::terminal::TerminalAdapter;
 
+impl lazybox_tui_core::dispatch::AgentTerminalView for crate::realm::components::sidebar::Sidebar {
+    fn find_agent_terminal(
+        &self,
+        session_key: &lazybox_core::SessionKey,
+        agent_id: &str,
+    ) -> Option<lazybox_ipc::TerminalId> {
+        crate::realm::components::sidebar::Sidebar::find_agent_terminal(self, session_key, agent_id)
+    }
+}
+
 impl<T: TerminalAdapter> Model<T> {
     /// Top-level key handler when no modal is active. Routes Tab,
     /// global escapes, and forwards everything else to the focused
@@ -586,8 +596,19 @@ impl<T: TerminalAdapter> Model<T> {
                 });
             }
         }
-        for cmd in cmds {
-            let rewritten = self.rewrite_spawn_to_inject(cmd);
+        let planned = lazybox_tui_core::dispatch::plan_dispatch(cmds.clone(), &self.sidebar);
+        for (original, rewritten) in cmds.into_iter().zip(planned) {
+            if let (
+                IpcCommand::Spawn {
+                    kind: lazybox_ipc::TerminalKind::Agent(agent_id),
+                    initial_prompt: Some(_),
+                    ..
+                },
+                IpcCommand::InjectPrompt { .. },
+            ) = (&original, &rewritten)
+            {
+                self.flash_hint(format!("→ injecting into existing {agent_id}"));
+            }
             self.send_cmd(rewritten);
         }
     }
@@ -853,28 +874,6 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
-    /// Rewrite a `Spawn { kind: Agent(id), initial_prompt: Some(_) }`
-    /// into `InjectPrompt { terminal_id, prompt }` when an agent
-    /// of the same kind is already running on this workspace.
-    /// Used by BOTH the pane-handler key path and the catalog
-    /// dispatch path so `w` and per-pane shortcuts agree on
-    /// "continue the existing conversation" semantics.
-    fn rewrite_spawn_to_inject(&mut self, cmd: IpcCommand) -> IpcCommand {
-        let terminal_id = match &cmd {
-            IpcCommand::Spawn {
-                session_key,
-                kind: lazybox_ipc::TerminalKind::Agent(agent_id),
-                initial_prompt: Some(_),
-                ..
-            } => self.sidebar.find_agent_terminal(session_key, agent_id),
-            _ => None,
-        };
-        match terminal_id {
-            Some(terminal_id) => self.rewrite_spawn_to_terminal(cmd, terminal_id),
-            None => cmd,
-        }
-    }
-
     /// Rewrite a contextual work spawn to an exact running terminal.
     /// The caller has already resolved the terminal choice, so this
     /// method never performs another agent-id lookup.
@@ -883,41 +882,15 @@ impl<T: TerminalAdapter> Model<T> {
         cmd: IpcCommand,
         terminal_id: lazybox_ipc::TerminalId,
     ) -> IpcCommand {
-        match cmd {
-            IpcCommand::Spawn {
-                model_alias,
-                session_key,
-                session_id,
-                kind: lazybox_ipc::TerminalKind::Agent(agent_id),
-                cwd,
-                initial_prompt: Some(prompt),
-                on_main: _,
-            } => {
-                self.flash_hint(format!("→ injecting into existing {agent_id}"));
-                // Always carry the Spawn parameters so a stale
-                // terminal id (agent died between this lookup and
-                // the command arriving at the daemon) falls back
-                // to Spawn instead of silently dropping the
-                // user's prompt. The TUI's view of
-                // `running_terminals` is updated from a broadcast
-                // channel, so there's always a small window where
-                // the chosen terminal is already dead.
-                let fallback_spawn = Some(lazybox_ipc::SpawnFallback {
-                    model_alias,
-                    session_key,
-                    session_id,
-                    kind: lazybox_ipc::TerminalKind::Agent(agent_id),
-                    cwd,
-                });
-                IpcCommand::InjectPrompt {
-                    terminal_id,
-                    prompt,
-                    fallback_spawn,
-                    submit: true,
-                }
-            }
-            other => other,
+        if let IpcCommand::Spawn {
+            kind: lazybox_ipc::TerminalKind::Agent(agent_id),
+            initial_prompt: Some(_),
+            ..
+        } = &cmd
+        {
+            self.flash_hint(format!("→ injecting into existing {agent_id}"));
         }
+        lazybox_tui_core::dispatch::plan_spawn_for_terminal(cmd, terminal_id)
     }
 
     /// Test entry point: drive a mouse event through `handle_mouse`
@@ -1265,8 +1238,7 @@ impl<T: TerminalAdapter> Model<T> {
                     && rect_contains(right_top_rect, m.column, m.row)
                     && let Some(ws_key) = self.sidebar.selected_workspace().map(|w| w.key.clone())
                 {
-                    self.activity_pane_overrides
-                        .insert(ws_key, lazybox_config::ActivityPaneMode::Full);
+                    self.activity_pane.expand(ws_key);
                     self.set_focus(PaneFocus::Right);
                     self.redraw = true;
                     return;

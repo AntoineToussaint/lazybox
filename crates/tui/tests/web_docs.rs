@@ -216,21 +216,35 @@ fn homepage_never_advertises_the_removed_single_w_action() {
 }
 
 #[test]
-fn homepage_install_delivers_the_showcased_source_build() {
+fn homepage_install_prioritizes_prebuilt_releases() {
     let page = read("web/src/pages/index.astro");
+    let brew = page
+        .find("brew install AntoineToussaint/lazybox/lazybox")
+        .expect("homepage is missing the Homebrew install");
+    let alternatives = page
+        .find("<details class=\"install-more\">")
+        .expect("homepage is missing alternate install methods");
+    let installer = page
+        .find("Installer script <span>Prebuilt</span>")
+        .expect("homepage is missing the prebuilt installer");
+    let source = page
+        .find("Advanced / from source")
+        .expect("homepage is missing the advanced source install");
+
+    assert!(
+        brew < alternatives,
+        "Homebrew must be the primary install method"
+    );
+    assert!(
+        alternatives < installer && installer < source,
+        "the prebuilt installer must come before the advanced source build"
+    );
     assert!(
         page.contains(
             "cargo install --git https://github.com/AntoineToussaint/lazybox --locked lazybox-tui-boot"
-        ),
-        "homepage install must build the source version whose workflows it showcases"
-    );
-    assert!(
-        page.contains("Prefer a published release?"),
-        "stable and current-source install paths are not distinguished"
-    );
-    assert!(
-        !page.contains("const installCmd =\n  'brew "),
-        "homepage still sends the flagship CTA to an older tap release"
+        ) && page.contains("Compiles the current main branch (HEAD) locally.")
+            && page.contains("Zig 0.15.2"),
+        "the advanced source build must identify HEAD and its toolchain requirements"
     );
 }
 
@@ -480,6 +494,88 @@ fn mention_guides_describe_the_full_sweep_cadence() {
             "{relative} must not imply incremental polls scan mentions",
         );
     }
+}
+
+#[test]
+fn comparison_distinguishes_task_sources_from_the_slack_mirror() {
+    let page = read("web/src/content/docs/docs/explanation/comparison.md");
+    let prose = page.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    assert!(
+        page.contains("✓ GitHub · Linear") && prose.contains("Slack mirrors workspace activity"),
+        "comparison must distinguish inbox task sources from the optional Slack mirror"
+    );
+    assert!(
+        !page.contains("GitHub · Linear · Slack")
+            && !prose.contains("Slack threads flow into one read/unread event feed"),
+        "comparison must not advertise Slack as a read/unread task source"
+    );
+}
+
+#[test]
+fn label_trigger_docs_explain_their_distinct_authorization_boundary() {
+    let page = read("web/src/content/docs/docs/how-to/lazybox-mentions.md");
+    let prose = page.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    for expected in [
+        "`mention.allowed_logins` applies only to `@lazybox` mentions",
+        "GitHub does not include who applied a label",
+        "anyone with permission to label an eligible issue can trigger the agent",
+    ] {
+        assert!(
+            prose.contains(expected),
+            "label authorization contract missing {expected:?}"
+        );
+    }
+}
+
+#[test]
+fn label_trigger_discovery_surfaces_state_issue_eligibility() {
+    for relative in [
+        "web/src/pages/index.astro",
+        "web/src/content/docs/docs/explanation/comparison.md",
+        "web/src/content/docs/docs/how-to/index.md",
+    ] {
+        let page = read(relative);
+        let prose = page.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            prose.contains("authored or are assigned to"),
+            "{relative} must state which issues are eligible for label-triggered agents"
+        );
+    }
+}
+
+#[test]
+fn comparison_tracks_documented_remote_and_license_contracts() {
+    let page = read("web/src/content/docs/docs/explanation/comparison.md");
+
+    assert!(
+        page.contains("✓ Cloud / API (beta)")
+            && page.contains("https://www.conductor.build/docs/api"),
+        "Conductor's documented cloud execution must be represented and sourced"
+    );
+    assert!(
+        page.contains("AGPL-3.0 client · proprietary service"),
+        "Warp's license cell must distinguish its open client from its hosted service"
+    );
+}
+
+#[test]
+fn bulk_label_example_preserves_metadata_and_paginates_the_backlog() {
+    let page = read("web/src/content/docs/docs/how-to/lazybox-mentions.md");
+
+    assert!(
+        page.contains("gh api --paginate"),
+        "bulk example must traverse every page of matching issues"
+    );
+    assert!(
+        page.contains("--color") && !page.contains("gh label create 'lazybox:claude/M'"),
+        "bulk example must create a missing label explicitly without force-updating it"
+    );
+    assert!(
+        !page.contains("--force") && !page.contains("--limit 1000"),
+        "bulk example must neither mutate existing label metadata nor truncate the backlog"
+    );
 }
 
 #[test]

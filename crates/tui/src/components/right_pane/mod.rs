@@ -606,6 +606,31 @@ impl RightPane {
         true
     }
 
+    /// Activity row under the cursor when per-row mark-read semantics apply.
+    pub fn activity_cursor_target(&self) -> Option<usize> {
+        let workspace = self.workspace.as_ref()?;
+        if self.activity_collapsed || workspace.activity.is_empty() {
+            None
+        } else {
+            Some(self.feed.cursor)
+        }
+    }
+
+    /// Apply the optimistic local echo for a planned per-row mark.
+    pub fn mark_activity_read_locally(&mut self, index: usize) {
+        let Some(workspace) = self.workspace.as_mut() else {
+            return;
+        };
+        let Some(fingerprint) = workspace.activity.get(index).map(ActivityFingerprint::of) else {
+            return;
+        };
+        self.last_marked_read = Some(AutoMarkRecord {
+            last_index: index,
+            fingerprint,
+        });
+        workspace.mark_activity_read(index);
+    }
+
     /// Undo the most recent auto-mark, if any. Returns
     /// `(session_key, index)` for the caller to persist via
     /// `Command::UnmarkActivityRead`.

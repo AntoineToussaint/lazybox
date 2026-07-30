@@ -7,10 +7,11 @@
 //! a v0.2 client can't talk to a v0.3 daemon.
 
 use lazybox_ipc::{
-    AgentApprovalDecision, AgentInputMessage, AgentQuestionAnswer, AgentRunId, AgentRuntimeMode,
-    AgentState, AgentUsage, Command, Event, HookEvent, HookEventKind, PrincipalId, PromptSource,
-    ProviderCredentialInput, ProviderCredentialMetadata, RemovableTerminalState, SpawnFallback,
-    TerminalId, TerminalKind, TerminalSnapshot, UserPrompt, WorktreeStep, WorktreeStepStatus,
+    AgentApprovalDecision, AgentInputMessage, AgentQuestionAnswer, AgentRunId, AgentRunRequestId,
+    AgentRuntimeMode, AgentState, AgentUsage, Command, Event, HookEvent, HookEventKind,
+    PrincipalId, PromptSource, ProviderCredentialInput, ProviderCredentialMetadata,
+    RemovableTerminalState, SpawnFallback, TerminalId, TerminalKind, TerminalSnapshot, UserPrompt,
+    WorktreeStep, WorktreeStepStatus,
 };
 use tokio::io::duplex;
 
@@ -121,6 +122,7 @@ fn all_commands() -> Vec<Command> {
             terminal_id: TerminalId(7),
         },
         Command::StartAgentRun {
+            request_id: AgentRunRequestId("request-1".into()),
             session_key: key.clone(),
             session_id: Some(lazybox_core::SessionId::new()),
             agent: "claude".into(),
@@ -133,6 +135,7 @@ fn all_commands() -> Vec<Command> {
             access: lazybox_ipc::AgentRunAccess::Default,
         },
         Command::StartAgentRun {
+            request_id: AgentRunRequestId("request-2".into()),
             session_key: key.clone(),
             session_id: None,
             agent: "claude".into(),
@@ -586,11 +589,16 @@ fn all_events() -> Vec<Event> {
             state: AgentState::Exited { code: Some(9) },
         },
         Event::AgentRunStarted {
+            request_id: AgentRunRequestId("request-1".into()),
             run_id: AgentRunId(9),
             session_key: key.clone(),
             session_id: Some(lazybox_core::SessionId::new()),
             agent: "claude".into(),
             mode: AgentRuntimeMode::StreamJson,
+        },
+        Event::AgentRunStartFailed {
+            request_id: AgentRunRequestId("request-2".into()),
+            message: "spawn failed".into(),
         },
         Event::AgentRawJson {
             run_id: AgentRunId(9),
@@ -924,6 +932,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::CheckoutsDiscovered { .. } => "CheckoutsDiscovered",
         Event::OrphanedWorktreeDeleted { .. } => "OrphanedWorktreeDeleted",
         Event::AgentRunStarted { .. } => "AgentRunStarted",
+        Event::AgentRunStartFailed { .. } => "AgentRunStartFailed",
         Event::AgentRawJson { .. } => "AgentRawJson",
         Event::AgentDebug { .. } => "AgentDebug",
         Event::AgentAssistantTextDelta { .. } => "AgentAssistantTextDelta",
@@ -963,7 +972,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
     );
     assert_eq!(
         event_tags.len(),
-        64,
+        65,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

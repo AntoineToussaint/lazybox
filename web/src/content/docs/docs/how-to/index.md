@@ -25,7 +25,9 @@ completion. Pick the one that matches what you need to do.
   inspect and toggle merge-on-green and per-workspace auto-fix behavior from
   the unified `g p` menu.
 - **[Trigger agents with @lazybox mentions](/docs/how-to/lazybox-mentions/)** —
-  choose priority and start an agent entirely from a GitHub issue.
+  choose priority and start an agent entirely from a GitHub issue, or tag a
+  whole backlog of issues you authored or are assigned to with a `lazybox:`
+  label to start a fleet across repos.
 - **[Get desktop notifications](/docs/how-to/desktop-notifications/)** — fire an
   OS banner when an agent needs input, including over SSH.
 - **[Change the theme](/docs/how-to/themes/)** — live-preview and persist a

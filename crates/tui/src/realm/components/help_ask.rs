@@ -16,12 +16,11 @@
 //! `Model` and mutated by daemon-event handlers while this component
 //! is mounted — shared by `Arc<Mutex<…>>` so a text delta doesn't
 //! have to remount the modal (which would drop the user's in-flight
-//! typing). It persists across open/close: the agent run stays alive
-//! for the app's lifetime, so follow-up questions are cheap.
+//! typing). It persists while Help is open so the user can move
+//! between Ask and the shortcut index without losing the thread.
 
 use crate::components::comment_render;
-use crate::realm::Msg;
-use crate::realm::UserEvent;
+use crate::realm::{HelpQuestionKind, Msg, UserEvent};
 use lazybox_tui_core::action::{ActionKind, CatalogEntry, Section};
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -54,9 +53,35 @@ pub struct HelpConvo {
     /// unavailable, run exited, spawn failure. Cleared on the next
     /// question.
     pub notice: Option<String>,
+    next_question: HelpQuestionKind,
+    follow_up_available: bool,
 }
 
 impl HelpConvo {
+    pub(crate) fn next_question(&self) -> HelpQuestionKind {
+        self.next_question
+    }
+
+    pub(crate) fn follow_up_available(&self) -> bool {
+        self.follow_up_available
+    }
+
+    pub(crate) fn select_next_question(&mut self, kind: HelpQuestionKind) {
+        if kind == HelpQuestionKind::NewQuestion || self.follow_up_available {
+            self.next_question = kind;
+        }
+    }
+
+    pub(crate) fn activate_thread(&mut self) {
+        self.follow_up_available = true;
+        self.next_question = HelpQuestionKind::FollowUp;
+    }
+
+    pub(crate) fn deactivate_thread(&mut self) {
+        self.follow_up_available = false;
+        self.next_question = HelpQuestionKind::NewQuestion;
+    }
+
     /// The turn awaiting its answer: the *earliest* un-done turn. The
     /// run answers questions in submission order, so deltas and results
     /// always belong to the oldest open turn — keyed on the last turn
@@ -81,6 +106,8 @@ impl HelpConvo {
 
 pub type SharedHelpConvo = Arc<Mutex<HelpConvo>>;
 
+const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
 pub struct HelpAsk {
     /// Catalog snapshot taken at mount — the search corpus.
     catalog: Vec<CatalogEntry>,
@@ -91,6 +118,7 @@ pub struct HelpAsk {
     /// Transcript scroll, in lines up from the bottom. 0 = pinned to
     /// the bottom so a streaming answer auto-follows.
     scroll_up: usize,
+    spinner_idx: usize,
 }
 
 impl HelpAsk {
@@ -115,6 +143,7 @@ impl HelpAsk {
             query: String::new(),
             matches: Vec::new(),
             scroll_up: 0,
+            spinner_idx: 0,
         }
     }
 
@@ -141,6 +170,12 @@ impl HelpAsk {
             return Some(Msg::HelpIndexOpen);
         }
         match key.code {
+            Key::Tab => {
+                let mut convo = self.convo();
+                let next = convo.next_question().toggled();
+                convo.select_next_question(next);
+                None
+            }
             Key::Enter => {
                 let question = self.query.trim().to_string();
                 if question.is_empty() {
@@ -149,7 +184,8 @@ impl HelpAsk {
                 self.query.clear();
                 self.refilter();
                 self.scroll_up = 0;
-                Some(Msg::HelpAsked(question))
+                let kind = self.convo().next_question();
+                Some(Msg::HelpAsked(question, kind))
             }
             Key::Backspace => {
                 self.query.pop();
@@ -275,15 +311,21 @@ impl HelpAsk {
             if turn.answer.is_empty() {
                 if !turn.done {
                     out.push(Line::from(Span::styled(
-                        "  thinking…",
-                        Style::default().fg(theme.text_dim).italic(),
+                        format!(
+                            "  {} thinking…",
+                            SPINNER_FRAMES[self.spinner_idx % SPINNER_FRAMES.len()]
+                        ),
+                        Style::default().fg(theme.accent).italic(),
                     )));
                 }
             } else {
                 out.extend(comment_render::render_body(&turn.answer, width, usize::MAX));
                 if !turn.done {
                     out.push(Line::from(Span::styled(
-                        "▌",
+                        format!(
+                            "{} answering…",
+                            SPINNER_FRAMES[self.spinner_idx % SPINNER_FRAMES.len()]
+                        ),
                         Style::default().fg(theme.accent),
                     )));
                 }
@@ -392,12 +434,44 @@ impl Component for HelpAsk {
             .border_style(theme.modal_border());
         let inner = block.inner(modal);
         frame.render_widget(block, modal);
-        if inner.height < 4 {
+        if inner.height < 5 {
             return;
         }
 
+        let (next_question, follow_up_available) = {
+            let convo = self.convo();
+            (convo.next_question(), convo.follow_up_available())
+        };
+        let mode_style = |kind| {
+            if next_question == kind {
+                Style::default().fg(Color::Black).bg(theme.accent).bold()
+            } else if kind == HelpQuestionKind::FollowUp && !follow_up_available {
+                Style::default().fg(theme.text_dim).dim()
+            } else {
+                Style::default().fg(theme.text_dim)
+            }
+        };
+        let mode_line = Line::from(vec![
+            Span::raw(" "),
+            Span::styled(
+                " Follow-up · keeps context ",
+                mode_style(HelpQuestionKind::FollowUp),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                " New question · fresh thread ",
+                mode_style(HelpQuestionKind::NewQuestion),
+            ),
+            Span::styled("  Tab switch", Style::default().fg(theme.text_dim)),
+        ]);
+        let mode_rect = Rect { height: 1, ..inner };
+        frame.render_widget(Paragraph::new(mode_line), mode_rect);
+
         let input_line = Line::from(vec![
-            Span::styled("› ", Style::default().fg(theme.accent).bold()),
+            Span::styled(
+                format!("{} › ", next_question.input_label()),
+                Style::default().fg(theme.accent).bold(),
+            ),
             Span::styled(self.query.clone(), Style::default().fg(theme.text_strong)),
             Span::styled("▌", Style::default().fg(theme.accent)),
         ]);
@@ -410,20 +484,21 @@ impl Component for HelpAsk {
         let wrapped = input_lines.len();
         let input_h = wrapped.clamp(
             1,
-            MAX_INPUT_ROWS.min(inner.height.saturating_sub(3)) as usize,
+            MAX_INPUT_ROWS.min(inner.height.saturating_sub(4)) as usize,
         ) as u16;
         let input_rect = Rect {
+            y: inner.y + 1,
             height: input_h,
             ..inner
         };
         let div_rect = Rect {
-            y: inner.y + input_h,
+            y: inner.y + input_h + 1,
             height: 1,
             ..inner
         };
         let body_rect = Rect {
-            y: inner.y + input_h + 1,
-            height: inner.height - input_h - 2,
+            y: inner.y + input_h + 2,
+            height: inner.height - input_h - 3,
             ..inner
         };
         let help_rect = Rect {
@@ -462,13 +537,13 @@ impl Component for HelpAsk {
         let hint = if searching {
             vec![
                 Span::styled("Enter", Style::default().fg(theme.success).bold()),
-                Span::raw(" ask the assistant  "),
+                Span::raw(" ask  "),
+                Span::styled("Tab", Style::default().fg(theme.accent).bold()),
+                Span::raw(" mode  "),
                 Span::styled("Type", Style::default().fg(theme.accent).bold()),
                 Span::raw(" filter keys  "),
                 Span::styled("Esc", Style::default().fg(theme.error).bold()),
-                Span::raw(" close  "),
-                Span::styled("?", Style::default().fg(theme.accent).bold()),
-                Span::raw(" shortcuts (clear query first)"),
+                Span::raw(" exit"),
             ]
         } else {
             vec![
@@ -476,12 +551,14 @@ impl Component for HelpAsk {
                 Span::raw(" search / ask  "),
                 Span::styled("Enter", Style::default().fg(theme.success).bold()),
                 Span::raw(" ask  "),
+                Span::styled("Tab", Style::default().fg(theme.accent).bold()),
+                Span::raw(" mode  "),
                 Span::styled("↑↓", Style::default().fg(theme.accent).bold()),
                 Span::raw(" scroll  "),
                 Span::styled("Esc", Style::default().fg(theme.error).bold()),
-                Span::raw(" close  "),
+                Span::raw(" exit  "),
                 Span::styled("?", Style::default().fg(theme.accent).bold()),
-                Span::raw(" all shortcuts"),
+                Span::raw(" shortcuts"),
             ]
         };
         frame.render_widget(Paragraph::new(Line::from(hint)), help_rect);
@@ -507,6 +584,10 @@ impl AppComponent<Msg, UserEvent> for HelpAsk {
                 self.query.push_str(text);
                 self.refilter();
                 None
+            }
+            Event::Tick if self.convo().turns.iter().any(|turn| !turn.done) => {
+                self.spinner_idx = self.spinner_idx.wrapping_add(1);
+                Some(Msg::HelpSpinnerTick)
             }
             _ => None,
         }
@@ -558,10 +639,18 @@ mod tests {
             let _ = c.on_key(&ke(ch));
         }
         match c.on_key(&key(Key::Enter)) {
-            Some(Msg::HelpAsked(q)) => assert_eq!(q, "how do I snooze?"),
+            Some(Msg::HelpAsked(q, kind)) => {
+                assert_eq!(q, "how do I snooze?");
+                assert_eq!(kind, HelpQuestionKind::NewQuestion);
+            }
             other => panic!("expected HelpAsked, got {other:?}"),
         }
         assert!(c.query.is_empty());
+        assert_eq!(
+            c.convo().next_question(),
+            HelpQuestionKind::NewQuestion,
+            "the model marks the thread active only after accepting the question"
+        );
     }
 
     /// Enter with an empty (or whitespace) query is a no-op — nothing
@@ -626,8 +715,8 @@ mod tests {
     }
 
     /// The transcript renders the shared conversation: question line,
-    /// streamed markdown answer, and the streaming cursor while a turn
-    /// is open — then drops the cursor once the turn completes.
+    /// streamed markdown answer, and the animated working indicator
+    /// while a turn is open — then drops it once the turn completes.
     #[test]
     fn transcript_renders_shared_convo() {
         let c = component();
@@ -656,13 +745,92 @@ mod tests {
         // Markdown syntax (backticks, `**`) is consumed into styling
         // by `comment_render`; the plain text remains.
         assert!(rendered.contains("Press z on a workspace."));
-        assert!(rendered.contains("▌"), "streaming cursor missing");
+        assert!(
+            rendered.contains("⠋ answering…"),
+            "working indicator missing"
+        );
 
         c.convo().turns[0].done = true;
         c.convo().notice = Some("assistant exited".into());
         let rendered = text(&c.body_lines(80));
-        assert!(!rendered.contains("▌"));
+        assert!(!rendered.contains("answering…"));
         assert!(rendered.contains("⚠ assistant exited"));
+    }
+
+    #[test]
+    fn tab_selects_follow_up_or_new_question() {
+        let mut c = component();
+        assert_eq!(c.convo().next_question(), HelpQuestionKind::NewQuestion);
+        assert!(c.on_key(&key(Key::Tab)).is_none());
+        assert_eq!(
+            c.convo().next_question(),
+            HelpQuestionKind::NewQuestion,
+            "there is no thread to follow up yet"
+        );
+
+        {
+            let mut convo = c.convo();
+            convo.turns.push(HelpTurn {
+                question: "q".into(),
+                answer: "a".into(),
+                done: true,
+            });
+            convo.activate_thread();
+        }
+        let _ = c.on_key(&key(Key::Tab));
+        assert_eq!(c.convo().next_question(), HelpQuestionKind::NewQuestion);
+        let _ = c.on_key(&key(Key::Tab));
+        assert_eq!(c.convo().next_question(), HelpQuestionKind::FollowUp);
+    }
+
+    #[test]
+    fn selected_question_kind_survives_component_remount() {
+        let shared = SharedHelpConvo::default();
+        {
+            let mut convo = shared.lock().unwrap_or_else(|e| e.into_inner());
+            convo.turns.push(HelpTurn {
+                question: "q".into(),
+                answer: "a".into(),
+                done: true,
+            });
+            convo.activate_thread();
+        }
+        let catalog =
+            ActionDef::catalog(&["claude".to_string()], &std::collections::BTreeMap::new());
+        let mut first = HelpAsk::new(catalog.clone(), shared.clone(), ']');
+        let _ = first.on_key(&key(Key::Tab));
+        assert!(matches!(first.on_key(&ke('?')), Some(Msg::HelpIndexOpen)));
+
+        let mut remounted = HelpAsk::new(catalog, shared, ']');
+        let _ = remounted.on_key(&ke('q'));
+        assert!(matches!(
+            remounted.on_key(&key(Key::Enter)),
+            Some(Msg::HelpAsked(_, HelpQuestionKind::NewQuestion))
+        ));
+    }
+
+    #[test]
+    fn tick_animates_spinner_while_agent_is_working() {
+        let mut c = component();
+        c.convo().turns.push(HelpTurn {
+            question: "q".into(),
+            ..Default::default()
+        });
+        let text = |lines: &[Line<'_>]| {
+            lines
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        };
+
+        assert!(text(&c.body_lines(80)).contains("⠋ thinking…"));
+        assert!(matches!(c.on(&Event::Tick), Some(Msg::HelpSpinnerTick)));
+        assert!(text(&c.body_lines(80)).contains("⠙ thinking…"));
+
+        c.convo().turns[0].answer = "partial".into();
+        assert!(matches!(c.on(&Event::Tick), Some(Msg::HelpSpinnerTick)));
+        assert!(text(&c.body_lines(80)).contains("⠹ answering…"));
     }
 
     /// Read each row of a rendered `TestBackend` buffer as a trimmed
@@ -743,6 +911,9 @@ mod tests {
         .unwrap();
         let rendered = format!("{:?}", term.backend().buffer());
         assert!(rendered.contains("Ask Lazybox"));
+        assert!(rendered.contains("Follow-up"));
+        assert!(rendered.contains("New question"));
+        assert!(rendered.contains("fresh thread"));
         assert!(rendered.contains("merge"));
     }
 }

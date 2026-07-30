@@ -342,8 +342,10 @@ async fn graceful_stop_drains_in_flight_mutation_before_exit() {
     client
         .send(Command::Spawn {
             model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
             session_key: "test:drain".into(),
             session_id: None,
+            client_request_id: None,
             kind: TerminalKind::Shell,
             cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
             initial_prompt: None,
@@ -396,8 +398,10 @@ async fn graceful_stop_abandons_mutation_past_the_drain_bound() {
     client
         .send(Command::Spawn {
             model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
             session_key: "test:wedged".into(),
             session_id: None,
+            client_request_id: None,
             kind: TerminalKind::Shell,
             cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
             initial_prompt: None,
@@ -435,10 +439,12 @@ async fn start_agent_run_unknown_agent_reports_error() {
             request_id: AgentRunRequestId("unknown-agent".into()),
             session_key: "test:ws".into(),
             session_id: None,
+            source_terminal_id: None,
             agent: "does-not-exist".into(),
             mode: AgentRuntimeMode::StreamJson,
             cwd: None,
             initial_input: None,
+            resume_latest: false,
             access: lazybox_ipc::AgentRunAccess::Default,
         })
         .unwrap();
@@ -643,8 +649,10 @@ fn all_non_shutdown_commands() -> Vec<Command> {
         },
         Command::Spawn {
             model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
             session_key: "test:ws".into(),
             session_id: None,
+            client_request_id: None,
             kind: TerminalKind::Shell,
             cwd: Some(cwd.clone()),
             initial_prompt: None,
@@ -673,7 +681,10 @@ fn all_non_shutdown_commands() -> Vec<Command> {
             cols: 80,
             rows: 24,
         },
-        Command::Close { terminal_id: tid },
+        Command::Close {
+            terminal_id: tid,
+            client_request_id: None,
+        },
         Command::IngestHook {
             terminal_id: tid,
             hook: HookEvent {
@@ -791,10 +802,12 @@ fn all_non_shutdown_commands() -> Vec<Command> {
             request_id: AgentRunRequestId("bulk-unknown-agent".into()),
             session_key: "test:ws".into(),
             session_id: None,
+            source_terminal_id: None,
             agent: "no-such-agent".into(),
             mode: AgentRuntimeMode::StreamJson,
             cwd: None,
             initial_input: None,
+            resume_latest: false,
             access: lazybox_ipc::AgentRunAccess::Default,
         },
         Command::SendAgentInput {
@@ -900,8 +913,10 @@ async fn a_stalled_handler_does_not_block_poll_forwarding() {
     client
         .send(Command::Spawn {
             model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
             session_key: "test:stall".into(),
             session_id: None,
+            client_request_id: None,
             kind: TerminalKind::Shell,
             cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
             initial_prompt: None,
@@ -1260,7 +1275,7 @@ async fn failed_terminal_close_keeps_the_io_lane_alive() {
         .await;
     mock.fail_kill(&key, "backend transport timed out").await;
 
-    let (client, server) = channel::pair();
+    let (mut client, server) = channel::pair();
     let handle = tokio::spawn({
         let config = config.clone();
         async move { Server::new(config).serve(server).await }
@@ -1268,6 +1283,7 @@ async fn failed_terminal_close_keeps_the_io_lane_alive() {
     client
         .send(Command::Close {
             terminal_id: TerminalId(55),
+            client_request_id: Some("replacement-close".into()),
         })
         .expect("close");
     client
@@ -1287,6 +1303,18 @@ async fn failed_terminal_close_keeps_the_io_lane_alive() {
     })
     .await
     .expect("failed Close must not retire the terminal's I/O worker");
+    let event = tokio::time::timeout(Duration::from_secs(1), client.recv())
+        .await
+        .expect("correlated close result")
+        .expect("close failure event");
+    assert!(matches!(
+        event,
+        Event::CommandFailed {
+            client_request_id,
+            message,
+        } if client_request_id == "replacement-close"
+            && message.contains("backend transport timed out")
+    ));
 
     client.send(Command::Shutdown).expect("shutdown");
     tokio::time::timeout(Duration::from_secs(2), handle)

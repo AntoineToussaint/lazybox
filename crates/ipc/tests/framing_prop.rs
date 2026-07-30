@@ -21,6 +21,7 @@ fn write_cmd() -> impl Strategy<Value = Command> {
         }),
         any::<u64>().prop_map(|id| Command::Close {
             terminal_id: TerminalId(id),
+            client_request_id: None,
         }),
     ]
 }

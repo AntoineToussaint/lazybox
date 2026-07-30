@@ -85,8 +85,10 @@ async fn spawn_shell(client: &mut lazybox_ipc::Client) -> lazybox_ipc::TerminalI
     client
         .send(Command::Spawn {
             model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
             session_key: "test:ws-teardown".into(),
             session_id: None,
+            client_request_id: None,
             kind: TerminalKind::Shell,
             // These tests isolate pump teardown, not workspace lookup.
             // Production workspace-less spawns are intentionally denied.
@@ -112,8 +114,10 @@ async fn spawn_agent(client: &mut lazybox_ipc::Client, agent: &str) -> lazybox_i
     client
         .send(Command::Spawn {
             model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
             session_key: "test:ws-teardown".into(),
             session_id: None,
+            client_request_id: None,
             kind: TerminalKind::Agent(agent.into()),
             cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
             initial_prompt: None,

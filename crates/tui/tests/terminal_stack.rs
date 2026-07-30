@@ -1063,8 +1063,9 @@ fn close_focused_tile_in_tabs_closes_the_active_terminal() {
     let mut cmds = Vec::new();
     t.close_focused_tile(&mut cmds);
     assert!(
-        cmds.iter()
-            .any(|c| matches!(c, Command::Close { terminal_id } if *terminal_id == TerminalId(1))),
+        cmds.iter().any(
+            |c| matches!(c, Command::Close { terminal_id, .. } if *terminal_id == TerminalId(1))
+        ),
         "Tabs-mode close targets the active terminal, got {cmds:?}"
     );
 }

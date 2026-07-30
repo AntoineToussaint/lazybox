@@ -35,8 +35,8 @@ use lazybox_core::{
     SessionId, SessionKey, SessionKind, Task, Workspace, WorkspaceKey, WorkspaceSession as Session,
 };
 use lazybox_ipc::{
-    Event, PromptSource, TerminalId, TerminalKind, TerminalSnapshot, UserPrompt, WorktreeStep,
-    WorktreeStepStatus,
+    AgentRunAccess, Event, PromptSource, TerminalId, TerminalKind, TerminalSnapshot, UserPrompt,
+    WorktreeStep, WorktreeStepStatus,
 };
 use lazybox_store::{StoreMutation, WorkspaceRecord};
 use spawn_executor::{ExecutedSpawn, SpawnExecutionOutcome, execute_spawn_plan};
@@ -73,6 +73,7 @@ static NEXT_TERMINAL_ID: AtomicU64 = AtomicU64::new(1);
 /// hook settings file path), so a fresh daemon restarting at 1 would
 /// silently reuse a surviving session's id.
 const TERMINAL_ID_HIGH_WATER_KEY: &str = "terminal-id-high-water";
+const SESSION_AGENT_ACCESS_PREFIX: &str = "session-agent-access:";
 
 /// Every persisted value owned by one backend terminal. Keeping the key
 /// namespace and cleanup inventory in one type prevents a restart feature
@@ -81,6 +82,7 @@ const TERMINAL_ID_HIGH_WATER_KEY: &str = "terminal-id-high-water";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TerminalPersistedField {
     Metadata,
+    Access,
     NoPermission,
     /// Legacy single last-prompt row (`terminal-msg`). Superseded by
     /// `UserMessageHistory`; still read once for migration and swept at
@@ -95,8 +97,9 @@ enum TerminalPersistedField {
 }
 
 impl TerminalPersistedField {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Metadata,
+        Self::Access,
         Self::NoPermission,
         Self::UserMessage,
         Self::UserMessageHistory,
@@ -108,6 +111,7 @@ impl TerminalPersistedField {
     fn key(self, backend_key: &str) -> String {
         let prefix = match self {
             Self::Metadata => "terminal",
+            Self::Access => "terminal-access",
             Self::NoPermission => "terminal-noperm",
             Self::UserMessage => "terminal-msg",
             Self::UserMessageHistory => "terminal-msgs",
@@ -618,6 +622,49 @@ fn wake_poll_for_terminal_kind(config: &ServerConfig, kind: &TerminalKind) {
     }
 }
 
+struct CorrelatedCommandOutcome {
+    bus: tokio::sync::broadcast::Sender<Event>,
+    client_request_id: Option<String>,
+    failure_message: &'static str,
+    finished: bool,
+}
+
+impl CorrelatedCommandOutcome {
+    fn new(
+        config: &ServerConfig,
+        client_request_id: Option<String>,
+        failure_message: &'static str,
+    ) -> Self {
+        Self {
+            bus: config.bus.clone(),
+            client_request_id,
+            failure_message,
+            finished: false,
+        }
+    }
+
+    fn complete(&mut self) {
+        self.finished = true;
+        if let Some(client_request_id) = self.client_request_id.take() {
+            let _ = self.bus.send(Event::CommandCompleted { client_request_id });
+        }
+    }
+}
+
+impl Drop for CorrelatedCommandOutcome {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        if let Some(client_request_id) = self.client_request_id.take() {
+            let _ = self.bus.send(Event::CommandFailed {
+                client_request_id,
+                message: self.failure_message.into(),
+            });
+        }
+    }
+}
+
 /// Spawn a terminal inside a session and broadcast
 /// `Event::TerminalSpawned`. Failures emit `Event::ProviderError` so
 /// the user gets feedback in the TUI rather than a silent miss.
@@ -651,8 +698,17 @@ pub async fn handle_spawn(
         on_main,
         model_alias,
         resume,
+        access,
+        client_request_id,
         origin,
     } = options;
+    let access = if matches!(&kind, TerminalKind::Agent(_)) {
+        access
+    } else {
+        AgentRunAccess::Default
+    };
+    let mut outcome =
+        CorrelatedCommandOutcome::new(config, client_request_id, "terminal was not spawned");
     // Autonomous sessions (e.g. `@lazybox`-triggered work) launch with
     // tool-use permission prompts disabled so the agent runs unattended
     // — there's no human nearby to approve. Gated by config so a
@@ -710,14 +766,18 @@ pub async fn handle_spawn(
     {
         Ok(guard) => guard,
         Err(()) => {
-            collapse_onto_inflight_spawn(
+            if collapse_onto_inflight_spawn(
                 config,
                 &session_key,
                 &kind,
                 on_main,
+                access,
                 initial_prompt.as_deref(),
             )
-            .await;
+            .await
+            {
+                outcome.complete();
+            }
             return;
         }
     };
@@ -730,6 +790,13 @@ pub async fn handle_spawn(
     if let Some(existing) =
         find_existing_singleton(config, &session_key, &kind, Some(on_main)).await
     {
+        if terminal_access_for(config, existing).await != access {
+            let _ = config.bus.send(Event::provider_error_permanent(
+                "spawn",
+                "an agent with a different host-access policy is already running in this checkout",
+            ));
+            return;
+        }
         tracing::info!(
             terminal_id = ?existing,
             has_initial_prompt = initial_prompt.is_some(),
@@ -749,6 +816,7 @@ pub async fn handle_spawn(
         let _ = config.bus.send(Event::TerminalFocusRequested {
             terminal_id: existing,
         });
+        outcome.complete();
         return;
     }
     // Resolve target session + cwd. The cwd param wins over
@@ -921,6 +989,7 @@ pub async fn handle_spawn(
             landed_on_main,
             model_alias,
             resume,
+            access,
             shell_command,
         },
         &cfg,
@@ -954,6 +1023,7 @@ pub async fn handle_spawn(
         terminal_id,
         state_durability,
     } = executed;
+    outcome.complete();
 
     // Pump backend output → bus. Also runs agent-state detection
     // on each chunk so the user sees a "needs input" badge when
@@ -3153,6 +3223,18 @@ pub(crate) async fn find_existing_singleton(
         .map(|t| t.terminal_id)
 }
 
+fn singleton_claim_target(target: String, on_main: bool) -> String {
+    if on_main {
+        format!("{target}:main")
+    } else {
+        target
+    }
+}
+
+async fn terminal_access_for(config: &ServerConfig, terminal_id: TerminalId) -> AgentRunAccess {
+    config.terminal.access_for(terminal_id).await
+}
+
 /// Releases a claimed in-flight singleton identity when dropped — on
 /// EVERY `handle_spawn` exit path (success, session-resolution failure,
 /// backend failure, panic) — and pings waiters so collapsing duplicates
@@ -3192,8 +3274,7 @@ impl InflightSpawnGuard {
             // spawn doesn't race-collapse onto an in-flight isolated
             // spawn of the same agent (mirrors
             // `find_existing_singleton`).
-            Some(target) if on_main => (format!("{target}:main"), true),
-            Some(target) => (target, true),
+            Some(target) => (singleton_claim_target(target, on_main), true),
             None => {
                 static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                 let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3267,8 +3348,9 @@ async fn collapse_onto_inflight_spawn(
     session_key: &SessionKey,
     kind: &TerminalKind,
     on_main: bool,
+    access: AgentRunAccess,
     prompt: Option<&str>,
-) {
+) -> bool {
     tracing::info!(
         %session_key,
         ?kind,
@@ -3286,8 +3368,15 @@ async fn collapse_onto_inflight_spawn(
             "spawn",
             "an agent spawn was already in flight but failed — press the key again",
         ));
-        return;
+        return false;
     };
+    if terminal_access_for(config, existing).await != access {
+        let _ = config.bus.send(Event::provider_error_permanent(
+            "spawn",
+            "an in-flight agent completed with a different host-access policy",
+        ));
+        return false;
+    }
     if let Some(prompt) = prompt {
         // Boxed for the same reason as the existing-singleton path in
         // `handle_spawn`: `handle_inject_prompt`'s fallback arm can
@@ -3298,6 +3387,7 @@ async fn collapse_onto_inflight_spawn(
     let _ = config.bus.send(Event::TerminalFocusRequested {
         terminal_id: existing,
     });
+    true
 }
 
 /// Wait for the in-flight winner's terminal to land in the live maps,
@@ -3315,11 +3405,7 @@ async fn await_inflight_singleton(
     // does, so a main-checkout collapse waits on the right winner and
     // never mistakes an isolated agent's claim for it.
     let target = kind.singleton_key()?;
-    let claim_target = if on_main {
-        format!("{target}:main")
-    } else {
-        target.clone()
-    };
+    let claim_target = singleton_claim_target(target.clone(), on_main);
     let claim = (session_key.as_str().to_string(), claim_target);
     let deadline = tokio::time::Instant::now() + INFLIGHT_COLLAPSE_DEADLINE;
     loop {
@@ -4141,6 +4227,7 @@ async fn finish_terminal(
         .lock()
         .await
         .remove(&terminal_id);
+    config.terminal.forget_access(terminal_id).await;
     config
         .terminal
         .on_main_terminals
@@ -5386,6 +5473,8 @@ async fn handle_inject_prompt_inner(
                         initial_prompt: prompt,
                         autonomous,
                         model_alias: fb.model_alias,
+                        access: fb.access,
+                        client_request_id: fb.client_request_id,
                         ..Default::default()
                     },
                 )
@@ -5674,7 +5763,11 @@ pub async fn handle_resize(config: &ServerConfig, terminal_id: TerminalId, cols:
 /// terminal should keep accepting input so the user can retry. The pump task
 /// drains remaining output, observes the stream close, and owns the eventual
 /// `Event::TerminalExited`.
-pub async fn handle_close(config: &ServerConfig, terminal_id: TerminalId) -> bool {
+pub async fn handle_close(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    client_request_id: Option<&str>,
+) -> bool {
     let Some(key) = config.terminal.backend_key_for(terminal_id).await else {
         return true;
     };
@@ -5683,6 +5776,12 @@ pub async fn handle_close(config: &ServerConfig, terminal_id: TerminalId) -> boo
     };
     if let Err(e) = config.backend.kill(&key).await {
         tracing::warn!("backend kill {key}: {e}");
+        if let Some(client_request_id) = client_request_id {
+            let _ = config.bus.send(Event::CommandFailed {
+                client_request_id: client_request_id.into(),
+                message: format!("could not close source terminal: {e}"),
+            });
+        }
         return false;
     }
     true
@@ -6073,6 +6172,7 @@ pub async fn recover_sessions(config: &ServerConfig) {
         let (session_key, kind) = load_terminal_meta(config, &key)
             .await
             .unwrap_or_else(|| (SessionKey::from(""), TerminalKind::Shell));
+        let access = load_terminal_access(config, &key).await;
         let no_permission = load_no_permission(config, &key).await;
         let required_generation = match &kind {
             TerminalKind::Agent(agent_id) => config
@@ -6093,6 +6193,9 @@ pub async fn recover_sessions(config: &ServerConfig) {
         } else {
             None
         };
+        if access != AgentRunAccess::Default {
+            config.terminal.record_access(terminal_id, access).await;
+        }
         // Recover the primary maps as one visible registration, under the
         // same canonical lock pair as a fresh spawn. This prevents snapshot
         // or workspace-rebadge readers from observing a backend id without
@@ -6417,6 +6520,59 @@ async fn load_terminal_meta(
         .flatten()?;
     let parsed: (String, TerminalKind) = serde_json::from_str(&raw).ok()?;
     Some((SessionKey::from(parsed.0.as_str()), parsed.1))
+}
+
+fn session_agent_access_key(session_id: SessionId) -> String {
+    format!("{SESSION_AGENT_ACCESS_PREFIX}{session_id}")
+}
+
+async fn persist_agent_access(
+    config: &ServerConfig,
+    backend_key: &str,
+    session_id: Option<SessionId>,
+    access: AgentRunAccess,
+) -> Result<(), String> {
+    let store = config.store.clone();
+    let terminal_key = TerminalPersistedField::Access.key(backend_key);
+    let session_key = session_id.map(session_agent_access_key);
+    tokio::task::spawn_blocking(move || {
+        match access {
+            AgentRunAccess::Default => store.delete_kv(&terminal_key),
+            AgentRunAccess::ReadOnly => store.set_kv(&terminal_key, "read-only"),
+        }
+        .map_err(|error| error.to_string())?;
+        if let Some(session_key) = session_key {
+            match access {
+                AgentRunAccess::Default => store.delete_kv(&session_key),
+                AgentRunAccess::ReadOnly => store.set_kv(&session_key, "read-only"),
+            }
+            .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+async fn load_agent_access(config: &ServerConfig, key: String) -> AgentRunAccess {
+    let store = config.store.clone();
+    let value = tokio::task::spawn_blocking(move || store.get_kv(&key))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten();
+    match value.as_deref() {
+        Some("read-only") => AgentRunAccess::ReadOnly,
+        _ => AgentRunAccess::Default,
+    }
+}
+
+async fn load_terminal_access(config: &ServerConfig, backend_key: &str) -> AgentRunAccess {
+    load_agent_access(config, TerminalPersistedField::Access.key(backend_key)).await
+}
+
+async fn load_session_access(config: &ServerConfig, session_id: SessionId) -> AgentRunAccess {
+    load_agent_access(config, session_agent_access_key(session_id)).await
 }
 
 /// Persist whether `backend_key` was launched in no-permission mode so
@@ -6999,6 +7155,7 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
     // workspace archived via `x x`, a session removed) before restoring —
     // the durable history has no other GC hook (#468).
     gc_scrollback_files(&workspaces, &lazybox_core::paths::scrollback_dir());
+    gc_session_access_policies(config, &workspaces);
 
     // Snapshot live (session_key, kind) pairs so we can dedupe.
     let mut live: std::collections::HashSet<(String, String)> = {
@@ -7059,6 +7216,7 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
             if live.contains(&key_pair) {
                 continue;
             }
+            let access = load_session_access(config, session.id).await;
             tracing::info!(
                 "restoring session {:?} in workspace {}",
                 kind,
@@ -7071,6 +7229,7 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
                 kind,
                 SpawnOptions {
                     resume: true,
+                    access,
                     origin: lazybox_ipc::SpawnOrigin::Autonomous(
                         lazybox_ipc::AutonomousTrigger::Restore,
                     ),
@@ -7078,6 +7237,40 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
                 },
             )
             .await;
+        }
+    }
+}
+
+fn gc_session_access_policies(
+    config: &ServerConfig,
+    workspaces: &[lazybox_store::WorkspaceRecord],
+) {
+    let mut keep = std::collections::HashSet::new();
+    for record in workspaces {
+        let Some(json) = &record.workspace_json else {
+            return;
+        };
+        let Ok(workspace) = serde_json::from_str::<Workspace>(json) else {
+            return;
+        };
+        keep.extend(
+            workspace
+                .sessions
+                .iter()
+                .map(|session| session.id.to_string()),
+        );
+    }
+    let Ok(rows) = config.store.list_kv_prefix(SESSION_AGENT_ACCESS_PREFIX) else {
+        return;
+    };
+    for (key, _) in rows {
+        let Some(session_id) = key.strip_prefix(SESSION_AGENT_ACCESS_PREFIX) else {
+            continue;
+        };
+        if !keep.contains(session_id)
+            && let Err(error) = config.store.delete_kv(&key)
+        {
+            tracing::warn!(%key, %error, "session access-policy cleanup failed");
         }
     }
 }
@@ -7170,6 +7363,7 @@ mod tests {
             hook_command,
             model_args,
             resume,
+            AgentRunAccess::Default,
         )
         .ok()
     }
@@ -7315,6 +7509,7 @@ mod tests {
                 landed_on_main: false,
                 model_alias: None,
                 resume: false,
+                access: AgentRunAccess::Default,
                 shell_command: String::new(),
             },
             &lazybox_config::Config::default(),
@@ -7656,6 +7851,7 @@ mod tests {
             keys,
             [
                 "terminal:backend".to_string(),
+                "terminal-access:backend".to_string(),
                 "terminal-noperm:backend".to_string(),
                 "terminal-msg:backend".to_string(),
                 "terminal-msgs:backend".to_string(),
@@ -8246,7 +8442,8 @@ mod tests {
         let kind = TerminalKind::Agent("claude".into());
         let mut rx = config.bus.subscribe();
         // No claim, no terminal: the winner is already gone.
-        collapse_onto_inflight_spawn(&config, &key, &kind, false, None).await;
+        collapse_onto_inflight_spawn(&config, &key, &kind, false, AgentRunAccess::Default, None)
+            .await;
         match rx.try_recv().expect("a retry notice is broadcast") {
             Event::ProviderError { source, kind, .. } => {
                 assert_eq!(source, "spawn");

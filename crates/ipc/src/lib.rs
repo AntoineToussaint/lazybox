@@ -158,13 +158,13 @@ pub enum AgentRuntimeMode {
     StreamJson,
 }
 
-/// Host access granted to a structured agent run.
+/// Host access granted to an agent launch.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentRunAccess {
-    /// Use the structured adapter's normal provider policy.
+    /// Use the agent's normal provider policy.
     #[default]
     Default,
-    /// Prevent the child from changing the host and ignore user-provided
+    /// Prevent the agent from changing the host and ignore user-provided
     /// extensions that could escape that boundary.
     ReadOnly,
 }
@@ -479,17 +479,21 @@ impl fmt::Debug for ProviderCredentialInput {
 /// Spawn parameters carried alongside `Command::InjectPrompt` so the
 /// daemon can fall back to creating a fresh terminal when the cached
 /// `terminal_id` no longer exists (agent died between the user's `w`
-/// press and the command arriving). Mirrors the `Spawn` variant's
-/// fields exactly so the rewrite is a straight field-for-field copy.
+/// press and the command arriving). Carries every spawn field that is
+/// not already supplied by `InjectPrompt` itself.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpawnFallback {
     pub session_key: SessionKey,
     #[serde(default)]
     pub session_id: Option<lazybox_core::SessionId>,
+    #[serde(default)]
+    pub client_request_id: Option<String>,
     pub kind: TerminalKind,
     pub cwd: Option<String>,
     #[serde(default)]
     pub model_alias: Option<String>,
+    #[serde(default)]
+    pub access: AgentRunAccess,
 }
 
 /// One row of `Event::WorktreesInspected`. Mirrors
@@ -566,6 +570,9 @@ pub enum Command {
         session_key: SessionKey,
         #[serde(default)]
         session_id: Option<lazybox_core::SessionId>,
+        /// Client-generated correlation id echoed by the command outcome.
+        #[serde(default)]
+        client_request_id: Option<String>,
         kind: TerminalKind,
         cwd: Option<String>,
         /// Optional initial prompt the daemon should inject after the
@@ -590,6 +597,10 @@ pub enum Command {
         /// default model.
         #[serde(default)]
         model_alias: Option<String>,
+        /// Host access policy for the spawned agent. Shell and log
+        /// terminals ignore this field.
+        #[serde(default)]
+        access: AgentRunAccess,
     },
     /// Cancel an in-flight `Spawn` for this workspace that is still
     /// provisioning its worktree (cold clone / fetch). The daemon
@@ -672,6 +683,10 @@ pub enum Command {
     },
     Close {
         terminal_id: TerminalId,
+        /// Client-generated correlation id used to report a backend kill
+        /// failure. Successful closes still complete with `TerminalExited`.
+        #[serde(default)]
+        client_request_id: Option<String>,
     },
     /// A lifecycle hook fired by an agent (Claude Code), forwarded by
     /// the `lazybox hook-ingest` helper the daemon injects at spawn. The
@@ -1050,10 +1065,18 @@ pub enum Command {
         session_key: SessionKey,
         #[serde(default)]
         session_id: Option<lazybox_core::SessionId>,
+        /// Resolve the run from this live terminal's daemon-owned session
+        /// instead of trusting a client-side session hint.
+        #[serde(default)]
+        source_terminal_id: Option<TerminalId>,
         agent: String,
         mode: AgentRuntimeMode,
         cwd: Option<String>,
         initial_input: Option<AgentInputMessage>,
+        /// Resume the most recent provider conversation in the resolved
+        /// cwd instead of starting with empty context.
+        #[serde(default)]
+        resume_latest: bool,
         #[serde(default)]
         access: AgentRunAccess,
     },
@@ -1890,6 +1913,18 @@ pub enum Event {
         session_key: SessionKey,
         snippet_key: String,
         prompt: Option<UserPrompt>,
+    },
+    /// A client-correlated command reached its durable success boundary.
+    /// Appended last for bincode ordinal compatibility.
+    CommandCompleted {
+        client_request_id: String,
+    },
+    /// A client-correlated command failed before reaching its success
+    /// boundary. The command had no further effect after this event.
+    /// Appended last for bincode ordinal compatibility.
+    CommandFailed {
+        client_request_id: String,
+        message: String,
     },
 }
 

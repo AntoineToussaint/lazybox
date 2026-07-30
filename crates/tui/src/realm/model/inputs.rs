@@ -512,6 +512,7 @@ showing keybinding search only",
             request_id,
             session_key: lazybox_core::SessionKey::new(HELP_SESSION_KEY),
             session_id: None,
+            source_terminal_id: None,
             agent: help_agent.to_string(),
             mode: AgentRuntimeMode::StreamJson,
             // Left to the daemon: the sentinel key resolves to no
@@ -523,6 +524,7 @@ showing keybinding search only",
                 text: Some(format!("{context}\n\n# Question\n\n{question}")),
                 json: None,
             }),
+            resume_latest: false,
             access: AgentRunAccess::ReadOnly,
         })
     }

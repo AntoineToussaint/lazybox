@@ -123,8 +123,10 @@ async fn spawn_and_wait(
     client
         .send(Command::Spawn {
             model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
             session_key: "test:ws-1".into(),
             session_id: None,
+            client_request_id: None,
             kind,
             // This helper tests the terminal pipeline, not workspace
             // resolution. An explicit cwd keeps that boundary honest:
@@ -690,8 +692,10 @@ async fn interactive_claude_spawn_keeps_permission_prompts() {
         client
             .send(Command::Spawn {
                 model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
                 session_key: "test:ws-1".into(),
                 session_id: None,
+                client_request_id: None,
                 kind: TerminalKind::Agent("claude".into()),
                 cwd: test_cwd(),
                 initial_prompt: None,
@@ -729,6 +733,192 @@ async fn interactive_claude_spawn_keeps_permission_prompts() {
             env.iter()
                 .any(|(key, value)| key == "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN" && value == "1"),
             "the interactive spawn boundary must receive Claude's inline renderer env: {env:?}",
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
+#[tokio::test]
+async fn read_only_spawn_rejects_a_writable_singleton() {
+    timeout(TEST_DEADLINE, async {
+        let _home = IsolatedConfigHome::new();
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config).await;
+        client
+            .send(Command::Spawn {
+                session_key: "test:critic".into(),
+                session_id: None,
+                client_request_id: None,
+                kind: TerminalKind::Agent("codex".into()),
+                cwd: test_cwd(),
+                initial_prompt: None,
+                on_main: false,
+                model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
+            })
+            .unwrap();
+        wait_for(
+            &mut client,
+            |event| matches!(event, Event::TerminalSpawned { .. }),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("writable TerminalSpawned arrived");
+        client
+            .send(Command::Spawn {
+                session_key: "test:critic".into(),
+                session_id: None,
+                client_request_id: Some("critic-1".into()),
+                kind: TerminalKind::Agent("codex".into()),
+                cwd: test_cwd(),
+                initial_prompt: Some("Review this work without editing".into()),
+                on_main: false,
+                model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::ReadOnly,
+            })
+            .unwrap();
+
+        let failed = wait_for(
+            &mut client,
+            |event| {
+                matches!(
+                    event,
+                    Event::CommandFailed { client_request_id, .. }
+                        if client_request_id == "critic-1"
+                )
+            },
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("correlated spawn failure arrived");
+        assert!(matches!(
+            failed,
+            Event::CommandFailed { message, .. }
+                if message == "terminal was not spawned"
+        ));
+        let keys = mock.list().await.unwrap();
+        assert_eq!(
+            keys.len(),
+            1,
+            "a read-only critic must neither reuse nor duplicate the writable singleton"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
+#[tokio::test]
+async fn read_only_prompt_spawn_cannot_inherit_autonomous_bypass() {
+    timeout(TEST_DEADLINE, async {
+        let _home = IsolatedConfigHome::new();
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config).await;
+        client
+            .send(Command::Spawn {
+                session_key: "test:critic".into(),
+                session_id: None,
+                client_request_id: Some("critic-1".into()),
+                kind: TerminalKind::Agent("codex".into()),
+                cwd: test_cwd(),
+                initial_prompt: Some("Review this work without editing".into()),
+                on_main: false,
+                model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::ReadOnly,
+            })
+            .unwrap();
+
+        wait_for(
+            &mut client,
+            |event| {
+                matches!(
+                    event,
+                    Event::CommandCompleted { client_request_id }
+                        if client_request_id == "critic-1"
+                )
+            },
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("correlated spawn completion arrived");
+        let keys = mock.list().await.unwrap();
+        assert_eq!(keys.len(), 1);
+        let argv = mock.argv_for(&keys[0]).await.unwrap();
+        assert!(
+            argv.windows(2)
+                .any(|args| args == ["--sandbox", "read-only"])
+        );
+        assert!(
+            !argv
+                .iter()
+                .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"),
+            "read-only access must win over prompt-driven autonomy: {argv:?}"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
+#[tokio::test]
+async fn restored_critic_session_keeps_read_only_access() {
+    timeout(TEST_DEADLINE, async {
+        let _home = IsolatedConfigHome::new();
+        let store: Arc<dyn Store> = Arc::new(MemoryStore::new());
+        let first_backend = MockBackend::new();
+        let first_config =
+            ServerConfig::with_store_and_backend(store.clone(), Arc::new(first_backend));
+        let workspace_key = lazybox_core::WorkspaceKey::new("test:critic-restore");
+        let worktree = tempfile::TempDir::new().unwrap();
+        let mut workspace =
+            lazybox_core::Workspace::empty(workspace_key.clone(), "critic", chrono::Utc::now());
+        let session = lazybox_core::WorkspaceSession::new(
+            workspace_key.clone(),
+            lazybox_core::SessionKind::Agent {
+                agent_id: "codex".into(),
+            },
+            worktree.path().to_path_buf(),
+            chrono::Utc::now(),
+        );
+        let session_id = session.id;
+        workspace.add_session(session);
+        store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: workspace_key.as_str().into(),
+                created_at: workspace.created_at,
+                workspace_json: Some(serde_json::to_string(&workspace).unwrap()),
+            })
+            .unwrap();
+
+        lazybox_server::spawn_handler::handle_spawn(
+            &first_config,
+            workspace_key.as_str().into(),
+            Some(session_id),
+            TerminalKind::Agent("codex".into()),
+            SpawnOptions {
+                access: lazybox_ipc::AgentRunAccess::ReadOnly,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let restored_backend = MockBackend::new();
+        let restored_config =
+            ServerConfig::with_store_and_backend(store, Arc::new(restored_backend.clone()));
+        lazybox_server::spawn_handler::restore_persisted_sessions(&restored_config).await;
+
+        let keys = restored_backend.list().await.unwrap();
+        assert_eq!(keys.len(), 1, "the persisted session is restored once");
+        let argv = restored_backend.argv_for(&keys[0]).await.unwrap();
+        assert!(
+            argv.windows(2)
+                .any(|args| args == ["--sandbox", "read-only"]),
+            "a restored critic must remain sandboxed: {argv:?}"
+        );
+        assert!(
+            !argv
+                .iter()
+                .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"),
+            "a restored critic must not become autonomous: {argv:?}"
         );
     })
     .await
@@ -814,8 +1004,10 @@ async fn unknown_agent_id_emits_provider_error() {
         client
             .send(Command::Spawn {
                 model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
                 session_key: "test:ws-1".into(),
                 session_id: None,
+                client_request_id: Some("unknown-agent-spawn".into()),
                 kind: TerminalKind::Agent("does-not-exist".into()),
                 cwd: test_cwd(),
                 initial_prompt: None,
@@ -835,6 +1027,64 @@ async fn unknown_agent_id_emits_provider_error() {
                 "unexpected message: {message}"
             );
         }
+        let failed = wait_for(
+            &mut client,
+            |event| {
+                matches!(
+                    event,
+                    Event::CommandFailed {
+                        client_request_id,
+                        ..
+                    } if client_request_id == "unknown-agent-spawn"
+                )
+            },
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("correlated spawn failure");
+        assert!(matches!(
+            failed,
+            Event::CommandFailed { message, .. }
+                if message.contains("was not spawned")
+        ));
+    })
+    .await
+    .expect("deadline");
+}
+
+#[tokio::test]
+async fn successful_spawn_emits_its_correlated_completion() {
+    timeout(TEST_DEADLINE, async {
+        let config = ServerConfig::in_memory();
+        let mut client = subscribed(config).await;
+        client
+            .send(Command::Spawn {
+                session_key: "test:correlated-spawn".into(),
+                session_id: None,
+                client_request_id: Some("spawn-success".into()),
+                kind: TerminalKind::Shell,
+                cwd: test_cwd(),
+                initial_prompt: None,
+                on_main: false,
+                model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
+            })
+            .unwrap();
+
+        let completed = wait_for(
+            &mut client,
+            |event| {
+                matches!(
+                    event,
+                    Event::CommandCompleted { client_request_id }
+                        if client_request_id == "spawn-success"
+                )
+            },
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("correlated spawn completion");
+        assert!(matches!(completed, Event::CommandCompleted { .. }));
     })
     .await
     .expect("deadline");
@@ -886,7 +1136,12 @@ async fn close_drops_terminal_and_emits_exit_event() {
         let mut client = subscribed(config.clone()).await;
         let terminal_id = spawn_and_wait(&mut client, TerminalKind::Shell).await;
 
-        client.send(Command::Close { terminal_id }).unwrap();
+        client
+            .send(Command::Close {
+                terminal_id,
+                client_request_id: None,
+            })
+            .unwrap();
 
         // handle_close calls backend.kill; the mock closes its
         // subscribers, the pump task awaits wait_exit, then broadcasts
@@ -1209,8 +1464,10 @@ async fn spawn_with_initial_prompt_delivers_work_to_agent() {
         client
             .send(Command::Spawn {
                 model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
                 session_key: "test:ws-ingest".into(),
                 session_id: None,
+                client_request_id: None,
                 kind: TerminalKind::Agent("claude".into()),
                 cwd: test_cwd(),
                 initial_prompt: Some(WORK.into()),
@@ -1282,8 +1539,10 @@ async fn codex_initial_prompt_pastes_then_sends_enter_separately() {
         client
             .send(Command::Spawn {
                 model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
                 session_key: "test:ws-codex-ingest".into(),
                 session_id: None,
+                client_request_id: None,
                 kind: TerminalKind::Agent("codex".into()),
                 cwd: test_cwd(),
                 initial_prompt: Some(WORK.into()),
@@ -1377,8 +1636,10 @@ async fn spawn_onto_existing_singleton_injects_the_prompt() {
         client
             .send(Command::Spawn {
                 model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
                 session_key: "test:ws-1".into(),
                 session_id: None,
+                client_request_id: None,
                 kind: TerminalKind::Agent("claude".into()),
                 cwd: None,
                 initial_prompt: Some(WORK.into()),
@@ -1465,8 +1726,10 @@ async fn linked_workspace_agent_spawn_is_a_singleton() {
         let spawn = |c: &mut lazybox_ipc::Client| {
             c.send(Command::Spawn {
                 model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
                 session_key: "acme-widget".into(),
                 session_id: None,
+                client_request_id: None,
                 kind: TerminalKind::Agent("claude".into()),
                 cwd: None,
                 initial_prompt: None,
@@ -1536,8 +1799,10 @@ async fn inject_prompt_falls_back_to_spawn_when_terminal_dead() {
                     model_alias: None,
                     session_key: "test:ws-fallback".into(),
                     session_id: None,
+                    client_request_id: None,
                     kind: TerminalKind::Shell,
                     cwd: test_cwd(),
+                    access: lazybox_ipc::AgentRunAccess::Default,
                 }),
                 submit: true,
             })
@@ -1880,8 +2145,10 @@ async fn wedged_session_does_not_block_subscribe_or_subsequent_spawn() {
         consumer
             .send(Command::Spawn {
                 model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
                 session_key: "test:wedge-followup".into(),
                 session_id: None,
+                client_request_id: None,
                 kind: TerminalKind::Shell,
                 cwd: test_cwd(),
                 initial_prompt: None,
@@ -2663,8 +2930,10 @@ async fn detectorless_spawn_prompt_pastes_blindly_at_the_hard_deadline() {
         client
             .send(Command::Spawn {
                 model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
                 session_key: "test:ws-deadline".into(),
                 session_id: None,
+                client_request_id: None,
                 // cursor-agent inherits the line-oriented protocol:
                 // best-effort readiness, no composer detector.
                 kind: TerminalKind::Agent("cursor-agent".into()),
@@ -3152,8 +3421,10 @@ async fn collapse_into_pr_carries_live_terminal_to_the_pr() {
         client
             .send(Command::Spawn {
                 model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
                 session_key: issue_key.as_str().into(),
                 session_id: None,
+                client_request_id: None,
                 kind: TerminalKind::Agent("claude".into()),
                 cwd: None,
                 initial_prompt: None,
@@ -3573,8 +3844,10 @@ async fn failed_provision_fails_spawn_loudly_and_leaves_no_session() {
         client
             .send(Command::Spawn {
                 model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
                 session_key: ws_key.as_str().into(),
                 session_id: None,
+                client_request_id: None,
                 kind: TerminalKind::Agent("claude".into()),
                 cwd: None,
                 initial_prompt: None,

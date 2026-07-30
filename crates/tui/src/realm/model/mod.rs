@@ -316,6 +316,10 @@ pub enum Id {
     /// source agent's captured on-screen output, editable before send.
     /// Submit → inject + submit into the target in `ModalFlow::Handoff`.
     HandoffText,
+    /// Continue/Critic role picker for the structured session-conversion
+    /// flow. The source terminal is fixed when the picker mounts and
+    /// lives in `ModalFlow::ConvertSession`.
+    ConvertSessionRole,
     /// Single-pick `Choice` over the enabled agents (`,` Settings →
     /// "Change default agent"), opened on the current default. Each row
     /// carries its agent id as a [`ChoicePayload::Text`]. Pick → persist
@@ -465,6 +469,34 @@ pub(crate) struct HandoffDraft {
     pub(crate) target: Option<lazybox_core::SessionKey>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ConversionDraft {
+    pub(crate) source_terminal: lazybox_ipc::TerminalId,
+    pub(crate) source: lazybox_core::SessionKey,
+    pub(crate) source_name: String,
+    pub(crate) agent: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConversionPhase {
+    Starting,
+    Capturing,
+    AwaitingSourceExit,
+    Spawning,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PendingConversion {
+    pub(crate) draft: ConversionDraft,
+    pub(crate) role: lazybox_core::prompts::AgentHandoffRole,
+    pub(crate) request_id: lazybox_ipc::AgentRunRequestId,
+    pub(crate) run_id: Option<lazybox_ipc::AgentRunId>,
+    pub(crate) source_session_id: Option<lazybox_core::SessionId>,
+    pub(crate) response: String,
+    pub(crate) target_prompt: Option<String>,
+    pub(crate) phase: ConversionPhase,
+}
+
 /// One queued workspace-removal prompt. Surfaced one at a time as a
 /// Confirm modal by `maybe_mount_next_removal_prompt`.
 #[derive(Debug, Clone)]
@@ -584,6 +616,9 @@ pub(crate) enum ModalFlow {
     Broadcast { draft: BroadcastDraft },
     /// Agent-to-agent handoff (`x s`, #431): target picker → compose.
     Handoff { draft: HandoffDraft },
+    /// Structured session conversion (`x f`): role picker. Once picked,
+    /// the async run moves into `Model::conversion`.
+    ConvertSession { draft: ConversionDraft },
     /// Prompt-history picker (#523) → resend into this terminal.
     PromptHistory { terminal: lazybox_ipc::TerminalId },
     /// The tour handed control to the real snippet picker. A confirmed
@@ -756,6 +791,8 @@ pub enum ChoicePayload {
     NewLocalProject,
     /// A session key (the handoff-target and jump-to-workspace pickers).
     Session(lazybox_core::SessionKey),
+    /// Continue/Critic role for an agent-authored session handoff.
+    HandoffRole(lazybox_core::prompts::AgentHandoffRole),
 }
 
 impl lazybox_tui_core::choice::PickPayload for ChoicePayload {
@@ -785,6 +822,13 @@ impl lazybox_tui_core::choice::PickPayload for ChoicePayload {
     fn as_duration(&self) -> Option<std::time::Duration> {
         match self {
             Self::Duration(duration) => Some(*duration),
+            _ => None,
+        }
+    }
+
+    fn handoff_role(&self) -> Option<lazybox_core::prompts::AgentHandoffRole> {
+        match self {
+            Self::HandoffRole(role) => Some(*role),
             _ => None,
         }
     }
@@ -1081,6 +1125,10 @@ pub struct Model<T: TerminalAdapter> {
     /// modal does when it resolves. Replaces the old fan of `pending_*`
     /// Options; see [`ModalFlow`]. `None` when no flow modal is armed.
     modal_flow: Option<ModalFlow>,
+    /// Async half of `x f` after the role picker resolves. Correlated to
+    /// one structured run by `request_id`, then retained while the source
+    /// PTY closes and the fresh target spawns.
+    conversion: Option<PendingConversion>,
     /// Body of the most recently submitted reply, kept until the next
     /// reply is composed. If the daemon later reports the post failed
     /// (`ProviderError { source: "reply" }`), the composed text would
@@ -1591,6 +1639,7 @@ impl<T: TerminalAdapter> Model<T> {
             preselect: None,
             layout: LayoutCtx::new(),
             modal_flow: None,
+            conversion: None,
             last_reply_body: None,
             awaiting_repo_labels: None,
             pending_mutations: Vec::new(),
@@ -3169,8 +3218,10 @@ impl<T: TerminalAdapter> Model<T> {
                     Some((workspace_key.clone(), self.setup.editors[0].clone()));
                 self.send_cmd(IpcCommand::Spawn {
                     model_alias: None,
+                    access: lazybox_ipc::AgentRunAccess::Default,
                     session_key: workspace_key.clone(),
                     session_id: None,
+                    client_request_id: None,
                     kind: lazybox_ipc::TerminalKind::Shell,
                     cwd: None,
                     initial_prompt: None,

@@ -41,15 +41,17 @@ pub async fn handle_start_agent_run(
     request_id: AgentRunRequestId,
     session_key: lazybox_core::SessionKey,
     session_id: Option<lazybox_core::SessionId>,
+    source_terminal_id: Option<lazybox_ipc::TerminalId>,
     agent: String,
     mode: AgentRuntimeMode,
     cwd: Option<String>,
     initial_input: Option<AgentInputMessage>,
+    resume_latest: bool,
     access: AgentRunAccess,
 ) {
     if mode != AgentRuntimeMode::StreamJson {
         let _ = config.bus.send(Event::AgentRunStartFailed {
-            request_id,
+            request_id: request_id.clone(),
             message: "only StreamJson agent runs are wired; use Spawn for terminal mode".into(),
         });
         return;
@@ -57,14 +59,14 @@ pub async fn handle_start_agent_run(
 
     let Some(agent_impl) = config.agents.get(&agent) else {
         let _ = config.bus.send(Event::AgentRunStartFailed {
-            request_id,
+            request_id: request_id.clone(),
             message: format!("no agent registered for id {agent}"),
         });
         return;
     };
     let Some(protocol) = agent_impl.structured_protocol() else {
         let _ = config.bus.send(Event::AgentRunStartFailed {
-            request_id,
+            request_id: request_id.clone(),
             message: format!(
                 "{agent} supports interactive terminals but has no structured runtime adapter"
             ),
@@ -72,9 +74,27 @@ pub async fn handle_start_agent_run(
         return;
     };
 
-    let cwd_path = resolve_cwd(config, &session_key, session_id, cwd).await;
+    let (cwd_path, resolved_session_id, resolved_session_key) = match resolve_target(
+        config,
+        &session_key,
+        session_id,
+        source_terminal_id,
+        &agent,
+        cwd,
+    )
+    .await
+    {
+        Ok(target) => target,
+        Err(message) => {
+            let _ = config.bus.send(Event::AgentRunStartFailed {
+                request_id: request_id.clone(),
+                message,
+            });
+            return;
+        }
+    };
     let spawn_ctx = SpawnCtx {
-        session_key: session_key.as_str().to_string(),
+        session_key: resolved_session_key.as_str().to_string(),
         worktree: cwd_path
             .clone()
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
@@ -82,6 +102,7 @@ pub async fn handle_start_agent_run(
         pr_number: None,
         env: Default::default(),
         skip_permissions: false,
+        access: AgentRunAccess::Default,
         // Structured runs expose lifecycle events through their own
         // JSONL protocol, so they don't need the interactive PTY
         // path's hook-command settings injection.
@@ -90,7 +111,7 @@ pub async fn handle_start_agent_run(
     let argv = agent_impl.spawn(&spawn_ctx);
     let Some((program, extra_args)) = argv.split_first() else {
         let _ = config.bus.send(Event::AgentRunStartFailed {
-            request_id,
+            request_id: request_id.clone(),
             message: format!("{agent} returned an empty argv"),
         });
         return;
@@ -109,6 +130,7 @@ pub async fn handle_start_agent_run(
     stream_config.extra_args = extra_args.to_vec();
     stream_config.env = env;
     stream_config.access = access;
+    stream_config.continue_latest = resume_latest;
 
     let io = match config
         .agent_stream_spawner
@@ -118,7 +140,7 @@ pub async fn handle_start_agent_run(
         Ok(io) => io,
         Err(e) => {
             let _ = config.bus.send(Event::AgentRunStartFailed {
-                request_id,
+                request_id: request_id.clone(),
                 message: e.to_string(),
             });
             return;
@@ -131,7 +153,7 @@ pub async fn handle_start_agent_run(
     let bus = config.bus.clone();
     let runs = config.agent_runs.clone();
     let spawner = config.agent_stream_spawner.clone();
-    let session_key_for_task = session_key.clone();
+    let session_key_for_task = resolved_session_key;
     let agent_for_event = agent.clone();
     // Gate the spawned task on a oneshot so it can't run before the outer code
     // has inserted the handle, published AgentRunStarted, and queued initial
@@ -177,7 +199,7 @@ pub async fn handle_start_agent_run(
         request_id,
         run_id,
         session_key: session_key_for_task,
-        session_id,
+        session_id: resolved_session_id,
         agent: agent_for_event,
         mode,
     });
@@ -289,33 +311,93 @@ pub async fn handle_answer_agent_question(
     .await;
 }
 
-async fn resolve_cwd(
+async fn resolve_target(
     config: &ServerConfig,
     session_key: &lazybox_core::SessionKey,
     session_id: Option<lazybox_core::SessionId>,
+    source_terminal_id: Option<lazybox_ipc::TerminalId>,
+    agent: &str,
     cwd: Option<String>,
-) -> Option<PathBuf> {
+) -> Result<
+    (
+        Option<PathBuf>,
+        Option<lazybox_core::SessionId>,
+        lazybox_core::SessionKey,
+    ),
+    String,
+> {
+    if let Some(terminal_id) = source_terminal_id {
+        if config.terminal.backend_key_for(terminal_id).await.is_none() {
+            return Err("source terminal is no longer running".into());
+        }
+        let Some((owner, kind)) = config.terminal.terminal_meta_for(terminal_id).await else {
+            return Err("source terminal is no longer running".into());
+        };
+        if !matches!(kind, lazybox_ipc::TerminalKind::Agent(id) if id == agent) {
+            return Err("source terminal does not match the requested agent".into());
+        }
+        let Some(owning_session) = config.terminal.terminal_session_for(terminal_id).await else {
+            return Err("source terminal has no isolated session to hand off".into());
+        };
+        let workspace = load_workspace(config, &owner)?;
+        let Some(session) = workspace.find_session(owning_session) else {
+            return Err("source terminal's session is no longer in its workspace".into());
+        };
+        return Ok((
+            Some(session.worktree_path.clone()),
+            Some(owning_session),
+            owner,
+        ));
+    }
     if let Some(cwd) = cwd {
-        return Some(PathBuf::from(cwd));
+        return Ok((Some(PathBuf::from(cwd)), session_id, session_key.clone()));
     }
     let key = lazybox_core::WorkspaceKey::new(session_key.as_str());
-    let workspace = config
+    let record = config
         .store
         .get_workspace(&key)
-        .ok()
-        .flatten()
-        .and_then(|record| record.workspace_json)
-        .and_then(|json| serde_json::from_str::<lazybox_core::Workspace>(&json).ok());
-    let Some(workspace) = workspace else {
+        .map_err(|error| format!("could not load agent workspace: {error}"))?;
+    let Some(record) = record else {
         // No workspace behind this key (e.g. the help assistant's
         // sentinel): pick a neutral cwd instead of the daemon's own —
         // a stray CLAUDE.md there would leak into the run's context.
-        return Some(std::env::temp_dir());
+        return Ok((Some(std::env::temp_dir()), None, session_key.clone()));
     };
-    if let Some(id) = session_id {
-        return workspace.find_session(id).map(|s| s.worktree_path.clone());
-    }
-    workspace.default_session().map(|s| s.worktree_path.clone())
+    let json = record
+        .workspace_json
+        .ok_or_else(|| "agent workspace has no persisted session data".to_string())?;
+    let workspace = lazybox_core::Workspace::decode_persisted(&json)
+        .map_err(|error| format!("could not decode agent workspace: {error}"))?;
+    let session = match session_id {
+        Some(id) => workspace
+            .find_session(id)
+            .ok_or_else(|| "requested agent session is no longer in its workspace".to_string())?,
+        None => workspace
+            .default_session()
+            .ok_or_else(|| "agent workspace has no session to run in".to_string())?,
+    };
+    Ok((
+        Some(session.worktree_path.clone()),
+        Some(session.id),
+        session_key.clone(),
+    ))
+}
+
+fn load_workspace(
+    config: &ServerConfig,
+    session_key: &lazybox_core::SessionKey,
+) -> Result<lazybox_core::Workspace, String> {
+    let key = lazybox_core::WorkspaceKey::new(session_key.as_str());
+    let record = config
+        .store
+        .get_workspace(&key)
+        .map_err(|error| format!("could not load source workspace: {error}"))?
+        .ok_or_else(|| "source workspace no longer exists".to_string())?;
+    let json = record
+        .workspace_json
+        .ok_or_else(|| "source workspace has no persisted session data".to_string())?;
+    lazybox_core::Workspace::decode_persisted(&json)
+        .map_err(|error| format!("could not decode source workspace: {error}"))
 }
 
 /// How a structured driver ended, so the spawning task can decide

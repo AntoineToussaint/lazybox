@@ -270,8 +270,10 @@ async fn hook_ingest_over_socket_reaches_shared_embedded_config() {
         .expect("snapshot");
     tui.send(Command::Spawn {
         model_alias: None,
+        access: lazybox_ipc::AgentRunAccess::Default,
         session_key: "test:ws-hooks".into(),
         session_id: None,
+        client_request_id: None,
         kind: lazybox_ipc::TerminalKind::Agent("claude".into()),
         // The test covers socket/bus sharing, not workspace lookup.
         cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
@@ -362,8 +364,10 @@ async fn shutdown_drains_in_flight_mutations_before_abort() {
     client
         .send(Command::Spawn {
             model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
             session_key: "test:sigterm-drain".into(),
             session_id: None,
+            client_request_id: None,
             kind: lazybox_ipc::TerminalKind::Shell,
             cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
             initial_prompt: None,

@@ -2793,6 +2793,467 @@ snippets:
         assert!(m.modal_flow.is_none(), "Esc on the picker cancels");
     }
 
+    fn model_with_conversion_source(
+        agent: &str,
+        on_main: bool,
+    ) -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        lazybox_ipc::Connection,
+        SessionKey,
+    ) {
+        use lazybox_ipc::{Event as IpcEvent, TerminalId, TerminalKind};
+        let (client, server) = channel::pair();
+        let mut model = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let key = SessionKey::new("github:o/r#649");
+        model.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(
+            lazybox_core::Workspace::empty(
+                WorkspaceKey::new(key.as_str()),
+                "main",
+                chrono::Utc::now(),
+            ),
+        )));
+        model.handle_daemon_event(IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(7),
+            session_key: key.clone(),
+            kind: TerminalKind::Agent(agent.into()),
+            no_permission: false,
+            on_main,
+            model_label: None,
+        });
+        assert!(model.sidebar.focus_workspace_key(&key));
+        (model, server, key)
+    }
+
+    #[test]
+    fn convert_session_uses_authored_handoff_then_replaces_the_source() {
+        use lazybox_core::prompts::AgentHandoffRole;
+        use lazybox_ipc::{
+            AgentRunAccess, AgentRunId, AgentRuntimeMode, Event as IpcEvent, TerminalId,
+            TerminalKind,
+        };
+        use lazybox_tui_core::action::Action;
+
+        let (mut model, mut server, key) = model_with_conversion_source("codex", false);
+        while server.rx.try_recv().is_ok() {}
+
+        model.dispatch_action(&Action::ConvertSession);
+        assert_eq!(model.modal_stack.last(), Some(&Id::ConvertSessionRole));
+        let commands = model
+            .handle_choice_picked(vec![ChoicePayload::HandoffRole(AgentHandoffRole::Continue)]);
+        let request_id = match commands.as_slice() {
+            [
+                IpcCommand::StartAgentRun {
+                    request_id,
+                    session_key,
+                    session_id,
+                    source_terminal_id,
+                    agent,
+                    mode,
+                    initial_input: Some(input),
+                    resume_latest,
+                    access,
+                    ..
+                },
+            ] => {
+                assert_eq!(session_key, &key);
+                assert_eq!(*session_id, None);
+                assert_eq!(*source_terminal_id, Some(TerminalId(7)));
+                assert_eq!(agent, "codex");
+                assert_eq!(*mode, AgentRuntimeMode::StreamJson);
+                assert!(*resume_latest);
+                assert_eq!(*access, AgentRunAccess::ReadOnly);
+                let prompt = input.text.as_deref().expect("handoff request");
+                assert!(prompt.contains("## Repository state"));
+                assert!(prompt.contains("Return only"));
+                request_id.clone()
+            }
+            other => panic!("expected one structured handoff run, got {other:?}"),
+        };
+
+        let source_session_id = lazybox_core::SessionId::new();
+        model.handle_daemon_event(IpcEvent::AgentRunStarted {
+            request_id: request_id.clone(),
+            run_id: AgentRunId(11),
+            session_key: key.clone(),
+            session_id: Some(source_session_id),
+            agent: "codex".into(),
+            mode: AgentRuntimeMode::StreamJson,
+        });
+        model.handle_daemon_event(IpcEvent::AgentAssistantTextDelta {
+            run_id: AgentRunId(11),
+            delta: "## Goal\nFinish the parser\n\n## Repository state\nsrc/parser.rs modified"
+                .into(),
+        });
+        model.handle_daemon_event(IpcEvent::AgentTurnFinished {
+            run_id: AgentRunId(11),
+            result: None,
+            session_id: Some("thread-649".into()),
+            error: None,
+        });
+
+        let after_handoff: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok()).collect();
+        assert!(after_handoff.iter().any(|command| matches!(
+            command,
+            IpcCommand::InterruptAgentRun {
+                run_id: AgentRunId(11)
+            }
+        )));
+        assert!(after_handoff.iter().any(|command| matches!(
+            command,
+            IpcCommand::Close {
+                terminal_id: TerminalId(7),
+                ..
+            }
+        )));
+        assert!(
+            !after_handoff
+                .iter()
+                .any(|command| matches!(command, IpcCommand::Spawn { .. })),
+            "the replacement waits until the singleton source has exited",
+        );
+
+        model.handle_daemon_event(IpcEvent::TerminalExited {
+            terminal_id: TerminalId(7),
+            exit_code: None,
+            last_output: None,
+        });
+        let spawn = std::iter::from_fn(|| server.rx.try_recv().ok())
+            .find(|command| matches!(command, IpcCommand::Spawn { .. }))
+            .expect("fresh role agent spawned after source exit");
+        match spawn {
+            IpcCommand::Spawn {
+                session_key,
+                session_id,
+                client_request_id,
+                kind: TerminalKind::Agent(agent),
+                initial_prompt: Some(prompt),
+                access,
+                ..
+            } => {
+                assert_eq!(session_key, key);
+                assert_eq!(session_id, Some(source_session_id));
+                assert_eq!(client_request_id.as_deref(), Some(request_id.0.as_str()));
+                assert_eq!(agent, "codex");
+                assert_eq!(access, AgentRunAccess::Default);
+                assert!(prompt.contains("continuing in-progress work"));
+                assert!(prompt.contains("Finish the parser"));
+                assert!(
+                    prompt
+                        .contains("<untrusted-content source=\"agent-authored session handoff\">")
+                );
+            }
+            other => panic!("expected seeded agent spawn, got {other:?}"),
+        }
+
+        model.handle_daemon_event(IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(8),
+            session_key: key,
+            kind: TerminalKind::Agent("codex".into()),
+            no_permission: true,
+            on_main: false,
+            model_label: None,
+        });
+        assert!(
+            model.conversion.is_some(),
+            "an unrelated terminal lifecycle event cannot complete the request"
+        );
+        model.handle_daemon_event(IpcEvent::CommandCompleted {
+            client_request_id: request_id.0,
+        });
+        assert!(model.conversion.is_none());
+        let notice = model.status.notice.as_ref().expect("conversion trail");
+        assert!(notice.message.contains("→ continue codex"));
+    }
+
+    #[test]
+    fn failed_authored_handoff_leaves_the_source_agent_running() {
+        use lazybox_core::prompts::AgentHandoffRole;
+        use lazybox_ipc::{AgentRunId, AgentRuntimeMode, Event as IpcEvent, TerminalId};
+        use lazybox_tui_core::action::Action;
+
+        let (mut model, mut server, key) = model_with_conversion_source("claude", false);
+        while server.rx.try_recv().is_ok() {}
+        model.dispatch_action(&Action::ConvertSession);
+        let commands =
+            model.handle_choice_picked(vec![ChoicePayload::HandoffRole(AgentHandoffRole::Critic)]);
+        let request_id = match &commands[0] {
+            IpcCommand::StartAgentRun { request_id, .. } => request_id.clone(),
+            other => panic!("expected StartAgentRun, got {other:?}"),
+        };
+        model.handle_daemon_event(IpcEvent::AgentRunStarted {
+            request_id,
+            run_id: AgentRunId(12),
+            session_key: key,
+            session_id: Some(lazybox_core::SessionId::new()),
+            agent: "claude".into(),
+            mode: AgentRuntimeMode::StreamJson,
+        });
+        model.handle_daemon_event(IpcEvent::AgentTurnFinished {
+            run_id: AgentRunId(12),
+            result: None,
+            session_id: None,
+            error: Some("resume failed".into()),
+        });
+
+        let commands: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok()).collect();
+        assert!(commands.iter().any(|command| matches!(
+            command,
+            IpcCommand::InterruptAgentRun {
+                run_id: AgentRunId(12)
+            }
+        )));
+        assert!(
+            !commands.iter().any(|command| matches!(
+                command,
+                IpcCommand::Close { .. } | IpcCommand::Spawn { .. }
+            ))
+        );
+        assert!(model.terminals.terminal_is_agent(TerminalId(7)));
+        assert!(model.conversion.is_none());
+        assert!(
+            model
+                .status
+                .notice
+                .as_ref()
+                .is_some_and(|notice| notice.message.contains("handoff failed"))
+        );
+    }
+
+    #[test]
+    fn failed_conversion_target_spawn_releases_the_conversion_latch() {
+        use lazybox_core::prompts::AgentHandoffRole;
+        use lazybox_ipc::{AgentRunId, AgentRuntimeMode, Event as IpcEvent};
+        use lazybox_tui_core::action::Action;
+
+        let (mut model, mut server, key) = model_with_conversion_source("codex", false);
+        model.dispatch_action(&Action::ConvertSession);
+        let commands =
+            model.handle_choice_picked(vec![ChoicePayload::HandoffRole(AgentHandoffRole::Critic)]);
+        let request_id = match &commands[0] {
+            IpcCommand::StartAgentRun { request_id, .. } => request_id.clone(),
+            other => panic!("expected StartAgentRun, got {other:?}"),
+        };
+        model.handle_daemon_event(IpcEvent::AgentRunStarted {
+            request_id: request_id.clone(),
+            run_id: AgentRunId(13),
+            session_key: key.clone(),
+            session_id: Some(lazybox_core::SessionId::new()),
+            agent: "codex".into(),
+            mode: AgentRuntimeMode::StreamJson,
+        });
+        model.handle_daemon_event(IpcEvent::AgentTurnFinished {
+            run_id: AgentRunId(13),
+            result: Some("## Goal\nReview the parser".into()),
+            session_id: None,
+            error: None,
+        });
+        model.handle_daemon_event(IpcEvent::TerminalExited {
+            terminal_id: lazybox_ipc::TerminalId(7),
+            exit_code: None,
+            last_output: None,
+        });
+        assert!(model.conversion.is_some());
+
+        let spawn = std::iter::from_fn(|| server.rx.try_recv().ok())
+            .find(|command| matches!(command, IpcCommand::Spawn { .. }))
+            .expect("critic target spawn");
+        assert!(matches!(
+            spawn,
+            IpcCommand::Spawn {
+                access: lazybox_ipc::AgentRunAccess::ReadOnly,
+                client_request_id: Some(ref id),
+                ..
+            } if id == &request_id.0
+        ));
+
+        model.handle_daemon_event(IpcEvent::TerminalSpawned {
+            terminal_id: lazybox_ipc::TerminalId(99),
+            session_key: key,
+            kind: lazybox_ipc::TerminalKind::Agent("codex".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+        });
+        model.handle_daemon_event(IpcEvent::CommandFailed {
+            client_request_id: "another-spawn".into(),
+            message: "unrelated".into(),
+        });
+        assert!(model.conversion.is_some());
+
+        model.handle_daemon_event(IpcEvent::CommandFailed {
+            client_request_id: request_id.0,
+            message: "backend unavailable".into(),
+        });
+
+        assert!(model.conversion.is_none());
+        assert!(
+            model
+                .status
+                .notice
+                .as_ref()
+                .is_some_and(|notice| notice.message.contains("backend unavailable"))
+        );
+    }
+
+    #[test]
+    fn conversion_follows_a_source_workspace_rebadge() {
+        use lazybox_core::prompts::AgentHandoffRole;
+        use lazybox_ipc::{AgentRunId, AgentRuntimeMode, Event as IpcEvent};
+        use lazybox_tui_core::action::Action;
+
+        let (mut model, mut server, source) = model_with_conversion_source("codex", false);
+        while server.rx.try_recv().is_ok() {}
+        model.dispatch_action(&Action::ConvertSession);
+        let commands = model
+            .handle_choice_picked(vec![ChoicePayload::HandoffRole(AgentHandoffRole::Continue)]);
+        let request_id = match &commands[0] {
+            IpcCommand::StartAgentRun { request_id, .. } => request_id.clone(),
+            other => panic!("expected StartAgentRun, got {other:?}"),
+        };
+        let source_session_id = lazybox_core::SessionId::new();
+        model.handle_daemon_event(IpcEvent::AgentRunStarted {
+            request_id,
+            run_id: AgentRunId(14),
+            session_key: source.clone(),
+            session_id: Some(source_session_id),
+            agent: "codex".into(),
+            mode: AgentRuntimeMode::StreamJson,
+        });
+        let target = SessionKey::new("github:o/r#650");
+        model.handle_daemon_event(IpcEvent::TerminalsRebadged {
+            from: source,
+            to: target.clone(),
+        });
+        model.handle_daemon_event(IpcEvent::AgentTurnFinished {
+            run_id: AgentRunId(14),
+            result: Some("## Goal\nContinue the parser".into()),
+            session_id: Some("thread-649".into()),
+            error: None,
+        });
+        model.handle_daemon_event(IpcEvent::TerminalExited {
+            terminal_id: lazybox_ipc::TerminalId(7),
+            exit_code: None,
+            last_output: None,
+        });
+
+        let spawn = std::iter::from_fn(|| server.rx.try_recv().ok())
+            .find(|command| matches!(command, IpcCommand::Spawn { .. }))
+            .expect("replacement spawn");
+        assert!(matches!(
+            spawn,
+            IpcCommand::Spawn {
+                session_key,
+                session_id: Some(id),
+                ..
+            } if session_key == target && id == source_session_id
+        ));
+    }
+
+    #[test]
+    fn conversion_close_failure_keeps_the_source_terminal_usable() {
+        use lazybox_core::prompts::AgentHandoffRole;
+        use lazybox_ipc::{AgentRunId, AgentRuntimeMode, Event as IpcEvent, TerminalId};
+        use lazybox_tui_core::action::Action;
+
+        let (mut model, _server, key) = model_with_conversion_source("claude", false);
+        model.dispatch_action(&Action::ConvertSession);
+        let commands =
+            model.handle_choice_picked(vec![ChoicePayload::HandoffRole(AgentHandoffRole::Critic)]);
+        let request_id = match &commands[0] {
+            IpcCommand::StartAgentRun { request_id, .. } => request_id.clone(),
+            other => panic!("expected StartAgentRun, got {other:?}"),
+        };
+        model.handle_daemon_event(IpcEvent::AgentRunStarted {
+            request_id: request_id.clone(),
+            run_id: AgentRunId(15),
+            session_key: key,
+            session_id: Some(lazybox_core::SessionId::new()),
+            agent: "claude".into(),
+            mode: AgentRuntimeMode::StreamJson,
+        });
+        model.handle_daemon_event(IpcEvent::AgentTurnFinished {
+            run_id: AgentRunId(15),
+            result: Some("## Goal\nReview the parser".into()),
+            session_id: None,
+            error: None,
+        });
+        model.handle_daemon_event(IpcEvent::CommandFailed {
+            client_request_id: request_id.0,
+            message: "could not close source terminal".into(),
+        });
+
+        assert!(model.conversion.is_none());
+        model.handle_daemon_event(IpcEvent::TerminalExited {
+            terminal_id: TerminalId(7),
+            exit_code: Some(1),
+            last_output: Some("agent stopped".into()),
+        });
+        assert!(
+            model.terminals.terminal_is_agent(TerminalId(7)),
+            "a failed replacement close must not classify a later natural exit as a user close"
+        );
+    }
+
+    #[test]
+    fn oversized_authored_handoff_is_interrupted_before_source_close() {
+        use lazybox_core::prompts::AgentHandoffRole;
+        use lazybox_ipc::{AgentRunId, AgentRuntimeMode, Event as IpcEvent};
+        use lazybox_tui_core::action::Action;
+
+        let (mut model, mut server, key) = model_with_conversion_source("codex", false);
+        while server.rx.try_recv().is_ok() {}
+        model.dispatch_action(&Action::ConvertSession);
+        let commands = model
+            .handle_choice_picked(vec![ChoicePayload::HandoffRole(AgentHandoffRole::Continue)]);
+        let request_id = match &commands[0] {
+            IpcCommand::StartAgentRun { request_id, .. } => request_id.clone(),
+            other => panic!("expected StartAgentRun, got {other:?}"),
+        };
+        model.handle_daemon_event(IpcEvent::AgentRunStarted {
+            request_id,
+            run_id: AgentRunId(16),
+            session_key: key,
+            session_id: Some(lazybox_core::SessionId::new()),
+            agent: "codex".into(),
+            mode: AgentRuntimeMode::StreamJson,
+        });
+        model.handle_daemon_event(IpcEvent::AgentAssistantTextDelta {
+            run_id: AgentRunId(16),
+            delta: "x".repeat(128 * 1024 + 1),
+        });
+
+        assert!(model.conversion.is_none());
+        let commands: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok()).collect();
+        assert!(commands.iter().any(|command| matches!(
+            command,
+            IpcCommand::InterruptAgentRun {
+                run_id: AgentRunId(16)
+            }
+        )));
+        assert!(
+            !commands
+                .iter()
+                .any(|command| matches!(command, IpcCommand::Close { .. }))
+        );
+    }
+
+    #[test]
+    fn convert_session_rejects_agents_without_structured_resume() {
+        use lazybox_tui_core::action::Action;
+        let (mut model, _server, _key) = model_with_conversion_source("cursor", false);
+
+        model.dispatch_action(&Action::ConvertSession);
+
+        assert!(model.modal_stack.is_empty());
+        assert!(
+            model
+                .status
+                .notice
+                .as_ref()
+                .is_some_and(|notice| notice.message.contains("does not support"))
+        );
+    }
+
     /// mount_snippet_picker with an empty collection flashes a hint
     /// and refuses to mount — no Id::SnippetPicker on the stack.
     /// This is the "user typed `]]s<key>` but never configured any
@@ -5336,6 +5797,33 @@ mod merge_focus_follow_tests {
             Some(Some("M".to_string())),
             "the daemon-visible fallback spawn keeps the explicit tier",
         );
+    }
+
+    #[test]
+    fn read_only_spawn_is_not_rewritten_to_a_writable_terminal() {
+        use lazybox_ipc::{AgentRunAccess, Command, TerminalId, TerminalKind};
+
+        let mut model = build_model();
+        let command = Command::Spawn {
+            session_key: "test:critic".into(),
+            session_id: None,
+            client_request_id: Some("critic-1".into()),
+            kind: TerminalKind::Agent("codex".into()),
+            cwd: Some("/tmp/critic".into()),
+            initial_prompt: Some("Review without editing".into()),
+            on_main: false,
+            model_alias: None,
+            access: AgentRunAccess::ReadOnly,
+        };
+
+        assert!(matches!(
+            model.rewrite_spawn_to_terminal(command, TerminalId(7)),
+            Command::Spawn {
+                access: AgentRunAccess::ReadOnly,
+                client_request_id: Some(request_id),
+                ..
+            } if request_id == "critic-1"
+        ));
     }
 
     /// Issue #557: `w` on an empty/scratch workspace (no PR, issue, or
@@ -10680,8 +11168,10 @@ mod worktree_progress_recovery_tests {
     fn remembered_spawn(session_key: lazybox_core::SessionKey) -> lazybox_ipc::Command {
         lazybox_ipc::Command::Spawn {
             model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
             session_key,
             session_id: None,
+            client_request_id: None,
             kind: TerminalKind::Agent("claude".into()),
             cwd: None,
             initial_prompt: None,
@@ -10863,8 +11353,10 @@ mod worktree_progress_recovery_tests {
         // What `flush_dispatched_cmds` stashes on the original `w`.
         m.last_spawn = Some(lazybox_ipc::Command::Spawn {
             model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
             session_key: session_key.clone(),
             session_id: None,
+            client_request_id: None,
             kind: TerminalKind::Agent("claude".into()),
             cwd: None,
             initial_prompt: Some("fix it".into()),

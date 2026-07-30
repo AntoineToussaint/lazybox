@@ -587,8 +587,10 @@ impl<T: TerminalAdapter> Model<T> {
             {
                 self.last_spawn = Some(IpcCommand::Spawn {
                     model_alias: fallback.model_alias.clone(),
+                    access: fallback.access,
                     session_key: fallback.session_key.clone(),
                     session_id: fallback.session_id,
+                    client_request_id: fallback.client_request_id.clone(),
                     kind: fallback.kind.clone(),
                     cwd: fallback.cwd.clone(),
                     initial_prompt: Some(prompt.clone()),
@@ -885,6 +887,7 @@ impl<T: TerminalAdapter> Model<T> {
         if let IpcCommand::Spawn {
             kind: lazybox_ipc::TerminalKind::Agent(agent_id),
             initial_prompt: Some(_),
+            access: lazybox_ipc::AgentRunAccess::Default,
             ..
         } = &cmd
         {
@@ -1919,6 +1922,7 @@ pub(super) fn action_from_kind(
         ActionKind::ForceRedraw => Action::ForceRedraw,
         ActionKind::AdoptSessions => Action::AdoptSessions,
         ActionKind::SendToSession => Action::SendToSession,
+        ActionKind::ConvertSession => Action::ConvertSession,
         ActionKind::CollapseIntoPr => Action::CollapseIntoPr,
         ActionKind::Reply => Action::Reply,
         ActionKind::EditNotes => Action::EditNotes,

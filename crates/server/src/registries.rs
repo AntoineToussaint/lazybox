@@ -1,6 +1,6 @@
 use crate::polling;
 use lazybox_core::{SessionId, SessionKey};
-use lazybox_ipc::{AgentState, TerminalId, TerminalKind};
+use lazybox_ipc::{AgentRunAccess, AgentState, TerminalId, TerminalKind};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,6 +19,8 @@ pub struct TerminalRegistry {
     pub(crate) agent_state_generations: Arc<Mutex<HashMap<TerminalId, u64>>>,
     /// Workspace session and kind used to rebuild reconnect snapshots.
     pub(crate) terminal_meta: Arc<Mutex<HashMap<TerminalId, (SessionKey, TerminalKind)>>>,
+    /// Host-access policy used to decide whether a singleton can be reused.
+    terminal_access: Arc<Mutex<HashMap<TerminalId, AgentRunAccess>>>,
     /// Reconnect-visible marker for terminals with permission prompts bypassed.
     pub(crate) no_permission_terminals: Arc<Mutex<HashSet<TerminalId>>>,
     /// Distinguishes shared-main agents from isolated-worktree singletons.
@@ -113,6 +115,7 @@ impl TerminalRegistry {
         self.agent_states.lock().await.remove(&id);
         self.agent_state_generations.lock().await.remove(&id);
         self.terminal_meta.lock().await.remove(&id);
+        self.terminal_access.lock().await.remove(&id);
         self.no_permission_terminals.lock().await.remove(&id);
         self.on_main_terminals.lock().await.remove(&id);
         self.terminal_models.lock().await.remove(&id);
@@ -143,6 +146,25 @@ impl TerminalRegistry {
         self.terminal_sessions.lock().await.get(&id).copied()
     }
 
+    pub(crate) async fn access_for(&self, id: TerminalId) -> AgentRunAccess {
+        self.terminal_access
+            .lock()
+            .await
+            .get(&id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub(crate) async fn record_access(&self, id: TerminalId, access: AgentRunAccess) {
+        if access != AgentRunAccess::Default {
+            self.terminal_access.lock().await.insert(id, access);
+        }
+    }
+
+    pub(crate) async fn forget_access(&self, id: TerminalId) {
+        self.terminal_access.lock().await.remove(&id);
+    }
+
     /// Associate a live terminal with its durable workspace session.
     pub async fn associate_session(&self, id: TerminalId, session_id: SessionId) {
         self.terminal_sessions.lock().await.insert(id, session_id);
@@ -152,6 +174,7 @@ impl TerminalRegistry {
         &self,
         id: TerminalId,
         owning_session: Option<SessionId>,
+        access: AgentRunAccess,
         no_permission: bool,
         on_main: bool,
         model_label: Option<&str>,
@@ -159,6 +182,7 @@ impl TerminalRegistry {
         if let Some(session_id) = owning_session {
             self.terminal_sessions.lock().await.insert(id, session_id);
         }
+        self.record_access(id, access).await;
         if no_permission {
             self.no_permission_terminals.lock().await.insert(id);
         }
@@ -266,6 +290,9 @@ impl TerminalRegistry {
             return false;
         }
         if !self.agent_states.lock().await.is_empty() {
+            return false;
+        }
+        if !self.terminal_access.lock().await.is_empty() {
             return false;
         }
         if !self.no_permission_terminals.lock().await.is_empty() {

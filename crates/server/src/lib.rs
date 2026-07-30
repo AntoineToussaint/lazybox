@@ -1315,11 +1315,13 @@ pub async fn dispatch_command(
         lazybox_ipc::Command::Spawn {
             session_key,
             session_id,
+            client_request_id,
             kind,
             cwd,
             initial_prompt,
             on_main,
             model_alias,
+            access,
         } => {
             // A spawn carrying a pre-built work prompt is an autonomous
             // "work on this" launch — run it unattended (skip permissions,
@@ -1339,6 +1341,9 @@ pub async fn dispatch_command(
                     autonomous,
                     on_main,
                     model_alias,
+                    access,
+                    client_request_id,
+                    origin: lazybox_ipc::SpawnOrigin::Interactive,
                     ..Default::default()
                 },
             )
@@ -1407,8 +1412,11 @@ pub async fn dispatch_command(
         } => {
             spawn_handler::handle_resize(config, terminal_id, cols, rows).await;
         }
-        lazybox_ipc::Command::Close { terminal_id } => {
-            spawn_handler::handle_close(config, terminal_id).await;
+        lazybox_ipc::Command::Close {
+            terminal_id,
+            client_request_id,
+        } => {
+            spawn_handler::handle_close(config, terminal_id, client_request_id.as_deref()).await;
         }
         lazybox_ipc::Command::FetchScrollback { terminal_id } => {
             spawn_handler::handle_fetch_scrollback(config, tx, terminal_id).await;
@@ -1424,10 +1432,12 @@ pub async fn dispatch_command(
             request_id,
             session_key,
             session_id,
+            source_terminal_id,
             agent,
             mode,
             cwd,
             initial_input,
+            resume_latest,
             access,
         } => {
             agent_runs::handle_start_agent_run(
@@ -1435,10 +1445,12 @@ pub async fn dispatch_command(
                 request_id,
                 session_key,
                 session_id,
+                source_terminal_id,
                 agent,
                 mode,
                 cwd,
                 initial_input,
+                resume_latest,
                 access,
             )
             .await;

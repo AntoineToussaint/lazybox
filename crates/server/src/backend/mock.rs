@@ -450,6 +450,18 @@ impl SessionBackend for MockBackend {
         })
     }
 
+    fn output_seq<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<u64, BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            let map = self.inner.sessions.lock().await;
+            map.get(key)
+                .map(|session| session.last_seq)
+                .ok_or_else(|| BackendError::NotFound(key.into()))
+        })
+    }
+
     fn resize<'a>(
         &'a self,
         key: &'a str,

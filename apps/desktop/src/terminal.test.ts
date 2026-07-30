@@ -16,10 +16,10 @@ describe("binary terminal protocol", () => {
     const frame = writeTerminalFrame(7, new Uint8Array([0, 27, 255]));
     const view = new DataView(frame.buffer);
 
-    expect(view.getUint32(0)).toBe(12);
+    expect(view.getUint32(0)).toBe(13);
     expect(view.getUint8(4)).toBe(1);
     expect(view.getBigUint64(5)).toBe(7n);
-    expect([...frame.slice(13)]).toEqual([0, 27, 255]);
+    expect([...frame.slice(13)]).toEqual([0, 0, 27, 255]);
   });
 
   it("encodes resize and resync metadata in network byte order", () => {
@@ -42,9 +42,24 @@ describe("binary terminal protocol", () => {
 
     expect(frames).toHaveLength(3);
     expect(frames.map((frame) => [...frame.slice(13)])).toEqual([
-      [0, 1],
-      [2, 3],
-      [4],
+      [0, 0, 1],
+      [0, 2, 3],
+      [0, 4],
+    ]);
+  });
+
+  it("marks only the final chunk of a submitted write as submit", () => {
+    const frames = writeTerminalFrames(
+      7,
+      new Uint8Array([0, 1, 2, 3, 4]),
+      2,
+      "submit",
+    );
+
+    expect(frames.map((frame) => [...frame.slice(13)])).toEqual([
+      [0, 0, 1],
+      [0, 2, 3],
+      [1, 4],
     ]);
   });
 

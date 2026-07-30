@@ -2248,7 +2248,11 @@ snippets:
         m.modal_stack.push(Id::BroadcastText);
         let cmds = m.handle_textarea_submitted("ls -la".into());
         match cmds.as_slice() {
-            [IpcCommand::Write { terminal_id, bytes }] => {
+            [
+                IpcCommand::Write {
+                    terminal_id, bytes, ..
+                },
+            ] => {
                 assert_eq!(terminal_id.0, 1);
                 assert_eq!(
                     bytes,
@@ -7473,7 +7477,9 @@ mod leader_tile_tests {
                         persisted_focus = Some(focused);
                     }
                 }
-                IpcCommand::Write { terminal_id, bytes } => {
+                IpcCommand::Write {
+                    terminal_id, bytes, ..
+                } => {
                     writes.push((terminal_id, bytes));
                 }
                 _ => {}
@@ -7541,7 +7547,9 @@ mod leader_tile_tests {
                         persisted_focus = Some(focused);
                     }
                 }
-                IpcCommand::Write { terminal_id, bytes } => {
+                IpcCommand::Write {
+                    terminal_id, bytes, ..
+                } => {
                     write = Some((terminal_id, bytes));
                 }
                 _ => {}
@@ -8305,11 +8313,18 @@ mod terminal_url_mouse_tests {
         assert!(opened_urls(&opened).is_empty());
         let writes: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok())
             .filter_map(|command| match command {
-                IpcCommand::Write { terminal_id, .. } => Some(terminal_id),
+                IpcCommand::Write {
+                    terminal_id,
+                    intent,
+                    ..
+                } => Some((terminal_id, intent)),
                 _ => None,
             })
             .collect();
-        assert_eq!(writes, vec![TerminalId(1)]);
+        assert_eq!(
+            writes,
+            vec![(TerminalId(1), lazybox_ipc::TerminalInputIntent::View)]
+        );
         assert_eq!(
             model.terminals.focused_terminal_id(),
             Some(TerminalId(2)),

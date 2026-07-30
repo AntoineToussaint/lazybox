@@ -1031,7 +1031,7 @@ impl Sidebar {
         if removed.is_some() {
             self.broadcast_selected.remove(key);
             self.agents.remove(key);
-            self.recompute_visible();
+            self.recompute_after_workspace_removed(key);
         }
         removed
     }
@@ -1865,6 +1865,49 @@ impl Sidebar {
     fn reset_cursor_and_recompute(&mut self) {
         self.set_cursor(0);
         self.recompute_visible_inner(false);
+    }
+
+    fn recompute_after_workspace_removed(&mut self, removed_key: &SessionKey) {
+        let removed_index = if self.selected_session_key() == Some(removed_key) {
+            self.visible
+                .iter()
+                .position(|row| matches!(row, VisibleRow::Workspace(key) if key == removed_key))
+        } else {
+            None
+        };
+        self.recompute_visible();
+        let Some(removed_index) = removed_index else {
+            return;
+        };
+
+        let agent_workspaces = self.agent_workspace_keys();
+        let target = self
+            .visible
+            .iter()
+            .enumerate()
+            .skip(removed_index)
+            .find_map(|(index, row)| match row {
+                VisibleRow::Workspace(key) if agent_workspaces.contains(key) => Some(index),
+                _ => None,
+            })
+            .or_else(|| {
+                self.visible
+                    .iter()
+                    .enumerate()
+                    .skip(removed_index)
+                    .find_map(|(index, row)| match row {
+                        VisibleRow::Workspace(_) => Some(index),
+                        _ => None,
+                    })
+            })
+            .or_else(|| {
+                self.visible
+                    .iter()
+                    .rposition(|row| matches!(row, VisibleRow::Workspace(_)))
+            });
+        if let Some(target) = target {
+            self.set_cursor(target);
+        }
     }
 
     fn recompute_visible_inner(&mut self, preserve_header_park: bool) {

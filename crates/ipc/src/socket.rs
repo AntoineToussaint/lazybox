@@ -584,7 +584,11 @@ mod batching_tests {
         assert!(peer.build_matches());
         assert!(matches!(
             server.await.expect("server task"),
-            Command::Write { terminal_id, bytes }
+            Command::Write {
+                terminal_id,
+                bytes,
+                ..
+            }
                 if terminal_id == TerminalId(674) && bytes == vec![b'x'; 8]
         ));
     }
@@ -643,6 +647,7 @@ mod batching_tests {
         Command::Write {
             terminal_id: TerminalId(i),
             bytes: vec![b'x'; 8],
+            intent: crate::TerminalInputIntent::Compose,
         }
     }
 
@@ -762,6 +767,7 @@ mod batching_tests {
         tx.try_send(Command::Write {
             terminal_id: TerminalId(3),
             bytes: original.clone(),
+            intent: crate::TerminalInputIntent::Submit,
         })
         .expect("capacity");
         drop(tx);
@@ -780,7 +786,9 @@ mod batching_tests {
             .expect("every chunked frame fits under the command cap")
         {
             match back {
-                Command::Write { terminal_id, bytes } => {
+                Command::Write {
+                    terminal_id, bytes, ..
+                } => {
                     assert_eq!(terminal_id, TerminalId(3));
                     assert!(bytes.len() <= crate::MAX_WRITE_CHUNK_BYTES);
                     frames += 1;
@@ -825,7 +833,9 @@ mod batching_tests {
                 .expect("read ok")
                 .expect("frame present");
             match back {
-                Command::Write { terminal_id, bytes } => {
+                Command::Write {
+                    terminal_id, bytes, ..
+                } => {
                     assert_eq!(terminal_id, TerminalId(i), "order must be preserved");
                     assert_eq!(bytes.len(), 8);
                 }
@@ -886,6 +896,7 @@ mod batching_tests {
         let big = Command::Write {
             terminal_id: TerminalId(1),
             bytes: vec![b'y'; MAX_BATCH_BYTES],
+            intent: crate::TerminalInputIntent::Compose,
         };
         let (tx, rx) = mpsc::channel::<Command>(8);
         tx.try_send(big.clone()).expect("capacity");

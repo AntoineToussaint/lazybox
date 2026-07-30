@@ -154,6 +154,16 @@ pub trait SessionBackend: Send + Sync + 'static {
         bytes: &'a [u8],
     ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>>;
 
+    /// Highest output sequence already produced by the session.
+    ///
+    /// This is a cheap causal boundary for terminal-side control operations:
+    /// output at or below the returned sequence predates the operation, even
+    /// if a slower consumer has not processed it yet.
+    fn output_seq<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<u64, BackendError>> + Send + 'a>>;
+
     /// Resize the session's terminal grid.
     fn resize<'a>(
         &'a self,

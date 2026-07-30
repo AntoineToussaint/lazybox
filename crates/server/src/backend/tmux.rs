@@ -741,6 +741,21 @@ impl SessionBackend for TmuxBackend {
         })
     }
 
+    fn output_seq<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<u64, BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            let pty = {
+                let map = self.sessions.lock().await;
+                map.get(key)
+                    .map(|s| s.client.clone())
+                    .ok_or_else(|| BackendError::NotFound(key.into()))?
+            };
+            Ok(pty.output_seq())
+        })
+    }
+
     fn resize<'a>(
         &'a self,
         key: &'a str,

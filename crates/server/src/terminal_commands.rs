@@ -153,14 +153,18 @@ async fn run_io_lane(
         };
 
         match command {
-            Command::Write { bytes, .. } => {
+            Command::Write { bytes, intent, .. } => {
                 let mut total = bytes.len();
                 let mut writes = vec![bytes];
                 while total < WRITE_BATCH_BYTES {
                     match rx.try_recv() {
                         Ok(Command::Write {
-                            bytes: next_bytes, ..
-                        }) if total.saturating_add(next_bytes.len()) <= WRITE_BATCH_BYTES => {
+                            bytes: next_bytes,
+                            intent: next_intent,
+                            ..
+                        }) if next_intent == intent
+                            && total.saturating_add(next_bytes.len()) <= WRITE_BATCH_BYTES =>
+                        {
                             total += next_bytes.len();
                             writes.push(next_bytes);
                         }
@@ -171,7 +175,7 @@ async fn run_io_lane(
                         Err(_) => break,
                     }
                 }
-                spawn_handler::handle_write_batch(&config, terminal_id, &writes).await;
+                spawn_handler::handle_write_batch(&config, terminal_id, &writes, intent).await;
             }
             Command::Resize { cols, rows, .. } => {
                 // Resize events are snapshots, not deltas. When a drag queues
@@ -438,6 +442,7 @@ mod tests {
                     .send(Command::Write {
                         terminal_id,
                         bytes: vec![b'x'],
+                        intent: lazybox_ipc::TerminalInputIntent::Compose,
                     })
                     .await
                     .expect("router open");

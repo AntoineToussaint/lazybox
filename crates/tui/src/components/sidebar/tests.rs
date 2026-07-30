@@ -1756,6 +1756,126 @@ mod search_tests {
 }
 
 #[cfg(test)]
+mod workspace_removal_cursor_tests {
+    use super::super::*;
+    use super::status_pill_tests::base_task;
+    use lazybox_core::{SessionKind, Workspace, WorkspaceSession};
+    use std::path::PathBuf;
+
+    fn issue_ws(key: &str) -> Workspace {
+        let mut task = base_task();
+        task.id.key = key.into();
+        task.title = key.into();
+        task.url = format!("https://github.com/o/r/issues/{key}");
+        Workspace::from_task(task, chrono::Utc::now())
+    }
+
+    fn sidebar_with_issues(count: usize) -> Sidebar {
+        let mut sidebar = Sidebar::new(PaneId::new(1));
+        for index in 0..count {
+            let workspace = issue_ws(&index.to_string());
+            sidebar
+                .workspaces
+                .insert(SessionKey::from(&workspace.key), workspace);
+        }
+        sidebar.recompute_visible();
+        sidebar
+    }
+
+    fn visible_workspace_keys(sidebar: &Sidebar) -> Vec<SessionKey> {
+        sidebar
+            .visible_rows()
+            .iter()
+            .filter_map(|row| match row {
+                VisibleRow::Workspace(key) => Some(key.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn add_agent_session(sidebar: &mut Sidebar, key: &SessionKey) {
+        let workspace = sidebar
+            .workspaces
+            .get_mut(key)
+            .expect("workspace must exist");
+        workspace.add_session(WorkspaceSession::new(
+            workspace.key.clone(),
+            SessionKind::Agent {
+                agent_id: "codex".into(),
+            },
+            PathBuf::from("/tmp/agent-workspace"),
+            chrono::Utc::now(),
+        ));
+        sidebar.recompute_visible();
+    }
+
+    #[test]
+    fn optimistic_removal_prefers_the_next_agent_workspace_and_echo_keeps_focus() {
+        let mut sidebar = sidebar_with_issues(4);
+        let keys = visible_workspace_keys(&sidebar);
+        let removed = keys[1].clone();
+        let immediate_next = keys[2].clone();
+        let next_agent = keys[3].clone();
+        add_agent_session(&mut sidebar, &next_agent);
+        assert!(sidebar.focus_workspace_key(&removed));
+
+        let removed_workspace = sidebar
+            .take_workspace(&removed)
+            .expect("optimistic removal must return the workspace");
+
+        assert_ne!(immediate_next, next_agent);
+        assert_eq!(sidebar.selected_session_key(), Some(&next_agent));
+
+        sidebar.on_event(&Event::WorkspaceRemoved(removed_workspace.key));
+        assert_eq!(
+            sidebar.selected_session_key(),
+            Some(&next_agent),
+            "the daemon echo must not move the cursor again",
+        );
+    }
+
+    #[test]
+    fn daemon_removal_falls_back_to_the_immediate_workspace_below() {
+        let mut sidebar = sidebar_with_issues(4);
+        let keys = visible_workspace_keys(&sidebar);
+        let agent_above = keys[0].clone();
+        let removed = keys[1].clone();
+        let expected = keys[2].clone();
+        add_agent_session(&mut sidebar, &agent_above);
+        assert!(sidebar.focus_workspace_key(&removed));
+        let workspace_key = sidebar
+            .workspaces
+            .get(&removed)
+            .expect("workspace must exist")
+            .key
+            .clone();
+
+        sidebar.on_event(&Event::WorkspaceRemoved(workspace_key));
+
+        assert_eq!(sidebar.selected_session_key(), Some(&expected));
+    }
+
+    #[test]
+    fn removing_the_bottom_workspace_clamps_to_the_new_bottom() {
+        let mut sidebar = sidebar_with_issues(3);
+        let keys = visible_workspace_keys(&sidebar);
+        let removed = keys[2].clone();
+        let expected = keys[1].clone();
+        assert!(sidebar.focus_workspace_key(&removed));
+        let workspace_key = sidebar
+            .workspaces
+            .get(&removed)
+            .expect("workspace must exist")
+            .key
+            .clone();
+
+        sidebar.on_event(&Event::WorkspaceRemoved(workspace_key));
+
+        assert_eq!(sidebar.selected_session_key(), Some(&expected));
+    }
+}
+
+#[cfg(test)]
 mod broadcast_select_tests {
     use super::super::*;
     use super::status_pill_tests::base_task;

@@ -5,7 +5,7 @@
 use lazybox_ipc::{
     AgentApprovalDecision, AgentInputMessage, AgentQuestionAnswer, AgentRunId, AgentRunRequestId,
     AgentRuntimeMode, Command, Event, HookEvent, HookEventKind, PrincipalId,
-    ProviderCredentialInput, TerminalId, TerminalKind, channel,
+    ProviderCredentialInput, TerminalId, TerminalInputIntent, TerminalKind, channel,
 };
 use lazybox_server::backend::SessionBackend;
 use lazybox_server::{Server, ServerConfig};
@@ -661,6 +661,7 @@ fn all_non_shutdown_commands() -> Vec<Command> {
         Command::Write {
             terminal_id: tid,
             bytes: b"x".to_vec(),
+            intent: TerminalInputIntent::Compose,
         },
         Command::RecordUserMessage {
             terminal_id: tid,
@@ -992,6 +993,7 @@ async fn a_wedged_terminal_write_does_not_block_the_bus_or_other_terminals() {
         .send(Command::Write {
             terminal_id: TerminalId(41),
             bytes: b"wedged".to_vec(),
+            intent: TerminalInputIntent::Compose,
         })
         .expect("write a");
     tokio::time::timeout(Duration::from_secs(1), async {
@@ -1009,6 +1011,7 @@ async fn a_wedged_terminal_write_does_not_block_the_bus_or_other_terminals() {
         .send(Command::Write {
             terminal_id: TerminalId(42),
             bytes: b"responsive".to_vec(),
+            intent: TerminalInputIntent::Compose,
         })
         .expect("write b");
     bus.send(Event::PollCompleted {
@@ -1065,6 +1068,7 @@ async fn terminal_write_bursts_are_coalesced_without_reordering_bytes() {
         .send(Command::Write {
             terminal_id: TerminalId(51),
             bytes: b"0".to_vec(),
+            intent: TerminalInputIntent::Compose,
         })
         .expect("first write");
     tokio::time::timeout(Duration::from_secs(1), async {
@@ -1086,6 +1090,7 @@ async fn terminal_write_bursts_are_coalesced_without_reordering_bytes() {
             .send(Command::Write {
                 terminal_id: TerminalId(51),
                 bytes: vec![byte],
+                intent: TerminalInputIntent::Compose,
             })
             .expect("queued write");
     }
@@ -1143,6 +1148,7 @@ async fn terminal_resize_storm_collapses_to_latest_before_next_write() {
         .send(Command::Write {
             terminal_id: TerminalId(52),
             bytes: b"before".to_vec(),
+            intent: TerminalInputIntent::Compose,
         })
         .expect("first write");
     tokio::time::timeout(Duration::from_secs(1), async {
@@ -1169,6 +1175,7 @@ async fn terminal_resize_storm_collapses_to_latest_before_next_write() {
         .send(Command::Write {
             terminal_id: TerminalId(52),
             bytes: b"after".to_vec(),
+            intent: TerminalInputIntent::Compose,
         })
         .expect("ordering barrier");
 
@@ -1238,6 +1245,7 @@ async fn a_wedged_terminal_resize_does_not_block_other_terminals() {
         .send(Command::Write {
             terminal_id: TerminalId(54),
             bytes: b"still-responsive".to_vec(),
+            intent: TerminalInputIntent::Compose,
         })
         .expect("write b");
 
@@ -1290,6 +1298,7 @@ async fn failed_terminal_close_keeps_the_io_lane_alive() {
         .send(Command::Write {
             terminal_id: TerminalId(55),
             bytes: b"after-failed-close".to_vec(),
+            intent: TerminalInputIntent::Compose,
         })
         .expect("write after failed close");
 
@@ -1396,12 +1405,14 @@ async fn multiple_clients_never_write_one_terminal_concurrently() {
         .send(Command::Write {
             terminal_id: TerminalId(71),
             bytes: b"client-a".to_vec(),
+            intent: TerminalInputIntent::Compose,
         })
         .expect("write a");
     client_b
         .send(Command::Write {
             terminal_id: TerminalId(71),
             bytes: b"client-b".to_vec(),
+            intent: TerminalInputIntent::Compose,
         })
         .expect("write b");
 
@@ -1463,6 +1474,7 @@ async fn prompt_injection_cannot_overtake_prior_terminal_input() {
         .send(Command::Write {
             terminal_id,
             bytes: b"prior-input".to_vec(),
+            intent: TerminalInputIntent::Compose,
         })
         .expect("prior input");
     client
@@ -1542,6 +1554,7 @@ async fn injected_paste_and_submit_are_atomic_against_user_input() {
         .send(Command::Write {
             terminal_id,
             bytes: b"interloper".to_vec(),
+            intent: TerminalInputIntent::Compose,
         })
         .expect("input during settle");
 

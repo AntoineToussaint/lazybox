@@ -35,8 +35,8 @@ use lazybox_core::{
     SessionId, SessionKey, SessionKind, Task, Workspace, WorkspaceKey, WorkspaceSession as Session,
 };
 use lazybox_ipc::{
-    AgentRunAccess, Event, PromptSource, TerminalId, TerminalKind, TerminalSnapshot, UserPrompt,
-    WorktreeStep, WorktreeStepStatus,
+    AgentRunAccess, Event, PromptSource, TerminalId, TerminalInputIntent, TerminalKind,
+    TerminalSnapshot, UserPrompt, WorktreeStep, WorktreeStepStatus,
 };
 use lazybox_store::{StoreMutation, WorkspaceRecord};
 use spawn_executor::{ExecutedSpawn, SpawnExecutionOutcome, execute_spawn_plan};
@@ -1207,6 +1207,7 @@ async fn handle_spawn_inner(
                     agent_for_pump.as_ref(),
                     &mut state_buf,
                     &sub.replay,
+                    sub.last_seq,
                     progress,
                     &terminal_registry,
                     &bus,
@@ -1324,6 +1325,7 @@ async fn handle_spawn_inner(
                         agent_for_pump.as_ref(),
                         &mut state_buf,
                         &snapshot.replay,
+                        snapshot.last_seq,
                         progress,
                         &terminal_registry,
                         &bus,
@@ -1393,6 +1395,7 @@ async fn handle_spawn_inner(
                     agent_for_pump.as_ref(),
                     &mut state_buf,
                     &chunk.bytes,
+                    chunk.seq,
                     progress,
                     &terminal_registry,
                     &bus,
@@ -1701,8 +1704,8 @@ async fn handle_spawn_inner(
                 id,
                 &backend_key,
                 encoded_prompt,
-                interaction,
                 true,
+                interaction,
             )
             .await
             {
@@ -3410,8 +3413,8 @@ pub(crate) async fn deliver_auto_fix_prompt(
         target.terminal_id,
         &target.backend_key,
         encoded,
-        interaction,
         true,
+        interaction,
     )
     .await
     {
@@ -4381,6 +4384,7 @@ async fn finish_terminal(
     // co-held here — each
     // `.lock().await.remove(...)` releases at end-of-statement.
     // `crate::TERMINAL_MAP_LOCK_ORDER` applies to co-holding sites only.
+    terminal_io::clear_view_activity(config, terminal_id).await;
     config
         .terminal
         .terminal_sessions
@@ -4509,6 +4513,7 @@ async fn note_pty_activity(
     agent: Option<&std::sync::Arc<dyn lazybox_agents::Agent>>,
     buf: &mut Vec<u8>,
     bytes: &[u8],
+    output_seq: u64,
     // Whether this chunk moved the content fingerprint (the pump's
     // watchdog tracker) — real output rather than repaint churn. Rides
     // the byte-flow `Working` reading so a progress streak can re-open
@@ -4576,6 +4581,7 @@ async fn note_pty_activity(
         id,
         session_key,
         state_machine,
+        Some(output_seq),
     )
     .await;
 }
@@ -4656,6 +4662,7 @@ async fn classify_quiet_screen(
             id,
             session_key,
             state_machine,
+            None,
         )
         .await;
         return;
@@ -4731,6 +4738,7 @@ async fn classify_quiet_screen(
         id,
         session_key,
         state_machine,
+        None,
     )
     .await;
 }
@@ -4837,6 +4845,7 @@ async fn watchdog_escape_working(
         id,
         session_key,
         state_machine,
+        None,
     )
     .await;
 }
@@ -4862,7 +4871,19 @@ async fn commit_pty_reading(
     // its state under the PR session, not the deleted issue one.
     session_key: &SessionKey,
     state_machine: &mut lazybox_agents::AgentStateMachine,
+    output_seq: Option<u64>,
 ) {
+    if terminal_io::suppresses_agent_reading(terminals, id, output_seq).await
+        && pty.state != lazybox_ipc::AgentState::InputNeeded
+    {
+        tracing::debug!(
+            terminal_id = ?id,
+            liveness = ?pty.liveness,
+            state = ?pty.state,
+            "client-provoked terminal redraw: suppressing lifecycle reading",
+        );
+        return;
+    }
     // The pump gathers facts and defers every decision to the state
     // machine (`on_pty_reading`), which owns the whole hooks-primary gate
     // and hysteresis. The only fact the machine can't derive itself is how
@@ -4998,8 +5019,13 @@ pub async fn handle_fetch_scrollback(
     }
 }
 
-pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes: &[u8]) -> bool {
-    handle_write_batch(config, terminal_id, &[bytes.to_vec()]).await
+pub async fn handle_write(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    bytes: &[u8],
+    intent: TerminalInputIntent,
+) -> bool {
+    handle_write_batch(config, terminal_id, &[bytes.to_vec()], intent).await
 }
 
 /// Deliver adjacent client writes in one backend call while retaining their
@@ -5009,12 +5035,34 @@ pub(crate) async fn handle_write_batch(
     config: &ServerConfig,
     terminal_id: TerminalId,
     writes: &[Vec<u8>],
+    intent: TerminalInputIntent,
 ) -> bool {
     let total: usize = writes.iter().map(Vec::len).sum();
     let mut joined = Vec::with_capacity(total);
     for bytes in writes {
         joined.extend_from_slice(bytes);
     }
+    let answered_chooser = writes
+        .iter()
+        .any(|bytes| bytes.len() == 1 && matches!(bytes[0], b'1'..=b'9' | b'y' | b'n' | 0x1b));
+    let current_state = config.terminal.agent_state_for(terminal_id).await;
+    let chooser_submission = intent == TerminalInputIntent::Compose
+        && current_state == Some(lazybox_ipc::AgentState::InputNeeded)
+        && answered_chooser
+        && config
+            .terminal
+            .input_needed_shapes
+            .lock()
+            .await
+            .get(&terminal_id)
+            .copied()
+            == Some(lazybox_agents::PromptShape::Chooser);
+    let submitted = intent == TerminalInputIntent::Submit || chooser_submission;
+    let effective_intent = if submitted {
+        TerminalInputIntent::Submit
+    } else {
+        intent
+    };
     let Some(key) = config.terminal.backend_key_for(terminal_id).await else {
         tracing::trace!("write to unknown terminal {terminal_id:?}");
         return false;
@@ -5022,7 +5070,9 @@ pub(crate) async fn handle_write_batch(
     let Some(interaction) = terminal_io::acquire_live(config, terminal_id, &key).await else {
         return false;
     };
-    if let Err(error) = terminal_io::write_locked(config, &key, &joined).await {
+    if let Err(error) =
+        terminal_io::write_locked(config, terminal_id, &key, &joined, effective_intent).await
+    {
         tracing::warn!(?terminal_id, %key, %error, "terminal input was not delivered");
         let _ = config.bus.send(Event::TerminalInputRejected {
             terminal_id,
@@ -5030,16 +5080,10 @@ pub(crate) async fn handle_write_batch(
         });
         return false;
     }
-    // If the user just answered a prompt on an agent terminal that's
-    // currently in `InputNeeded` state, optimistically flip it to
-    // `Working` — the agent is about to act on the answer. This
-    // submitted-input flip is the authoritative signal that clears the
-    // `?`: a parked prompt emits no output, so the byte-flow readings
-    // that follow are ambiguous and can never leave `InputNeeded` on
-    // their own (an incidental click/redraw repaint must not, #374). The
-    // classifier still corrects this flip on the next quiet boundary
-    // (back to `InputNeeded` if the response was another prompt, or to
-    // `Idle`/`Done` once the agent settles).
+    // A submitted input is affirmative evidence that the agent may start a
+    // turn. Commit Working optimistically for agent terminals so a hookless
+    // session can leave Idle/Done and an answered prompt can clear its `?`.
+    // Compose and View writes never enter this path.
     //
     // An answer is either Enter (`\r`/`\n` — `y`/`yes`/`1`/<text> +
     // Enter; bracket-paste markers wrapping claude's submit count too)
@@ -5047,30 +5091,22 @@ pub(crate) async fn handle_write_batch(
     // digit, y/n, or Esc (dismiss) with no Enter at all. Without the
     // bare-key arm, answering a chooser with `1` left the stale
     // markers pinning `InputNeeded` until fresh output evicted them.
-    let pressed_enter = writes
-        .iter()
-        .any(|bytes| bytes.contains(&b'\r') || bytes.contains(&b'\n'));
-    let answered_chooser = writes
-        .iter()
-        .any(|bytes| bytes.len() == 1 && matches!(bytes[0], b'1'..=b'9' | b'y' | b'n' | 0x1b));
-    if !pressed_enter && !answered_chooser {
+    if !submitted {
         return true;
     }
-    // Flip a terminal that's either parked on a prompt (answering a live
-    // `?`) or finished (`Done`) and just handed a fresh prompt via Enter —
-    // a submitted line at a `Done` agent starts a new turn, and for a
-    // hookless agent (Codex, Cursor) this optimistic flip is the ONLY thing
-    // that leaves `Done`: byte-flow `Working` can't clear it (a stray repaint
-    // must not un-finish a turn), and there's no `UserPromptSubmit` hook to
-    // do it either. A raced bare Enter that wasn't really a new turn
-    // self-corrects: the agent settles back to `Done` on the next quiet
-    // classification (#357). The bare-keystroke shape check below is only
-    // meaningful for `InputNeeded`. Fast pre-check; re-validated atomically
-    // under the state lock below, since the terminal can resolve in between.
-    let flippable = |state: Option<lazybox_ipc::AgentState>| match state {
-        Some(lazybox_ipc::AgentState::InputNeeded) => true,
-        Some(lazybox_ipc::AgentState::Done) => pressed_enter,
-        _ => false,
+    // Explicit Submit may start the first turn, resume an idle composer, or
+    // start a new turn from Done. A bare chooser answer is narrower: it only
+    // submits while the same chooser is still live. Revalidate atomically at
+    // the state transition because the terminal can resolve during the write.
+    let flippable = |state: Option<lazybox_ipc::AgentState>| {
+        if chooser_submission {
+            state == Some(lazybox_ipc::AgentState::InputNeeded)
+        } else {
+            !matches!(
+                state,
+                Some(lazybox_ipc::AgentState::Working | lazybox_ipc::AgentState::Exited { .. })
+            )
+        }
     };
     if !flippable(config.terminal.agent_state_for(terminal_id).await) {
         return true;
@@ -5084,7 +5120,7 @@ pub(crate) async fn handle_write_batch(
     // chunk fast path) and by `handle_ingest_hook` (permission → chooser,
     // elicit → free text);
     // with no recorded shape we conservatively don't flip on a bare key.
-    if !pressed_enter {
+    if chooser_submission {
         let shape = config
             .terminal
             .input_needed_shapes
@@ -5114,13 +5150,8 @@ pub(crate) async fn handle_write_batch(
     let Some(durability) = agent_state_durability(config, terminal_id, &key).await else {
         return true;
     };
-    // Atomic compare-and-set under the state lock: flip ONLY if the
-    // terminal is still in a flippable state (parked on a prompt, or a
-    // `Done` agent handed a fresh Enter). If it raced to `Working`/`Idle`
-    // since the pre-check, leave it alone. The `transition` call keeps the
-    // flip behind the same choke point as the detection paths (it always
-    // commits here, since both `InputNeeded → Working` and `Done → Working`
-    // are legal, state-changing edges).
+    // Atomic compare-and-set under the state lock keeps the flip behind the
+    // same transition choke point as PTY readings and hooks.
     let transition = transition_and_broadcast_agent_state(
         &config.terminal,
         &config.bus,
@@ -5208,17 +5239,28 @@ async fn write_prompt_sequence(
     terminal_id: TerminalId,
     backend_key: &str,
     encoded: lazybox_agents::EncodedPrompt,
+    submit: bool,
     interaction: tokio::sync::OwnedMutexGuard<()>,
-    starts_turn: bool,
 ) -> Result<bool, PromptWriteError> {
     let echo_probes = encoded.echo_probes().to_vec();
     let (initial_write, submit_write) = encoded.into_writes();
     // Subscribe BEFORE the first write so its repaint chunks cannot race the
     // settle gate. Line-oriented prompts submit inline and skip this receiver.
     let output_events = submit_write.is_some().then(|| config.bus.subscribe());
-    terminal_io::write_locked(config, backend_key, &initial_write)
-        .await
-        .map_err(PromptWriteError::Initial)?;
+    let initial_intent = if submit && submit_write.is_none() {
+        TerminalInputIntent::Submit
+    } else {
+        TerminalInputIntent::Compose
+    };
+    terminal_io::write_locked(
+        config,
+        terminal_id,
+        backend_key,
+        &initial_write,
+        initial_intent,
+    )
+    .await
+    .map_err(PromptWriteError::Initial)?;
 
     if let (Some(submit_bytes), Some(mut output_events)) = (submit_write, output_events) {
         let settle_t0 = std::time::Instant::now();
@@ -5237,10 +5279,16 @@ async fn write_prompt_sequence(
             "prompt paste settled — sending submit keystroke",
         );
         let confirm = prepare_submit_confirmation(config, terminal_id).await;
-        terminal_io::write_locked(config, backend_key, &submit_bytes)
-            .await
-            .map_err(PromptWriteError::Submit)?;
-        if starts_turn {
+        terminal_io::write_locked(
+            config,
+            terminal_id,
+            backend_key,
+            &submit_bytes,
+            TerminalInputIntent::Submit,
+        )
+        .await
+        .map_err(PromptWriteError::Submit)?;
+        if submit {
             mark_done_agent_working(config, terminal_id, backend_key).await;
         }
         drop(interaction);
@@ -5253,7 +5301,7 @@ async fn write_prompt_sequence(
         )
         .await);
     }
-    if starts_turn {
+    if submit {
         mark_done_agent_working(config, terminal_id, backend_key).await;
     }
     Ok(true)
@@ -5383,7 +5431,14 @@ async fn confirm_prompt_submission(
              prompt likely parked in the composer; resending Enter \
              ({resends}/{SUBMIT_RESEND_LIMIT})",
         );
-        match terminal_io::write_live(config, confirm.terminal_id, backend_key, submit_bytes).await
+        match terminal_io::write_live(
+            config,
+            confirm.terminal_id,
+            backend_key,
+            submit_bytes,
+            TerminalInputIntent::Submit,
+        )
+        .await
         {
             Ok(true) => {}
             Ok(false) => break false,
@@ -5860,8 +5915,8 @@ async fn handle_inject_prompt_inner(
             id,
             &backend_key,
             encoded_prompt,
-            interaction,
             submit,
+            interaction,
         )
         .await
         {
@@ -5941,7 +5996,14 @@ pub async fn handle_deliver_snippet(
                 .await;
         }
         TerminalKind::Shell => {
-            if handle_write(config, terminal_id, &encode_shell_snippet(&body)).await {
+            if handle_write(
+                config,
+                terminal_id,
+                &encode_shell_snippet(&body),
+                TerminalInputIntent::Submit,
+            )
+            .await
+            {
                 record_confirmed_snippet(config, terminal_id, session_key, snippet_key, None).await;
             }
         }
@@ -6120,6 +6182,7 @@ pub async fn handle_ingest_hook(
         .lock()
         .await
         .insert(terminal_id, std::time::Instant::now());
+    terminal_io::clear_view_activity(config, terminal_id).await;
     // Proof-of-submission signal for the prompt-inject paths: a
     // `UserPromptSubmit` hook means the injected prompt actually
     // entered Claude's turn (issue #122's failure is the prompt parked
@@ -6252,6 +6315,12 @@ async fn pump_recovered_session(
                         continue;
                     };
                     resync_unavailable_announced = false;
+                    let _ = terminal_io::suppresses_agent_reading(
+                        &config.terminal,
+                        terminal_id,
+                        Some(snapshot.last_seq),
+                    )
+                    .await;
                     replace_detection_history(
                         &mut state_buf,
                         &mut watchdog_fp,
@@ -6281,6 +6350,7 @@ async fn pump_recovered_session(
                     agent.as_ref(),
                     &mut state_buf,
                     &chunk.bytes,
+                    chunk.seq,
                     progress,
                     &config.terminal,
                     &config.bus,
@@ -7884,6 +7954,148 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn view_activity_is_released_only_by_submitted_input() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "resize-redraw")
+            .await
+            .expect("spawn");
+        let terminal_id = TerminalId(699);
+        config
+            .terminal
+            .register_terminal(
+                terminal_id,
+                backend_key,
+                SessionKey::new("resize-redraw"),
+                TerminalKind::Agent("codex".into()),
+            )
+            .await;
+
+        handle_resize(&config, terminal_id, 100, 30).await;
+        assert!(
+            config
+                .terminal
+                .agent_terminal_activities
+                .lock()
+                .await
+                .contains_key(&terminal_id)
+        );
+
+        assert!(handle_write(&config, terminal_id, b"x", TerminalInputIntent::Compose,).await);
+        assert!(
+            config
+                .terminal
+                .agent_terminal_activities
+                .lock()
+                .await
+                .contains_key(&terminal_id)
+        );
+
+        assert!(handle_write(&config, terminal_id, b"\r", TerminalInputIntent::Submit,).await);
+        assert!(
+            !config
+                .terminal
+                .agent_terminal_activities
+                .lock()
+                .await
+                .contains_key(&terminal_id)
+        );
+
+        config
+            .terminal
+            .record_agent_state(terminal_id, lazybox_ipc::AgentState::Working)
+            .await;
+        handle_resize(&config, terminal_id, 101, 31).await;
+        assert!(
+            config
+                .terminal
+                .agent_terminal_activities
+                .lock()
+                .await
+                .contains_key(&terminal_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn fast_output_during_submit_is_not_hidden_by_prior_view_activity() {
+        use lazybox_ipc::AgentState::{Idle, Working};
+
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "submit-redraw-race")
+            .await
+            .expect("spawn");
+        let terminal_id = TerminalId(703);
+        let session_key = SessionKey::new("submit-redraw-race");
+        config
+            .terminal
+            .register_terminal(
+                terminal_id,
+                backend_key.clone(),
+                session_key.clone(),
+                TerminalKind::Agent("claude".into()),
+            )
+            .await;
+        config.terminal.record_agent_state(terminal_id, Idle).await;
+        config
+            .terminal
+            .record_agent_state_generation(terminal_id, terminal_id.0)
+            .await;
+        let durability = agent_state_durability(&config, terminal_id, &backend_key)
+            .await
+            .expect("state durability");
+
+        handle_resize(&config, terminal_id, 100, 30).await;
+        mock.set_write_delay(&backend_key, Duration::from_millis(200))
+            .await;
+        let write_config = config.clone();
+        let write = tokio::spawn(async move {
+            handle_write(
+                &write_config,
+                terminal_id,
+                b"\r",
+                TerminalInputIntent::Submit,
+            )
+            .await
+        });
+        while mock.write_attempts().await.is_empty() {
+            tokio::task::yield_now().await;
+        }
+
+        let working_bytes = include_bytes!("../../agents/tests/fixtures/working_status_line.bin");
+        mock.emit(&backend_key, working_bytes).await;
+        let agent = lazybox_agents::registry()
+            .get("claude")
+            .expect("claude agent");
+        let mut buf = Vec::new();
+        let mut machine = lazybox_agents::AgentStateMachine::new();
+        machine.mark_booted();
+        let mut events = config.bus.subscribe();
+        note_pty_activity(
+            Some(&agent),
+            &mut buf,
+            working_bytes,
+            1,
+            false,
+            &config.terminal,
+            &config.bus,
+            Some(&durability),
+            terminal_id,
+            &session_key,
+            &mut machine,
+        )
+        .await;
+
+        assert_eq!(
+            recv_state_for(&mut events, terminal_id),
+            Some((session_key, Working)),
+            "the response must become visible before the queued write reports completion",
+        );
+        assert!(!write.is_finished());
+        assert!(write.await.expect("write task"));
+    }
+
+    #[tokio::test]
     async fn coalesced_writes_preserve_bare_chooser_answer_boundaries() {
         let (config, mock) = ServerConfig::in_memory_with_mock();
         let backend_key = mock
@@ -7921,7 +8133,13 @@ mod tests {
             .await
             .insert(terminal_id, lazybox_agents::PromptShape::Chooser);
 
-        handle_write_batch(&config, terminal_id, &[b"1".to_vec(), b"next".to_vec()]).await;
+        handle_write_batch(
+            &config,
+            terminal_id,
+            &[b"1".to_vec(), b"next".to_vec()],
+            TerminalInputIntent::Compose,
+        )
+        .await;
 
         assert_eq!(mock.writes_for(&backend_key).await, vec![b"1next".to_vec()]);
         assert_eq!(
@@ -7943,7 +8161,13 @@ mod tests {
             .insert(terminal_id, "missing-backend-session".into());
         let mut events = config.bus.subscribe();
 
-        handle_write(&config, terminal_id, b"not delivered").await;
+        handle_write(
+            &config,
+            terminal_id,
+            b"not delivered",
+            TerminalInputIntent::Compose,
+        )
+        .await;
 
         let event = events.try_recv().expect("delivery failure event");
         assert!(matches!(
@@ -7975,7 +8199,13 @@ mod tests {
 
             let write_config = config.clone();
             let write = tokio::spawn(async move {
-                handle_write(&write_config, terminal_id, b"accepted-before-exit").await;
+                handle_write(
+                    &write_config,
+                    terminal_id,
+                    b"accepted-before-exit",
+                    TerminalInputIntent::Compose,
+                )
+                .await;
             });
             loop {
                 if !mock.write_attempts().await.is_empty() {
@@ -11667,6 +11897,7 @@ mod tests {
         id: TerminalId,
         session_key: SessionKey,
         state_machine: lazybox_agents::AgentStateMachine,
+        next_output_seq: u64,
         /// The pump's rolling content fingerprint, mirrored so `feed`
         /// derives each chunk's progress bit the same way production does.
         watchdog_fp: Option<u64>,
@@ -11717,6 +11948,7 @@ mod tests {
                 buf: Vec::new(),
                 watchdog_fp: None,
                 last_chunk_len: 0,
+                next_output_seq: 1,
                 terminals,
                 durability: test_agent_state_durability(id),
                 bus,
@@ -11738,6 +11970,11 @@ mod tests {
         /// derived through the rolling content fingerprint — so churn vs
         /// content behaves as in production.
         async fn feed(&mut self, bytes: &[u8]) -> Vec<lazybox_ipc::AgentState> {
+            let output_seq = self.next_output_seq;
+            self.feed_at(output_seq, bytes).await
+        }
+
+        async fn feed_at(&mut self, output_seq: u64, bytes: &[u8]) -> Vec<lazybox_ipc::AgentState> {
             if self
                 .terminals
                 .agent_detect_resets
@@ -11748,10 +11985,12 @@ mod tests {
                 self.buf.clear();
             }
             let progress = watchdog_notes_progress(&mut self.watchdog_fp, bytes);
+            self.next_output_seq = self.next_output_seq.max(output_seq.saturating_add(1));
             note_pty_activity(
                 Some(&self.agent),
                 &mut self.buf,
                 bytes,
+                output_seq,
                 progress,
                 &self.terminals,
                 &self.bus,
@@ -11783,6 +12022,15 @@ mod tests {
             )
             .await;
             self.drain()
+        }
+
+        async fn view_action(&self) {
+            self.view_action_after(self.next_output_seq.saturating_sub(1))
+                .await;
+        }
+
+        async fn view_action_after(&self, after_seq: u64) {
+            terminal_io::record_view_activity(&self.terminals, self.id, after_seq).await;
         }
 
         /// The user answers the parked prompt through lazybox:
@@ -12349,6 +12597,126 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn resize_redraw_keeps_an_idle_agent_idle() {
+        use lazybox_ipc::AgentState::Idle;
+        let idle = include_bytes!("../../agents/tests/fixtures/idle_composer.bin");
+        let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
+        p.terminals.agent_states.lock().await.insert(p.id, Idle);
+        p.view_action().await;
+
+        assert_eq!(p.feed(idle).await, Vec::new());
+        assert_eq!(p.quiet().await, Vec::new());
+        assert_eq!(p.state().await, Some(Idle));
+        assert!(
+            p.terminals
+                .agent_terminal_activities
+                .lock()
+                .await
+                .get(&p.id)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn resize_redraw_still_surfaces_an_authoritative_prompt() {
+        use lazybox_ipc::AgentState::{Idle, InputNeeded};
+        let prompt = include_bytes!("../../agents/tests/fixtures/permission_prompt_fragmented.bin");
+        let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
+        p.terminals.agent_states.lock().await.insert(p.id, Idle);
+        p.view_action().await;
+
+        assert_eq!(p.feed(prompt).await, Vec::new());
+        assert_eq!(p.quiet().await, vec![InputNeeded]);
+        assert_eq!(p.state().await, Some(InputNeeded));
+    }
+
+    #[tokio::test]
+    async fn multi_chunk_resize_redraw_keeps_a_done_agent_done() {
+        use lazybox_ipc::AgentState::Done;
+        let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
+        p.terminals.agent_states.lock().await.insert(p.id, Done);
+        p.view_action().await;
+
+        for chunk in [b"first frame".as_slice(), b"second frame", b"third frame"] {
+            assert_eq!(p.feed(chunk).await, Vec::new());
+        }
+        assert_eq!(p.quiet().await, Vec::new());
+        assert_eq!(p.state().await, Some(Done));
+    }
+
+    #[tokio::test]
+    async fn output_queued_before_a_view_action_still_starts_working() {
+        use lazybox_ipc::AgentState::{Idle, Working};
+        let working = include_bytes!("../../agents/tests/fixtures/working_status_line.bin");
+        let mut p = PumpDriver::new(Duration::ZERO, Duration::ZERO);
+        p.terminals.agent_states.lock().await.insert(p.id, Idle);
+
+        p.view_action_after(1).await;
+
+        assert_eq!(p.feed_at(1, working).await, vec![Working]);
+        assert_eq!(p.state().await, Some(Working));
+    }
+
+    #[tokio::test]
+    async fn older_quiet_timer_does_not_consume_a_new_view_epoch() {
+        use lazybox_ipc::AgentState::Idle;
+        let idle = include_bytes!("../../agents/tests/fixtures/idle_composer.bin");
+        let mut p = PumpDriver::new(Duration::ZERO, Duration::ZERO);
+        p.terminals.agent_states.lock().await.insert(p.id, Idle);
+        p.buf.extend_from_slice(idle);
+        p.last_chunk_len = idle.len();
+        p.view_action_after(0).await;
+
+        assert!(p.quiet().await.is_empty());
+        assert!(p.feed_at(1, idle).await.is_empty());
+        assert!(p.quiet().await.is_empty());
+        assert_eq!(p.state().await, Some(Idle));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn view_epoch_without_output_does_not_hide_later_agent_work() {
+        use lazybox_ipc::AgentState::{Idle, Working};
+        let working = include_bytes!("../../agents/tests/fixtures/working_status_line.bin");
+        let mut p = PumpDriver::new(Duration::ZERO, Duration::ZERO);
+        p.terminals.agent_states.lock().await.insert(p.id, Idle);
+        p.view_action_after(0).await;
+        tokio::time::advance(Duration::from_secs(3)).await;
+
+        assert_eq!(p.feed_at(1, working).await, vec![Working]);
+        assert_eq!(p.state().await, Some(Working));
+    }
+
+    #[tokio::test]
+    async fn view_redraw_cannot_settle_a_working_agent_to_done() {
+        use lazybox_ipc::AgentState::Working;
+        let idle = include_bytes!("../../agents/tests/fixtures/idle_composer.bin");
+        let mut p = PumpDriver::new(Duration::ZERO, Duration::ZERO);
+        p.terminals.agent_states.lock().await.insert(p.id, Working);
+        p.view_action().await;
+
+        assert!(p.feed(idle).await.is_empty());
+        assert!(p.quiet().await.is_empty());
+        assert_eq!(p.state().await, Some(Working));
+    }
+
+    #[tokio::test]
+    async fn view_redraw_cannot_clear_input_needed() {
+        use lazybox_ipc::AgentState::InputNeeded;
+        let idle = include_bytes!("../../agents/tests/fixtures/idle_composer.bin");
+        let mut p = PumpDriver::new(Duration::ZERO, Duration::ZERO);
+        p.terminals
+            .agent_states
+            .lock()
+            .await
+            .insert(p.id, InputNeeded);
+        p.view_action().await;
+
+        assert!(p.feed(idle).await.is_empty());
+        assert!(p.quiet().await.is_empty());
+        assert_eq!(p.state().await, Some(InputNeeded));
+    }
+
     /// Quiet after a `Stop` hook: the resting composer classifies Idle,
     /// but `Done` is sticky against Idle — the "finished, take a look"
     /// alert must survive both the trailing paint chunks (hooks are fresh,
@@ -12903,6 +13271,7 @@ mod tests {
             Some(&agent),
             &mut buf,
             working,
+            1,
             false,
             &config.terminal,
             &config.bus,
@@ -12926,7 +13295,7 @@ mod tests {
             .await
             .insert(id, AgentState::InputNeeded);
         let mut rx = config.bus.subscribe();
-        handle_write(&config, id, b"\r").await;
+        handle_write(&config, id, b"\r", TerminalInputIntent::Submit).await;
         assert_eq!(
             recv_state_for(&mut rx, id),
             Some((pr_key.clone(), AgentState::Working)),

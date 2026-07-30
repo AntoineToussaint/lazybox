@@ -4,7 +4,7 @@
 //! curl. Tests drive synthetic output via `MockBackend::emit` and end
 //! sessions via `finish`.
 
-use lazybox_ipc::{Command, Event, TerminalKind, channel};
+use lazybox_ipc::{Command, Event, TerminalInputIntent, TerminalKind, channel};
 use lazybox_server::backend::{MockBackend, SessionBackend};
 use lazybox_server::spawn_handler::SpawnOptions;
 use lazybox_server::{Server, ServerConfig};
@@ -2277,6 +2277,7 @@ async fn answering_a_prompt_clears_input_needed_and_does_not_bounce_back() {
             .send(Command::Write {
                 terminal_id,
                 bytes: b"1\r".to_vec(),
+                intent: TerminalInputIntent::Submit,
             })
             .unwrap();
         let working = wait_for(
@@ -2564,6 +2565,7 @@ async fn bare_keystroke_does_not_clear_free_text_elicitation() {
             .send(Command::Write {
                 terminal_id,
                 bytes: b"1".to_vec(),
+                intent: TerminalInputIntent::Compose,
             })
             .unwrap();
         let flipped = wait_for(
@@ -2590,6 +2592,7 @@ async fn bare_keystroke_does_not_clear_free_text_elicitation() {
             .send(Command::Write {
                 terminal_id,
                 bytes: b"\r".to_vec(),
+                intent: TerminalInputIntent::Submit,
             })
             .unwrap();
         let submitted = wait_for(
@@ -2636,6 +2639,7 @@ async fn done_agent_resumes_working_on_a_fresh_prompt() {
             .send(Command::Write {
                 terminal_id,
                 bytes: b"do more\r".to_vec(),
+                intent: TerminalInputIntent::Submit,
             })
             .unwrap();
         let resumed = wait_for(
@@ -2679,6 +2683,7 @@ async fn done_agent_ignores_a_bare_keystroke() {
             .send(Command::Write {
                 terminal_id,
                 bytes: b"d".to_vec(),
+                intent: TerminalInputIntent::Compose,
             })
             .unwrap();
         let flipped = wait_for(
@@ -2764,6 +2769,7 @@ async fn bare_chooser_keystroke_clears_input_needed() {
             .send(Command::Write {
                 terminal_id,
                 bytes: b"1".to_vec(),
+                intent: TerminalInputIntent::Compose,
             })
             .unwrap();
         assert!(
@@ -2785,6 +2791,7 @@ async fn bare_chooser_keystroke_clears_input_needed() {
             .send(Command::Write {
                 terminal_id,
                 bytes: vec![0x1b],
+                intent: TerminalInputIntent::Compose,
             })
             .unwrap();
         assert!(

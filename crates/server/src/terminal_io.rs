@@ -100,7 +100,31 @@ pub(crate) async fn resize_live(
     let Some(_guard) = acquire_live(config, terminal_id, backend_key).await else {
         return Ok(false);
     };
-    match tokio::time::timeout(
+    let agent_terminal = config
+        .terminal_meta_for(terminal_id)
+        .await
+        .is_some_and(|(_, kind)| matches!(kind, lazybox_ipc::TerminalKind::Agent(_)));
+    let hold_redraw = agent_terminal
+        && !matches!(
+            config.agent_state_for(terminal_id).await,
+            Some(lazybox_ipc::AgentState::Working | lazybox_ipc::AgentState::Exited { .. })
+        );
+    let mut inserted_redraw = false;
+    if hold_redraw {
+        inserted_redraw = config.agent_resize_redraws.lock().await.insert(terminal_id);
+        if matches!(
+            config.agent_state_for(terminal_id).await,
+            Some(lazybox_ipc::AgentState::Working | lazybox_ipc::AgentState::Exited { .. })
+        ) {
+            config
+                .agent_resize_redraws
+                .lock()
+                .await
+                .remove(&terminal_id);
+            inserted_redraw = false;
+        }
+    }
+    let result = match tokio::time::timeout(
         OPERATION_TIMEOUT,
         config.backend.resize(backend_key, cols, rows),
     )
@@ -115,5 +139,13 @@ pub(crate) async fn resize_live(
             operation: "terminal resize",
             timeout_ms: OPERATION_TIMEOUT.as_millis(),
         }),
+    };
+    if result.is_err() && inserted_redraw {
+        config
+            .agent_resize_redraws
+            .lock()
+            .await
+            .remove(&terminal_id);
     }
+    result
 }

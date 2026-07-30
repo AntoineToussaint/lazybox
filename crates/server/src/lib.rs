@@ -1360,8 +1360,12 @@ pub async fn dispatch_command(
         } => {
             spawn_handler::handle_create_session(config, session_key, kind, label).await;
         }
-        lazybox_ipc::Command::Write { terminal_id, bytes } => {
-            spawn_handler::handle_write(config, terminal_id, &bytes).await;
+        lazybox_ipc::Command::Write {
+            terminal_id,
+            bytes,
+            intent,
+        } => {
+            spawn_handler::handle_write(config, terminal_id, &bytes, intent).await;
         }
         lazybox_ipc::Command::RecordUserMessage {
             terminal_id,

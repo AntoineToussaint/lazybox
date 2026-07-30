@@ -18,7 +18,7 @@
 //!   `LAZYBOX_E2E_LIVE_AGENTS=1` plus `--run-ignored`, because they need
 //!   an installed, authenticated CLI and consume real tokens.
 
-use lazybox_ipc::{Command, Event, TerminalKind, channel};
+use lazybox_ipc::{Command, Event, TerminalInputIntent, TerminalKind, channel};
 use lazybox_server::backend::SessionBackend;
 use lazybox_server::backend::TmuxBackend;
 use lazybox_server::backend::tmux::modern_tmux_version;
@@ -1280,6 +1280,7 @@ async fn e2e_serve_loop_restart_recovers_session_with_deep_scrollback() {
             .send(Command::Write {
                 terminal_id,
                 bytes: b"for i in $(seq 1 200); do echo line-$i; done; exec sleep 300\n".to_vec(),
+                intent: TerminalInputIntent::Submit,
             })
             .unwrap();
         let mut seen = Vec::new();
@@ -1699,6 +1700,7 @@ async fn e2e_live_scroll_fetch_serves_deep_history_without_restart() {
             .send(Command::Write {
                 terminal_id,
                 bytes: b"for i in $(seq 1 200); do echo line-$i; done\n".to_vec(),
+                intent: TerminalInputIntent::Submit,
             })
             .unwrap();
         let mut seen = Vec::new();

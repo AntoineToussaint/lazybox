@@ -378,9 +378,14 @@ fn char_key_emits_write_to_active_terminal() {
     assert_eq!(outcome, PaneOutcome::Consumed);
     assert_eq!(cmds.len(), 1);
     match &cmds[0] {
-        Command::Write { terminal_id, bytes } => {
+        Command::Write {
+            terminal_id,
+            bytes,
+            intent,
+        } => {
             assert_eq!(*terminal_id, TerminalId(42));
             assert_eq!(bytes, b"a");
+            assert_eq!(*intent, lazybox_ipc::TerminalInputIntent::Compose);
         }
         other => panic!("expected Write, got {other:?}"),
     }
@@ -394,7 +399,10 @@ fn enter_emits_cr_to_terminal() {
     let mut cmds = Vec::new();
     t.handle_key(code(KeyCode::Enter), &mut cmds);
     match &cmds[0] {
-        Command::Write { bytes, .. } => assert_eq!(bytes, b"\r"),
+        Command::Write { bytes, intent, .. } => {
+            assert_eq!(bytes, b"\r");
+            assert_eq!(*intent, lazybox_ipc::TerminalInputIntent::Submit);
+        }
         _ => panic!(),
     }
 }
@@ -410,7 +418,10 @@ fn shift_enter_emits_alt_enter() {
         &mut cmds,
     );
     match &cmds[0] {
-        Command::Write { bytes, .. } => assert_eq!(bytes, b"\x1b\r"),
+        Command::Write { bytes, intent, .. } => {
+            assert_eq!(bytes, b"\x1b\r");
+            assert_eq!(*intent, lazybox_ipc::TerminalInputIntent::Compose);
+        }
         _ => panic!(),
     }
 }

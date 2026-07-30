@@ -17,7 +17,9 @@ use lazybox_server::api_gateway::{
     TERMINAL_SERVER_FRAME_PAYLOAD_OFFSET, TERMINAL_SERVER_FRAME_RESYNC,
     TERMINAL_SERVER_FRAME_RESYNC_UNAVAILABLE, TERMINAL_SERVER_FRAME_SCROLLBACK,
     TERMINAL_SERVER_FRAME_SNAPSHOT, TERMINAL_SERVER_FRAME_TERMINAL_ID_OFFSET,
-    UnsupportedFingerprintResponse, UnsupportedProtocolResponse, WorkspacesResponse,
+    TERMINAL_WRITE_BYTES_OFFSET, TERMINAL_WRITE_INTENT_COMPOSE, TERMINAL_WRITE_INTENT_OFFSET,
+    TERMINAL_WRITE_INTENT_SUBMIT, TERMINAL_WRITE_INTENT_VIEW, UnsupportedFingerprintResponse,
+    UnsupportedProtocolResponse, WorkspacesResponse,
 };
 use std::path::PathBuf;
 use ts_rs::{Config, TS};
@@ -102,6 +104,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          export const TERMINAL_RESYNC_PAYLOAD_LAYOUT = {{\n\
          \u{20}\u{20}bytes: {TERMINAL_RESYNC_PAYLOAD_BYTES},\n\
          \u{20}\u{20}requiredSeqOffset: {TERMINAL_RESYNC_REQUIRED_SEQ_OFFSET},\n\
+         }} as const;\n\
+         export const TERMINAL_WRITE_PAYLOAD_LAYOUT = {{\n\
+         \u{20}\u{20}intentOffset: {TERMINAL_WRITE_INTENT_OFFSET},\n\
+         \u{20}\u{20}bytesOffset: {TERMINAL_WRITE_BYTES_OFFSET},\n\
+         }} as const;\n\
+         export const TERMINAL_INPUT_INTENTS = {{\n\
+         \u{20}\u{20}compose: {TERMINAL_WRITE_INTENT_COMPOSE},\n\
+         \u{20}\u{20}submit: {TERMINAL_WRITE_INTENT_SUBMIT},\n\
+         \u{20}\u{20}view: {TERMINAL_WRITE_INTENT_VIEW},\n\
          }} as const;\n\
          export const TERMINAL_SERVER_FRAME_KINDS = {{\n\
          \u{20}\u{20}snapshot: {TERMINAL_SERVER_FRAME_SNAPSHOT},\n\

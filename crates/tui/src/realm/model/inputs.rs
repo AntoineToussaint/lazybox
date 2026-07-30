@@ -184,6 +184,7 @@ impl<T: TerminalAdapter> Model<T> {
             cmds.push(IpcCommand::Write {
                 terminal_id,
                 bytes: encode_snippet_for_pty(body),
+                intent: lazybox_ipc::TerminalInputIntent::Submit,
             });
         }
     }

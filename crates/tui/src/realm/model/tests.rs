@@ -7805,7 +7805,7 @@ mod terminal_url_mouse_tests {
     }
 
     #[test]
-    fn mouse_mode_guidance_only_appears_when_links_are_disabled() {
+    fn mouse_reporting_guidance_tracks_disabled_unverified_and_verified() {
         let (mut model, _server, _opened) = build_model(1);
         model.mouse_capture_on = false;
         model.status.notice = None;
@@ -7816,11 +7816,55 @@ mod terminal_url_mouse_tests {
         assert!(host_mode.contains("]] menu"));
 
         model.mouse_capture_on = true;
-        let capture_mode = rendered_model(&mut model);
-        assert!(capture_mode.contains("]] menu"));
-        assert!(!capture_mode.contains("mouse on"));
-        assert!(!capture_mode.contains("]]u"));
-        assert!(!capture_mode.contains("Ctrl-c"));
+        model.mouse_input_observed_at = None;
+        let unverified = rendered_model(&mut model);
+        assert!(unverified.contains("mouse ?"));
+        assert!(unverified.contains("host reporting"));
+
+        model.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 80,
+            row: 20,
+            modifiers: KeyModifiers::empty(),
+        });
+        let verified = rendered_model(&mut model);
+        assert!(verified.contains("]] menu"));
+        assert!(!verified.contains("mouse ?"));
+        assert!(!verified.contains("]]u"));
+        assert!(!verified.contains("Ctrl-c"));
+    }
+
+    #[test]
+    fn mouse_capture_refresh_reasserts_through_the_host_boundary() {
+        let (mut model, _server, _opened) = build_model(1);
+        let requested = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&requested);
+        model.mouse_capture_requester = Box::new(move |enabled| {
+            captured.lock().expect("mouse request mutex").push(enabled);
+            Ok(())
+        });
+        model.mouse_capture_requested_at =
+            std::time::Instant::now() - std::time::Duration::from_secs(3);
+        let stale_request = model.mouse_capture_requested_at;
+
+        model.tick_mouse_capture();
+
+        assert!(model.mouse_capture_requested_at > stale_request);
+        assert_eq!(*requested.lock().expect("mouse request mutex"), vec![true]);
+    }
+
+    #[test]
+    fn stale_mouse_reporting_evidence_restores_actionable_guidance() {
+        let (mut model, _server, _opened) = build_model(1);
+        model.mouse_input_observed_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(11));
+        model.mouse_capture_requested_at = std::time::Instant::now();
+
+        model.tick_mouse_capture();
+
+        let rendered = rendered_model(&mut model);
+        assert!(rendered.contains("mouse ?"));
+        assert!(rendered.contains("host reporting"));
     }
 
     #[test]

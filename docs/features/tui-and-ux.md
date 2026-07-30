@@ -311,18 +311,27 @@ terminal for native whole-screen selection.
   open a detected URL/file/issue reference.
 - Drag a splitter to resize; mouse wheel scrolls the focused list/terminal.
 - `F8` (or `Alt-s` / `Ctrl-Alt-s`) toggles lazybox's mouse capture; off = host-native selection, on = lazybox pane-scoped selection + splitter drag.
+- `mouse ?` in the terminal footer means lazybox has requested capture but has
+  not received a recent host mouse event. Move the pointer to verify reporting;
+  if the indicator remains, enable mouse reporting in the host terminal
+  (Ghostty: Command Palette → Toggle Mouse Reporting).
 
 ### How it works (brief)
 Mouse events route through `crates/tui/src/realm/model/keys.rs`: hit-testing for
 panes/splitters (±1 cell tolerance), drag-select with OSC 52 copy on release,
-wheel scroll with inertia damping, and the capture toggle. The context menu is a
-`SidebarContext` modal.
+wheel scroll with inertia damping, and the capture toggle. Capture is reasserted
+periodically and on focus regain so a host-side mode reset heals without a
+restart. The context menu is a `SidebarContext` modal.
 
 ### Test checklist
 - [ ] Clicking selects/focuses the expected pane or row.
 - [ ] Dragging a splitter resizes; the layout persists for the session.
 - [ ] Mouse wheel scrolls the focused list/terminal.
 - [ ] `F8` flips capture; host-native selection works when off, lazybox selection when on.
+- [ ] Disabling host mouse reporting after a verified event restores the
+  `mouse ?` guidance without requiring a focus change.
+- [ ] `scripts/check-ghostty-mouse-reporting.sh` passes against Ghostty's default
+  configuration and records an SGR right-button report.
 - [ ] Right-click on a sidebar row opens the context menu.
 - [ ] In Ghostty with its default mouse-reporting configuration and `ui.browser: null`, right-click plain, soft-wrapped, and OSC 8 terminal links in the active tab and in each non-focused horizontal/vertical split tile; each exact URL opens, while `/tmp/lazybox.log` records the received coordinates, resolved tile/terminal, target or miss reason, and browser-launch outcome.
 - [ ] Drag-select in a terminal copies via OSC 52 (footer confirms).

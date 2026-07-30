@@ -1157,6 +1157,7 @@ impl<T: TerminalAdapter> Model<T> {
     pub fn handle_mouse(&mut self, m: crossterm::event::MouseEvent) {
         use crossterm::event::MouseEventKind;
 
+        self.note_host_mouse_input();
         if self.layout.last_area.width == 0 || self.layout.last_area.height == 0 {
             return;
         }

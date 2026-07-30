@@ -222,6 +222,14 @@ pub struct DesktopInfo {
     pub agents: Vec<String>,
     pub default_agent: String,
     pub setup_completed: bool,
+    pub repositories: Vec<DesktopRepository>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct DesktopRepository {
+    pub project_key: lazybox_core::ProjectKey,
+    pub label: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -287,9 +295,11 @@ impl From<DesktopCommand> for Command {
                 spawn_agent: agent,
             },
             DesktopCommand::MarkRead { session_key } => Command::MarkRead { session_key },
-            DesktopCommand::PostReply { session_key, body } => {
-                Command::PostReply { session_key, body }
-            }
+            DesktopCommand::PostReply { session_key, body } => Command::PostReply {
+                session_key,
+                body,
+                client_request_id: Some(uuid::Uuid::new_v4().simple().to_string()),
+            },
             DesktopCommand::FocusWorkspace { session_key } => {
                 Command::FocusWorkspace { session_key }
             }
@@ -773,10 +783,13 @@ where
             while let Ok(event) = event_rx.try_recv() {
                 events.push(event);
             }
+            let ok = !events
+                .iter()
+                .any(|event| matches!(event, Event::CommandFailed { .. }));
             json_response(
                 StatusCode::OK,
                 &CommandResponse {
-                    ok: true,
+                    ok,
                     completed: true,
                     events,
                 },

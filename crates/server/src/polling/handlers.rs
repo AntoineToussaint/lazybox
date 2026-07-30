@@ -26,51 +26,48 @@ pub async fn post_reply(
     config: &ServerConfig,
     session_key: lazybox_core::SessionKey,
     body: String,
-) {
+) -> Result<(), String> {
+    let result = post_reply_inner(config, session_key, body).await;
+    if let Err(error) = &result {
+        emit_reply_error(config, error);
+    }
+    result
+}
+
+async fn post_reply_inner(
+    config: &ServerConfig,
+    session_key: lazybox_core::SessionKey,
+    body: String,
+) -> Result<(), String> {
     let trimmed = body.trim();
     if trimmed.is_empty() {
-        return;
+        return Err("reply body is empty".into());
     }
     let workspace_key = WorkspaceKey::new(session_key.as_str().to_string());
-    let workspace = match config
+    let workspace_json = config
         .store
         .get_workspace(&workspace_key)
-        .ok()
-        .flatten()
-        .and_then(|r| r.workspace_json)
-    {
-        Some(json) => match serde_json::from_str::<Workspace>(&json) {
-            Ok(w) => w,
-            Err(e) => {
-                tracing::warn!("post_reply: bad JSON for {workspace_key}: {e}");
-                emit_reply_error(config, &format!("workspace decode failed: {e}"));
-                return;
-            }
-        },
-        None => {
-            emit_reply_error(config, "workspace not found");
-            return;
-        }
-    };
-    let provider = match build_provider_for_workspace(&workspace_key).await {
-        Ok(p) => p,
-        Err(e) => {
-            emit_reply_error(config, &e);
-            return;
-        }
-    };
-    if let Err(e) = provider.post_reply(&workspace, trimmed).await {
-        tracing::warn!("post_reply {workspace_key}: {e:?}");
-        emit_reply_error(config, &format!("post failed: {e}"));
-        return;
-    }
+        .map_err(|error| format!("load workspace: {error}"))?
+        .and_then(|record| record.workspace_json)
+        .ok_or_else(|| "workspace not found".to_string())?;
+    let workspace = serde_json::from_str::<Workspace>(&workspace_json).map_err(|error| {
+        tracing::warn!("post_reply: bad JSON for {workspace_key}: {error}");
+        format!("workspace decode failed: {error}")
+    })?;
+    let provider = build_provider_for_workspace(&workspace_key).await?;
+    provider
+        .post_reply(&workspace, trimmed)
+        .await
+        .map_err(|error| {
+            tracing::warn!("post_reply {workspace_key}: {error:?}");
+            format!("post failed: {error}")
+        })?;
     tracing::info!(
         "posted reply to {} ({} chars)",
         workspace_key,
         trimmed.len()
     );
-    // The poller picks up the comment on its next tick and broadcasts
-    // a workspace upsert; nothing else to do here.
+    Ok(())
 }
 
 fn emit_reply_error(config: &ServerConfig, msg: &str) {

@@ -354,7 +354,9 @@ mod effects_tests {
         let cmds = m.handle_textarea_submitted("hello".into());
         assert_eq!(cmds.len(), 2);
         match &cmds[0] {
-            IpcCommand::PostReply { session_key, body } => {
+            IpcCommand::PostReply {
+                session_key, body, ..
+            } => {
                 assert_eq!(session_key, &key);
                 assert_eq!(body, "hello");
             }

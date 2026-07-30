@@ -1,8 +1,11 @@
 use lazybox_config::Config;
 use lazybox_core::{ProviderConfig, Scope};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::Path;
+use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
@@ -11,7 +14,7 @@ use std::collections::BTreeSet;
 const AGENTS: [(&str, &str, &str); 3] = [
     ("claude", "Claude Code", "claude"),
     ("codex", "Codex", "codex"),
-    ("cursor", "Cursor Agent", "cursor-agent"),
+    ("cursor-agent", "Cursor Agent", "cursor-agent"),
 ];
 
 #[derive(Debug, Clone, Serialize)]
@@ -19,7 +22,7 @@ pub struct DesktopSetupStatus {
     pub completed: bool,
     pub github: ToolStatus,
     pub agents: Vec<ToolStatus>,
-    pub selected_repositories: Vec<String>,
+    pub selected_scopes: Vec<String>,
     pub default_agent: Option<String>,
     pub analytics_enabled: bool,
     pub crash_reports_enabled: bool,
@@ -52,7 +55,7 @@ impl From<Scope> for DesktopScope {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DesktopSetupInput {
-    pub repositories: Vec<String>,
+    pub github_scopes: Vec<String>,
     pub default_agent: String,
     pub analytics_enabled: bool,
     pub crash_reports_enabled: bool,
@@ -82,8 +85,8 @@ impl AnalyticsEvent {
 
 pub async fn status() -> Result<DesktopSetupStatus, String> {
     let config = Config::load().map_err(|error| format!("load settings: {error}"))?;
-    let (github, agents) = tokio::join!(github_status(), detect_agents());
-    let selected_repositories = config
+    let (github, agents) = tokio::join!(github_status(), detect_agents(&config));
+    let selected_scopes = config
         .setup
         .scopes
         .get("github")
@@ -95,7 +98,7 @@ pub async fn status() -> Result<DesktopSetupStatus, String> {
         completed: config.setup.wizard_completed,
         github,
         agents,
-        selected_repositories,
+        selected_scopes,
         default_agent: config.setup.default_agent,
         analytics_enabled: config.desktop.analytics_enabled,
         crash_reports_enabled: config.desktop.crash_reports_enabled,
@@ -151,7 +154,8 @@ pub async fn begin_github_login() -> Result<(), String> {
 }
 
 pub fn save(input: DesktopSetupInput) -> Result<(), String> {
-    validate_input(&input)?;
+    let config = Config::load().map_err(|error| format!("load desktop settings: {error}"))?;
+    validate_input(&input, &config, !config.setup.wizard_completed)?;
     Config::save_with(|config| apply_input(config, &input))
         .map_err(|error| format!("save desktop settings: {error}"))
 }
@@ -181,6 +185,48 @@ pub fn install_crash_hook() {
         }
         default(info);
     }));
+}
+
+#[cfg(target_os = "macos")]
+pub fn hydrate_gui_path() {
+    let config = Config::load().unwrap_or_default();
+    let shell = config.shell.resolved_command();
+    let Some(login_path) = login_shell_path(&shell) else {
+        return;
+    };
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let Some(path) = merge_paths(&login_path, &inherited) else {
+        return;
+    };
+    // This runs before Tauri or Tokio starts any threads, as required by set_var.
+    unsafe {
+        std::env::set_var("PATH", path);
+    }
+}
+
+fn login_shell_path(shell: &str) -> Option<OsString> {
+    const MARKER: &str = "__LAZYBOX_LOGIN_PATH__";
+    let output = Command::new(shell)
+        .args(["-lc", "printf '\\n__LAZYBOX_LOGIN_PATH__%s\\n' \"$PATH\""])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()?
+        .lines()
+        .rev()
+        .find_map(|line| line.strip_prefix(MARKER).map(OsString::from))
+}
+
+fn merge_paths(login_path: &OsStr, inherited_path: &OsStr) -> Option<OsString> {
+    let mut seen = HashSet::new();
+    let paths = std::env::split_paths(login_path)
+        .chain(std::env::split_paths(inherited_path))
+        .filter(|path| seen.insert(path.clone()))
+        .collect::<Vec<_>>();
+    std::env::join_paths(paths).ok()
 }
 
 async fn github_status() -> ToolStatus {
@@ -223,9 +269,39 @@ async fn github_status() -> ToolStatus {
     }
 }
 
-async fn detect_agents() -> Vec<ToolStatus> {
+async fn detect_agents(config: &Config) -> Vec<ToolStatus> {
     let futures = AGENTS.map(|(id, label, command)| detect_agent(id, label, command));
-    futures_util::future::join_all(futures).await
+    let mut statuses = futures_util::future::join_all(futures).await;
+    for id in &config.setup.agents {
+        if AGENTS.iter().any(|(builtin, _, _)| builtin == id) {
+            continue;
+        }
+        let Some(entry) = config.agents.get(id) else {
+            statuses.push(ToolStatus {
+                id: id.clone(),
+                label: id.clone(),
+                available: false,
+                detail: "Missing agent configuration".into(),
+            });
+            continue;
+        };
+        let Some(argv) = entry.spawn_argv() else {
+            statuses.push(ToolStatus {
+                id: id.clone(),
+                label: entry.name.clone().unwrap_or_else(|| id.clone()),
+                available: false,
+                detail: "Missing agent command".into(),
+            });
+            continue;
+        };
+        statuses.push(ToolStatus {
+            id: id.clone(),
+            label: entry.name.clone().unwrap_or_else(|| id.clone()),
+            available: true,
+            detail: format!("Configured: {}", argv[0]),
+        });
+    }
+    statuses
 }
 
 async fn detect_agent(id: &str, label: &str, command: &str) -> ToolStatus {
@@ -299,32 +375,44 @@ fn validate_parent_scope(parent_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_input(input: &DesktopSetupInput) -> Result<(), String> {
-    if !AGENTS.iter().any(|(id, _, _)| *id == input.default_agent) {
+fn validate_input(
+    input: &DesktopSetupInput,
+    config: &Config,
+    require_explicit_scope: bool,
+) -> Result<(), String> {
+    let configured_custom_agent = config
+        .agents
+        .get(&input.default_agent)
+        .and_then(|entry| entry.spawn_argv())
+        .is_some();
+    if !AGENTS.iter().any(|(id, _, _)| *id == input.default_agent) && !configured_custom_agent {
         return Err("unsupported default agent".into());
     }
-    if input.repositories.is_empty() {
-        return Err("select at least one GitHub repository".into());
+    if require_explicit_scope && input.github_scopes.is_empty() {
+        return Err("select at least one GitHub scope".into());
     }
-    if input.repositories.len() > 256
+    if input.github_scopes.len() > 256
         || input
-            .repositories
+            .github_scopes
             .iter()
-            .any(|scope| !valid_repository_scope(scope))
+            .any(|scope| !valid_github_scope(scope))
     {
-        return Err("invalid GitHub repository selection".into());
+        return Err("invalid GitHub scope selection".into());
     }
     Ok(())
 }
 
-fn valid_repository_scope(scope: &str) -> bool {
+fn valid_github_scope(scope: &str) -> bool {
     let Some(slug) = scope.strip_prefix("github:") else {
         return false;
     };
-    let Some((owner, repo)) = slug.split_once('/') else {
-        return false;
-    };
-    scope.len() <= 300 && !owner.is_empty() && !repo.is_empty() && !repo.contains('/')
+    let mut parts = slug.split('/');
+    let owner = parts.next().unwrap_or_default();
+    let repo = parts.next();
+    scope.len() <= 300
+        && !owner.is_empty()
+        && repo.is_none_or(|repo| !repo.is_empty())
+        && parts.next().is_none()
 }
 
 fn apply_input(config: &mut Config, input: &DesktopSetupInput) {
@@ -337,7 +425,7 @@ fn apply_input(config: &mut Config, input: &DesktopSetupInput) {
         .or_insert_with(|| ProviderConfig::default_for("github").enabled_keys);
     config.setup.scopes.insert(
         "github".into(),
-        input.repositories.iter().cloned().collect(),
+        input.github_scopes.iter().cloned().collect(),
     );
     config.setup.default_agent = Some(input.default_agent.clone());
     config.setup.wizard_completed = true;
@@ -383,7 +471,7 @@ mod tests {
 
     fn input() -> DesktopSetupInput {
         DesktopSetupInput {
-            repositories: vec!["github:owner/repo".into()],
+            github_scopes: vec!["github:owner/repo".into()],
             default_agent: "codex".into(),
             analytics_enabled: true,
             crash_reports_enabled: false,
@@ -453,14 +541,62 @@ mod tests {
     }
 
     #[test]
-    fn setup_validation_rejects_non_repository_scopes_and_unknown_agents() {
+    fn setup_validation_accepts_shared_scope_and_agent_contracts() {
+        let mut config = Config::default();
+        config.agents.insert(
+            "custom".into(),
+            lazybox_config::AgentEntry {
+                command: Some("custom-cli".into()),
+                ..Default::default()
+            },
+        );
+        let mut valid = input();
+        valid.github_scopes = vec!["github:owner".into()];
+        valid.default_agent = "cursor-agent".into();
+        assert!(validate_input(&valid, &config, true).is_ok());
+
+        valid.github_scopes.clear();
+        valid.default_agent = "custom".into();
+        assert!(validate_input(&valid, &config, false).is_ok());
+    }
+
+    #[test]
+    fn first_run_still_requires_a_scope_and_rejects_unknown_agents() {
+        let config = Config::default();
         let mut invalid = input();
-        invalid.repositories = vec!["github:owner".into()];
-        assert!(validate_input(&invalid).is_err());
+        invalid.github_scopes.clear();
+        assert!(validate_input(&invalid, &config, true).is_err());
 
         invalid = input();
         invalid.default_agent = "arbitrary-command".into();
-        assert!(validate_input(&invalid).is_err());
+        assert!(validate_input(&invalid, &config, true).is_err());
+    }
+
+    #[tokio::test]
+    async fn configured_agents_are_returned_with_daemon_registry_ids() {
+        let mut config = Config::default();
+        config
+            .setup
+            .agents
+            .extend(["cursor-agent".into(), "custom".into()]);
+        config.agents.insert(
+            "custom".into(),
+            lazybox_config::AgentEntry {
+                name: Some("Custom Agent".into()),
+                command: Some("custom-cli".into()),
+                ..Default::default()
+            },
+        );
+
+        let agents = detect_agents(&config).await;
+
+        assert!(agents.iter().any(|agent| agent.id == "cursor-agent"));
+        assert!(agents.iter().any(|agent| {
+            agent.id == "custom"
+                && agent.label == "Custom Agent"
+                && agent.available
+                && agent.detail == "Configured: custom-cli"
+        }));
     }
 
     #[test]
@@ -482,7 +618,7 @@ mod tests {
                 detail: "Authenticated as @fixture".into(),
             },
             agents: Vec::new(),
-            selected_repositories: Vec::new(),
+            selected_scopes: Vec::new(),
             default_agent: None,
             analytics_enabled: false,
             crash_reports_enabled: false,
@@ -502,6 +638,20 @@ mod tests {
                 "timestamp=42 version={} source=main.rs:7",
                 env!("CARGO_PKG_VERSION")
             )
+        );
+    }
+
+    #[test]
+    fn login_path_precedes_and_deduplicates_the_gui_path() {
+        let merged = merge_paths(
+            OsStr::new("/opt/homebrew/bin:/usr/bin:/bin"),
+            OsStr::new("/usr/bin:/bin:/usr/sbin"),
+        )
+        .expect("merge paths");
+
+        assert_eq!(
+            merged,
+            OsString::from("/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin")
         );
     }
 }

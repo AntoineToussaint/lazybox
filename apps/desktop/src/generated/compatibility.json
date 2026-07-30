@@ -249,12 +249,6 @@
       }
     }
   ],
-<<<<<<< HEAD
-  "protocol_fingerprint": 1361266201,
-||||||| parent of 3ca07617 (Complete private macOS desktop workflow (#647))
-  "protocol_fingerprint": 212278580,
-=======
-  "protocol_fingerprint": 2392251102,
->>>>>>> 3ca07617 (Complete private macOS desktop workflow (#647))
+  "protocol_fingerprint": 3300557300,
   "protocol_version": 1
 }

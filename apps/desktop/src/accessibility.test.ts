@@ -28,6 +28,7 @@ describe("desktop accessibility contract", () => {
       "analytics-checkbox",
       "crash-checkbox",
       "reply-body",
+      "new-workspace-project",
       "new-workspace-name",
     ]) {
       expect(html).toMatch(

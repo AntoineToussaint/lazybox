@@ -139,7 +139,11 @@ impl<T: TerminalAdapter> Model<T> {
             // failure handler parks this in the messages log so the
             // user's words aren't lost.
             self.last_reply_body = Some(body.clone());
-            cmds.push(IpcCommand::PostReply { session_key, body });
+            cmds.push(IpcCommand::PostReply {
+                session_key,
+                body,
+                client_request_id: None,
+            });
             self.flash_info("Reply submitted — fetching…");
             cmds.push(IpcCommand::Refresh);
         }

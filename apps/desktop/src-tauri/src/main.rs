@@ -7,8 +7,8 @@ use lazybox_server::ServerConfig;
 use lazybox_server::api_gateway::{
     CommandResponse, DESKTOP_PROTOCOL_FINGERPRINT, DESKTOP_PROTOCOL_VERSION,
     DESKTOP_TERMINAL_STREAM_ITEM_DATA, DESKTOP_TERMINAL_STREAM_ITEM_RESET, DesktopCommand,
-    DesktopInfo, DesktopStreamMessage, GatewayOptions, JsonClientFrame, JsonServerFrame,
-    PROTOCOL_FINGERPRINT_HEADER, PROTOCOL_VERSION_HEADER, ProtocolResponse,
+    DesktopInfo, DesktopRepository, DesktopStreamMessage, GatewayOptions, JsonClientFrame,
+    JsonServerFrame, PROTOCOL_FINGERPRINT_HEADER, PROTOCOL_VERSION_HEADER, ProtocolResponse,
     TERMINAL_BINARY_CONTENT_TYPE, WorkspacesResponse, desktop_event,
 };
 use lazybox_server::client_runtime::{ClientRuntime, ClientRuntimeOptions};
@@ -41,6 +41,7 @@ struct DesktopState {
     agents: Vec<String>,
     default_agent: String,
     setup_completed: bool,
+    repositories: Vec<DesktopRepository>,
     terminal_commands: mpsc::Sender<Bytes>,
     terminal_command_rx: Arc<Mutex<mpsc::Receiver<Bytes>>>,
     terminal_rx: Mutex<mpsc::Receiver<TerminalStreamItem>>,
@@ -59,6 +60,7 @@ fn desktop_info(state: State<'_, DesktopState>) -> DesktopInfo {
         agents: state.agents.clone(),
         default_agent: state.default_agent.clone(),
         setup_completed: state.setup_completed,
+        repositories: state.repositories.clone(),
     }
 }
 
@@ -138,8 +140,19 @@ async fn send_command(
     if response.ok && response.completed {
         Ok(())
     } else {
-        Err("daemon did not complete the desktop command".to_string())
+        Err(command_failure_message(&response))
     }
+}
+
+fn command_failure_message(response: &CommandResponse) -> String {
+    response
+        .events
+        .iter()
+        .find_map(|event| match event {
+            lazybox_ipc::Event::CommandFailed { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| "daemon did not complete the desktop command".to_string())
 }
 
 #[tauri::command]
@@ -461,13 +474,14 @@ async fn start_desktop_state() -> Result<DesktopState, String> {
 
     let mut agents = user_config.setup.agents.iter().cloned().collect::<Vec<_>>();
     if agents.is_empty() {
-        agents = ["claude", "codex", "cursor"]
+        agents = ["claude", "codex", "cursor-agent"]
             .into_iter()
             .map(str::to_string)
             .collect();
     }
     agents.sort();
     agents.dedup();
+    let repositories = configured_repositories(&user_config);
     let configured_default = user_config
         .setup
         .default_agent
@@ -490,6 +504,7 @@ async fn start_desktop_state() -> Result<DesktopState, String> {
         agents,
         default_agent,
         setup_completed,
+        repositories,
         terminal_commands,
         terminal_command_rx: Arc::new(Mutex::new(terminal_command_rx)),
         terminal_rx: Mutex::new(terminal_rx),
@@ -498,6 +513,28 @@ async fn start_desktop_state() -> Result<DesktopState, String> {
         client_runtime: Mutex::new(Some(client_runtime)),
         gateway_task: Mutex::new(Some(gateway_task)),
     })
+}
+
+fn configured_repositories(config: &lazybox_config::Config) -> Vec<DesktopRepository> {
+    let mut repositories = config
+        .setup
+        .scopes
+        .get("github")
+        .into_iter()
+        .flatten()
+        .filter_map(|scope| {
+            let slug = scope.strip_prefix("github:")?;
+            let (owner, repo) = slug.split_once('/')?;
+            (!owner.is_empty() && !repo.is_empty() && !repo.contains('/')).then(|| {
+                DesktopRepository {
+                    project_key: lazybox_core::ProjectKey::github(owner, repo),
+                    label: slug.to_string(),
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    repositories.sort_by(|left, right| left.label.cmp(&right.label));
+    repositories
 }
 
 fn validate_protocol(protocol: &ProtocolResponse) -> Result<(), String> {
@@ -523,6 +560,8 @@ fn validate_protocol(protocol: &ProtocolResponse) -> Result<(), String> {
 }
 
 fn main() {
+    #[cfg(target_os = "macos")]
+    desktop_setup::hydrate_gui_path();
     desktop_setup::install_crash_hook();
     let state = match tauri::async_runtime::block_on(start_desktop_state()) {
         Ok(state) => state,
@@ -664,8 +703,49 @@ mod tests {
                 session_key,
                 body: "hello".into(),
             }),
-            Command::PostReply { body, .. } if body == "hello"
+            Command::PostReply {
+                body,
+                client_request_id: Some(_),
+                ..
+            } if body == "hello"
         ));
+    }
+
+    #[test]
+    fn desktop_surfaces_the_correlated_daemon_failure() {
+        let response = CommandResponse {
+            ok: false,
+            completed: true,
+            events: vec![lazybox_ipc::Event::CommandFailed {
+                client_request_id: "reply-1".into(),
+                message: "post failed: permission denied".into(),
+            }],
+        };
+
+        assert_eq!(
+            command_failure_message(&response),
+            "post failed: permission denied"
+        );
+    }
+
+    #[test]
+    fn configured_repository_is_available_before_its_first_workspace() {
+        let mut config = lazybox_config::Config::default();
+        config.setup.scopes.insert(
+            "github".into(),
+            ["github:acme/widget".into(), "github:whole-org".into()]
+                .into_iter()
+                .collect(),
+        );
+
+        let repositories = configured_repositories(&config);
+
+        assert_eq!(repositories.len(), 1);
+        assert_eq!(repositories[0].label, "acme/widget");
+        assert_eq!(
+            repositories[0].project_key,
+            lazybox_core::ProjectKey::github("acme", "widget")
+        );
     }
 
     #[tokio::test]

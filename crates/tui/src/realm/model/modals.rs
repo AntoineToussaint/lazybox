@@ -335,7 +335,7 @@ fn format_age_short(unix_secs: Option<u64>) -> String {
 impl<T: TerminalAdapter> Model<T> {
     /// Mount the reply textarea targeted at `workspace_key`. Submit
     /// → `Msg::TextareaSubmitted(body)` → orchestrator builds a
-    /// `Command::PostReply { session_key, body }`.
+    /// `Command::PostReply`.
     pub(super) fn mount_reply(&mut self, workspace_key: lazybox_core::SessionKey) {
         use crate::realm::components::textarea::Textarea;
 

@@ -1149,6 +1149,36 @@ async fn command_route_returns_connection_scoped_handler_events() {
 }
 
 #[tokio::test]
+async fn desktop_reply_reports_the_mutation_failure_in_its_response() {
+    let command = Command::from(DesktopCommand::PostReply {
+        session_key: "github:o/r#404".into(),
+        body: "hello".into(),
+    });
+    let frame = JsonClientFrame::Command(command);
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/commands")
+        .body(Full::new(Bytes::from(serde_json::to_vec(&frame).unwrap())))
+        .unwrap();
+
+    let response = api_gateway::handle_request(
+        ServerConfig::in_memory(),
+        GatewayOptions::default(),
+        request,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: CommandResponse = read_json(response).await;
+    assert!(!payload.ok);
+    assert!(payload.completed);
+    assert!(matches!(
+        payload.events.as_slice(),
+        [Event::CommandFailed { message, .. }] if message == "workspace not found"
+    ));
+}
+
+#[tokio::test]
 async fn json_command_route_rejects_every_binary_terminal_command() {
     let commands = [
         Command::Write {

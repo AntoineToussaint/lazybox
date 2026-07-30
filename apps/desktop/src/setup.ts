@@ -9,7 +9,7 @@ export interface DesktopSetupStatus {
   completed: boolean;
   github: ToolStatus;
   agents: ToolStatus[];
-  selected_repositories: string[];
+  selected_scopes: string[];
   default_agent: string | null;
   analytics_enabled: boolean;
   crash_reports_enabled: boolean;
@@ -22,7 +22,7 @@ export interface DesktopScope {
 }
 
 export interface DesktopSetupInput {
-  repositories: string[];
+  github_scopes: string[];
   default_agent: string;
   analytics_enabled: boolean;
   crash_reports_enabled: boolean;
@@ -44,7 +44,7 @@ export function canCompleteSetup(
     status.agents.some(
       (agent) => agent.available && agent.id === input.default_agent,
     ) &&
-    input.repositories.length > 0
+    input.github_scopes.length > 0
   );
 }
 

@@ -748,6 +748,7 @@ fn all_non_shutdown_commands() -> Vec<Command> {
         Command::PostReply {
             session_key: "test:ws".into(),
             body: "b".into(),
+            client_request_id: None,
         },
         Command::Refresh,
         Command::ConfirmMerge {

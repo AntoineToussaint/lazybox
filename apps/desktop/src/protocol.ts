@@ -1,5 +1,6 @@
 import type {
   DesktopInfo,
+  DesktopRepository,
   DesktopStreamMessage,
   LazyboxCommand,
   LazyboxEvent,
@@ -12,6 +13,7 @@ import type {
 
 export type {
   DesktopInfo,
+  DesktopRepository,
   DesktopStreamMessage,
   LazyboxCommand,
   LazyboxEvent,

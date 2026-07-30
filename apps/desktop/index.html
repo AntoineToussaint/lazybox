@@ -156,7 +156,7 @@
           <div class="setup-section-heading">
             <div>
               <h3 id="repositories-heading">Repositories</h3>
-              <p>Select an organization, then choose the repositories to watch.</p>
+              <p>Select an organization, then watch it entirely or choose individual repositories. In Settings, no selection means all accessible repositories.</p>
             </div>
           </div>
           <label class="field">
@@ -216,7 +216,7 @@
         <p id="reply-error" class="form-error hidden" role="alert"></p>
         <div class="modal-actions">
           <button id="reply-cancel-button" type="button" class="secondary-button">Cancel</button>
-          <button type="submit" class="primary-button">Post reply</button>
+          <button id="reply-submit-button" type="submit" class="primary-button">Post reply</button>
         </div>
       </form>
     </dialog>
@@ -230,6 +230,10 @@
           </div>
         </div>
         <p class="modal-copy">Create a separate worktree in the selected repository.</p>
+        <label class="field">
+          <span>Repository</span>
+          <select id="new-workspace-project" required></select>
+        </label>
         <label class="field">
           <span>Name</span>
           <input id="new-workspace-name" type="text" maxlength="80" required />

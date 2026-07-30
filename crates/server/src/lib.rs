@@ -1625,8 +1625,22 @@ pub async fn dispatch_command(
             }
             config.poll.wake(true);
         }
-        lazybox_ipc::Command::PostReply { session_key, body } => {
-            polling::post_reply(config, session_key, body).await;
+        lazybox_ipc::Command::PostReply {
+            session_key,
+            body,
+            client_request_id,
+        } => {
+            let result = polling::post_reply(config, session_key, body).await;
+            if let Some(client_request_id) = client_request_id {
+                let event = match result {
+                    Ok(()) => lazybox_ipc::Event::CommandCompleted { client_request_id },
+                    Err(message) => lazybox_ipc::Event::CommandFailed {
+                        client_request_id,
+                        message,
+                    },
+                };
+                let _ = tx.send(event);
+            }
         }
         lazybox_ipc::Command::SetSessionLayout {
             session_key,

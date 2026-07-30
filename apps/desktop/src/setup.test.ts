@@ -22,14 +22,14 @@ const status: DesktopSetupStatus = {
       detail: "codex 1.0",
     },
   ],
-  selected_repositories: [],
+  selected_scopes: [],
   default_agent: null,
   analytics_enabled: false,
   crash_reports_enabled: false,
 };
 
 const input: DesktopSetupInput = {
-  repositories: ["github:owner/repo"],
+  github_scopes: ["github:owner/repo"],
   default_agent: "codex",
   analytics_enabled: false,
   crash_reports_enabled: false,
@@ -44,7 +44,7 @@ describe("desktop setup", () => {
         input,
       ),
     ).toBe(false);
-    expect(canCompleteSetup(status, { ...input, repositories: [] })).toBe(false);
+    expect(canCompleteSetup(status, { ...input, github_scopes: [] })).toBe(false);
     expect(
       canCompleteSetup(status, { ...input, default_agent: "claude" }),
     ).toBe(false);

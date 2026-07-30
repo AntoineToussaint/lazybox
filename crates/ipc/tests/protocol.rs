@@ -320,6 +320,7 @@ fn all_commands() -> Vec<Command> {
         Command::PostReply {
             session_key: key.clone(),
             body: "ship it".into(),
+            client_request_id: Some("reply-1".into()),
         },
         Command::ConfirmMerge {
             issue_workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),

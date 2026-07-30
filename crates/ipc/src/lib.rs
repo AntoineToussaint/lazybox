@@ -906,6 +906,8 @@ pub enum Command {
     PostReply {
         session_key: SessionKey,
         body: String,
+        #[serde(default)]
+        client_request_id: Option<String>,
     },
     Refresh,
     Shutdown,

@@ -14,6 +14,7 @@ import {
 } from "./model";
 import {
   type DesktopInfo,
+  type DesktopRepository,
   type DesktopStreamMessage,
   type LazyboxCommand,
   type LazyboxEvent,
@@ -124,8 +125,10 @@ const replyForm = element<HTMLFormElement>("reply-form");
 const replyBody = element<HTMLTextAreaElement>("reply-body");
 const replyError = element<HTMLParagraphElement>("reply-error");
 const replyCancelButton = element<HTMLButtonElement>("reply-cancel-button");
+const replySubmitButton = element<HTMLButtonElement>("reply-submit-button");
 const newWorkspaceDialog = element<HTMLDialogElement>("new-workspace-dialog");
 const newWorkspaceForm = element<HTMLFormElement>("new-workspace-form");
+const newWorkspaceProject = element<HTMLSelectElement>("new-workspace-project");
 const newWorkspaceName = element<HTMLInputElement>("new-workspace-name");
 const newWorkspaceAgent = element<HTMLInputElement>("new-workspace-agent");
 const newWorkspaceError = element<HTMLParagraphElement>("new-workspace-error");
@@ -145,14 +148,15 @@ let terminals = new Map<number, TerminalRecord>();
 let selectedKey: string | null = null;
 let defaultAgent = "claude";
 let configuredAgents = ["claude"];
+let configuredRepositories: DesktopRepository[] = [];
 let inboxFilter: InboxFilter = "all";
 let searchQuery = "";
 let setupStatus: DesktopSetupStatus | null = null;
-let selectedRepositoryIds = new Set<string>();
+let selectedScopeIds = new Set<string>();
 let repositoryScopes: DesktopScope[] = [];
 let setupBlocking = false;
 let clientStarted = false;
-let pendingReplyBody = "";
+let replySubmitting = false;
 let previewMode = false;
 let activeTerminal: ActiveTerminal | null = null;
 let resizeTimer: number | undefined;
@@ -246,6 +250,7 @@ async function boot(): Promise<void> {
     previewMode = true;
     defaultAgent = preview.defaultAgent;
     configuredAgents = [preview.defaultAgent];
+    configuredRepositories = [];
     workspaces = preview.workspaces;
     terminals = preview.terminals;
     configureAgentSelect();
@@ -276,6 +281,7 @@ async function bootClient(existingInfo?: DesktopInfo): Promise<void> {
     terminalDecoder = new TerminalFrameDecoder(info.max_terminal_frame_bytes);
     maxTerminalWriteBytes = info.max_terminal_write_bytes;
     configuredAgents = info.agents;
+    configuredRepositories = info.repositories;
     defaultAgent = info.default_agent;
     configureAgentSelect();
     const initial = await invoke<WorkspacesResponse>("list_workspaces");
@@ -352,7 +358,7 @@ async function refreshSetupStatus(): Promise<void> {
   githubRecheckButton.disabled = true;
   try {
     setupStatus = await invoke<DesktopSetupStatus>("desktop_setup_status");
-    selectedRepositoryIds = new Set(setupStatus.selected_repositories);
+    selectedScopeIds = new Set(setupStatus.selected_scopes);
     renderSetupStatus(setupStatus);
     if (setupStatus.github.available) {
       await loadOrganizations();
@@ -403,7 +409,7 @@ async function loadOrganizations(): Promise<void> {
       );
     }
     organizationSelect.disabled = organizations.length === 0;
-    const selected = [...selectedRepositoryIds][0];
+    const selected = [...selectedScopeIds][0];
     const owner =
       selected === undefined
         ? organizations[0]?.id
@@ -450,7 +456,29 @@ function renderRepositoryList(parentId: string): void {
   const repositories = repositoryScopes.filter(
     (repository) => repository.parent === parentId,
   );
-  repositoryList.disabled = repositories.length === 0;
+  repositoryList.disabled = false;
+  const organization = document.createElement("label");
+  organization.className = "check-row";
+  const organizationCheckbox = document.createElement("input");
+  organizationCheckbox.type = "checkbox";
+  organizationCheckbox.value = parentId;
+  organizationCheckbox.checked = selectedScopeIds.has(parentId);
+  organizationCheckbox.addEventListener("change", () => {
+    if (organizationCheckbox.checked) {
+      selectedScopeIds.add(parentId);
+      for (const repository of repositories) {
+        selectedScopeIds.delete(repository.id);
+      }
+    } else {
+      selectedScopeIds.delete(parentId);
+    }
+    renderRepositoryList(parentId);
+    updateSetupSubmit();
+  });
+  const organizationText = document.createElement("span");
+  organizationText.textContent = "All repositories in this organization";
+  organization.append(organizationCheckbox, organizationText);
+  repositoryList.append(organization);
   if (repositories.length === 0) {
     repositoryList.append(statusParagraph("No repositories found."));
     return;
@@ -461,12 +489,14 @@ function renderRepositoryList(parentId: string): void {
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
     checkbox.value = repository.id;
-    checkbox.checked = selectedRepositoryIds.has(repository.id);
+    checkbox.checked = selectedScopeIds.has(repository.id);
+    checkbox.disabled = organizationCheckbox.checked;
     checkbox.addEventListener("change", () => {
       if (checkbox.checked) {
-        selectedRepositoryIds.add(repository.id);
+        selectedScopeIds.delete(parentId);
+        selectedScopeIds.add(repository.id);
       } else {
-        selectedRepositoryIds.delete(repository.id);
+        selectedScopeIds.delete(repository.id);
       }
       updateSetupSubmit();
     });
@@ -479,7 +509,7 @@ function renderRepositoryList(parentId: string): void {
 
 function setupInput(): DesktopSetupInput {
   return {
-    repositories: [...selectedRepositoryIds].sort(),
+    github_scopes: [...selectedScopeIds].sort(),
     default_agent: setupAgentSelect.value,
     analytics_enabled: analyticsCheckbox.checked,
     crash_reports_enabled: crashCheckbox.checked,
@@ -494,7 +524,7 @@ function updateSetupSubmit(): void {
   const input = setupInput();
   setupSubmitButton.disabled = setupBlocking
     ? !canCompleteSetup(setupStatus, input)
-    : input.repositories.length === 0 || input.default_agent === "";
+    : input.default_agent === "";
   setupSubmitButton.textContent = "Save and restart";
 }
 
@@ -630,20 +660,11 @@ function handleEvent(event: LazyboxEvent): void {
     }
   } else if ("ProviderError" in event) {
     setStatus(`${event.ProviderError.source}: ${event.ProviderError.message}`);
-    if (event.ProviderError.source === "reply" && pendingReplyBody !== "") {
-      replyBody.value = pendingReplyBody;
-      replyError.textContent = event.ProviderError.message;
-      replyError.classList.remove("hidden");
-      if (!replyDialog.open) {
-        replyDialog.showModal();
-      }
-    }
   } else if ("CommandRejected" in event) {
     setStatus(`${event.CommandRejected.command}: ${event.CommandRejected.message}`);
   } else if ("PollProgress" in event) {
     setStatus(event.PollProgress.message);
   } else if ("PollCompleted" in event) {
-    pendingReplyBody = "";
     setStatus(
       `${event.PollCompleted.source}: ${event.PollCompleted.count} tasks synchronized.`,
     );
@@ -792,7 +813,7 @@ function renderWorkspace(): void {
   workspaceEmpty.classList.toggle("hidden", workspace !== undefined);
   workspaceDetail.classList.toggle("hidden", workspace === undefined);
   if (workspace === undefined) {
-    newWorkspaceButton.disabled = true;
+    newWorkspaceButton.disabled = availableRepositories().length === 0;
     spawnButton.disabled = true;
     shellButton.disabled = true;
     markReadButton.disabled = true;
@@ -813,7 +834,7 @@ function renderWorkspace(): void {
   shellButton.textContent = shellTerminal === undefined ? "Shell" : "Resume shell";
   spawnButton.disabled = false;
   shellButton.disabled = false;
-  newWorkspaceButton.disabled = workspace.project_key === null;
+  newWorkspaceButton.disabled = availableRepositories().length === 0;
   markReadButton.disabled = unreadCount(workspace) === 0;
   replyButton.disabled = task === null;
   taskKicker.textContent = task === null ? "Local workspace" : taskReference(task);
@@ -893,7 +914,7 @@ async function openOrStartAgent(): Promise<void> {
     spawnAgentCommand(selectedKey, defaultAgent),
     `Preparing a workspace for ${defaultAgent}…`,
   );
-  if (sent) {
+  if (sent.ok) {
     recordAnalytics("agent_started");
   }
 }
@@ -915,7 +936,7 @@ async function openOrStartShell(): Promise<void> {
     spawnShellCommand(selectedKey),
     "Preparing workspace shell…",
   );
-  if (sent) {
+  if (sent.ok) {
     recordAnalytics("shell_started");
   }
 }
@@ -941,48 +962,63 @@ function openReplyDialog(): void {
 
 async function submitReply(event: SubmitEvent): Promise<void> {
   event.preventDefault();
+  if (replySubmitting) {
+    return;
+  }
   const body = replyBody.value.trim();
   if (selectedKey === null || body === "") {
     replyError.textContent = "Write a reply before posting.";
     replyError.classList.remove("hidden");
     return;
   }
-  pendingReplyBody = body;
-  const sent = await sendCommand(
-    postReplyCommand(selectedKey, body),
-    "Posting reply…",
-  );
-  if (sent) {
+  replySubmitting = true;
+  replySubmitButton.disabled = true;
+  replyCancelButton.disabled = true;
+  replyError.classList.add("hidden");
+  const result = await sendCommand(postReplyCommand(selectedKey, body), "Posting reply…");
+  replySubmitting = false;
+  replySubmitButton.disabled = false;
+  replyCancelButton.disabled = false;
+  if (result.ok) {
     replyDialog.close();
     replyBody.value = "";
     setStatus("Reply posted. Refreshing the task…");
     recordAnalytics("reply_posted");
     await sendCommand("Refresh");
+  } else {
+    replyError.textContent = result.error;
+    replyError.classList.remove("hidden");
+    replyBody.focus();
   }
 }
 
 function openNewWorkspaceDialog(): void {
   const workspace =
     selectedKey === null ? undefined : workspaces.get(selectedKey);
-  if (workspace?.project_key === null || workspace === undefined) {
-    setStatus("Choose a repository-backed workspace first.");
+  const repositories = availableRepositories();
+  if (repositories.length === 0) {
+    setStatus("Configure a GitHub repository in Settings first.");
     return;
   }
   newWorkspaceError.classList.add("hidden");
   newWorkspaceName.value = "";
   newWorkspaceAgent.checked = true;
+  newWorkspaceProject.replaceChildren(
+    ...repositories.map((repository) => {
+      const option = new Option(repository.label, repository.project_key);
+      option.selected = repository.project_key === workspace?.project_key;
+      return option;
+    }),
+  );
   newWorkspaceDialog.showModal();
   newWorkspaceName.focus();
 }
 
 async function submitNewWorkspace(event: SubmitEvent): Promise<void> {
   event.preventDefault();
-  const workspace =
-    selectedKey === null ? undefined : workspaces.get(selectedKey);
   const name = newWorkspaceName.value.trim();
-  if (workspace?.project_key === null || workspace === undefined) {
-    newWorkspaceError.textContent =
-      "Choose a repository-backed workspace first.";
+  if (newWorkspaceProject.value === "") {
+    newWorkspaceError.textContent = "Choose a repository.";
     newWorkspaceError.classList.remove("hidden");
     return;
   }
@@ -994,20 +1030,43 @@ async function submitNewWorkspace(event: SubmitEvent): Promise<void> {
   const sent = await sendCommand(
     createWorkspaceCommand(
       name,
-      workspace.project_key,
+      newWorkspaceProject.value,
       newWorkspaceAgent.checked ? defaultAgent : null,
     ),
     `Creating ${name}…`,
   );
-  if (sent) {
+  if (sent.ok) {
     newWorkspaceDialog.close();
   }
+}
+
+function availableRepositories(): DesktopRepository[] {
+  const repositories = new Map(
+    configuredRepositories.map((repository) => [
+      repository.project_key,
+      repository,
+    ]),
+  );
+  for (const workspace of workspaces.values()) {
+    if (workspace.project_key === null) {
+      continue;
+    }
+    repositories.set(workspace.project_key, {
+      project_key: workspace.project_key,
+      label: primaryTask(workspace)?.repo ?? workspace.project_key,
+    });
+  }
+  return [...repositories.values()].sort((left, right) =>
+    left.label.localeCompare(right.label),
+  );
 }
 
 function handleGlobalKey(event: KeyboardEvent): void {
   if (event.metaKey && event.key === ",") {
     event.preventDefault();
-    void openSetup(false);
+    if (!setupBlocking && !setupDialog.open) {
+      void openSetup(false);
+    }
     return;
   }
   if (event.metaKey && event.key.toLowerCase() === "r") {
@@ -1329,19 +1388,20 @@ function scheduleResize(): void {
 async function sendCommand(
   command: LazyboxCommand,
   pendingMessage?: string,
-): Promise<boolean> {
+): Promise<{ ok: true } | { ok: false; error: string }> {
   if (pendingMessage !== undefined) {
     setStatus(pendingMessage);
   }
   if (previewMode) {
-    return true;
+    return { ok: true };
   }
   try {
     await invoke("send_command", { command });
-    return true;
+    return { ok: true };
   } catch (error) {
-    setStatus(String(error));
-    return false;
+    const message = String(error);
+    setStatus(message);
+    return { ok: false, error: message };
   }
 }
 

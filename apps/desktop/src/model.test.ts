@@ -97,6 +97,7 @@ describe("workspace model", () => {
 
   it("orders unread work before newer read work", () => {
     const unread = workspace("unread", task("unread", 2, "2026-01-01"));
+    unread.activity = [activity("a", "new")];
     const newer = workspace("newer", task("newer", 0, "2026-02-01"));
     expect(sortedWorkspaces([newer, unread]).map((item) => item.key)).toEqual([
       "unread",
@@ -104,7 +105,7 @@ describe("workspace model", () => {
     ]);
   });
 
-  it("uses unseen activity when it exceeds task unread counts", () => {
+  it("counts only unseen activity rows that were not individually read", () => {
     const item = workspace("activity", task("activity", 1));
     item.activity = [
       activity("a", "one"),
@@ -112,7 +113,15 @@ describe("workspace model", () => {
       activity("c", "three"),
     ];
     item.seen_count = 1;
-    expect(unreadCount(item)).toBe(2);
+    item.read_indices = [0];
+    expect(unreadCount(item)).toBe(1);
+  });
+
+  it("does not resurrect a marked-read workspace from provider task counts", () => {
+    const item = workspace("read", task("read", 4));
+    item.activity = [activity("a", "one"), activity("b", "two")];
+    item.seen_count = 2;
+    expect(unreadCount(item)).toBe(0);
   });
 
   it("filters the inbox by text and actionable state", () => {
@@ -125,11 +134,16 @@ describe("workspace model", () => {
       review.pr.role = "Reviewer";
       review.pr.review = "Pending";
     }
+    const mixed = workspace("mixed", task("Mixed checks", 0));
+    if (mixed.pr !== null) {
+      mixed.pr.ci = "Mixed";
+    }
     const unread = workspace("unread", task("Fresh comment", 2));
-    const values = [review, unread, failing];
+    unread.activity = [activity("a", "fresh")];
+    const values = [review, unread, failing, mixed];
 
     expect(filteredWorkspaces(values, "broken", "all")).toEqual([failing]);
-    expect(filteredWorkspaces(values, "", "ci")).toEqual([failing]);
+    expect(filteredWorkspaces(values, "", "ci")).toEqual([failing, mixed]);
     expect(filteredWorkspaces(values, "", "review")).toEqual([review]);
     expect(filteredWorkspaces(values, "", "unread")).toEqual([unread]);
   });

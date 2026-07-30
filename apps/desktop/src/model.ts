@@ -12,11 +12,15 @@ export function primaryTask(workspace: Workspace): Task | null {
 }
 
 export function unreadCount(workspace: Workspace): number {
-  const taskUnread =
-    (workspace.pr?.unread_count ?? 0) +
-    workspace.gh_issues.reduce((sum, task) => sum + task.unread_count, 0) +
-    workspace.linear_issues.reduce((sum, task) => sum + task.unread_count, 0);
-  return Math.max(taskUnread, workspace.activity.length - workspace.seen_count);
+  const unseenEnd = Math.max(0, workspace.activity.length - workspace.seen_count);
+  const read = new Set(workspace.read_indices);
+  let unread = 0;
+  for (let index = 0; index < unseenEnd; index += 1) {
+    if (!read.has(index)) {
+      unread += 1;
+    }
+  }
+  return unread;
 }
 
 export function sortedWorkspaces(
@@ -58,7 +62,7 @@ export function filteredWorkspaces(
       case "unread":
         return unreadCount(workspace) > 0;
       case "ci":
-        return task?.ci === "Failure";
+        return task?.ci === "Failure" || task?.ci === "Mixed";
       case "review":
         return task?.role === "Reviewer" && task.review === "Pending";
       case "all":

@@ -431,7 +431,12 @@ async fn hook_with_unknown_backend_key_is_dropped() {
             "unknown backend key must not produce a state transition"
         );
         assert!(
-            config.hook_driven_terminals.lock().await.is_empty(),
+            config
+                .terminal
+                .hook_driven_terminals
+                .lock()
+                .await
+                .is_empty(),
             "unknown backend key must not mark any terminal hook-driven"
         );
     })
@@ -470,7 +475,12 @@ async fn legacy_terminal_id_only_hook_is_dropped() {
             "legacy terminal-id-only hooks must be dropped, not trusted"
         );
         assert!(
-            config.hook_driven_terminals.lock().await.is_empty(),
+            config
+                .terminal
+                .hook_driven_terminals
+                .lock()
+                .await
+                .is_empty(),
             "a dropped legacy hook must not mark the terminal hook-driven"
         );
     })
@@ -543,6 +553,7 @@ async fn stale_hooks_degrade_to_pty_detection() {
         // equivalent to 31s of hook silence without sleeping for it.
         let stale = std::time::Instant::now() - Duration::from_secs(31);
         config
+            .terminal
             .hook_driven_terminals
             .lock()
             .await
@@ -620,6 +631,7 @@ async fn stale_hooks_do_not_demote_input_needed_without_dialog_evidence() {
 
         let stale = std::time::Instant::now() - Duration::from_secs(31);
         config
+            .terminal
             .hook_driven_terminals
             .lock()
             .await
@@ -648,7 +660,7 @@ async fn stale_hooks_do_not_demote_input_needed_without_dialog_evidence() {
             "a bare Working reading must not clear a hook-set `?` after staleness"
         );
         assert_eq!(
-            config.agent_state_for(terminal_id).await,
+            config.terminal.agent_state_for(terminal_id).await,
             Some(lazybox_ipc::AgentState::InputNeeded),
             "cached state must stay InputNeeded"
         );
@@ -895,7 +907,7 @@ async fn close_drops_terminal_and_emits_exit_event() {
         assert!(exited.is_some(), "TerminalExited should arrive after Close");
 
         // Map should be empty.
-        let map_len = config.terminals.lock().await.len();
+        let map_len = config.terminal.terminals.lock().await.len();
         assert_eq!(map_len, 0, "terminal map cleared after exit");
     })
     .await
@@ -983,7 +995,7 @@ async fn client_requested_terminal_resync_is_covered_or_explicitly_unavailable()
         let mut client = subscribed(config.clone()).await;
         let terminal_id = spawn_and_wait(&mut client, TerminalKind::Shell).await;
         let key = config
-            .backend_key_for(terminal_id)
+            .terminal.backend_key_for(terminal_id)
             .await
             .expect("backend key");
         mock.emit(&key, b"screen").await;
@@ -1052,7 +1064,7 @@ async fn recover_sessions_reattaches_survivors() {
         let store: Arc<dyn lazybox_store::Store> = Arc::new(MemoryStore::new());
         let backend_arc: Arc<dyn SessionBackend> = Arc::new(backend.clone());
         let config = ServerConfig::with_store_and_backend(store, backend_arc);
-        assert!(config.terminals.lock().await.is_empty());
+        assert!(config.terminal.terminals.lock().await.is_empty());
 
         // Listen on the bus before recovery so TerminalSpawned isn't lost.
         let mut bus = config.bus.subscribe();
@@ -1060,7 +1072,7 @@ async fn recover_sessions_reattaches_survivors() {
         lazybox_server::spawn_handler::recover_sessions(&config).await;
 
         // Map now has the survivor under a fresh wire id.
-        let map = config.terminals.lock().await;
+        let map = config.terminal.terminals.lock().await;
         assert_eq!(map.len(), 1, "expected one recovered session, got {map:?}");
         let recovered_key = map.values().next().unwrap().clone();
         assert_eq!(recovered_key, preexisting);
@@ -1095,7 +1107,10 @@ async fn recovered_pre_generation_claude_requires_an_explicit_restart() {
 
         let config = ServerConfig::with_store_and_backend(store, Arc::new(backend));
         lazybox_server::spawn_handler::recover_sessions(&config).await;
-        assert_eq!(config.outdated_agent_terminals.lock().await.len(), 1);
+        assert_eq!(
+            config.terminal.outdated_agent_terminals.lock().await.len(),
+            1
+        );
 
         let mut client = subscribed(config).await;
         let warning = timeout(Duration::from_secs(1), client.recv())
@@ -1117,6 +1132,7 @@ async fn subscribe_does_not_warn_for_an_outdated_terminal_absent_from_its_snapsh
     timeout(TEST_DEADLINE, async {
         let config = ServerConfig::in_memory();
         config
+            .terminal
             .outdated_agent_terminals
             .lock()
             .await
@@ -1172,7 +1188,12 @@ async fn recovered_claude_at_current_or_newer_generation_needs_no_restart() {
         lazybox_server::spawn_handler::recover_sessions(&config).await;
 
         assert!(
-            config.outdated_agent_terminals.lock().await.is_empty(),
+            config
+                .terminal
+                .outdated_agent_terminals
+                .lock()
+                .await
+                .is_empty(),
             "a recovered process at least as new as this daemon's PTY contract is compatible"
         );
     })
@@ -2369,6 +2390,7 @@ async fn done_agent_resumes_working_on_a_fresh_prompt() {
 
         // The agent finished a turn: its pill is Done.
         config
+            .terminal
             .agent_states
             .lock()
             .await
@@ -2414,6 +2436,7 @@ async fn done_agent_ignores_a_bare_keystroke() {
         let mut client = subscribed(config.clone()).await;
         let terminal_id = spawn_and_wait(&mut client, TerminalKind::Agent("codex".into())).await;
         config
+            .terminal
             .agent_states
             .lock()
             .await
@@ -2444,7 +2467,7 @@ async fn done_agent_ignores_a_bare_keystroke() {
             "a bare keystroke at a Done agent must not resume Working"
         );
         assert_eq!(
-            config.agent_state_for(terminal_id).await,
+            config.terminal.agent_state_for(terminal_id).await,
             Some(lazybox_ipc::AgentState::Done),
         );
     })
@@ -2845,19 +2868,21 @@ async fn continuously_ready_codex_repaints_do_not_starve_the_working_watchdog() 
             tokio::task::yield_now().await;
         }
         assert_eq!(
-            config.agent_state_for(terminal_id).await,
+            config.terminal.agent_state_for(terminal_id).await,
             Some(lazybox_ipc::AgentState::Working),
             "the watchdog fired before its configured 15-second bound",
         );
 
         tokio::time::advance(Duration::from_secs(1)).await;
         for _ in 0..2_048 {
-            if config.agent_state_for(terminal_id).await == Some(lazybox_ipc::AgentState::Done) {
+            if config.terminal.agent_state_for(terminal_id).await
+                == Some(lazybox_ipc::AgentState::Done)
+            {
                 break;
             }
             tokio::task::yield_now().await;
         }
-        let state_at_deadline = config.agent_state_for(terminal_id).await;
+        let state_at_deadline = config.terminal.agent_state_for(terminal_id).await;
         let elapsed_at_transition = working_started.elapsed();
         producer.abort();
         let _ = producer.await;
@@ -2966,7 +2991,7 @@ async fn continuously_ready_meaningful_codex_output_advances_the_watchdog_anchor
             tokio::time::advance(Duration::from_secs(14)).await;
             wait_for_output_count(&emitted, before + 1).await;
             assert_eq!(
-                config.agent_state_for(terminal_id).await,
+                config.terminal.agent_state_for(terminal_id).await,
                 Some(lazybox_ipc::AgentState::Working),
                 "changed content failed to advance the watchdog anchor",
             );
@@ -3022,7 +3047,7 @@ async fn queued_meaningful_output_at_the_watchdog_deadline_prevents_a_stale_done
             tokio::task::yield_now().await;
         }
         assert_eq!(
-            config.agent_state_for(terminal_id).await,
+            config.terminal.agent_state_for(terminal_id).await,
             Some(lazybox_ipc::AgentState::Working),
             "the watchdog settled stale state before queued meaningful output",
         );
@@ -3254,7 +3279,7 @@ async fn collapse_into_pr_carries_live_terminal_to_the_pr() {
         // And the daemon's terminal_meta must now key the terminal to
         // the PR workspace so wire-side traffic + restart recovery
         // follow it.
-        let meta = config.terminal_meta.lock().await;
+        let meta = config.terminal.terminal_meta.lock().await;
         let (sk, _) = meta.get(&terminal_id).expect("terminal still tracked");
         assert_eq!(
             sk, &pr_session_key,
@@ -3525,8 +3550,8 @@ async fn restore_skips_live_but_unregistered_backend_sessions() {
         // Simulate the restart whose recovery got cancelled before
         // registering this session: the in-memory maps are empty, the
         // backend session and its persisted meta survive.
-        config.terminals.lock().await.clear();
-        config.terminal_meta.lock().await.clear();
+        config.terminal.terminals.lock().await.clear();
+        config.terminal.terminal_meta.lock().await.clear();
 
         lazybox_server::spawn_handler::restore_persisted_sessions(&config).await;
         assert_eq!(
@@ -3535,7 +3560,7 @@ async fn restore_skips_live_but_unregistered_backend_sessions() {
             "restore must not spawn a second agent beside the live unregistered session"
         );
         assert!(
-            config.terminal_meta.lock().await.is_empty(),
+            config.terminal.terminal_meta.lock().await.is_empty(),
             "nothing was registered by the skipped restore"
         );
 
@@ -3551,7 +3576,7 @@ async fn restore_skips_live_but_unregistered_backend_sessions() {
             .unwrap();
         lazybox_server::spawn_handler::restore_persisted_sessions(&config).await;
         assert!(
-            !config.terminal_meta.lock().await.is_empty(),
+            !config.terminal.terminal_meta.lock().await.is_empty(),
             "restore spawns normally once no live backend session maps to the record"
         );
     })

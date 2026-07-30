@@ -84,11 +84,12 @@ async fn client_kv_recorded_by_one_connection_replays_to_another() {
         .expect("spawn shell");
     let terminal_id = TerminalId(611);
     config
+        .terminal
         .terminals
         .lock()
         .await
         .insert(terminal_id, backend_key.clone());
-    config.terminal_meta.lock().await.insert(
+    config.terminal.terminal_meta.lock().await.insert(
         terminal_id,
         (
             lazybox_core::SessionKey::new("github:o/r#611"),
@@ -921,7 +922,7 @@ async fn a_wedged_terminal_write_does_not_block_the_bus_or_other_terminals() {
     let (config, mock) = ServerConfig::in_memory_with_mock();
     let key_a = mock.spawn(&[], None, &[], "a").await.expect("spawn a");
     let key_b = mock.spawn(&[], None, &[], "b").await.expect("spawn b");
-    config.terminals.lock().await.extend([
+    config.terminal.terminals.lock().await.extend([
         (TerminalId(41), key_a.clone()),
         (TerminalId(42), key_b.clone()),
     ]);
@@ -1002,6 +1003,7 @@ async fn terminal_write_bursts_are_coalesced_without_reordering_bytes() {
     let (config, mock) = ServerConfig::in_memory_with_mock();
     let key = mock.spawn(&[], None, &[], "burst").await.expect("spawn");
     config
+        .terminal
         .terminals
         .lock()
         .await
@@ -1080,6 +1082,7 @@ async fn terminal_resize_storm_collapses_to_latest_before_next_write() {
         .await
         .expect("spawn");
     config
+        .terminal
         .terminals
         .lock()
         .await
@@ -1163,7 +1166,7 @@ async fn a_wedged_terminal_resize_does_not_block_other_terminals() {
         .spawn(&[], None, &[], "resize-b")
         .await
         .expect("spawn b");
-    config.terminals.lock().await.extend([
+    config.terminal.terminals.lock().await.extend([
         (TerminalId(53), key_a.clone()),
         (TerminalId(54), key_b.clone()),
     ]);
@@ -1219,6 +1222,7 @@ async fn failed_terminal_close_keeps_the_io_lane_alive() {
         .await
         .expect("spawn");
     config
+        .terminal
         .terminals
         .lock()
         .await
@@ -1269,6 +1273,7 @@ async fn composing_burst_persists_the_latest_ordered_revision() {
     let (config, mock) = ServerConfig::in_memory_with_mock();
     let key = mock.spawn(&[], None, &[], "draft").await.expect("spawn");
     config
+        .terminal
         .terminals
         .lock()
         .await
@@ -1315,6 +1320,7 @@ async fn multiple_clients_never_write_one_terminal_concurrently() {
         .await
         .expect("spawn");
     config
+        .terminal
         .terminals
         .lock()
         .await
@@ -1383,11 +1389,12 @@ async fn prompt_injection_cannot_overtake_prior_terminal_input() {
         .expect("spawn");
     let terminal_id = TerminalId(72);
     config
+        .terminal
         .terminals
         .lock()
         .await
         .insert(terminal_id, key.clone());
-    config.terminal_meta.lock().await.insert(
+    config.terminal.terminal_meta.lock().await.insert(
         terminal_id,
         (
             lazybox_core::SessionKey::new("inject-order"),
@@ -1454,11 +1461,12 @@ async fn injected_paste_and_submit_are_atomic_against_user_input() {
     let terminal_id = TerminalId(73);
     let session_key = lazybox_core::SessionKey::new("inject-atomic");
     config
+        .terminal
         .terminals
         .lock()
         .await
         .insert(terminal_id, key.clone());
-    config.terminal_meta.lock().await.insert(
+    config.terminal.terminal_meta.lock().await.insert(
         terminal_id,
         (session_key.clone(), TerminalKind::Agent("claude".into())),
     );

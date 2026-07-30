@@ -328,7 +328,7 @@ fn select_engagement_snapshot(
 
 pub async fn refresh_github_engagement(config: &ServerConfig) -> EngagementSnapshot {
     let live_agent_workspaces: std::collections::HashSet<String> = {
-        let terminal_meta = config.terminal_meta.lock().await;
+        let terminal_meta = config.terminal.terminal_meta.lock().await;
         terminal_meta
             .values()
             .filter(|(_, kind)| matches!(kind, lazybox_ipc::TerminalKind::Agent(_)))
@@ -341,11 +341,11 @@ pub async fn refresh_github_engagement(config: &ServerConfig) -> EngagementSnaps
         Ok(Ok(records)) => records,
         Ok(Err(error)) => {
             tracing::warn!("engagement: list_workspaces failed: {error}");
-            return config.poll_engagement.read().snapshot();
+            return config.poll.engagement.read().snapshot();
         }
         Err(error) => {
             tracing::warn!("engagement: workspace scan task failed: {error}");
-            return config.poll_engagement.read().snapshot();
+            return config.poll.engagement.read().snapshot();
         }
     };
 
@@ -396,7 +396,7 @@ pub async fn refresh_github_engagement(config: &ServerConfig) -> EngagementSnaps
         });
     }
 
-    let mut engagement = config.poll_engagement.write();
+    let mut engagement = config.poll.engagement.write();
     let snapshot =
         select_engagement_snapshot(candidates, engagement.focused_workspace.as_deref(), now);
     tracing::info!(
@@ -681,7 +681,7 @@ mod engagement_tier_tests {
         let task = task(42, TaskRole::Reviewer);
         let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
         upsert(&config, task).await;
-        config.terminal_meta.lock().await.insert(
+        config.terminal.terminal_meta.lock().await.insert(
             lazybox_ipc::TerminalId(1),
             (
                 lazybox_core::SessionKey::from(key.as_str()),
@@ -723,7 +723,7 @@ mod engagement_tier_tests {
             .unwrap();
 
         // No terminal_meta entry — this is NOT a live agent.
-        assert!(config.terminal_meta.lock().await.is_empty());
+        assert!(config.terminal.terminal_meta.lock().await.is_empty());
 
         let snapshot = refresh_github_engagement(&config).await;
         assert_eq!(snapshot.tier_for(&key), EngagementTier::Hot);
@@ -1907,7 +1907,7 @@ async fn has_live_agent_session(
     config: &ServerConfig,
     session_key: &lazybox_core::SessionKey,
 ) -> bool {
-    let terminal_meta = config.terminal_meta.lock().await;
+    let terminal_meta = config.terminal.terminal_meta.lock().await;
     terminal_meta.values().any(|(sk, kind)| {
         sk.as_str() == session_key.as_str() && matches!(kind, lazybox_ipc::TerminalKind::Agent(_))
     })
@@ -3282,7 +3282,7 @@ pub async fn tick_with_state(
                 // automatically as the user's involvement set grows.
                 let now = std::time::Instant::now();
                 if source.name() == lazybox_gh::SOURCE {
-                    let engagement = config.poll_engagement.read().snapshot();
+                    let engagement = config.poll.engagement.read().snapshot();
                     let mut seen_repos: std::collections::HashSet<&str> =
                         std::collections::HashSet::new();
                     for task in &tasks {
@@ -3420,7 +3420,7 @@ pub async fn tick_with_state(
                 // Clone the cached GitHub client (Arc-backed, cheap) so
                 // the auto-fix arm can post its PR comment. Read from the
                 // dedicated cache lock, not `poll_state` (issue #92).
-                let gh = config.gh_client_cache.lock().clone();
+                let gh = config.poll.gh_client_cache.lock().clone();
                 for action in actions {
                     dispatch_action(config, source.name(), gh.as_ref(), action).await;
                 }
@@ -3440,7 +3440,7 @@ pub async fn tick_with_state(
                 // this, the cache-reuse filter could keep handing back
                 // the bricked client until daemon restart.
                 if e.is_auth() && source.name() == lazybox_gh::SOURCE {
-                    *config.gh_client_cache.lock() = None;
+                    *config.poll.gh_client_cache.lock() = None;
                     tracing::info!(
                         "cleared cached GitHub client after auth failure — \
                          next tick rebuilds from the credential chain"
@@ -3661,7 +3661,7 @@ pub async fn rescope_with_state(
     // Per session_key → count of live terminals. Lets us both
     // detect "has active session" and report the count to the user
     // when prompting.
-    let terminal_meta = config.terminal_meta.lock().await;
+    let terminal_meta = config.terminal.terminal_meta.lock().await;
     let mut active_counts: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     for (sk, _) in terminal_meta.values() {
@@ -3922,7 +3922,7 @@ pub fn spawn(config: ServerConfig, interval: Duration) -> tokio::task::JoinHandl
     //    a new client connecting, or "GitHub returned `mergeable:
     //    UNKNOWN`, please re-query in a few seconds" all want a
     //    fast wake instead of waiting out the rest of a 60s sleep.
-    //    `config.poll_wake.notified()` is selected against the
+    //    `config.poll.wake_signal.notified()` is selected against the
     //    chunked sleep — pinging the Notify forces an immediate
     //    re-check of the wall-clock condition.
     tokio::spawn(async move {
@@ -3985,7 +3985,7 @@ pub fn spawn(config: ServerConfig, interval: Duration) -> tokio::task::JoinHandl
                 let chunk = remaining.min(CHUNK);
                 tokio::select! {
                     _ = tokio::time::sleep(chunk) => {}
-                    _ = config.poll_wake.notified() => {
+                    _ = config.poll.wake_signal.notified() => {
                         tracing::info!("polling: woken (Refresh / Subscribe / UNKNOWN retry)");
                         break;
                     }
@@ -3994,7 +3994,7 @@ pub fn spawn(config: ServerConfig, interval: Duration) -> tokio::task::JoinHandl
 
             tick_n += 1;
             tracing::info!("polling: tick #{tick_n} starting");
-            let warm_requested = config.take_warm_poll_request();
+            let warm_requested = config.poll.take_warm_request();
             let poll_warm = Instant::now() >= next_warm_due || warm_requested;
 
             // Tolerate panics inside `run_one_tick`. tokio swallows
@@ -4118,7 +4118,7 @@ pub fn spawn_with_sources(
                 let nap = remaining.min(chunk);
                 tokio::select! {
                     _ = tokio::time::sleep(nap) => {}
-                    _ = config.poll_wake.notified() => { break; }
+                    _ = config.poll.wake_signal.notified() => { break; }
                 }
             }
             let outcome = tick_with_state(&config, &sources, &mut state).await;
@@ -4134,7 +4134,7 @@ pub fn spawn_with_sources(
 /// Single iteration of the poll loop. Loads the latest persisted
 /// setup, builds sources, ticks, rescopes. Shared between the
 /// long-lived spawn and the `Command::Refresh` immediate-tick path.
-/// Uses `config.poll_state` so prompt-dismissal memory crosses both
+/// Uses `config.poll.tick_state` so prompt-dismissal memory crosses both
 /// paths.
 /// Summary of one tick — what the driver loop needs to schedule
 /// the next one. `retry_after_secs` extends the next sleep when a
@@ -4204,7 +4204,7 @@ pub struct TickSummary {
     pub hot_count: usize,
 }
 
-/// Check the cross-tick [`TickState`] OUT of `config.poll_state`,
+/// Check the cross-tick [`TickState`] OUT of `config.poll.tick_state`,
 /// returning an owned copy and leaving a `default()` in its place.
 /// Paired with [`restore_poll_state`].
 ///
@@ -4230,8 +4230,8 @@ pub struct TickSummary {
 /// (`run_one_tick` is awaited to completion before the next), so no
 /// other tick contends for the checked-out state; the only concurrent
 /// writer is the focus hint, which [`restore_poll_state`] folds back in.
-pub async fn checkout_poll_state(config: &ServerConfig) -> TickState {
-    std::mem::take(&mut *config.poll_state.lock().await)
+pub async fn checkout_poll_state(poll: &crate::PollState) -> TickState {
+    std::mem::take(&mut *poll.tick_state.lock().await)
 }
 
 /// Restore a [`TickState`] checked out by [`checkout_poll_state`].
@@ -4243,8 +4243,8 @@ pub async fn checkout_poll_state(config: &ServerConfig) -> TickState {
 /// tick's round-robin, so we prefer it over the value the tick carried
 /// out. Every other `TickState` field is owned exclusively by the tick,
 /// so the checked-out copy is authoritative for them.
-pub async fn restore_poll_state(config: &ServerConfig, mut state: TickState) {
-    let mut guard = config.poll_state.lock().await;
+pub async fn restore_poll_state(poll: &crate::PollState, mut state: TickState) {
+    let mut guard = poll.tick_state.lock().await;
     if guard.round_robin.focused_repo.is_some() {
         state.round_robin.focused_repo = guard.round_robin.focused_repo.take();
     }
@@ -4273,9 +4273,9 @@ async fn run_one_tick_with_notifications(
     // `upsert` can block on a guard we're holding (we hold none), and
     // the serve loop's own `poll_state` users stay responsive while a
     // slow sync runs. See `checkout_poll_state`.
-    let mut state = checkout_poll_state(config).await;
+    let mut state = checkout_poll_state(&config.poll).await;
     let summary = run_tick_inner(config, &setup, &mut state, poll_notifications).await;
-    restore_poll_state(config, state).await;
+    restore_poll_state(&config.poll, state).await;
     // Level-triggered removal prompts (issue #292): after every tick,
     // re-offer cleanup for any workspace still merged/closed with
     // sessions and no answer. Outside the tick body — it only needs
@@ -4316,8 +4316,8 @@ async fn run_tick_inner(
         setup,
         config.bus.clone(),
         state,
-        config.viewer_identities.clone(),
-        config.gh_client_cache.clone(),
+        config.poll.viewer_identities.clone(),
+        config.poll.gh_client_cache.clone(),
         &engagement,
         poll_notifications,
     )
@@ -4908,7 +4908,7 @@ async fn prepare_upsert(
         } else {
             observation_window_ms
         };
-        let tier = config.poll_engagement.read().tier_for(key);
+        let tier = config.poll.engagement.read().tier_for(key);
         if let Some(age_ms) = age_ms {
             match tier {
                 EngagementTier::Hot => config.event_metrics.record_hot_sync_latency(age_ms),
@@ -5221,8 +5221,8 @@ async fn commit_workspace_move(
     let terminal_guards = if terminal_moves.is_empty() {
         None
     } else {
-        let terminals = config.terminals.clone().lock_owned().await;
-        let terminal_meta = config.terminal_meta.clone().lock_owned().await;
+        let terminals = config.terminal.terminals.clone().lock_owned().await;
+        let terminal_meta = config.terminal.terminal_meta.clone().lock_owned().await;
         Some((terminals, terminal_meta))
     };
     let config_owned = config.clone();
@@ -5681,6 +5681,7 @@ async fn sync_one_tracked_workspace(
 /// session (issue #499). The row stays until removed explicitly.
 pub async fn keep_merged_workspace(config: &ServerConfig, key: &WorkspaceKey) {
     config
+        .poll
         .removal_prompts
         .lock()
         .await
@@ -5703,7 +5704,7 @@ pub async fn keep_merged_workspace(config: &ServerConfig, key: &WorkspaceKey) {
 /// waiting out `REMOVAL_REPROMPT_AFTER`. A prompt the reconnecting
 /// client never saw shouldn't be throttled as if it had been.
 pub async fn mark_removal_prompts_for_replay(config: &ServerConfig) {
-    config.removal_prompts.lock().await.prompted.clear();
+    config.poll.removal_prompts.lock().await.prompted.clear();
 }
 
 /// If `workspace`'s PR closes issues that lazybox tracks as their own
@@ -5965,7 +5966,7 @@ async fn merge_closing_issue_workspaces(
         let live_terminals = handlers::count_live_terminals(config, &issue_key).await;
         let issue_key_str = issue_key.as_str().to_string();
         let should_prompt = {
-            let mut prompts = config.merge_prompts.lock().await;
+            let mut prompts = config.poll.merge_prompts.lock().await;
             if prompts.rejected.contains(&issue_key_str) {
                 None
             } else if live_terminals == 0 {
@@ -6158,6 +6159,7 @@ async fn retire_pr_stub_sessions(
     }
 
     let live: std::collections::HashSet<lazybox_core::SessionId> = config
+        .terminal
         .terminal_sessions
         .lock()
         .await
@@ -6257,7 +6259,7 @@ pub async fn handle_confirm_merge(
     accept: bool,
 ) {
     {
-        let mut prompts = config.merge_prompts.lock().await;
+        let mut prompts = config.poll.merge_prompts.lock().await;
         prompts.prompted.remove(issue_workspace_key.as_str());
         if !accept {
             prompts
@@ -6376,7 +6378,7 @@ pub async fn handle_collapse_into_pr(config: &ServerConfig, issue_workspace_key:
     // Clear any dedupe state so the modal pipeline doesn't re-fire
     // a duplicate prompt right after this completes.
     {
-        let mut prompts = config.merge_prompts.lock().await;
+        let mut prompts = config.poll.merge_prompts.lock().await;
         prompts.prompted.remove(issue_workspace_key.as_str());
         prompts.rejected.remove(issue_workspace_key.as_str());
     }
@@ -6582,7 +6584,8 @@ pub async fn set_focused_workspace(config: &ServerConfig, key: &WorkspaceKey) {
         .filter(|repo| !repo.is_empty());
     let focused_workspace = repo.as_ref().map(|_| key.as_str().to_string());
     let changed = config
-        .poll_engagement
+        .poll
+        .engagement
         .write()
         .set_focused_workspace(focused_workspace);
 
@@ -6602,7 +6605,7 @@ pub async fn set_focused_workspace(config: &ServerConfig, key: &WorkspaceKey) {
     // keystroke `Write` and `Spawn` — the "can't type in the agent while
     // GitHub syncs" regression. The hint only steers WHICH repo the NEXT
     // poll prioritizes, so skipping it under contention costs nothing.
-    match config.poll_state.try_lock() {
+    match config.poll.tick_state.try_lock() {
         Ok(mut state) => {
             let prev = std::mem::replace(&mut state.round_robin.focused_repo, repo.clone());
             if prev != repo {
@@ -6628,7 +6631,7 @@ pub async fn set_focused_workspace(config: &ServerConfig, key: &WorkspaceKey) {
             github = repo.is_some(),
             "polling focus changed — waking targeted refresh"
         );
-        config.wake_poll(false);
+        config.poll.wake(false);
     }
 }
 
@@ -7259,7 +7262,7 @@ pub async fn delete_workspace_with_archive(
         .deleted_workspaces
         .lock()
         .insert(key.as_str().to_string());
-    crate::spawn_handler::await_inflight_spawns(config, key.as_str()).await;
+    crate::spawn_handler::await_inflight_spawns(&config.spawn, key.as_str()).await;
     let _workspace_guard = config.lock_workspace(key.as_str()).await;
     let reclaimed = delete_workspace_internal(config, key, archive).await;
     // The tombstone must not outlive the delete it guarded: a
@@ -7302,14 +7305,14 @@ async fn delete_workspace_internal(
     // `lazybox-{repo}-{kind}-{pid}-{n}`); the meta map is. Locks are
     // taken + dropped before async backend.kill() calls.
     let to_kill_ids: Vec<lazybox_ipc::TerminalId> = {
-        let meta = config.terminal_meta.lock().await;
+        let meta = config.terminal.terminal_meta.lock().await;
         meta.iter()
             .filter(|(_, (sk, _))| sk.as_str() == key_str)
             .map(|(tid, _)| *tid)
             .collect()
     };
     let to_kill: Vec<(lazybox_ipc::TerminalId, String)> = {
-        let terminals = config.terminals.lock().await;
+        let terminals = config.terminal.terminals.lock().await;
         to_kill_ids
             .into_iter()
             .filter_map(|tid| terminals.get(&tid).map(|k| (tid, k.clone())))
@@ -8601,6 +8604,7 @@ mod rescope_collapse_tests {
         let key = ws.key.clone();
         seed(&store, &ws);
         config
+            .poll
             .removal_prompts
             .lock()
             .await
@@ -8625,6 +8629,7 @@ mod rescope_collapse_tests {
         assert!(saw_cancel, "reopen must broadcast RemovalCancelled");
         assert!(
             !config
+                .poll
                 .removal_prompts
                 .lock()
                 .await
@@ -8761,7 +8766,7 @@ mod rescope_collapse_tests {
 
         // Live agent: a terminal is attached to the PR's session.
         let session_key: lazybox_core::SessionKey = (&pr_key).into();
-        config.terminal_meta.lock().await.insert(
+        config.terminal.terminal_meta.lock().await.insert(
             lazybox_ipc::TerminalId(1),
             (session_key, lazybox_ipc::TerminalKind::Shell),
         );
@@ -9819,7 +9824,7 @@ mod auto_spawn_dedup_tests {
             "no terminals → no live session (spawn failed) → label may retry"
         );
 
-        config.terminal_meta.lock().await.insert(
+        config.terminal.terminal_meta.lock().await.insert(
             lazybox_ipc::TerminalId(1),
             (
                 sk.clone(),
@@ -9830,7 +9835,7 @@ mod auto_spawn_dedup_tests {
 
         // A shell on a different workspace doesn't count as an agent.
         let sk2 = lazybox_core::SessionKey::new("github:o/r#10");
-        config.terminal_meta.lock().await.insert(
+        config.terminal.terminal_meta.lock().await.insert(
             lazybox_ipc::TerminalId(2),
             (sk2.clone(), lazybox_ipc::TerminalKind::Shell),
         );

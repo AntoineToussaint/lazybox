@@ -1121,6 +1121,7 @@ async fn assert_real_claude_spawn_env(
     socket: &str,
 ) {
     let backend_key = config
+        .terminal
         .backend_key_for(terminal_id)
         .await
         .expect("Claude backend key");

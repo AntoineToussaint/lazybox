@@ -377,7 +377,7 @@ async fn set_focused_workspace_never_blocks_on_an_in_flight_poll() {
 
     // Simulate an in-flight poll tick holding the lock across its
     // network fetch, exactly like `run_one_tick` does.
-    let held = config.poll_state.lock().await;
+    let held = config.poll.tick_state.lock().await;
 
     // The inline handler must return promptly rather than wait on the
     // held lock. Pre-fix this hangs until `held` drops; the 2s timeout
@@ -400,18 +400,24 @@ async fn set_focused_workspace_never_blocks_on_an_in_flight_poll() {
         "focus hint must be skipped, not applied, while a poll holds the lock"
     );
     assert_eq!(
-        config.poll_engagement.read().focused_workspace(),
+        config.poll.engagement.read().focused_workspace(),
         Some(workspace.key.as_str()),
         "the exact workspace focus must remain available to engagement scheduling",
     );
-    tokio::time::timeout(Duration::from_millis(50), config.poll_wake.notified())
-        .await
-        .expect("focus change did not wake the poll loop");
+    tokio::time::timeout(
+        Duration::from_millis(50),
+        config.poll.wake_signal.notified(),
+    )
+    .await
+    .expect("focus change did not wake the poll loop");
     polling::set_focused_workspace(&config, &workspace.key).await;
     assert!(
-        tokio::time::timeout(Duration::from_millis(10), config.poll_wake.notified())
-            .await
-            .is_err(),
+        tokio::time::timeout(
+            Duration::from_millis(10),
+            config.poll.wake_signal.notified()
+        )
+        .await
+        .is_err(),
         "repeating the same focus should not schedule redundant polls",
     );
 }
@@ -1948,6 +1954,7 @@ async fn rescope_keeps_workspaces_with_active_sessions_and_emits_prompt() {
     let session_key: SessionKey =
         SessionKey::from(lazybox_core::workspace_key_for(&make_task("o/r#alive")));
     config
+        .terminal
         .terminal_meta
         .lock()
         .await
@@ -2467,11 +2474,12 @@ async fn delete_workspace_kills_terminals_via_terminal_meta() {
     // key.
     let backend_key_new_format = format!("lazybox-o-r-1-claude-{}-1", std::process::id());
     config
+        .terminal
         .terminals
         .lock()
         .await
         .insert(TerminalId(42), backend_key_new_format.clone());
-    config.terminal_meta.lock().await.insert(
+    config.terminal.terminal_meta.lock().await.insert(
         TerminalId(42),
         (session_key.clone(), TerminalKind::Agent("claude".into())),
     );
@@ -2479,11 +2487,13 @@ async fn delete_workspace_kills_terminals_via_terminal_meta() {
     // them up — otherwise a stale entry leaks into rescope's next
     // tick.
     config
+        .terminal
         .terminal_sessions
         .lock()
         .await
         .insert(TerminalId(42), lazybox_core::SessionId::new());
     config
+        .terminal
         .agent_states
         .lock()
         .await
@@ -2496,11 +2506,18 @@ async fn delete_workspace_kills_terminals_via_terminal_meta() {
     );
 
     assert!(
-        config.terminals.lock().await.get(&TerminalId(42)).is_none(),
+        config
+            .terminal
+            .terminals
+            .lock()
+            .await
+            .get(&TerminalId(42))
+            .is_none(),
         "delete_workspace must remove the terminal from the wire-side map"
     );
     assert!(
         config
+            .terminal
             .terminal_meta
             .lock()
             .await
@@ -2510,6 +2527,7 @@ async fn delete_workspace_kills_terminals_via_terminal_meta() {
     );
     assert!(
         config
+            .terminal
             .terminal_sessions
             .lock()
             .await
@@ -2519,6 +2537,7 @@ async fn delete_workspace_kills_terminals_via_terminal_meta() {
     );
     assert!(
         config
+            .terminal
             .agent_states
             .lock()
             .await
@@ -2580,11 +2599,13 @@ async fn delete_workspace_kills_every_owned_session_and_spares_other_workspaces(
         ),
     ] {
         config
+            .terminal
             .terminals
             .lock()
             .await
             .insert(id, backend_key.clone());
         config
+            .terminal
             .terminal_meta
             .lock()
             .await
@@ -2606,10 +2627,10 @@ async fn delete_workspace_kills_every_owned_session_and_spares_other_workspaces(
         "deleting one workspace must not touch another workspace's tmux session"
     );
     assert_eq!(
-        config.terminals.lock().await.get(&TerminalId(503)),
+        config.terminal.terminals.lock().await.get(&TerminalId(503)),
         Some(&unrelated)
     );
-    let terminals = config.terminals.lock().await;
+    let terminals = config.terminal.terminals.lock().await;
     assert!(
         terminals.get(&TerminalId(501)).is_none() && terminals.get(&TerminalId(502)).is_none(),
         "every terminal owned by the deleted workspace must be detached"
@@ -2634,11 +2655,12 @@ async fn failed_terminal_kill_preserves_workspace_and_retryable_mappings() {
         .await
         .unwrap();
     config
+        .terminal
         .terminals
         .lock()
         .await
         .insert(terminal_id, backend_key.clone());
-    config.terminal_meta.lock().await.insert(
+    config.terminal.terminal_meta.lock().await.insert(
         terminal_id,
         (session_key, TerminalKind::Agent("codex".into())),
     );
@@ -2662,7 +2684,7 @@ async fn failed_terminal_kill_preserves_workspace_and_retryable_mappings() {
         "a workspace must stay visible when its live process could not be stopped"
     );
     assert_eq!(
-        config.terminals.lock().await.get(&terminal_id),
+        config.terminal.terminals.lock().await.get(&terminal_id),
         Some(&backend_key),
         "the retryable terminal mapping must not be orphaned"
     );
@@ -3019,7 +3041,7 @@ async fn merge_collapse_does_not_deadlock_while_poll_state_held() {
     attach_live_terminal(&config, &issue_key, 71).await;
 
     // Hold the guard exactly as `run_one_tick` does for the whole tick.
-    let guard = config.poll_state.lock().await;
+    let guard = config.poll.tick_state.lock().await;
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
         polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])),
@@ -3057,12 +3079,12 @@ async fn merge_collapse_does_not_deadlock_while_poll_state_held() {
 #[tokio::test]
 async fn checkout_poll_state_frees_the_guard_for_the_tick() {
     let config = ServerConfig::in_memory();
-    let state = polling::checkout_poll_state(&config).await;
+    let state = polling::checkout_poll_state(&config.poll).await;
     assert!(
-        config.poll_state.try_lock().is_ok(),
+        config.poll.tick_state.try_lock().is_ok(),
         "poll_state must be free while a tick holds the checked-out state (#133)",
     );
-    polling::restore_poll_state(&config, state).await;
+    polling::restore_poll_state(&config.poll, state).await;
 }
 
 /// `restore_poll_state` must fold back a `focused_repo` recorded by the
@@ -3079,11 +3101,11 @@ async fn restore_poll_state_keeps_a_concurrent_focus_hint() {
 
     // Tick checks the state out (empty round-robin); a sidebar
     // navigation then fires the focus hint into the now-free poll_state.
-    let state = polling::checkout_poll_state(&config).await;
+    let state = polling::checkout_poll_state(&config.poll).await;
     polling::set_focused_workspace(&config, &workspace.key).await;
 
-    polling::restore_poll_state(&config, state).await;
-    let restored = config.poll_state.lock().await;
+    polling::restore_poll_state(&config.poll, state).await;
+    let restored = config.poll.tick_state.lock().await;
     assert_eq!(
         restored.round_robin.focused_repo.as_deref(),
         Some("o/r"),
@@ -3099,16 +3121,16 @@ async fn restore_poll_state_keeps_a_concurrent_focus_hint() {
 async fn checkout_restore_round_trips_cross_tick_state() {
     let config = ServerConfig::in_memory();
     {
-        let mut s = config.poll_state.lock().await;
+        let mut s = config.poll.tick_state.lock().await;
         s.round_robin.tick = 7;
         s.round_robin.focused_repo = Some("o/seed".into());
     }
-    let state = polling::checkout_poll_state(&config).await;
+    let state = polling::checkout_poll_state(&config.poll).await;
     // Checked out → the live slot is reset to default.
-    assert_eq!(config.poll_state.lock().await.round_robin.tick, 0);
+    assert_eq!(config.poll.tick_state.lock().await.round_robin.tick, 0);
 
-    polling::restore_poll_state(&config, state).await;
-    let restored = config.poll_state.lock().await;
+    polling::restore_poll_state(&config.poll, state).await;
+    let restored = config.poll.tick_state.lock().await;
     assert_eq!(
         restored.round_robin.tick, 7,
         "tick counter must survive the checkout/restore round-trip",
@@ -3136,9 +3158,9 @@ async fn gh_client_cache_is_independent_of_poll_state() {
     let config = ServerConfig::in_memory();
     // Simulate a tick holding poll_state (the pre-#133 worst case) /
     // the brief checkout window.
-    let _poll_state_held = config.poll_state.lock().await;
+    let _poll_state_held = config.poll.tick_state.lock().await;
     assert!(
-        config.gh_client_cache.try_lock().is_some(),
+        config.poll.gh_client_cache.try_lock().is_some(),
         "gh_client_cache must be reachable without poll_state (#92)",
     );
 }
@@ -3341,6 +3363,7 @@ async fn failed_issue_merge_batch_preserves_source_and_emits_no_removal() {
     );
     assert_eq!(
         config
+            .terminal
             .terminal_meta
             .lock()
             .await
@@ -3676,11 +3699,12 @@ async fn closing_pr_transfers_live_session_durably_to_pr() {
     // persisted record, exactly as `handle_spawn` would have left them.
     let issue_session_key: SessionKey = (&issue_key).into();
     let backend_key = "lazybox-test-o-r-71-claude";
-    config.terminal_meta.lock().await.insert(
+    config.terminal.terminal_meta.lock().await.insert(
         TerminalId(7),
         (issue_session_key.clone(), TerminalKind::Shell),
     );
     config
+        .terminal
         .terminals
         .lock()
         .await
@@ -3713,7 +3737,7 @@ async fn closing_pr_transfers_live_session_durably_to_pr() {
     // …and so did the live terminal, in memory…
     let pr_session_key: SessionKey = (&pr_key).into();
     {
-        let meta = config.terminal_meta.lock().await;
+        let meta = config.terminal.terminal_meta.lock().await;
         assert_eq!(
             meta.get(&TerminalId(7)).expect("terminal kept").0,
             pr_session_key,
@@ -3897,6 +3921,7 @@ async fn failed_adopt_batch_cannot_duplicate_or_lose_sessions() {
     );
     assert_eq!(
         config
+            .terminal
             .terminal_meta
             .lock()
             .await
@@ -3995,6 +4020,7 @@ async fn cancelled_adopt_still_finishes_the_started_commit_and_projection() {
     );
     assert_eq!(
         config
+            .terminal
             .terminal_meta
             .lock()
             .await
@@ -4077,7 +4103,7 @@ async fn spawn_losing_to_merge_cannot_recreate_the_deleted_source() {
         "the losing spawn must not recreate the deleted issue workspace"
     );
     assert!(
-        config.terminals.lock().await.is_empty(),
+        config.terminal.terminals.lock().await.is_empty(),
         "the losing spawn must register no terminal under the stale source"
     );
     assert!(
@@ -4167,11 +4193,12 @@ async fn adopt_sessions_rewrites_terminal_meta() {
     // persisted record, exactly as `handle_spawn` would have left them.
     let source_session_key: SessionKey = (&source_key).into();
     let backend_key = "lazybox-test-o-r-71-claude";
-    config.terminal_meta.lock().await.insert(
+    config.terminal.terminal_meta.lock().await.insert(
         TerminalId(7),
         (source_session_key.clone(), TerminalKind::Shell),
     );
     config
+        .terminal
         .terminals
         .lock()
         .await
@@ -4188,7 +4215,7 @@ async fn adopt_sessions_rewrites_terminal_meta() {
 
     let target_session_key: SessionKey = (&target_key).into();
     {
-        let meta = config.terminal_meta.lock().await;
+        let meta = config.terminal.terminal_meta.lock().await;
         let entry = meta.get(&TerminalId(7)).expect("terminal_meta entry kept");
         assert_eq!(
             entry.0, target_session_key,
@@ -4249,8 +4276,18 @@ async fn confirm_merge_reject_pins_until_restart_after_terminal_exits() {
         "rejecting must keep the issue workspace intact",
     );
 
-    config.terminal_meta.lock().await.remove(&TerminalId(71));
-    config.terminals.lock().await.remove(&TerminalId(71));
+    config
+        .terminal
+        .terminal_meta
+        .lock()
+        .await
+        .remove(&TerminalId(71));
+    config
+        .terminal
+        .terminals
+        .lock()
+        .await
+        .remove(&TerminalId(71));
     polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
 
     let mut saw_merged = false;
@@ -4368,7 +4405,7 @@ async fn merge_rewrites_terminal_meta_so_terminals_dont_orphan() {
     // user's "yes" completes the merge.
     polling::handle_confirm_merge(&config, issue_key.clone(), pr_key.clone(), true).await;
     let pr_session_key: SessionKey = (&pr_key).into();
-    let meta = config.terminal_meta.lock().await;
+    let meta = config.terminal.terminal_meta.lock().await;
     let entry = meta
         .get(&TerminalId(7))
         .expect("terminal_meta still present");
@@ -4455,12 +4492,12 @@ async fn tick_no_retry_after_when_no_source_supplied_a_hint() {
 #[tokio::test]
 async fn poll_wake_fires_an_extra_tick_before_interval() {
     // The long-lived loop sleeps in chunks AND selects against
-    // `config.poll_wake.notified()`. Pinging the Notify must make
+    // `config.poll.wake_signal.notified()`. Pinging the Notify must make
     // the next tick run before the regular cadence would have
     // delivered it — that's the property Refresh / Subscribe lean
     // on to deliver fresh data on demand.
     let config = ServerConfig::in_memory();
-    let wake = config.poll_wake.clone();
+    let wake = config.poll.wake_signal.clone();
     let counter = Arc::new(AtomicUsize::new(0));
     let source: Box<dyn TaskSource> = Box::new(CountingSource {
         name: "test".into(),
@@ -4690,14 +4727,14 @@ async fn auth_poll_failure_clears_gh_client_cache() {
     let config = ServerConfig::in_memory();
     let stub =
         lazybox_gh::GhClient::stub_for_tests("cmd:gh auth token", "fp-old").expect("stub client");
-    *config.gh_client_cache.lock() = Some(stub);
+    *config.poll.gh_client_cache.lock() = Some(stub);
 
     let source: Box<dyn TaskSource> = Box::new(AuthFailingSource("github".into()));
     let mut state = polling::TickState::default();
     polling::tick_with_state(&config, &[source], &mut state).await;
 
     assert!(
-        config.gh_client_cache.lock().is_none(),
+        config.poll.gh_client_cache.lock().is_none(),
         "an auth failure must drop the cached client so the next tick rebuilds"
     );
 }
@@ -4709,14 +4746,14 @@ async fn retryable_poll_failure_keeps_gh_client_cache() {
     let config = ServerConfig::in_memory();
     let stub =
         lazybox_gh::GhClient::stub_for_tests("cmd:gh auth token", "fp-old").expect("stub client");
-    *config.gh_client_cache.lock() = Some(stub);
+    *config.poll.gh_client_cache.lock() = Some(stub);
 
     let source: Box<dyn TaskSource> = Box::new(FailingSource("github".into()));
     let mut state = polling::TickState::default();
     polling::tick_with_state(&config, &[source], &mut state).await;
 
     assert!(
-        config.gh_client_cache.lock().is_some(),
+        config.poll.gh_client_cache.lock().is_some(),
         "a transient failure must not evict the cached client"
     );
 }
@@ -4728,13 +4765,13 @@ async fn other_sources_auth_failure_leaves_gh_client_cache_alone() {
     let config = ServerConfig::in_memory();
     let stub =
         lazybox_gh::GhClient::stub_for_tests("cmd:gh auth token", "fp-old").expect("stub client");
-    *config.gh_client_cache.lock() = Some(stub);
+    *config.poll.gh_client_cache.lock() = Some(stub);
 
     let source: Box<dyn TaskSource> = Box::new(AuthFailingSource("linear".into()));
     let mut state = polling::TickState::default();
     polling::tick_with_state(&config, &[source], &mut state).await;
 
-    assert!(config.gh_client_cache.lock().is_some());
+    assert!(config.poll.gh_client_cache.lock().is_some());
 }
 
 /// The pure cache-reuse decision: rotation shows up as a fingerprint
@@ -4986,11 +5023,12 @@ async fn delete_project_preserves_parent_when_a_child_cannot_stop() {
         .await
         .unwrap();
     config
+        .terminal
         .terminals
         .lock()
         .await
         .insert(terminal_id, backend_key.clone());
-    config.terminal_meta.lock().await.insert(
+    config.terminal.terminal_meta.lock().await.insert(
         terminal_id,
         (
             SessionKey::from(workspace_key.as_str()),
@@ -5285,11 +5323,12 @@ async fn attach_live_terminal_persisted(
     use lazybox_core::SessionKey;
     use lazybox_ipc::{TerminalId, TerminalKind};
     let session_key: SessionKey = key.into();
-    config.terminal_meta.lock().await.insert(
+    config.terminal.terminal_meta.lock().await.insert(
         TerminalId(terminal_id),
         (session_key.clone(), TerminalKind::Shell),
     );
     config
+        .terminal
         .terminals
         .lock()
         .await
@@ -5378,7 +5417,7 @@ async fn combining_multiple_issues_with_live_sessions_rebadges_every_terminal() 
 
     // …every live terminal followed onto the PR, in memory…
     {
-        let meta = config.terminal_meta.lock().await;
+        let meta = config.terminal.terminal_meta.lock().await;
         for (tid, _) in &terminals {
             let entry = meta
                 .get(&TerminalId(*tid))
@@ -5652,6 +5691,7 @@ mod live_collapse_e2e {
             // …keyed to the PR in memory…
             assert_eq!(
                 live.config
+                    .terminal
                     .terminal_meta
                     .lock()
                     .await
@@ -5760,6 +5800,7 @@ mod live_collapse_e2e {
 
             assert_eq!(
                 live.config
+                    .terminal
                     .terminal_meta
                     .lock()
                     .await
@@ -5869,6 +5910,7 @@ mod live_collapse_e2e {
             // ── STILL WIRED — in-memory meta repointed at the PR… ──
             assert_eq!(
                 live.config
+                    .terminal
                     .terminal_meta
                     .lock()
                     .await
@@ -5975,6 +6017,7 @@ mod live_collapse_e2e {
             );
             assert_eq!(
                 live.config
+                    .terminal
                     .terminal_meta
                     .lock()
                     .await
@@ -6051,6 +6094,7 @@ mod live_collapse_e2e {
             );
             assert_eq!(
                 live.config
+                    .terminal
                     .terminal_meta
                     .lock()
                     .await

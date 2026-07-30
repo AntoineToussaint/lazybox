@@ -41,7 +41,7 @@ pub fn spawn(config: &ServerConfig) -> Option<tokio::task::JoinHandle<()>> {
     // this call returning and the task's first poll must queue, not
     // vanish.
     let rx = config.bus.subscribe();
-    let states = config.agent_states.clone();
+    let states = config.terminal.agent_states.clone();
     Some(tokio::spawn(async move {
         run(rx, states, argv, keep_awake_enabled).await;
     }))

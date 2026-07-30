@@ -161,6 +161,7 @@ async fn self_exiting_terminal_releases_backend_slot() {
         let terminal_id = spawn_shell(&mut client).await;
 
         let key = config
+            .terminal
             .backend_key_for(terminal_id)
             .await
             .expect("terminal registered");
@@ -211,12 +212,14 @@ async fn exiting_agent_broadcasts_exited_not_stuck_working() {
         let mut client = subscribed(config.clone()).await;
         let terminal_id = spawn_agent(&mut client, "claude").await;
         let key = config
+            .terminal
             .backend_key_for(terminal_id)
             .await
             .expect("terminal registered");
 
         // The agent is mid-turn: its pill is `Working`.
         config
+            .terminal
             .agent_states
             .lock()
             .await
@@ -267,6 +270,7 @@ async fn exiting_shell_emits_no_agent_state() {
         let mut client = subscribed(config.clone()).await;
         let terminal_id = spawn_shell(&mut client).await;
         let key = config
+            .terminal
             .backend_key_for(terminal_id)
             .await
             .expect("terminal registered");
@@ -304,6 +308,7 @@ async fn agent_exit_captures_last_output_tail() {
         let mut client = subscribed(config.clone()).await;
         let terminal_id = spawn_agent(&mut client, "codex").await;
         let key = config
+            .terminal
             .backend_key_for(terminal_id)
             .await
             .expect("terminal registered");
@@ -350,6 +355,7 @@ async fn shell_exit_carries_no_last_output() {
         let mut client = subscribed(config.clone()).await;
         let terminal_id = spawn_shell(&mut client).await;
         let key = config
+            .terminal
             .backend_key_for(terminal_id)
             .await
             .expect("terminal registered");
@@ -384,6 +390,7 @@ async fn seq_gap_resyncs_from_replay_ring() {
         let mut client = subscribed(config.clone()).await;
         let terminal_id = spawn_shell(&mut client).await;
         let key = config
+            .terminal
             .backend_key_for(terminal_id)
             .await
             .expect("terminal registered");
@@ -458,7 +465,7 @@ async fn seq_gap_snapshot_failure_preserves_state_and_retries() {
         let mut client = subscribed(config.clone()).await;
         let terminal_id = spawn_shell(&mut client).await;
         let key = config
-            .backend_key_for(terminal_id)
+            .terminal.backend_key_for(terminal_id)
             .await
             .expect("terminal registered");
 
@@ -584,21 +591,25 @@ async fn recovered_session_teardown_matches_main_pump() {
         // detection, prompt-inject bookkeeping). The old teardown swept
         // none of these.
         config
+            .terminal
             .agent_states
             .lock()
             .await
             .insert(terminal_id, lazybox_ipc::AgentState::Working);
         config
+            .terminal
             .hook_driven_terminals
             .lock()
             .await
             .insert(terminal_id, std::time::Instant::now());
         config
+            .terminal
             .input_needed_shapes
             .lock()
             .await
             .insert(terminal_id, lazybox_agents::PromptShape::Chooser);
         config
+            .spawn
             .prompt_submit_signals
             .lock()
             .await
@@ -623,13 +634,23 @@ async fn recovered_session_teardown_matches_main_pump() {
             move || {
                 let config = config_probe.clone();
                 async move {
-                    config.agent_states.lock().await.is_empty()
-                        && config.hook_driven_terminals.lock().await.is_empty()
-                        && config.input_needed_shapes.lock().await.is_empty()
-                        && config.prompt_submit_signals.lock().await.is_empty()
-                        && config.terminals.lock().await.is_empty()
-                        && config.terminal_meta.lock().await.is_empty()
-                        && config.no_permission_terminals.lock().await.is_empty()
+                    config.terminal.agent_states.lock().await.is_empty()
+                        && config
+                            .terminal
+                            .hook_driven_terminals
+                            .lock()
+                            .await
+                            .is_empty()
+                        && config.terminal.input_needed_shapes.lock().await.is_empty()
+                        && config.spawn.prompt_submit_signals.lock().await.is_empty()
+                        && config.terminal.terminals.lock().await.is_empty()
+                        && config.terminal.terminal_meta.lock().await.is_empty()
+                        && config
+                            .terminal
+                            .no_permission_terminals
+                            .lock()
+                            .await
+                            .is_empty()
                 }
             },
             Duration::from_secs(2),
@@ -689,6 +710,7 @@ async fn queued_draft_cannot_resurrect_metadata_after_terminal_exit() {
         let _ = client.recv().await.expect("snapshot");
         let terminal_id = spawn_shell(&mut client).await;
         let key = config
+            .terminal
             .backend_key_for(terminal_id)
             .await
             .expect("terminal registered");

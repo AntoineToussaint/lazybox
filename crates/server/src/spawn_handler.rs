@@ -5,7 +5,7 @@
 //!
 //! ## Per-process state on `ServerConfig`
 //!
-//! `ServerConfig::terminals` maps wire `TerminalId` → backend session
+//! `ServerConfig::terminal` maps wire `TerminalId` → backend session
 //! key. Multiple connections (in-process channel + a remote SSH
 //! `lazybox --connect`) share this map so they see the same set.
 //!
@@ -17,14 +17,14 @@
 //!    - `LogTail` → `tail -F path`.
 //! 2. `backend.spawn(argv, cwd, env)` returns a backend session key.
 //! 3. Allocate a fresh `TerminalId`; store the pairing on
-//!    `config.terminals`.
+//!    `config.terminal.terminals`.
 //! 4. `backend.subscribe(key)` → spawn a pump task that fans each
 //!    output chunk to `config.bus` as `Event::TerminalOutput`. When
 //!    the chunk stream ends, await `backend.wait_exit`, emit
 //!    `Event::TerminalExited`, drop the map entry.
 //! 5. Broadcast `Event::TerminalSpawned` to every subscriber.
 
-use crate::{ServerConfig, client_kv, polling, terminal_io};
+use crate::{ServerConfig, SpawnCoordinator, TerminalRegistry, client_kv, polling, terminal_io};
 use chrono::Utc;
 use futures::{StreamExt, stream};
 use lazybox_agents::SpawnCtx;
@@ -510,6 +510,7 @@ async fn agent_state_durability(
     backend_key: &str,
 ) -> Option<AgentStateDurability> {
     let generation = config
+        .terminal
         .agent_state_generations
         .lock()
         .await
@@ -549,14 +550,7 @@ struct StateFold<R> {
 /// the direct-transition wrapper and PTY-reading path route through here;
 /// this is the only production `Event::AgentState` send site.
 async fn fold_and_broadcast_agent_state<R>(
-    terminal_meta: &std::sync::Arc<
-        tokio::sync::Mutex<
-            std::collections::HashMap<TerminalId, (SessionKey, lazybox_ipc::TerminalKind)>,
-        >,
-    >,
-    states: &std::sync::Arc<
-        tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
-    >,
+    terminals: &TerminalRegistry,
     bus: &tokio::sync::broadcast::Sender<Event>,
     durability: &AgentStateDurability,
     id: TerminalId,
@@ -570,11 +564,11 @@ async fn fold_and_broadcast_agent_state<R>(
     reason: &'static str,
     fold: impl FnOnce(Option<lazybox_ipc::AgentState>, bool) -> (R, Option<lazybox_ipc::AgentState>),
 ) -> StateFold<R> {
-    let meta = terminal_meta.lock().await;
+    let meta = terminals.terminal_meta.lock().await;
     let live_session = meta.get(&id).map(|(sk, _)| sk.clone());
     let session_key = live_session.clone().unwrap_or_else(|| captured.clone());
     let terminal_live = live_session.is_some();
-    let mut states = states.lock().await;
+    let mut states = terminals.agent_states.lock().await;
     let previous = states.get(&id).copied();
     let (result, committed) = fold(previous, terminal_live);
     if let Some(state) = committed {
@@ -616,14 +610,7 @@ async fn fold_and_broadcast_agent_state<R>(
 /// lock so current-state-dependent hook mappings and optimistic flips are
 /// compare-and-set operations rather than stale read/modify/write pairs.
 async fn transition_and_broadcast_agent_state(
-    terminal_meta: &std::sync::Arc<
-        tokio::sync::Mutex<
-            std::collections::HashMap<TerminalId, (SessionKey, lazybox_ipc::TerminalKind)>,
-        >,
-    >,
-    states: &std::sync::Arc<
-        tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
-    >,
+    terminals: &TerminalRegistry,
     bus: &tokio::sync::broadcast::Sender<Event>,
     durability: &AgentStateDurability,
     id: TerminalId,
@@ -641,8 +628,7 @@ async fn transition_and_broadcast_agent_state(
         StateSource::Pty => "pty",
     };
     let folded = fold_and_broadcast_agent_state(
-        terminal_meta,
-        states,
+        terminals,
         bus,
         durability,
         id,
@@ -691,7 +677,7 @@ async fn transition_and_broadcast_agent_state(
 
 fn wake_poll_for_terminal_kind(config: &ServerConfig, kind: &TerminalKind) {
     if matches!(kind, TerminalKind::Agent(_)) {
-        config.wake_poll(false);
+        config.poll.wake(false);
     }
 }
 
@@ -806,7 +792,8 @@ pub async fn handle_spawn(
     // path: wait for the winner's terminal, deliver the prompt, focus.
     // Held in a drop guard so every exit path — including the failure
     // returns below — releases the claim.
-    let inflight = match InflightSpawnGuard::try_claim(config, &session_key, &kind, on_main) {
+    let inflight = match InflightSpawnGuard::try_claim(&config.spawn, &session_key, &kind, on_main)
+    {
         Ok(guard) => guard,
         Err(()) => {
             collapse_onto_inflight_spawn(
@@ -1178,6 +1165,7 @@ pub async fn handle_spawn(
     // primary terminal registration.
     if let Some(sid) = owning_session {
         config
+            .terminal
             .terminal_sessions
             .lock()
             .await
@@ -1185,16 +1173,23 @@ pub async fn handle_spawn(
     }
     if skip_permissions {
         config
+            .terminal
             .no_permission_terminals
             .lock()
             .await
             .insert(terminal_id);
     }
     if landed_on_main {
-        config.on_main_terminals.lock().await.insert(terminal_id);
+        config
+            .terminal
+            .on_main_terminals
+            .lock()
+            .await
+            .insert(terminal_id);
     }
     if let Some(label) = &model_label {
         config
+            .terminal
             .terminal_models
             .lock()
             .await
@@ -1210,9 +1205,9 @@ pub async fn handle_spawn(
     // delayed metadata write, then the old spawn payload would resurrect the
     // source ownership in the restart record.
     {
-        let mut terminals = config.terminals.lock().await;
-        let mut terminal_meta = config.terminal_meta.lock().await;
-        let mut agent_state_generations = config.agent_state_generations.lock().await;
+        let mut terminals = config.terminal.terminals.lock().await;
+        let mut terminal_meta = config.terminal.terminal_meta.lock().await;
+        let mut agent_state_generations = config.terminal.agent_state_generations.lock().await;
         terminal_meta.insert(terminal_id, (session_key.clone(), kind.clone()));
         terminals.insert(terminal_id, backend_key.clone());
         if let Some(generation) = agent_state_generation {
@@ -1236,11 +1231,7 @@ pub async fn handle_spawn(
     // cached per-terminal so we only broadcast on transitions.
     let bus = config.bus.clone();
     let backend = config.backend.clone();
-    let agent_states_map = config.agent_states.clone();
-    let agent_detect_resets_map = config.agent_detect_resets.clone();
-    let hook_driven_map = config.hook_driven_terminals.clone();
-    let input_shapes_map = config.input_needed_shapes.clone();
-    let terminal_meta_map = config.terminal_meta.clone();
+    let terminal_registry = config.terminal.clone();
     let state_durability_for_pump = state_durability;
     // Whole-config clone for the shared exit teardown
     // (`teardown_exited_terminal`) — it sweeps every per-terminal map
@@ -1421,15 +1412,12 @@ pub async fn handle_spawn(
                     &mut state_buf,
                     &sub.replay,
                     progress,
-                    &agent_states_map,
+                    &terminal_registry,
                     &bus,
                     state_durability_for_pump.as_ref(),
                     id_for_pump,
                     &session_key_for_pump,
-                    &terminal_meta_map,
                     &mut state_machine,
-                    &hook_driven_map,
-                    &input_shapes_map,
                 )
                 .await;
                 last_chunk_len = sub.replay.len();
@@ -1541,15 +1529,12 @@ pub async fn handle_spawn(
                         &mut state_buf,
                         &snapshot.replay,
                         progress,
-                        &agent_states_map,
+                        &terminal_registry,
                         &bus,
                         state_durability_for_pump.as_ref(),
                         id_for_pump,
                         &session_key_for_pump,
-                        &terminal_meta_map,
                         &mut state_machine,
-                        &hook_driven_map,
-                        &input_shapes_map,
                     )
                     .await;
                     last_chunk_len = snapshot.replay.len();
@@ -1593,7 +1578,11 @@ pub async fn handle_spawn(
                 // with no await in the body, a latent deadlock the moment
                 // one is added).
                 if agent_for_pump.is_some() {
-                    let answered = agent_detect_resets_map.lock().await.remove(&id_for_pump);
+                    let answered = terminal_registry
+                        .agent_detect_resets
+                        .lock()
+                        .await
+                        .remove(&id_for_pump);
                     if answered {
                         state_buf.clear();
                         tracing::debug!(
@@ -1609,15 +1598,12 @@ pub async fn handle_spawn(
                     &mut state_buf,
                     &chunk.bytes,
                     progress,
-                    &agent_states_map,
+                    &terminal_registry,
                     &bus,
                     state_durability_for_pump.as_ref(),
                     id_for_pump,
                     &session_key_for_pump,
-                    &terminal_meta_map,
                     &mut state_machine,
-                    &hook_driven_map,
-                    &input_shapes_map,
                 )
                 .await;
                 last_chunk_len = chunk.bytes.len();
@@ -1683,16 +1669,12 @@ pub async fn handle_spawn(
                             &state_buf,
                             last_chunk_len,
                             lazybox_agents::Liveness::Silent,
-                            &agent_states_map,
+                            &terminal_registry,
                             &bus,
                             state_durability_for_pump.as_ref(),
                             id_for_pump,
                             &session_key_for_pump,
-                            &terminal_meta_map,
                             &mut state_machine,
-                            &hook_driven_map,
-                            &input_shapes_map,
-                            &agent_detect_resets_map,
                         )
                         .await;
                     }
@@ -1727,7 +1709,12 @@ pub async fn handle_spawn(
                         // content stayed put — the gap-1 "keepalive pins
                         // Working" signature; a large one is a genuine silent
                         // stall the quiet timer would also have caught.
-                        if agent_states_map.lock().await.get(&id_for_pump).copied()
+                        if terminal_registry
+                            .agent_states
+                            .lock()
+                            .await
+                            .get(&id_for_pump)
+                            .copied()
                             == Some(lazybox_ipc::AgentState::Working)
                         {
                             if content_stable >= watchdog_window.saturating_mul(2) {
@@ -1755,16 +1742,12 @@ pub async fn handle_spawn(
                             agent_for_pump.as_ref(),
                             &state_buf,
                             last_chunk_len,
-                            &agent_states_map,
+                            &terminal_registry,
                             &bus,
                             state_durability_for_pump.as_ref(),
                             id_for_pump,
                             &session_key_for_pump,
-                            &terminal_meta_map,
                             &mut state_machine,
-                            &hook_driven_map,
-                            &input_shapes_map,
-                            &agent_detect_resets_map,
                         )
                         .await;
                     }
@@ -1856,7 +1839,7 @@ pub async fn handle_spawn(
                 match await_pending_ready(
                     id,
                     &ready_signal,
-                    &config_for_inject.terminals,
+                    &config_for_inject.terminal.terminals,
                     PENDING_READY_CAP,
                 )
                 .await
@@ -3342,7 +3325,7 @@ impl InflightSpawnGuard {
     /// `Kill`'s teardown still waits for it, without introducing any
     /// duplicate-collapse semantics.
     fn try_claim(
-        config: &ServerConfig,
+        coordinator: &SpawnCoordinator,
         session_key: &SessionKey,
         kind: &TerminalKind,
         on_main: bool,
@@ -3362,14 +3345,14 @@ impl InflightSpawnGuard {
         };
         let key = (session_key.as_str().to_string(), target);
         let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
-        let mut set = config.inflight_spawns.lock();
+        let mut set = coordinator.inflight_spawns.lock();
         if exclusive && set.contains_key(&key) {
             return Err(());
         }
         set.insert(key.clone(), cancel.clone());
         Ok(Self {
-            set: config.inflight_spawns.clone(),
-            changed: config.inflight_spawn_changed.clone(),
+            set: coordinator.inflight_spawns.clone(),
+            changed: coordinator.inflight_spawn_changed.clone(),
             key,
             cancel,
         })
@@ -3390,8 +3373,8 @@ impl Drop for InflightSpawnGuard {
 /// child and releases the claim so a retry starts fresh. `notify_one`
 /// stores a permit, so a cancel landing before the winner reaches its
 /// select point is not lost. No-op when nothing is in flight.
-pub(crate) fn handle_cancel_spawn(config: &ServerConfig, session_key: &SessionKey) {
-    let cancels: Vec<_> = config
+pub(crate) fn handle_cancel_spawn(coordinator: &SpawnCoordinator, session_key: &SessionKey) {
+    let cancels: Vec<_> = coordinator
         .inflight_spawns
         .lock()
         .iter()
@@ -3486,7 +3469,7 @@ async fn await_inflight_singleton(
         if let Some(id) = live_singleton(config, session_key, &target, on_main).await {
             return Some(id);
         }
-        let claimed = config.inflight_spawns.lock().contains_key(&claim);
+        let claimed = config.spawn.inflight_spawns.lock().contains_key(&claim);
         if !claimed || tokio::time::Instant::now() >= deadline {
             // Winner released (or we timed out). One final scan closes
             // the insert→release window — the maps are populated before
@@ -3496,7 +3479,7 @@ async fn await_inflight_singleton(
         }
         let _ = tokio::time::timeout(
             Duration::from_millis(100),
-            config.inflight_spawn_changed.notified(),
+            config.spawn.inflight_spawn_changed.notified(),
         )
         .await;
     }
@@ -3515,7 +3498,7 @@ async fn live_singleton(
     on_main: bool,
 ) -> Option<TerminalId> {
     let candidates: Vec<TerminalId> = {
-        let meta = config.terminal_meta.lock().await;
+        let meta = config.terminal.terminal_meta.lock().await;
         meta.iter()
             .filter(|(_, (sk, k))| {
                 sk == session_key && k.singleton_key().as_deref() == Some(target)
@@ -3527,7 +3510,7 @@ async fn live_singleton(
         return None;
     }
     let present: Vec<TerminalId> = {
-        let terminals = config.terminals.lock().await;
+        let terminals = config.terminal.terminals.lock().await;
         candidates
             .into_iter()
             .filter(|id| terminals.contains_key(id))
@@ -3543,7 +3526,7 @@ async fn live_singleton(
     // teardown), so a terminal that's live in `terminals` always has its
     // checkout flag settled here. Reading the set first would open the
     // same TOCTOU `find_existing_singleton` avoids.
-    let on_main_set = config.on_main_terminals.lock().await;
+    let on_main_set = config.terminal.on_main_terminals.lock().await;
     present
         .into_iter()
         .find(|id| on_main_set.contains(id) == on_main)
@@ -3560,10 +3543,10 @@ const KILL_INFLIGHT_WAIT: Duration = Duration::from_secs(30);
 /// provisioning into it. Without this, Kill could delete the worktree
 /// mid-provision and the spawn would re-create it (plus a terminal)
 /// right after teardown.
-pub(crate) async fn await_inflight_spawns(config: &ServerConfig, workspace_key: &str) {
+pub(crate) async fn await_inflight_spawns(coordinator: &SpawnCoordinator, workspace_key: &str) {
     let deadline = tokio::time::Instant::now() + KILL_INFLIGHT_WAIT;
     loop {
-        let busy = config
+        let busy = coordinator
             .inflight_spawns
             .lock()
             .keys()
@@ -3580,7 +3563,7 @@ pub(crate) async fn await_inflight_spawns(config: &ServerConfig, workspace_key: 
         }
         let _ = tokio::time::timeout(
             Duration::from_millis(100),
-            config.inflight_spawn_changed.notified(),
+            coordinator.inflight_spawn_changed.notified(),
         )
         .await;
     }
@@ -3605,8 +3588,13 @@ pub(crate) async fn await_inflight_spawns(config: &ServerConfig, workspace_key: 
 /// tombstone lived forever: recreating a same-name workspace reuses
 /// the same key, and every spawn on the new row was silently killed.
 pub(crate) fn release_delete_tombstone(config: &ServerConfig, workspace_key: &str) {
-    let still_busy =
-        |cfg: &ServerConfig, key: &str| cfg.inflight_spawns.lock().keys().any(|(ws, _)| ws == key);
+    let still_busy = |cfg: &ServerConfig, key: &str| {
+        cfg.spawn
+            .inflight_spawns
+            .lock()
+            .keys()
+            .any(|(ws, _)| ws == key)
+    };
     if !still_busy(config, workspace_key) {
         config.deleted_workspaces.lock().remove(workspace_key);
         return;
@@ -3625,7 +3613,7 @@ pub(crate) fn release_delete_tombstone(config: &ServerConfig, workspace_key: &st
             }
             let _ = tokio::time::timeout(
                 Duration::from_millis(200),
-                config.inflight_spawn_changed.notified(),
+                config.spawn.inflight_spawn_changed.notified(),
             )
             .await;
         }
@@ -4096,18 +4084,18 @@ async fn finish_terminal(
     // session the daemon has declared detached. Once the mapping is removed,
     // queued interaction waiters acquire this guard in turn, fail their
     // liveness re-check, and leave without touching the backend.
-    let _io_guard = config.lock_terminal_io(backend_key).await;
+    let _io_guard = config.terminal.lock_terminal_io(backend_key).await;
     // Background draft/user-message persistence is independent from the PTY
     // input lane. Serialize its final write with the entire teardown claim +
     // kv sweep: persistence that won first completes before our deletes;
     // persistence that lost re-checks the removed terminal mapping and skips.
     // Either ordering ends with no orphan rows.
-    let _persistence_guard = config.lock_terminal_persistence(backend_key).await;
+    let _persistence_guard = config.terminal.lock_terminal_persistence(backend_key).await;
     // Atomically claim the wire terminal. Forced workspace deletion and the
     // output pump can race to finish the same child; only the winner emits
     // lifecycle events and sweeps bookkeeping. The output-pump loser still
     // releases the backend slot after observing the real exit.
-    let registered_key = config.terminals.lock().await.remove(&terminal_id);
+    let registered_key = config.terminal.terminals.lock().await.remove(&terminal_id);
     match registered_key.as_deref() {
         Some(key) if key == backend_key => {}
         Some(other) => {
@@ -4118,20 +4106,25 @@ async fn finish_terminal(
                 "terminal teardown key mismatch — refusing to sweep the wrong terminal",
             );
             config
+                .terminal
                 .terminals
                 .lock()
                 .await
                 .insert(terminal_id, other.to_string());
-            config.forget_terminal_persistence_lock(backend_key);
-            config.forget_terminal_io_lock(backend_key);
+            config
+                .terminal
+                .forget_terminal_persistence_lock(backend_key);
+            config.terminal.forget_terminal_io_lock(backend_key);
             return;
         }
         None => {
             if release_backend {
                 config.backend.release(backend_key).await;
             }
-            config.forget_terminal_persistence_lock(backend_key);
-            config.forget_terminal_io_lock(backend_key);
+            config
+                .terminal
+                .forget_terminal_persistence_lock(backend_key);
+            config.terminal.forget_terminal_io_lock(backend_key);
             return;
         }
     }
@@ -4141,7 +4134,13 @@ async fn finish_terminal(
     // issue #355) left no trace in the log, so #356 read as "the whole
     // workspace just vanished". Announce every exit with its status and
     // owning session/kind so the log makes an abnormal exit obvious.
-    let meta = config.terminal_meta.lock().await.get(&terminal_id).cloned();
+    let meta = config
+        .terminal
+        .terminal_meta
+        .lock()
+        .await
+        .get(&terminal_id)
+        .cloned();
     let (session, kind) = match &meta {
         Some((session_key, kind)) => (Some(session_key.as_str()), Some(kind)),
         None => (None, None),
@@ -4205,8 +4204,7 @@ async fn finish_terminal(
         && let Some(durability) = agent_state_durability(config, terminal_id, backend_key).await
     {
         transition_and_broadcast_agent_state(
-            &config.terminal_meta,
-            &config.agent_states,
+            &config.terminal,
             &config.bus,
             &durability,
             terminal_id,
@@ -4228,38 +4226,78 @@ async fn finish_terminal(
     // co-held here — each
     // `.lock().await.remove(...)` releases at end-of-statement.
     // `crate::TERMINAL_MAP_LOCK_ORDER` applies to co-holding sites only.
-    config.terminal_sessions.lock().await.remove(&terminal_id);
-    config.agent_detect_resets.lock().await.remove(&terminal_id);
     config
+        .terminal
+        .terminal_sessions
+        .lock()
+        .await
+        .remove(&terminal_id);
+    config
+        .terminal
+        .agent_detect_resets
+        .lock()
+        .await
+        .remove(&terminal_id);
+    config
+        .terminal
         .hook_driven_terminals
         .lock()
         .await
         .remove(&terminal_id);
     config
+        .spawn
         .prompt_submit_signals
         .lock()
         .await
         .remove(&terminal_id);
-    config.input_needed_shapes.lock().await.remove(&terminal_id);
+    config
+        .terminal
+        .input_needed_shapes
+        .lock()
+        .await
+        .remove(&terminal_id);
     // Close the state owner's live-terminal ingress gate before dropping the
     // absorbing Exited tombstone. Reversing these two removals creates a
     // window where a delayed hook sees `(meta: live, state: None)` and
     // resurrects the terminal from its first reading.
-    config.terminal_meta.lock().await.remove(&terminal_id);
-    config.agent_states.lock().await.remove(&terminal_id);
+    config
+        .terminal
+        .terminal_meta
+        .lock()
+        .await
+        .remove(&terminal_id);
+    config
+        .terminal
+        .agent_states
+        .lock()
+        .await
+        .remove(&terminal_id);
     let agent_state_generation = config
+        .terminal
         .agent_state_generations
         .lock()
         .await
         .remove(&terminal_id);
     config
+        .terminal
         .no_permission_terminals
         .lock()
         .await
         .remove(&terminal_id);
-    config.on_main_terminals.lock().await.remove(&terminal_id);
-    config.terminal_models.lock().await.remove(&terminal_id);
     config
+        .terminal
+        .on_main_terminals
+        .lock()
+        .await
+        .remove(&terminal_id);
+    config
+        .terminal
+        .terminal_models
+        .lock()
+        .await
+        .remove(&terminal_id);
+    config
+        .terminal
         .outdated_agent_terminals
         .lock()
         .await
@@ -4291,8 +4329,10 @@ async fn finish_terminal(
     // tidy. Reconstructed from the id, no bookkeeping needed.
     let _ = std::fs::remove_file(hook_settings_path(terminal_id));
     let _ = std::fs::remove_file(hook_backend_key_path(terminal_id));
-    config.forget_terminal_persistence_lock(backend_key);
-    config.forget_terminal_io_lock(backend_key);
+    config
+        .terminal
+        .forget_terminal_persistence_lock(backend_key);
+    config.terminal.forget_terminal_io_lock(backend_key);
 }
 
 /// Ingest one PTY output chunk for a terminal: append it to the rolling
@@ -4318,25 +4358,12 @@ async fn note_pty_activity(
     // the byte-flow `Working` reading so a progress streak can re-open
     // `Working` from `Done` (#398).
     progress: bool,
-    states: &std::sync::Arc<
-        tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
-    >,
+    terminals: &TerminalRegistry,
     bus: &tokio::sync::broadcast::Sender<Event>,
     durability: Option<&AgentStateDurability>,
     id: TerminalId,
     session_key: &SessionKey,
-    terminal_meta: &std::sync::Arc<
-        tokio::sync::Mutex<
-            std::collections::HashMap<TerminalId, (SessionKey, lazybox_ipc::TerminalKind)>,
-        >,
-    >,
     state_machine: &mut lazybox_agents::AgentStateMachine,
-    hook_driven: &std::sync::Arc<
-        tokio::sync::Mutex<std::collections::HashMap<TerminalId, std::time::Instant>>,
-    >,
-    input_shapes: &std::sync::Arc<
-        tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_agents::PromptShape>>,
-    >,
 ) {
     const STATE_BUF_CAP: usize = 32 * 1024;
     let Some(agent) = agent else {
@@ -4366,7 +4393,7 @@ async fn note_pty_activity(
     let immediate_shape =
         agent.detect_input_needed_in_current_chunk(detect_window, last_chunk_start);
     let pty = if let Some(shape) = immediate_shape {
-        input_shapes.lock().await.insert(id, shape);
+        terminals.input_needed_shapes.lock().await.insert(id, shape);
         lazybox_agents::PtyReading {
             state: lazybox_ipc::AgentState::InputNeeded,
             clear: true,
@@ -4387,14 +4414,12 @@ async fn note_pty_activity(
         agent,
         detect_window,
         pty,
-        states,
+        terminals,
         bus,
         durability,
         id,
         session_key,
-        terminal_meta,
         state_machine,
-        hook_driven,
     )
     .await;
 }
@@ -4421,26 +4446,12 @@ async fn classify_quiet_screen(
     // [`Liveness::Watchdog`] from the configured content-stability bound.
     // Both are authoritative inactivity evidence while `Working`.
     liveness: lazybox_agents::Liveness,
-    states: &std::sync::Arc<
-        tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
-    >,
+    terminals: &TerminalRegistry,
     bus: &tokio::sync::broadcast::Sender<Event>,
     durability: Option<&AgentStateDurability>,
     id: TerminalId,
     session_key: &SessionKey,
-    terminal_meta: &std::sync::Arc<
-        tokio::sync::Mutex<
-            std::collections::HashMap<TerminalId, (SessionKey, lazybox_ipc::TerminalKind)>,
-        >,
-    >,
     state_machine: &mut lazybox_agents::AgentStateMachine,
-    hook_driven: &std::sync::Arc<
-        tokio::sync::Mutex<std::collections::HashMap<TerminalId, std::time::Instant>>,
-    >,
-    input_shapes: &std::sync::Arc<
-        tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_agents::PromptShape>>,
-    >,
-    detect_resets: &std::sync::Arc<tokio::sync::Mutex<std::collections::HashSet<TerminalId>>>,
 ) {
     let Some(agent) = agent else {
         return;
@@ -4472,7 +4483,7 @@ async fn classify_quiet_screen(
     // terminal settles here. Leave the reset latched: a late chunk still
     // clears the stale buffer via the pump's chunk arm, and by then the state
     // is `Done`.
-    if detect_resets.lock().await.contains(&id) {
+    if terminals.agent_detect_resets.lock().await.contains(&id) {
         commit_pty_reading(
             agent,
             detect_window(buf),
@@ -4483,14 +4494,12 @@ async fn classify_quiet_screen(
                 liveness: lazybox_agents::Liveness::Stalled,
                 ready_for_prompt: false,
             },
-            states,
+            terminals,
             bus,
             durability,
             id,
             session_key,
-            terminal_meta,
             state_machine,
-            hook_driven,
         )
         .await;
         return;
@@ -4521,7 +4530,7 @@ async fn classify_quiet_screen(
                 // Shape comes from the adapter's semantic observation rather
                 // than being guessed here. Recorded before state dedupe so a
                 // re-rendered prompt can refresh its interaction contract.
-                input_shapes.lock().await.insert(id, shape);
+                terminals.input_needed_shapes.lock().await.insert(id, shape);
             }
             new_state
         }
@@ -4560,14 +4569,12 @@ async fn classify_quiet_screen(
         agent,
         detect_window,
         pty,
-        states,
+        terminals,
         bus,
         durability,
         id,
         session_key,
-        terminal_meta,
         state_machine,
-        hook_driven,
     )
     .await;
 }
@@ -4594,26 +4601,12 @@ async fn watchdog_escape_working(
     agent: Option<&std::sync::Arc<dyn lazybox_agents::Agent>>,
     buf: &[u8],
     last_chunk_len: usize,
-    states: &std::sync::Arc<
-        tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
-    >,
+    terminals: &TerminalRegistry,
     bus: &tokio::sync::broadcast::Sender<Event>,
     durability: Option<&AgentStateDurability>,
     id: TerminalId,
     session_key: &SessionKey,
-    terminal_meta: &std::sync::Arc<
-        tokio::sync::Mutex<
-            std::collections::HashMap<TerminalId, (SessionKey, lazybox_ipc::TerminalKind)>,
-        >,
-    >,
     state_machine: &mut lazybox_agents::AgentStateMachine,
-    hook_driven: &std::sync::Arc<
-        tokio::sync::Mutex<std::collections::HashMap<TerminalId, std::time::Instant>>,
-    >,
-    input_shapes: &std::sync::Arc<
-        tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_agents::PromptShape>>,
-    >,
-    detect_resets: &std::sync::Arc<tokio::sync::Mutex<std::collections::HashSet<TerminalId>>>,
 ) {
     let Some(agent) = agent else {
         return;
@@ -4625,7 +4618,9 @@ async fn watchdog_escape_working(
         );
         return;
     };
-    if states.lock().await.get(&id).copied() != Some(lazybox_ipc::AgentState::Working) {
+    if terminals.agent_states.lock().await.get(&id).copied()
+        != Some(lazybox_ipc::AgentState::Working)
+    {
         return;
     }
     // A pending answer reset normally vetoes the whole tick: the buffer
@@ -4641,7 +4636,7 @@ async fn watchdog_escape_working(
     // watchdog bound is authoritative even for a fresh-hook terminal. Leave
     // the reset latched — a late chunk clears the buffer via the chunk arm,
     // and by then the state is `Done`, so the watchdog no-ops.
-    let answered = detect_resets.lock().await.contains(&id);
+    let answered = terminals.agent_detect_resets.lock().await.contains(&id);
     if !answered {
         classify_quiet_screen(
             Some(agent),
@@ -4651,19 +4646,17 @@ async fn watchdog_escape_working(
             // ticking counter can keep the stream alive. This evidence is
             // the configured upper bound even when the last hook is fresh.
             lazybox_agents::Liveness::Watchdog,
-            states,
+            terminals,
             bus,
             Some(durability),
             id,
             session_key,
-            terminal_meta,
             state_machine,
-            hook_driven,
-            input_shapes,
-            detect_resets,
         )
         .await;
-        if states.lock().await.get(&id).copied() != Some(lazybox_ipc::AgentState::Working) {
+        if terminals.agent_states.lock().await.get(&id).copied()
+            != Some(lazybox_ipc::AgentState::Working)
+        {
             return;
         }
     }
@@ -4682,14 +4675,12 @@ async fn watchdog_escape_working(
             liveness: lazybox_agents::Liveness::Watchdog,
             ready_for_prompt: false,
         },
-        states,
+        terminals,
         bus,
         durability,
         id,
         session_key,
-        terminal_meta,
         state_machine,
-        hook_driven,
     )
     .await;
 }
@@ -4705,9 +4696,7 @@ async fn commit_pty_reading(
     agent: &std::sync::Arc<dyn lazybox_agents::Agent>,
     detect_window: &[u8],
     pty: lazybox_agents::PtyReading,
-    states: &std::sync::Arc<
-        tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
-    >,
+    terminals: &TerminalRegistry,
     bus: &tokio::sync::broadcast::Sender<Event>,
     durability: &AgentStateDurability,
     id: TerminalId,
@@ -4716,15 +4705,7 @@ async fn commit_pty_reading(
     // terminal rebadged onto a PR (issue→PR collapse) broadcasts
     // its state under the PR session, not the deleted issue one.
     session_key: &SessionKey,
-    terminal_meta: &std::sync::Arc<
-        tokio::sync::Mutex<
-            std::collections::HashMap<TerminalId, (SessionKey, lazybox_ipc::TerminalKind)>,
-        >,
-    >,
     state_machine: &mut lazybox_agents::AgentStateMachine,
-    hook_driven: &std::sync::Arc<
-        tokio::sync::Mutex<std::collections::HashMap<TerminalId, std::time::Instant>>,
-    >,
 ) {
     // The pump gathers facts and defers every decision to the state
     // machine (`on_pty_reading`), which owns the whole hooks-primary gate
@@ -4738,7 +4719,12 @@ async fn commit_pty_reading(
     // "gated" and "folded", never fabricates a state), the transition
     // table re-validates whatever folds, and the very next chunk re-reads
     // a fresh age — the same read-then-decide shape the pre-gate pump had.
-    let since_last_hook = hook_driven.lock().await.get(&id).map(|at| at.elapsed());
+    let since_last_hook = terminals
+        .hook_driven_terminals
+        .lock()
+        .await
+        .get(&id)
+        .map(|at| at.elapsed());
     // The liveness tier that produced this reading is the PTY path's "why"
     // (#538): a byte-silent quiet-timer settle, a content-stable watchdog
     // force, or ordinary streaming (a live dialog surfacing, or a byte-flow
@@ -4757,8 +4743,7 @@ async fn commit_pty_reading(
     // concurrent hook/exit to commit second but publish first, presenting the
     // client with a state older than the cache.
     let folded = fold_and_broadcast_agent_state(
-        terminal_meta,
-        states,
+        terminals,
         bus,
         durability,
         id,
@@ -4836,7 +4821,7 @@ pub async fn handle_fetch_scrollback(
     tx: &lazybox_ipc::EventSender,
     terminal_id: TerminalId,
 ) {
-    let Some(key) = config.backend_key_for(terminal_id).await else {
+    let Some(key) = config.terminal.backend_key_for(terminal_id).await else {
         tracing::trace!("scrollback fetch for unknown terminal {terminal_id:?}");
         return;
     };
@@ -4874,7 +4859,7 @@ pub(crate) async fn handle_write_batch(
     for bytes in writes {
         joined.extend_from_slice(bytes);
     }
-    let Some(key) = config.backend_key_for(terminal_id).await else {
+    let Some(key) = config.terminal.backend_key_for(terminal_id).await else {
         tracing::trace!("write to unknown terminal {terminal_id:?}");
         return false;
     };
@@ -4934,7 +4919,7 @@ pub(crate) async fn handle_write_batch(
         Some(lazybox_ipc::AgentState::Done) => pressed_enter,
         _ => false,
     };
-    if !flippable(config.agent_state_for(terminal_id).await) {
+    if !flippable(config.terminal.agent_state_for(terminal_id).await) {
         return true;
     }
     // A bare chooser keystroke only ANSWERS chooser/permission-shaped
@@ -4948,6 +4933,7 @@ pub(crate) async fn handle_write_batch(
     // with no recorded shape we conservatively don't flip on a bare key.
     if !pressed_enter {
         let shape = config
+            .terminal
             .input_needed_shapes
             .lock()
             .await
@@ -4963,6 +4949,7 @@ pub(crate) async fn handle_write_batch(
         }
     }
     let session_key = config
+        .terminal
         .terminal_meta
         .lock()
         .await
@@ -4982,8 +4969,7 @@ pub(crate) async fn handle_write_batch(
     // commits here, since both `InputNeeded → Working` and `Done → Working`
     // are legal, state-changing edges).
     let transition = transition_and_broadcast_agent_state(
-        &config.terminal_meta,
-        &config.agent_states,
+        &config.terminal,
         &config.bus,
         &durability,
         terminal_id,
@@ -5002,7 +4988,12 @@ pub(crate) async fn handle_write_batch(
     // back on until ~16 KiB of fresh output finally evicts the stale
     // prompt. (The regression behind issue #101: "the ? won't go away
     // after I answer.")
-    config.agent_detect_resets.lock().await.insert(terminal_id);
+    config
+        .terminal
+        .agent_detect_resets
+        .lock()
+        .await
+        .insert(terminal_id);
     true
 }
 
@@ -5135,6 +5126,7 @@ async fn prepare_submit_confirmation(
 ) -> SubmitConfirmation {
     let signal = std::sync::Arc::new(tokio::sync::Notify::new());
     config
+        .spawn
         .prompt_submit_signals
         .lock()
         .await
@@ -5143,7 +5135,7 @@ async fn prepare_submit_confirmation(
         terminal_id,
         signal,
         events: config.bus.subscribe(),
-        signals_map: config.prompt_submit_signals.clone(),
+        signals_map: config.spawn.prompt_submit_signals.clone(),
         bus: config.bus.clone(),
     }
 }
@@ -5184,7 +5176,7 @@ async fn confirm_prompt_submission(
             &confirm.signal,
             &mut confirm.events,
             confirm.terminal_id,
-            &config.agent_states,
+            &config.terminal.agent_states,
             wait,
         )
         .await
@@ -5196,7 +5188,7 @@ async fn confirm_prompt_submission(
         // permission gate / chooser, that dialog owns input and a bare
         // Enter would ANSWER it (typically "Yes"). Abort instead; the
         // loud failure below tells the user the prompt didn't start.
-        if config.agent_state_for(confirm.terminal_id).await
+        if config.terminal.agent_state_for(confirm.terminal_id).await
             == Some(lazybox_ipc::AgentState::InputNeeded)
         {
             blocked_on_input = true;
@@ -5469,8 +5461,8 @@ struct PendingInjectionGuard {
 }
 
 impl PendingInjectionGuard {
-    fn claim(config: &ServerConfig, terminal_id: TerminalId) -> Option<Self> {
-        let pending = config.pending_prompt_injections.clone();
+    fn claim(coordinator: &SpawnCoordinator, terminal_id: TerminalId) -> Option<Self> {
+        let pending = coordinator.pending_prompt_injections.clone();
         if !pending.lock().insert(terminal_id) {
             return None;
         }
@@ -5525,7 +5517,7 @@ async fn handle_inject_prompt_inner(
     // lives for the entire match arm. The helpers acquire-then-drop
     // the lock inside one method call so no guard can outlive the
     // scrutinee.
-    let backend_key = match config.backend_key_for(terminal_id).await {
+    let backend_key = match config.terminal.backend_key_for(terminal_id).await {
         Some(k) => k,
         None => {
             // The TUI's cached terminal id is stale — the agent died
@@ -5568,7 +5560,7 @@ async fn handle_inject_prompt_inner(
             return;
         }
     };
-    let kind = match config.terminal_meta_for(terminal_id).await {
+    let kind = match config.terminal.terminal_meta_for(terminal_id).await {
         Some((_session_key, kind)) => kind,
         None => {
             tracing::debug!("inject_prompt: no terminal_meta for {terminal_id:?} — skipping");
@@ -5604,7 +5596,7 @@ async fn handle_inject_prompt_inner(
     // per-terminal reservation every repeated `w` press spawned another
     // waiter, and all of them pasted once the gate cleared. Reject duplicates
     // explicitly instead of growing background work and duplicating input.
-    let Some(pending_injection) = PendingInjectionGuard::claim(config, terminal_id) else {
+    let Some(pending_injection) = PendingInjectionGuard::claim(&config.spawn, terminal_id) else {
         let _ = config.bus.send(Event::TerminalInputRejected {
             terminal_id,
             message: "a prompt injection is already waiting for this agent — answer its prompt before retrying"
@@ -5625,9 +5617,9 @@ async fn handle_inject_prompt_inner(
     // Subscribe BEFORE reading the current state so a transition that
     // races between the read and the wait isn't missed.
     let events = config.bus.subscribe();
-    let blocked =
-        config.agent_state_for(terminal_id).await == Some(lazybox_ipc::AgentState::InputNeeded);
-    let states = config.agent_states.clone();
+    let blocked = config.terminal.agent_state_for(terminal_id).await
+        == Some(lazybox_ipc::AgentState::InputNeeded);
+    let states = config.terminal.agent_states.clone();
     let bus = config.bus.clone();
     let id = terminal_id;
     let config_for_confirm = config.clone();
@@ -5759,7 +5751,7 @@ pub async fn handle_deliver_snippet(
     category: String,
     body: String,
 ) {
-    let Some((session_key, kind)) = config.terminal_meta_for(terminal_id).await else {
+    let Some((session_key, kind)) = config.terminal.terminal_meta_for(terminal_id).await else {
         let _ = config.bus.send(Event::TerminalInputRejected {
             terminal_id,
             message: "snippet was not delivered because the terminal is no longer running".into(),
@@ -5833,7 +5825,7 @@ fn encode_shell_snippet(body: &str) -> Vec<u8> {
 }
 
 pub async fn handle_resize(config: &ServerConfig, terminal_id: TerminalId, cols: u16, rows: u16) {
-    let Some(key) = config.backend_key_for(terminal_id).await else {
+    let Some(key) = config.terminal.backend_key_for(terminal_id).await else {
         return;
     };
     if let Err(error) = terminal_io::resize_live(config, terminal_id, &key, cols, rows).await {
@@ -5847,7 +5839,7 @@ pub async fn handle_resize(config: &ServerConfig, terminal_id: TerminalId, cols:
 /// drains remaining output, observes the stream close, and owns the eventual
 /// `Event::TerminalExited`.
 pub async fn handle_close(config: &ServerConfig, terminal_id: TerminalId) -> bool {
-    let Some(key) = config.backend_key_for(terminal_id).await else {
+    let Some(key) = config.terminal.backend_key_for(terminal_id).await else {
         return true;
     };
     let Some(_guard) = terminal_io::acquire_live(config, terminal_id, &key).await else {
@@ -5903,7 +5895,7 @@ pub async fn handle_ingest_hook(
     let terminal_id = match backend_key.as_deref() {
         Some(key) => {
             let resolved = {
-                let terminals = config.terminals.lock().await;
+                let terminals = config.terminal.terminals.lock().await;
                 terminals
                     .iter()
                     .find_map(|(id, k)| (k == key).then_some(*id))
@@ -5926,7 +5918,7 @@ pub async fn handle_ingest_hook(
     // resolved but meta already swept) is dropped without marking
     // anything hook-driven.
     let session_key = {
-        let meta = config.terminal_meta.lock().await;
+        let meta = config.terminal.terminal_meta.lock().await;
         match meta.get(&terminal_id) {
             Some((sk, _)) => sk.clone(),
             None => {
@@ -5942,6 +5934,7 @@ pub async fn handle_ingest_hook(
     // change (e.g. SessionStart) — the signal is "this terminal speaks
     // hooks", not the specific transition.
     config
+        .terminal
         .hook_driven_terminals
         .lock()
         .await
@@ -5951,7 +5944,12 @@ pub async fn handle_ingest_hook(
     // entered Claude's turn (issue #122's failure is the prompt parked
     // in the composer, which fires nothing).
     if hook.kind == lazybox_ipc::HookEventKind::UserPromptSubmit
-        && let Some(signal) = config.prompt_submit_signals.lock().await.get(&terminal_id)
+        && let Some(signal) = config
+            .spawn
+            .prompt_submit_signals
+            .lock()
+            .await
+            .get(&terminal_id)
     {
         signal.notify_one();
     }
@@ -5970,8 +5968,7 @@ pub async fn handle_ingest_hook(
         return;
     };
     let transition = transition_and_broadcast_agent_state(
-        &config.terminal_meta,
-        &config.agent_states,
+        &config.terminal,
         &config.bus,
         &durability,
         terminal_id,
@@ -5989,7 +5986,7 @@ pub async fn handle_ingest_hook(
     // vice versa, must update the gate), and OUTSIDE the states guard so
     // the two maps are never co-held.
     if new_state == lazybox_ipc::AgentState::InputNeeded {
-        config.input_needed_shapes.lock().await.insert(
+        config.terminal.input_needed_shapes.lock().await.insert(
             terminal_id,
             lazybox_agents::hook::notification_prompt_shape(hook.notification.as_deref()),
         );
@@ -6093,7 +6090,7 @@ async fn pump_recovered_session(
                 }
                 last_seq = chunk.seq;
                 if agent.is_some()
-                    && config.agent_detect_resets.lock().await.remove(&terminal_id)
+                    && config.terminal.agent_detect_resets.lock().await.remove(&terminal_id)
                 {
                     state_buf.clear();
                 }
@@ -6104,15 +6101,12 @@ async fn pump_recovered_session(
                     &mut state_buf,
                     &chunk.bytes,
                     progress,
-                    &config.agent_states,
+                    &config.terminal,
                     &config.bus,
                     durability,
                     terminal_id,
                     session_key,
-                    &config.terminal_meta,
                     &mut state_machine,
-                    &config.hook_driven_terminals,
-                    &config.input_needed_shapes,
                 )
                 .await;
                 last_chunk_len = chunk.bytes.len();
@@ -6139,16 +6133,12 @@ async fn pump_recovered_session(
                     &state_buf,
                     last_chunk_len,
                     lazybox_agents::Liveness::Silent,
-                    &config.agent_states,
+                    &config.terminal,
                     &config.bus,
                     durability,
                     terminal_id,
                     session_key,
-                    &config.terminal_meta,
                     &mut state_machine,
-                    &config.hook_driven_terminals,
-                    &config.input_needed_shapes,
-                    &config.agent_detect_resets,
                 )
                 .await;
             }
@@ -6162,16 +6152,12 @@ async fn pump_recovered_session(
                     agent.as_ref(),
                     &state_buf,
                     last_chunk_len,
-                    &config.agent_states,
+                    &config.terminal,
                     &config.bus,
                     durability,
                     terminal_id,
                     session_key,
-                    &config.terminal_meta,
                     &mut state_machine,
-                    &config.hook_driven_terminals,
-                    &config.input_needed_shapes,
-                    &config.agent_detect_resets,
                 )
                 .await;
             }
@@ -6276,10 +6262,10 @@ pub async fn recover_sessions(config: &ServerConfig) {
         // or workspace-rebadge readers from observing a backend id without
         // its durable workspace owner (or vice versa).
         {
-            let mut terminals = config.terminals.lock().await;
-            let mut terminal_meta = config.terminal_meta.lock().await;
-            let mut agent_state_generations = config.agent_state_generations.lock().await;
-            let mut agent_states = config.agent_states.lock().await;
+            let mut terminals = config.terminal.terminals.lock().await;
+            let mut terminal_meta = config.terminal.terminal_meta.lock().await;
+            let mut agent_state_generations = config.terminal.agent_state_generations.lock().await;
+            let mut agent_states = config.terminal.agent_states.lock().await;
             terminal_meta.insert(terminal_id, (session_key.clone(), kind.clone()));
             terminals.insert(terminal_id, key.clone());
             if let Some((durability, state)) = &recovered_agent {
@@ -6304,6 +6290,7 @@ pub async fn recover_sessions(config: &ServerConfig) {
         }
         if no_permission {
             config
+                .terminal
                 .no_permission_terminals
                 .lock()
                 .await
@@ -6311,6 +6298,7 @@ pub async fn recover_sessions(config: &ServerConfig) {
         }
         if outdated_launch {
             config
+                .terminal
                 .outdated_agent_terminals
                 .lock()
                 .await
@@ -6347,6 +6335,7 @@ pub async fn recover_sessions(config: &ServerConfig) {
             let mut failures = 0u32;
             loop {
                 if config_for_pump
+                    .terminal
                     .backend_key_for(terminal_id)
                     .await
                     .as_deref()
@@ -6367,6 +6356,7 @@ pub async fn recover_sessions(config: &ServerConfig) {
                 match subscribe_result {
                     Ok(sub) => {
                         let current_state = config_for_pump
+                            .terminal
                             .agent_states
                             .lock()
                             .await
@@ -6510,10 +6500,10 @@ async fn reconcile_missing_recovered_sessions(
             None
         };
         {
-            let mut terminals = config.terminals.lock().await;
-            let mut terminal_meta = config.terminal_meta.lock().await;
-            let mut generations = config.agent_state_generations.lock().await;
-            let mut states = config.agent_states.lock().await;
+            let mut terminals = config.terminal.terminals.lock().await;
+            let mut terminal_meta = config.terminal.terminal_meta.lock().await;
+            let mut generations = config.terminal.agent_state_generations.lock().await;
+            let mut states = config.terminal.agent_states.lock().await;
             terminals.insert(terminal_id, backend_key.to_string());
             terminal_meta.insert(terminal_id, (session_key, kind));
             if let Some((durability, state)) = &recovered_agent {
@@ -6772,12 +6762,21 @@ pub async fn handle_record_user_message(
     terminal_id: TerminalId,
     prompt: &UserPrompt,
 ) {
-    let Some(backend_key) = config.backend_key_for(terminal_id).await else {
+    let Some(backend_key) = config.terminal.backend_key_for(terminal_id).await else {
         tracing::trace!("record user message for unknown terminal {terminal_id:?}");
         return;
     };
-    let _guard = config.lock_terminal_persistence(&backend_key).await;
-    if config.backend_key_for(terminal_id).await.as_deref() != Some(backend_key.as_str()) {
+    let _guard = config
+        .terminal
+        .lock_terminal_persistence(&backend_key)
+        .await;
+    if config
+        .terminal
+        .backend_key_for(terminal_id)
+        .await
+        .as_deref()
+        != Some(backend_key.as_str())
+    {
         tracing::debug!(
             ?terminal_id,
             %backend_key,
@@ -6883,12 +6882,21 @@ pub async fn handle_record_composing_buffer(
     terminal_id: TerminalId,
     buffer: &str,
 ) {
-    let Some(backend_key) = config.backend_key_for(terminal_id).await else {
+    let Some(backend_key) = config.terminal.backend_key_for(terminal_id).await else {
         tracing::trace!("record composing buffer for unknown terminal {terminal_id:?}");
         return;
     };
-    let _guard = config.lock_terminal_persistence(&backend_key).await;
-    if config.backend_key_for(terminal_id).await.as_deref() != Some(backend_key.as_str()) {
+    let _guard = config
+        .terminal
+        .lock_terminal_persistence(&backend_key)
+        .await;
+    if config
+        .terminal
+        .backend_key_for(terminal_id)
+        .await
+        .as_deref()
+        != Some(backend_key.as_str())
+    {
         tracing::debug!(
             ?terminal_id,
             %backend_key,
@@ -6944,9 +6952,9 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
         TerminalKind,
         Option<lazybox_ipc::AgentState>,
     )> = {
-        let map = config.terminals.lock().await;
-        let meta = config.terminal_meta.lock().await;
-        let agent_states = config.agent_states.lock().await;
+        let map = config.terminal.terminals.lock().await;
+        let meta = config.terminal.terminal_meta.lock().await;
+        let agent_states = config.terminal.agent_states.lock().await;
         map.iter()
             .filter_map(|(id, key)| {
                 // Skip orphaned ids (terminals map says yes,
@@ -6970,9 +6978,9 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
             })
             .collect()
     };
-    let no_permission = config.no_permission_terminals.lock().await.clone();
-    let on_main = config.on_main_terminals.lock().await.clone();
-    let terminal_models = config.terminal_models.lock().await.clone();
+    let no_permission = config.terminal.no_permission_terminals.lock().await.clone();
+    let on_main = config.terminal.on_main_terminals.lock().await.clone();
+    let terminal_models = config.terminal.terminal_models.lock().await.clone();
 
     // Assemble independent terminals concurrently. `buffered` preserves the
     // stable map-entry order while capping fan-out; one wedged session now
@@ -7077,7 +7085,13 @@ pub async fn handle_terminal_resync_request(
     terminal_id: TerminalId,
     required_seq: u64,
 ) {
-    let key = config.terminals.lock().await.get(&terminal_id).cloned();
+    let key = config
+        .terminal
+        .terminals
+        .lock()
+        .await
+        .get(&terminal_id)
+        .cloned();
     let Some(key) = key else {
         let _ = tx.send(Event::TerminalResyncUnavailable { terminal_id });
         return;
@@ -7147,7 +7161,7 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
 
     // Snapshot live (session_key, kind) pairs so we can dedupe.
     let mut live: std::collections::HashSet<(String, String)> = {
-        let meta = config.terminal_meta.lock().await;
+        let meta = config.terminal.terminal_meta.lock().await;
         meta.values()
             .map(|(sk, k)| (sk.as_str().to_string(), kind_id(k)))
             .collect()
@@ -7479,7 +7493,7 @@ mod tests {
         assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(10),
-                config.poll_wake.notified(),
+                config.poll.wake_signal.notified(),
             )
             .await
             .is_err()
@@ -7488,12 +7502,12 @@ mod tests {
         wake_poll_for_terminal_kind(&config, &TerminalKind::Agent("codex".into()));
         tokio::time::timeout(
             std::time::Duration::from_millis(50),
-            config.poll_wake.notified(),
+            config.poll.wake_signal.notified(),
         )
         .await
         .expect("agent registration did not wake polling");
         assert!(
-            !config.take_warm_poll_request(),
+            !config.poll.take_warm_request(),
             "agent registration only needs the hot targeted path"
         );
     }
@@ -7508,25 +7522,29 @@ mod tests {
         let terminal_id = TerminalId(700);
         let session_key = SessionKey::new("chooser");
         config
+            .terminal
             .terminals
             .lock()
             .await
             .insert(terminal_id, backend_key.clone());
-        config.terminal_meta.lock().await.insert(
+        config.terminal.terminal_meta.lock().await.insert(
             terminal_id,
             (session_key, TerminalKind::Agent("codex".into())),
         );
         config
+            .terminal
             .agent_states
             .lock()
             .await
             .insert(terminal_id, lazybox_ipc::AgentState::InputNeeded);
         config
+            .terminal
             .agent_state_generations
             .lock()
             .await
             .insert(terminal_id, terminal_id.0);
         config
+            .terminal
             .input_needed_shapes
             .lock()
             .await
@@ -7536,7 +7554,7 @@ mod tests {
 
         assert_eq!(mock.writes_for(&backend_key).await, vec![b"1next".to_vec()]);
         assert_eq!(
-            config.agent_state_for(terminal_id).await,
+            config.terminal.agent_state_for(terminal_id).await,
             Some(lazybox_ipc::AgentState::Working),
             "the first logical write remains a one-key chooser answer"
         );
@@ -7547,6 +7565,7 @@ mod tests {
         let (config, _mock) = ServerConfig::in_memory_with_mock();
         let terminal_id = TerminalId(701);
         config
+            .terminal
             .terminals
             .lock()
             .await
@@ -7575,6 +7594,7 @@ mod tests {
                 .await
                 .expect("spawn mock terminal");
             config
+                .terminal
                 .terminals
                 .lock()
                 .await
@@ -7606,14 +7626,18 @@ mod tests {
                 "teardown must join the interaction lock before detaching the terminal"
             );
             assert_eq!(
-                config.backend_key_for(terminal_id).await.as_deref(),
+                config
+                    .terminal
+                    .backend_key_for(terminal_id)
+                    .await
+                    .as_deref(),
                 Some(backend_key.as_str()),
                 "the live mapping stays valid until the accepted write completes"
             );
 
             write.await.expect("write task");
             teardown.await.expect("teardown task");
-            assert!(config.backend_key_for(terminal_id).await.is_none());
+            assert!(config.terminal.backend_key_for(terminal_id).await.is_none());
             assert_eq!(
                 mock.writes_for(&backend_key).await,
                 vec![b"accepted-before-exit".to_vec()]
@@ -7929,11 +7953,10 @@ mod tests {
         let id = TerminalId(7);
         let issue_key: SessionKey = "github-o-r-161".into(); // captured at spawn
         let pr_key: SessionKey = "github-o-r-164".into(); // where rebadge moved it
-        let meta = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
-        let states = input_resolved_states();
+        let terminals = TerminalRegistry::default();
         let (bus, mut rx) = tokio::sync::broadcast::channel(4);
         let durability = test_agent_state_durability(id);
-        meta.lock().await.insert(
+        terminals.terminal_meta.lock().await.insert(
             id,
             (
                 pr_key.clone(),
@@ -7942,8 +7965,7 @@ mod tests {
         );
 
         let transition = transition_and_broadcast_agent_state(
-            &meta,
-            &states,
+            &terminals,
             &bus,
             &durability,
             id,
@@ -7969,14 +7991,12 @@ mod tests {
     async fn state_owner_falls_back_to_captured_when_terminal_swept() {
         let id = TerminalId(7);
         let captured: SessionKey = "github-o-r-161".into();
-        let meta = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
-        let states = input_resolved_states();
+        let terminals = TerminalRegistry::default();
         let (bus, mut rx) = tokio::sync::broadcast::channel(4);
         let durability = test_agent_state_durability(id);
 
         transition_and_broadcast_agent_state(
-            &meta,
-            &states,
+            &terminals,
             &bus,
             &durability,
             id,
@@ -7998,14 +8018,12 @@ mod tests {
     async fn state_owner_rejects_non_exit_signal_after_metadata_is_swept() {
         let id = TerminalId(7);
         let captured: SessionKey = "github-o-r-161".into();
-        let meta = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
-        let states = input_resolved_states();
+        let terminals = TerminalRegistry::default();
         let (bus, mut rx) = tokio::sync::broadcast::channel(4);
         let durability = test_agent_state_durability(id);
 
         let late = transition_and_broadcast_agent_state(
-            &meta,
-            &states,
+            &terminals,
             &bus,
             &durability,
             id,
@@ -8016,7 +8034,7 @@ mod tests {
         .await;
 
         assert!(!late.committed);
-        assert!(states.lock().await.is_empty());
+        assert!(terminals.agent_states.lock().await.is_empty());
         assert!(
             rx.try_recv().is_err(),
             "a hook for a swept terminal must not recreate or broadcast state"
@@ -8029,22 +8047,24 @@ mod tests {
 
         let id = TerminalId(8);
         let key: SessionKey = "github-o-r-357".into();
-        let meta = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
-        let states = input_resolved_states();
+        let terminals = TerminalRegistry::default();
         let (bus, mut rx) = tokio::sync::broadcast::channel(4);
         let durability = test_agent_state_durability(id);
-        meta.lock().await.insert(
+        terminals.terminal_meta.lock().await.insert(
             id,
             (
                 key.clone(),
                 lazybox_ipc::TerminalKind::Agent("codex".into()),
             ),
         );
-        states.lock().await.insert(id, AgentState::Working);
+        terminals
+            .agent_states
+            .lock()
+            .await
+            .insert(id, AgentState::Working);
 
         let exited = transition_and_broadcast_agent_state(
-            &meta,
-            &states,
+            &terminals,
             &bus,
             &durability,
             id,
@@ -8055,8 +8075,7 @@ mod tests {
         .await;
         assert!(exited.committed);
         let late = transition_and_broadcast_agent_state(
-            &meta,
-            &states,
+            &terminals,
             &bus,
             &durability,
             id,
@@ -8067,7 +8086,7 @@ mod tests {
         .await;
         assert!(!late.committed, "a late hook must not resurrect Exited");
         assert_eq!(
-            states.lock().await.get(&id),
+            terminals.agent_states.lock().await.get(&id),
             Some(&AgentState::Exited { code: Some(9) })
         );
         assert!(matches!(
@@ -8156,11 +8175,12 @@ mod tests {
             .expect("spawn mock terminal");
         let id = TerminalId(711);
         config
+            .terminal
             .terminals
             .lock()
             .await
             .insert(id, backend_key.clone());
-        config.terminal_meta.lock().await.insert(
+        config.terminal.terminal_meta.lock().await.insert(
             id,
             (
                 SessionKey::new("blocked-injection"),
@@ -8168,6 +8188,7 @@ mod tests {
             ),
         );
         config
+            .terminal
             .agent_states
             .lock()
             .await
@@ -8177,7 +8198,7 @@ mod tests {
         // it must not hold the per-terminal command lane for the keystroke
         // that answers this prompt.
         handle_inject_prompt(&config, id, "first", None, false).await;
-        assert_eq!(config.pending_prompt_injections.lock().len(), 1);
+        assert_eq!(config.spawn.pending_prompt_injections.lock().len(), 1);
 
         let mut events = config.bus.subscribe();
         handle_inject_prompt(&config, id, "duplicate", None, false).await;
@@ -8188,7 +8209,7 @@ mod tests {
                 message,
             } if terminal_id == id && message.contains("already waiting")
         ));
-        assert_eq!(config.pending_prompt_injections.lock().len(), 1);
+        assert_eq!(config.spawn.pending_prompt_injections.lock().len(), 1);
         assert!(
             mock.writes_for(&backend_key).await.is_empty(),
             "neither prompt may be written into the live input gate"
@@ -8205,7 +8226,7 @@ mod tests {
             })
             .expect("exit event");
         tokio::time::timeout(Duration::from_secs(1), async {
-            while !config.pending_prompt_injections.lock().is_empty() {
+            while !config.spawn.pending_prompt_injections.lock().is_empty() {
                 tokio::task::yield_now().await;
             }
         })
@@ -8223,14 +8244,14 @@ mod tests {
         let key: SessionKey = "test:ws-guard".into();
         let kind = TerminalKind::Agent("claude".into());
 
-        let guard =
-            InflightSpawnGuard::try_claim(&config, &key, &kind, false).expect("first claim wins");
+        let guard = InflightSpawnGuard::try_claim(&config.spawn, &key, &kind, false)
+            .expect("first claim wins");
         // Second claim on the same identity loses.
-        assert!(InflightSpawnGuard::try_claim(&config, &key, &kind, false).is_err());
+        assert!(InflightSpawnGuard::try_claim(&config.spawn, &key, &kind, false).is_err());
         // A different kind on the same workspace is a separate identity.
         assert!(
             InflightSpawnGuard::try_claim(
-                &config,
+                &config.spawn,
                 &key,
                 &TerminalKind::Agent("codex".into()),
                 false
@@ -8240,13 +8261,15 @@ mod tests {
         // Shells are never singletons: every shell spawn claims its own
         // unique key (for cancellability + Kill serialization), so two
         // concurrent shell claims coexist and never collide.
-        let _shell_a = InflightSpawnGuard::try_claim(&config, &key, &TerminalKind::Shell, false)
-            .expect("shells never collide");
-        let _shell_b = InflightSpawnGuard::try_claim(&config, &key, &TerminalKind::Shell, false)
-            .expect("shells never collide");
+        let _shell_a =
+            InflightSpawnGuard::try_claim(&config.spawn, &key, &TerminalKind::Shell, false)
+                .expect("shells never collide");
+        let _shell_b =
+            InflightSpawnGuard::try_claim(&config.spawn, &key, &TerminalKind::Shell, false)
+                .expect("shells never collide");
         drop(guard);
         // Released → claimable again.
-        assert!(InflightSpawnGuard::try_claim(&config, &key, &kind, false).is_ok());
+        assert!(InflightSpawnGuard::try_claim(&config.spawn, &key, &kind, false).is_ok());
     }
 
     /// `CancelSpawn` pings the cancel channel of every in-flight claim
@@ -8261,14 +8284,15 @@ mod tests {
         let other: SessionKey = "test:ws-untouched".into();
         let kind = TerminalKind::Agent("claude".into());
 
-        let guard = InflightSpawnGuard::try_claim(&config, &key, &kind, false).expect("claim wins");
-        let shell = InflightSpawnGuard::try_claim(&config, &key, &TerminalKind::Shell, false)
+        let guard =
+            InflightSpawnGuard::try_claim(&config.spawn, &key, &kind, false).expect("claim wins");
+        let shell = InflightSpawnGuard::try_claim(&config.spawn, &key, &TerminalKind::Shell, false)
             .expect("shells never collide");
         let bystander =
-            InflightSpawnGuard::try_claim(&config, &other, &kind, false).expect("claim wins");
+            InflightSpawnGuard::try_claim(&config.spawn, &other, &kind, false).expect("claim wins");
 
         // Cancel fired BEFORE anyone waits: the permit must persist.
-        handle_cancel_spawn(&config, &key);
+        handle_cancel_spawn(&config.spawn, &key);
         tokio::time::timeout(Duration::from_secs(1), guard.cancel.notified())
             .await
             .expect("the claim's cancel channel fires");
@@ -8315,15 +8339,15 @@ mod tests {
         let key: SessionKey = "test:ws-main".into();
         let kind = TerminalKind::Agent("claude".into());
 
-        let _isolated = InflightSpawnGuard::try_claim(&config, &key, &kind, false)
+        let _isolated = InflightSpawnGuard::try_claim(&config.spawn, &key, &kind, false)
             .expect("isolated claim wins");
         // The isolated identity is taken…
-        assert!(InflightSpawnGuard::try_claim(&config, &key, &kind, false).is_err());
+        assert!(InflightSpawnGuard::try_claim(&config.spawn, &key, &kind, false).is_err());
         // …but the on-main identity is still free.
-        let _main =
-            InflightSpawnGuard::try_claim(&config, &key, &kind, true).expect("main claim wins");
+        let _main = InflightSpawnGuard::try_claim(&config.spawn, &key, &kind, true)
+            .expect("main claim wins");
         // And now the on-main identity is taken too.
-        assert!(InflightSpawnGuard::try_claim(&config, &key, &kind, true).is_err());
+        assert!(InflightSpawnGuard::try_claim(&config.spawn, &key, &kind, true).is_err());
     }
 
     /// #271: `find_existing_singleton` matches by checkout. A live
@@ -8342,16 +8366,18 @@ mod tests {
         // Simulate a live main-checkout claude: meta + terminals entry
         // (so `snapshot_terminals` emits it) + the on_main marker.
         config
+            .terminal
             .terminal_meta
             .lock()
             .await
             .insert(tid, (sk.clone(), kind.clone()));
         config
+            .terminal
             .terminals
             .lock()
             .await
             .insert(tid, "backend-fes-1".to_string());
-        config.on_main_terminals.lock().await.insert(tid);
+        config.terminal.on_main_terminals.lock().await.insert(tid);
 
         assert_eq!(
             find_existing_singleton(&config, &sk, &kind, Some(false)).await,
@@ -8383,11 +8409,11 @@ mod tests {
         let config = ServerConfig::in_memory();
         let key: SessionKey = "test:ws-kill".into();
         let kind = TerminalKind::Agent("claude".into());
-        let guard = InflightSpawnGuard::try_claim(&config, &key, &kind, false).unwrap();
+        let guard = InflightSpawnGuard::try_claim(&config.spawn, &key, &kind, false).unwrap();
 
         let cfg = config.clone();
         let waiter = tokio::spawn(async move {
-            await_inflight_spawns(&cfg, "test:ws-kill").await;
+            await_inflight_spawns(&cfg.spawn, "test:ws-kill").await;
         });
         // Still parked while the claim is held.
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -8402,7 +8428,7 @@ mod tests {
         // No claim at all → returns immediately.
         tokio::time::timeout(
             Duration::from_millis(500),
-            await_inflight_spawns(&config, "test:ws-other"),
+            await_inflight_spawns(&config.spawn, "test:ws-other"),
         )
         .await
         .expect("no in-flight spawn → no wait");
@@ -8435,8 +8461,8 @@ mod tests {
             Some(-1),
             "the unregistered backend process must be terminated, not orphaned"
         );
-        assert!(config.terminals.lock().await.is_empty());
-        assert!(config.terminal_meta.lock().await.is_empty());
+        assert!(config.terminal.terminals.lock().await.is_empty());
+        assert!(config.terminal.terminal_meta.lock().await.is_empty());
     }
 
     /// The delete tombstone must not outlive the delete it guarded: a
@@ -8503,7 +8529,7 @@ mod tests {
 
         let session_key: SessionKey = "test:del-busy".into();
         let kind = TerminalKind::Agent("claude".into());
-        let guard = InflightSpawnGuard::try_claim(&config, &session_key, &kind, false)
+        let guard = InflightSpawnGuard::try_claim(&config.spawn, &session_key, &kind, false)
             .expect("claim the in-flight slot");
 
         // The delete waits out `KILL_INFLIGHT_WAIT` (auto-advanced
@@ -8547,7 +8573,12 @@ mod tests {
             .await
             .unwrap();
         let id = TerminalId(4245);
-        config.terminals.lock().await.insert(id, key.clone());
+        config
+            .terminal
+            .terminals
+            .lock()
+            .await
+            .insert(id, key.clone());
 
         let first = prepare_submit_confirmation(&config, id).await;
         // A second injection registers its own signal, replacing the
@@ -8558,7 +8589,12 @@ mod tests {
         // remove the second's registration.
         confirm_prompt_submission(first, &config, &key, b"\r", Duration::from_millis(10)).await;
         assert!(
-            config.prompt_submit_signals.lock().await.contains_key(&id),
+            config
+                .spawn
+                .prompt_submit_signals
+                .lock()
+                .await
+                .contains_key(&id),
             "first confirmation must not remove the second's signal"
         );
         let resends = mock.writes_for(&key).await.len();
@@ -8568,6 +8604,7 @@ mod tests {
         // notify suppresses its resend, and its cleanup removes its own
         // registration.
         config
+            .spawn
             .prompt_submit_signals
             .lock()
             .await
@@ -8581,7 +8618,7 @@ mod tests {
             "confirmed second submit must not resend"
         );
         assert!(
-            config.prompt_submit_signals.lock().await.is_empty(),
+            config.spawn.prompt_submit_signals.lock().await.is_empty(),
             "second confirmation cleans up its own signal"
         );
     }
@@ -8601,8 +8638,14 @@ mod tests {
             .await
             .unwrap();
         let id = TerminalId(4246);
-        config.terminals.lock().await.insert(id, key.clone());
         config
+            .terminal
+            .terminals
+            .lock()
+            .await
+            .insert(id, key.clone());
+        config
+            .terminal
             .agent_states
             .lock()
             .await
@@ -8645,9 +8688,15 @@ mod tests {
             .await
             .unwrap();
         let id = TerminalId(4247);
-        config.terminals.lock().await.insert(id, key.clone());
+        config
+            .terminal
+            .terminals
+            .lock()
+            .await
+            .insert(id, key.clone());
         // The authoritative map saw the submit take: the agent is Working.
         config
+            .terminal
             .agent_states
             .lock()
             .await
@@ -8785,8 +8834,14 @@ mod tests {
         let id = TerminalId(7);
         let session_key: SessionKey = "acme/widget#1".into();
         let kind = TerminalKind::Agent("claude".into());
-        config.terminals.lock().await.insert(id, key.clone());
         config
+            .terminal
+            .terminals
+            .lock()
+            .await
+            .insert(id, key.clone());
+        config
+            .terminal
             .terminal_meta
             .lock()
             .await
@@ -8849,8 +8904,13 @@ mod tests {
             .await
             .unwrap();
         let id = TerminalId(9);
-        config.terminals.lock().await.insert(id, key.clone());
-        config.terminal_meta.lock().await.insert(
+        config
+            .terminal
+            .terminals
+            .lock()
+            .await
+            .insert(id, key.clone());
+        config.terminal.terminal_meta.lock().await.insert(
             id,
             ("acme/widget#2".into(), TerminalKind::Agent("claude".into())),
         );
@@ -8915,8 +8975,14 @@ mod tests {
         let id = TerminalId(7);
         let session_key: SessionKey = "acme/widget#1".into();
         let kind = TerminalKind::Agent("claude".into());
-        config.terminals.lock().await.insert(id, key.clone());
         config
+            .terminal
+            .terminals
+            .lock()
+            .await
+            .insert(id, key.clone());
+        config
+            .terminal
             .terminal_meta
             .lock()
             .await
@@ -8979,8 +9045,14 @@ mod tests {
         let id = TerminalId(1);
         let session_key: SessionKey = "acme/widget#1".into();
         let kind = TerminalKind::Agent("claude".into());
-        config.terminals.lock().await.insert(id, key.clone());
         config
+            .terminal
+            .terminals
+            .lock()
+            .await
+            .insert(id, key.clone());
+        config
+            .terminal
             .terminal_meta
             .lock()
             .await
@@ -9016,8 +9088,14 @@ mod tests {
         let id = TerminalId(1);
         let session_key: SessionKey = "acme/widget#1".into();
         let kind = TerminalKind::Agent("claude".into());
-        config.terminals.lock().await.insert(id, key.clone());
         config
+            .terminal
+            .terminals
+            .lock()
+            .await
+            .insert(id, key.clone());
+        config
+            .terminal
             .terminal_meta
             .lock()
             .await
@@ -9052,7 +9130,12 @@ mod tests {
         mock.emit(&key, b"screen-state").await; // seq 1
         mock.mark_snapshot_incomplete(&key).await;
         let id = TerminalId(1);
-        config.terminals.lock().await.insert(id, key.clone());
+        config
+            .terminal
+            .terminals
+            .lock()
+            .await
+            .insert(id, key.clone());
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let sender = lazybox_ipc::EventSender::from_unbounded(tx);
@@ -9085,7 +9168,12 @@ mod tests {
             .expect("spawn");
         mock.emit(&key, b"old").await; // seq 1
         let id = TerminalId(1);
-        config.terminals.lock().await.insert(id, key.clone());
+        config
+            .terminal
+            .terminals
+            .lock()
+            .await
+            .insert(id, key.clone());
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let sender = lazybox_ipc::EventSender::from_unbounded(tx);
@@ -9151,7 +9239,12 @@ mod tests {
             .await
             .unwrap();
         let id = TerminalId(4242);
-        config.terminals.lock().await.insert(id, key.clone());
+        config
+            .terminal
+            .terminals
+            .lock()
+            .await
+            .insert(id, key.clone());
 
         let confirm = prepare_submit_confirmation(&config, id).await;
         let mut bus_rx = config.bus.subscribe();
@@ -9169,7 +9262,7 @@ mod tests {
             "only Enter resends, never the prompt body, bounded by the limit"
         );
         assert!(
-            config.prompt_submit_signals.lock().await.is_empty(),
+            config.spawn.prompt_submit_signals.lock().await.is_empty(),
             "signal registration cleaned up"
         );
         let mut gave_up_loudly = false;
@@ -9189,7 +9282,12 @@ mod tests {
         let config = ServerConfig::in_memory_with_mock().0;
         let id = TerminalId(4248);
         let key = "missing-submit-backend".to_string();
-        config.terminals.lock().await.insert(id, key.clone());
+        config
+            .terminal
+            .terminals
+            .lock()
+            .await
+            .insert(id, key.clone());
         let confirm = prepare_submit_confirmation(&config, id).await;
         let mut events = config.bus.subscribe();
 
@@ -9208,7 +9306,7 @@ mod tests {
                 message,
             } if terminal_id == id && message.contains("submit retry failed")
         ));
-        assert!(config.prompt_submit_signals.lock().await.is_empty());
+        assert!(config.spawn.prompt_submit_signals.lock().await.is_empty());
     }
 
     /// A `UserPromptSubmit` hook (via the registered signal) is proof
@@ -9222,13 +9320,19 @@ mod tests {
             .await
             .unwrap();
         let id = TerminalId(4243);
-        config.terminals.lock().await.insert(id, key.clone());
+        config
+            .terminal
+            .terminals
+            .lock()
+            .await
+            .insert(id, key.clone());
 
         let confirm = prepare_submit_confirmation(&config, id).await;
         // What handle_ingest_hook does when UserPromptSubmit lands.
         // notify_one stores a permit, so firing before the wait is the
         // hard case this pins.
         config
+            .spawn
             .prompt_submit_signals
             .lock()
             .await
@@ -9257,7 +9361,12 @@ mod tests {
             .await
             .unwrap();
         let id = TerminalId(4244);
-        config.terminals.lock().await.insert(id, key.clone());
+        config
+            .terminal
+            .terminals
+            .lock()
+            .await
+            .insert(id, key.clone());
 
         let confirm = prepare_submit_confirmation(&config, id).await;
         // The receiver was subscribed in prepare_submit_confirmation,
@@ -9290,13 +9399,18 @@ mod tests {
             .await
             .unwrap();
         let id = TerminalId(4246);
-        config.terminals.lock().await.insert(id, key.clone());
+        config
+            .terminal
+            .terminals
+            .lock()
+            .await
+            .insert(id, key.clone());
 
         let confirm = prepare_submit_confirmation(&config, id).await;
         let mut bus_rx = config.bus.subscribe();
         // Stand-in for Claude finally taking the resent Enter: once the
         // first resend hits the backend, fire UserPromptSubmit.
-        let signals = config.prompt_submit_signals.clone();
+        let signals = config.spawn.prompt_submit_signals.clone();
         let mock_for_watch = mock.clone();
         let key_for_watch = key.clone();
         tokio::spawn(async move {
@@ -9353,7 +9467,12 @@ mod tests {
             .await
             .unwrap();
         let id = TerminalId(4247);
-        config.terminals.lock().await.insert(id, key.clone());
+        config
+            .terminal
+            .terminals
+            .lock()
+            .await
+            .insert(id, key.clone());
         let confirm = prepare_submit_confirmation(&config, id).await;
 
         // Pump stand-in: the resent Enter takes, the screen flips from
@@ -9596,14 +9715,20 @@ mod tests {
         let config = ServerConfig::in_memory();
         let id = TerminalId(7);
         config
+            .terminal
             .terminals
             .lock()
             .await
             .insert(id, "backend-key".to_string());
         let ready = tokio::sync::Notify::new();
         let t0 = std::time::Instant::now();
-        let outcome =
-            await_pending_ready(id, &ready, &config.terminals, Duration::from_millis(120)).await;
+        let outcome = await_pending_ready(
+            id,
+            &ready,
+            &config.terminal.terminals,
+            Duration::from_millis(120),
+        )
+        .await;
         assert_eq!(outcome, PendingReady::Capped);
         assert!(t0.elapsed() >= Duration::from_millis(120));
         assert!(
@@ -11018,27 +11143,13 @@ mod tests {
         agent: std::sync::Arc<dyn lazybox_agents::Agent>,
         buf: Vec<u8>,
         last_chunk_len: usize,
-        states: std::sync::Arc<
-            tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
-        >,
+        terminals: TerminalRegistry,
         durability: AgentStateDurability,
         bus: tokio::sync::broadcast::Sender<Event>,
         rx: tokio::sync::broadcast::Receiver<Event>,
         id: TerminalId,
         session_key: SessionKey,
-        terminal_meta: std::sync::Arc<
-            tokio::sync::Mutex<
-                std::collections::HashMap<TerminalId, (SessionKey, lazybox_ipc::TerminalKind)>,
-            >,
-        >,
         state_machine: lazybox_agents::AgentStateMachine,
-        hook_driven: std::sync::Arc<
-            tokio::sync::Mutex<std::collections::HashMap<TerminalId, std::time::Instant>>,
-        >,
-        input_shapes: std::sync::Arc<
-            tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_agents::PromptShape>>,
-        >,
-        detect_resets: std::sync::Arc<tokio::sync::Mutex<std::collections::HashSet<TerminalId>>>,
         /// The pump's rolling content fingerprint, mirrored so `feed`
         /// derives each chunk's progress bit the same way production does.
         watchdog_fp: Option<u64>,
@@ -11072,44 +11183,34 @@ mod tests {
             let session_key: SessionKey = "github-o-r-1".into();
             let (bus, rx) = tokio::sync::broadcast::channel(256);
             let agent_id = agent.id().to_string();
-            let terminal_meta =
-                std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::from([
+            let terminals = TerminalRegistry::default();
+            terminals
+                .terminal_meta
+                .try_lock()
+                .expect("fresh terminal registry is unlocked")
+                .insert(
+                    id,
                     (
-                        id,
-                        (
-                            session_key.clone(),
-                            lazybox_ipc::TerminalKind::Agent(agent_id),
-                        ),
+                        session_key.clone(),
+                        lazybox_ipc::TerminalKind::Agent(agent_id),
                     ),
-                ])));
+                );
             Self {
                 agent,
                 buf: Vec::new(),
                 watchdog_fp: None,
                 last_chunk_len: 0,
-                states: std::sync::Arc::new(tokio::sync::Mutex::new(
-                    std::collections::HashMap::new(),
-                )),
+                terminals,
                 durability: test_agent_state_durability(id),
                 bus,
                 rx,
                 id,
                 session_key,
-                terminal_meta,
                 state_machine: {
                     let mut m = lazybox_agents::AgentStateMachine::new();
                     m.mark_booted();
                     m
                 },
-                hook_driven: std::sync::Arc::new(tokio::sync::Mutex::new(
-                    std::collections::HashMap::new(),
-                )),
-                input_shapes: std::sync::Arc::new(tokio::sync::Mutex::new(
-                    std::collections::HashMap::new(),
-                )),
-                detect_resets: std::sync::Arc::new(tokio::sync::Mutex::new(
-                    std::collections::HashSet::new(),
-                )),
             }
         }
 
@@ -11120,7 +11221,13 @@ mod tests {
         /// derived through the rolling content fingerprint — so churn vs
         /// content behaves as in production.
         async fn feed(&mut self, bytes: &[u8]) -> Vec<lazybox_ipc::AgentState> {
-            if self.detect_resets.lock().await.remove(&self.id) {
+            if self
+                .terminals
+                .agent_detect_resets
+                .lock()
+                .await
+                .remove(&self.id)
+            {
                 self.buf.clear();
             }
             let progress = watchdog_notes_progress(&mut self.watchdog_fp, bytes);
@@ -11129,15 +11236,12 @@ mod tests {
                 &mut self.buf,
                 bytes,
                 progress,
-                &self.states,
+                &self.terminals,
                 &self.bus,
                 Some(&self.durability),
                 self.id,
                 &self.session_key,
-                &self.terminal_meta,
                 &mut self.state_machine,
-                &self.hook_driven,
-                &self.input_shapes,
             )
             .await;
             self.last_chunk_len = bytes.len();
@@ -11153,16 +11257,12 @@ mod tests {
                 &self.buf,
                 self.last_chunk_len,
                 lazybox_agents::Liveness::Silent,
-                &self.states,
+                &self.terminals,
                 &self.bus,
                 Some(&self.durability),
                 self.id,
                 &self.session_key,
-                &self.terminal_meta,
                 &mut self.state_machine,
-                &self.hook_driven,
-                &self.input_shapes,
-                &self.detect_resets,
             )
             .await;
             self.drain()
@@ -11173,11 +11273,16 @@ mod tests {
         /// state cache and marks the detection buffer for reset (#101).
         /// The pump's own state machine is not consulted by the flip.
         async fn answer(&mut self) {
-            self.states
+            self.terminals
+                .agent_states
                 .lock()
                 .await
                 .insert(self.id, lazybox_ipc::AgentState::Working);
-            self.detect_resets.lock().await.insert(self.id);
+            self.terminals
+                .agent_detect_resets
+                .lock()
+                .await
+                .insert(self.id);
         }
 
         /// A lifecycle hook just landed for this terminal — the pump
@@ -11186,7 +11291,8 @@ mod tests {
         /// hooks-primary policy, so this is how a test asserts the PTY
         /// paths defer to a still-fresh hook.
         async fn hook_now(&mut self) {
-            self.hook_driven
+            self.terminals
+                .hook_driven_terminals
                 .lock()
                 .await
                 .insert(self.id, std::time::Instant::now());
@@ -11201,16 +11307,12 @@ mod tests {
                 Some(&self.agent),
                 &self.buf,
                 self.last_chunk_len,
-                &self.states,
+                &self.terminals,
                 &self.bus,
                 Some(&self.durability),
                 self.id,
                 &self.session_key,
-                &self.terminal_meta,
                 &mut self.state_machine,
-                &self.hook_driven,
-                &self.input_shapes,
-                &self.detect_resets,
             )
             .await;
             self.drain()
@@ -11232,7 +11334,12 @@ mod tests {
 
         /// The terminal's current cached state (what the sidebar pill reads).
         async fn state(&self) -> Option<lazybox_ipc::AgentState> {
-            self.states.lock().await.get(&self.id).copied()
+            self.terminals
+                .agent_states
+                .lock()
+                .await
+                .get(&self.id)
+                .copied()
         }
 
         /// Reset the state machine to a freshly-spawned, **un-booted**
@@ -11500,7 +11607,11 @@ mod tests {
         // But the same unclassifiable quiet screen must NOT clear a parked
         // `?` — a bare Done carries no evidence the prompt was answered.
         let mut p = PumpDriver::with_agent(agent, Duration::ZERO, Duration::ZERO);
-        p.states.lock().await.insert(p.id, InputNeeded);
+        p.terminals
+            .agent_states
+            .lock()
+            .await
+            .insert(p.id, InputNeeded);
         p.feed(output).await;
         assert!(
             p.quiet().await.is_empty(),
@@ -11556,7 +11667,7 @@ mod tests {
         assert_eq!(p.feed(modal.as_bytes()).await, vec![InputNeeded]);
         assert_eq!(p.state().await, Some(InputNeeded));
         assert_eq!(
-            p.input_shapes.lock().await.get(&p.id),
+            p.terminals.input_needed_shapes.lock().await.get(&p.id),
             Some(&lazybox_agents::PromptShape::Chooser),
         );
     }
@@ -11589,7 +11700,7 @@ mod tests {
         // ~1s" acceptance is this line needing no quiet() first.
         assert_eq!(p.feed(paint).await, vec![InputNeeded]);
         assert_eq!(
-            p.input_shapes.lock().await.get(&p.id),
+            p.terminals.input_needed_shapes.lock().await.get(&p.id),
             Some(&lazybox_agents::PromptShape::Chooser),
         );
         // The parked modal keeps repainting its spinner ticks; none of that
@@ -11700,7 +11811,7 @@ mod tests {
         assert_eq!(p.feed(b"Please explain:").await, vec![Working]);
         assert_eq!(p.quiet().await, vec![InputNeeded]);
         assert_eq!(
-            p.input_shapes.lock().await.get(&p.id),
+            p.terminals.input_needed_shapes.lock().await.get(&p.id),
             Some(&lazybox_agents::PromptShape::FreeText),
         );
     }
@@ -11733,8 +11844,9 @@ mod tests {
 
         let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
         // A Stop hook just landed: state is Done, hooks are fresh.
-        p.states.lock().await.insert(p.id, Done);
-        p.hook_driven
+        p.terminals.agent_states.lock().await.insert(p.id, Done);
+        p.terminals
+            .hook_driven_terminals
             .lock()
             .await
             .insert(p.id, std::time::Instant::now());
@@ -11749,7 +11861,10 @@ mod tests {
             Vec::<lazybox_ipc::AgentState>::new(),
             "the quiet Idle classification must not clear Done",
         );
-        assert_eq!(p.states.lock().await.get(&p.id), Some(&Done));
+        assert_eq!(
+            p.terminals.agent_states.lock().await.get(&p.id),
+            Some(&Done)
+        );
     }
 
     /// The stale-hook variant of Done stickiness: 30+ seconds after the
@@ -11767,8 +11882,9 @@ mod tests {
         let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
         // Done was set by a Stop hook long ago; the hook stream has been
         // silent since (a finished agent fires no more hooks).
-        p.states.lock().await.insert(p.id, Done);
-        p.hook_driven
+        p.terminals.agent_states.lock().await.insert(p.id, Done);
+        p.terminals
+            .hook_driven_terminals
             .lock()
             .await
             .insert(p.id, std::time::Instant::now() - Duration::from_secs(31));
@@ -11783,7 +11899,10 @@ mod tests {
             Vec::<lazybox_ipc::AgentState>::new(),
             "the follow-up quiet Idle must stay rejected by Done stickiness",
         );
-        assert_eq!(p.states.lock().await.get(&p.id), Some(&Done));
+        assert_eq!(
+            p.terminals.agent_states.lock().await.get(&p.id),
+            Some(&Done)
+        );
     }
 
     /// The quiet timer racing the optimistic answer flip: `handle_write`
@@ -11805,16 +11924,19 @@ mod tests {
         assert_eq!(p.feed(input).await, vec![Working]);
         assert_eq!(p.quiet().await, vec![InputNeeded]);
         // The user answers: the flip commits Working and marks the reset.
-        p.states.lock().await.insert(p.id, Working);
-        p.detect_resets.lock().await.insert(p.id);
+        p.terminals.agent_states.lock().await.insert(p.id, Working);
+        p.terminals.agent_detect_resets.lock().await.insert(p.id);
         assert_eq!(
             p.quiet().await,
             vec![Done],
             "a latched reset at the quiet timer settles Done, not the stale `?`",
         );
-        assert_eq!(p.states.lock().await.get(&p.id), Some(&Done));
+        assert_eq!(
+            p.terminals.agent_states.lock().await.get(&p.id),
+            Some(&Done)
+        );
         assert!(
-            p.detect_resets.lock().await.contains(&p.id),
+            p.terminals.agent_detect_resets.lock().await.contains(&p.id),
             "the reset stays latched — a late chunk still clears the buffer via the chunk arm",
         );
     }
@@ -11835,17 +11957,20 @@ mod tests {
         assert_eq!(p.quiet().await, vec![InputNeeded]);
         // Answered, no chunk cleared the reset — but a hook landed just now,
         // so the agent is provably still at work.
-        p.states.lock().await.insert(p.id, Working);
-        p.detect_resets.lock().await.insert(p.id);
+        p.terminals.agent_states.lock().await.insert(p.id, Working);
+        p.terminals.agent_detect_resets.lock().await.insert(p.id);
         p.hook_now().await;
         assert_eq!(
             p.quiet().await,
             Vec::<lazybox_ipc::AgentState>::new(),
             "a fresh hook must gate the settle — the turn is still live",
         );
-        assert_eq!(p.states.lock().await.get(&p.id), Some(&Working));
+        assert_eq!(
+            p.terminals.agent_states.lock().await.get(&p.id),
+            Some(&Working)
+        );
         assert!(
-            p.detect_resets.lock().await.contains(&p.id),
+            p.terminals.agent_detect_resets.lock().await.contains(&p.id),
             "the reset stays latched: the next chunk, not this gated tick, clears it",
         );
     }
@@ -11873,7 +11998,10 @@ mod tests {
             Vec::<lazybox_ipc::AgentState>::new(),
             "re-classifying the same dialog is a no-op",
         );
-        assert_eq!(p.states.lock().await.get(&p.id), Some(&InputNeeded));
+        assert_eq!(
+            p.terminals.agent_states.lock().await.get(&p.id),
+            Some(&InputNeeded)
+        );
     }
 
     /// The #398 acceptance scenario: an agent that stops doing work but
@@ -11943,7 +12071,10 @@ mod tests {
                 "churn alone must never clear Done",
             );
         }
-        assert_eq!(p.states.lock().await.get(&p.id), Some(&Done));
+        assert_eq!(
+            p.terminals.agent_states.lock().await.get(&p.id),
+            Some(&Done)
+        );
         // The agent genuinely resumes: every chunk carries new content.
         let mut seq = Vec::new();
         seq.extend(p.feed(b"Reading crates/server/src/lib.rs\n").await);
@@ -11998,7 +12129,10 @@ mod tests {
             vec![Done],
             "a fresh hook must not extend the configured watchdog bound",
         );
-        assert_eq!(p.states.lock().await.get(&p.id), Some(&Done));
+        assert_eq!(
+            p.terminals.agent_states.lock().await.get(&p.id),
+            Some(&Done)
+        );
     }
 
     /// The fix (#504). The quiet timer measures true byte-silence, and a
@@ -12016,7 +12150,8 @@ mod tests {
         let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
         assert_eq!(p.feed(working).await, vec![Working]);
         // A hook fired one instant ago.
-        p.hook_driven
+        p.terminals
+            .hook_driven_terminals
             .lock()
             .await
             .insert(p.id, std::time::Instant::now());
@@ -12026,7 +12161,10 @@ mod tests {
             vec![Done],
             "byte-silence must settle Working → Done without waiting for hook staleness",
         );
-        assert_eq!(p.states.lock().await.get(&p.id), Some(&Done));
+        assert_eq!(
+            p.terminals.agent_states.lock().await.get(&p.id),
+            Some(&Done)
+        );
     }
 
     /// A pending answer reset still latched a full watchdog window after
@@ -12044,23 +12182,29 @@ mod tests {
         let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
         assert_eq!(p.feed(working).await, vec![Working]);
         // The user answered, but no chunk has arrived to clear the reset.
-        p.detect_resets.lock().await.insert(p.id);
+        p.terminals.agent_detect_resets.lock().await.insert(p.id);
         assert_eq!(
             p.watchdog().await,
             vec![Done],
             "a zero-output answer must settle to Done, not pin Working",
         );
-        assert_eq!(p.states.lock().await.get(&p.id), Some(&Done));
+        assert_eq!(
+            p.terminals.agent_states.lock().await.get(&p.id),
+            Some(&Done)
+        );
         // The reset is left latched so a late chunk still clears the buffer
         // via the pump's chunk arm — but the terminal is `Done` now, so a
         // further watchdog tick is a plain no-op.
-        assert!(p.detect_resets.lock().await.contains(&p.id));
+        assert!(p.terminals.agent_detect_resets.lock().await.contains(&p.id));
         assert_eq!(
             p.watchdog().await,
             Vec::<lazybox_ipc::AgentState>::new(),
             "out of Working the tick is a no-op",
         );
-        assert_eq!(p.states.lock().await.get(&p.id), Some(&Done));
+        assert_eq!(
+            p.terminals.agent_states.lock().await.get(&p.id),
+            Some(&Done)
+        );
     }
 
     /// A fresh hook protects an ambiguous post-answer screen from the short
@@ -12074,17 +12218,20 @@ mod tests {
         assert_eq!(p.feed(working).await, vec![Working]);
         // The user answered, no chunk cleared the reset, and the terminal
         // remained content-stable for the full watchdog window.
-        p.detect_resets.lock().await.insert(p.id);
+        p.terminals.agent_detect_resets.lock().await.insert(p.id);
         p.hook_now().await;
         assert_eq!(
             p.watchdog().await,
             vec![Done],
             "a fresh hook must not extend the configured watchdog bound",
         );
-        assert_eq!(p.states.lock().await.get(&p.id), Some(&Done));
+        assert_eq!(
+            p.terminals.agent_states.lock().await.get(&p.id),
+            Some(&Done)
+        );
         // The reset stays latched: the buffer still predates the answer,
         // so the next chunk is still what clears it.
-        assert!(p.detect_resets.lock().await.contains(&p.id));
+        assert!(p.terminals.agent_detect_resets.lock().await.contains(&p.id));
     }
 
     #[test]
@@ -12201,19 +12348,25 @@ mod tests {
             .await
             .expect("spawn live backend session");
         config
+            .terminal
             .terminals
             .lock()
             .await
             .insert(id, backend_key.clone());
         // The workspace-move owner moved the live meta entry onto the PR.
-        config.terminal_meta.lock().await.insert(
+        config.terminal.terminal_meta.lock().await.insert(
             id,
             (
                 pr_key.clone(),
                 lazybox_ipc::TerminalKind::Agent("claude".into()),
             ),
         );
-        config.agent_state_generations.lock().await.insert(id, id.0);
+        config
+            .terminal
+            .agent_state_generations
+            .lock()
+            .await
+            .insert(id, id.0);
         let durability = agent_state_durability(&config, id, &backend_key)
             .await
             .expect("state durability");
@@ -12234,15 +12387,12 @@ mod tests {
             &mut buf,
             working,
             false,
-            &config.agent_states,
+            &config.terminal,
             &config.bus,
             Some(&durability),
             id,
             &issue_key,
-            &config.terminal_meta,
             &mut state_machine,
-            &config.hook_driven_terminals,
-            &config.input_needed_shapes,
         )
         .await;
         assert_eq!(
@@ -12253,6 +12403,7 @@ mod tests {
 
         // (b) optimistic flip via handle_write — prereq: parked on a prompt.
         config
+            .terminal
             .agent_states
             .lock()
             .await
@@ -12267,6 +12418,7 @@ mod tests {
 
         // (c) hook ingest via handle_ingest_hook — PreToolUse maps to Working.
         config
+            .terminal
             .agent_states
             .lock()
             .await

@@ -40,8 +40,14 @@ pub(crate) async fn acquire_live(
     terminal_id: TerminalId,
     backend_key: &str,
 ) -> Option<tokio::sync::OwnedMutexGuard<()>> {
-    let guard = config.lock_terminal_io(backend_key).await;
-    if config.backend_key_for(terminal_id).await.as_deref() == Some(backend_key) {
+    let guard = config.terminal.lock_terminal_io(backend_key).await;
+    if config
+        .terminal
+        .backend_key_for(terminal_id)
+        .await
+        .as_deref()
+        == Some(backend_key)
+    {
         Some(guard)
     } else {
         None

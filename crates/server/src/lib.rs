@@ -40,6 +40,7 @@ pub mod lifecycle;
 pub mod metrics;
 pub mod polling;
 pub mod pty;
+pub mod registries;
 mod resource_limits;
 pub mod slack;
 pub mod socket_service;
@@ -48,14 +49,15 @@ mod terminal_commands;
 mod terminal_io;
 
 use crate::backend::{RawPtyBackend, SessionBackend, TmuxBackend};
+pub use crate::registries::{PollState, SpawnCoordinator, TerminalRegistry};
 use lazybox_agents::Registry;
 use lazybox_agents::agent::builtins::GenericCli;
-use lazybox_ipc::{AgentRunId, Connection, Event, TerminalId};
+use lazybox_ipc::{AgentRunId, Connection, Event};
 use lazybox_store::{MemoryStore, SqliteStore, Store};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use tokio::sync::{Mutex, broadcast};
 
 /// Filesystem root used by daemon-owned git worktrees.
@@ -302,111 +304,10 @@ pub struct ServerConfig {
     /// Root for every daemon-owned bare clone and worktree. Private so
     /// production code cannot bypass [`ServerConfig::worktree_manager`].
     worktree_root: Arc<WorktreeRoot>,
-    /// Wire-side `TerminalId` ↔ backend session key. The server
-    /// allocates numeric ids for the IPC stream; the backend uses its
-    /// own stable string keys (e.g. tmux session names). This map
-    /// translates between them. Every connection's serve loop reads
-    /// + writes it.
-    pub terminals: Arc<Mutex<HashMap<TerminalId, String>>>,
-    /// Wire-side `TerminalId` → owning `SessionId`. Lets the
-    /// migration code freeze just one session's runners during a
-    /// `git worktree move`, instead of freezing every backend
-    /// session in the process. Populated by `handle_spawn` when a
-    /// terminal is created against a known session; entries are
-    /// removed on `TerminalExited`.
-    pub terminal_sessions: Arc<Mutex<HashMap<TerminalId, lazybox_core::SessionId>>>,
-    /// Cached `AgentState` per agent terminal. Hydrated from durable state
-    /// before recovery replay, then updated by the lifecycle owner;
-    /// transitions are broadcast as `Event::AgentState`. Caching avoids
-    /// broadcasting on every PTY chunk when nothing changed.
-    pub agent_states: Arc<Mutex<HashMap<TerminalId, lazybox_ipc::AgentState>>>,
-    /// Durable process generation for each agent terminal. Fresh spawns use
-    /// their globally unique first wire id; recovered terminals restore the
-    /// original value so state records cannot bleed into a later process
-    /// that happens to receive the same backend key.
-    pub agent_state_generations: Arc<Mutex<HashMap<TerminalId, u64>>>,
-    /// Wire-side metadata per terminal: `(session_key, kind)`. The
-    /// `terminals` map only carries the backend key; clients
-    /// reconnecting via Subscribe need the full pairing so the
-    /// initial Snapshot can route terminals into the right tab
-    /// strip. Populated by `handle_spawn`, cleaned on
-    /// `TerminalExited`.
-    pub terminal_meta:
-        Arc<Mutex<HashMap<TerminalId, (lazybox_core::SessionKey, lazybox_ipc::TerminalKind)>>>,
-    /// Terminals launched in no-permission / bypass mode (autonomous
-    /// sessions). Populated by `handle_spawn` when a spawn skips
-    /// permission prompts; read by `snapshot_terminals` so a
-    /// reconnecting client can re-render the indicator. Cleaned on
-    /// `TerminalExited` alongside the other per-terminal maps.
-    pub no_permission_terminals: Arc<Mutex<HashSet<TerminalId>>>,
-    /// Terminals running on the repo's shared main checkout rather than
-    /// an isolated worktree. Populated by `handle_spawn` for a
-    /// main-checkout spawn; read by `snapshot_terminals` (badge replay
-    /// on reconnect) and `find_existing_singleton` (so a main-checkout
-    /// agent is a distinct singleton from the same agent on an isolated
-    /// worktree in the same workspace). Cleaned on `TerminalExited`
-    /// alongside the other per-terminal maps.
-    pub on_main_terminals: Arc<Mutex<HashSet<TerminalId>>>,
-    /// Model-tier display label a terminal was launched with (`"Opus"`),
-    /// keyed by terminal id. Populated by `handle_spawn` when the user
-    /// picked a tier; read by `snapshot_terminals` so a reconnecting
-    /// client re-renders the tier badge. Cleaned on `TerminalExited`
-    /// alongside the other per-terminal maps.
-    pub terminal_models: Arc<Mutex<HashMap<TerminalId, String>>>,
-    /// Recovered agent processes launched under an older PTY compatibility
-    /// generation. Their inherited environment cannot be changed in place;
-    /// Subscribe reports an actionable restart notice until they exit.
-    pub outdated_agent_terminals: Arc<Mutex<HashSet<TerminalId>>>,
-    /// Per-backend-key serialization between prompt-state persistence and
-    /// terminal teardown. Draft/user-message writes run on a background lane;
-    /// without this boundary a delayed write could finish after teardown's
-    /// deletes and resurrect orphaned `terminal-draft:*` rows.
-    terminal_persistence_locks: Arc<parking_lot::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
-    /// Global per-backend interaction lock shared by every connection and
-    /// producer (keyboard input, prompt injection, chat, submit retry). The
-    /// per-connection command lanes cannot by themselves prevent concurrent
-    /// writes from different owners corrupting a PTY byte stream.
-    terminal_io_locks: Arc<parking_lot::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
-    /// Terminals whose agent-state detection buffer should be dropped
-    /// on the pump's next output chunk. Set by `handle_write` when the
-    /// user submits an answer to an `InputNeeded` prompt (Enter while
-    /// the `?` pill is up); consumed (and cleared) by the output pump.
-    ///
-    /// Without this, the just-answered prompt's markers (`❯`, the
-    /// numbered options, `Esc to cancel`, `do you want to …`) linger in
-    /// the rolling detection window and re-fire `InputNeeded` on the
-    /// very next chunk — so the `?` pill reappears the instant after
-    /// the user answers and never clears until ~16 KiB of fresh output
-    /// evicts the stale prompt. Dropping the buffer here lets detection
-    /// restart from post-answer output. Safe: if the prompt is
-    /// genuinely still up, Claude re-renders it and the fresh chunk
-    /// re-establishes `InputNeeded`.
-    pub agent_detect_resets: Arc<Mutex<HashSet<TerminalId>>>,
-    /// Agent terminals that have reported at least one structured
-    /// lifecycle hook (`Command::IngestHook`), mapped to the arrival
-    /// time of their most recent hook. For these, hooks are the
-    /// authoritative source of `Working` / `InputNeeded`; the PTY
-    /// detector only supplies the idle/interrupt fallback the `Stop`
-    /// hook misses (Ctrl-C / Esc don't fire `Stop`) — unless the last
-    /// hook is stale (see `spawn_handler::HOOK_STALENESS`), in which
-    /// case the terminal degrades back to full PTY detection instead
-    /// of freezing on the last hook state. A terminal that never
-    /// reports a hook (old Claude version, hooks disabled, non-Claude
-    /// agent) is absent here and keeps full PTY detection. Populated
-    /// by `handle_ingest_hook`, cleaned on `TerminalExited`.
-    pub hook_driven_terminals: Arc<Mutex<HashMap<TerminalId, std::time::Instant>>>,
-    /// Per-terminal signal fired by `handle_ingest_hook` when a
-    /// `UserPromptSubmit` hook lands. The prompt-inject paths register
-    /// a `Notify` here before sending the submit keystroke so they can
-    /// verify the prompt actually entered Claude's turn (and resend
-    /// the Enter once if it didn't — issue #122). Entries are removed
-    /// by the registering inject task; the pump also sweeps on
-    /// `TerminalExited`.
-    pub prompt_submit_signals: Arc<Mutex<HashMap<TerminalId, Arc<tokio::sync::Notify>>>>,
-    /// At most one readiness-gated prompt injection may wait per terminal.
-    /// A synchronous mutex lets the spawned waiter's RAII guard release the
-    /// reservation on every return/cancellation path.
-    pub pending_prompt_injections: Arc<parking_lot::Mutex<std::collections::HashSet<TerminalId>>>,
+    /// PTY lifecycle and agent-state maps.
+    pub terminal: TerminalRegistry,
+    /// Spawn claims and prompt-injection synchronization.
+    pub spawn: SpawnCoordinator,
     /// Factory for a structured agent run's underlying process I/O.
     /// Defaults to spawning a real subprocess; tests swap in an
     /// in-memory fake so they never launch an agent CLI or a shell.
@@ -422,106 +323,8 @@ pub struct ServerConfig {
     /// Local/dev fallback principal. API auth can replace this with a
     /// per-connection principal later.
     pub default_principal_id: lazybox_ipc::PrincipalId,
-    /// Cross-tick polling state — provider-error debounce + the
-    /// "already prompted" set for out-of-scope workspaces. Shared
-    /// between the long-lived poll loop and `Command::Refresh`'s
-    /// one-shot tick so dismissed prompts stay dismissed across
-    /// both paths. Without this, Refresh would prompt, you'd
-    /// dismiss, and 30s later the long-lived loop would re-prompt
-    /// (each has its own `TickState`).
-    pub poll_state: Arc<Mutex<polling::TickState>>,
-    /// Current GitHub workspace engagement tiers. Focus updates write
-    /// here on the serve loop; poll ticks fold in live agents and
-    /// persisted workspace state, then publish one bounded hot set.
-    pub poll_engagement: Arc<parking_lot::RwLock<polling::PollEngagement>>,
-    /// Long-lived GitHub client, cached across ticks in its OWN lock —
-    /// deliberately NOT a field of `poll_state` (issue #92). WITHOUT a
-    /// persistent client, every tick (and every user-triggered
-    /// `fetch_pr_details`) would rebuild it via
-    /// `GhClient::from_credential`, resetting the inner `RateBudget` to
-    /// its full-bucket / no-remote-observation default — the "GitHub said
-    /// remaining=50, back off" knowledge from the last call is thrown
-    /// away and the next request flies blind into a 429. We reuse the
-    /// client (and its budget `Arc`) and only rebuild when the credential
-    /// SOURCE changes.
-    ///
-    /// Why its own `parking_lot::Mutex` rather than living in `poll_state`:
-    /// `handle_fetch_pr_details` and the poll tick both need this client,
-    /// and the cold-cache path builds it with a network `.await`. Holding
-    /// `poll_state` across that build re-creates the exact serve-loop
-    /// stall #91/#92 fight — and #133's `checkout_poll_state` made it
-    /// worse by emptying `poll_state`'s copy for the whole tick, so every
-    /// concurrent fetch hit the rebuild path. Keeping the client here
-    /// means reaching it is a brief `parking_lot::Mutex` clone-out that
-    /// never blocks on `poll_state` and never spans the `from_credential`
-    /// await.
-    pub gh_client_cache: Arc<parking_lot::Mutex<Option<lazybox_gh::GhClient>>>,
-    /// Issue→PR merge-prompt dedupe memory. Deliberately separate from
-    /// `poll_state`: the collapse path that touches it runs inside an
-    /// `upsert`, and sharing `poll_state`'s non-reentrant
-    /// `tokio::sync::Mutex` self-deadlocked when the tick held that
-    /// guard across the upsert loop (#131/#132). A tick no longer holds
-    /// `poll_state` across its body (#133), but `upsert` staying
-    /// decoupled from it is worth keeping. See
-    /// [`polling::MergePromptMemory`].
-    pub merge_prompts: Arc<Mutex<polling::MergePromptMemory>>,
-    /// Daemon-side "auto-merge on green" one-shot latch (the trigger
-    /// moved out of the TUI client — see [`polling::auto_merge`]).
-    /// Own `parking_lot::Mutex` for the same reason as `merge_prompts`:
-    /// it's touched from inside the upsert/commit path and must stay
-    /// decoupled from `poll_state`'s non-reentrant lock. In-memory on
-    /// purpose — a restart re-evaluates and may re-attempt an
-    /// idempotent merge, which GitHub answers "already merged".
-    pub auto_merge: Arc<parking_lot::Mutex<polling::AutoMergeMemory>>,
-    /// Workspace-removal prompt memory (level-triggered
-    /// `MergedPrRemovable` re-emits + "keep" pins). Own lock for the
-    /// same reason as `merge_prompts`: it's touched from inside the
-    /// upsert path via `prompt_merged_pr_removal_with`. See
-    /// [`polling::RemovalPromptMemory`].
-    pub removal_prompts: Arc<Mutex<polling::RemovalPromptMemory>>,
-    /// Authenticated user logins per provider source ("github" →
-    /// "AntoineToussaint"). Populated by the polling layer when
-    /// each provider client initializes; consumed by the Subscribe
-    /// handler so reconnecting TUIs immediately know which authors
-    /// in activity bylines are the local user (→ render as `@me`).
-    /// `parking_lot::Mutex` (not tokio's) because the data is tiny
-    /// and read/written from sync contexts only — no await needed.
-    pub viewer_identities: Arc<parking_lot::Mutex<Vec<(String, String)>>>,
-    /// Wake handle for the long-lived poll loop. Pinging this
-    /// `Notify` makes the next poll tick fire immediately instead of
-    /// waiting out the remainder of its current sleep. Used by:
-    /// - `Command::Refresh` (manual `Shift-R`)
-    /// - client connect (so a freshly-opened TUI sees current data
-    ///   instead of "whatever the daemon polled last")
-    /// - the lazy mergeable retry path (`Mergeable::Unknown` PRs
-    ///   re-fired ~5s later so GitHub's lazy compute lands)
-    pub poll_wake: Arc<tokio::sync::Notify>,
-    /// Set by wake sources that require the notifications heartbeat,
-    /// rather than only the bounded hot-target refresh.
-    poll_warm_requested: Arc<AtomicBool>,
-    /// In-flight singleton-spawn claims: `(workspace key, singleton
-    /// kind key)` pairs a `handle_spawn` is currently provisioning.
-    /// The duplicate-spawn check reads maps that are only populated
-    /// AFTER worktree provisioning + `backend.spawn` — a minutes-long
-    /// window on a cold clone — so two `w` presses (or autofix racing
-    /// a user spawn, or startup restore racing both) each passed it
-    /// and launched two skip-permissions agents into one worktree.
-    /// Claimed synchronously at the top of `handle_spawn`, released by
-    /// a drop guard on EVERY exit path; `Kill` also serializes against
-    /// it. `parking_lot::Mutex` — the data is tiny and no await ever
-    /// happens under the guard, which lets the drop guard release
-    /// synchronously. Each claim carries a cancel `Notify`:
-    /// `Command::CancelSpawn` pings it and the owning `handle_spawn`
-    /// aborts its provisioning (dropping the in-flight `git` child) —
-    /// how an Esc on the "Setting up workspace" checklist actually
-    /// stops a wedged clone instead of letting it run on (issue #403).
-    pub inflight_spawns:
-        Arc<parking_lot::Mutex<HashMap<(String, String), Arc<tokio::sync::Notify>>>>,
-    /// Pinged whenever an in-flight spawn claim is released, so
-    /// waiters (duplicate spawns collapsing onto the winner, `Kill`
-    /// waiting out a mid-flight provision) re-check promptly instead
-    /// of busy-polling.
-    pub inflight_spawn_changed: Arc<tokio::sync::Notify>,
+    /// Cross-tick provider state, caches, and wake coordination.
+    pub poll: PollState,
     /// Workspace keys whose deletion began in this process (single delete,
     /// merged cleanup, or project cascade). Consulted both when a workspace
     /// row is missing and immediately after `backend.spawn`, so a provision
@@ -542,15 +345,6 @@ pub struct ServerConfig {
     /// `poll_state` — see the `MergePromptMemory` deadlock note in
     /// `polling`.
     pub undecodable_row_reports: Arc<parking_lot::Mutex<HashMap<String, std::time::Instant>>>,
-    /// Shape of the last `InputNeeded` decision per terminal — whether
-    /// a bare chooser keystroke (`1`-`9`, y/n, Esc) is a complete
-    /// answer. Written by the PTY detector (its structural triggers
-    /// are all chooser-shaped) and by `handle_ingest_hook` (permission
-    /// → chooser, elicitation → free text); read by `handle_write`'s
-    /// optimistic InputNeeded→Working flip so a digit typed into a
-    /// free-text elicitation can't clear a real `?`. Cleaned on
-    /// `TerminalExited`.
-    pub input_needed_shapes: Arc<Mutex<HashMap<TerminalId, lazybox_agents::PromptShape>>>,
     /// Cumulative event-pipeline counters and bounded GitHub sync
     /// delivery-latency samples. Surfaced at `/v1/metrics`.
     pub event_metrics: Arc<metrics::EventMetrics>,
@@ -570,17 +364,6 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
-    pub(crate) fn wake_poll(&self, poll_notifications: bool) {
-        if poll_notifications {
-            self.poll_warm_requested.store(true, Ordering::Release);
-        }
-        self.poll_wake.notify_one();
-    }
-
-    pub(crate) fn take_warm_poll_request(&self) -> bool {
-        self.poll_warm_requested.swap(false, Ordering::AcqRel)
-    }
-
     /// Open the store at `~/.lazybox/v2/state.db`.
     ///
     /// Open failures (permissions, disk corruption) abort startup. A
@@ -680,41 +463,17 @@ impl ServerConfig {
             bus,
             backend,
             worktree_root: Arc::new(worktree_root),
-            terminals: Arc::new(Mutex::new(HashMap::new())),
-            terminal_sessions: Arc::new(Mutex::new(HashMap::new())),
-            agent_states: Arc::new(Mutex::new(HashMap::new())),
-            agent_state_generations: Arc::new(Mutex::new(HashMap::new())),
-            terminal_meta: Arc::new(Mutex::new(HashMap::new())),
-            no_permission_terminals: Arc::new(Mutex::new(HashSet::new())),
-            on_main_terminals: Arc::new(Mutex::new(HashSet::new())),
-            terminal_models: Arc::new(Mutex::new(HashMap::new())),
-            outdated_agent_terminals: Arc::new(Mutex::new(HashSet::new())),
-            terminal_persistence_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
-            terminal_io_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
-            agent_detect_resets: Arc::new(Mutex::new(HashSet::new())),
-            hook_driven_terminals: Arc::new(Mutex::new(HashMap::new())),
-            prompt_submit_signals: Arc::new(Mutex::new(HashMap::new())),
-            pending_prompt_injections: Arc::new(parking_lot::Mutex::new(HashSet::new())),
+            terminal: TerminalRegistry::default(),
+            spawn: SpawnCoordinator::default(),
             agent_stream_spawner: Arc::new(agent_stream::ProcessAgentStreamSpawner),
             agent_runs: Arc::new(Mutex::new(HashMap::new())),
             next_agent_run_id: Arc::new(AtomicU64::new(1)),
             credential_store: Arc::new(auth::MemoryCredentialStore::new()),
             default_principal_id: lazybox_ipc::PrincipalId::local(),
-            poll_state: Arc::new(Mutex::new(polling::TickState::default())),
-            poll_engagement: Arc::new(parking_lot::RwLock::new(polling::PollEngagement::default())),
-            gh_client_cache: Arc::new(parking_lot::Mutex::new(None)),
-            merge_prompts: Arc::new(Mutex::new(polling::MergePromptMemory::default())),
-            auto_merge: Arc::new(parking_lot::Mutex::new(polling::AutoMergeMemory::default())),
-            removal_prompts: Arc::new(Mutex::new(polling::RemovalPromptMemory::default())),
-            viewer_identities: Arc::new(parking_lot::Mutex::new(Vec::new())),
-            poll_wake: Arc::new(tokio::sync::Notify::new()),
-            poll_warm_requested: Arc::new(AtomicBool::new(false)),
-            inflight_spawns: Arc::new(parking_lot::Mutex::new(HashMap::new())),
-            inflight_spawn_changed: Arc::new(tokio::sync::Notify::new()),
+            poll: PollState::default(),
             deleted_workspaces: Arc::new(parking_lot::Mutex::new(HashSet::new())),
             archive_updates: Arc::new(parking_lot::Mutex::new(())),
             undecodable_row_reports: Arc::new(parking_lot::Mutex::new(HashMap::new())),
-            input_needed_shapes: Arc::new(Mutex::new(HashMap::new())),
             event_metrics: Arc::new(metrics::EventMetrics::default()),
             workspace_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             worktree_ownership_lock: Arc::new(Mutex::new(())),
@@ -821,85 +580,6 @@ impl ServerConfig {
         let config =
             Self::with_store_and_backend(Arc::new(MemoryStore::new()), Arc::new(mock.clone()));
         (config, mock)
-    }
-
-    // ── Lock-then-clone helpers ──────────────────────────────────
-    //
-    // Pattern these helpers replace:
-    //
-    //   let key = match config.terminals.lock().await.get(&id).cloned() {
-    //       Some(k) => k,
-    //       None => return,
-    //   };
-    //
-    // The MutexGuard is a temporary in the match scrutinee, so per
-    // Rust temporary-scope rules it lives for the WHOLE match. Any
-    // `.await` in a match arm holds the lock across the suspension
-    // point — exactly the latent deadlock I caught in
-    // `handle_inject_prompt` mid-push. Each helper here takes the
-    // lock, clones the lookup result, and releases on return — no
-    // way for a caller to accidentally hold a guard across an await.
-
-    /// Snapshot the backend key for a wire-side terminal id.
-    /// Returns `None` when the terminal isn't registered.
-    pub async fn backend_key_for(&self, id: TerminalId) -> Option<String> {
-        self.terminals.lock().await.get(&id).cloned()
-    }
-
-    /// Snapshot the `(session_key, kind)` metadata for a terminal.
-    /// `None` when the terminal isn't registered (or the entry got
-    /// cleaned by a concurrent `TerminalExited` between calls).
-    pub async fn terminal_meta_for(
-        &self,
-        id: TerminalId,
-    ) -> Option<(lazybox_core::SessionKey, lazybox_ipc::TerminalKind)> {
-        self.terminal_meta.lock().await.get(&id).cloned()
-    }
-
-    /// Snapshot the cached `AgentState` for a terminal. `None` when
-    /// the pump hasn't observed a state transition yet.
-    pub async fn agent_state_for(&self, id: TerminalId) -> Option<lazybox_ipc::AgentState> {
-        self.agent_states.lock().await.get(&id).copied()
-    }
-
-    /// Serialize durable prompt state with teardown for one backend session.
-    /// Callers re-check terminal liveness after acquiring: teardown may have
-    /// won the lock and removed the wire mapping while they waited.
-    pub(crate) async fn lock_terminal_persistence(
-        &self,
-        backend_key: &str,
-    ) -> tokio::sync::OwnedMutexGuard<()> {
-        let entry = {
-            let mut locks = self.terminal_persistence_locks.lock();
-            locks.entry(backend_key.to_string()).or_default().clone()
-        };
-        entry.lock_owned().await
-    }
-
-    /// Drop the registry entry after teardown. Existing guards/waiters keep
-    /// their `Arc`; future stale writers create a fresh lock, re-check the now
-    /// absent terminal mapping, and skip without resurrecting state.
-    pub(crate) fn forget_terminal_persistence_lock(&self, backend_key: &str) {
-        self.terminal_persistence_locks.lock().remove(backend_key);
-    }
-
-    /// Serialize every backend interaction for one terminal across all client
-    /// connections and non-command producers.
-    pub(crate) async fn lock_terminal_io(
-        &self,
-        backend_key: &str,
-    ) -> tokio::sync::OwnedMutexGuard<()> {
-        let entry = {
-            let mut locks = self.terminal_io_locks.lock();
-            locks.entry(backend_key.to_string()).or_default().clone()
-        };
-        entry.lock_owned().await
-    }
-
-    /// Retire the registry entry after terminal teardown. Existing waiters
-    /// keep the old `Arc`, re-check liveness, and reject stale work.
-    pub(crate) fn forget_terminal_io_lock(&self, backend_key: &str) {
-        self.terminal_io_locks.lock().remove(backend_key);
     }
 }
 
@@ -1464,13 +1144,13 @@ mod mutation_admission_tests {
     #[test]
     fn warm_poll_requests_survive_wake_coalescing_until_consumed() {
         let config = ServerConfig::in_memory();
-        config.wake_poll(false);
-        assert!(!config.take_warm_poll_request());
+        config.poll.wake(false);
+        assert!(!config.poll.take_warm_request());
 
-        config.wake_poll(true);
-        config.wake_poll(false);
-        assert!(config.take_warm_poll_request());
-        assert!(!config.take_warm_poll_request());
+        config.poll.wake(true);
+        config.poll.wake(false);
+        assert!(config.poll.take_warm_request());
+        assert!(!config.poll.take_warm_request());
     }
 
     #[tokio::test]
@@ -1550,7 +1230,7 @@ pub async fn dispatch_command(
             // the marker set independently could therefore warn about a
             // terminal absent from this snapshot.
             let restart_required = {
-                let outdated = config.outdated_agent_terminals.lock().await;
+                let outdated = config.terminal.outdated_agent_terminals.lock().await;
                 terminals
                     .iter()
                     .filter_map(|terminal| {
@@ -1582,10 +1262,10 @@ pub async fn dispatch_command(
             polling::mark_removal_prompts_for_replay(config).await;
             // Kick a fresh poll so the freshly-opened TUI refreshes within
             // a few seconds instead of waiting out the current sleep.
-            config.wake_poll(true);
+            config.poll.wake(true);
             // Replay cached viewer identities so a reconnecting TUI can
             // render `@me` without waiting for the next poll cycle.
-            let logins = config.viewer_identities.lock().clone();
+            let logins = config.poll.viewer_identities.lock().clone();
             if !logins.is_empty() {
                 let _ = tx.send(Event::ViewerIdentities { logins });
             }
@@ -1656,7 +1336,7 @@ pub async fn dispatch_command(
             .await;
         }
         lazybox_ipc::Command::CancelSpawn { session_key } => {
-            spawn_handler::handle_cancel_spawn(config, &session_key);
+            spawn_handler::handle_cancel_spawn(&config.spawn, &session_key);
         }
         lazybox_ipc::Command::CreateSession {
             session_key,
@@ -1914,10 +1594,10 @@ pub async fn dispatch_command(
             // issue appears now instead of next scheduled sweep (issue
             // #180), then wake the long-lived poll loop — the single
             // source of truth for ticks.
-            if let Some(client) = config.gh_client_cache.lock().as_ref() {
+            if let Some(client) = config.poll.gh_client_cache.lock().as_ref() {
                 client.force_full_sweep();
             }
-            config.wake_poll(true);
+            config.poll.wake(true);
         }
         lazybox_ipc::Command::PostReply { session_key, body } => {
             polling::post_reply(config, session_key, body).await;

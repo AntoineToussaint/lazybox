@@ -460,7 +460,7 @@ async fn run_case(case: Case) {
 
     // (c) every live terminal is re-keyed to the PR.
     {
-        let meta = config.terminal_meta.lock().await;
+        let meta = config.terminal.terminal_meta.lock().await;
         for tid in &terminal_ids {
             let (sk, _) = meta.get(tid).expect("terminal still tracked");
             assert_eq!(sk, &pr_sk, "terminal_meta must rebadge onto the PR");
@@ -498,7 +498,7 @@ async fn run_case(case: Case) {
         ServerConfig::with_store_and_backend(config.store.clone(), config.backend.clone());
     lazybox_server::spawn_handler::recover_sessions(&config2).await;
     {
-        let meta2 = config2.terminal_meta.lock().await;
+        let meta2 = config2.terminal.terminal_meta.lock().await;
         assert_eq!(
             meta2.len(),
             terminal_ids.len(),
@@ -701,7 +701,7 @@ async fn collapse_with_distinct_issue_and_pr_worktrees_keeps_both_sessions() {
             "neither backend session may be killed by the collapse",
         );
         {
-            let meta = config.terminal_meta.lock().await;
+            let meta = config.terminal.terminal_meta.lock().await;
             for tid in [issue_tid, pr_tid] {
                 let (sk, _) = meta.get(&tid).expect("terminal still tracked");
                 assert_eq!(sk, &pr_sk);

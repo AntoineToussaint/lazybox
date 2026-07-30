@@ -517,7 +517,7 @@ pub async fn handle_inbound(
     // actually dispatches the assembled prompt.
     let bytes = encode_for_pty(text);
     let backend_key = {
-        let terminals = server.terminals.lock().await;
+        let terminals = server.terminal.terminals.lock().await;
         terminals.get(&terminal_id).cloned()
     };
     if let Some(key) = backend_key {
@@ -563,6 +563,7 @@ pub async fn handle_bus_event(
             // Look up the session id; without it we can't pick a
             // unique chat surface per (session, agent).
             let session_id = server
+                .terminal
                 .terminal_sessions
                 .lock()
                 .await
@@ -740,9 +741,9 @@ pub(crate) async fn resync_spawned_terminals(
     state: &Arc<Mutex<RouterState>>,
 ) {
     let meta: HashMap<TerminalId, (lazybox_core::SessionKey, TerminalKind)> =
-        { server.terminal_meta.lock().await.clone() };
+        { server.terminal.terminal_meta.lock().await.clone() };
     let sessions: HashMap<TerminalId, lazybox_core::SessionId> =
-        { server.terminal_sessions.lock().await.clone() };
+        { server.terminal.terminal_sessions.lock().await.clone() };
     for (terminal_id, (session_key, kind)) in meta {
         let TerminalKind::Agent(agent_id) = kind else {
             continue;
@@ -829,7 +830,7 @@ fn asking_label(quiet_for: Option<Duration>) -> &'static str {
 /// user can see what the agent is asking.
 async fn recent_terminal_text(server: &ServerConfig, terminal_id: TerminalId) -> String {
     let backend_key = {
-        let terminals = server.terminals.lock().await;
+        let terminals = server.terminal.terminals.lock().await;
         match terminals.get(&terminal_id) {
             Some(k) => k.clone(),
             None => return String::new(),
@@ -931,7 +932,7 @@ async fn build_status_reply(
 ) -> String {
     let ChatCommand::Status = cmd;
     let agent_states_snapshot: HashMap<TerminalId, AgentState> = {
-        let m = server.agent_states.lock().await;
+        let m = server.terminal.agent_states.lock().await;
         m.clone()
     };
     let terminal_to_channel: HashMap<TerminalId, String> = {
@@ -939,11 +940,11 @@ async fn build_status_reply(
         s.terminal_to_channel.clone()
     };
     let terminal_meta: HashMap<TerminalId, (lazybox_core::SessionKey, TerminalKind)> = {
-        let m = server.terminal_meta.lock().await;
+        let m = server.terminal.terminal_meta.lock().await;
         m.clone()
     };
     let terminal_sessions: HashMap<TerminalId, lazybox_core::SessionId> = {
-        let m = server.terminal_sessions.lock().await;
+        let m = server.terminal.terminal_sessions.lock().await;
         m.clone()
     };
     let workspaces = load_workspaces_for_status(server.store.clone()).await;
@@ -1695,7 +1696,7 @@ mod tests {
         let known = TerminalId(8);
         let shell = TerminalId(9);
         {
-            let mut meta = server.terminal_meta.lock().await;
+            let mut meta = server.terminal.terminal_meta.lock().await;
             meta.insert(
                 missed,
                 (
@@ -1716,7 +1717,7 @@ mod tests {
             );
         }
         {
-            let mut sessions = server.terminal_sessions.lock().await;
+            let mut sessions = server.terminal.terminal_sessions.lock().await;
             sessions.insert(missed, lazybox_core::SessionId::new());
             sessions.insert(known, lazybox_core::SessionId::new());
             sessions.insert(shell, lazybox_core::SessionId::new());

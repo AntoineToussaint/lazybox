@@ -76,7 +76,8 @@ pub(crate) async fn run_io_router(
                 ..
             }
         ) || matches!(&command, Command::DeliverSnippet { .. });
-        if !handle_missing_terminal && config.backend_key_for(terminal_id).await.is_none() {
+        if !handle_missing_terminal && config.terminal.backend_key_for(terminal_id).await.is_none()
+        {
             // Never allocate a 60-second worker for arbitrary stale/hostile
             // terminal ids. Prompt injection with a fallback is the one
             // exception: its documented contract can legitimately spawn a
@@ -143,7 +144,7 @@ async fn run_io_lane(
                 Ok(Some(command)) => command,
                 Ok(None) => break,
                 Err(_) => {
-                    if config.backend_key_for(terminal_id).await.is_none() {
+                    if config.terminal.backend_key_for(terminal_id).await.is_none() {
                         break;
                     }
                     continue;
@@ -269,7 +270,7 @@ pub(crate) async fn run_persistence_router(
                 continue;
             }
         };
-        if config.backend_key_for(terminal_id).await.is_none() {
+        if config.terminal.backend_key_for(terminal_id).await.is_none() {
             continue;
         }
 
@@ -344,7 +345,7 @@ async fn run_persistence_lane(
                 Ok(Some(command)) => command,
                 Ok(None) => break,
                 Err(_) => {
-                    if config.backend_key_for(terminal_id).await.is_none() {
+                    if config.terminal.backend_key_for(terminal_id).await.is_none() {
                         break;
                     }
                     continue;
@@ -416,6 +417,7 @@ mod tests {
                 .await
                 .expect("spawn");
             config
+                .terminal
                 .terminals
                 .lock()
                 .await

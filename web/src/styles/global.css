@@ -422,7 +422,9 @@ img, video { max-width: 100%; display: block; }
   left: 0;
   right: 0;
   bottom: 0;
-  padding: 0.6rem 0.75rem 0.85rem;
+  /* Bottom padding lifts the pill clear of the native control bar, which the
+     scrim still covers, so a caption never overlaps the scrubber on hover. */
+  padding: 0.6rem 0.75rem 2.75rem;
   display: flex;
   justify-content: center;
   pointer-events: none;
@@ -441,9 +443,12 @@ img, video { max-width: 100%; display: block; }
   max-width: 100%;
   padding: 0.32rem 0.6rem;
   border-radius: 0.5rem;
+  /* Opaque enough to stay readable on browsers without backdrop-filter; the
+     blur is a progressive enhancement. Both properties per site convention. */
   background: rgba(9, 12, 18, 0.78);
   border: 1px solid var(--border);
   backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
   font-family: var(--sans);
   font-size: clamp(0.72rem, 1.4vw, 0.92rem);
   line-height: 1.35;

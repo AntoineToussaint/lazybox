@@ -148,6 +148,24 @@ test('the styled caption overlay reads its cues from the same track', () => {
   assert.match(keyRule, /font-family:\s*var\(--mono\)/, 'expected the keycap chip in the mono font');
 });
 
+test('the caption pill clears the control bar and reads without blur', () => {
+  const overlayRule = css.match(/\.demo-overlay\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(
+    overlayRule,
+    /padding:[^;}]*2\.75rem/,
+    'expected extra bottom padding so the pill sits above the native control bar',
+  );
+  const lineRule = css.match(/\.demo-overlay-line\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(lineRule, /backdrop-filter:\s*blur/, 'expected the backdrop blur enhancement');
+  // The fallback for browsers without backdrop-filter: a near-opaque fill keeps
+  // the caption legible, so the missing blur is purely cosmetic.
+  assert.match(
+    lineRule,
+    /background:#090c12[0-9a-f]{2}/,
+    'expected an opaque fill so the caption reads without blur support',
+  );
+});
+
 test('the homepage publishes the established public-safe social preview', () => {
   assert.ok(html.includes('<meta property="og:image" content="https://lazybox.ai/og.png">'));
   assert.ok(html.includes('<meta name="twitter:image" content="https://lazybox.ai/og.png">'));

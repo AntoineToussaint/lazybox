@@ -1,4 +1,3 @@
-use crate::backend::{BackendError, SessionBackend};
 use lazybox_agents::{Agent, Registry, SpawnCtx};
 use lazybox_core::{SessionId, SessionKey};
 use lazybox_ipc::{SpawnOrigin, TerminalId, TerminalKind};
@@ -19,7 +18,8 @@ pub struct SpawnOptions {
 pub(crate) struct SpawnPlanInput {
     pub session_key: SessionKey,
     pub kind: TerminalKind,
-    pub cwd: Option<PathBuf>,
+    pub cwd: PathBuf,
+    pub agent_worktree: PathBuf,
     pub owning_session: Option<SessionId>,
     pub initial_prompt: Option<String>,
     pub terminal_id: TerminalId,
@@ -47,7 +47,7 @@ pub(crate) struct SpawnPlan {
     pub session_key: SessionKey,
     pub kind: TerminalKind,
     pub argv: Vec<String>,
-    pub cwd: Option<PathBuf>,
+    pub cwd: PathBuf,
     pub env: Vec<(String, String)>,
     pub hint: String,
     pub persist_key: Option<String>,
@@ -74,6 +74,7 @@ pub(crate) fn build_spawn_plan(
         session_key,
         kind,
         cwd,
+        agent_worktree,
         owning_session,
         initial_prompt,
         terminal_id,
@@ -111,7 +112,7 @@ pub(crate) fn build_spawn_plan(
     let argv = argv_for(
         agents,
         &kind,
-        &cwd,
+        &agent_worktree,
         || shell_command,
         no_permission,
         hook_settings.clone(),
@@ -131,7 +132,7 @@ pub(crate) fn build_spawn_plan(
     }
     let env = with_agent_spawn_defaults(env, agent.as_deref());
     let env = with_agent_pty_spawn_env(env, agent.as_deref());
-    let env = with_worktree_cargo_target(env, cwd.as_deref());
+    let env = with_worktree_cargo_target(env, Some(&cwd));
     let kind_label = match &kind {
         TerminalKind::Agent(id) => id.clone(),
         TerminalKind::Shell => "shell".into(),
@@ -169,25 +170,10 @@ pub(crate) fn build_spawn_plan(
     })
 }
 
-pub(crate) async fn execute_spawn_plan(
-    plan: &SpawnPlan,
-    backend: &dyn SessionBackend,
-) -> Result<String, BackendError> {
-    backend
-        .spawn_persistent(
-            &plan.argv,
-            plan.cwd.as_deref(),
-            &plan.env,
-            &plan.hint,
-            plan.persist_key.as_deref(),
-        )
-        .await
-}
-
 pub(crate) fn argv_for(
     agents: &Registry,
     kind: &TerminalKind,
-    cwd: &Option<PathBuf>,
+    agent_worktree: &Path,
     resolve_shell: impl FnOnce() -> String,
     skip_permissions: bool,
     hook_settings_path: Option<PathBuf>,
@@ -202,7 +188,7 @@ pub(crate) fn argv_for(
                 .ok_or_else(|| SpawnPlanError::UnknownAgent(agent_id.clone()))?;
             let ctx = SpawnCtx {
                 session_key: String::new(),
-                worktree: cwd.clone().unwrap_or_default(),
+                worktree: agent_worktree.to_path_buf(),
                 repo: None,
                 pr_number: None,
                 env: Default::default(),
@@ -303,7 +289,8 @@ mod tests {
         SpawnPlanInput {
             session_key: SessionKey::from("github-acme-widget-657"),
             kind,
-            cwd: Some(PathBuf::from("/worktrees/widget-657")),
+            cwd: PathBuf::from("/worktrees/widget-657"),
+            agent_worktree: PathBuf::from("/worktrees/widget-657"),
             owning_session: Some(SessionId::new()),
             initial_prompt: Some("extract the spawn plan".into()),
             terminal_id: TerminalId(42),
@@ -394,6 +381,30 @@ mod tests {
     }
 
     #[test]
+    fn codex_plan_uses_the_resolved_agent_worktree_without_filesystem_lookup() {
+        let cfg = lazybox_config::Config::default();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let resolved = temp.path().join("resolved");
+        let alias = temp.path().join("alias");
+        std::fs::create_dir(&resolved).expect("resolved directory");
+        std::os::unix::fs::symlink(&resolved, &alias).expect("worktree symlink");
+        let mut input = input(TerminalKind::Agent("codex".into()));
+        input.autonomous = true;
+        input.cwd = PathBuf::from("/worktrees/widget-link");
+        input.agent_worktree = alias.clone();
+
+        let plan =
+            build_spawn_plan(input, &cfg, &Registry::default_builtins()).expect("valid plan");
+
+        let path = serde_json::to_string(&alias.to_string_lossy()).expect("serialize path");
+        assert_eq!(plan.cwd, PathBuf::from("/worktrees/widget-link"));
+        assert!(
+            plan.argv
+                .contains(&format!("projects={{{path}={{trust_level=\"trusted\"}}}}"))
+        );
+    }
+
+    #[test]
     fn shell_plan_uses_resolved_command_and_main_flags() {
         let cfg = lazybox_config::Config::default();
         let mut input = input(TerminalKind::Shell);
@@ -421,24 +432,5 @@ mod tests {
         .expect("unknown agent");
 
         assert_eq!(error, SpawnPlanError::UnknownAgent("missing".into()));
-    }
-
-    #[tokio::test]
-    async fn execute_passes_the_resolved_plan_to_the_backend() {
-        let cfg = lazybox_config::Config::default();
-        let mut input = input(TerminalKind::Shell);
-        input.shell_command = "/bin/fish".into();
-        input.repo_env = vec![("PROJECT_ENV".into(), "test".into())];
-        let plan =
-            build_spawn_plan(input, &cfg, &Registry::default_builtins()).expect("valid plan");
-        let backend = crate::backend::MockBackend::new();
-
-        let key = execute_spawn_plan(&plan, &backend)
-            .await
-            .expect("backend spawn");
-
-        assert_eq!(backend.argv_for(&key).await, Some(plan.argv.clone()));
-        assert_eq!(backend.env_for(&key).await, Some(plan.env.clone()));
-        assert_eq!(backend.cwd_for(&key).await, plan.cwd);
     }
 }

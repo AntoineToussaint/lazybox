@@ -492,9 +492,22 @@ pub struct SpawnCoordinator {
         Arc<parking_lot::Mutex<HashMap<(String, String), (Arc<Notify>, bool)>>>,
     /// Wakes duplicate spawns and teardown without busy-polling.
     pub(crate) inflight_spawn_changed: Arc<Notify>,
+    /// Serializes agent target selection and spawn registration per workspace.
+    workspace_agent_actions: Arc<parking_lot::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 impl SpawnCoordinator {
+    pub(crate) async fn lock_workspace_agent(
+        &self,
+        session_key: &SessionKey,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self.workspace_agent_actions.lock();
+            locks.entry(session_key.to_string()).or_default().clone()
+        };
+        lock.lock_owned().await
+    }
+
     /// Register a waiter that is notified when an agent submits its prompt.
     pub async fn register_prompt_confirmation(&self, id: TerminalId) -> Arc<Notify> {
         let signal = Arc::new(Notify::new());

@@ -249,9 +249,42 @@ impl Sidebar {
             self.sort_chip_rect = None;
         }
 
-        // Row 2 — stats summary, only when there's something to summarize.
+        // Row 2 — focused automation plus stats summary.
         let mut stats_spans: Vec<Span> = Vec::new();
+        let focused_auto_fix = self
+            .visible
+            .get(self.cursor)
+            .and_then(|row| match row {
+                VisibleRow::Workspace(key) => self.workspaces.get(key),
+                _ => None,
+            })
+            .and_then(|workspace| {
+                let ci = workspace.policies.arm(lazybox_core::AutoFixKind::CiFailure)
+                    == lazybox_core::PolicyArm::Arm;
+                let conflict = workspace
+                    .policies
+                    .arm(lazybox_core::AutoFixKind::MergeConflict)
+                    == lazybox_core::PolicyArm::Arm;
+                match (ci, conflict) {
+                    (true, true) => Some(" AUTO-FIX ON · CI+CONFLICT "),
+                    (true, false) => Some(" AUTO-FIX ON · CI FAIL "),
+                    (false, true) => Some(" AUTO-FIX ON · CONFLICT "),
+                    (false, false) => None,
+                }
+            });
+        if let Some(label) = focused_auto_fix {
+            stats_spans.push(Span::styled(
+                label,
+                Style::default()
+                    .bg(theme.warn)
+                    .fg(ratatui::style::Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
         if ci_failing > 0 {
+            if !stats_spans.is_empty() {
+                stats_spans.push(Span::raw("  "));
+            }
             stats_spans.push(Span::styled(
                 ci_failing.to_string(),
                 Style::default()

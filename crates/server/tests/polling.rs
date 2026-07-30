@@ -6333,7 +6333,7 @@ async fn tick_dispatches_auto_fix_action_spawns_agent() {
     let action = polling::ProviderAction::AutoFixPr {
         session_key: session_key.clone(),
         agent_id: "claude".to_string(),
-        prompt: Some("Fix the failing CI".to_string()),
+        prompt: "Fix the failing CI".to_string(),
         repo: "o/r".to_string(),
         pr_number: 202,
         kind: lazybox_core::AutoFixKind::CiFailure,
@@ -6419,7 +6419,7 @@ async fn auto_fix_disarm_policy_skips_spawn() {
     let action = polling::ProviderAction::AutoFixPr {
         session_key,
         agent_id: "claude".to_string(),
-        prompt: Some("Fix CI".to_string()),
+        prompt: "Fix CI".to_string(),
         repo: "o/r".to_string(),
         pr_number: 505,
         kind: lazybox_core::AutoFixKind::CiFailure,
@@ -6468,7 +6468,7 @@ async fn auto_fix_arm_overrides_label_opt_out() {
     let action = polling::ProviderAction::AutoFixPr {
         session_key: session_key.clone(),
         agent_id: "claude".to_string(),
-        prompt: Some("Fix CI".to_string()),
+        prompt: "Fix CI".to_string(),
         repo: "o/r".to_string(),
         pr_number: 606,
         kind: lazybox_core::AutoFixKind::CiFailure,
@@ -6516,7 +6516,7 @@ async fn tick_auto_fix_respects_exhausted_budget() {
     let action = polling::ProviderAction::AutoFixPr {
         session_key,
         agent_id: "claude".to_string(),
-        prompt: Some("Fix the failing CI".to_string()),
+        prompt: "Fix the failing CI".to_string(),
         repo: "o/r".to_string(),
         pr_number: 303,
         kind: lazybox_core::AutoFixKind::CiFailure,
@@ -6566,7 +6566,7 @@ async fn auto_fix_skips_and_burns_no_attempt_while_agent_already_running() {
     let make_action = || polling::ProviderAction::AutoFixPr {
         session_key: session_key.clone(),
         agent_id: "claude".to_string(),
-        prompt: Some("Fix CI".to_string()),
+        prompt: "Fix CI".to_string(),
         repo: "o/r".to_string(),
         pr_number: 404,
         kind: lazybox_core::AutoFixKind::CiFailure,
@@ -6608,7 +6608,7 @@ async fn auto_fix_skips_and_burns_no_attempt_while_agent_already_running() {
     );
 
     // The attempt counter must still read 1 — tick 2 skipped before
-    // `check_and_record`. (AttemptRecord is private; assert on the JSON.)
+    // recording the delivered attempt. (AttemptRecord is private; assert on the JSON.)
     let rec = config
         .store
         .get_kv(&format!("autofix:{}:ci", session_key.as_str()))

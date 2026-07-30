@@ -746,20 +746,13 @@ fn cell_arm(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     Cell::from_span(Span::styled(" ARM ", style))
 }
 
-/// The compact ` FIX ` badge expands on the cursor row to name the
-/// armed repair signals. Its own center-aligned, Max-collapsing column.
+/// The compact ` FIX ` badge. Its own center-aligned, Max-collapsing
+/// column stays fixed-width across the table; the focused workspace's
+/// full trigger description lives in the sidebar header.
 fn cell_fix(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    let label = match (
-        ctx.auto_fix_ci_armed,
-        ctx.auto_fix_conflict_armed,
-        ctx.is_cursor,
-    ) {
-        (false, false, _) => return Cell::empty(),
-        (true, true, true) => " AUTO-FIX ARMED: CI+CONFLICT ",
-        (true, false, true) => " AUTO-FIX ARMED: CI ",
-        (false, true, true) => " AUTO-FIX ARMED: CONFLICT ",
-        _ => " FIX ",
-    };
+    if !ctx.auto_fix_ci_armed && !ctx.auto_fix_conflict_armed {
+        return Cell::empty();
+    }
     let style = if ctx.is_cursor {
         ctx.row_style()
     } else {
@@ -768,7 +761,7 @@ fn cell_fix(ctx: &WorkspaceRowCtx<'_>) -> Cell {
             .fg(ratatui::style::Color::Black)
             .add_modifier(Modifier::BOLD)
     };
-    Cell::from_span(Span::styled(label, style))
+    Cell::from_span(Span::styled(" FIX ", style))
 }
 
 /// The track-main badge (issue #535). A synced tracked workspace shows a
@@ -1577,10 +1570,9 @@ mod tests {
         assert_eq!(cell_status(&ctx).width(), 0);
     }
 
-    /// The cursor row names exactly which auto-fix signals are armed,
-    /// while other armed rows keep the compact fleet-scanning badge.
+    /// The shared auto-fix column stays compact even on the cursor row.
     #[test]
-    fn cell_fix_names_armed_signals_on_the_cursor_row() {
+    fn cell_fix_stays_compact_on_the_cursor_row() {
         let mut task = make_task("owner/repo#1", "x");
         task.review = ReviewStatus::None;
         task.ci = CiStatus::None;
@@ -1591,22 +1583,41 @@ mod tests {
         assert_eq!(cell_fix(&ctx).width(), 0, "unarmed row has no FIX slot");
         ctx.is_cursor = true;
         ctx.auto_fix_ci_armed = true;
-        assert_eq!(
-            cell_fix(&ctx).spans[0].content.as_ref(),
-            " AUTO-FIX ARMED: CI "
-        );
+        assert_eq!(cell_fix(&ctx).spans[0].content.as_ref(), " FIX ");
         ctx.auto_fix_conflict_armed = true;
-        assert_eq!(
-            cell_fix(&ctx).spans[0].content.as_ref(),
-            " AUTO-FIX ARMED: CI+CONFLICT "
-        );
+        assert_eq!(cell_fix(&ctx).spans[0].content.as_ref(), " FIX ");
         ctx.auto_fix_ci_armed = false;
-        assert_eq!(
-            cell_fix(&ctx).spans[0].content.as_ref(),
-            " AUTO-FIX ARMED: CONFLICT "
-        );
+        assert_eq!(cell_fix(&ctx).spans[0].content.as_ref(), " FIX ");
         ctx.is_cursor = false;
         assert_eq!(cell_fix(&ctx).spans[0].content.as_ref(), " FIX ");
+    }
+
+    #[test]
+    fn focused_auto_fix_keeps_its_column_at_default_sidebar_width() {
+        let theme = theme();
+        let task0 = make_task("owner/repo#1", "Focused workspace");
+        let task1 = make_task("owner/repo#2", "Another readable workspace");
+        let ws0 = Workspace::from_task(task0.clone(), fixed_time());
+        let ws1 = Workspace::from_task(task1.clone(), fixed_time());
+        let mut focused = ctx_for(&ws0, &task0, &theme);
+        focused.is_cursor = true;
+        focused.auto_fix_ci_armed = true;
+        focused.auto_fix_conflict_armed = true;
+        let other = ctx_for(&ws1, &task1, &theme);
+
+        let lines = crate::components::table::render_table(
+            &[build_row(&focused), build_row(&other)],
+            &build_columns(4),
+            38,
+        );
+        let focused_line = line_text(&lines[0]);
+        let other_line = line_text(&lines[1]);
+
+        assert!(focused_line.contains("FIX"), "{focused_line:?}");
+        assert!(
+            other_line.contains("Another readable"),
+            "focused auto-fix must not reserve a long blank column on sibling rows: {other_line:?}"
+        );
     }
 
     /// The track-main badge (issue #535): empty when untracked, a calm

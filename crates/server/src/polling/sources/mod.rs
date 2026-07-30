@@ -195,7 +195,7 @@ pub enum ProviderAction {
     AutoFixPr {
         session_key: lazybox_core::SessionKey,
         agent_id: String,
-        prompt: Option<String>,
+        prompt: String,
         /// `owner/name` — for the PR comment.
         repo: String,
         /// PR number — for the PR comment.
@@ -416,7 +416,7 @@ impl GhSource {
             pending.push(ProviderAction::AutoFixPr {
                 session_key,
                 agent_id: DEFAULT_AGENT_ID.to_string(),
-                prompt: Some(prompt),
+                prompt,
                 repo,
                 pr_number,
                 kind,
@@ -1173,43 +1173,16 @@ pub(super) async fn dispatch_action(
                 );
                 return;
             }
-            let term_kind = lazybox_ipc::TerminalKind::Agent(agent_id.clone());
-            // Reuse a settled agent, but never interrupt one mid-turn.
-            // The red/conflict signal persists across polls, so a
-            // working or input-blocked agent is retried after it reaches
-            // Done without consuming an attempt or posting a kickoff
-            // comment. `None` matches either checkout so an agent on the
-            // shared main checkout is gated the same way.
-            if let Some(existing) = crate::spawn_handler::find_existing_singleton(
-                config,
-                &session_key,
-                &term_kind,
-                None,
-            )
-            .await
-            {
-                let state = config.terminal.agent_state_for(existing).await;
-                if state != Some(lazybox_ipc::AgentState::Done) {
-                    tracing::info!(
-                        source = source_name,
-                        %session_key,
-                        ?kind,
-                        ?existing,
-                        ?state,
-                        "auto-fix: agent has not settled to Done — skipping (no attempt burned)"
-                    );
-                    return;
-                }
-            }
             // Stateful guard: cooldown + max-attempts, persisted so it
             // survives restarts. Runs HERE (not in the source) because
             // it needs the store, which `TaskSource::fetch` doesn't get.
-            let decision = autofix::check_and_record(
+            let now = Utc::now();
+            let decision = autofix::check(
                 config.store.as_ref(),
                 session_key.as_str(),
                 kind,
                 &settings,
-                Utc::now(),
+                now,
             );
             match decision {
                 autofix::AttemptDecision::Cooldown => {
@@ -1251,6 +1224,41 @@ pub(super) async fn dispatch_action(
                     }
                 }
                 autofix::AttemptDecision::Proceed { attempt, max } => {
+                    match crate::spawn_handler::deliver_auto_fix_prompt(
+                        config,
+                        session_key.clone(),
+                        agent_id.clone(),
+                        prompt,
+                    )
+                    .await
+                    {
+                        crate::spawn_handler::DoneGatedPromptOutcome::WaitingForDone => {
+                            tracing::info!(
+                                source = source_name,
+                                %session_key,
+                                ?kind,
+                                "auto-fix: workspace agent has not settled to Done — skipping (no attempt burned)"
+                            );
+                            return;
+                        }
+                        crate::spawn_handler::DoneGatedPromptOutcome::DeliveryFailed => {
+                            tracing::warn!(
+                                source = source_name,
+                                %session_key,
+                                ?kind,
+                                "auto-fix: prompt delivery failed — skipping (no attempt burned)"
+                            );
+                            return;
+                        }
+                        crate::spawn_handler::DoneGatedPromptOutcome::Delivered => {}
+                    }
+                    autofix::record_attempt(
+                        config.store.as_ref(),
+                        session_key.as_str(),
+                        kind,
+                        &settings,
+                        now,
+                    );
                     tracing::info!(
                         source = source_name,
                         %session_key,
@@ -1258,12 +1266,8 @@ pub(super) async fn dispatch_action(
                         %reason,
                         attempt,
                         max,
-                        "auto-fixing PR (spawning agent)"
+                        "auto-fixing PR"
                     );
-                    // Post the "why work just started" comment BEFORE
-                    // spawning so the user sees lazybox's note even if the
-                    // agent races to push first. Best-effort: a failed
-                    // comment never blocks the fix.
                     if let Some(gh) = gh {
                         let body = format!(
                             "🤖 lazybox is {what} on this PR (auto-fix attempt {attempt}/{max}). \
@@ -1276,21 +1280,6 @@ pub(super) async fn dispatch_action(
                             );
                         }
                     }
-                    crate::spawn_handler::handle_spawn(
-                        config,
-                        session_key,
-                        None,
-                        term_kind,
-                        crate::spawn_handler::SpawnOptions {
-                            initial_prompt: prompt,
-                            autonomous: true,
-                            origin: lazybox_ipc::SpawnOrigin::Autonomous(
-                                lazybox_ipc::AutonomousTrigger::AutoFix,
-                            ),
-                            ..Default::default()
-                        },
-                    )
-                    .await;
                 }
             }
         }
@@ -1937,7 +1926,7 @@ mod auto_fix_dispatch_tests {
         ProviderAction::AutoFixPr {
             session_key,
             agent_id: "codex".into(),
-            prompt: Some("Fix the failed CI checks.".into()),
+            prompt: "Fix the failed CI checks.".into(),
             repo: "o/r".into(),
             pr_number: 7,
             kind: AutoFixKind::CiFailure,
@@ -1968,17 +1957,22 @@ mod auto_fix_dispatch_tests {
     async fn seed_agent(
         config: &ServerConfig,
         session_key: &SessionKey,
+        terminal_id: TerminalId,
+        agent_id: &str,
         state: AgentState,
+        on_main: bool,
     ) -> (TerminalId, String) {
         let backend_key = config
             .backend
-            .spawn(&["codex".into()], None, &[], "auto-fix-test")
+            .spawn(&[agent_id.into()], None, &[], "auto-fix-test")
             .await
             .expect("spawn mock agent");
-        let terminal_id = TerminalId(705);
         config.terminal.terminal_meta.lock().await.insert(
             terminal_id,
-            (session_key.clone(), TerminalKind::Agent("codex".into())),
+            (
+                session_key.clone(),
+                TerminalKind::Agent(agent_id.to_string()),
+            ),
         );
         config
             .terminal
@@ -1992,6 +1986,20 @@ mod auto_fix_dispatch_tests {
             .lock()
             .await
             .insert(terminal_id, state);
+        config
+            .terminal
+            .agent_state_generations
+            .lock()
+            .await
+            .insert(terminal_id, 1);
+        if on_main {
+            config
+                .terminal
+                .on_main_terminals
+                .lock()
+                .await
+                .insert(terminal_id);
+        }
         (terminal_id, backend_key)
     }
 
@@ -2000,7 +2008,15 @@ mod auto_fix_dispatch_tests {
         let (config, mock) = ServerConfig::in_memory_with_mock();
         let session_key = SessionKey::new("github:o/r#7");
         seed_workspace(&config, &session_key);
-        let (_, backend_key) = seed_agent(&config, &session_key, AgentState::Working).await;
+        let (_, backend_key) = seed_agent(
+            &config,
+            &session_key,
+            TerminalId(705),
+            "codex",
+            AgentState::Working,
+            false,
+        )
+        .await;
 
         dispatch_action(&config, "github", None, action(session_key.clone())).await;
 
@@ -2023,7 +2039,15 @@ mod auto_fix_dispatch_tests {
         let (config, mock) = ServerConfig::in_memory_with_mock();
         let session_key = SessionKey::new("github:o/r#7");
         seed_workspace(&config, &session_key);
-        let (_, backend_key) = seed_agent(&config, &session_key, AgentState::Done).await;
+        let (_, backend_key) = seed_agent(
+            &config,
+            &session_key,
+            TerminalId(705),
+            "codex",
+            AgentState::Done,
+            false,
+        )
+        .await;
 
         dispatch_action(&config, "github", None, action(session_key.clone())).await;
 
@@ -2046,6 +2070,101 @@ mod auto_fix_dispatch_tests {
                 .expect("read attempt record")
                 .is_some(),
             "a delivered Done-gated repair consumes one attempt"
+        );
+    }
+
+    #[tokio::test]
+    async fn working_agent_of_another_kind_blocks_auto_fix() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let session_key = SessionKey::new("github:o/r#7");
+        seed_workspace(&config, &session_key);
+        let (_, backend_key) = seed_agent(
+            &config,
+            &session_key,
+            TerminalId(706),
+            "claude",
+            AgentState::Working,
+            false,
+        )
+        .await;
+
+        dispatch_action(&config, "github", None, action(session_key.clone())).await;
+
+        assert!(mock.writes_for(&backend_key).await.is_empty());
+        assert_eq!(config.terminal.terminal_count().await, 1);
+        assert_eq!(
+            config
+                .store
+                .get_kv(&format!("autofix:{session_key}:ci"))
+                .expect("read attempt record"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn done_main_checkout_agent_is_the_exact_auto_fix_target() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let session_key = SessionKey::new("github:o/r#7");
+        seed_workspace(&config, &session_key);
+        let (_, backend_key) = seed_agent(
+            &config,
+            &session_key,
+            TerminalId(707),
+            "codex",
+            AgentState::Done,
+            true,
+        )
+        .await;
+
+        dispatch_action(&config, "github", None, action(session_key)).await;
+
+        assert!(
+            String::from_utf8_lossy(&mock.writes_for(&backend_key).await.concat())
+                .contains("Fix the failed CI checks.")
+        );
+        assert_eq!(
+            config.terminal.terminal_count().await,
+            1,
+            "auto-fix must reuse the Done main-checkout agent"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_resuming_while_auto_fix_waits_for_io_is_not_interrupted() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let session_key = SessionKey::new("github:o/r#7");
+        seed_workspace(&config, &session_key);
+        let (terminal_id, backend_key) = seed_agent(
+            &config,
+            &session_key,
+            TerminalId(708),
+            "codex",
+            AgentState::Done,
+            false,
+        )
+        .await;
+        let interaction = config.terminal.lock_terminal_io(&backend_key).await;
+        let dispatch_config = config.clone();
+        let dispatch_key = session_key.clone();
+        let dispatch = tokio::spawn(async move {
+            dispatch_action(&dispatch_config, "github", None, action(dispatch_key)).await;
+        });
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        config
+            .terminal
+            .record_agent_state(terminal_id, AgentState::Working)
+            .await;
+        drop(interaction);
+        dispatch.await.expect("dispatch task");
+
+        assert!(mock.writes_for(&backend_key).await.is_empty());
+        assert_eq!(
+            config
+                .store
+                .get_kv(&format!("autofix:{session_key}:ci"))
+                .expect("read attempt record"),
+            None
         );
     }
 }

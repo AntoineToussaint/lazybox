@@ -388,6 +388,7 @@ struct AgentStateDurability {
     store: std::sync::Arc<dyn lazybox_store::Store>,
     backend_key: String,
     generation: u64,
+    poll: crate::PollState,
 }
 
 impl AgentStateDurability {
@@ -469,6 +470,7 @@ async fn agent_state_durability(
         store: config.store.clone(),
         backend_key: backend_key.to_string(),
         generation,
+        poll: config.poll.clone(),
     })
 }
 
@@ -534,6 +536,9 @@ async fn fold_and_broadcast_agent_state<R>(
             terminal_id: id,
             state,
         });
+        if state == lazybox_ipc::AgentState::Done {
+            durability.poll.wake(false);
+        }
         return StateFold {
             result,
             committed: true,
@@ -685,6 +690,21 @@ impl Drop for CorrelatedCommandOutcome {
 /// every terminal lives inside a session, which lives inside a
 /// folder worktree.
 pub async fn handle_spawn(
+    config: &ServerConfig,
+    session_key: SessionKey,
+    session_id: Option<SessionId>,
+    kind: TerminalKind,
+    options: SpawnOptions,
+) {
+    let _workspace_agent = if matches!(kind, TerminalKind::Agent(_)) {
+        Some(config.spawn.lock_workspace_agent(&session_key).await)
+    } else {
+        None
+    };
+    handle_spawn_inner(config, session_key, session_id, kind, options).await;
+}
+
+async fn handle_spawn_inner(
     config: &ServerConfig,
     session_key: SessionKey,
     session_id: Option<SessionId>,
@@ -1682,6 +1702,7 @@ pub async fn handle_spawn(
                 &backend_key,
                 encoded_prompt,
                 interaction,
+                true,
             )
             .await
             {
@@ -3221,6 +3242,197 @@ pub(crate) async fn find_existing_singleton(
                 && on_main.is_none_or(|want| t.on_main == want)
         })
         .map(|t| t.terminal_id)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DoneGatedPromptOutcome {
+    Delivered,
+    WaitingForDone,
+    DeliveryFailed,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct WorkspaceAgent {
+    terminal_id: TerminalId,
+    backend_key: String,
+    agent_id: String,
+    state: Option<lazybox_ipc::AgentState>,
+    on_main: bool,
+}
+
+async fn workspace_agents(config: &ServerConfig, session_key: &SessionKey) -> Vec<WorkspaceAgent> {
+    let terminals = config.terminal.terminals.lock().await.clone();
+    let metadata = config.terminal.terminal_meta.lock().await.clone();
+    let states = config.terminal.agent_states.lock().await.clone();
+    let on_main = config.terminal.on_main_terminals.lock().await.clone();
+    let mut agents: Vec<_> = metadata
+        .into_iter()
+        .filter_map(|(terminal_id, (owner, kind))| {
+            if owner != *session_key {
+                return None;
+            }
+            let TerminalKind::Agent(agent_id) = kind else {
+                return None;
+            };
+            Some(WorkspaceAgent {
+                terminal_id,
+                backend_key: terminals.get(&terminal_id)?.clone(),
+                agent_id,
+                state: states.get(&terminal_id).copied(),
+                on_main: on_main.contains(&terminal_id),
+            })
+        })
+        .collect();
+    agents.sort_unstable_by(|left, right| {
+        left.backend_key
+            .cmp(&right.backend_key)
+            .then_with(|| left.terminal_id.0.cmp(&right.terminal_id.0))
+    });
+    agents
+}
+
+fn auto_fix_target<'a>(
+    agents: &'a [WorkspaceAgent],
+    preferred_agent_id: &str,
+) -> Option<&'a WorkspaceAgent> {
+    agents.iter().min_by_key(|agent| {
+        (
+            agent.agent_id != preferred_agent_id,
+            agent.on_main,
+            agent.agent_id.as_str(),
+            agent.terminal_id.0,
+        )
+    })
+}
+
+pub(crate) async fn deliver_auto_fix_prompt(
+    config: &ServerConfig,
+    session_key: SessionKey,
+    preferred_agent_id: String,
+    prompt: String,
+) -> DoneGatedPromptOutcome {
+    let _workspace_agent = config.spawn.lock_workspace_agent(&session_key).await;
+    let agents = workspace_agents(config, &session_key).await;
+    if agents.is_empty() {
+        handle_spawn_inner(
+            config,
+            session_key.clone(),
+            None,
+            TerminalKind::Agent(preferred_agent_id.clone()),
+            SpawnOptions {
+                initial_prompt: Some(prompt),
+                autonomous: true,
+                origin: lazybox_ipc::SpawnOrigin::Autonomous(
+                    lazybox_ipc::AutonomousTrigger::AutoFix,
+                ),
+                ..Default::default()
+            },
+        )
+        .await;
+        return if workspace_agents(config, &session_key)
+            .await
+            .iter()
+            .any(|agent| agent.agent_id == preferred_agent_id)
+        {
+            DoneGatedPromptOutcome::Delivered
+        } else {
+            DoneGatedPromptOutcome::DeliveryFailed
+        };
+    }
+    if agents
+        .iter()
+        .any(|agent| agent.state != Some(lazybox_ipc::AgentState::Done))
+    {
+        return DoneGatedPromptOutcome::WaitingForDone;
+    }
+
+    let mut interactions = Vec::with_capacity(agents.len());
+    for agent in &agents {
+        let Some(interaction) =
+            terminal_io::acquire_live(config, agent.terminal_id, &agent.backend_key).await
+        else {
+            return DoneGatedPromptOutcome::DeliveryFailed;
+        };
+        interactions.push((agent.terminal_id, interaction));
+    }
+
+    let final_agents = workspace_agents(config, &session_key).await;
+    if final_agents
+        .iter()
+        .any(|agent| agent.state != Some(lazybox_ipc::AgentState::Done))
+    {
+        return DoneGatedPromptOutcome::WaitingForDone;
+    }
+    if final_agents
+        .iter()
+        .map(|agent| {
+            (
+                agent.terminal_id,
+                agent.backend_key.as_str(),
+                agent.agent_id.as_str(),
+                agent.on_main,
+            )
+        })
+        .ne(agents.iter().map(|agent| {
+            (
+                agent.terminal_id,
+                agent.backend_key.as_str(),
+                agent.agent_id.as_str(),
+                agent.on_main,
+            )
+        }))
+    {
+        return DoneGatedPromptOutcome::DeliveryFailed;
+    }
+
+    let Some(target) = auto_fix_target(&final_agents, &preferred_agent_id) else {
+        return DoneGatedPromptOutcome::DeliveryFailed;
+    };
+    let Some(agent) = config.agents.get(&target.agent_id) else {
+        tracing::warn!(
+            agent_id = %target.agent_id,
+            terminal_id = ?target.terminal_id,
+            "auto-fix: target agent is not registered"
+        );
+        return DoneGatedPromptOutcome::DeliveryFailed;
+    };
+    let Some(position) = interactions
+        .iter()
+        .position(|(terminal_id, _)| *terminal_id == target.terminal_id)
+    else {
+        return DoneGatedPromptOutcome::DeliveryFailed;
+    };
+    let (_, interaction) = interactions.swap_remove(position);
+    drop(interactions);
+    let encoded = agent.encode_prompt(&prompt, lazybox_agents::PromptIntent::Submit);
+    match write_prompt_sequence(
+        config,
+        target.terminal_id,
+        &target.backend_key,
+        encoded,
+        interaction,
+        true,
+    )
+    .await
+    {
+        Ok(_) => DoneGatedPromptOutcome::Delivered,
+        Err(PromptWriteError::Submit(error)) => {
+            tracing::warn!(
+                terminal_id = ?target.terminal_id,
+                %error,
+                "auto-fix: prompt was pasted but submit failed"
+            );
+            DoneGatedPromptOutcome::Delivered
+        }
+        Err(PromptWriteError::Initial(error)) => {
+            tracing::warn!(
+                terminal_id = ?target.terminal_id,
+                %error,
+                "auto-fix: prompt was not delivered"
+            );
+            DoneGatedPromptOutcome::DeliveryFailed
+        }
+    }
 }
 
 fn singleton_claim_target(target: String, on_main: bool) -> String {
@@ -4807,19 +5019,16 @@ pub(crate) async fn handle_write_batch(
         tracing::trace!("write to unknown terminal {terminal_id:?}");
         return false;
     };
-    match terminal_io::write_live(config, terminal_id, &key, &joined).await {
-        Ok(true) => {}
-        Ok(false) => return false,
-        Err(error) => {
-            tracing::warn!(?terminal_id, %key, %error, "terminal input was not delivered");
-            let _ = config.bus.send(Event::TerminalInputRejected {
-                terminal_id,
-                message: format!(
-                    "input was not delivered ({error}); retry after checking the session"
-                ),
-            });
-            return false;
-        }
+    let Some(interaction) = terminal_io::acquire_live(config, terminal_id, &key).await else {
+        return false;
+    };
+    if let Err(error) = terminal_io::write_locked(config, &key, &joined).await {
+        tracing::warn!(?terminal_id, %key, %error, "terminal input was not delivered");
+        let _ = config.bus.send(Event::TerminalInputRejected {
+            terminal_id,
+            message: format!("input was not delivered ({error}); retry after checking the session"),
+        });
+        return false;
     }
     // If the user just answered a prompt on an agent terminal that's
     // currently in `InputNeeded` state, optimistically flip it to
@@ -4938,6 +5147,7 @@ pub(crate) async fn handle_write_batch(
         .lock()
         .await
         .insert(terminal_id);
+    drop(interaction);
     true
 }
 
@@ -4999,6 +5209,7 @@ async fn write_prompt_sequence(
     backend_key: &str,
     encoded: lazybox_agents::EncodedPrompt,
     interaction: tokio::sync::OwnedMutexGuard<()>,
+    starts_turn: bool,
 ) -> Result<bool, PromptWriteError> {
     let echo_probes = encoded.echo_probes().to_vec();
     let (initial_write, submit_write) = encoded.into_writes();
@@ -5029,6 +5240,9 @@ async fn write_prompt_sequence(
         terminal_io::write_locked(config, backend_key, &submit_bytes)
             .await
             .map_err(PromptWriteError::Submit)?;
+        if starts_turn {
+            mark_done_agent_working(config, terminal_id, backend_key).await;
+        }
         drop(interaction);
         return Ok(confirm_prompt_submission(
             confirm,
@@ -5039,7 +5253,38 @@ async fn write_prompt_sequence(
         )
         .await);
     }
+    if starts_turn {
+        mark_done_agent_working(config, terminal_id, backend_key).await;
+    }
     Ok(true)
+}
+
+async fn mark_done_agent_working(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    backend_key: &str,
+) {
+    let Some((session_key, TerminalKind::Agent(_))) =
+        config.terminal.terminal_meta_for(terminal_id).await
+    else {
+        return;
+    };
+    let Some(durability) = agent_state_durability(config, terminal_id, backend_key).await else {
+        return;
+    };
+    transition_and_broadcast_agent_state(
+        &config.terminal,
+        &config.bus,
+        &durability,
+        terminal_id,
+        &session_key,
+        StateSource::Flip,
+        |current| {
+            (current == Some(lazybox_ipc::AgentState::Done))
+                .then_some(lazybox_ipc::AgentState::Working)
+        },
+    )
+    .await;
 }
 
 /// Wait plumbing for [`confirm_prompt_submission`], registered BEFORE
@@ -5616,6 +5861,7 @@ async fn handle_inject_prompt_inner(
             &backend_key,
             encoded_prompt,
             interaction,
+            submit,
         )
         .await
         {
@@ -6670,6 +6916,7 @@ async fn initialize_agent_state_generation(
         store: config.store.clone(),
         backend_key: backend_key.to_string(),
         generation,
+        poll: config.poll.clone(),
     })
 }
 
@@ -6740,6 +6987,7 @@ async fn load_recovered_agent_state(
         store: config.store.clone(),
         backend_key: backend_key.to_string(),
         generation,
+        poll: config.poll.clone(),
     };
     if !matches!(loaded, Some((_, Some(_)))) && !durability.persist(state).await {
         return Err(());
@@ -7440,6 +7688,7 @@ mod tests {
             store: std::sync::Arc::new(lazybox_store::MemoryStore::new()),
             backend_key: format!("test-{}", id.0),
             generation: id.0,
+            poll: crate::PollState::default(),
         }
     }
 
@@ -8104,6 +8353,48 @@ mod tests {
         assert_eq!(
             session_key, pr_key,
             "a rebadged terminal must broadcast state under the PR session, not the captured issue key",
+        );
+    }
+
+    #[tokio::test]
+    async fn done_transition_wakes_polling_for_red_pr_recheck() {
+        let id = TerminalId(705);
+        let key: SessionKey = "github-o-r-705".into();
+        let terminals = TerminalRegistry::default();
+        let (bus, _rx) = tokio::sync::broadcast::channel(4);
+        let durability = test_agent_state_durability(id);
+        let poll = durability.poll.clone();
+        terminals.terminal_meta.lock().await.insert(
+            id,
+            (
+                key.clone(),
+                lazybox_ipc::TerminalKind::Agent("codex".into()),
+            ),
+        );
+        terminals
+            .agent_states
+            .lock()
+            .await
+            .insert(id, lazybox_ipc::AgentState::Working);
+
+        let transition = transition_and_broadcast_agent_state(
+            &terminals,
+            &bus,
+            &durability,
+            id,
+            &key,
+            StateSource::Hook,
+            |_| Some(lazybox_ipc::AgentState::Done),
+        )
+        .await;
+
+        assert!(transition.committed);
+        tokio::time::timeout(std::time::Duration::from_millis(50), poll.wait_for_wake())
+            .await
+            .expect("Done should wake the poll loop immediately");
+        assert!(
+            !poll.take_warm_request(),
+            "Done needs a targeted hot recheck, not a warm notification sweep"
         );
     }
 

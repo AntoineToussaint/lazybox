@@ -823,16 +823,11 @@ impl<T: TerminalAdapter> Model<T> {
                     lazybox_core::PolicyArm::Default => unreachable!(),
                 }
                 let session_key = lazybox_core::SessionKey::from(&workspace.key);
-                for kind in [
-                    lazybox_core::AutoFixKind::CiFailure,
-                    lazybox_core::AutoFixKind::MergeConflict,
-                ] {
-                    cmds.push(IpcCommand::SetAutoFixPolicy {
-                        session_key: session_key.clone(),
-                        kind,
-                        arm,
-                    });
-                }
+                cmds.push(IpcCommand::SetAutoFixPolicies {
+                    session_key,
+                    ci: arm,
+                    conflict: arm,
+                });
             }
             Action::ToggleTrackMain => {
                 let workspace = self.sidebar.selected_workspace().cloned();

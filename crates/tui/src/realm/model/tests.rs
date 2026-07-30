@@ -5415,20 +5415,14 @@ mod merge_focus_follow_tests {
         assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
 
         let cmds = m.dispatch_action(&Action::ToggleAutoFix);
-        assert_eq!(cmds.len(), 2);
-        for (command, expected_kind) in cmds.iter().zip([
-            lazybox_core::AutoFixKind::CiFailure,
-            lazybox_core::AutoFixKind::MergeConflict,
-        ]) {
-            assert!(matches!(
-                command,
-                IpcCommand::SetAutoFixPolicy {
-                    session_key,
-                    kind,
-                    arm: lazybox_core::PolicyArm::Arm,
-                } if session_key.as_str() == ws_key.as_str() && *kind == expected_kind
-            ));
-        }
+        assert!(matches!(
+            cmds.as_slice(),
+            [IpcCommand::SetAutoFixPolicies {
+                session_key,
+                ci: lazybox_core::PolicyArm::Arm,
+                conflict: lazybox_core::PolicyArm::Arm,
+            }] if session_key.as_str() == ws_key.as_str()
+        ));
         let notice = m
             .status
             .notice
@@ -5456,14 +5450,14 @@ mod merge_focus_follow_tests {
         assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
 
         let cmds = m.dispatch_action(&Action::ToggleAutoFix);
-        assert_eq!(cmds.len(), 2);
-        assert!(cmds.iter().all(|command| matches!(
-            command,
-            IpcCommand::SetAutoFixPolicy {
-                arm: lazybox_core::PolicyArm::Disarm,
+        assert!(matches!(
+            cmds.as_slice(),
+            [IpcCommand::SetAutoFixPolicies {
+                ci: lazybox_core::PolicyArm::Disarm,
+                conflict: lazybox_core::PolicyArm::Disarm,
                 ..
-            }
-        )));
+            }]
+        ));
     }
 
     #[test]

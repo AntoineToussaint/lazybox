@@ -897,6 +897,14 @@ pub enum Command {
         kind: lazybox_core::AutoFixKind,
         arm: lazybox_core::PolicyArm,
     },
+    /// Atomically set both auto-fix arms for the workspace. The direct
+    /// one-key toggle uses one command so bounded transports cannot admit
+    /// only half of the requested policy change.
+    SetAutoFixPolicies {
+        session_key: SessionKey,
+        ci: lazybox_core::PolicyArm,
+        conflict: lazybox_core::PolicyArm,
+    },
     /// Post a top-level reply to the workspace's primary task. Today
     /// this maps to "create an issue/PR comment" on GitHub; future
     /// providers (Linear, etc.) wire their own send path. The daemon

@@ -537,6 +537,60 @@ pub struct WorktreeInspectionDto {
     pub is_safe_to_delete: bool,
 }
 
+/// Wire-friendly projection of a combined staged/unstaged worktree diff.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct WorkspaceDiffDto {
+    pub status: Vec<String>,
+    pub stat: Vec<String>,
+    pub files: Vec<DiffFileDto>,
+    pub truncated: bool,
+}
+
+/// Exact checkout whose local changes should be reviewed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum WorkspaceDiffTarget {
+    Session(lazybox_core::SessionId),
+    LinkedCheckout,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct DiffFileDto {
+    pub old_path: Option<String>,
+    pub path: String,
+    pub headers: Vec<String>,
+    pub hunks: Vec<DiffHunkDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct DiffHunkDto {
+    pub header: String,
+    pub old_start: u32,
+    pub new_start: u32,
+    pub lines: Vec<DiffLineDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct DiffLineDto {
+    pub kind: DiffLineKindDto,
+    pub text: String,
+    pub old_line: Option<u32>,
+    pub new_line: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum DiffLineKindDto {
+    Context,
+    Addition,
+    Deletion,
+    Meta,
+}
+
 /// One row of `Event::CheckoutsDiscovered` — an on-disk git checkout
 /// found by the dev-folder scan, mapped to its GitHub repo when the
 /// origin allows. Wire-friendly projection of
@@ -1034,6 +1088,12 @@ pub enum Command {
     /// Read-only — no deletes happen until the TUI follows up with
     /// per-row `DeleteOrphanedWorktree` calls.
     InspectWorktrees,
+    /// Read the focused checkout and reply
+    /// with `Event::WorkspaceDiffInspected`.
+    InspectWorkspaceDiff {
+        workspace_key: lazybox_core::WorkspaceKey,
+        target: WorkspaceDiffTarget,
+    },
     /// Walk the configured dev roots (`scan.roots`, or `roots` when the
     /// user pointed the scan at an explicit folder) and reply with
     /// `Event::CheckoutsDiscovered` — every on-disk git clone found,
@@ -1783,6 +1843,16 @@ pub enum Event {
     /// path-sorted order. Drives the in-app inspector modal.
     WorktreesInspected {
         inspections: Vec<WorktreeInspectionDto>,
+    },
+    /// `Command::InspectWorkspaceDiff` finished. `diff` is absent when
+    /// the workspace/target disappeared or git could not read it.
+    WorkspaceDiffInspected {
+        workspace_key: lazybox_core::WorkspaceKey,
+        target: WorkspaceDiffTarget,
+        /// Live agent terminals rooted in the inspected checkout.
+        agent_terminal_ids: Vec<TerminalId>,
+        diff: Option<WorkspaceDiffDto>,
+        error: Option<String>,
     },
     /// `Command::ScanCheckouts` finished. `checkouts` is every on-disk
     /// git clone found under the dev roots, mapped to its GitHub repo

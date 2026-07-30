@@ -829,6 +829,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::Notification { .. }
                 | IpcEvent::CleanWorktreesCompleted { .. }
                 | IpcEvent::WorktreesInspected { .. }
+                | IpcEvent::WorkspaceDiffInspected { .. }
                 | IpcEvent::CheckoutsDiscovered { .. }
                 | IpcEvent::OrphanedWorktreeDeleted { .. }
                 | IpcEvent::AgentRunStarted { .. }
@@ -1505,6 +1506,7 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::Notification { .. }
             | IpcEvent::CleanWorktreesCompleted { .. }
             | IpcEvent::WorktreesInspected { .. }
+            | IpcEvent::WorkspaceDiffInspected { .. }
             | IpcEvent::CheckoutsDiscovered { .. }
             | IpcEvent::OrphanedWorktreeDeleted { .. }
             | IpcEvent::AgentRunStarted { .. }
@@ -1723,6 +1725,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::Notification { .. }
                 | IpcEvent::CleanWorktreesCompleted { .. }
                 | IpcEvent::WorktreesInspected { .. }
+                | IpcEvent::WorkspaceDiffInspected { .. }
                 | IpcEvent::CheckoutsDiscovered { .. }
                 | IpcEvent::OrphanedWorktreeDeleted { .. }
                 | IpcEvent::AgentRunStarted { .. }
@@ -1862,6 +1865,35 @@ impl<T: TerminalAdapter> Model<T> {
         // the inspector stays open across edits.
         if let IpcEvent::WorktreesInspected { inspections } = &event {
             self.mount_inspect_list(inspections.clone());
+        }
+        if let IpcEvent::WorkspaceDiffInspected {
+            workspace_key,
+            target,
+            agent_terminal_ids,
+            diff,
+            error,
+        } = &event
+            && self.pending_diff_session.as_ref() == Some(&(workspace_key.clone(), target.clone()))
+        {
+            self.pending_diff_session = None;
+            match (diff, error) {
+                (Some(diff), _) if self.modal_stack.is_empty() => {
+                    self.mount_modal(
+                        Id::DiffReview,
+                        crate::realm::components::diff_review::DiffReview::new(
+                            workspace_key.clone(),
+                            target.clone(),
+                            agent_terminal_ids.clone(),
+                            diff.clone(),
+                        ),
+                    );
+                }
+                (Some(_), _) => {
+                    self.flash_hint("diff is ready — close the current modal and reopen review");
+                }
+                (None, Some(error)) => self.flash_error(format!("couldn't read diff: {error}")),
+                (None, None) => self.flash_error("couldn't read diff"),
+            }
         }
         // Dev-folder scan replied. Swap the loading placeholder for the
         // import picker listing every discovered checkout.

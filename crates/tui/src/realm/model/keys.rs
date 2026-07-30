@@ -1921,6 +1921,7 @@ pub(super) fn action_from_kind(
         ActionKind::MarkAllRead => Action::MarkAllRead,
         ActionKind::Work => Action::Work,
         ActionKind::OpenEditor => Action::OpenEditor,
+        ActionKind::ViewDiff => Action::ViewDiff,
         ActionKind::NewWorkspace => Action::NewWorkspace,
         ActionKind::NewProject => Action::NewProject,
         ActionKind::ImportCheckout => Action::ImportCheckout,

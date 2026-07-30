@@ -65,7 +65,7 @@ use crate::realm::components::terminals::Terminals;
 use activity_pane::ActivityPaneState;
 use lazybox_ipc::{Client, Command as IpcCommand};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tuirealm::application::Application;
 use tuirealm::event::Event as RealmEvent;
 use tuirealm::listener::{EventListenerCfg, Poll, PortError, PortResult};
@@ -1030,6 +1030,12 @@ pub struct Model<T: TerminalAdapter> {
     /// inside the terminal pane do lazybox-side text selection.
     #[allow(dead_code)] // accessed indirectly via the toggle handler
     mouse_capture_on: bool,
+    /// Set only after crossterm receives a real mouse event while
+    /// capture is requested. Until then the footer keeps host mouse
+    /// reporting visibly unverified.
+    mouse_input_verified: bool,
+    mouse_unverified_logged: bool,
+    mouse_capture_requested_at: Instant,
     url_opener: Box<UrlOpener>,
     /// Active lazybox-side drag-selection in the terminal pane. Set on
     /// mouse Down inside the terminal rect and extended on Drag; while a
@@ -1542,6 +1548,9 @@ impl<T: TerminalAdapter> Model<T> {
             cmd_send_overloaded: std::cell::Cell::new(false),
             daemon_disconnect_notified: false,
             mouse_capture_on: true,
+            mouse_input_verified: false,
+            mouse_unverified_logged: false,
+            mouse_capture_requested_at: Instant::now(),
             url_opener: Box::new(crate::editors::open_url),
             terminal_drag: None,
             preselect: None,
@@ -3809,14 +3818,21 @@ impl<T: TerminalAdapter> Model<T> {
         // widths while the error's own actions still out-rank the
         // tour/help hints.
         let mut globals = globals;
-        if self.focus == PaneFocus::Terminals && !self.mouse_capture_on {
+        if self.focus == PaneFocus::Terminals
+            && (!self.mouse_capture_on || !self.mouse_input_verified)
+        {
             use lazybox_tui_core::action::{ActionDef, ActionKind};
             let toggle = ActionDef::for_kind(ActionKind::ToggleMouseCapture);
+            let label = if self.mouse_capture_on {
+                "mouse ? · re-toggle / host reporting"
+            } else {
+                "links off · enable"
+            };
             globals.insert(
                 0,
                 crate::pane::Binding {
                     keys: toggle.effective_keys_display(&self.action_key_overrides),
-                    label: std::borrow::Cow::Borrowed("links off · enable"),
+                    label: std::borrow::Cow::Borrowed(label),
                 },
             );
         }

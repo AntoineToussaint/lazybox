@@ -1250,6 +1250,7 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
         model.tick_working();
         model.tick_terminal_leader();
         model.tick_terminal_drag();
+        model.tick_mouse_capture();
         // Surface a dead daemon channel within a frame of the first
         // failed `send_cmd` — without this a `--connect` client whose
         // daemon died keeps rendering as if everything works while
@@ -1557,6 +1558,7 @@ fn dispatch_event<T: TerminalAdapter>(model: &mut Model<T>, event: crossterm::ev
         // event, and this is the first signal we get afterwards.
         crossterm::event::Event::FocusGained => {
             crate::notify::set_terminal_focus(true);
+            model.host_focus_gained();
             model.force_full_redraw();
         }
         crossterm::event::Event::FocusLost => {
@@ -1702,11 +1704,23 @@ mod host_event_redraw_tests {
     #[test]
     fn focus_gained_forces_redraw() {
         let mut m = build_model();
+        m.mouse_input_verified = true;
+        m.mouse_capture_requested_at =
+            std::time::Instant::now() - std::time::Duration::from_secs(3);
+        let previous_request = m.mouse_capture_requested_at;
         m.redraw = false;
         dispatch_event(&mut m, crossterm::event::Event::FocusGained);
         assert!(
             m.redraw,
             "regaining focus (e.g. after display sleep/wake) must repaint"
+        );
+        assert!(
+            !m.mouse_input_verified,
+            "focus regain must require fresh evidence of host mouse reporting"
+        );
+        assert!(
+            m.mouse_capture_requested_at > previous_request,
+            "focus regain must reassert mouse capture"
         );
     }
 

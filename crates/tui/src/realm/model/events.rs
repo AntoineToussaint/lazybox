@@ -12,6 +12,7 @@
 
 use super::{Id, ModalFlow, Model, Msg, PaneFocus, ShellCommandConfig};
 use lazybox_ipc::{Command as IpcCommand, Event as IpcEvent};
+use std::time::Duration;
 use tuirealm::terminal::TerminalAdapter;
 
 /// Left in a help turn when the agent proposed an action (#353) but the
@@ -19,6 +20,8 @@ use tuirealm::terminal::TerminalAdapter;
 /// the answer so a reopened transcript reads as an unapplied proposal.
 const ACTION_DROPPED_NOTE: &str =
     "\n\n_(Proposed an action, but Ask was closed before you could confirm — ask again to apply.)_";
+
+const MOUSE_CAPTURE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Compose a readable action-failure banner (merge/close/update/delete
 /// rejected). Leads with the reason — the part that matters — and trims
@@ -51,6 +54,12 @@ fn strip_graphql_path(reason: &str) -> String {
 }
 
 impl<T: TerminalAdapter> Model<T> {
+    fn request_host_mouse_capture(&mut self, enabled: bool) -> std::io::Result<()> {
+        let result = super::host_terminal::request_mouse_capture(enabled);
+        self.mouse_capture_requested_at = std::time::Instant::now();
+        result
+    }
+
     /// Flip lazybox's mouse capture on/off. Issues
     /// `EnableMouseCapture` / `DisableMouseCapture` to stdout so the
     /// host terminal switches between "send mouse to lazybox" and
@@ -58,24 +67,92 @@ impl<T: TerminalAdapter> Model<T> {
     /// confirms which mode is now active.
     pub(super) fn toggle_mouse_capture(&mut self) {
         self.mouse_capture_on = !self.mouse_capture_on;
-        let (msg, _) = if self.mouse_capture_on {
-            let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture,);
-            (
-                "mouse: lazybox — right-click links enabled; F8 or Alt-s for host selection",
-                (),
-            )
+        self.mouse_input_verified = false;
+        self.mouse_unverified_logged = false;
+        let msg = if self.mouse_capture_on {
+            "mouse: lazybox capture requested — move the pointer to verify; F8 or Alt-s for host selection"
         } else {
-            let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture,);
-            (
-                "mouse: host selection — right-click links are off; press F8 or Alt-s to enable",
-                (),
-            )
+            "mouse: host selection — right-click links are off; press F8 or Alt-s to enable"
         };
-        tracing::info!(
-            mouse_capture_on = self.mouse_capture_on,
-            "mouse capture toggled"
-        );
-        self.flash_info(msg);
+        match self.request_host_mouse_capture(self.mouse_capture_on) {
+            Ok(()) => {
+                tracing::info!(
+                    mouse_capture_on = self.mouse_capture_on,
+                    "mouse capture toggled"
+                );
+                self.flash_info(msg);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    mouse_capture_on = self.mouse_capture_on,
+                    "mouse capture request failed: {e}"
+                );
+                self.flash_error(format!("mouse mode failed: {e}"));
+            }
+        }
+    }
+
+    pub(super) fn note_host_mouse_input(&mut self) {
+        if self.mouse_capture_on && !self.mouse_input_verified {
+            self.mouse_input_verified = true;
+            self.mouse_unverified_logged = false;
+            tracing::info!("host mouse reporting verified");
+            if self.focus == PaneFocus::Terminals {
+                self.redraw = true;
+            }
+        }
+    }
+
+    pub(super) fn host_focus_gained(&mut self) {
+        if !self.mouse_capture_on {
+            return;
+        }
+        let was_verified = self.mouse_input_verified;
+        self.mouse_input_verified = false;
+        self.mouse_unverified_logged = false;
+        match self.request_host_mouse_capture(true) {
+            Ok(()) => {
+                tracing::info!(
+                    previously_verified = was_verified,
+                    "mouse capture reasserted on focus regain"
+                );
+                if !was_verified && self.focus == PaneFocus::Terminals {
+                    self.flash_info(
+                        "mouse: waiting for host reporting — move the pointer; if ? remains, enable mouse reporting in the terminal",
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!("mouse capture reassert failed on focus regain: {e}");
+                self.flash_error(format!("mouse mode failed: {e}"));
+            }
+        }
+    }
+
+    pub(super) fn tick_mouse_capture(&mut self) {
+        if !self.mouse_capture_on
+            || self.mouse_capture_requested_at.elapsed() < MOUSE_CAPTURE_REFRESH_INTERVAL
+        {
+            return;
+        }
+        match self.request_host_mouse_capture(true) {
+            Ok(()) => {
+                if !self.mouse_input_verified && !self.mouse_unverified_logged {
+                    tracing::info!(
+                        reason = "no_mouse_event_since_capture_request",
+                        "host mouse reporting remains unverified"
+                    );
+                    self.mouse_unverified_logged = true;
+                }
+                tracing::debug!(
+                    verified = self.mouse_input_verified,
+                    "mouse capture refreshed"
+                );
+            }
+            Err(e) => {
+                tracing::warn!("mouse capture refresh failed: {e}");
+            }
+        }
     }
 
     /// The single owned mutator for `focus`. Assigns the focused pane AND

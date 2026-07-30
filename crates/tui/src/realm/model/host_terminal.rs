@@ -63,7 +63,7 @@ impl HostMode {
             // lazybox-side terminal text selection. F8 / Alt-s toggles
             // it off for host-native selection.
             HostMode::MouseCapture => {
-                let _ = crossterm::execute!(out, EnableMouseCapture);
+                let _ = set_mouse_capture(out, true);
             }
             // Bracketed paste: the host wraps pasted text in
             // `ESC[200~ … ESC[201~` so a paste is one `Event::Paste`
@@ -100,7 +100,7 @@ impl HostMode {
                 let _ = crossterm::execute!(out, LeaveAlternateScreen);
             }
             HostMode::MouseCapture => {
-                let _ = crossterm::execute!(out, DisableMouseCapture);
+                let _ = set_mouse_capture(out, false);
             }
             HostMode::BracketedPaste => {
                 let _ = crossterm::execute!(out, DisableBracketedPaste);
@@ -113,6 +113,18 @@ impl HostMode {
             }
         }
     }
+}
+
+fn set_mouse_capture(out: &mut impl Write, enabled: bool) -> std::io::Result<()> {
+    if enabled {
+        crossterm::execute!(out, EnableMouseCapture)
+    } else {
+        crossterm::execute!(out, DisableMouseCapture)
+    }
+}
+
+pub(crate) fn request_mouse_capture(enabled: bool) -> std::io::Result<()> {
+    set_mouse_capture(&mut std::io::stdout(), enabled)
 }
 
 /// Set the first time [`restore_host_terminal`] runs. The guard's
@@ -213,5 +225,22 @@ mod tests {
         let restore: Vec<HostMode> = HostMode::ALL.into_iter().rev().collect();
         assert_eq!(restore, reversed);
         assert_ne!(restore, forward);
+    }
+
+    #[test]
+    fn mouse_capture_request_uses_crossterm_tracking_modes() {
+        let mut out = Vec::new();
+        set_mouse_capture(&mut out, true).expect("enable mouse capture");
+        assert_eq!(
+            out,
+            b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h"
+        );
+
+        out.clear();
+        set_mouse_capture(&mut out, false).expect("disable mouse capture");
+        assert_eq!(
+            out,
+            b"\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l"
+        );
     }
 }

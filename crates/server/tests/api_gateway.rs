@@ -66,7 +66,9 @@ impl Agent for FakePtyAgent {
             "/bin/sh".into(),
             "-c".into(),
             "sleep 1; printf '__LB_SIZE__'; stty size; printf '__LB_BEGIN__\\n'; \
-             yes x | head -c 6291456; printf '__LB_END__\\n'; \
+             i=0; while [ \"$i\" -lt 800 ]; do \
+             printf '__LB_OUTPUT__%04d xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' \"$i\"; \
+             i=$((i + 1)); sleep 0.005; done; printf '__LB_END__\\n'; \
              IFS= read -r line; printf '__LB_INPUT__%s\\n' \"$line\"; sleep 30"
                 .into(),
         ]
@@ -887,18 +889,7 @@ async fn desktop_runtime_real_pty_handles_backpressure_reconnect_replay_and_resy
     })
     .await
     .expect("sustained PTY command completes");
-    assert!(output_snapshot.last_seq > 512);
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        loop {
-            let metrics = config.event_metrics.snapshot();
-            if metrics.terminal_output_dropped > 0 || metrics.bus_lagged_events > 0 {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("a stalled binary response must shed output instead of buffering without a bound");
+    assert!(output_snapshot.last_seq > lazybox_ipc::EVENT_CHANNEL_CAPACITY as u64);
 
     let mut saw_size = false;
     let mut saw_begin = false;

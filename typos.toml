@@ -25,6 +25,7 @@ unparseable = "unparseable"  # accepted English variant
 unmergable = "unmergable"    # accepted English variant
 clonable = "clonable"        # accepted English variant
 activit = "activit"          # format-string fragment: "activit{}"
+seeked = "seeked"            # DOM media event name (HTMLMediaElement 'seeked')
 Shft = "Shft"                # deliberate typo'd chord in the unparseable-chord example/test
 mis = "mis"                  # hyphenated prefix: "mis-decode" etc.
 fo = "fo"                    # RFC 4648 base64 test vector (b"fo")

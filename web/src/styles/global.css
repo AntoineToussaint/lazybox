@@ -415,6 +415,59 @@ img, video { max-width: 100%; display: block; }
   filter: brightness(1.14) contrast(1.08);
 }
 
+/* Timed caption overlay over the silent demo videos (see index.astro). */
+.demo-video { position: relative; }
+.demo-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  /* Bottom padding lifts the pill clear of the native control bar, which the
+     scrim still covers, so a caption never overlaps the scrubber on hover. */
+  padding: 0.6rem 0.75rem 2.75rem;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+  background: linear-gradient(to top, rgba(3, 5, 8, 0.82), rgba(3, 5, 8, 0));
+  opacity: 0;
+  transform: translateY(0.3rem);
+}
+.demo-overlay.on { opacity: 1; transform: translateY(0); }
+@media (prefers-reduced-motion: no-preference) {
+  .demo-overlay { transition: opacity 0.22s ease, transform 0.22s ease; }
+}
+.demo-overlay-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  max-width: 100%;
+  padding: 0.32rem 0.6rem;
+  border-radius: 0.5rem;
+  /* Opaque enough to stay readable on browsers without backdrop-filter; the
+     blur is a progressive enhancement. Both properties per site convention. */
+  background: rgba(9, 12, 18, 0.78);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  font-family: var(--sans);
+  font-size: clamp(0.72rem, 1.4vw, 0.92rem);
+  line-height: 1.35;
+  color: var(--fg);
+  text-align: left;
+}
+.demo-overlay-key {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 0.82em;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 0.35rem;
+  padding: 0.1rem 0.4rem;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
 .term .bar {
   display: flex;
   align-items: center;

@@ -1,0 +1,22 @@
+WEBVTT
+
+NOTE
+"⌨ <chord> — <text>" lines render as a keycap chip + description in the
+overlay; plain lines are context. Drives both the native <track> and the
+styled overlay from one source.
+
+1
+00:00.500 --> 00:03.200
+Tag a GitHub issue @lazybox and it surfaces in the inbox
+
+2
+00:03.500 --> 00:06.500
+An agent picks it up and works it in its own worktree
+
+3
+00:06.800 --> 00:09.200
+⌨ ! — jump to the agent that needs your input
+
+4
+00:09.500 --> 00:12.400
+Reply once and it keeps going

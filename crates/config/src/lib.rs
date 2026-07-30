@@ -44,6 +44,10 @@ pub struct Config {
     /// Edit by hand if you want to lock a layout.
     #[serde(default)]
     pub ui: UiSection,
+    /// Privacy choices owned by the macOS desktop client. Both data-sharing
+    /// switches are opt-in and default off.
+    #[serde(default)]
+    pub desktop: DesktopSection,
     /// Per-repo overrides — env vars to inject into spawned PTYs
     /// (Claude/codex/shell) and additional mount points to symlink
     /// into the worktree on checkout. Keyed by `owner/name`. See
@@ -101,6 +105,13 @@ pub struct SetupSection {
     /// re-trigger the first-run wizard forever.
     #[serde(default)]
     pub wizard_completed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct DesktopSection {
+    pub analytics_enabled: bool,
+    pub crash_reports_enabled: bool,
 }
 
 /// One entry under `editors:`. Args support `{path}` for the
@@ -1664,6 +1675,21 @@ mod duration_human_opt {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_privacy_controls_are_opt_in_and_round_trip() {
+        let defaults: Config = serde_yaml::from_str("{}").expect("parse defaults");
+        assert!(!defaults.desktop.analytics_enabled);
+        assert!(!defaults.desktop.crash_reports_enabled);
+
+        let configured: Config = serde_yaml::from_str(
+            "desktop:\n  analytics_enabled: true\n  crash_reports_enabled: true\n",
+        )
+        .expect("parse desktop settings");
+        let yaml = serde_yaml::to_string(&configured).expect("serialize desktop settings");
+        let reparsed: Config = serde_yaml::from_str(&yaml).expect("reparse desktop settings");
+        assert_eq!(reparsed.desktop, configured.desktop);
+    }
 
     /// config.yaml can hold Slack tokens: every write path must land
     /// owner-only, and loading a pre-existing loose file tightens it.

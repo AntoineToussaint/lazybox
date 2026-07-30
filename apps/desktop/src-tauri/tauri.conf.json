@@ -28,7 +28,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
-    "icon": ["icons/icon.png"]
+    "targets": ["app"],
+    "icon": ["icons/icon.png", "icons/icon.icns"]
   }
 }

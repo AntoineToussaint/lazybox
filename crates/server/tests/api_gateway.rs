@@ -167,6 +167,10 @@ fn desktop_contract_workspace() -> Workspace {
 fn desktop_command_tag(command: &DesktopCommand) -> &'static str {
     match command {
         DesktopCommand::SpawnAgent { .. } => "SpawnAgent",
+        DesktopCommand::SpawnShell { .. } => "SpawnShell",
+        DesktopCommand::CreateWorkspace { .. } => "CreateWorkspace",
+        DesktopCommand::MarkRead { .. } => "MarkRead",
+        DesktopCommand::PostReply { .. } => "PostReply",
         DesktopCommand::FocusWorkspace { .. } => "FocusWorkspace",
         DesktopCommand::Refresh => "Refresh",
     }
@@ -197,6 +201,21 @@ fn desktop_compatibility_fixture_is_current() {
         DesktopCommand::SpawnAgent {
             session_key: session_key.clone(),
             agent: "codex".into(),
+        },
+        DesktopCommand::SpawnShell {
+            session_key: session_key.clone(),
+        },
+        DesktopCommand::CreateWorkspace {
+            name: "investigate".into(),
+            project_key: lazybox_core::ProjectKey::new("github-o-r"),
+            agent: Some("codex".into()),
+        },
+        DesktopCommand::MarkRead {
+            session_key: session_key.clone(),
+        },
+        DesktopCommand::PostReply {
+            session_key: session_key.clone(),
+            body: "Shipped in the latest update.".into(),
         },
         DesktopCommand::FocusWorkspace {
             session_key: session_key.clone(),
@@ -264,7 +283,7 @@ fn desktop_compatibility_fixture_is_current() {
         .iter()
         .map(desktop_event_tag)
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(command_tags.len(), 3);
+    assert_eq!(command_tags.len(), 7);
     assert_eq!(event_tags.len(), 12);
     let fixture = serde_json::json!({
         "protocol_version": api_gateway::DESKTOP_PROTOCOL_VERSION,

@@ -16,7 +16,7 @@ export function loadPreview(): PreviewState {
   const selected: Workspace = {
     schema: 1,
     key: selectedKey,
-    project_key: null,
+    project_key: "github-acme-relay",
     local: false,
     linked_checkout: null,
     name: "Desktop client boundary",
@@ -130,7 +130,7 @@ export function loadPreview(): PreviewState {
               "\u001b[1;36mCodex\u001b[0m  lazybox desktop client\n\n" +
                 "› Inspecting the API gateway and terminal replay contract\n" +
                 "  ✓ Inbox snapshot received\n" +
-                "  ✓ PTY attached through NDJSON\n" +
+                "  ✓ PTY attached through the binary stream\n" +
                 "  • Waiting for your next instruction\n\n",
             ),
           lastSeq: 4,

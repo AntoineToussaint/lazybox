@@ -88,25 +88,20 @@ transport encryption or principal isolation. Enabling a routable listener
 requires a future design with TLS and principal-scoped authorization; a flag
 cannot waive that boundary.
 
-## Delivery status and estimate
+## Delivery status
 
-The reusable desktop boundary shipped in
-[#666](https://github.com/AntoineToussaint/lazybox/pull/666) and is complete.
-Starting from that merged baseline, the remaining path to a paid macOS release
-is intentionally split into two product milestones:
+The reusable boundary shipped in
+[#666](https://github.com/AntoineToussaint/lazybox/pull/666). The private macOS
+MVP now layers first-run setup, repository scope selection, inbox triage,
+activity/reply, local workspace creation, agent and shell recovery, desktop
+settings, keyboard/accessibility semantics, content-free diagnostics, and
+opt-in analytics onto that boundary.
 
-- [the private macOS MVP](https://github.com/AntoineToussaint/lazybox/issues/647)
-  requires an estimated 2–3 engineer-weeks;
-- [the paid macOS v1](https://github.com/AntoineToussaint/lazybox/issues/648)
-  then adds an estimated 4–6 engineer-weeks for entitlements, distribution,
-  updates, recovery, and support hardening.
-
-These incremental estimates leave roughly 6–9 engineer-weeks for one senior
-engineer familiar with Rust and TypeScript. The estimate assumes macOS first
-and excludes Apple account approval delays, external legal review, full TUI
-parity, hosted execution, and Windows or Linux support. Features beyond the
-focused paid workflow should be ported only when MVP usage demonstrates
-demand.
+The manually dispatched `Desktop dogfood build` workflow produces the internal
+macOS `.app` used to gather workflow evidence. The
+[paid macOS v1](https://github.com/AntoineToussaint/lazybox/issues/648) remains
+the next milestone for entitlements, signed/notarized distribution, automatic
+updates, account recovery, and support operations.
 
 ## Packaging and licensing boundary
 
@@ -133,7 +128,9 @@ cd apps/desktop
 npm ci
 npm test
 npm run build
-cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+cargo test --manifest-path src-tauri/Cargo.toml --locked
+npm run tauri build -- --no-bundle
 ```
 
 The gateway integration suite uses a real raw PTY and covers binary input,

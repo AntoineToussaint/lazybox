@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       name="description"
-      content="A desktop proof of lazybox's client-agnostic daemon."
+      content="The focused macOS client for lazybox."
     />
     <title>lazybox desktop</title>
   </head>
@@ -19,33 +19,59 @@
             <span>desktop client</span>
           </div>
         </div>
-        <div class="connection">
-          <span id="connection-dot" class="connection-dot"></span>
-          <span id="connection-label">Starting daemon…</span>
+        <div class="topbar-actions">
+          <div class="connection" role="status" aria-live="polite">
+            <span id="connection-dot" class="connection-dot"></span>
+            <span id="connection-label">Starting daemon…</span>
+          </div>
+          <button id="settings-button" class="icon-button" aria-label="Open settings" title="Settings (⌘,)">⚙</button>
         </div>
       </header>
 
-      <main class="workspace-grid">
-        <aside class="inbox-panel">
+      <main class="workspace-grid" aria-label="lazybox workspace">
+        <aside class="inbox-panel" aria-labelledby="inbox-heading">
           <div class="panel-heading">
             <div>
               <p class="eyebrow">Reactive inbox</p>
-              <h1>Workspaces</h1>
+              <h1 id="inbox-heading">Workspaces</h1>
             </div>
-            <button id="refresh-button" class="icon-button" title="Refresh inbox">↻</button>
+            <div class="heading-actions">
+              <button id="new-workspace-button" class="icon-button" aria-label="Create workspace" title="Create workspace">＋</button>
+              <button id="refresh-button" class="icon-button" aria-label="Refresh inbox" title="Refresh inbox (⌘R)">↻</button>
+            </div>
+          </div>
+          <div class="inbox-controls">
+            <label class="search-control">
+              <span class="sr-only">Search workspaces</span>
+              <input id="search-input" type="search" placeholder="Search workspaces" autocomplete="off" />
+            </label>
+            <label>
+              <span class="sr-only">Filter workspaces</span>
+              <select id="filter-select">
+                <option value="all">All</option>
+                <option value="unread">Unread</option>
+                <option value="ci">Failing CI</option>
+                <option value="review">Review requested</option>
+              </select>
+            </label>
           </div>
           <div class="inbox-summary">
             <span id="workspace-count">0 workspaces</span>
             <span id="unread-count">0 unread</span>
           </div>
-          <div id="workspace-list" class="workspace-list" aria-live="polite"></div>
+          <div id="inbox-loading" class="inbox-state" role="status">Loading persisted workspaces…</div>
+          <div id="inbox-error" class="inbox-state hidden" role="alert">
+            <span id="inbox-error-message">The inbox could not be loaded.</span>
+            <button id="retry-button" class="secondary-button">Retry</button>
+          </div>
+          <div id="workspace-list" class="workspace-list hidden" role="listbox" aria-label="Workspaces"></div>
         </aside>
 
-        <section class="activity-panel">
+        <section class="activity-panel" aria-labelledby="task-title">
           <div id="workspace-empty" class="empty-state">
             <span class="empty-glyph">↳</span>
             <h2>Choose a workspace</h2>
-            <p>Open a task to see its context and start an agent.</p>
+            <p>Open a task to inspect activity, reply, or start work.</p>
           </div>
           <div id="workspace-detail" class="workspace-detail hidden">
             <div class="detail-heading">
@@ -54,43 +80,184 @@
                 <h2 id="task-title"></h2>
                 <p id="task-meta" class="task-meta"></p>
               </div>
-              <button id="spawn-button" class="primary-button">
-                <span>Start</span>
-                <strong id="agent-label">agent</strong>
-              </button>
+              <div class="workspace-actions">
+                <label>
+                  <span class="sr-only">Agent</span>
+                  <select id="agent-select" aria-label="Agent"></select>
+                </label>
+                <button id="spawn-button" class="primary-button">
+                  <span id="spawn-action-label">Start</span>
+                  <strong id="agent-label">agent</strong>
+                </button>
+                <button id="shell-button" class="secondary-button">Shell</button>
+              </div>
             </div>
             <div id="task-description" class="task-description"></div>
             <div class="activity-heading">
               <h3>Activity</h3>
-              <span id="activity-count"></span>
+              <div class="activity-actions">
+                <span id="activity-count"></span>
+                <button id="mark-read-button" class="text-button">Mark read</button>
+                <button id="reply-button" class="secondary-button">Reply</button>
+              </div>
             </div>
-            <div id="activity-list" class="activity-list"></div>
+            <div id="activity-list" class="activity-list" aria-live="polite"></div>
           </div>
         </section>
 
-        <section class="terminal-panel">
+        <section class="terminal-panel" aria-labelledby="terminal-title">
           <div class="terminal-heading">
             <div>
-              <p class="eyebrow">Live daemon PTY</p>
+              <p class="eyebrow">Workspace terminal</p>
               <h2 id="terminal-title">No terminal attached</h2>
             </div>
-            <span id="terminal-state" class="terminal-state">idle</span>
+            <div class="terminal-actions">
+              <span id="terminal-state" class="terminal-state">idle</span>
+              <button id="close-terminal-button" class="icon-button hidden" aria-label="Close terminal" title="Close terminal">×</button>
+            </div>
           </div>
           <div id="terminal-shell" class="terminal-shell">
             <div id="terminal-empty" class="terminal-empty">
               <span>›_</span>
-              <p>Start an agent to prove the terminal bridge end to end.</p>
+              <p>Start or resume an agent, or open a shell.</p>
             </div>
             <div id="terminal" class="terminal-host hidden"></div>
           </div>
         </section>
       </main>
 
-      <footer class="statusbar">
+      <footer class="statusbar" role="status" aria-live="polite">
         <span id="status-message">Loading persisted workspaces…</span>
-        <span>daemon → HTTP/NDJSON → Tauri channel → xterm.js</span>
+        <span>⌘, settings · / search · ↑↓ navigate · ⌘R refresh</span>
       </footer>
     </div>
+
+    <dialog id="setup-dialog" class="modal setup-modal" aria-labelledby="setup-title">
+      <form id="setup-form">
+        <div class="modal-heading">
+          <div>
+            <p id="setup-eyebrow" class="eyebrow">First run</p>
+            <h2 id="setup-title">Set up lazybox</h2>
+          </div>
+          <button id="setup-close-button" type="button" class="icon-button" aria-label="Close settings">×</button>
+        </div>
+        <p id="setup-intro" class="modal-copy">Connect GitHub, choose the repositories you want in your inbox, and pick the agent lazybox starts by default.</p>
+        <section class="setup-section" aria-labelledby="github-setup-heading">
+          <div class="setup-section-heading">
+            <div>
+              <h3 id="github-setup-heading">GitHub</h3>
+              <p id="github-status">Checking authentication…</p>
+            </div>
+            <button id="github-login-button" type="button" class="secondary-button">Sign in</button>
+          </div>
+          <button id="github-recheck-button" type="button" class="text-button">Recheck authentication</button>
+        </section>
+        <section class="setup-section" aria-labelledby="repositories-heading">
+          <div class="setup-section-heading">
+            <div>
+              <h3 id="repositories-heading">Repositories</h3>
+              <p>Select an organization, then choose the repositories to watch.</p>
+            </div>
+          </div>
+          <label class="field">
+            <span>Organization</span>
+            <select id="organization-select" disabled>
+              <option value="">Authenticate GitHub first</option>
+            </select>
+          </label>
+          <fieldset id="repository-list" class="repository-list" disabled>
+            <legend class="sr-only">Repositories</legend>
+            <p>Choose an organization to load repositories.</p>
+          </fieldset>
+        </section>
+        <section class="setup-section" aria-labelledby="agent-heading">
+          <div class="setup-section-heading">
+            <div>
+              <h3 id="agent-heading">Default agent</h3>
+              <p>Only installed agents can be selected.</p>
+            </div>
+          </div>
+          <label class="field">
+            <span>Agent</span>
+            <select id="setup-agent-select"></select>
+          </label>
+        </section>
+        <section class="setup-section" aria-labelledby="privacy-heading">
+          <div class="setup-section-heading">
+            <div>
+              <h3 id="privacy-heading">Privacy</h3>
+              <p>Both controls are off until you opt in. Events are fixed names only—never task content, prompts, credentials, or terminal output.</p>
+            </div>
+          </div>
+          <label class="check-row"><input id="analytics-checkbox" type="checkbox" /> Share anonymous feature-use events</label>
+          <label class="check-row"><input id="crash-checkbox" type="checkbox" /> Save content-free crash diagnostics for support</label>
+        </section>
+        <p id="setup-error" class="form-error hidden" role="alert"></p>
+        <div class="modal-actions">
+          <button id="setup-cancel-button" type="button" class="secondary-button">Cancel</button>
+          <button id="setup-submit-button" type="submit" class="primary-button" disabled>Save and restart</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="reply-dialog" class="modal" aria-labelledby="reply-title">
+      <form id="reply-form">
+        <div class="modal-heading">
+          <div>
+            <p class="eyebrow">GitHub mutation</p>
+            <h2 id="reply-title">Post a reply</h2>
+          </div>
+        </div>
+        <p class="modal-copy">This sends a public comment to the selected task.</p>
+        <label class="field">
+          <span>Reply</span>
+          <textarea id="reply-body" rows="8" maxlength="20000" required></textarea>
+        </label>
+        <p id="reply-error" class="form-error hidden" role="alert"></p>
+        <div class="modal-actions">
+          <button id="reply-cancel-button" type="button" class="secondary-button">Cancel</button>
+          <button type="submit" class="primary-button">Post reply</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="new-workspace-dialog" class="modal" aria-labelledby="new-workspace-title">
+      <form id="new-workspace-form">
+        <div class="modal-heading">
+          <div>
+            <p class="eyebrow">Local workspace</p>
+            <h2 id="new-workspace-title">Create workspace</h2>
+          </div>
+        </div>
+        <p class="modal-copy">Create a separate worktree in the selected repository.</p>
+        <label class="field">
+          <span>Name</span>
+          <input id="new-workspace-name" type="text" maxlength="80" required />
+        </label>
+        <label class="check-row"><input id="new-workspace-agent" type="checkbox" checked /> Start the selected agent</label>
+        <p id="new-workspace-error" class="form-error hidden" role="alert"></p>
+        <div class="modal-actions">
+          <button id="new-workspace-cancel-button" type="button" class="secondary-button">Cancel</button>
+          <button type="submit" class="primary-button">Create workspace</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="close-terminal-dialog" class="modal compact-modal" aria-labelledby="close-terminal-title">
+      <form id="close-terminal-form">
+        <div class="modal-heading">
+          <div>
+            <p class="eyebrow">Running process</p>
+            <h2 id="close-terminal-title">Close this terminal?</h2>
+          </div>
+        </div>
+        <p class="modal-copy">The daemon will stop the focused agent or shell. Workspace files remain on disk.</p>
+        <div class="modal-actions">
+          <button id="close-terminal-cancel-button" type="button" class="secondary-button">Keep running</button>
+          <button type="submit" class="danger-button">Close terminal</button>
+        </div>
+      </form>
+    </dialog>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

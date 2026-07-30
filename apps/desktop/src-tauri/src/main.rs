@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod desktop_setup;
+
 use bytes::Bytes;
 use lazybox_server::ServerConfig;
 use lazybox_server::api_gateway::{
@@ -18,7 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tauri::ipc::{Channel, InvokeBody, Request};
-use tauri::{Manager, State};
+use tauri::{AppHandle, Manager, State};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, mpsc};
 
@@ -38,6 +40,7 @@ struct DesktopState {
     gateway: GatewayClient,
     agents: Vec<String>,
     default_agent: String,
+    setup_completed: bool,
     terminal_commands: mpsc::Sender<Bytes>,
     terminal_command_rx: Arc<Mutex<mpsc::Receiver<Bytes>>>,
     terminal_rx: Mutex<mpsc::Receiver<TerminalStreamItem>>,
@@ -55,6 +58,7 @@ fn desktop_info(state: State<'_, DesktopState>) -> DesktopInfo {
         max_terminal_write_bytes: lazybox_ipc::MAX_WRITE_CHUNK_BYTES,
         agents: state.agents.clone(),
         default_agent: state.default_agent.clone(),
+        setup_completed: state.setup_completed,
     }
 }
 
@@ -72,6 +76,44 @@ async fn list_workspaces(state: State<'_, DesktopState>) -> Result<WorkspacesRes
         .await
         .map_err(|error| format!("list workspaces: {error}"))?;
     decode_response(response).await
+}
+
+#[tauri::command]
+async fn desktop_setup_status() -> Result<desktop_setup::DesktopSetupStatus, String> {
+    desktop_setup::status().await
+}
+
+#[tauri::command]
+async fn list_github_organizations() -> Result<Vec<desktop_setup::DesktopScope>, String> {
+    desktop_setup::github_organizations().await
+}
+
+#[tauri::command]
+async fn list_github_repositories(
+    parent_id: String,
+) -> Result<Vec<desktop_setup::DesktopScope>, String> {
+    desktop_setup::github_repositories(&parent_id).await
+}
+
+#[tauri::command]
+async fn begin_github_login() -> Result<(), String> {
+    desktop_setup::begin_github_login().await
+}
+
+#[tauri::command]
+async fn save_desktop_setup(
+    state: State<'_, DesktopState>,
+    app: AppHandle,
+    input: desktop_setup::DesktopSetupInput,
+) -> Result<(), String> {
+    desktop_setup::save(input)?;
+    state.shutdown().await;
+    app.restart()
+}
+
+#[tauri::command]
+fn record_analytics_event(event: desktop_setup::AnalyticsEvent) -> Result<bool, String> {
+    desktop_setup::record_analytics(event)
 }
 
 #[tauri::command]
@@ -439,6 +481,7 @@ async fn start_desktop_state() -> Result<DesktopState, String> {
         })
         .or_else(|| agents.first().cloned())
         .ok_or_else(|| "no agent is configured".to_string())?;
+    let setup_completed = user_config.setup.wizard_completed;
     let (terminal_commands, terminal_command_rx) = mpsc::channel(256);
     let (terminal_tx, terminal_rx) = mpsc::channel(32);
 
@@ -446,6 +489,7 @@ async fn start_desktop_state() -> Result<DesktopState, String> {
         gateway,
         agents,
         default_agent,
+        setup_completed,
         terminal_commands,
         terminal_command_rx: Arc::new(Mutex::new(terminal_command_rx)),
         terminal_rx: Mutex::new(terminal_rx),
@@ -479,6 +523,7 @@ fn validate_protocol(protocol: &ProtocolResponse) -> Result<(), String> {
 }
 
 fn main() {
+    desktop_setup::install_crash_hook();
     let state = match tauri::async_runtime::block_on(start_desktop_state()) {
         Ok(state) => state,
         Err(error) => {
@@ -496,6 +541,12 @@ fn main() {
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             desktop_info,
+            desktop_setup_status,
+            list_github_organizations,
+            list_github_repositories,
+            begin_github_login,
+            save_desktop_setup,
+            record_analytics_event,
             list_workspaces,
             send_command,
             send_terminal_frame,
@@ -587,6 +638,33 @@ mod tests {
                 client_request_id: None,
                 ..
             } if agent == "codex"
+        ));
+    }
+
+    #[test]
+    fn desktop_mutations_reuse_daemon_command_semantics() {
+        let session_key = lazybox_core::SessionKey::from("github:o/r#1");
+        assert!(matches!(
+            Command::from(DesktopCommand::SpawnShell {
+                session_key: session_key.clone(),
+            }),
+            Command::Spawn {
+                kind: lazybox_ipc::TerminalKind::Shell,
+                ..
+            }
+        ));
+        assert!(matches!(
+            Command::from(DesktopCommand::MarkRead {
+                session_key: session_key.clone(),
+            }),
+            Command::MarkRead { session_key: key } if key == session_key
+        ));
+        assert!(matches!(
+            Command::from(DesktopCommand::PostReply {
+                session_key,
+                body: "hello".into(),
+            }),
+            Command::PostReply { body, .. } if body == "hello"
         ));
     }
 

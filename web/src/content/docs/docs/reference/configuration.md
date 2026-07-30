@@ -20,6 +20,7 @@ which is the canonical source of truth for defaults and field names.
 | Key | Purpose |
 | --- | --- |
 | [`setup`](#setup) | Wizard output: enabled providers / agents, filters, scopes, default agent |
+| [`desktop`](#desktop) | Opt-in macOS desktop analytics and crash diagnostics |
 | [`editors`](#editors) | Override / extend the detected editors |
 | [`repos`](#repos) | Per-repo env, mounts, scripts, branch prefix |
 | [`agent`](#agent) | Permission prompts, LLM gateway, agent state-detection timers |
@@ -86,6 +87,12 @@ setup:
   providers: [github, linear]
   agents: [claude, codex, aider]
   default_agent: claude      # what `w w` spawns; unset → claude
+
+# ── desktop privacy ──────────────────────────────────────────────────
+# Both controls are opt-in and default to false.
+desktop:
+  analytics_enabled: false
+  crash_reports_enabled: false
 
 # ── agent ────────────────────────────────────────────────────────────
 agent:
@@ -250,6 +257,19 @@ hand.
 | `scopes` | map | `{}` | Per-provider scope ids (orgs / repos); empty = all |
 | `default_agent` | string | unset | Agent the `w w` work shortcut spawns; unset falls back to `claude` |
 | `wizard_completed` | bool | `false` | Set once the wizard finishes, so an all-empty block doesn't re-trigger it |
+
+## `desktop`
+
+Privacy controls for the macOS desktop client. Both are opt-in and default off.
+Analytics accepts fixed feature-event names only; crash diagnostics contain
+only the app version, timestamp, and Rust source basename/line. Neither path
+records task content, repository names, credentials, prompts, replies, or
+terminal output.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `analytics_enabled` | bool | `false` | Allow content-free feature-use events |
+| `crash_reports_enabled` | bool | `false` | Save content-free crash diagnostics to `~/.lazybox/v2/desktop-crash.log` |
 
 ## `agent`
 

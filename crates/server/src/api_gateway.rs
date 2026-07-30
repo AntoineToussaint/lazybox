@@ -221,6 +221,7 @@ pub struct DesktopInfo {
     pub max_terminal_write_bytes: usize,
     pub agents: Vec<String>,
     pub default_agent: String,
+    pub setup_completed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -229,6 +230,21 @@ pub enum DesktopCommand {
     SpawnAgent {
         session_key: lazybox_core::SessionKey,
         agent: String,
+    },
+    SpawnShell {
+        session_key: lazybox_core::SessionKey,
+    },
+    CreateWorkspace {
+        name: String,
+        project_key: lazybox_core::ProjectKey,
+        agent: Option<String>,
+    },
+    MarkRead {
+        session_key: lazybox_core::SessionKey,
+    },
+    PostReply {
+        session_key: lazybox_core::SessionKey,
+        body: String,
     },
     FocusWorkspace {
         session_key: lazybox_core::SessionKey,
@@ -250,6 +266,30 @@ impl From<DesktopCommand> for Command {
                 model_alias: None,
                 access: lazybox_ipc::AgentRunAccess::Default,
             },
+            DesktopCommand::SpawnShell { session_key } => Command::Spawn {
+                session_key,
+                session_id: None,
+                client_request_id: None,
+                kind: lazybox_ipc::TerminalKind::Shell,
+                cwd: None,
+                initial_prompt: None,
+                on_main: false,
+                model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
+            },
+            DesktopCommand::CreateWorkspace {
+                name,
+                project_key,
+                agent,
+            } => Command::CreateWorkspace {
+                name,
+                project_key,
+                spawn_agent: agent,
+            },
+            DesktopCommand::MarkRead { session_key } => Command::MarkRead { session_key },
+            DesktopCommand::PostReply { session_key, body } => {
+                Command::PostReply { session_key, body }
+            }
             DesktopCommand::FocusWorkspace { session_key } => {
                 Command::FocusWorkspace { session_key }
             }

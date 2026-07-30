@@ -1645,6 +1645,15 @@ pub enum Event {
         #[serde(default)]
         kind: String,
     },
+    /// GitHub polling is intentionally paused until its observed
+    /// rate-limit window resets. This is a wait state, not a failed
+    /// or in-flight sync: clients should stop any poll spinner and
+    /// show the budget/reset details.
+    GithubRateLimitWait {
+        remaining: u32,
+        limit: u32,
+        reset_at: chrono::DateTime<chrono::Utc>,
+    },
     /// Emitted at the end of every successful poll cycle, even when
     /// no tasks matched. The TUI uses this to distinguish "polling
     /// hasn't run yet" from "polling ran and found nothing matching

@@ -110,6 +110,9 @@ pub struct GhSource {
     /// strictly in sequence (fetch resolves, THEN last_fetch_kind), so
     /// there's no contention.
     last_kind: parking_lot::Mutex<FetchMode>,
+    /// Retry delay reported by a failed side of the last partial
+    /// successful fetch.
+    retry_after_secs: parking_lot::Mutex<Option<u64>>,
     /// Coverage of the last full sweep. PARTIAL means one side
     /// (PRs or Issues) errored while the other returned results, so
     /// `fetch` returned `Ok` with only half the inbox to keep the
@@ -326,6 +329,7 @@ impl GhSource {
             // Default to Full so a never-fetched source doesn't
             // accidentally block rescope.
             last_kind: parking_lot::Mutex::new(FetchMode::Full),
+            retry_after_secs: parking_lot::Mutex::new(None),
             last_coverage: parking_lot::Mutex::new(FetchCoverage::Complete),
             last_windowed: parking_lot::Mutex::new(false),
             hot_targets: Vec::new(),
@@ -336,6 +340,10 @@ impl GhSource {
 
     fn set_last_kind(&self, kind: FetchMode) {
         *self.last_kind.lock() = kind;
+    }
+
+    fn set_retry_after_secs(&self, retry_after_secs: Option<u64>) {
+        *self.retry_after_secs.lock() = retry_after_secs;
     }
 
     fn set_coverage(&self, coverage: FetchCoverage) {
@@ -517,6 +525,7 @@ impl GhSource {
         let sweep_complete = coverage == FetchCoverage::Complete;
         let raw = outcome.tasks;
         let partial_warning = outcome.partial_failure;
+        self.set_retry_after_secs(outcome.retry_after_secs);
         let mentions = outcome.mentions;
         // Record this sweep's coverage so `polled_scope` downgrades
         // PARTIAL results from `Exhaustive` to "no authoritative
@@ -1336,6 +1345,7 @@ impl TaskSource for GhSource {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, lazybox_core::ProviderError>> + Send + 'a>>
     {
         Box::pin(async move {
+            self.set_retry_after_secs(None);
             let (mut tasks, kind) =
                 match gh_fetch_plan(self.client.should_full_sweep(), self.poll_notifications) {
                     GhFetchPlan::Full => (self.fetch_full().await?, FetchMode::Full),
@@ -1373,6 +1383,9 @@ impl TaskSource for GhSource {
     }
     fn last_fetch_kind(&self) -> FetchMode {
         *self.last_kind.lock()
+    }
+    fn retry_after_secs(&self) -> Option<u64> {
+        *self.retry_after_secs.lock()
     }
 }
 
@@ -2115,6 +2128,7 @@ pub(super) async fn sources_for_with_engagement(
                             // Default to Full so a never-fetched
                             // source doesn't accidentally block rescope.
                             last_kind: parking_lot::Mutex::new(FetchMode::Full),
+                            retry_after_secs: parking_lot::Mutex::new(None),
                             last_coverage: parking_lot::Mutex::new(FetchCoverage::Complete),
                             last_windowed: parking_lot::Mutex::new(false),
                             hot_targets: engagement.hot_targets().to_vec(),

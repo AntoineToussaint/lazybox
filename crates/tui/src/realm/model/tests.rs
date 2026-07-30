@@ -4203,6 +4203,51 @@ mod modal_input_responsiveness_tests {
         assert!(m.top_modal().is_none(), "Esc closes the sync-status window",);
     }
 
+    #[test]
+    fn github_rate_limit_event_replaces_spinner_without_sync_error() {
+        let mut m = build_model();
+        m.status.polling = None;
+        m.pending_refresh_ack = true;
+        m.handle_daemon_event(IpcEvent::PollProgress {
+            source: "github".into(),
+            message: "Fetching issues".into(),
+        });
+        assert!(m.status.bg_poll.is_some());
+
+        m.handle_daemon_event(IpcEvent::GithubRateLimitWait {
+            remaining: 98,
+            limit: 5000,
+            reset_at: chrono::Utc::now() + chrono::Duration::minutes(7),
+        });
+
+        assert!(m.status.bg_poll.is_none());
+        assert!(m.status.github_rate_limit_wait.is_some());
+        assert!(!m.pending_refresh_ack);
+        assert!(
+            m.status.notice.is_none(),
+            "an intentional wait must not raise a sync-failed notice"
+        );
+        assert!(matches!(
+            m.status
+                .sync
+                .latest_per_source()
+                .first()
+                .map(|entry| &entry.outcome),
+            Some(crate::realm::status_ctx::SyncOutcome::RateLimited {
+                remaining: 98,
+                limit: 5000,
+                ..
+            })
+        ));
+
+        m.handle_daemon_event(IpcEvent::PollProgress {
+            source: "github".into(),
+            message: "Fetching issues".into(),
+        });
+        assert!(m.status.github_rate_limit_wait.is_none());
+        assert!(m.status.bg_poll.is_some());
+    }
+
     /// `t` opens the theme picker (catalog → dispatch → mount): the
     /// modal mounts, every registered palette is offered, and the
     /// active theme is stashed so Esc can restore it. Esc then closes
@@ -12761,17 +12806,40 @@ mod mutation_failure_notice_tests {
         }
     }
 
-    /// Non-mutation provider sources (poll cycles) keep their existing
-    /// quiet handling — no footer notice on an auto-cycle failure.
+    /// A failed provider cycle replaces its in-flight spinner with a
+    /// named error and also lands in Shift-D.
     #[test]
-    fn poll_cycle_failures_stay_out_of_the_footer() {
+    fn poll_cycle_failures_replace_the_spinner_with_an_explicit_error() {
         let mut m = build_model();
         m.status.polling = None;
-        m.handle_daemon_event(provider_error("github", "rate limited"));
+        m.handle_daemon_event(IpcEvent::PollProgress {
+            source: "github".into(),
+            message: "Fetching issues".into(),
+        });
+        assert!(m.status.bg_poll.is_some());
+
+        m.handle_daemon_event(provider_error("github", "request failed"));
         assert!(
-            m.status.notice.is_none(),
-            "an auto-cycle poll failure must not flash (sync log only)"
+            m.status.bg_poll.is_none(),
+            "a failed poll must not retain its in-flight spinner"
         );
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .expect("failed poll must replace the spinner with an error");
+        assert_eq!(notice.severity, NoticeSeverity::Permanent);
+        assert!(notice.message.contains("sync failed"));
+        assert!(notice.message.contains("request failed"));
+        assert!(matches!(
+            m.status
+                .sync
+                .latest_per_source()
+                .first()
+                .map(|entry| &entry.outcome),
+            Some(crate::realm::status_ctx::SyncOutcome::Err { message, .. })
+                if message == "request failed"
+        ));
     }
 
     /// A failed reply names the action AND parks the (otherwise lost)

@@ -892,6 +892,13 @@ pub trait TaskSource: Send + Sync + 'static {
     fn last_fetch_kind(&self) -> FetchMode {
         FetchMode::Full
     }
+
+    /// Retry delay attached to a partial successful fetch. Read after
+    /// `fetch` resolves so the scheduler can retain successful tasks
+    /// without immediately retrying a rate-limited side.
+    fn retry_after_secs(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// What a [`TaskSource`] authoritatively covered in its most recent
@@ -1060,6 +1067,115 @@ pub struct RemovalPromptMemory {
     pub(crate) prompted: std::collections::HashMap<String, std::time::Instant>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct GithubRateLimitWait {
+    remaining: u32,
+    limit: u32,
+    reset_at: chrono::DateTime<Utc>,
+}
+
+impl GithubRateLimitWait {
+    fn retry_after_secs(self, now: chrono::DateTime<Utc>) -> u64 {
+        let duration = self
+            .reset_at
+            .signed_duration_since(now)
+            .to_std()
+            .unwrap_or_default();
+        duration
+            .as_secs()
+            .saturating_add(u64::from(duration.subsec_nanos() > 0))
+            .max(1)
+    }
+
+    fn event(self) -> Event {
+        Event::GithubRateLimitWait {
+            remaining: self.remaining,
+            limit: self.limit,
+            reset_at: self.reset_at,
+        }
+    }
+}
+
+fn github_rate_limit_wait(
+    snapshot: &lazybox_gh::RateSnapshot,
+    now: chrono::DateTime<Utc>,
+) -> Option<GithubRateLimitWait> {
+    let remote = snapshot.remote.as_ref()?;
+    (remote.remaining <= lazybox_gh::rate_budget::LOW_THRESHOLD && remote.reset_at > now).then_some(
+        GithubRateLimitWait {
+            remaining: remote.remaining,
+            limit: remote.limit,
+            reset_at: remote.reset_at,
+        },
+    )
+}
+
+#[cfg(test)]
+mod rate_limit_wait_tests {
+    use super::*;
+
+    fn snapshot(
+        remaining: u32,
+        limit: u32,
+        reset_at: chrono::DateTime<Utc>,
+    ) -> lazybox_gh::RateSnapshot {
+        lazybox_gh::RateSnapshot {
+            local_available: 30.0,
+            local_capacity: 30,
+            remote: Some(lazybox_gh::RemoteRateLimit {
+                remaining,
+                limit,
+                reset_at,
+                observed_at: std::time::Instant::now(),
+            }),
+        }
+    }
+
+    #[test]
+    fn remote_low_budget_becomes_an_explicit_wait_event() {
+        let now = Utc::now();
+        let wait =
+            github_rate_limit_wait(&snapshot(98, 5000, now + chrono::Duration::minutes(7)), now);
+
+        assert!(matches!(
+            wait.map(GithubRateLimitWait::event),
+            Some(Event::GithubRateLimitWait {
+                remaining: 98,
+                limit: 5000,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn healthy_or_reset_budget_is_not_a_wait() {
+        let now = Utc::now();
+        assert!(
+            github_rate_limit_wait(
+                &snapshot(101, 5000, now + chrono::Duration::minutes(7)),
+                now,
+            )
+            .is_none()
+        );
+        assert!(
+            github_rate_limit_wait(&snapshot(98, 5000, now - chrono::Duration::seconds(1)), now,)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn wait_deadline_supplies_the_scheduler_backoff_without_an_error_hint() {
+        let now = Utc::now();
+        let wait = github_rate_limit_wait(
+            &snapshot(98, 5000, now + chrono::Duration::seconds(414)),
+            now,
+        )
+        .expect("low remote budget");
+
+        assert_eq!(wait.retry_after_secs(now), 414);
+    }
+}
+
 pub async fn tick_with_state(
     config: &ServerConfig,
     sources: &[Box<dyn TaskSource>],
@@ -1103,6 +1219,10 @@ pub async fn tick_with_state(
                 let mode = source.last_fetch_kind();
                 if mode != FetchMode::Full {
                     all_full = false;
+                }
+                if let Some(secs) = source.retry_after_secs() {
+                    max_retry_after_secs =
+                        Some(max_retry_after_secs.map_or(secs, |existing| existing.max(secs)));
                 }
                 let count = tasks.len();
                 tracing::info!(
@@ -1275,6 +1395,19 @@ pub async fn tick_with_state(
                     source: source.name().to_string(),
                     count,
                 });
+                if source.name() == lazybox_gh::SOURCE {
+                    let now = Utc::now();
+                    let rate_limit_wait =
+                        config.gh_client_cache.lock().as_ref().and_then(|client| {
+                            github_rate_limit_wait(&client.rate_snapshot(), now)
+                        });
+                    if let Some(wait) = rate_limit_wait {
+                        let secs = wait.retry_after_secs(now);
+                        max_retry_after_secs =
+                            Some(max_retry_after_secs.map_or(secs, |existing| existing.max(secs)));
+                        let _ = config.bus.send(wait.event());
+                    }
+                }
                 // Drain + dispatch any side-effect actions the source
                 // queued during `fetch` (today: auto-spawn requests
                 // from `@lazybox` mentions).
@@ -1339,22 +1472,38 @@ pub async fn tick_with_state(
                     max_retry_after_secs =
                         Some(max_retry_after_secs.map_or(secs, |existing| existing.max(secs)));
                 }
-                // Debounce: only emit a ProviderError if the message
-                // changed since the last failure for this source.
-                // Same rate-limit error every minute → one event,
-                // not 60/hour.
                 let msg = e.user_message();
-                let prev = state.last_error.get(source.name());
-                if prev.map(String::as_str) != Some(msg.as_str()) {
-                    state
-                        .last_error
-                        .insert(source.name().to_string(), msg.clone());
-                    let _ = config.bus.send(Event::ProviderError {
-                        source: e.source().to_string(),
-                        message: msg,
-                        detail: e.diagnostic(),
-                        kind: kind.to_string(),
-                    });
+                let now = Utc::now();
+                let rate_limit_wait = if source.name() == lazybox_gh::SOURCE {
+                    config
+                        .gh_client_cache
+                        .lock()
+                        .as_ref()
+                        .and_then(|client| github_rate_limit_wait(&client.rate_snapshot(), now))
+                } else {
+                    None
+                };
+                if let Some(wait) = rate_limit_wait {
+                    let secs = wait.retry_after_secs(now);
+                    max_retry_after_secs =
+                        Some(max_retry_after_secs.map_or(secs, |existing| existing.max(secs)));
+                    state.last_error.remove(source.name());
+                    let _ = config.bus.send(wait.event());
+                } else {
+                    // Debounce: only emit a ProviderError if the message
+                    // changed since the last failure for this source.
+                    let prev = state.last_error.get(source.name());
+                    if prev.map(String::as_str) != Some(msg.as_str()) {
+                        state
+                            .last_error
+                            .insert(source.name().to_string(), msg.clone());
+                        let _ = config.bus.send(Event::ProviderError {
+                            source: e.source().to_string(),
+                            message: msg,
+                            detail: e.diagnostic(),
+                            kind: kind.to_string(),
+                        });
+                    }
                 }
             }
         }
@@ -5166,6 +5315,11 @@ mod tick_noop_skip_tests {
         tasks: Mutex<Vec<Task>>,
     }
 
+    struct RateLimitFixtureSource {
+        succeeds: bool,
+        retry_after_secs: Option<u64>,
+    }
+
     impl FixtureSource {
         fn new(tasks: Vec<Task>) -> Self {
             Self {
@@ -5192,6 +5346,37 @@ mod tick_noop_skip_tests {
         > {
             let tasks = self.tasks.lock().clone();
             Box::pin(async move { Ok(tasks) })
+        }
+    }
+
+    impl TaskSource for RateLimitFixtureSource {
+        fn name(&self) -> &str {
+            lazybox_gh::SOURCE
+        }
+
+        fn fetch<'a>(
+            &'a self,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<Vec<Task>, lazybox_core::ProviderError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async move {
+                if self.succeeds {
+                    Ok(Vec::new())
+                } else {
+                    Err(lazybox_core::ProviderError::retryable(
+                        lazybox_gh::SOURCE,
+                        "aggregate query failed without a retry hint",
+                    ))
+                }
+            })
+        }
+
+        fn retry_after_secs(&self) -> Option<u64> {
+            self.retry_after_secs
         }
     }
 
@@ -5307,6 +5492,102 @@ mod tick_noop_skip_tests {
             vec![key],
             "a changed task must re-broadcast"
         );
+    }
+
+    fn config_with_low_github_budget(
+        reset_at: chrono::DateTime<Utc>,
+    ) -> (ServerConfig, tokio::sync::broadcast::Receiver<Event>) {
+        let config = ServerConfig::with_store(Arc::new(lazybox_store::MemoryStore::new()));
+        *config.gh_client_cache.lock() = Some(
+            lazybox_gh::GhClient::stub_with_rate_limit_for_tests(
+                "test",
+                "fingerprint",
+                98,
+                5000,
+                reset_at,
+            )
+            .expect("stub GitHub client"),
+        );
+        let rx = config.bus.subscribe();
+        (config, rx)
+    }
+
+    #[tokio::test]
+    async fn cached_rate_limit_controls_an_error_without_a_retry_hint() {
+        let reset_at = Utc::now() + chrono::Duration::minutes(10);
+        let (config, mut rx) = config_with_low_github_budget(reset_at);
+        let sources: Vec<Box<dyn TaskSource>> = vec![Box::new(RateLimitFixtureSource {
+            succeeds: false,
+            retry_after_secs: None,
+        })];
+
+        let outcome = tick(&config, &sources).await;
+        let events = drain(&mut rx);
+
+        assert!(
+            outcome.retry_after_secs.is_some_and(|secs| secs >= 598),
+            "scheduler must wait for the cached reset, got {:?}",
+            outcome.retry_after_secs
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::GithubRateLimitWait {
+                remaining: 98,
+                limit: 5000,
+                ..
+            }
+        )));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::ProviderError { .. })),
+            "a known rate-limit wait must not be reported as a generic failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_rate_limit_controls_a_successful_partial_result() {
+        let reset_at = Utc::now() + chrono::Duration::minutes(10);
+        let (config, mut rx) = config_with_low_github_budget(reset_at);
+        let sources: Vec<Box<dyn TaskSource>> = vec![Box::new(RateLimitFixtureSource {
+            succeeds: true,
+            retry_after_secs: None,
+        })];
+
+        let outcome = tick(&config, &sources).await;
+        let events = drain(&mut rx);
+        let completed = events
+            .iter()
+            .position(|event| matches!(event, Event::PollCompleted { source, .. } if source == lazybox_gh::SOURCE))
+            .expect("successful result completes the poll");
+        let waiting = events
+            .iter()
+            .position(|event| matches!(event, Event::GithubRateLimitWait { .. }))
+            .expect("low cached budget starts a wait");
+
+        assert!(
+            outcome.retry_after_secs.is_some_and(|secs| secs >= 598),
+            "scheduler must wait for the cached reset, got {:?}",
+            outcome.retry_after_secs
+        );
+        assert!(
+            completed < waiting,
+            "the wait must replace the completed state after a partial result"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_partial_result_preserves_its_scheduler_retry_hint() {
+        let config = ServerConfig::with_store(Arc::new(lazybox_store::MemoryStore::new()));
+        let sources: Vec<Box<dyn TaskSource>> = vec![Box::new(RateLimitFixtureSource {
+            succeeds: true,
+            retry_after_secs: Some(414),
+        })];
+
+        let outcome = tick(&config, &sources).await;
+
+        assert_eq!(outcome.retry_after_secs, Some(414));
+        assert!(outcome.any_source_succeeded);
     }
 
     /// Thin newtype so a single `FixtureSource` can be shared with the

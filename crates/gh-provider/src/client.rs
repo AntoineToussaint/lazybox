@@ -55,6 +55,32 @@ pub enum GhError {
     },
 }
 
+impl GhError {
+    fn retry_after_secs(&self) -> Option<u64> {
+        match self {
+            Self::RateLimited {
+                retry_after_secs, ..
+            } => Some(*retry_after_secs),
+            _ => None,
+        }
+    }
+
+    fn aggregate(reason: String, errors: &[&Self]) -> Self {
+        let retry_after_secs = errors
+            .iter()
+            .map(|error| error.retry_after_secs())
+            .collect::<Option<Vec<_>>>()
+            .and_then(|delays| delays.into_iter().max());
+        match retry_after_secs {
+            Some(retry_after_secs) => Self::RateLimited {
+                retry_after_secs,
+                reason,
+            },
+            None => Self::Graphql(reason),
+        }
+    }
+}
+
 /// Is this error worth retrying? Used by `post_graphql_with_retry`
 /// to decide between sleep-and-retry and fail-fast.
 ///
@@ -233,6 +259,7 @@ fn incomplete_pagination_error(
 pub struct SelectedFetchOutcome {
     pub tasks: Vec<Task>,
     pub partial_failure: Option<String>,
+    pub retry_after_secs: Option<u64>,
     pub mentions: Vec<crate::LazyboxMention>,
     pub coverage: FetchCoverage,
     pub pr_coverage: FetchCoverage,
@@ -242,6 +269,7 @@ pub struct SelectedFetchOutcome {
 struct PrFetchOutcome {
     tasks: Vec<Task>,
     partial_failure: Option<String>,
+    retry_after_secs: Option<u64>,
 }
 
 impl PrFetchOutcome {
@@ -249,13 +277,15 @@ impl PrFetchOutcome {
         Self {
             tasks,
             partial_failure: None,
+            retry_after_secs: None,
         }
     }
 
-    fn partial(tasks: Vec<Task>, partial_failure: String) -> Self {
+    fn partial(tasks: Vec<Task>, partial_failure: String, retry_after_secs: Option<u64>) -> Self {
         Self {
             tasks,
             partial_failure: Some(partial_failure),
+            retry_after_secs,
         }
     }
 
@@ -279,6 +309,7 @@ fn combine_selected_fetches(
             Ok(SelectedFetchOutcome {
                 tasks: prs.tasks,
                 partial_failure: prs.partial_failure,
+                retry_after_secs: prs.retry_after_secs,
                 mentions,
                 coverage: if pr_complete {
                     FetchCoverage::Complete
@@ -296,6 +327,7 @@ fn combine_selected_fetches(
             if !pr_side_requested {
                 return Err(error);
             }
+            let retry_after_secs = prs.retry_after_secs.max(error.retry_after_secs());
             let message = format!("issues sync failed (PRs OK): {error}");
             tracing::warn!("{message}");
             let pr_complete = prs.is_complete();
@@ -306,6 +338,7 @@ fn combine_selected_fetches(
             Ok(SelectedFetchOutcome {
                 tasks: prs.tasks,
                 partial_failure,
+                retry_after_secs,
                 mentions: Vec::new(),
                 coverage: FetchCoverage::Partial,
                 pr_coverage: if pr_complete {
@@ -324,14 +357,17 @@ fn combine_selected_fetches(
             Ok(SelectedFetchOutcome {
                 tasks: issues,
                 partial_failure: Some(message),
+                retry_after_secs: error.retry_after_secs(),
                 mentions,
                 coverage: FetchCoverage::Partial,
                 pr_coverage: FetchCoverage::Partial,
             })
         }
-        (Err(pr_error), Err(issue_error)) => Err(GhError::Graphql(format!(
-            "both PR and issue fetches failed: PRs={pr_error}; issues={issue_error}"
-        ))),
+        (Err(pr_error), Err(issue_error)) => {
+            let reason =
+                format!("both PR and issue fetches failed: PRs={pr_error}; issues={issue_error}");
+            Err(GhError::aggregate(reason, &[&pr_error, &issue_error]))
+        }
     }
 }
 
@@ -689,6 +725,29 @@ impl GhClient {
             )),
             notifications_state: NotificationsState::shared(),
         })
+    }
+
+    /// Test-only: a stub client whose cached budget already contains a
+    /// remote rate-limit observation.
+    #[doc(hidden)]
+    pub fn stub_with_rate_limit_for_tests(
+        credential_source: &str,
+        credential_fingerprint: &str,
+        remaining: u32,
+        limit: u32,
+        reset_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Self, GhError> {
+        let client = Self::stub_for_tests(credential_source, credential_fingerprint)?;
+        client
+            .budget
+            .lock()
+            .observe(crate::rate_budget::RemoteRateLimit {
+                remaining,
+                limit,
+                reset_at,
+                observed_at: std::time::Instant::now(),
+            });
+        Ok(client)
     }
 
     /// Snapshot of the current rate budget state. Used by the polling
@@ -2106,20 +2165,36 @@ impl GhClient {
         // error so the tick doesn't silently wipe focus repo's PRs
         // from the inbox on the next rescope.
         if !repos.is_empty() && repo_failures.len() == repos.len() {
+            let retry_after_secs = repo_failures
+                .iter()
+                .map(|(_, error)| error.retry_after_secs())
+                .collect::<Option<Vec<_>>>()
+                .and_then(|delays| delays.into_iter().max());
             let details = repo_failures
                 .into_iter()
                 .map(|(repo, error)| format!("{repo}: {error}"))
                 .collect::<Vec<_>>()
                 .join("; ");
-            return Err(GhError::Graphql(format!(
+            let reason = format!(
                 "all {} round-robin repo queries failed: {details}",
                 repos.len(),
-            )));
+            );
+            return Err(match retry_after_secs {
+                Some(retry_after_secs) => GhError::RateLimited {
+                    retry_after_secs,
+                    reason,
+                },
+                None => GhError::Graphql(reason),
+            });
         }
         if repo_failures.is_empty() {
             Ok(PrFetchOutcome::complete(tasks))
         } else {
             let failure_count = repo_failures.len();
+            let retry_after_secs = repo_failures
+                .iter()
+                .filter_map(|(_, error)| error.retry_after_secs())
+                .max();
             let failed = repo_failures
                 .into_iter()
                 .map(|(repo, error)| format!("{repo}: {error}"))
@@ -2132,6 +2207,7 @@ impl GhClient {
                     failure_count,
                     repos.len(),
                 ),
+                retry_after_secs,
             ))
         }
     }
@@ -2630,6 +2706,7 @@ impl GhClient {
             return Ok(SelectedFetchOutcome {
                 tasks: Vec::new(),
                 partial_failure: None,
+                retry_after_secs: None,
                 mentions: Vec::new(),
                 coverage: FetchCoverage::Complete,
                 pr_coverage: FetchCoverage::Complete,
@@ -3721,6 +3798,60 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn aggregate_rate_limit_keeps_the_longest_retry_window() {
+        let error = combine_selected_fetches(
+            true,
+            true,
+            Err(GhError::RateLimited {
+                retry_after_secs: 1,
+                reason: "PR budget blocked".into(),
+            }),
+            Err(GhError::RateLimited {
+                retry_after_secs: 414,
+                reason: "issue budget blocked".into(),
+            }),
+        )
+        .expect_err("both requested sides failed");
+        let provider_error = lazybox_core::ProviderError::from(error);
+
+        assert_eq!(provider_error.retry_after_secs(), Some(414));
+        assert!(provider_error.diagnostic().contains("both PR and issue"));
+    }
+
+    #[test]
+    fn partial_success_preserves_the_failed_sides_retry_window() {
+        let outcome = combine_selected_fetches(
+            true,
+            true,
+            Ok(PrFetchOutcome::complete(Vec::new())),
+            Err(GhError::RateLimited {
+                retry_after_secs: 414,
+                reason: "issue budget blocked".into(),
+            }),
+        )
+        .expect("successful PR side keeps the partial result");
+
+        assert_eq!(outcome.retry_after_secs, Some(414));
+        assert_eq!(outcome.pr_coverage, FetchCoverage::Complete);
+        assert_eq!(outcome.coverage, FetchCoverage::Partial);
+    }
+
+    #[test]
+    fn aggregate_does_not_hide_a_non_rate_limit_failure() {
+        let rate_limited = GhError::RateLimited {
+            retry_after_secs: 414,
+            reason: "budget blocked".into(),
+        };
+        let graphql = GhError::Graphql("query shape rejected".into());
+        let error = GhError::aggregate(
+            format!("{rate_limited}; {graphql}"),
+            &[&rate_limited, &graphql],
+        );
+
+        assert!(matches!(error, GhError::Graphql(_)));
     }
 
     #[test]

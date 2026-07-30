@@ -36,6 +36,7 @@ pub struct Polling {
     saw_workspace: bool,
     polls_completed: std::collections::BTreeSet<String>,
     last_progress: Option<(String, String)>,
+    rate_limited: bool,
     queries_seen: Vec<String>,
     /// Set when an error arrives — we surface it as `Msg::PollingError`
     /// so the caller can push an `ErrorModal`.
@@ -52,6 +53,7 @@ impl Polling {
             saw_workspace: false,
             polls_completed: Default::default(),
             last_progress: None,
+            rate_limited: false,
             queries_seen: Vec::new(),
             error: None,
         }
@@ -85,8 +87,14 @@ impl Polling {
             }
             IpcEvent::PollCompleted { source, .. } => {
                 self.polls_completed.insert(source.clone());
+                if source == "github" {
+                    self.rate_limited = false;
+                }
             }
             IpcEvent::PollProgress { source, message } => {
+                if source == "github" {
+                    self.rate_limited = false;
+                }
                 self.last_progress = Some((source.clone(), message.clone()));
                 if message.starts_with("PR query:") || message.starts_with("Issue query:") {
                     self.queries_seen.push(format!("[{source}] {message}"));
@@ -98,6 +106,9 @@ impl Polling {
                 detail,
                 kind,
             } => {
+                if source == "github" {
+                    self.rate_limited = false;
+                }
                 // Retryable errors self-heal next cycle. Surface them
                 // inline as a progress hiccup rather than escalating
                 // to an ErrorModal that interrupts the user every
@@ -115,6 +126,22 @@ impl Polling {
                     ));
                 }
             }
+            IpcEvent::GithubRateLimitWait {
+                remaining,
+                limit,
+                reset_at,
+            } => {
+                self.rate_limited = true;
+                self.last_progress = Some((
+                    "github".into(),
+                    crate::realm::status_ctx::rate_limit_wait_label(
+                        *remaining,
+                        *limit,
+                        *reset_at,
+                        chrono::Utc::now(),
+                    ),
+                ));
+            }
             _ => {}
         }
     }
@@ -123,7 +150,9 @@ impl Polling {
     /// conditions. Returns `Some(msg)` if Polling wants to be
     /// dismissed (saw workspace / timed out / hit empty / error).
     pub fn tick_direct(&mut self) -> Option<Msg> {
-        self.spinner_idx = self.spinner_idx.wrapping_add(1);
+        if !self.rate_limited {
+            self.spinner_idx = self.spinner_idx.wrapping_add(1);
+        }
         if self.saw_workspace {
             return Some(Msg::ModalDismissed);
         }
@@ -149,13 +178,18 @@ impl Polling {
 
     /// Current spinner frame as a static glyph. Driven by `tick_direct`.
     pub fn spinner_glyph(&self) -> &'static str {
-        SPINNER_FRAMES[self.spinner_idx % SPINNER_FRAMES.len()]
+        if self.rate_limited {
+            "◷"
+        } else {
+            SPINNER_FRAMES[self.spinner_idx % SPINNER_FRAMES.len()]
+        }
     }
 
     /// Footer-friendly status label: source list + most recent
     /// progress message, joined into a single line.
     pub fn status_label(&self) -> String {
         match (&self.last_progress, self.sources.is_empty()) {
+            (Some((_, msg)), _) if self.rate_limited => msg.clone(),
             (Some((source, msg)), _) => {
                 format!("Pulling from {source} · {msg}")
             }
@@ -270,41 +304,47 @@ impl AppComponent<Msg, UserEvent> for Polling {
             }
             // Daemon events drive the inner state.
             Event::User(UserEvent::Daemon(evt)) => {
-                match evt.as_ref() {
-                    IpcEvent::WorkspaceUpserted(_) => {
-                        self.saw_workspace = true;
-                    }
-                    IpcEvent::PollCompleted { source, .. } => {
-                        self.polls_completed.insert(source.clone());
-                    }
-                    IpcEvent::PollProgress { source, message } => {
-                        self.last_progress = Some((source.clone(), message.clone()));
-                        if message.starts_with("PR query:") || message.starts_with("Issue query:") {
-                            self.queries_seen.push(format!("[{source}] {message}"));
-                        }
-                    }
-                    IpcEvent::ProviderError {
-                        source,
-                        message,
-                        detail,
-                        kind,
-                    } => {
-                        if kind == "retryable" {
-                            self.last_progress = Some((source.clone(), message.clone()));
-                        } else if self.error.is_none() {
-                            self.error = Some((
-                                source.clone(),
-                                kind.clone(),
-                                detail.clone(),
-                                message.clone(),
-                            ));
-                        }
-                    }
-                    _ => {}
-                }
+                self.feed_daemon_event(evt.as_ref());
                 None
             }
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+
+    #[test]
+    fn rate_limit_wait_replaces_initial_poll_progress_label() {
+        let mut polling = Polling::new(vec!["github".into()]);
+        polling.feed_daemon_event(&IpcEvent::GithubRateLimitWait {
+            remaining: 98,
+            limit: 5000,
+            reset_at: Utc.with_ymd_and_hms(2026, 7, 30, 7, 23, 22).unwrap(),
+        });
+
+        assert!(polling.status_label().starts_with("GitHub rate-limited"));
+        assert!(!polling.status_label().contains("Pulling from"));
+        assert!(polling.status_label().contains("98/5000 left"));
+        assert_eq!(polling.spinner_glyph(), "◷");
+        let _ = polling.tick_direct();
+        assert_eq!(
+            polling.spinner_glyph(),
+            "◷",
+            "an intentional wait must not animate like in-flight work"
+        );
+
+        polling.feed_daemon_event(&IpcEvent::PollProgress {
+            source: "github".into(),
+            message: "Fetching issues".into(),
+        });
+        assert_ne!(
+            polling.spinner_glyph(),
+            "◷",
+            "new progress resumes the in-flight indicator"
+        );
     }
 }

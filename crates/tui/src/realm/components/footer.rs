@@ -122,9 +122,12 @@ pub fn render(
     // and middle-truncation otherwise spends the head budget on the
     // fixed `✗ <verb> failed:` prefix and clips the reason (#588). The
     // hint zone still elides gracefully around it (#303), so quit stays
-    // findable. Routine notices and polling status keep the 40% cap.
+    // findable. Rate-limit waits use the same room for their reset and
+    // budget; routine notices and active polling keep the 40% cap.
     let sticky_notice = notice.is_some_and(|n| n.severity.is_sticky());
-    let right_cap = if sticky_notice {
+    let rate_limit_wait =
+        polling_status.is_some_and(|(_, label)| label.starts_with("GitHub rate-limited"));
+    let right_cap = if sticky_notice || rate_limit_wait {
         (area.width as usize) / 2
     } else {
         (area.width as usize) * 2 / 5
@@ -550,6 +553,18 @@ mod tests {
         assert!(row.contains("work on this"), "contextual hint displaced");
         assert!(row.contains("quit"), "quit label displaced");
         assert!(row.contains('…'), "long label must truncate visibly");
+    }
+
+    #[test]
+    fn rate_limit_wait_keeps_reset_and_budget_visible() {
+        let globals = [binding("q q", "quit")];
+        let label = "GitHub rate-limited · ~7m · 07:23 UTC · 98/5000 left";
+        let row = render_row_full(&[], &globals, Some(("◷", label)), None);
+
+        assert!(row.contains("GitHub rate-limited"), "{row:?}");
+        assert!(row.contains("07:23 UTC"), "{row:?}");
+        assert!(row.contains("98/5000 left"), "{row:?}");
+        assert!(row.contains("quit"), "{row:?}");
     }
 
     /// Narrow terminals elide whole hint cells by priority: the

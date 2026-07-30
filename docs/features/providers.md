@@ -54,7 +54,7 @@ model (`crates/core/src/task.rs`): `TaskState`, `TaskRole`, `CiStatus`,
 
 **Status:** stable
 **Crate(s):** `gh-provider`
-**Config / flags:** `setup.scopes` (orgs/repos), `providers.github.poll_interval`; auth via `GH_TOKEN` / `GITHUB_TOKEN` / `gh auth token`; `ui.browser` picks the browser for `g o` / right-clicked links (`"Google Chrome"` → `open -a` on macOS, an executable on Linux; default = OS default browser)
+**Config / flags:** `setup.scopes` (orgs/repos), `providers.github.poll_interval`; auth via `LAZYBOX_GITHUB_TOKEN` / `GH_TOKEN` / `GITHUB_TOKEN` / `gh auth token`; `ui.browser` picks the browser for `g o` / right-clicked links (`"Google Chrome"` → `open -a` on macOS, an executable on Linux; default = OS default browser)
 **Key bindings:** GitHub action group — `g m` merge, `g g` auto-merge on green, `g r` reviewers, `g a` assignees, `g l` labels, `g o` open in browser
 
 ### What it does
@@ -69,6 +69,14 @@ from `gh auth token` if you've run `gh auth login`. PRs and issues you author,
 review, are assigned, or are mentioned on appear in the inbox. Act on them with
 the GitHub action group (`g` leader); its which-key popup shows every continuation.
 
+GitHub's GraphQL budget belongs to the authenticated user, so lazybox,
+interactive `gh`, and spawned agents share that user's quota even when they use
+separate personal access tokens. `LAZYBOX_GITHUB_TOKEN` is a lazybox credential
+override, not a way to create another same-user quota; `gh` does not
+automatically read that variable. A token for a different GitHub account has
+that account's quota, but it also changes the viewer identity and therefore
+which PRs, issues, and review requests lazybox fetches.
+
 ### How it works (brief)
 `GhClient` (`crates/gh-provider/src/client.rs`) fetches PRs and issues via
 GraphQL; the polling loop itself lives daemon-side in
@@ -76,8 +84,9 @@ GraphQL; the polling loop itself lives daemon-side in
 (stalest-first), diffs against the previous snapshot, and emits fine-grained
 events (state change, CI change, review change, new activity). CI is a
 `CiStatus` rolled up from individual `CheckRun`s. `GhClient` also implements
-`ScopeSource` for the setup flow. Credential chain: `GH_TOKEN` env →
-`GITHUB_TOKEN` env → `gh auth token` (`crates/gh-provider/src/lib.rs`).
+`ScopeSource` for the setup flow. Credential chain:
+`LAZYBOX_GITHUB_TOKEN` env → `GH_TOKEN` env → `GITHUB_TOKEN` env →
+`gh auth token` (`crates/gh-provider/src/lib.rs`).
 
 ### Test checklist
 - [ ] PRs and issues both appear, with correct state (open/draft/merged/closed).
@@ -86,7 +95,8 @@ events (state change, CI change, review change, new activity). CI is a
 - [ ] `g m` merges a green, approved, conflict-free PR.
 - [ ] `g r` / `g a` / `g l` mutate reviewers / assignees / labels and the change reflects on next poll.
 - [ ] `g o` opens the PR/issue in the browser.
-- [ ] With no `GH_TOKEN`, creds fall back to `gh auth token`.
+- [ ] With no GitHub token environment variable, creds fall back to `gh auth token`.
+- [ ] `LAZYBOX_GITHUB_TOKEN` takes precedence over `GH_TOKEN` without being described as a separate same-user quota.
 
 ### Known sharp edges
 - `mergeable: UNKNOWN` from GitHub triggers a fast re-poll (~5s) to resolve; brief flicker is expected.

@@ -78,6 +78,16 @@ impl SyncStatus {
         for e in &self.summary {
             lines.push(self.summary_line(e, theme));
         }
+        if self.summary.iter().any(SyncEntry::is_rate_limited) {
+            lines.push(Line::from(Span::styled(
+                "      GitHub user quota is shared by lazybox + gh + agents.",
+                Style::default().fg(theme.text_dim),
+            )));
+            lines.push(Line::from(Span::styled(
+                "      Separate PATs for the same user do not create a new quota.",
+                Style::default().fg(theme.text_dim),
+            )));
+        }
 
         lines.push(Line::raw(""));
         lines.push(Line::from(Span::styled(
@@ -104,6 +114,8 @@ impl SyncStatus {
     fn summary_line(&self, e: &SyncEntry, theme: &crate::theme::Theme) -> Line<'static> {
         let dot_color = if e.is_ok() {
             theme.success
+        } else if e.is_rate_limited() {
+            theme.warn
         } else {
             theme.error
         };
@@ -116,7 +128,7 @@ impl SyncStatus {
                     .fg(theme.text_strong)
                     .add_modifier(Modifier::BOLD),
             ),
-            outcome_span(e, theme),
+            outcome_span(e, theme, self.now),
             Span::styled(format!("  ·  {ago}"), Style::default().fg(theme.text_dim)),
         ])
     }
@@ -125,6 +137,8 @@ impl SyncStatus {
     fn entry_line(&self, e: &SyncEntry, theme: &crate::theme::Theme) -> Line<'static> {
         let (glyph, glyph_color) = if e.is_ok() {
             ("✓ ", theme.success)
+        } else if e.is_rate_limited() {
+            ("◷ ", theme.warn)
         } else {
             ("✗ ", theme.error)
         };
@@ -135,7 +149,7 @@ impl SyncStatus {
                 format!("{:<10}", e.source),
                 Style::default().fg(theme.text_strong),
             ),
-            outcome_span(e, theme),
+            outcome_span(e, theme, self.now),
             Span::styled(format!("  ·  {ago}"), Style::default().fg(theme.text_dim)),
         ])
     }
@@ -143,7 +157,7 @@ impl SyncStatus {
 
 /// The human-readable outcome fragment shared by the summary and log
 /// rows — `12 tasks` on success, `auth: bad credentials` on failure.
-fn outcome_span(e: &SyncEntry, theme: &crate::theme::Theme) -> Span<'static> {
+fn outcome_span(e: &SyncEntry, theme: &crate::theme::Theme, now: DateTime<Utc>) -> Span<'static> {
     match &e.outcome {
         SyncOutcome::Ok { count } => {
             let noun = if *count == 1 { "task" } else { "tasks" };
@@ -152,6 +166,19 @@ fn outcome_span(e: &SyncEntry, theme: &crate::theme::Theme) -> Span<'static> {
                 Style::default().fg(theme.text_dim),
             )
         }
+        SyncOutcome::RateLimited {
+            remaining,
+            limit,
+            reset_at,
+        } => Span::styled(
+            format!(
+                "rate-limited · {}",
+                crate::realm::status_ctx::rate_limit_wait_detail(
+                    *remaining, *limit, *reset_at, now
+                )
+            ),
+            Style::default().fg(theme.warn),
+        ),
         SyncOutcome::Err { kind, message, .. } => {
             let text = if kind.is_empty() {
                 message.clone()
@@ -261,6 +288,18 @@ mod tests {
         }
     }
 
+    fn rate_limited(now: DateTime<Utc>) -> SyncEntry {
+        SyncEntry {
+            source: "github".into(),
+            at: now - chrono::Duration::seconds(5),
+            outcome: SyncOutcome::RateLimited {
+                remaining: 98,
+                limit: 5000,
+                reset_at: now + chrono::Duration::minutes(7),
+            },
+        }
+    }
+
     fn render(comp: &mut SyncStatus, w: u16, h: u16) -> String {
         use tuirealm::ratatui::Terminal;
         use tuirealm::ratatui::backend::TestBackend;
@@ -321,6 +360,49 @@ mod tests {
         let out = render(&mut comp, 80, 12);
         assert!(out.contains("1 task"), "{out}");
         assert!(!out.contains("1 tasks"), "{out}");
+    }
+
+    #[test]
+    fn renders_rate_limit_budget_reset_and_per_user_contention_guidance() {
+        let n = now();
+        let entry = rate_limited(n);
+        let mut comp = SyncStatus::new(vec![entry.clone()], vec![entry], n);
+        let out = render(&mut comp, 100, 16);
+
+        assert!(
+            out.contains("rate-limited · ~7m · 12:07 UTC · 98/5000 left"),
+            "{out}"
+        );
+        assert!(
+            out.contains("user quota is shared by lazybox + gh + agents"),
+            "{out}"
+        );
+        assert!(
+            out.contains("Separate PATs for the same user do not create a new quota"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn historical_rate_limit_attempt_shows_its_reset_instead_of_now() {
+        let n = now();
+        let entry = SyncEntry {
+            source: "github".into(),
+            at: n - chrono::Duration::minutes(2),
+            outcome: SyncOutcome::RateLimited {
+                remaining: 98,
+                limit: 5000,
+                reset_at: n - chrono::Duration::minutes(1),
+            },
+        };
+        let mut comp = SyncStatus::new(vec![entry.clone()], vec![entry], n);
+        let out = render(&mut comp, 100, 16);
+
+        assert!(
+            out.contains("rate-limited · reset 11:59 UTC · 98/5000 left"),
+            "{out}"
+        );
+        assert!(!out.contains("rate-limited · now"), "{out}");
     }
 
     #[test]

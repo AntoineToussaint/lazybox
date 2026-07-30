@@ -8,7 +8,7 @@
 //! Run it against your own account:
 //!
 //! ```sh
-//! # token comes from $GH_TOKEN, $GITHUB_TOKEN, or `gh auth token`
+//! # token comes from $LAZYBOX_GITHUB_TOKEN, $GH_TOKEN, $GITHUB_TOKEN, or `gh auth token`
 //! LAZYBOX_WATCH=owner/repo-a,owner/repo-b \
 //!   cargo test -p lazybox-gh --test sync_trace -- --ignored --nocapture
 //! ```
@@ -37,7 +37,7 @@ fn init_metrics_subscriber() {
 }
 
 fn token() -> String {
-    for var in ["GH_TOKEN", "GITHUB_TOKEN"] {
+    for var in ["LAZYBOX_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"] {
         if let Ok(t) = std::env::var(var)
             && !t.trim().is_empty()
         {
@@ -47,7 +47,10 @@ fn token() -> String {
     let out = std::process::Command::new("gh")
         .args(["auth", "token"])
         .output()
-        .expect("no $GH_TOKEN/$GITHUB_TOKEN and `gh auth token` failed to spawn");
+        .expect(
+            "no $LAZYBOX_GITHUB_TOKEN/$GH_TOKEN/$GITHUB_TOKEN and \
+             `gh auth token` failed to spawn",
+        );
     assert!(
         out.status.success(),
         "`gh auth token` failed: {}",

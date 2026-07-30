@@ -12,14 +12,17 @@ dashboard.
 
 Two capabilities set it apart from every tool below:
 
-- **A reactive multi-provider inbox.** GitHub PRs and issues, Linear tickets,
-  and Slack threads flow into one read/unread event feed — new comments, CI
-  failures, and review requests surface as they land. Some tools below accept
-  external triggers or show agent-run history; none documents the same
-  read/unread inbox across GitHub **and** Linear **and** Slack.
-- **Tag-to-spawn from a labeled issue.** Drop a `lazybox:` label on a GitHub
-  issue — one, or a whole backlog across repos — and lazybox opens each worktree
-  and starts an agent, no TUI required. See
+- **A reactive multi-provider inbox.** GitHub PRs and issues, plus Linear
+  tickets, flow into one read/unread event feed — new comments, CI failures,
+  and review requests surface as they land. Slack mirrors workspace activity
+  into channels and can route replies back to an existing agent; it is not a
+  third task source. Some tools below accept external triggers or show agent-run
+  history; none documents the same read/unread inbox across GitHub **and**
+  Linear.
+- **Tag-to-spawn from a labeled issue.** Drop a `lazybox:` label on GitHub
+  issues you authored or are assigned to — one, or a whole eligible backlog
+  across repos — and lazybox opens each worktree and starts an agent, no TUI
+  required. See
   [Trigger agents with @lazybox mentions](/docs/how-to/lazybox-mentions/).
   Among the documented products below, no other one documents this exact
   GitHub-label trigger.
@@ -32,9 +35,9 @@ one surface you live in when you're orchestrating a fleet.
 
 | Tool | Interface | Isolation | Reactive inbox¹ | Tag-to-spawn² | Remote / headless | Platforms | License |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| **lazybox** | Terminal TUI | Worktree | ✓ GitHub · Linear · Slack | ✓ GitHub label | ✓ SSH daemon | macOS · Linux | MIT |
-| [Conductor](https://www.conductor.build/docs/) | Native GUI | Worktree | — | — | — | macOS | Proprietary |
-| [Warp](https://docs.warp.dev/agent-platform) | Terminal + web | Checkout / container | — | —² | ✓ cloud / self-hosted | macOS · Linux · Windows | Proprietary |
+| **lazybox** | Terminal TUI | Worktree | ✓ GitHub · Linear | ✓ GitHub label | ✓ SSH daemon | macOS · Linux | MIT |
+| [Conductor](https://www.conductor.build/docs/) | Native GUI | Worktree | — | — | ✓ Cloud / API (beta) | macOS · cloud | Proprietary |
+| [Warp](https://docs.warp.dev/agent-platform) | Terminal + web | Checkout / container | — | —² | ✓ cloud / self-hosted | macOS · Linux · Windows | AGPL-3.0 client · proprietary service |
 | [Crystal](https://github.com/stravu/crystal)³ | Desktop GUI | Worktree | — | — | — | macOS · Win/Linux source | MIT |
 | [Vibe Kanban](https://www.vibekanban.com/docs/)⁴ | Web (local / cloud) | Worktree | — | — | ✓ paired host / cloud⁵ | Cross-platform | Apache-2.0 |
 | [Sculptor](https://github.com/imbue-ai/sculptor) | Desktop GUI | Worktree (containers optional) | — | — | Partial⁶ | macOS · Linux | MIT |
@@ -43,8 +46,9 @@ one surface you live in when you're orchestrating a fleet.
 
 <div style="font-size:0.85em">
 
-¹ A read/unread **event feed** across providers (new comments, CI, review
-requests) — not an agent-run dashboard or a one-off "open this issue" picker.
+¹ A read/unread **event feed** across task providers (new comments, CI, review
+requests) — not an agent-run dashboard, a one-off "open this issue" picker, or
+the optional Slack mirror.
 ² Auto-spawn an agent from a label on a **GitHub issue**. Warp can spawn a cloud
 agent when you tag `@Oz` in **Linear or Slack**, and also supports schedules,
 APIs, and GitHub Actions; GitHub-label auto-spawn is not a documented Warp
@@ -102,8 +106,9 @@ Honesty helps you trust the rest of this page:
 
 If instead you're running **many agents across many repositories**, want work to
 **flow to you** instead of hunting for it, and want to **start a whole backlog
-with a label** — from a terminal you can forward over SSH — that's the workload
-lazybox is built for, and nothing above matches the combination.
+of eligible issues with a label** — from a terminal you can forward over SSH —
+that's the workload lazybox is built for, and nothing above matches the
+combination.
 
 ---
 
@@ -115,9 +120,11 @@ issue](https://github.com/AntoineToussaint/lazybox/issues).</sub>
 ## Sources
 
 - [Conductor: worktrees](https://www.conductor.build/docs/concepts/git-worktrees)
+  and [cloud-workspace API](https://www.conductor.build/docs/api)
 - [Warp: Oz overview](https://docs.warp.dev/agent-platform),
   [integrations](https://docs.warp.dev/reference/cli/integration-setup), and
-  [environments](https://docs.warp.dev/agent-platform/cloud-agents/environments)
+  [environments](https://docs.warp.dev/agent-platform/cloud-agents/environments);
+  [the client is AGPL-3.0](https://github.com/warpdotdev/warp)
 - [Crystal repository and final documentation](https://github.com/stravu/crystal)
 - [Vibe Kanban: worktrees](https://www.vibekanban.com/docs/workspaces/repositories),
   [remote access](https://www.vibekanban.com/docs/remote-access), and

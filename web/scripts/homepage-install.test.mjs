@@ -1,8 +1,13 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 const html = await readFile(new URL('../dist/index.html', import.meta.url), 'utf8');
+const stylesheetPath = html.match(/href="(\/_astro\/[^"]+\.css)"/)?.[1];
+assert.ok(stylesheetPath, 'expected the built homepage stylesheet');
+const css = await readFile(new URL(`../dist${stylesheetPath}`, import.meta.url), 'utf8');
+const socialPreview = await readFile(new URL('../public/og.png', import.meta.url));
 
 const brewCommand = 'brew install AntoineToussaint/lazybox/lazybox';
 const installerCommand =
@@ -39,7 +44,7 @@ test('every install method has a copy control for its exact command', () => {
 
 test('the hero presents lazybox as a terminal TUI before any install choice', () => {
   const heroStart = html.indexOf('<header class="hero">');
-  const heroEnd = html.indexOf('<div class="strip">');
+  const heroEnd = html.indexOf('<section id="demos"');
   const hero = html.slice(heroStart, heroEnd);
   const declaration = 'A terminal TUI — reactive GitHub inbox + agent fleet, keyboard-driven.';
 
@@ -47,7 +52,39 @@ test('the hero presents lazybox as a terminal TUI before any install choice', ()
   assert.ok(hero.includes(declaration), 'expected the explicit terminal-TUI description');
   assert.ok(hero.indexOf(declaration) < hero.indexOf(brewCommand), 'expected the terminal description before install');
   assert.ok(hero.includes('Runs in your terminal. No Electron. No tab farm.'));
-  assert.ok(hero.includes('src="/demo/lazybox.mp4"'), 'expected the real TUI recording');
-  assert.ok(hero.includes('real TUI capture · 14s loop'));
+  const demoIndex = hero.indexOf('src="/demo/01-inbox.mp4"');
+  assert.ok(demoIndex > 0, 'expected the real TUI recording');
+  assert.ok(demoIndex < hero.indexOf(brewCommand), 'expected the TUI recording before install');
+  assert.ok(hero.includes('real TUI capture · inbox at scale'));
   assert.equal(hero.includes('<span class="dot r">'), false, 'hero must not use macOS window chrome');
+});
+
+test('the hero recording stays full width at desktop and tablet sizes', () => {
+  const heroGrid = css.match(/\.hero-grid\s*\{([^}]*)\}/)?.[1] ?? '';
+  const terminal = css.match(/\.term\s*\{([^}]*)\}/)?.[1] ?? '';
+
+  assert.equal(
+    heroGrid.includes('grid-template-columns'),
+    false,
+    'hero media must not be squeezed into a desktop side column',
+  );
+  assert.match(terminal, /width:\s*100%/, 'expected the terminal capture to use the full hero width');
+});
+
+test('hero alignment does not change the centered footer call to action', () => {
+  const sharedCta = css.match(/\.cta-row\s*\{([^}]*)\}/)?.[1] ?? '';
+  const heroCta = css.match(/\.hero \.cta-row\s*\{([^}]*)\}/)?.[1] ?? '';
+
+  assert.match(sharedCta, /justify-content:\s*center/);
+  assert.match(heroCta, /justify-content:\s*flex-start/);
+});
+
+test('the homepage publishes the established public-safe social preview', () => {
+  assert.ok(html.includes('<meta property="og:image" content="https://lazybox.ai/og.png">'));
+  assert.ok(html.includes('<meta name="twitter:image" content="https://lazybox.ai/og.png">'));
+  assert.ok(html.includes('<meta name="twitter:card" content="summary_large_image">'));
+  assert.equal(
+    createHash('sha256').update(socialPreview).digest('hex'),
+    '2caa482e5167d921530c6d3e6dfa7304585713165b73aa9a64308f0bba2c5a29',
+  );
 });

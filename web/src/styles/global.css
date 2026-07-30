@@ -195,14 +195,11 @@ img, video { max-width: 100%; display: block; }
   border-bottom: 1px solid var(--border-soft);
 }
 .hero-grid {
-  display: grid;
-  grid-template-columns: minmax(18rem, 0.72fr) minmax(0, 1.28fr);
-  gap: clamp(2rem, 4vw, 4rem);
-  align-items: center;
   max-width: 1320px;
 }
 .hero-copy {
   min-width: 0;
+  max-width: 50rem;
   font-family: var(--mono);
 }
 .terminal-command {
@@ -251,7 +248,13 @@ img, video { max-width: 100%; display: block; }
 .cta-row {
   display: flex;
   gap: 0.85rem;
+  justify-content: center;
   flex-wrap: wrap;
+  margin-bottom: 1.4rem;
+}
+.hero .cta-row {
+  justify-content: flex-start;
+  margin-bottom: 0;
 }
 .hero .btn {
   border-radius: 0.25rem;
@@ -374,7 +377,8 @@ img, video { max-width: 100%; display: block; }
 
 /* ── terminal / demo frame ───────────────────────────────── */
 .term {
-  margin: 0;
+  width: 100%;
+  margin: clamp(2rem, 4vw, 3rem) 0 0;
   min-width: 0;
   background: #05070a;
   border: 1px solid var(--fg-faint);
@@ -1926,7 +1930,6 @@ footer .links a:hover { color: var(--fg); }
 
 /* ── responsive ──────────────────────────────────────────── */
 @media (max-width: 900px) {
-  .hero-grid { grid-template-columns: 1fr; }
   .hero-copy { max-width: 42rem; }
   .snippet-showcase { grid-template-columns: 1fr; }
   .snippet-copy { max-width: 42rem; }

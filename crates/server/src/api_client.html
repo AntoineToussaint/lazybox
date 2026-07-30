@@ -154,15 +154,15 @@
       </header>
 
       <form id="connect" class="panel">
-        <label for="token">Gateway bearer token</label>
+        <label for="token">Gateway bearer token (if configured)</label>
         <div class="connect-row">
-          <input id="token" name="token" type="password" required autocomplete="off" autocapitalize="none" spellcheck="false">
+          <input id="token" name="token" type="password" autocomplete="off" autocapitalize="none" spellcheck="false">
           <button id="connect-button" type="submit">Connect</button>
         </div>
-        <p class="privacy">The token is cleared from this field after connection and kept only in page memory.</p>
+        <p class="privacy">Leave blank when auth is disabled or to reuse the current connection token. Tokens are kept only in page memory.</p>
       </form>
 
-      <div id="status" class="status" role="status" aria-live="polite">Enter the token printed for this gateway.</div>
+      <div id="status" class="status" role="status" aria-live="polite">Enter the configured token, or leave blank when auth is disabled.</div>
 
       <div class="grid">
         <section class="panel" aria-labelledby="workspaces-title">
@@ -180,7 +180,7 @@
             <h2 id="events-title">Live events</h2>
             <span id="event-count" class="count">0 received</span>
           </div>
-          <p id="event-empty" class="empty">The authenticated event stream will appear here.</p>
+          <p id="event-empty" class="empty">The live event stream will appear here.</p>
           <ol id="events" class="event-list"></ol>
         </section>
       </div>
@@ -210,9 +210,13 @@
         status.dataset.tone = tone;
       }
 
+      function authorizationHeaders(token) {
+        return token ? { Authorization: `Bearer ${token}` } : {};
+      }
+
       async function requestJson(path, token) {
         const response = await fetch(path, {
-          headers: { Authorization: `Bearer ${token}` },
+          headers: authorizationHeaders(token),
           cache: "no-store",
         });
         if (!response.ok) {
@@ -283,7 +287,7 @@
 
       async function streamEvents(token, controller) {
         const response = await fetch("/v1/events", {
-          headers: { Authorization: `Bearer ${token}` },
+          headers: authorizationHeaders(token),
           cache: "no-store",
           signal: controller.signal,
         });
@@ -294,7 +298,10 @@
         let buffer = "";
         while (true) {
           const { done, value } = await reader.read();
-          if (done) break;
+          if (done) {
+            if (controller.signal.aborted) return;
+            throw new Error("Live event stream disconnected. Reconnect to resume.");
+          }
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split("\n");
           buffer = lines.pop() ?? "";
@@ -307,7 +314,8 @@
 
       async function connect(token) {
         streamController?.abort();
-        streamController = new AbortController();
+        const controller = new AbortController();
+        streamController = controller;
         receivedEvents = 0;
         eventList.replaceChildren();
         eventEmpty.hidden = false;
@@ -323,11 +331,12 @@
           renderWorkspaces(workspaces);
           setStatus(`Connected to ${health.service}.`, "ok");
           button.textContent = "Reconnect";
-          streamEvents(token, streamController).catch((error) => {
-            if (error.name !== "AbortError") setStatus(error.message, "error");
+          streamEvents(token, controller).catch((error) => {
+            if (!controller.signal.aborted && error.name !== "AbortError") {
+              setStatus(error.message, "error");
+            }
           });
         } catch (error) {
-          currentToken = "";
           setStatus(error instanceof Error ? error.message : String(error), "error");
         } finally {
           button.disabled = false;
@@ -336,7 +345,7 @@
 
       form.addEventListener("submit", (event) => {
         event.preventDefault();
-        currentToken = tokenInput.value;
+        if (tokenInput.value) currentToken = tokenInput.value;
         tokenInput.value = "";
         connect(currentToken);
       });

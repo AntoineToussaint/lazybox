@@ -32,13 +32,14 @@ network. See [`SECURITY.md`](https://github.com/AntoineToussaint/lazybox/blob/ma
 
 The gateway serves a responsive, read-only client at `/`. Open the gateway URL,
 enter its bearer token, and the page loads the current workspaces and streams
-live daemon events. The token is cleared from the form after connection and
-kept only in page memory.
+live daemon events. Leave the token blank only when the gateway was explicitly
+started with `--insecure-no-auth`. A submitted token is cleared from the form,
+retained only in page memory, and reused when reconnecting.
 
 The static page is intentionally available without authentication so a browser
-can load it. Every `/v1/*` request it makes is still bearer-authenticated. The
-client is served by the gateway itself, so the PoC does not need a permissive
-cross-origin policy.
+can load it. When a token is configured, every `/v1/*` request it makes is
+still bearer-authenticated. The client is served by the gateway itself, so the
+PoC does not need a permissive cross-origin policy.
 
 For a phone on a trusted private network, or behind a TLS reverse proxy:
 

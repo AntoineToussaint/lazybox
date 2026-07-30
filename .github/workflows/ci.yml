@@ -54,6 +54,7 @@ jobs:
               - "scripts/**"
             web:
               - ".github/workflows/ci.yml"
+              - "crates/server/src/api_client.html"
               - "web/**"
             contracts:
               - ".github/ISSUE_TEMPLATE/**"
@@ -172,6 +173,7 @@ jobs:
         if: needs.changes.outputs.web == 'true'
         working-directory: web
         run: |
+          npm test
           npm run check
           npm run build
       - name: Enforce Lighthouse and transfer-size budgets

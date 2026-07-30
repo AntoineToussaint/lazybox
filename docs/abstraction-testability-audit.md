@@ -58,7 +58,7 @@ deliverable is this evidence plus independently reviewable child issues.
 | Spawn planning | `server/src/spawn_handler.rs:717` begins a handler in a roughly 12k-line module where policy selection and effects are interleaved | A pure `SpawnPlan` followed by a narrower executor | [#657](https://github.com/AntoineToussaint/lazybox/issues/657) |
 | Polling responsibilities | `server/src/polling/mod.rs` is roughly 9.8k lines and owns source fetches, upsert decisions, store writes, and workspace lifecycle | `sources`, `upsert`, and `workspace` modules with the tick left as coordinator | [#658](https://github.com/AntoineToussaint/lazybox/issues/658) |
 | Provider pagination | `gh-provider/src/client.rs:230` and `linear-provider/src/lib.rs:316` define separate complete/partial outcomes around separate cursor loops | A shared pagination helper and core-owned coverage contract | [#659](https://github.com/AntoineToussaint/lazybox/issues/659) |
-| TUI decisions | Dispatch, choice resolution, and key decisions were spread across `tui/src/realm/model/{dispatch,modals,keys}.rs`, so tests exercised them through `Model` | Pure resolvers in `tui-core`; `Model` applies returned effects | [#660](https://github.com/AntoineToussaint/lazybox/issues/660) |
+| TUI decisions | Dispatch, choice resolution, and key decisions were spread across `tui/src/realm/model/{dispatch,inputs,keys}.rs`, so tests exercised them through `Model` | Pure resolvers in `tui-core`; `Model` applies returned effects | [#660](https://github.com/AntoineToussaint/lazybox/issues/660) |
 | TUI state | `tui/src/realm/model/mod.rs:863` placed more than 70 fields from unrelated flows on `Model`; the compensating test module exceeded 14k lines | Cohesive sub-state with narrower mutation surfaces | [#661](https://github.com/AntoineToussaint/lazybox/issues/661) |
 
 These are separate issues deliberately. Combining them would make structural
@@ -79,11 +79,12 @@ movement in one crate obscure the review and regression signal in another.
   `polling/handlers.rs:270` (`handle_merge_pr`) constructs or reaches the real
   provider internally. A `*_with(provider)` boundary would let tests assert
   sequencing and error propagation with a fake `TaskProvider`.
-- **Medium — consolidate already-duplicated pure helpers.** `strip_ansi` exists
-  in `spawn_handler.rs:3960` and `chat.rs:860`; `expand_tilde` exists in
-  `spawn_handler.rs:3172` and `polling/handlers.rs:1344`; path canonicalization
-  has two local forms in `polling/handlers.rs`. These are current duplicates,
-  not a request for a general utilities layer.
+- **Medium — consolidate only helpers with matching contracts.** `expand_tilde`
+  exists in `spawn_handler.rs:3172` and `polling/handlers.rs:1344`; path
+  canonicalization has two local forms in `polling/handlers.rs`. The
+  same-named `strip_ansi` functions are intentionally distinct: the chat
+  sanitizer drops carriage returns, while the terminal-tail sanitizer
+  preserves them until in-place output is collapsed.
 - **Low — split detection only if navigation remains costly.**
   `agents/src/detect.rs` is about 2.2k lines, but its logic is already pure and
   well exercised. A per-agent module split would improve ownership, not
@@ -99,11 +100,11 @@ movement in one crate obscure the review and regression signal in another.
   error string at `slack-provider/src/lib.rs:112` and parses
   `retry-after=N` back out at `:135`. A typed `RetryAfter` avoids a
   string-format contract between two layers.
-- **Medium — remove repeated mutation preambles.** GitHub mutations repeatedly
-  poll to obtain a PR or issue node id before executing the requested
-  operation (`gh-provider/src/client.rs:3047` onward). Narrow
-  `pr_node_id`/`issue_node_id` guards would isolate that prerequisite and its
-  errors.
+- **Medium — remove repeated cached-node guards.** GitHub mutations repeatedly
+  extract a cached PR or issue node id and return a permanent `poll first`
+  error when it is absent before executing the requested operation
+  (`gh-provider/src/client.rs:3119` onward). Narrow `pr_node_id`/`issue_node_id`
+  guards would isolate that prerequisite and its errors.
 - **Low — keep URL parsing in one place.** `extract_repo_from_url` is duplicated
   at `gh-provider/src/graphql.rs:2660` and
   `gh-provider/src/mentions.rs:290`, with different invalid-input fallbacks.
@@ -136,12 +137,12 @@ movement in one crate obscure the review and regression signal in another.
   `config/src/lib.rs` is roughly 2.6k lines and mixes section types, defaults,
   validation, and file IO. Per-section modules plus `config/io.rs` would
   preserve the public configuration shape while isolating disk behavior.
-- **Low — complete three small test seams.** Add a wrapper test for
-  `core/src/time.rs:28` (`time_ago`), a deterministic
-  `SessionId::from_uuid` constructor beside `core/src/workspace.rs:63`, and
+- **Low — complete two small test seams.** Add a wrapper test for
+  `core/src/time.rs:28` (`time_ago`) and
   `Snippets::load_for_launch_dir_with(global_path, launch_dir)` beside
   `config/src/snippets.rs:879`, mirroring the existing path-injected snippet
-  write helper.
+  write helper. `SessionId` already exposes deterministic construction through
+  its public tuple field.
 
 ### Git operations
 

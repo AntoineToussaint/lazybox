@@ -4338,6 +4338,81 @@ mod tests {
         }
     }
 
+    fn task_without_node_id(kind: TaskKind) -> Task {
+        let (key, url) = match kind {
+            TaskKind::Pr => ("o/r#1", "https://github.com/o/r/pull/1"),
+            TaskKind::Issue => ("o/r#2", "https://github.com/o/r/issues/2"),
+        };
+        Task {
+            id: TaskId {
+                source: "github".to_string(),
+                key: key.to_string(),
+            },
+            title: "Task without a cached node id".to_string(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Author,
+            ci: CiStatus::None,
+            review: ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: url.to_string(),
+            repo: Some("o/r".to_string()),
+            branch: Some("topic".to_string()),
+            base_branch: Some("main".to_string()),
+            updated_at: chrono::Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: Mergeable::Unknown,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+            kind: Some(kind),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mutations_require_cached_node_ids_before_network_io() {
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let base_uri =
+            spawn_counting_response_server("200 OK", "application/json", "", "{}", hits.clone())
+                .await;
+        let client = make_client(&base_uri);
+
+        let pr = Workspace::from_task(task_without_node_id(TaskKind::Pr), chrono::Utc::now());
+        let error = TaskProvider::merge(&client, &pr, None)
+            .await
+            .expect_err("a PR mutation requires the node id cached by polling");
+        assert_eq!(
+            error,
+            ProviderError::permanent("github", "PR has no node_id (poll first)")
+        );
+
+        let issue = Workspace::from_task(task_without_node_id(TaskKind::Issue), chrono::Utc::now());
+        let error = TaskProvider::close_issue(&client, &issue)
+            .await
+            .expect_err("an issue mutation requires the node id cached by polling");
+        assert_eq!(
+            error,
+            ProviderError::permanent("github", "issue has no node_id (poll first)")
+        );
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "missing cached node ids must fail before provider IO"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn hot_tasks_are_fetched_in_one_ordered_batch() {
         const BODY: &str = r#"{

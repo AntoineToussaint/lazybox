@@ -10438,7 +10438,7 @@ mod tests {
     fn last_output_tail_keeps_only_content_after_carriage_return() {
         // Progress bars overwrite in place with a bare `\r`; only the
         // last-written state should survive.
-        let raw = b"Downloading 10%\rDownloading 100%\n";
+        let raw = b"\x1b[33mDownloading 10%\x1b[0m\r\x1b[32mDownloading 100%\x1b[0m\n";
         assert_eq!(last_output_tail(raw).as_deref(), Some("Downloading 100%"));
     }
 

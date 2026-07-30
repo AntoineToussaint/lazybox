@@ -2753,7 +2753,20 @@ async fn provision_worktree(
                                 blocker,
                             });
                         }
-                        _ => {}
+                        Some((_, BranchHolderReclaim::Preserved)) => {
+                            // The branch is held by a genuinely live checkout we
+                            // must not co-opt — another workspace's session, or
+                            // an agent that thrashed onto this branch inside its
+                            // own worktree (#721). Rather than dead-end the PR's
+                            // workspace in a permanent recovery modal, provision a
+                            // detached checkout of the head: it lands on the PR's
+                            // code without contending for the branch name, leaving
+                            // the holder's branch and files untouched.
+                            checkout = mgr
+                                .checkout_pr_head_detached(target, owner, name, branch, pr_number)
+                                .await;
+                        }
+                        None => {}
                     }
                     checkout.map_err(|e| ServerError::Worktree(format!("checkout_at: {e}")))?
                 }

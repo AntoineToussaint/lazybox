@@ -701,6 +701,40 @@ impl WorktreeManager {
         branch: &str,
         pr_number: Option<u64>,
     ) -> Result<Worktree, GitError> {
+        self.checkout_at_mode(wt_path, owner, repo, branch, pr_number, false)
+            .await
+    }
+
+    /// Provision the head as a *detached* checkout: a worktree that checks
+    /// out the resolved head commit without taking the branch. Used when
+    /// the head branch is already checked out in another live worktree —
+    /// an agent thrashing branches across a single worktree (#721) — so
+    /// the branch name is exclusively owned yet the PR still needs a
+    /// workspace. Detaching sidesteps the collision entirely: the holder
+    /// keeps sole ownership of the branch and its files untouched, while
+    /// the workspace still lands on the PR's head. `pr_number` enables the
+    /// `refs/pull/<N>/head` fallback exactly as [`Self::checkout_at`].
+    pub async fn checkout_pr_head_detached(
+        &self,
+        wt_path: &Path,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+        pr_number: Option<u64>,
+    ) -> Result<Worktree, GitError> {
+        self.checkout_at_mode(wt_path, owner, repo, branch, pr_number, true)
+            .await
+    }
+
+    async fn checkout_at_mode(
+        &self,
+        wt_path: &Path,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+        pr_number: Option<u64>,
+        detached: bool,
+    ) -> Result<Worktree, GitError> {
         let bare_path = self.bare_clone_path(owner, repo);
         let lock = repo_lock(&bare_path);
         let _guard = lock.lock().await;
@@ -854,15 +888,20 @@ impl WorktreeManager {
         // gets the auth env and the transfer-class timeout instead of
         // the 30s in-repo cap. Resilient to a nested agent worktree
         // already holding the branch (issue #439).
-        add_worktree_resilient(
-            self.git_runner(),
-            &bare_path,
-            wt_path,
-            branch,
-            &start_point,
-            &auth,
-        )
-        .await?;
+        if detached {
+            add_worktree_detached(self.git_runner(), &bare_path, wt_path, &start_point, &auth)
+                .await?;
+        } else {
+            add_worktree_resilient(
+                self.git_runner(),
+                &bare_path,
+                wt_path,
+                branch,
+                &start_point,
+                &auth,
+            )
+            .await?;
+        }
 
         // Record the upstream when we branched off the remote-tracking
         // ref. `git worktree add -B` doesn't set it, so without this
@@ -871,7 +910,7 @@ impl WorktreeManager {
         // (whose remote ref later vanished — PR merged + auto-delete)
         // from a never-pushed local one. Best-effort: a failure here
         // must not fail the checkout.
-        if start_point.starts_with("refs/remotes/origin/") {
+        if !detached && start_point.starts_with("refs/remotes/origin/") {
             let _ = run_git_in(
                 self.git_runner(),
                 &bare_path,
@@ -2566,6 +2605,35 @@ async fn add_worktree_resilient(
     })
 }
 
+/// Materialize a *detached* worktree at `wt_path` checked out on
+/// `start_point`'s commit. Unlike [`add_worktree_resilient`] there is no
+/// branch to contend for, so the branch-collision ladder is irrelevant —
+/// a detached HEAD never conflicts with another worktree holding the
+/// branch name (#721). Retains the same-path `prune`-and-retry rung for a
+/// stale registration whose directory was `rm -rf`'d by hand, and the
+/// same blobless-clone error rewording.
+async fn add_worktree_detached(
+    git: &dyn GitRunner,
+    bare_path: &Path,
+    wt_path: &Path,
+    start_point: &str,
+    auth: &[(String, String)],
+) -> Result<(), GitError> {
+    let wt = wt_path.to_string_lossy();
+    let wt: &str = &wt;
+    let add: [&str; 5] = ["worktree", "add", "--detach", wt, start_point];
+    match git.run_transfer(bare_path, &add, auth, None).await {
+        Ok(()) => Ok(()),
+        Err(e) if worktree_missing_but_registered(&e) => {
+            let _ = run_git_in(git, bare_path, &["worktree", "prune"]).await;
+            git.run_transfer(bare_path, &add, auth, None)
+                .await
+                .map_err(explain_promisor_failure)
+        }
+        Err(e) => Err(explain_promisor_failure(e)),
+    }
+}
+
 /// Parse the holding worktree's path out of a failed `worktree add`
 /// where the branch is checked out elsewhere, returning `None` for any
 /// other failure (the caller then treats the error as fatal). git
@@ -2702,18 +2770,26 @@ pub async fn worktree_dir_ready_on_branch(wt_path: &Path, expected_branch: &str)
             .is_ok_and(|branch| branch.as_deref() == Some(expected_branch))
 }
 
+/// Guard the idempotent re-entry: a worktree already at the session path
+/// must be on the expected branch before we reuse it, else a completed
+/// checkout on the *wrong named branch* would be silently repurposed
+/// (`BranchMismatch`). A *detached* HEAD is deliberately tolerated — it
+/// is a state lazybox itself creates when the branch is exclusively held
+/// by another live worktree (#721), and one an agent/user reaches by
+/// inspecting a commit. Erroring the re-entry (or forcing HEAD back onto
+/// the branch) would strand the session or yank work; sync already
+/// refuses to advance a detached HEAD (`worktree_unsafe_to_advance`), so
+/// reusing it in place is consistent.
 async fn ensure_worktree_branch(wt_path: &Path, expected: &str) -> Result<(), GitError> {
-    let actual = current_worktree_branch(wt_path)
-        .await?
-        .unwrap_or_else(|| "detached HEAD".to_string());
-    if actual == expected {
-        return Ok(());
+    match current_worktree_branch(wt_path).await? {
+        None => Ok(()),
+        Some(actual) if actual == expected => Ok(()),
+        Some(actual) => Err(GitError::WorktreeBranchMismatch {
+            path: wt_path.to_path_buf(),
+            expected: expected.to_string(),
+            actual,
+        }),
     }
-    Err(GitError::WorktreeBranchMismatch {
-        path: wt_path.to_path_buf(),
-        expected: expected.to_string(),
-        actual,
-    })
 }
 
 async fn current_worktree_branch(wt_path: &Path) -> Result<Option<String>, GitError> {
@@ -4928,6 +5004,69 @@ mod track_main_tests {
             std::fs::read_to_string(wt.join("f.txt")).expect("read"),
             "c1\n",
             "the working tree is untouched"
+        );
+    }
+
+    /// A branch already checked out in another live worktree can still be
+    /// provisioned as a *detached* checkout of its head (#721): rather
+    /// than dead-ending the PR's workspace, the new tree lands on the same
+    /// commit without contending for the branch name, so the holder keeps
+    /// sole ownership of the branch and its files untouched. A later
+    /// idempotent provision then reuses the detached tree in place instead
+    /// of erroring on the "wrong branch".
+    #[tokio::test]
+    async fn held_branch_provisions_as_detached_head() {
+        let (tmp, mgr, _src, holder) = tracked_worktree().await;
+        // `holder` is a live worktree holding branch `scratch`.
+        let holder_tip = head(&holder);
+        std::fs::write(holder.join("WIP.txt"), "holder work\n").expect("write WIP");
+
+        // A second workspace wants the same branch. A plain `checkout_at`
+        // would collide (the branch is held live); the detached provision
+        // sidesteps it.
+        let detached_wt = tmp.path().join("detached");
+        let wt = mgr
+            .checkout_pr_head_detached(&detached_wt, "acme", "widgets", "scratch", None)
+            .await
+            .expect("detached provision must succeed despite the live holder");
+        assert_eq!(wt.path, detached_wt);
+        assert_eq!(wt.branch, "scratch", "the logical branch is still recorded");
+        assert_eq!(
+            head(&detached_wt),
+            holder_tip,
+            "the detached tree lands on the branch head"
+        );
+        let symref = std::process::Command::new("git")
+            .current_dir(&detached_wt)
+            .args(["symbolic-ref", "-q", "HEAD"])
+            .output()
+            .expect("git runs");
+        assert!(
+            !symref.status.success(),
+            "the new tree is on a detached HEAD, not the branch"
+        );
+
+        // The holder still owns `scratch`, its work untouched.
+        assert_eq!(
+            git(&holder, &["symbolic-ref", "--short", "HEAD"]),
+            "scratch"
+        );
+        assert_eq!(
+            std::fs::read_to_string(holder.join("WIP.txt")).expect("read"),
+            "holder work\n"
+        );
+
+        // Idempotent re-entry: a plain `checkout_at` reuses the detached
+        // tree in place rather than erroring on a branch mismatch.
+        let again = mgr
+            .checkout_at(&detached_wt, "acme", "widgets", "scratch", None)
+            .await
+            .expect("re-entry reuses the detached worktree in place");
+        assert_eq!(again.path, detached_wt);
+        assert_eq!(
+            head(&detached_wt),
+            holder_tip,
+            "re-entry left HEAD in place"
         );
     }
 

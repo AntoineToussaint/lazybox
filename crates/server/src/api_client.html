@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>lazybox remote</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #07090f;
+        color: #eef1f6;
+        --panel: #11151f;
+        --border: #232a38;
+        --muted: #9aa4b2;
+        --faint: #727c8c;
+        --blue: #7cc4ff;
+        --green: #6ee7a8;
+        --red: #ff8a8a;
+      }
+
+      * { box-sizing: border-box; }
+      body {
+        min-height: 100vh;
+        margin: 0;
+        background:
+          radial-gradient(48rem 30rem at 90% -10%, rgba(124, 196, 255, 0.13), transparent 60%),
+          radial-gradient(38rem 28rem at -8% 12%, rgba(110, 231, 168, 0.08), transparent 55%),
+          #07090f;
+      }
+      button, input { font: inherit; }
+      main { width: min(68rem, 100%); margin: 0 auto; padding: 2rem 1.1rem 4rem; }
+      header { margin-bottom: 1.75rem; }
+      .eyebrow {
+        margin: 0 0 0.5rem;
+        color: var(--green);
+        font: 600 0.75rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+      h1 { margin: 0; font-size: clamp(2rem, 8vw, 3.5rem); line-height: 1; letter-spacing: -0.045em; }
+      header > p:last-child { max-width: 38rem; margin: 0.85rem 0 0; color: var(--muted); }
+      .panel {
+        border: 1px solid var(--border);
+        border-radius: 1rem;
+        background: rgba(17, 21, 31, 0.9);
+        box-shadow: 0 26px 70px -34px #000;
+      }
+      form { padding: 1.1rem; }
+      label { display: block; margin-bottom: 0.45rem; color: var(--muted); font-size: 0.85rem; font-weight: 650; }
+      .connect-row { display: flex; gap: 0.65rem; }
+      input {
+        min-width: 0;
+        flex: 1;
+        border: 1px solid var(--border);
+        border-radius: 0.65rem;
+        padding: 0.75rem 0.85rem;
+        outline: none;
+        background: #090c13;
+        color: #eef1f6;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(124, 196, 255, 0.12); }
+      button {
+        border: 0;
+        border-radius: 0.65rem;
+        padding: 0.75rem 1rem;
+        background: linear-gradient(115deg, var(--blue), var(--green));
+        color: #04121f;
+        font-weight: 750;
+        cursor: pointer;
+      }
+      button:disabled { cursor: wait; opacity: 0.65; }
+      .privacy { margin: 0.55rem 0 0; color: var(--faint); font-size: 0.76rem; }
+      .status {
+        display: flex;
+        align-items: center;
+        gap: 0.55rem;
+        min-height: 2.8rem;
+        margin: 1rem 0;
+        padding: 0.65rem 0.85rem;
+        border: 1px solid var(--border);
+        border-radius: 0.75rem;
+        color: var(--muted);
+        background: rgba(7, 9, 15, 0.72);
+      }
+      .status::before {
+        width: 0.55rem;
+        height: 0.55rem;
+        border-radius: 50%;
+        background: var(--faint);
+        content: "";
+      }
+      .status[data-tone="ok"]::before { background: var(--green); box-shadow: 0 0 0.75rem rgba(110, 231, 168, 0.7); }
+      .status[data-tone="error"] { color: var(--red); }
+      .status[data-tone="error"]::before { background: var(--red); }
+      .grid { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(17rem, 0.75fr); gap: 1rem; }
+      .section-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 1rem;
+        padding: 1rem 1rem 0.8rem;
+        border-bottom: 1px solid var(--border);
+      }
+      h2 { margin: 0; font-size: 1rem; letter-spacing: -0.015em; }
+      .count { color: var(--faint); font: 0.75rem ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .empty { margin: 0; padding: 1.25rem 1rem; color: var(--faint); }
+      .workspace-list, .event-list { margin: 0; padding: 0; list-style: none; }
+      .workspace {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 0.2rem 1rem;
+        padding: 0.9rem 1rem;
+        border-bottom: 1px solid rgba(35, 42, 56, 0.72);
+      }
+      .workspace:last-child, .event-list li:last-child { border-bottom: 0; }
+      .workspace strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .workspace .branch {
+        grid-column: 1 / -1;
+        color: var(--faint);
+        font: 0.73rem ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .workspace .source { color: var(--blue); font-size: 0.76rem; }
+      .warning { padding: 0.75rem 1rem; border-bottom: 1px solid var(--border); color: #f2c879; font-size: 0.8rem; }
+      .event-list { max-height: 31rem; overflow: auto; }
+      .event-list li {
+        display: flex;
+        justify-content: space-between;
+        gap: 0.75rem;
+        padding: 0.72rem 1rem;
+        border-bottom: 1px solid rgba(35, 42, 56, 0.72);
+        color: var(--muted);
+        font: 0.75rem ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .event-list time { flex: 0 0 auto; color: var(--faint); }
+      footer { margin-top: 1rem; color: var(--faint); font-size: 0.75rem; text-align: center; }
+      @media (max-width: 720px) {
+        main { padding-top: 1.25rem; }
+        .grid { grid-template-columns: 1fr; }
+        .connect-row { align-items: stretch; flex-direction: column; }
+        button { min-height: 3rem; }
+        .event-list { max-height: 18rem; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="eyebrow">experimental thin client</p>
+        <h1>lazybox remote</h1>
+        <p>Check workspaces and live daemon events from a phone or browser without moving the shell into the client.</p>
+      </header>
+
+      <form id="connect" class="panel">
+        <label for="token">Gateway bearer token (if configured)</label>
+        <div class="connect-row">
+          <input id="token" name="token" type="password" autocomplete="off" autocapitalize="none" spellcheck="false">
+          <button id="connect-button" type="submit">Connect</button>
+        </div>
+        <p class="privacy">Leave blank when auth is disabled or to reuse the current connection token. Tokens are kept only in page memory.</p>
+      </form>
+
+      <div id="status" class="status" role="status" aria-live="polite">Enter the configured token, or leave blank when auth is disabled.</div>
+
+      <div class="grid">
+        <section class="panel" aria-labelledby="workspaces-title">
+          <div class="section-head">
+            <h2 id="workspaces-title">Workspaces</h2>
+            <span id="workspace-count" class="count">not connected</span>
+          </div>
+          <div id="warnings"></div>
+          <p id="workspace-empty" class="empty">Connect to load the current inbox.</p>
+          <ul id="workspaces" class="workspace-list"></ul>
+        </section>
+
+        <section class="panel" aria-labelledby="events-title">
+          <div class="section-head">
+            <h2 id="events-title">Live events</h2>
+            <span id="event-count" class="count">0 received</span>
+          </div>
+          <p id="event-empty" class="empty">The live event stream will appear here.</p>
+          <ol id="events" class="event-list"></ol>
+        </section>
+      </div>
+
+      <footer>Read-only PoC · use behind TLS or on a trusted private network</footer>
+    </main>
+
+    <script>
+      const form = document.querySelector("#connect");
+      const tokenInput = document.querySelector("#token");
+      const button = document.querySelector("#connect-button");
+      const status = document.querySelector("#status");
+      const workspaceList = document.querySelector("#workspaces");
+      const workspaceEmpty = document.querySelector("#workspace-empty");
+      const workspaceCount = document.querySelector("#workspace-count");
+      const warnings = document.querySelector("#warnings");
+      const eventList = document.querySelector("#events");
+      const eventEmpty = document.querySelector("#event-empty");
+      const eventCount = document.querySelector("#event-count");
+
+      let currentToken = "";
+      let streamController;
+      let receivedEvents = 0;
+
+      function setStatus(message, tone = "") {
+        status.textContent = message;
+        status.dataset.tone = tone;
+      }
+
+      function authorizationHeaders(token) {
+        return token ? { Authorization: `Bearer ${token}` } : {};
+      }
+
+      async function requestJson(path, token) {
+        const response = await fetch(path, {
+          headers: authorizationHeaders(token),
+          cache: "no-store",
+        });
+        if (!response.ok) {
+          const body = await response.text();
+          throw new Error(response.status === 401 ? "Token rejected by the gateway." : `${path} returned ${response.status}: ${body}`);
+        }
+        return response.json();
+      }
+
+      function renderWorkspaces(payload) {
+        workspaceList.replaceChildren();
+        warnings.replaceChildren();
+        const items = Array.isArray(payload.workspaces) ? payload.workspaces : [];
+        const messages = Array.isArray(payload.warnings) ? payload.warnings : [];
+
+        for (const message of messages) {
+          const row = document.createElement("div");
+          row.className = "warning";
+          row.textContent = message;
+          warnings.append(row);
+        }
+
+        for (const workspace of items) {
+          const upstream = workspace.pr ?? workspace.gh_issues?.[0] ?? workspace.linear_issues?.[0];
+          const row = document.createElement("li");
+          row.className = "workspace";
+
+          const name = document.createElement("strong");
+          name.textContent = workspace.name || workspace.key || "Untitled workspace";
+          const source = document.createElement("span");
+          source.className = "source";
+          source.textContent = upstream?.repo ?? workspace.project_key ?? "local";
+          const branch = document.createElement("span");
+          branch.className = "branch";
+          branch.textContent = workspace.branch ? `⎇ ${workspace.branch}` : "no branch";
+
+          row.append(name, source, branch);
+          workspaceList.append(row);
+        }
+
+        workspaceEmpty.hidden = items.length > 0;
+        workspaceEmpty.textContent = "No workspaces in the current inbox.";
+        workspaceCount.textContent = `${items.length} workspace${items.length === 1 ? "" : "s"}`;
+      }
+
+      function eventName(frame) {
+        if (frame?.type !== "Event") return frame?.type ?? "Unknown";
+        const payload = frame.payload;
+        if (!payload || typeof payload !== "object") return "Event";
+        return Object.keys(payload)[0] ?? "Event";
+      }
+
+      function recordEvent(frame) {
+        receivedEvents += 1;
+        eventEmpty.hidden = true;
+        eventCount.textContent = `${receivedEvents} received`;
+
+        const row = document.createElement("li");
+        const name = document.createElement("span");
+        name.textContent = eventName(frame);
+        const time = document.createElement("time");
+        time.dateTime = new Date().toISOString();
+        time.textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        row.append(name, time);
+        eventList.prepend(row);
+        while (eventList.children.length > 50) eventList.lastElementChild.remove();
+      }
+
+      async function streamEvents(token, controller) {
+        const response = await fetch("/v1/events", {
+          headers: authorizationHeaders(token),
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        if (!response.ok || !response.body) throw new Error(`Event stream returned ${response.status}.`);
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) {
+            if (controller.signal.aborted) return;
+            throw new Error("Live event stream disconnected. Reconnect to resume.");
+          }
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() ?? "";
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            recordEvent(JSON.parse(line));
+          }
+        }
+      }
+
+      async function connect(token) {
+        streamController?.abort();
+        const controller = new AbortController();
+        streamController = controller;
+        receivedEvents = 0;
+        eventList.replaceChildren();
+        eventEmpty.hidden = false;
+        eventCount.textContent = "0 received";
+        setStatus("Connecting…");
+        button.disabled = true;
+
+        try {
+          const [health, workspaces] = await Promise.all([
+            requestJson("/v1/health", token),
+            requestJson("/v1/workspaces", token),
+          ]);
+          renderWorkspaces(workspaces);
+          setStatus(`Connected to ${health.service}.`, "ok");
+          button.textContent = "Reconnect";
+          streamEvents(token, controller).catch((error) => {
+            if (!controller.signal.aborted && error.name !== "AbortError") {
+              setStatus(error.message, "error");
+            }
+          });
+        } catch (error) {
+          setStatus(error instanceof Error ? error.message : String(error), "error");
+        } finally {
+          button.disabled = false;
+        }
+      }
+
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (tokenInput.value) currentToken = tokenInput.value;
+        tokenInput.value = "";
+        connect(currentToken);
+      });
+    </script>
+  </body>
+</html>

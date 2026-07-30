@@ -1428,8 +1428,8 @@ impl GhSource {
             )
             .await
             .map_err(lazybox_core::ProviderError::from)?;
-        let pr_complete = outcome.coverage.pr_complete();
-        let sweep_complete = outcome.coverage.sweep_complete();
+        let pr_complete = outcome.pr_coverage == lazybox_core::FetchCoverage::Complete;
+        let sweep_complete = outcome.coverage == lazybox_core::FetchCoverage::Complete;
         let raw = outcome.tasks;
         let partial_warning = outcome.partial_failure;
         let mentions = outcome.mentions;
@@ -2385,9 +2385,9 @@ impl TaskSource for LinearSource {
             *self.last_coverage_partial.lock() = outcome.is_partial();
             self.emit_progress(format!(
                 "Got {} issues, applying filters…",
-                outcome.tasks.len()
+                outcome.items.len()
             ));
-            let kept = filter_linear_tasks(outcome.tasks, &self.filter);
+            let kept = filter_linear_tasks(outcome.items, &self.filter);
             self.emit_progress(format!("{} issues kept after filter", kept.len()));
             Ok(kept)
         })

@@ -212,18 +212,14 @@ fn body_prefix_bytes(body: &str, max_bytes: usize) -> &str {
     &body[..end]
 }
 
-fn next_page_cursor(
-    page_info: Option<graphql::GqlPageInfo>,
-    operation: &str,
-) -> Result<Option<String>, GhError> {
-    let page_info = page_info
-        .ok_or_else(|| GhError::Graphql(format!("{operation}: response omitted pageInfo")))?;
-    if !page_info.has_next_page {
-        return Ok(None);
+fn incomplete_pagination_error(operation: &str, count: usize, pages: usize) -> GhError {
+    if pages >= DEFAULT_MAX_PAGES {
+        GhError::Truncated { count, pages }
+    } else {
+        GhError::Graphql(format!(
+            "{operation}: pagination stopped after {pages} page(s) without complete coverage"
+        ))
     }
-    page_info.end_cursor.map(Some).ok_or_else(|| {
-        GhError::Graphql(format!("{operation}: hasNextPage=true but endCursor=null"))
-    })
 }
 
 #[derive(Debug)]
@@ -231,32 +227,8 @@ pub struct SelectedFetchOutcome {
     pub tasks: Vec<Task>,
     pub partial_failure: Option<String>,
     pub mentions: Vec<crate::LazyboxMention>,
-    pub coverage: SelectedFetchCoverage,
-}
-
-/// Authoritative coverage completed by a selected GitHub fetch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SelectedFetchCoverage {
-    /// Every requested side completed.
-    Complete,
-    /// At least one requested side was incomplete.
-    Partial {
-        /// Whether the PR side completed despite the partial result.
-        pr_complete: bool,
-    },
-}
-
-impl SelectedFetchCoverage {
-    pub fn pr_complete(self) -> bool {
-        match self {
-            Self::Complete => true,
-            Self::Partial { pr_complete } => pr_complete,
-        }
-    }
-
-    pub fn sweep_complete(self) -> bool {
-        self == Self::Complete
-    }
+    pub coverage: FetchCoverage,
+    pub pr_coverage: FetchCoverage,
 }
 
 #[derive(Debug)]
@@ -302,9 +274,14 @@ fn combine_selected_fetches(
                 partial_failure: prs.partial_failure,
                 mentions,
                 coverage: if pr_complete {
-                    SelectedFetchCoverage::Complete
+                    FetchCoverage::Complete
                 } else {
-                    SelectedFetchCoverage::Partial { pr_complete: false }
+                    FetchCoverage::Partial
+                },
+                pr_coverage: if pr_complete {
+                    FetchCoverage::Complete
+                } else {
+                    FetchCoverage::Partial
                 },
             })
         }
@@ -323,7 +300,12 @@ fn combine_selected_fetches(
                 tasks: prs.tasks,
                 partial_failure,
                 mentions: Vec::new(),
-                coverage: SelectedFetchCoverage::Partial { pr_complete },
+                coverage: FetchCoverage::Partial,
+                pr_coverage: if pr_complete {
+                    FetchCoverage::Complete
+                } else {
+                    FetchCoverage::Partial
+                },
             })
         }
         (Err(error), Ok((issues, mentions))) => {
@@ -336,7 +318,8 @@ fn combine_selected_fetches(
                 tasks: issues,
                 partial_failure: Some(message),
                 mentions,
-                coverage: SelectedFetchCoverage::Partial { pr_complete: false },
+                coverage: FetchCoverage::Partial,
+                pr_coverage: FetchCoverage::Partial,
             })
         }
         (Err(pr_error), Err(issue_error)) => Err(GhError::Graphql(format!(
@@ -2153,91 +2136,102 @@ impl GhClient {
     /// watched-repo fan-out.
     async fn fetch_pr_search_paginated(&self, search_query: &str) -> Result<Vec<Task>, GhError> {
         let started = std::time::Instant::now();
-        let mut metrics = BranchMetrics::new("involves-main");
-        let mut tasks: Vec<Task> = Vec::new();
-        let mut cursor: Option<String> = None;
-        let mut page = 0usize;
-        loop {
-            self.acquire_or_block("PR search")?;
-            let body = graphql::query_body_after(search_query, cursor.as_deref());
-            tracing::debug!(
-                "GraphQL page {page} body: {}",
-                serde_json::to_string(&body).unwrap_or_default()
-            );
-            let (raw, page_bytes): (serde_json::Value, usize) = self
-                .post_graphql_with_retry_measured(&body)
-                .await
-                .map_err(|e| {
-                    tracing::error!("GraphQL HTTP error (page {page}): {e}\n{e:?}");
-                    tracing::error!(
-                        "GraphQL request body was: {}",
-                        serde_json::to_string_pretty(&body).unwrap_or_default()
+        let metrics = parking_lot::Mutex::new(BranchMetrics::new("involves-main"));
+        let outcome = paginate(
+            |cursor, page| {
+                let metrics = &metrics;
+                async move {
+                    self.acquire_or_block("PR search").map_err(|error| {
+                        tracing::error!("PR search budget error (page {page}): {error}");
+                        error
+                    })?;
+                    let body = graphql::query_body_after(search_query, cursor.as_deref());
+                    tracing::debug!(
+                        "GraphQL page {page} body: {}",
+                        serde_json::to_string(&body).unwrap_or_default()
                     );
-                    e
-                })?;
-            metrics.requests += 1;
-            metrics.resp_bytes += page_bytes;
-            let response: graphql::GqlResponse = match serde_json::from_value(raw.clone()) {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::error!(
-                        "GraphQL response did not match schema (page {page}): {e}\n\
-                         Full response body:\n{}",
-                        serde_json::to_string_pretty(&raw).unwrap_or_default()
-                    );
-                    return Err(GhError::Graphql(format!(
-                        "response schema mismatch (page {page}): {e}"
-                    )));
+                    let (raw, page_bytes): (serde_json::Value, usize) = self
+                        .post_graphql_with_retry_measured(&body)
+                        .await
+                        .map_err(|e| {
+                            tracing::error!("GraphQL HTTP error (page {page}): {e}\n{e:?}");
+                            tracing::error!(
+                                "GraphQL request body was: {}",
+                                serde_json::to_string_pretty(&body).unwrap_or_default()
+                            );
+                            e
+                        })?;
+                    {
+                        let mut metrics = metrics.lock();
+                        metrics.requests += 1;
+                        metrics.resp_bytes += page_bytes;
+                    }
+                    let response: graphql::GqlResponse = serde_json::from_value(raw.clone())
+                        .map_err(|e| {
+                            tracing::error!(
+                                "GraphQL response did not match schema (page {page}): {e}\n\
+                             Full response body:\n{}",
+                                serde_json::to_string_pretty(&raw).unwrap_or_default()
+                            );
+                            GhError::Graphql(format!("response schema mismatch (page {page}): {e}"))
+                        })?;
+                    if let Some(errors) = &response.errors {
+                        let joined = errors
+                            .iter()
+                            .map(|e| e.full())
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        tracing::error!("GraphQL errors (search page {page}): {joined}");
+                        return Err(GhError::Graphql(format!(
+                            "search `{search_query}` (page {page}): {joined}"
+                        )));
+                    }
+                    let data = response
+                        .data
+                        .ok_or_else(|| GhError::Graphql("No data in response".into()))?;
+                    if let Some(rl) = &data.rate_limit {
+                        tracing::info!(
+                            "GitHub rate limit: {}/{} remaining, resets {}",
+                            rl.remaining,
+                            rl.limit,
+                            rl.reset_at
+                        );
+                        metrics.lock().graphql_cost += rl.cost.unwrap_or(0);
+                        self.observe_rate_limit(rl);
+                    }
+                    Ok(FetchPage {
+                        items: data
+                            .search
+                            .nodes
+                            .iter()
+                            .map(|pr| graphql::pr_to_task(pr, &self.user))
+                            .collect(),
+                        page_info: data.search.page_info.map(|page_info| FetchPageInfo {
+                            has_next_page: page_info.has_next_page,
+                            end_cursor: page_info.end_cursor,
+                        }),
+                    })
                 }
-            };
-            if let Some(errors) = &response.errors {
-                let joined: String = errors
-                    .iter()
-                    .map(|e| e.full())
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                tracing::error!("GraphQL errors (search page {page}): {joined}");
-                return Err(GhError::Graphql(format!(
-                    "search `{search_query}` (page {page}): {joined}"
-                )));
-            }
-            let data = response
-                .data
-                .ok_or_else(|| GhError::Graphql("No data in response".into()))?;
-            if let Some(rl) = &data.rate_limit {
-                tracing::info!(
-                    "GitHub rate limit: {}/{} remaining, resets {}",
-                    rl.remaining,
-                    rl.limit,
-                    rl.reset_at
-                );
-                metrics.graphql_cost += rl.cost.unwrap_or(0);
-                self.observe_rate_limit(rl);
-            }
-            tasks.extend(
-                data.search
-                    .nodes
-                    .iter()
-                    .map(|pr| graphql::pr_to_task(pr, &self.user)),
-            );
-            let Some(next_cursor) = next_page_cursor(data.search.page_info, "PR search")? else {
-                break;
-            };
-            cursor = Some(next_cursor);
-            page += 1;
-            if page >= 20 {
-                tracing::error!(
-                    "GraphQL paged: bailing after {page} pages (safety cap; tail truncated)"
-                );
-                return Err(GhError::Truncated {
-                    count: tasks.len(),
-                    pages: page,
-                });
-            }
-        }
+            },
+            DEFAULT_MAX_PAGES,
+        )
+        .await?;
+        let tasks = outcome.items;
+        let mut metrics = metrics.into_inner();
         metrics.prs = tasks.len();
         metrics.elapsed_ms = started.elapsed().as_millis();
         metrics.emit();
+        if outcome.coverage.is_partial() {
+            tracing::error!(
+                "GraphQL pagination stopped after {} pages; tail is non-authoritative",
+                metrics.requests
+            );
+            return Err(incomplete_pagination_error(
+                "PR search",
+                tasks.len(),
+                metrics.requests,
+            ));
+        }
         Ok(tasks)
     }
 
@@ -2256,64 +2250,87 @@ impl GhClient {
         query: String,
     ) -> Result<Vec<Task>, GhError> {
         let started = std::time::Instant::now();
-        let mut metrics = BranchMetrics::new(op);
-        let mut tasks: Vec<Task> = Vec::new();
-        let mut cursor: Option<String> = None;
-        let mut page = 0usize;
-        loop {
-            if let Err(reason) = self.try_acquire() {
-                return Err(GhError::RateLimited {
-                    retry_after_secs: 1,
-                    reason: format!("{op} blocked: {reason}"),
-                });
-            }
-            let body = graphql::query_body_after(&query, cursor.as_deref());
-            let (resp, bytes): (graphql::GqlResponse, usize) =
-                self.post_graphql_with_retry_measured(&body).await?;
-            metrics.requests += 1;
-            metrics.resp_bytes += bytes;
-            if let Some(errors) = resp.errors {
-                let joined: String = errors
-                    .iter()
-                    .map(|e| e.full())
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                return Err(GhError::Graphql(format!("{op}: {joined}")));
-            }
-            let Some(data) = resp.data else {
-                break;
-            };
-            if let Some(rl) = &data.rate_limit {
-                metrics.graphql_cost += rl.cost.unwrap_or(0);
-                self.observe_rate_limit(rl);
-            }
-            tasks.extend(
-                data.search
-                    .nodes
-                    .iter()
-                    .map(|pr| graphql::pr_to_task(pr, &self.user)),
-            );
-            let Some(next_cursor) = next_page_cursor(data.search.page_info, op)? else {
-                break;
-            };
-            cursor = Some(next_cursor);
-            page += 1;
-            if page >= 20 {
-                // Same safety-cap visibility as the main paginated
-                // search: error (don't silently truncate) so the
-                // caller treats this branch's coverage as failed.
-                tracing::error!(
-                    "{op} paged: bailing after {page} pages (safety cap; tail truncated)"
-                );
-                return Err(GhError::Truncated {
-                    count: tasks.len(),
-                    pages: page,
-                });
-            }
-        }
+        let metrics = parking_lot::Mutex::new(BranchMetrics::new(op));
+        let outcome = paginate(
+            |cursor, page| {
+                let metrics = &metrics;
+                let query = &query;
+                async move {
+                    if let Err(reason) = self.try_acquire() {
+                        tracing::error!("{op} budget error (page {page}): {reason}");
+                        return Err(GhError::RateLimited {
+                            retry_after_secs: 1,
+                            reason: format!("{op} blocked: {reason}"),
+                        });
+                    }
+                    let body = graphql::query_body_after(query, cursor.as_deref());
+                    let (resp, bytes): (graphql::GqlResponse, usize) = self
+                        .post_graphql_with_retry_measured(&body)
+                        .await
+                        .map_err(|error| {
+                            tracing::error!("{op} HTTP error (page {page}): {error}");
+                            error
+                        })?;
+                    {
+                        let mut metrics = metrics.lock();
+                        metrics.requests += 1;
+                        metrics.resp_bytes += bytes;
+                    }
+                    if let Some(errors) = resp.errors {
+                        let joined = errors
+                            .iter()
+                            .map(|e| e.full())
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        tracing::error!("{op} GraphQL errors (page {page}): {joined}");
+                        return Err(GhError::Graphql(format!("{op}: {joined}")));
+                    }
+                    let Some(data) = resp.data else {
+                        return Ok(FetchPage {
+                            items: Vec::new(),
+                            page_info: Some(FetchPageInfo {
+                                has_next_page: false,
+                                end_cursor: None,
+                            }),
+                        });
+                    };
+                    if let Some(rl) = &data.rate_limit {
+                        metrics.lock().graphql_cost += rl.cost.unwrap_or(0);
+                        self.observe_rate_limit(rl);
+                    }
+                    Ok(FetchPage {
+                        items: data
+                            .search
+                            .nodes
+                            .iter()
+                            .map(|pr| graphql::pr_to_task(pr, &self.user))
+                            .collect(),
+                        page_info: data.search.page_info.map(|page_info| FetchPageInfo {
+                            has_next_page: page_info.has_next_page,
+                            end_cursor: page_info.end_cursor,
+                        }),
+                    })
+                }
+            },
+            DEFAULT_MAX_PAGES,
+        )
+        .await?;
+        let tasks = outcome.items;
+        let mut metrics = metrics.into_inner();
         metrics.prs = tasks.len();
         metrics.elapsed_ms = started.elapsed().as_millis();
         metrics.emit();
+        if outcome.coverage.is_partial() {
+            tracing::error!(
+                "{op} pagination stopped after {} pages; tail is non-authoritative",
+                metrics.requests
+            );
+            return Err(incomplete_pagination_error(
+                op,
+                tasks.len(),
+                metrics.requests,
+            ));
+        }
         Ok(tasks)
     }
 
@@ -2354,66 +2371,88 @@ impl GhClient {
         let search_query = graphql::build_issues_query(&quals);
         tracing::info!("GraphQL issues search: {search_query}");
 
-        let mut tasks: Vec<Task> = Vec::new();
-        let mut mentions: Vec<crate::LazyboxMention> = Vec::new();
-        let mut cursor: Option<String> = None;
-        let mut page = 0usize;
-        loop {
-            // Same rate-budget guard as PR fetch — see fetch_all_prs.
-            self.acquire_or_block("issues search")?;
-            let body = graphql::issues_query_body(&search_query, cursor.as_deref());
-            let response: graphql::GqlIssueResponse =
-                self.post_graphql_with_retry(&body).await.map_err(|e| {
-                    tracing::error!("Issues HTTP error (page {page}): {e}\n{e:?}");
-                    e
-                })?;
+        let pages_fetched = parking_lot::Mutex::new(0usize);
+        let outcome = paginate(
+            |cursor, page| {
+                let pages_fetched = &pages_fetched;
+                let search_query = &search_query;
+                async move {
+                    self.acquire_or_block("issues search").map_err(|error| {
+                        tracing::error!("Issues budget error (page {page}): {error}");
+                        error
+                    })?;
+                    let body = graphql::issues_query_body(search_query, cursor.as_deref());
+                    let response: graphql::GqlIssueResponse =
+                        self.post_graphql_with_retry(&body).await.map_err(|e| {
+                            tracing::error!("Issues HTTP error (page {page}): {e}\n{e:?}");
+                            e
+                        })?;
+                    *pages_fetched.lock() += 1;
 
-            if let Some(errors) = &response.errors {
-                let joined = errors
-                    .iter()
-                    .map(|e| e.full())
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                tracing::error!("Issues GraphQL errors (page {page}): {joined}");
-                return Err(GhError::Graphql(joined));
-            }
+                    if let Some(errors) = &response.errors {
+                        let joined = errors
+                            .iter()
+                            .map(|e| e.full())
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        tracing::error!("Issues GraphQL errors (page {page}): {joined}");
+                        return Err(GhError::Graphql(joined));
+                    }
 
-            let data = response
-                .data
-                .ok_or_else(|| GhError::Graphql("No data in response".into()))?;
+                    let data = response
+                        .data
+                        .ok_or_else(|| GhError::Graphql("No data in response".into()))?;
 
-            if let Some(rl) = &data.rate_limit {
-                tracing::debug!(
-                    "GitHub rate limit after issues: {}/{} remaining",
-                    rl.remaining,
-                    rl.limit
-                );
-                self.observe_rate_limit(rl);
-            }
+                    if let Some(rl) = &data.rate_limit {
+                        tracing::debug!(
+                            "GitHub rate limit after issues: {}/{} remaining",
+                            rl.remaining,
+                            rl.limit
+                        );
+                        self.observe_rate_limit(rl);
+                    }
 
-            for issue in &data.search.nodes {
-                tasks.push(graphql::issue_to_task(issue, &self.user));
-                if !allowed_logins.is_empty() {
-                    mentions.extend(crate::mentions::scan_issue(issue, allowed_logins));
+                    Ok(FetchPage {
+                        items: data
+                            .search
+                            .nodes
+                            .iter()
+                            .map(|issue| {
+                                let mentions = if allowed_logins.is_empty() {
+                                    Vec::new()
+                                } else {
+                                    crate::mentions::scan_issue(issue, allowed_logins)
+                                };
+                                (graphql::issue_to_task(issue, &self.user), mentions)
+                            })
+                            .collect(),
+                        page_info: data.search.page_info.map(|page_info| FetchPageInfo {
+                            has_next_page: page_info.has_next_page,
+                            end_cursor: page_info.end_cursor,
+                        }),
+                    })
                 }
-            }
-
-            let Some(next_cursor) = next_page_cursor(data.search.page_info, "issues search")?
-            else {
-                break;
-            };
-            cursor = Some(next_cursor);
-            page += 1;
-            if page >= 20 {
-                // Same safety-cap visibility as fetch_all_prs.
-                tracing::error!(
-                    "Issues paged: bailing after {page} pages (safety cap; tail truncated)"
-                );
-                return Err(GhError::Truncated {
-                    count: tasks.len(),
-                    pages: page,
-                });
-            }
+            },
+            DEFAULT_MAX_PAGES,
+        )
+        .await?;
+        let coverage = outcome.coverage;
+        let mut tasks = Vec::with_capacity(outcome.items.len());
+        let mut mentions = Vec::new();
+        for (task, mut issue_mentions) in outcome.items {
+            tasks.push(task);
+            mentions.append(&mut issue_mentions);
+        }
+        let pages_fetched = pages_fetched.into_inner();
+        if coverage.is_partial() {
+            tracing::error!(
+                "Issues pagination stopped after {pages_fetched} pages; tail is non-authoritative"
+            );
+            return Err(incomplete_pagination_error(
+                "issues search",
+                tasks.len(),
+                pages_fetched,
+            ));
         }
 
         let elapsed_ms = started.elapsed().as_millis();
@@ -2580,7 +2619,8 @@ impl GhClient {
                 tasks: Vec::new(),
                 partial_failure: None,
                 mentions: Vec::new(),
-                coverage: SelectedFetchCoverage::Complete,
+                coverage: FetchCoverage::Complete,
+                pr_coverage: FetchCoverage::Complete,
             });
         }
         let do_pr_side = want_prs && (run_global || !repos.is_empty());
@@ -3628,8 +3668,8 @@ mod tests {
                 .as_deref()
                 .is_some_and(|message| message.contains("issues unavailable"))
         );
-        assert!(outcome.coverage.pr_complete());
-        assert!(!outcome.coverage.sweep_complete());
+        assert_eq!(outcome.pr_coverage, FetchCoverage::Complete);
+        assert_eq!(outcome.coverage, FetchCoverage::Partial);
 
         let outcome = combine_selected_fetches(
             true,
@@ -3645,8 +3685,8 @@ mod tests {
                 .as_deref()
                 .is_some_and(|message| message.contains("PRs unavailable"))
         );
-        assert!(!outcome.coverage.pr_complete());
-        assert!(!outcome.coverage.sweep_complete());
+        assert_eq!(outcome.pr_coverage, FetchCoverage::Partial);
+        assert_eq!(outcome.coverage, FetchCoverage::Partial);
     }
 
     #[test]
@@ -3668,42 +3708,6 @@ mod tests {
                 Ok((Vec::new(), Vec::new())),
             )
             .is_err()
-        );
-    }
-
-    #[test]
-    fn next_page_requires_a_cursor() {
-        let error = next_page_cursor(
-            Some(graphql::GqlPageInfo {
-                has_next_page: true,
-                end_cursor: None,
-            }),
-            "test search",
-        )
-        .expect_err("a next page without its cursor is incomplete coverage");
-        assert!(matches!(error, GhError::Graphql(message) if message.contains("endCursor=null")));
-        assert_eq!(
-            next_page_cursor(
-                Some(graphql::GqlPageInfo {
-                    has_next_page: true,
-                    end_cursor: Some("CURSOR".into()),
-                }),
-                "test search",
-            )
-            .unwrap()
-            .as_deref(),
-            Some("CURSOR")
-        );
-        assert!(
-            next_page_cursor(Some(graphql::GqlPageInfo::default()), "test search")
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            next_page_cursor(None, "test search")
-                .expect_err("missing pageInfo is incomplete coverage")
-                .to_string()
-                .contains("omitted pageInfo")
         );
     }
 
@@ -4508,7 +4512,9 @@ mod tests {
             .await
             .expect_err("a response without pageInfo is not complete coverage");
 
-        assert!(matches!(error, GhError::Graphql(message) if message.contains("omitted pageInfo")));
+        assert!(
+            matches!(error, GhError::Graphql(message) if message.contains("without complete coverage"))
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4532,8 +4538,8 @@ mod tests {
             outcome.tasks.iter().any(|task| task.id.key == "o/r#2"),
             "tasks from the successful repo are preserved"
         );
-        assert!(!outcome.coverage.pr_complete());
-        assert!(!outcome.coverage.sweep_complete());
+        assert_eq!(outcome.pr_coverage, FetchCoverage::Partial);
+        assert_eq!(outcome.coverage, FetchCoverage::Partial);
         assert!(
             outcome
                 .partial_failure

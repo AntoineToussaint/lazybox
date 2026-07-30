@@ -27,7 +27,7 @@ body:
     attributes:
       label: lazybox version
       description: Paste the output of `lazybox --version`.
-      placeholder: lazybox 0.1.8
+      placeholder: lazybox 0.1.9
     validations:
       required: true
   - type: dropdown

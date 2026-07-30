@@ -6,6 +6,7 @@
 
 use lazybox_ipc::{Command, Event, TerminalKind, channel};
 use lazybox_server::backend::{MockBackend, SessionBackend};
+use lazybox_server::spawn_handler::SpawnOptions;
 use lazybox_server::{Server, ServerConfig};
 use lazybox_store::{MemoryStore, Store};
 use std::sync::Arc;
@@ -751,13 +752,11 @@ async fn autonomous_spawn_wires_no_permission_consistently() {
             "test:ws-auto".into(),
             None,
             TerminalKind::Agent("claude".into()),
-            Some(cwd),
-            None,
-            true,  // autonomous
-            false, // on_main
-            None,  // model_alias
-            false,
-            lazybox_ipc::SpawnOrigin::Interactive,
+            SpawnOptions {
+                cwd: Some(cwd),
+                autonomous: true,
+                ..Default::default()
+            },
         )
         .await;
 
@@ -2092,13 +2091,10 @@ async fn concurrent_spawns_collapse_onto_one_backend_session() {
                 "test:ws-race".into(),
                 None,
                 TerminalKind::Agent("claude".into()),
-                Some(cwd_a),
-                None,
-                false,
-                false, // on_main
-                None,  // model_alias
-                false,
-                lazybox_ipc::SpawnOrigin::Interactive,
+                SpawnOptions {
+                    cwd: Some(cwd_a),
+                    ..Default::default()
+                },
             )
             .await;
         });
@@ -2113,13 +2109,12 @@ async fn concurrent_spawns_collapse_onto_one_backend_session() {
                 "test:ws-race".into(),
                 None,
                 TerminalKind::Agent("claude".into()),
-                Some(cwd),
-                Some(WORK.into()),
-                true,
-                false, // on_main
-                None,  // model_alias
-                false,
-                lazybox_ipc::SpawnOrigin::Interactive,
+                SpawnOptions {
+                    cwd: Some(cwd),
+                    initial_prompt: Some(WORK.into()),
+                    autonomous: true,
+                    ..Default::default()
+                },
             )
             .await;
         });
@@ -2191,13 +2186,7 @@ async fn spawn_aborts_when_workspace_was_deleted_mid_flight() {
             "test:ws-deleted".into(),
             None,
             TerminalKind::Agent("claude".into()),
-            None, // no cwd override → goes through workspace resolution
-            None,
-            false,
-            false, // on_main
-            None,  // model_alias
-            false,
-            lazybox_ipc::SpawnOrigin::Interactive,
+            SpawnOptions::default(),
         )
         .await;
 
@@ -2235,13 +2224,7 @@ async fn spawn_aborts_when_workspace_does_not_exist() {
             "test:missing-workspace".into(),
             None,
             TerminalKind::Agent("claude".into()),
-            None,
-            None,
-            false,
-            false,
-            None,
-            false,
-            lazybox_ipc::SpawnOrigin::Interactive,
+            SpawnOptions::default(),
         )
         .await;
 
@@ -3328,13 +3311,11 @@ async fn many_concurrent_prompt_spawns_all_deliver() {
                     format!("test:ws-stress-{i}").into(),
                     None,
                     TerminalKind::Agent("claude".into()),
-                    Some(cwd),
-                    Some(prompt),
-                    false,
-                    false, // on_main
-                    None,  // model_alias
-                    false,
-                    lazybox_ipc::SpawnOrigin::Interactive,
+                    SpawnOptions {
+                        cwd: Some(cwd),
+                        initial_prompt: Some(prompt),
+                        ..Default::default()
+                    },
                 )
                 .await;
             }));
@@ -3517,13 +3498,7 @@ async fn restore_skips_live_but_unregistered_backend_sessions() {
             "test:restore-live".into(),
             Some(session_id),
             TerminalKind::Agent("claude".into()),
-            None,
-            None,
-            false, // autonomous
-            false, // on_main
-            None,  // model_alias
-            false, // resume
-            lazybox_ipc::SpawnOrigin::Interactive,
+            SpawnOptions::default(),
         )
         .await;
         assert_eq!(

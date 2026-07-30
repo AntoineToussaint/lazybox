@@ -19,6 +19,7 @@ tracing             = { workspace = true }
 [dev-dependencies]
 tokio      = { workspace = true, features = ["full", "test-util"] }
 proptest   = "1"
+tempfile   = "3"
 
 [lints]
 workspace = true

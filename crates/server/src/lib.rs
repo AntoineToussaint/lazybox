@@ -45,6 +45,7 @@ mod resource_limits;
 pub mod slack;
 pub mod socket_service;
 pub mod spawn_handler;
+mod spawn_plan;
 mod terminal_commands;
 mod terminal_io;
 pub mod workspace;
@@ -820,6 +821,7 @@ impl Server {
                         lazybox_ipc::Command::InjectPrompt { .. } => "InjectPrompt",
                         lazybox_ipc::Command::MarkRead { .. } => "MarkRead",
                         lazybox_ipc::Command::FocusWorkspace { .. } => "FocusWorkspace",
+                        lazybox_ipc::Command::ActivateWorkspace { .. } => "ActivateWorkspace",
                         lazybox_ipc::Command::MarkActivityRead { .. } => "MarkActivityRead",
                         lazybox_ipc::Command::UnmarkActivityRead { .. } => "UnmarkActivityRead",
                         lazybox_ipc::Command::FetchPrDetails { .. } => "FetchPrDetails",
@@ -1324,15 +1326,14 @@ pub async fn dispatch_command(
                 session_key,
                 session_id,
                 kind,
-                cwd,
-                initial_prompt,
-                autonomous,
-                on_main,
-                model_alias,
-                false,
-                // A client `Spawn` is always a local-user action (`w` /
-                // `a` / `x …`), so provisioning mounts the progress modal.
-                lazybox_ipc::SpawnOrigin::Interactive,
+                spawn_handler::SpawnOptions {
+                    cwd,
+                    initial_prompt,
+                    autonomous,
+                    on_main,
+                    model_alias,
+                    ..Default::default()
+                },
             )
             .await;
         }
@@ -1483,6 +1484,13 @@ pub async fn dispatch_command(
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
             polling::set_focused_workspace(config, &key).await;
         }
+        lazybox_ipc::Command::ActivateWorkspace { session_key } => {
+            let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
+            polling::set_focused_workspace(config, &key).await;
+            let _ = config
+                .bus
+                .send(lazybox_ipc::Event::WorkspaceFocusRequested { session_key });
+        }
         lazybox_ipc::Command::MarkActivityRead {
             session_key,
             index,
@@ -1513,14 +1521,7 @@ pub async fn dispatch_command(
                     session_key,
                     None,
                     lazybox_ipc::TerminalKind::Agent(agent_id),
-                    None,
-                    None,
-                    false,
-                    false,
-                    None,
-                    false,
-                    // `x n` / `Shift-W` — a local-user spawn.
-                    lazybox_ipc::SpawnOrigin::Interactive,
+                    spawn_handler::SpawnOptions::default(),
                 )
                 .await;
             }
@@ -1698,14 +1699,7 @@ pub async fn dispatch_command(
                     session_key,
                     None,
                     lazybox_ipc::TerminalKind::Agent(agent_id),
-                    None,
-                    None,
-                    false,
-                    false,
-                    None,
-                    false,
-                    // `x a` adopt / import checkout — a local-user spawn.
-                    lazybox_ipc::SpawnOrigin::Interactive,
+                    spawn_handler::SpawnOptions::default(),
                 )
                 .await;
             }

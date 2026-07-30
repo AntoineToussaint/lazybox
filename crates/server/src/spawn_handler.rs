@@ -24,10 +24,13 @@
 //!    `Event::TerminalExited`, drop the map entry.
 //! 5. Broadcast `Event::TerminalSpawned` to every subscriber.
 
+mod spawn_executor;
+
+pub use crate::spawn_plan::SpawnOptions;
+use crate::spawn_plan::{SpawnPlanInput, build_spawn_plan};
 use crate::{ServerConfig, SpawnCoordinator, TerminalRegistry, client_kv, terminal_io};
 use chrono::Utc;
 use futures::{StreamExt, stream};
-use lazybox_agents::SpawnCtx;
 use lazybox_core::{
     SessionId, SessionKey, SessionKind, Task, Workspace, WorkspaceKey, WorkspaceSession as Session,
 };
@@ -36,6 +39,7 @@ use lazybox_ipc::{
     WorktreeStepStatus,
 };
 use lazybox_store::{StoreMutation, WorkspaceRecord};
+use spawn_executor::{ExecutedSpawn, SpawnExecutionOutcome, execute_spawn_plan};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
@@ -151,73 +155,6 @@ fn alloc_terminal_id(store: &dyn lazybox_store::Store) -> TerminalId {
         tracing::warn!("terminal-id high-water mark: store write failed: {e}");
     }
     TerminalId(id)
-}
-
-/// Build the argv for `kind`. None means we don't know how to spawn
-/// it (unknown agent id, etc.) — handled by emitting a ProviderError.
-///
-/// `hook_settings_path` is the per-session settings file the daemon
-/// generated for an agent that reports state through a settings-file hook
-/// (Claude). It's threaded into [`SpawnCtx`] so the agent's argv builder
-/// can append its settings flag; `None` for agents without one.
-///
-/// `hook_command` is the correlated `hook-ingest` command for an agent
-/// that wires hooks through spawn-argv config overrides instead (Codex).
-/// The agent's [`lazybox_agents::agent::Agent::hook_command_args`] turns it into the argv
-/// fragments — appended here — that route its lifecycle events through the
-/// same `IngestHook` path. `None` when no hook command could be built
-/// (binary missing); agents that use neither transport keep PTY detection.
-fn argv_for(
-    config: &ServerConfig,
-    kind: &TerminalKind,
-    cwd: &Option<PathBuf>,
-    resolve_shell: impl FnOnce() -> String,
-    skip_permissions: bool,
-    hook_settings_path: Option<PathBuf>,
-    hook_command: Option<&str>,
-    model_args: &[String],
-    resume: bool,
-) -> Option<Vec<String>> {
-    match kind {
-        TerminalKind::Agent(agent_id) => {
-            let agent = config.agents.get(agent_id)?;
-            let ctx = SpawnCtx {
-                session_key: String::new(),
-                worktree: cwd
-                    .clone()
-                    .unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
-                repo: None,
-                pr_number: None,
-                env: Default::default(),
-                skip_permissions,
-                hook_settings_path,
-            };
-            // Restoring a persisted session consults the agent's declared
-            // resume incantation (Claude `--continue`, Codex `resume
-            // --last`) so the prior conversation reattaches; a fresh spawn
-            // starts a new one. Agents without a resume override fall back
-            // to `spawn`, so parity is opt-in per agent, never guessed here.
-            let mut argv = if resume {
-                agent.resume(&ctx)
-            } else {
-                agent.spawn(&ctx)
-            };
-            // Argv-based hooks (Codex's `-c hooks.*`) go next, before the
-            // model flag, so the agent's own launch config is complete
-            // before any tier override lands. Appended on both the spawn
-            // and resume paths so a restored Codex session stays hook-driven.
-            if let Some(cmd) = hook_command {
-                argv.extend(agent.hook_command_args(cmd));
-            }
-            // The tier's model flag (`--model claude-opus-4-8`) is
-            // appended after the agent's own args so it can override a
-            // default the agent baked into its spawn argv.
-            argv.extend(model_args.iter().cloned());
-            Some(argv)
-        }
-        TerminalKind::Shell => Some(vec![resolve_shell()]),
-        TerminalKind::LogTail { path } => Some(vec!["tail".into(), "-F".into(), path.clone()]),
-    }
 }
 
 /// The tier alias the workspace task's declared priority
@@ -705,14 +642,17 @@ pub async fn handle_spawn(
     session_key: SessionKey,
     session_id: Option<SessionId>,
     kind: TerminalKind,
-    cwd: Option<String>,
-    initial_prompt: Option<String>,
-    autonomous: bool,
-    on_main: bool,
-    model_alias: Option<String>,
-    resume: bool,
-    origin: lazybox_ipc::SpawnOrigin,
+    options: SpawnOptions,
 ) {
+    let SpawnOptions {
+        cwd,
+        initial_prompt,
+        autonomous,
+        on_main,
+        model_alias,
+        resume,
+        origin,
+    } = options;
     // Autonomous sessions (e.g. `@lazybox`-triggered work) launch with
     // tool-use permission prompts disabled so the agent runs unattended
     // — there's no human nearby to approve. Gated by config so a
@@ -728,36 +668,11 @@ pub async fn handle_spawn(
     // `/tmp/lazybox.log` instead of guessed at (#142).
     let t0 = std::time::Instant::now();
     let cfg = lazybox_config::Config::load().unwrap_or_default();
-    let skip_permissions = skip_permissions_for(autonomous, &cfg);
-    // Resolve the picked model tier against the target agent's menu:
-    // `model_args` are appended to the spawn argv, `model_label` rides
-    // the `TerminalSpawned` event to drive the tab's tier badge. Both
-    // empty/None for a bare (default-model) spawn, a shell, or an
-    // unknown tier alias — the agent then uses its own default model.
-    let (model_args, model_label): (Vec<String>, Option<String>) = match &kind {
-        TerminalKind::Agent(agent_id) => {
-            let models = cfg.agent_models(agent_id);
-            // An explicit tier chord (`w S` / `a L`) wins. Absent one,
-            // fall back to the alias the workspace task's declared
-            // priority (a `high`/`medium`/`low` label or an
-            // `@high`/`@medium`/`@low` body marker) maps to — so every
-            // autonomous "pilot" spawn AND `w w` on a prioritized
-            // issue pick the right-sized model automatically (#340).
-            let priority_alias = match model_alias {
-                Some(_) => None,
-                None => priority_alias_for(config, &session_key, &models),
-            };
-            let alias = model_alias.as_deref().or(priority_alias.as_deref());
-            // Label mirrors `resolve_args`: the picked tier, falling
-            // back to the agent's configured default tier, so a bare
-            // spawn that lands on a default tier still wears its badge.
-            let label = alias
-                .or(models.default.as_deref())
-                .and_then(|a| models.tier(a))
-                .map(|t| t.label.clone());
-            (models.resolve_args(alias), label)
+    let priority_model_alias = match &kind {
+        TerminalKind::Agent(agent_id) if model_alias.is_none() => {
+            priority_alias_for(config, &session_key, &cfg.agent_models(agent_id))
         }
-        _ => (Vec::new(), None),
+        _ => None,
     };
     tracing::info!(
         %session_key,
@@ -766,7 +681,6 @@ pub async fn handle_spawn(
         cwd = ?cwd,
         has_initial_prompt = initial_prompt.is_some(),
         autonomous,
-        skip_permissions,
         "handle_spawn: entry"
     );
     // A linked (no-worktree) workspace runs every session in the user's
@@ -849,11 +763,11 @@ pub async fn handle_spawn(
     // no repo scope to give a main checkout — in which case the spawn
     // falls back to an isolated tree and must NOT wear the "main" badge.
     let (cwd_path, owning_session, landed_on_main): (
-        Option<PathBuf>,
+        PathBuf,
         Option<lazybox_core::SessionId>,
         bool,
     ) = if let Some(c) = cwd.as_deref() {
-        (Some(PathBuf::from(c)), None, false)
+        (PathBuf::from(c), None, false)
     } else {
         // Race provisioning against a `CancelSpawn` on this claim: Esc
         // on the setup checklist must abort a wedged cold clone —
@@ -883,7 +797,7 @@ pub async fn handle_spawn(
             return;
         };
         match resolved {
-            Ok((path, sid, landed)) => (Some(path), Some(sid), landed),
+            Ok((path, sid, landed)) => (path, Some(sid), landed),
             Err(e) => {
                 // Label a worktree-provisioning failure distinctly so the
                 // client routes it to the recovery modal without having to
@@ -978,252 +892,68 @@ pub async fn handle_spawn(
     let argv_hook_command = exe
         .as_deref()
         .map(|exe| hook_command_keyfile(exe, &hook_backend_key_path(terminal_id)));
-    let uses_argv_hooks = matches!(&kind, TerminalKind::Agent(id)
-        if argv_hook_command
-            .as_deref()
-            .zip(config.agents.get(id))
-            .is_some_and(|(cmd, agent)| !agent.hook_command_args(cmd).is_empty()));
-    let argv = match argv_for(
-        config,
-        &kind,
-        &cwd_path,
-        || cfg.shell.resolved_command(),
-        skip_permissions,
-        hook_settings.clone(),
-        argv_hook_command.as_deref(),
-        &model_args,
-        resume,
+    let shell_command = if matches!(kind, TerminalKind::Shell) {
+        cfg.shell.resolved_command()
+    } else {
+        String::new()
+    };
+    let agent_worktree = if matches!(kind, TerminalKind::Agent(_)) {
+        std::fs::canonicalize(&cwd_path).unwrap_or_else(|_| cwd_path.clone())
+    } else {
+        cwd_path.clone()
+    };
+    let plan_error_source = format!("spawn:{kind:?}");
+    let repo_env = collect_repo_env(config, &session_key);
+    let plan = match build_spawn_plan(
+        SpawnPlanInput {
+            session_key,
+            kind,
+            cwd: cwd_path,
+            agent_worktree,
+            owning_session,
+            initial_prompt,
+            terminal_id,
+            hook_settings,
+            hook_command: argv_hook_command,
+            repo_env,
+            priority_model_alias,
+            autonomous,
+            landed_on_main,
+            model_alias,
+            resume,
+            shell_command,
+        },
+        &cfg,
+        &config.agents,
     ) {
-        Some(a) => a,
-        None => {
+        Ok(plan) => plan,
+        Err(_) => {
             let _ = config.bus.send(Event::provider_error_permanent(
-                &format!("spawn:{kind:?}"),
+                &plan_error_source,
                 "no agent registered for this id",
             ));
             return;
         }
     };
-
-    // Human-readable hint the backend bakes into its session name so
-    // `tmux ls` shows something like `lazybox-github-acme-widget-126-claude-NNNN`
-    // instead of `lazybox-4`. Backends append their own uniqueness
-    // suffix (PID + counter) so the hint doesn't need to be unique.
-    let kind_label = match &kind {
-        TerminalKind::Agent(id) => id.clone(),
-        TerminalKind::Shell => "shell".into(),
-        TerminalKind::LogTail { path } => {
-            let base = path.rsplit('/').next().unwrap_or(path);
-            format!("log-{base}")
-        }
-    };
-    let hint = format!("{}-{kind_label}", session_key.as_str());
-    // Pre-trust the worktree for an unattended launch. Claude shows an
-    // interactive workspace-trust dialog for any directory it hasn't
-    // seen (skipped only in non-interactive `-p` mode, which we don't
-    // use), so an autonomous spawn in a freshly provisioned worktree
-    // would hang on it with no human to accept. Gated on
-    // `skip_permissions`: interactive spawns keep the user-facing prompt.
-    if skip_permissions
-        && let TerminalKind::Agent(agent_id) = &kind
-        && let Some(agent) = config.agents.get(agent_id)
-        && let Some(worktree) = cwd_path.as_deref()
-    {
-        agent.prepare_unattended(worktree);
-    }
-
-    // Per-repo env injection: look up the workspace's primary task
-    // repo, read `repos.<owner/name>.env` from YAML, fan it into
-    // the spawn. Missing config or workspace = empty env, no error.
-    // Then layer the global LLM-gateway base URL for the agent's
-    // provider, but only for keys the per-repo env didn't already set —
-    // an explicit per-repo `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`
-    // overrides (or opts out of) the global gateway. Finally pin a
-    // per-worktree `CARGO_TARGET_DIR` so concurrent cargo builds across
-    // sessions don't block on a shared target lock.
-    let agent_for_env = match &kind {
-        TerminalKind::Agent(id) => config.agents.get(id),
-        _ => None,
-    };
-    let mut env = collect_repo_env(config, &session_key);
-    for (k, v) in gateway_env_for_agent(&cfg, agent_for_env.as_deref()) {
-        if !env.iter().any(|(ek, _)| ek == &k) {
-            env.push((k, v));
-        }
-    }
-    let env = with_agent_spawn_defaults(env, agent_for_env.as_deref());
-    let env = with_agent_pty_spawn_env(env, agent_for_env.as_deref());
-    let env = with_worktree_cargo_target(env, cwd_path.as_deref());
-    tracing::info!(
-        program = argv.first().map(String::as_str).unwrap_or("<empty>"),
-        arg_count = argv.len().saturating_sub(1),
-        cwd_path = ?cwd_path,
-        %hint,
-        env_count = env.len(),
-        "handle_spawn: calling backend.spawn"
-    );
-    // Persist this terminal's scrollback keyed by its session id — stable
-    // across restarts, unlike the backend key a respawn reallocates — so
-    // restart replay reconstructs real history (#468). Only sessions the
-    // restart path actually respawns are worth persisting: a `cwd`
-    // override carries no session, and a main-checkout terminal is never
-    // restored, so both skip it (and its GC-able orphan file).
-    let persist_key = match owning_session {
-        Some(sid) if !landed_on_main => Some(sid.to_string()),
-        _ => None,
-    };
-    let backend_key = match config
-        .backend
-        .spawn_persistent(
-            &argv,
-            cwd_path.as_deref(),
-            &env,
-            &hint,
-            persist_key.as_deref(),
-        )
-        .await
-    {
-        Ok(k) => k,
-        Err(e) => {
-            tracing::error!("handle_spawn: backend.spawn failed: {e}");
+    let executed = match execute_spawn_plan(config, plan, workspace_registration_guard, t0).await {
+        Ok(SpawnExecutionOutcome::Spawned(executed)) => executed,
+        Ok(SpawnExecutionOutcome::Cancelled) => return,
+        Err(error) => {
+            tracing::error!("handle_spawn: spawn execution failed: {error}");
             let _ = config
                 .bus
-                .send(Event::provider_error_permanent("spawn", e.to_string()));
+                .send(Event::provider_error_permanent("spawn", error.to_string()));
             return;
         }
     };
-    tracing::info!(
-        %backend_key,
-        elapsed_ms = t0.elapsed().as_millis(),
-        "handle_spawn: backend.spawn ok",
-    );
-    // A user deletion waits for in-flight spawns, but that wait is bounded:
-    // provisioning can wedge in git/backend IO. Re-check the shared
-    // tombstone at the last point before this process becomes a live terminal
-    // so a spawn finishing after the bound cannot recreate the workspace.
-    if cancel_spawn_for_deleted_workspace(config, &session_key, &backend_key).await {
-        if let Some(path) = hook_settings {
-            let _ = std::fs::remove_file(path);
-        }
-        return;
-    }
-    // Phase 2 of 2: now the backend key exists, atomically rewrite the
-    // settings file with the real correlated hook command.
-    if hook_settings.is_some()
-        && let Some(exe) = hook_exe()
-    {
-        let _ = write_hook_settings(
-            config,
-            &kind,
-            terminal_id,
-            &hook_command(&exe, &backend_key),
-        );
-    }
-    // Argv-hooked agents (Codex) can't rewrite their launched argv, so
-    // instead the backend key is dropped into the file their baked hook
-    // command reads. This is the moment it becomes known — write it now,
-    // long before the agent's first lifecycle event.
-    if uses_argv_hooks {
-        write_hook_backend_key(terminal_id, &backend_key);
-    }
-    let state_durability = if agent_for_env.is_some() {
-        match initialize_agent_state_generation(config, &backend_key, terminal_id.0).await {
-            Ok(durability) => Some(durability),
-            Err(error) => {
-                tracing::error!(
-                    %backend_key,
-                    ?terminal_id,
-                    %error,
-                    "agent spawn rolled back because lifecycle generation was not durable"
-                );
-                if let Err(kill_error) = config.backend.kill(&backend_key).await {
-                    tracing::error!(
-                        %backend_key,
-                        %kill_error,
-                        "failed to roll back agent backend after lifecycle persistence failure"
-                    );
-                }
-                if let Some(path) = hook_settings {
-                    let _ = std::fs::remove_file(path);
-                }
-                let _ = std::fs::remove_file(hook_backend_key_path(terminal_id));
-                let _ = config.bus.send(Event::provider_error_permanent(
-                    "spawn",
-                    format!("agent lifecycle persistence failed: {error}"),
-                ));
-                return;
-            }
-        }
-    } else {
-        None
-    };
-    let agent_state_generation = state_durability
-        .as_ref()
-        .map(|durability| durability.generation);
-
-    // `terminal_id` was allocated above (before argv) so the hook settings
-    // file could embed it. Populate auxiliary maps before publishing the
-    // primary terminal registration.
-    if let Some(sid) = owning_session {
-        config
-            .terminal
-            .terminal_sessions
-            .lock()
-            .await
-            .insert(terminal_id, sid);
-    }
-    if skip_permissions {
-        config
-            .terminal
-            .no_permission_terminals
-            .lock()
-            .await
-            .insert(terminal_id);
-    }
-    if landed_on_main {
-        config
-            .terminal
-            .on_main_terminals
-            .lock()
-            .await
-            .insert(terminal_id);
-    }
-    if let Some(label) = &model_label {
-        config
-            .terminal
-            .terminal_models
-            .lock()
-            .await
-            .insert(terminal_id, label.clone());
-    }
-    // Publish the primary id→backend and id→workspace mappings atomically
-    // under the canonical terminal-map lock order. A workspace rebadge also
-    // co-holds this pair while committing its durable metadata; without this
-    // paired insertion a spawn could slip a half-registered terminal through
-    // the rebadge and leave it attached to a workspace whose sessions moved.
-    // Keep both guards through initial persistence too: otherwise a rebadge
-    // could commit the new workspace between registration and this spawn's
-    // delayed metadata write, then the old spawn payload would resurrect the
-    // source ownership in the restart record.
-    {
-        let mut registration = config.terminal.lock_registration().await;
-        registration.register(
-            terminal_id,
-            backend_key.clone(),
-            session_key.clone(),
-            kind.clone(),
-            agent_state_generation,
-        );
-        persist_terminal_meta(config, &backend_key, &session_key, &kind).await;
-        if let Some(agent) = agent_for_env.as_deref() {
-            persist_pty_launch_generation(config, &backend_key, agent.pty_launch_generation())
-                .await;
-        }
-    }
-    wake_poll_for_terminal_kind(config, &kind);
-    drop(workspace_registration_guard);
-    // The persisted backend_key → session ownership pairing lets the next
-    // lazybox start reattach surviving tmux sessions to their workspace.
-    persist_no_permission(config, &backend_key, skip_permissions).await;
+    let ExecutedSpawn {
+        backend_key,
+        session_key,
+        kind,
+        initial_prompt,
+        terminal_id,
+        state_durability,
+    } = executed;
 
     // Pump backend output → bus. Also runs agent-state detection
     // on each chunk so the user sees a "needs input" badge when
@@ -1270,30 +1000,6 @@ pub async fn handle_spawn(
     let t0_for_pump = t0;
     let watchdog_after = working_watchdog_after(&cfg);
     let quiet_after = pty_quiet_classify_after(&cfg);
-    // Broadcast BEFORE spawning the pump task. Otherwise a
-    // fast-exiting terminal (e.g. a command that immediately
-    // errors) can fire `TerminalExited` from the pump before this
-    // `TerminalSpawned` even goes out — subscribers see "remove a
-    // terminal you never told me about" and book-keeping diverges.
-    let subscriber_count = config.bus.receiver_count();
-    tracing::info!(
-        ?terminal_id,
-        %session_key,
-        ?kind,
-        subscriber_count,
-        "handle_spawn: broadcasting TerminalSpawned"
-    );
-    let send_result = config.bus.send(Event::TerminalSpawned {
-        terminal_id,
-        session_key,
-        kind,
-        no_permission: skip_permissions,
-        on_main: landed_on_main,
-        model_label,
-    });
-    if let Err(e) = send_result {
-        tracing::error!("handle_spawn: bus.send(TerminalSpawned) failed: {e}");
-    }
     tokio::spawn(async move {
         let sub = match backend.subscribe(&key_for_pump).await {
             Ok(s) => Some(s),
@@ -2943,47 +2649,6 @@ fn collect_repo_env(config: &ServerConfig, session_key: &SessionKey) -> Vec<(Str
     env_for_repo(&cfg, &repo)
 }
 
-/// Pin Cargo's build directory under the session's own worktree so
-/// concurrent `cargo` invocations across sessions don't serialize on a
-/// shared `target/` lock. Git worktrees each get their own `target/` by
-/// default, but a globally-exported `CARGO_TARGET_DIR` (a common
-/// build-cache optimization) collapses every worktree onto one
-/// directory — then a build in one session makes any `cargo` in another
-/// wait on the build lock. Setting it explicitly per worktree overrides
-/// that inherited value. The registry cache stays shared, so only build
-/// artifacts (not downloads) are duplicated. Skipped when the repo
-/// config already set `CARGO_TARGET_DIR` — an explicit choice wins.
-fn with_worktree_cargo_target(
-    mut env: Vec<(String, String)>,
-    cwd: Option<&Path>,
-) -> Vec<(String, String)> {
-    let Some(cwd) = cwd else {
-        return env;
-    };
-    if env.iter().any(|(k, _)| k == "CARGO_TARGET_DIR") {
-        return env;
-    }
-    let target = cwd.join("target");
-    env.push((
-        "CARGO_TARGET_DIR".to_string(),
-        target.to_string_lossy().into_owned(),
-    ));
-    env
-}
-
-/// Whether a spawn should launch in no-permission / bypass mode.
-/// Autonomous (lazybox-spawned) sessions follow `autonomous_skip_permissions`
-/// (default on); interactive sessions the user opens follow the
-/// separate `skip_permissions` toggle (default off). Pure so tests
-/// don't need a real YAML on disk.
-pub(crate) fn skip_permissions_for(autonomous: bool, cfg: &lazybox_config::Config) -> bool {
-    if autonomous {
-        cfg.agent.autonomous_skip_permissions
-    } else {
-        cfg.agent.skip_permissions
-    }
-}
-
 /// Whether a client `Spawn` should run as an autonomous, unattended
 /// launch. A spawn that carries a pre-built initial prompt is a
 /// lazybox-driven "work on this" (the `w` key / address-comments
@@ -3121,69 +2786,6 @@ pub(crate) fn watchdog_notes_progress(last_fp: &mut Option<u64>, bytes: &[u8]) -
         }
         _ => false,
     }
-}
-
-/// Base-URL env var pointing the agent at the global LLM gateway, if one
-/// is configured. The gateway URL (`agent.llm_gateway_url`) is global;
-/// the agent's upstream provider only picks *which* base-URL var carries
-/// it (Claude → `ANTHROPIC_BASE_URL`, Codex / Cursor → `OPENAI_BASE_URL`),
-/// so one gateway fronts whichever upstream the agent speaks. Empty for
-/// non-agent spawns (shells, log tails), agents with no inferable provider
-/// (`GenericCli`), or when no gateway URL is set. Pure so tests don't need
-/// a real YAML on disk.
-pub(crate) fn gateway_env_for_agent(
-    cfg: &lazybox_config::Config,
-    agent: Option<&dyn lazybox_agents::Agent>,
-) -> Vec<(String, String)> {
-    let Some(provider) = agent.and_then(|a| a.llm_provider()) else {
-        return Vec::new();
-    };
-    // The "blank == unset" rule lives in `gateway_url`.
-    cfg.agent
-        .gateway_url()
-        .map(|u| vec![(provider.base_url_env().to_string(), u.to_string())])
-        .unwrap_or_default()
-}
-
-/// Layer the spawning agent's own env defaults ([`lazybox_agents::agent::Agent::spawn_env`],
-/// e.g. Codex's Homebrew auto-update suppression) onto `env`, shared by
-/// the PTY and structured (`exec`) spawn paths. A key a higher-priority
-/// source (per-repo `env`) already set wins, so these stay defaults.
-/// Non-agent spawns (shells, log tails) pass `None` and get nothing.
-pub(crate) fn with_agent_spawn_defaults(
-    mut env: Vec<(String, String)>,
-    agent: Option<&dyn lazybox_agents::Agent>,
-) -> Vec<(String, String)> {
-    let Some(agent) = agent else {
-        return env;
-    };
-    for (k, v) in agent.spawn_env() {
-        if !env.iter().any(|(ek, _)| ek == &k) {
-            env.push((k, v));
-        }
-    }
-    env
-}
-
-/// Apply environment required by an agent's interactive terminal UI. Unlike
-/// [`lazybox_agents::Agent::spawn_env`], these values are correctness
-/// constraints and replace a colliding repository value. Structured runs
-/// intentionally do not call this helper.
-pub(crate) fn with_agent_pty_spawn_env(
-    mut env: Vec<(String, String)>,
-    agent: Option<&dyn lazybox_agents::Agent>,
-) -> Vec<(String, String)> {
-    let Some(agent) = agent else {
-        return env;
-    };
-    for (key, value) in agent.pty_spawn_env() {
-        if let Some((_, existing)) = env.iter_mut().find(|(existing, _)| existing == &key) {
-            *existing = value;
-        } else {
-            env.push((key, value));
-        }
-    }
-    env
 }
 
 /// Pure-data lookup so tests don't need a real YAML on disk.
@@ -5524,19 +5126,13 @@ async fn handle_inject_prompt_inner(
                     fb.session_key,
                     fb.session_id,
                     fb.kind,
-                    fb.cwd,
-                    prompt,
-                    autonomous,
-                    // Inject-fallback re-spawns an isolated worktree
-                    // session; the main-checkout flow never routes
-                    // through prompt injection.
-                    false,
-                    fb.model_alias,
-                    // A fresh re-spawn, not a restore.
-                    false,
-                    // The user pressed `w`/`a` — the injected prompt is
-                    // theirs, so this stays an interactive spawn.
-                    lazybox_ipc::SpawnOrigin::Interactive,
+                    SpawnOptions {
+                        cwd: fb.cwd,
+                        initial_prompt: prompt,
+                        autonomous,
+                        model_alias: fb.model_alias,
+                        ..Default::default()
+                    },
                 )
                 .await;
                 return;
@@ -7218,26 +6814,13 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
                 session_key.clone(),
                 Some(session.id),
                 kind,
-                None,
-                None,
-                // Restored from a persisted session record, which
-                // doesn't carry the autonomous flag — re-spawn with
-                // prompts on rather than silently bypassing.
-                false,
-                // Restored sessions live in their persisted worktree;
-                // main-checkout terminals aren't persisted as sessions.
-                false,
-                // A restored session keeps whatever model it was first
-                // launched with; we don't re-pick a tier here.
-                None,
-                // Restore: relaunch through the agent's resume path so the
-                // prior conversation reattaches (Claude `--continue`, Codex
-                // `resume --last`) instead of coming back blank.
-                true,
-                // Startup session recovery, not a live user chord — a
-                // re-provision of a missing worktree reports quietly
-                // rather than popping a modal.
-                lazybox_ipc::SpawnOrigin::Autonomous(lazybox_ipc::AutonomousTrigger::Restore),
+                SpawnOptions {
+                    resume: true,
+                    origin: lazybox_ipc::SpawnOrigin::Autonomous(
+                        lazybox_ipc::AutonomousTrigger::Restore,
+                    ),
+                    ..Default::default()
+                },
             )
             .await;
         }
@@ -7306,6 +6889,35 @@ fn kind_id(kind: &TerminalKind) -> String {
 mod tests {
     use super::*;
     use crate::backend::SessionBackend;
+    use crate::spawn_plan::{
+        argv_for as build_argv, gateway_env_for_agent, skip_permissions_for,
+        with_agent_pty_spawn_env, with_agent_spawn_defaults, with_worktree_cargo_target,
+    };
+
+    fn argv_for(
+        config: &ServerConfig,
+        kind: &TerminalKind,
+        agent_worktree: &Path,
+        resolve_shell: impl FnOnce() -> String,
+        skip_permissions: bool,
+        hook_settings_path: Option<PathBuf>,
+        hook_command: Option<&str>,
+        model_args: &[String],
+        resume: bool,
+    ) -> Option<Vec<String>> {
+        build_argv(
+            &config.agents,
+            kind,
+            agent_worktree,
+            resolve_shell,
+            skip_permissions,
+            hook_settings_path,
+            hook_command,
+            model_args,
+            resume,
+        )
+        .ok()
+    }
 
     #[test]
     fn recovered_terminal_retry_is_exponential_spread_and_bounded() {
@@ -7425,6 +7037,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_spawn_plan_publishes_a_durable_registered_terminal() {
+        let (config, backend) = ServerConfig::in_memory_with_mock();
+        let mut events = config.bus.subscribe();
+        let session_key = SessionKey::from("test:spawn-plan-execution");
+        let terminal_id = TerminalId(4242);
+        let cwd = std::env::current_dir().expect("current directory");
+        let plan = build_spawn_plan(
+            SpawnPlanInput {
+                session_key: session_key.clone(),
+                kind: TerminalKind::Agent("claude".into()),
+                cwd: cwd.clone(),
+                agent_worktree: cwd.clone(),
+                owning_session: None,
+                initial_prompt: None,
+                terminal_id,
+                hook_settings: None,
+                hook_command: None,
+                repo_env: vec![("PROJECT_ENV".into(), "test".into())],
+                priority_model_alias: None,
+                autonomous: false,
+                landed_on_main: false,
+                model_alias: None,
+                resume: false,
+                shell_command: String::new(),
+            },
+            &lazybox_config::Config::default(),
+            &config.agents,
+        )
+        .expect("valid plan");
+        let expected_argv = plan.argv.clone();
+
+        let executed = match execute_spawn_plan(&config, plan, None, std::time::Instant::now())
+            .await
+            .expect("execute plan")
+        {
+            SpawnExecutionOutcome::Spawned(executed) => executed,
+            SpawnExecutionOutcome::Cancelled => panic!("spawn was cancelled"),
+        };
+
+        assert_eq!(backend.cwd_for(&executed.backend_key).await, Some(cwd));
+        assert_eq!(
+            backend.argv_for(&executed.backend_key).await,
+            Some(expected_argv)
+        );
+        let snapshots = snapshot_terminals(&config).await;
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].terminal_id, terminal_id);
+        assert_eq!(snapshots[0].session_key, session_key);
+        assert!(
+            config
+                .store
+                .get_kv(&TerminalPersistedField::Metadata.key(&executed.backend_key))
+                .expect("load terminal metadata")
+                .is_some()
+        );
+        assert_eq!(
+            config
+                .store
+                .get_kv(&TerminalPersistedField::AgentStateGeneration.key(&executed.backend_key))
+                .expect("load lifecycle generation"),
+            Some(terminal_id.0.to_string())
+        );
+        assert!(matches!(
+            events.recv().await.expect("spawn event"),
+            Event::TerminalSpawned {
+                terminal_id: event_terminal_id,
+                session_key: event_session_key,
+                ..
+            } if event_terminal_id == terminal_id && event_session_key == session_key
+        ));
+    }
+
+    #[tokio::test]
     async fn agent_spawn_is_rolled_back_when_generation_is_not_durable() {
         let mock = crate::backend::MockBackend::new();
         let config = ServerConfig::with_store_and_backend(
@@ -7438,18 +7123,15 @@ mod tests {
             SessionKey::from("test:failed-generation"),
             None,
             TerminalKind::Agent("codex".into()),
-            Some(
-                std::env::current_dir()
-                    .expect("current directory")
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
-            None,
-            false,
-            false,
-            None,
-            false,
-            lazybox_ipc::SpawnOrigin::Interactive,
+            SpawnOptions {
+                cwd: Some(
+                    std::env::current_dir()
+                        .expect("current directory")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                ..Default::default()
+            },
         )
         .await;
 
@@ -9767,7 +9449,7 @@ mod tests {
         let config =
             ServerConfig::with_store(std::sync::Arc::new(lazybox_store::MemoryStore::new()));
         let kind = TerminalKind::Agent("claude".into());
-        let cwd = Some(std::path::PathBuf::from("/tmp/wt"));
+        let cwd = std::path::PathBuf::from("/tmp/wt");
 
         let with_skip = argv_for(
             &config,
@@ -9833,7 +9515,7 @@ mod tests {
         let config =
             ServerConfig::with_store(std::sync::Arc::new(lazybox_store::MemoryStore::new()));
         let kind = TerminalKind::Agent("codex".into());
-        let cwd = Some(std::path::PathBuf::from("/tmp/wt"));
+        let cwd = std::path::PathBuf::from("/tmp/wt");
 
         // No hook command → PTY-only, argv untouched beyond the bare spawn.
         let bare = argv_for(
@@ -9883,7 +9565,7 @@ mod tests {
         let config =
             ServerConfig::with_store(std::sync::Arc::new(lazybox_store::MemoryStore::new()));
         let kind = TerminalKind::Agent("claude".into());
-        let cwd = Some(std::path::PathBuf::from("/tmp/wt"));
+        let cwd = std::path::PathBuf::from("/tmp/wt");
         // The tier's args are appended after the agent's own argv, so a
         // `--model` flag lands last and selects the picked model.
         let argv = argv_for(
@@ -9912,7 +9594,7 @@ mod tests {
     fn argv_for_resume_uses_agent_resume_incantation() {
         let config =
             ServerConfig::with_store(std::sync::Arc::new(lazybox_store::MemoryStore::new()));
-        let cwd = Some(std::path::PathBuf::from("/tmp/wt"));
+        let cwd = std::path::PathBuf::from("/tmp/wt");
 
         // Restore relaunches through the agent's declared resume path, so
         // the prior conversation reattaches instead of coming back blank.
@@ -9960,7 +9642,7 @@ mod tests {
         let argv = argv_for(
             &config,
             &TerminalKind::Shell,
-            &None,
+            Path::new("/tmp"),
             || "fish".into(),
             false,
             None,
@@ -9981,7 +9663,7 @@ mod tests {
         let agent = argv_for(
             &config,
             &TerminalKind::Agent("codex".into()),
-            &None,
+            Path::new("/tmp"),
             || panic!("agent launch must not resolve a shell"),
             false,
             None,
@@ -9997,7 +9679,7 @@ mod tests {
             &TerminalKind::LogTail {
                 path: "/tmp/lazybox.log".into(),
             },
-            &None,
+            Path::new("/tmp"),
             || panic!("log tail launch must not resolve a shell"),
             false,
             None,
@@ -10553,7 +10235,7 @@ mod tests {
     fn last_output_tail_keeps_only_content_after_carriage_return() {
         // Progress bars overwrite in place with a bare `\r`; only the
         // last-written state should survive.
-        let raw = b"Downloading 10%\rDownloading 100%\n";
+        let raw = b"\x1b[33mDownloading 10%\x1b[0m\r\x1b[32mDownloading 100%\x1b[0m\n";
         assert_eq!(last_output_tail(raw).as_deref(), Some("Downloading 100%"));
     }
 

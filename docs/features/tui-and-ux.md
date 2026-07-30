@@ -371,7 +371,7 @@ an async future/channel via `tick()`.
 
 **Status:** stable
 **Crate(s):** `tui-core` (`src/platform.rs`, `src/notify.rs`), `tui` (`components/sidebar/handlers.rs`)
-**Config / flags:** `attention.desktop_notify` (master), `attention.notifier` (`auto` | `osc` | `subprocess` delivery), `attention.{unread,ci_failing,review_pending}` (which events notify)
+**Config / flags:** `attention.desktop_notify` (master), `attention.notifier` (`auto` | `osc` | `subprocess` delivery), `attention.terminal_bundle_id` (macOS activation override), `attention.{unread,ci_failing,review_pending}` (which events notify)
 **Key bindings:** —
 
 ### What it does
@@ -387,6 +387,12 @@ events read `lazybox — CI failing on <workspace>` / `… review requested on �
 Disable all OS banners with `attention.desktop_notify: false` (the footer notice
 stays). Which provider events notify follows the per-signal `attention` flags
 (`ci_failing`, `review_pending`, `unread`) that already gate the in-app badge.
+On macOS with `terminal-notifier` installed, clicking a banner activates the
+terminal session and jumps every attached TUI to the workspace that raised it.
+Terminal.app and iTerm2 are targeted by TTY; WezTerm is targeted by pane id.
+Other hosts fall back to app-level activation. The app is inferred from macOS's
+inherited bundle identifier or `$TERM_PROGRAM`; set
+`attention.terminal_bundle_id` when the host cannot be recognized.
 
 ### How it works (brief)
 Notifications funnel through `platform::notify_user`
@@ -416,6 +422,16 @@ bytes can't interleave with a ratatui frame flush and paint as literal junk
 (#296). Every attempt logs its chosen backend at debug level in
 `/tmp/lazybox.log`.
 
+Each notification carries its originating workspace key. On macOS,
+`terminal-notifier -execute` launches a one-shot hidden lazybox command on
+click; it activates the configured terminal bundle, sends an
+`ActivateWorkspace` request to the exact daemon socket used by the client, and
+the daemon broadcasts the resulting focus request to attached TUIs. An embedded
+client only adds the click action after verifying that its own socket service
+owns that path; otherwise the banner remains non-clickable rather than
+targeting another daemon. OSC, `osascript`, and `notify-send` banners remain
+non-clickable.
+
 Banners are suppressed while lazybox's terminal is reported focused (DEC mode
 1004 focus reporting) so it doesn't self-spam — a terminal that never reports
 focus is treated as unfocused so it still notifies.
@@ -426,10 +442,12 @@ focus is treated as unfocused so it still notifies.
 - [ ] A workspace seen for the first time (already failing) does not fire a startup banner.
 - [ ] The in-app footer notice appears regardless of OS banner support.
 - [ ] `attention.desktop_notify: false` suppresses every OS banner but keeps the footer.
+- [ ] Clicking a `terminal-notifier` banner focuses the terminal and jumps to its originating workspace.
 - [ ] On Ghostty/iTerm2, the banner appears with no `terminal-notifier` installed.
 
 ### Known sharp edges
 - macOS subprocess fallback has no bundle id yet (no custom icon); `terminal-notifier` must be installed for grouped banners, else it falls back to `osascript`.
+- Terminal hosts that expose no stable session identifier can activate the app but not reliably select one window.
 - tmux passthrough needs `allow-passthrough on` (default since tmux 3.3a) for OSC banners to reach the outer terminal.
 - A provider-event signal that's already present when a workspace first appears seeds the baseline silently — only the rising edge notifies, so a second unread comment before you've read the first won't re-notify.
 - Windows notifications are not implemented.

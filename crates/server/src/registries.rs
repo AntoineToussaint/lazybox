@@ -148,6 +148,28 @@ impl TerminalRegistry {
         self.terminal_sessions.lock().await.insert(id, session_id);
     }
 
+    pub(crate) async fn record_spawn_attributes(
+        &self,
+        id: TerminalId,
+        owning_session: Option<SessionId>,
+        no_permission: bool,
+        on_main: bool,
+        model_label: Option<&str>,
+    ) {
+        if let Some(session_id) = owning_session {
+            self.terminal_sessions.lock().await.insert(id, session_id);
+        }
+        if no_permission {
+            self.no_permission_terminals.lock().await.insert(id);
+        }
+        if on_main {
+            self.on_main_terminals.lock().await.insert(id);
+        }
+        if let Some(label) = model_label {
+            self.terminal_models.lock().await.insert(id, label.into());
+        }
+    }
+
     /// Record the last durable state emitted for an agent terminal.
     pub async fn record_agent_state(&self, id: TerminalId, state: AgentState) {
         self.agent_states.lock().await.insert(id, state);

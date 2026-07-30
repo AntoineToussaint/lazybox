@@ -21,7 +21,152 @@
 //! Display defaults to the *terse* user-facing message; call
 //! `diagnostic()` for the full text in dev tooling.
 
+use std::future::Future;
+
 use crate::{Task, Workspace};
+
+/// Default safety cap for provider cursor walks.
+pub const DEFAULT_MAX_PAGES: usize = 20;
+
+/// Whether a fetch consumed the entire upstream result set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetchCoverage {
+    /// Every page was consumed, so the result is authoritative.
+    Complete,
+    /// The returned value is only a prefix and must not drive deletion.
+    Partial,
+}
+
+impl FetchCoverage {
+    /// Returns whether the fetch stopped before covering every page.
+    pub fn is_partial(self) -> bool {
+        self == Self::Partial
+    }
+}
+
+/// A fetched value together with its authoritative-coverage verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchOutcome<T> {
+    pub items: T,
+    pub coverage: FetchCoverage,
+}
+
+impl<T> FetchOutcome<T> {
+    /// Returns whether the value is a non-authoritative prefix.
+    pub fn is_partial(&self) -> bool {
+        self.coverage.is_partial()
+    }
+}
+
+/// Provider-neutral cursor metadata for one fetched page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchPageInfo {
+    pub has_next_page: bool,
+    pub end_cursor: Option<String>,
+}
+
+/// One page returned by a provider-specific page closure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchPage<T> {
+    pub items: Vec<T>,
+    pub page_info: Option<FetchPageInfo>,
+}
+
+/// Why a cursor walk stopped before consuming the full result set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaginationStop<E> {
+    /// Fetching a page after the first successful page failed.
+    PageError(E),
+    /// The provider omitted the page metadata needed to prove completion.
+    MissingPageInfo,
+    /// The provider advertised another page without supplying its cursor.
+    MissingEndCursor,
+    /// The walk reached its configured page limit while more pages remained.
+    PageLimit { pages: usize },
+}
+
+/// The result of walking a cursor-paginated endpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaginationOutcome<T, E> {
+    /// Every upstream page was consumed.
+    Complete(Vec<T>),
+    /// The returned items are a non-authoritative prefix.
+    Partial {
+        items: Vec<T>,
+        reason: PaginationStop<E>,
+    },
+}
+
+impl<T, E> PaginationOutcome<T, E> {
+    /// Discards the pagination stop reason while preserving its coverage verdict.
+    pub fn into_fetch_outcome(self) -> FetchOutcome<Vec<T>> {
+        match self {
+            Self::Complete(items) => FetchOutcome {
+                items,
+                coverage: FetchCoverage::Complete,
+            },
+            Self::Partial { items, .. } => FetchOutcome {
+                items,
+                coverage: FetchCoverage::Partial,
+            },
+        }
+    }
+}
+
+/// Walks a cursor-paginated provider endpoint.
+///
+/// A first-page error is returned because there is no usable result. Once a
+/// page succeeds, a later error, missing cursor, missing page metadata, or the
+/// safety cap produces [`PaginationOutcome::Partial`] with the exact stop
+/// reason so callers can either preserve the error or deliberately keep the
+/// fetched prefix as [`FetchCoverage::Partial`].
+pub async fn paginate<T, E, F, Fut>(
+    mut fetch_page: F,
+    max_pages: usize,
+) -> Result<PaginationOutcome<T, E>, E>
+where
+    F: FnMut(Option<String>, usize) -> Fut,
+    Fut: Future<Output = Result<FetchPage<T>, E>>,
+{
+    let mut items = Vec::new();
+    let mut cursor = None;
+
+    for page in 0..max_pages {
+        let fetched = match fetch_page(cursor, page).await {
+            Ok(fetched) => fetched,
+            Err(error) if page == 0 => return Err(error),
+            Err(error) => {
+                return Ok(PaginationOutcome::Partial {
+                    items,
+                    reason: PaginationStop::PageError(error),
+                });
+            }
+        };
+        items.extend(fetched.items);
+
+        let Some(page_info) = fetched.page_info else {
+            return Ok(PaginationOutcome::Partial {
+                items,
+                reason: PaginationStop::MissingPageInfo,
+            });
+        };
+        if !page_info.has_next_page {
+            return Ok(PaginationOutcome::Complete(items));
+        }
+        let Some(next_cursor) = page_info.end_cursor else {
+            return Ok(PaginationOutcome::Partial {
+                items,
+                reason: PaginationStop::MissingEndCursor,
+            });
+        };
+        cursor = Some(next_cursor);
+    }
+
+    Ok(PaginationOutcome::Partial {
+        items,
+        reason: PaginationStop::PageLimit { pages: max_pages },
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderError {
@@ -372,6 +517,8 @@ pub fn provider_for_workspace<'a, P: TaskProvider + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::future::ready;
 
     #[test]
     fn classification_helpers() {
@@ -442,5 +589,141 @@ mod tests {
         let msg = r.user_message();
         assert!(msg.contains("300s"), "got {msg}");
         assert!(msg.contains("throttled"), "got {msg}");
+    }
+
+    #[test]
+    fn coverage_helpers_report_partial_results() {
+        assert!(FetchCoverage::Partial.is_partial());
+        assert!(
+            FetchOutcome {
+                items: vec![1],
+                coverage: FetchCoverage::Partial,
+            }
+            .is_partial()
+        );
+    }
+
+    #[test]
+    fn paginate_walks_cursors_to_complete_coverage() {
+        let cursors = RefCell::new(Vec::new());
+        let outcome = futures::executor::block_on(paginate(
+            |cursor, page| {
+                cursors.borrow_mut().push(cursor);
+                ready(Ok::<_, &str>(FetchPage {
+                    items: vec![page],
+                    page_info: Some(FetchPageInfo {
+                        has_next_page: page == 0,
+                        end_cursor: (page == 0).then(|| "next".to_string()),
+                    }),
+                }))
+            },
+            DEFAULT_MAX_PAGES,
+        ))
+        .unwrap();
+
+        assert_eq!(outcome, PaginationOutcome::Complete(vec![0, 1]));
+        assert_eq!(cursors.into_inner(), vec![None, Some("next".to_string())]);
+    }
+
+    #[test]
+    fn paginate_reports_why_walks_are_incomplete() {
+        let capped = futures::executor::block_on(paginate(
+            |_cursor, page| {
+                ready(Ok::<_, &str>(FetchPage {
+                    items: vec![page],
+                    page_info: Some(FetchPageInfo {
+                        has_next_page: true,
+                        end_cursor: Some(format!("cursor-{page}")),
+                    }),
+                }))
+            },
+            2,
+        ))
+        .unwrap();
+        assert_eq!(
+            capped,
+            PaginationOutcome::Partial {
+                items: vec![0, 1],
+                reason: PaginationStop::PageLimit { pages: 2 },
+            }
+        );
+
+        let missing_cursor = futures::executor::block_on(paginate(
+            |_cursor, _page| {
+                ready(Ok::<_, &str>(FetchPage {
+                    items: vec![1],
+                    page_info: Some(FetchPageInfo {
+                        has_next_page: true,
+                        end_cursor: None,
+                    }),
+                }))
+            },
+            DEFAULT_MAX_PAGES,
+        ))
+        .unwrap();
+        assert_eq!(
+            missing_cursor,
+            PaginationOutcome::Partial {
+                items: vec![1],
+                reason: PaginationStop::MissingEndCursor,
+            }
+        );
+
+        let missing_page_info = futures::executor::block_on(paginate(
+            |_cursor, _page| {
+                ready(Ok::<_, &str>(FetchPage {
+                    items: vec![1],
+                    page_info: None,
+                }))
+            },
+            DEFAULT_MAX_PAGES,
+        ))
+        .unwrap();
+        assert_eq!(
+            missing_page_info,
+            PaginationOutcome::Partial {
+                items: vec![1],
+                reason: PaginationStop::MissingPageInfo,
+            }
+        );
+    }
+
+    #[test]
+    fn paginate_preserves_later_page_errors_until_the_caller_discards_them() {
+        let error = futures::executor::block_on(paginate::<usize, _, _, _>(
+            |_cursor, _page| ready(Err("first page failed")),
+            DEFAULT_MAX_PAGES,
+        ))
+        .unwrap_err();
+        assert_eq!(error, "first page failed");
+
+        let partial = futures::executor::block_on(paginate(
+            |_cursor, page| {
+                ready(if page == 0 {
+                    Ok(FetchPage {
+                        items: vec![1],
+                        page_info: Some(FetchPageInfo {
+                            has_next_page: true,
+                            end_cursor: Some("next".to_string()),
+                        }),
+                    })
+                } else {
+                    Err("later page failed")
+                })
+            },
+            DEFAULT_MAX_PAGES,
+        ))
+        .unwrap();
+        assert_eq!(
+            partial,
+            PaginationOutcome::Partial {
+                items: vec![1],
+                reason: PaginationStop::PageError("later page failed"),
+            }
+        );
+
+        let fetch_outcome = partial.into_fetch_outcome();
+        assert_eq!(fetch_outcome.items, vec![1]);
+        assert_eq!(fetch_outcome.coverage, FetchCoverage::Partial);
     }
 }

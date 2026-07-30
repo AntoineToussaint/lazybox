@@ -234,6 +234,27 @@ where
         .map_err(|error| std::io::Error::other(error.to_string()))
 }
 
+/// Connect, complete the bounded protocol handshake, and send one
+/// command without starting the long-lived client tasks.
+pub async fn send_command(path: &Path, command: &Command) -> std::io::Result<PeerInfo> {
+    send_command_with_timeout(path, command, HANDSHAKE_TIMEOUT).await
+}
+
+async fn send_command_with_timeout(
+    path: &Path,
+    command: &Command,
+    handshake_timeout: Duration,
+) -> std::io::Result<PeerInfo> {
+    let (mut rd, mut wr) = transport::connect(path)
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let peer = client_handshake_with_timeout(&mut rd, &mut wr, handshake_timeout).await?;
+    write_frame(&mut wr, command)
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    Ok(peer)
+}
+
 /// Encode one message as a length-prefixed wire frame:
 /// `[u32 BE length][bincode payload]`. Shared by the single-frame
 /// writer and the batching event writer so the framing (and the
@@ -540,6 +561,49 @@ mod batching_tests {
             .await
             .expect_err("silent peer must not hold the client forever");
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn send_command_delivers_one_command_to_a_socket_peer() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("one-shot.sock");
+        let listener = transport::Listener::bind(&path).await.expect("bind");
+        let server = tokio::spawn(async move {
+            let (mut rd, mut wr) = listener.accept().await.expect("accept");
+            server_handshake(&mut rd, &mut wr)
+                .await
+                .expect("server handshake");
+            read_frame::<_, Command>(&mut rd)
+                .await
+                .expect("frame")
+                .expect("command")
+        });
+        let expected = cmd(674);
+
+        let peer = send_command(&path, &expected).await.expect("send command");
+        assert!(peer.build_matches());
+        assert!(matches!(
+            server.await.expect("server task"),
+            Command::Write { terminal_id, bytes }
+                if terminal_id == TerminalId(674) && bytes == vec![b'x'; 8]
+        ));
+    }
+
+    #[tokio::test]
+    async fn one_shot_command_times_out_when_socket_peer_stays_silent() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("silent.sock");
+        let listener = transport::Listener::bind(&path).await.expect("bind");
+        let server = tokio::spawn(async move {
+            let _connection = listener.accept().await.expect("accept");
+            std::future::pending::<()>().await;
+        });
+
+        let error = send_command_with_timeout(&path, &cmd(674), Duration::from_millis(10))
+            .await
+            .expect_err("silent peer must not hold a one-shot helper forever");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        server.abort();
     }
 
     /// AsyncWrite wrapper counting `poll_flush` completions, so the

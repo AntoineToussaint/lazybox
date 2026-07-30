@@ -2,6 +2,7 @@
 import Layout from '../layouts/Layout.astro';
 
 const repo = 'https://github.com/AntoineToussaint/lazybox';
+const sponsors = 'https://github.com/sponsors/AntoineToussaint';
 const docs = '/docs/';
 const workflows = '/docs/tutorials/core-workflows/';
 const orchestrationGuide = '/docs/how-to/orchestrate-multiple-agents/';
@@ -1031,6 +1032,23 @@ const steps = [
         </div>
       </div>
     </section>
+
+    <section id="support" class="support-section">
+      <div class="container">
+        <div class="support-card" data-reveal>
+          <div>
+            <p class="kicker">Open source, built in public</p>
+            <h2>Support lazybox.</h2>
+            <p>
+              If lazybox saves you time, a sponsorship helps fund maintenance,
+              releases, and the infrastructure behind the project. The
+              open-source TUI and daemon remain available to everyone.
+            </p>
+          </div>
+          <a class="btn btn-ghost" href={sponsors}>♡ Sponsor on GitHub</a>
+        </div>
+      </div>
+    </section>
   </main>
 
   <footer>
@@ -1039,6 +1057,7 @@ const steps = [
       <div class="links">
         <a href={docs}>Docs</a>
         <a href={repo}>GitHub</a>
+        <a href={sponsors}>Sponsor</a>
         <a href={`${repo}/blob/main/LICENSE`}>License</a>
       </div>
     </div>

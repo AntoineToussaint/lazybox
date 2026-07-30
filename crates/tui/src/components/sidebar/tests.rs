@@ -1701,6 +1701,50 @@ mod search_tests {
         assert_eq!(sb.workspace_count(), 1, "back to a matching prefix");
     }
 
+    #[test]
+    fn reveal_workspace_crosses_every_sidebar_visibility_boundary() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let mut workspace = issue_ws("674", "Notification focus");
+        workspace.snoozed_until = Some(chrono::Utc::now() + chrono::Duration::hours(1));
+        let key = SessionKey::from(&workspace.key);
+        sb.workspaces.insert(key.clone(), workspace);
+        sb.filters.replace([Filter::CiFailing]);
+        sb.search = Some(SearchState {
+            scope: "o/r".into(),
+            query: "does-not-match".into(),
+            editing: false,
+        });
+        sb.collapsed_repos.insert("o/r".into());
+        sb.recompute_visible();
+        assert!(!sb.focus_workspace_key(&key));
+
+        assert!(sb.reveal_workspace_key(&key));
+        assert_eq!(sb.mailbox(), Mailbox::Snoozed);
+        assert!(sb.filters().is_empty());
+        assert!(sb.search().is_none());
+        assert!(!sb.collapsed_repos.contains("o/r"));
+        assert_eq!(sb.selected_session_key(), Some(&key));
+    }
+
+    #[test]
+    fn reveal_workspace_preserves_a_view_that_already_contains_the_target() {
+        let mut sb = sidebar_with_issues(&[("674", "Notification focus")]);
+        let key = sb.selected_session_key().expect("selected").clone();
+        sb.set_filters([Filter::Author]);
+        sb.open_search();
+        type_query(&mut sb, "notification");
+
+        assert!(sb.reveal_workspace_key(&key));
+        assert_eq!(
+            sb.filters().iter().collect::<Vec<_>>(),
+            vec![Filter::Author]
+        );
+        assert_eq!(
+            sb.search().map(|search| search.query.as_str()),
+            Some("notification")
+        );
+    }
+
     /// Enter with an empty query just closes the bar (nothing to keep).
     #[test]
     fn enter_on_empty_query_closes_bar() {

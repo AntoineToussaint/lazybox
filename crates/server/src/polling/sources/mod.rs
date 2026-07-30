@@ -8,7 +8,7 @@ use super::{
 };
 use crate::ServerConfig;
 use chrono::Utc;
-use lazybox_core::{AutoFixKind, ProviderConfig, Task, WorkspaceKey};
+use lazybox_core::{AutoFixKind, FetchCoverage, ProviderConfig, Task, WorkspaceKey};
 use lazybox_gh::GhClient;
 use lazybox_ipc::Event;
 use lazybox_linear::LinearClient;
@@ -110,7 +110,7 @@ pub struct GhSource {
     /// strictly in sequence (fetch resolves, THEN last_fetch_kind), so
     /// there's no contention.
     last_kind: parking_lot::Mutex<FetchMode>,
-    /// Whether the last full sweep was a PARTIAL success — one side
+    /// Coverage of the last full sweep. PARTIAL means one side
     /// (PRs or Issues) errored while the other returned results, so
     /// `fetch` returned `Ok` with only half the inbox to keep the
     /// rest alive. Read by [`TaskSource::polled_scope`] AFTER `fetch`
@@ -128,12 +128,12 @@ pub struct GhSource {
     /// because a fetch failed. On a partial sweep we therefore report
     /// "no authoritative coverage" so rescope preserves everything
     /// this tick; the next clean sweep deletes anything genuinely
-    /// gone. Initialized `false` (a never-fetched source isn't
+    /// gone. Initialized COMPLETE (a never-fetched source isn't
     /// partial).
-    last_coverage_partial: parking_lot::Mutex<bool>,
+    last_coverage: parking_lot::Mutex<FetchCoverage>,
     /// Whether the last global sweep narrowed the `involves:` search to
     /// `updated:>=` (issue #14). A windowed sweep only returned changed
-    /// PRs, so — like `last_coverage_partial` — it must NOT report
+    /// PRs, so — like `last_coverage` — it must NOT report
     /// `Exhaustive` coverage or rescope would delete every unchanged
     /// row. Read by [`TaskSource::polled_scope`] after `fetch` resolves.
     /// Initialized `false` (a never-fetched source isn't windowed).
@@ -326,7 +326,7 @@ impl GhSource {
             // Default to Full so a never-fetched source doesn't
             // accidentally block rescope.
             last_kind: parking_lot::Mutex::new(FetchMode::Full),
-            last_coverage_partial: parking_lot::Mutex::new(false),
+            last_coverage: parking_lot::Mutex::new(FetchCoverage::Complete),
             last_windowed: parking_lot::Mutex::new(false),
             hot_targets: Vec::new(),
             cold_targets: std::collections::BTreeSet::new(),
@@ -338,8 +338,8 @@ impl GhSource {
         *self.last_kind.lock() = kind;
     }
 
-    fn set_coverage_partial(&self, partial: bool) {
-        *self.last_coverage_partial.lock() = partial;
+    fn set_coverage(&self, coverage: FetchCoverage) {
+        *self.last_coverage.lock() = coverage;
     }
 
     fn set_windowed(&self, windowed: bool) {
@@ -512,17 +512,18 @@ impl GhSource {
             )
             .await
             .map_err(lazybox_core::ProviderError::from)?;
-        let pr_complete = outcome.coverage.pr_complete();
-        let sweep_complete = outcome.coverage.sweep_complete();
+        let coverage = outcome.coverage;
+        let pr_complete = outcome.pr_coverage == FetchCoverage::Complete;
+        let sweep_complete = coverage == FetchCoverage::Complete;
         let raw = outcome.tasks;
         let partial_warning = outcome.partial_failure;
         let mentions = outcome.mentions;
-        // Record whether this sweep was partial so `polled_scope`
-        // downgrades from `Exhaustive` to "no authoritative coverage"
-        // — otherwise rescope would delete the half of the inbox the
-        // failed side couldn't return (e.g. every PR when the PR
-        // query errored). See `last_coverage_partial`.
-        self.set_coverage_partial(partial_warning.is_some());
+        // Record this sweep's coverage so `polled_scope` downgrades
+        // PARTIAL results from `Exhaustive` to "no authoritative
+        // coverage" — otherwise rescope would delete the half of the
+        // inbox the failed side couldn't return (e.g. every PR when
+        // the PR query errored). See `last_coverage`.
+        self.set_coverage(coverage);
         // A windowed sweep only returned changed PRs — it can't drive
         // deletion (issue #14). `pr_since.is_some()` implies this was a
         // global PR sweep, so this also clears the flag on reconcile +
@@ -1087,23 +1088,13 @@ pub(super) async fn dispatch_action(
                 session_key.clone(),
                 None,
                 lazybox_ipc::TerminalKind::Agent(agent_id),
-                None,
-                prompt,
-                // Autonomous `@lazybox` spawn — launch unattended with
-                // permission prompts disabled (subject to the
-                // `agent.autonomous_skip_permissions` toggle).
-                true,
-                // Autonomous work runs on its own isolated worktree.
-                false,
-                // The tier the trigger asked for (`@lazybox codex xhigh`
-                // / `lazybox:codex/xhigh`); `None` keeps the agent default.
-                model_alias,
-                // Fresh spawn, not a session restore.
-                false,
-                // Label / `@lazybox`-mention auto-spawn — background work
-                // the user didn't initiate, so it reports a footer notice
-                // instead of stealing focus with a progress modal (#645).
-                lazybox_ipc::SpawnOrigin::Autonomous(trigger),
+                crate::spawn_handler::SpawnOptions {
+                    initial_prompt: prompt,
+                    autonomous: true,
+                    model_alias,
+                    origin: lazybox_ipc::SpawnOrigin::Autonomous(trigger),
+                    ..Default::default()
+                },
             )
             .await;
             // Record the label marker only once a live agent session
@@ -1283,25 +1274,14 @@ pub(super) async fn dispatch_action(
                         session_key,
                         None,
                         term_kind,
-                        None,
-                        prompt,
-                        // Unattended auto-fix spawn — the agent has to
-                        // clear the first-run workspace-trust dialog on
-                        // the fresh worktree (else the injected fix
-                        // prompt lands in the trust chooser) and push a
-                        // fix without a human to approve its edits.
-                        true,
-                        // Auto-fix runs on its own isolated worktree.
-                        false,
-                        // Auto-fix uses the agent's default model.
-                        None,
-                        // Fresh spawn, not a session restore.
-                        false,
-                        // Auto-fix is daemon-initiated background work —
-                        // report it, don't interrupt with a modal (#645).
-                        lazybox_ipc::SpawnOrigin::Autonomous(
-                            lazybox_ipc::AutonomousTrigger::AutoFix,
-                        ),
+                        crate::spawn_handler::SpawnOptions {
+                            initial_prompt: prompt,
+                            autonomous: true,
+                            origin: lazybox_ipc::SpawnOrigin::Autonomous(
+                                lazybox_ipc::AutonomousTrigger::AutoFix,
+                            ),
+                            ..Default::default()
+                        },
                     )
                     .await;
                 }
@@ -1321,12 +1301,12 @@ impl TaskSource for GhSource {
     /// #34: without this, `rescope` would treat unpolled repos as
     /// "fell out of scope" and delete their workspaces every warm tick.
     fn polled_scope(&self) -> PolledScope {
-        let partial = *self.last_coverage_partial.lock();
+        let coverage = *self.last_coverage.lock();
         let windowed = *self.last_windowed.lock();
         gh_polled_scope(
             self.scheduling.run_global,
             &self.scheduling.repos,
-            partial,
+            coverage,
             windowed,
         )
     }
@@ -1407,7 +1387,7 @@ pub struct LinearSource {
     /// on a page we never got, so `polled_scope` downgrades to
     /// non-authoritative and rescope preserves the rest. Read by
     /// [`TaskSource::polled_scope`] AFTER `fetch` resolves (mirrors
-    /// `GhSource::last_coverage_partial`).
+    /// `GhSource::last_coverage`).
     last_coverage_partial: parking_lot::Mutex<bool>,
 }
 
@@ -1469,9 +1449,9 @@ impl TaskSource for LinearSource {
             *self.last_coverage_partial.lock() = outcome.is_partial();
             self.emit_progress(format!(
                 "Got {} issues, applying filters…",
-                outcome.tasks.len()
+                outcome.items.len()
             ));
-            let kept = filter_linear_tasks(outcome.tasks, &self.filter);
+            let kept = filter_linear_tasks(outcome.items, &self.filter);
             self.emit_progress(format!("{} issues kept after filter", kept.len()));
             Ok(kept)
         })
@@ -2135,7 +2115,7 @@ pub(super) async fn sources_for_with_engagement(
                             // Default to Full so a never-fetched
                             // source doesn't accidentally block rescope.
                             last_kind: parking_lot::Mutex::new(FetchMode::Full),
-                            last_coverage_partial: parking_lot::Mutex::new(false),
+                            last_coverage: parking_lot::Mutex::new(FetchCoverage::Complete),
                             last_windowed: parking_lot::Mutex::new(false),
                             hot_targets: engagement.hot_targets().to_vec(),
                             cold_targets: engagement.cold_targets().clone(),

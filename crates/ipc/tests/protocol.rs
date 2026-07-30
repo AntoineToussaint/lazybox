@@ -246,6 +246,9 @@ fn all_commands() -> Vec<Command> {
         Command::FocusWorkspace {
             session_key: key.clone(),
         },
+        Command::ActivateWorkspace {
+            session_key: key.clone(),
+        },
         Command::MarkActivityRead {
             session_key: key.clone(),
             index: 2,
@@ -559,6 +562,9 @@ fn all_events() -> Vec<Event> {
         Event::TerminalFocusRequested {
             terminal_id: TerminalId(2),
         },
+        Event::WorkspaceFocusRequested {
+            session_key: key.clone(),
+        },
         Event::TerminalsRebadged {
             from: "github:o/r#1".into(),
             to: "github:o/r#2".into(),
@@ -836,6 +842,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::CollapseIntoPr { .. } => "CollapseIntoPr",
         Command::MarkRead { .. } => "MarkRead",
         Command::FocusWorkspace { .. } => "FocusWorkspace",
+        Command::ActivateWorkspace { .. } => "ActivateWorkspace",
         Command::MarkActivityRead { .. } => "MarkActivityRead",
         Command::UnmarkActivityRead { .. } => "UnmarkActivityRead",
         Command::CreateWorkspace { .. } => "CreateWorkspace",
@@ -921,6 +928,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::TerminalResyncUnavailable { .. } => "TerminalResyncUnavailable",
         Event::TerminalExited { .. } => "TerminalExited",
         Event::TerminalFocusRequested { .. } => "TerminalFocusRequested",
+        Event::WorkspaceFocusRequested { .. } => "WorkspaceFocusRequested",
         Event::TerminalsRebadged { .. } => "TerminalsRebadged",
         Event::AgentState { .. } => "AgentState",
         Event::ProviderError { .. } => "ProviderError",
@@ -967,12 +975,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        64,
+        65,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(
         event_tags.len(),
-        65,
+        66,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

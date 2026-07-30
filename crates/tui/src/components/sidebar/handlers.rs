@@ -358,8 +358,11 @@ impl Sidebar {
                                 .primary_task()
                                 .map(|t| t.title.clone())
                                 .unwrap_or_else(|| workspace.name.clone());
-                            self.pending_notifications
-                                .push(PendingNotification { title, body });
+                            self.pending_notifications.push(PendingNotification {
+                                title,
+                                body,
+                                workspace_key: session_key.clone(),
+                            });
                         }
                         // Inline footer notice in addition to the OS
                         // popup — covers users with notifications muted
@@ -386,8 +389,11 @@ impl Sidebar {
                             .primary_task()
                             .map(|t| t.title.clone())
                             .unwrap_or_else(|| workspace.name.clone());
-                        self.pending_notifications
-                            .push(PendingNotification { title, body });
+                        self.pending_notifications.push(PendingNotification {
+                            title,
+                            body,
+                            workspace_key: session_key.clone(),
+                        });
                     }
                     self.pending_asking_notices.push(format!(
                         "{} finished",
@@ -501,5 +507,9 @@ fn attention_notification(signal: AttentionSignal, w: &Workspace) -> Option<Pend
         .primary_task()
         .map(|t| t.title.clone())
         .unwrap_or_else(|| w.name.clone());
-    Some(PendingNotification { title, body })
+    Some(PendingNotification {
+        title,
+        body,
+        workspace_key: (&w.key).into(),
+    })
 }

@@ -143,6 +143,9 @@ Prefer a loopback listener reached through SSH or an authenticated TLS proxy.
 Endpoints: `GET /v1/health`, `GET /v1/metrics` (event-pipeline drop/lag
 counters), `GET /v1/workspaces`, `GET /v1/events` (NDJSON stream), `POST
 /v1/commands` (single command), `POST /v1/stream` (duplex commands ↔ events).
+`GET /` serves the responsive read-only thin-client PoC without auth so the
+browser shell can load; every `/v1/*` request it makes still requires the
+configured bearer token.
 
 ### How it works (brief)
 `server_api` (`crates/tui/src/main.rs`) parses the addr (arg → `LAZYBOX_API_ADDR`
@@ -172,6 +175,8 @@ or `~/.lazybox/config.yaml` until an encrypted credential store is available.
 - [ ] Without `LAZYBOX_API_TOKEN` and without `--insecure-no-auth`, the
       command refuses to start.
 - [ ] A non-loopback bind is refused without `--allow-insecure-http`.
+- [ ] A wildcard-bound gateway serves the thin client while preserving bearer
+      auth on every API route.
 - [ ] `/v1/commands` does not respond until its handler side effect is visible.
 - [ ] Oversized bodies/lines and over-limit command streams are rejected.
 
@@ -280,7 +285,7 @@ Top-level keys (`crates/config/src/lib.rs`):
 | `slack` | `bot_token`, `app_token`, `anchor_channel`, `channel_prefix`, `per_workspace_channels` |
 | `agent` | `autonomous_skip_permissions`, `skip_permissions`, `llm_gateway_url`, nested agent config |
 | `agents.<id>` | Per-agent overrides — today the model-tier menu `models` (`default` + ordered `tiers` of `alias`/`label`/`args`, plus `priority` aliases) |
-| `attention` | Which signals flag a row: `unread`, `ci_failing`, `review_pending`, `agent_asking`, `mentioned`, `desktop_notify`, `notifier` (`auto` \| `osc` \| `subprocess` banner delivery) |
+| `attention` | Which signals flag a row: `unread`, `ci_failing`, `review_pending`, `agent_asking`, `mentioned`, `desktop_notify`, `notifier` (`auto` \| `osc` \| `subprocess` banner delivery), `terminal_bundle_id` (optional macOS click activation override) |
 | `ui` | View/behavior: `auto_mark_delay`, `quit_double_tap_window`, `split_step_percent`, `task_body_max_rows`, `short_snooze`, `long_snooze`, `action_keys` (incl. `spawn_agent.<id>` keys), `keymap_preset`, `theme`, `tour_seen`, `tips_seen` |
 | `display`, `shell`, `hooks`, `terminal`, `mention`, `auto_fix` | Display merging, shell, agent hooks, terminal, mention routing, auto-fix triggers |
 

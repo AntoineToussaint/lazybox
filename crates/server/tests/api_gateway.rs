@@ -926,11 +926,17 @@ async fn desktop_runtime_real_pty_handles_backpressure_reconnect_replay_and_resy
     .await
     .expect("sustained PTY command completes");
     assert!(output_snapshot.last_seq > 512);
-    let metrics = config.event_metrics.snapshot();
-    assert!(
-        metrics.terminal_output_dropped > 0 || metrics.bus_lagged_events > 0,
-        "a stalled binary response must shed output instead of buffering without a bound"
-    );
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let metrics = config.event_metrics.snapshot();
+            if metrics.terminal_output_dropped > 0 || metrics.bus_lagged_events > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a stalled binary response must shed output instead of buffering without a bound");
 
     let mut saw_size = false;
     let mut saw_begin = false;

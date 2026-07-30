@@ -1890,6 +1890,7 @@ fn agent_state_asking_queues_a_desktop_notification() {
         "title should signal urgency: {}",
         queued[0].title
     );
+    assert_eq!(queued[0].workspace_key, key);
 
     // Repeat broadcast — no new notification.
     s.on_event(&Event::AgentState {
@@ -1984,6 +1985,7 @@ fn ci_failure_transition_enqueues_desktop_notification() {
         "title should name the signal: {}",
         queued[0].title
     );
+    assert_eq!(queued[0].workspace_key, ws_key(&red));
 
     s.on_event(&Event::WorkspaceUpserted(Box::new(red)));
     assert!(

@@ -453,6 +453,7 @@ pub struct Sidebar {
 pub struct PendingNotification {
     pub title: String,
     pub body: String,
+    pub workspace_key: SessionKey,
 }
 
 impl Sidebar {

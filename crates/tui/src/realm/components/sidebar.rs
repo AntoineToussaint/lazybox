@@ -78,7 +78,7 @@ impl Sidebar {
     pub fn on_daemon_event(&mut self, evt: &IpcEvent) {
         self.inner.on_event(evt);
         for notif in self.inner.drain_pending_notifications() {
-            crate::platform::notify_user(&notif.title, &notif.body);
+            crate::platform::notify_user(&notif.title, &notif.body, &notif.workspace_key);
         }
     }
 
@@ -535,7 +535,7 @@ impl AppComponent<Msg, UserEvent> for Sidebar {
             Event::User(UserEvent::Daemon(evt)) => {
                 self.inner.on_event(evt);
                 for notif in self.inner.drain_pending_notifications() {
-                    crate::platform::notify_user(&notif.title, &notif.body);
+                    crate::platform::notify_user(&notif.title, &notif.body, &notif.workspace_key);
                 }
                 None
             }

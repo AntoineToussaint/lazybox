@@ -296,6 +296,7 @@ async fn main() -> anyhow::Result<()> {
         Some("scan") => scan_subcommand(&args[1..]).await,
         Some("worktree") => worktree_gc::worktree_subcommand(&args[1..]).await,
         Some("hook-ingest") => hook_ingest_subcommand(&args[1..]).await,
+        Some("notification-click") => notification_click_subcommand(&args[1..]).await,
         Some("--connect") => {
             let socket_path = args
                 .get(1)
@@ -305,6 +306,56 @@ async fn main() -> anyhow::Result<()> {
         }
         _ => run_embedded_realm(preselect).await,
     }
+}
+
+async fn notification_click_subcommand(args: &[String]) -> anyhow::Result<()> {
+    let mut args = args.to_vec();
+    let Some(workspace_key) = take_value(&mut args, "--workspace") else {
+        return Ok(());
+    };
+    let socket_path = take_value(&mut args, "--socket")
+        .map(PathBuf::from)
+        .unwrap_or_else(lifecycle::socket_path);
+
+    #[cfg(target_os = "macos")]
+    if let Some(bundle_id) = take_value(&mut args, "--terminal-bundle-id") {
+        let status = std::process::Command::new("open")
+            .arg("-b")
+            .arg(&bundle_id)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        match status {
+            Ok(status) if status.success() => {}
+            Ok(status) => {
+                tracing::warn!(%bundle_id, %status, "notification click could not activate terminal")
+            }
+            Err(error) => {
+                tracing::warn!(%bundle_id, %error, "notification click could not launch open")
+            }
+        }
+    }
+
+    let command = lazybox_ipc::Command::ActivateWorkspace {
+        session_key: lazybox_core::SessionKey::new(workspace_key),
+    };
+    match lazybox_ipc::transport::connect(&socket_path).await {
+        Ok((mut rd, mut wr)) => match socket::client_handshake(&mut rd, &mut wr).await {
+            Ok(_) => {
+                if let Err(error) = socket::write_frame(&mut wr, &command).await {
+                    tracing::warn!(%error, "notification click could not send workspace focus");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "notification click IPC handshake failed");
+            }
+        },
+        Err(error) => {
+            tracing::warn!(%error, socket = %socket_path.display(), "notification click could not reach daemon");
+        }
+    }
+    Ok(())
 }
 
 /// `lazybox hook-ingest --backend-key <key>` — the command Claude Code
@@ -585,10 +636,14 @@ async fn run_remote(
     // The remote path skips the full config application (the daemon
     // owns most of it), but notifications fire client-side — arm them
     // here too or `--connect` sessions would stay silent.
-    let notifier = lazybox_config::Config::load()
-        .map(|c| c.attention.notifier)
+    let attention = lazybox_config::Config::load()
+        .map(|c| c.attention)
         .unwrap_or_default();
-    lazybox_tui::platform::set_notifier_backend(map_notifier_backend(notifier));
+    lazybox_tui::platform::set_notification_click_context(
+        socket_path.to_path_buf(),
+        attention.terminal_bundle_id,
+    );
+    lazybox_tui::platform::set_notifier_backend(map_notifier_backend(attention.notifier));
     let available_update = update_check.await.unwrap_or_else(|error| {
         tracing::debug!("startup update check task failed: {error}");
         None
@@ -851,6 +906,10 @@ async fn run_embedded_realm(
         // Arm desktop notifications with the configured backend. Until
         // this call `notify_user` is a logged no-op — arming is the
         // binary's opt-in so library tests never spawn real banners.
+        lazybox_tui::platform::set_notification_click_context(
+            lifecycle::socket_path(),
+            user_config.attention.terminal_bundle_id.clone(),
+        );
         lazybox_tui::platform::set_notifier_backend(map_notifier_backend(
             user_config.attention.notifier,
         ));

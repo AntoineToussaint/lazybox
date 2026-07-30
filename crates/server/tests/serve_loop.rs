@@ -55,6 +55,36 @@ async fn subscribe_yields_snapshot() {
     }
 }
 
+#[tokio::test]
+async fn activate_workspace_broadcasts_a_focus_request() {
+    let (mut client, server) = channel::pair();
+    tokio::spawn(async move {
+        Server::new(ServerConfig::in_memory())
+            .serve(server)
+            .await
+            .unwrap();
+    });
+
+    client.send(Command::Subscribe).unwrap();
+    let key = lazybox_core::SessionKey::new("github:o/r#674");
+    client
+        .send(Command::ActivateWorkspace {
+            session_key: key.clone(),
+        })
+        .unwrap();
+
+    let event = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if let Some(Event::WorkspaceFocusRequested { session_key }) = client.recv().await {
+                break session_key;
+            }
+        }
+    })
+    .await
+    .expect("focus request");
+    assert_eq!(event, key);
+}
+
 /// Snippet MRU and update dismissals are daemon-owned (#548), so a value
 /// recorded by one client is replayed to every subsequently-connecting
 /// client through `Event::Snapshot` — the cross-transport parity the old
@@ -674,6 +704,9 @@ fn all_non_shutdown_commands() -> Vec<Command> {
             session_key: "test:ws".into(),
         },
         Command::FocusWorkspace {
+            session_key: "test:ws".into(),
+        },
+        Command::ActivateWorkspace {
             session_key: "test:ws".into(),
         },
         Command::MarkActivityRead {

@@ -371,7 +371,7 @@ an async future/channel via `tick()`.
 
 **Status:** stable
 **Crate(s):** `tui-core` (`src/platform.rs`, `src/notify.rs`), `tui` (`components/sidebar/handlers.rs`)
-**Config / flags:** `attention.desktop_notify` (master), `attention.notifier` (`auto` | `osc` | `subprocess` delivery), `attention.{unread,ci_failing,review_pending}` (which events notify)
+**Config / flags:** `attention.desktop_notify` (master), `attention.notifier` (`auto` | `osc` | `subprocess` delivery), `attention.terminal_bundle_id` (macOS activation override), `attention.{unread,ci_failing,review_pending}` (which events notify)
 **Key bindings:** —
 
 ### What it does
@@ -387,6 +387,10 @@ events read `lazybox — CI failing on <workspace>` / `… review requested on �
 Disable all OS banners with `attention.desktop_notify: false` (the footer notice
 stays). Which provider events notify follows the per-signal `attention` flags
 (`ci_failing`, `review_pending`, `unread`) that already gate the in-app badge.
+On macOS with `terminal-notifier` installed, clicking a banner activates the
+terminal app and jumps every attached TUI to the workspace that raised it. The
+app is inferred from macOS's inherited bundle identifier or `$TERM_PROGRAM`;
+set `attention.terminal_bundle_id` when the host cannot be recognized.
 
 ### How it works (brief)
 Notifications funnel through `platform::notify_user`
@@ -416,6 +420,13 @@ bytes can't interleave with a ratatui frame flush and paint as literal junk
 (#296). Every attempt logs its chosen backend at debug level in
 `/tmp/lazybox.log`.
 
+Each notification carries its originating workspace key. On macOS,
+`terminal-notifier -execute` launches a one-shot hidden lazybox command on
+click; it activates the configured terminal bundle, sends an
+`ActivateWorkspace` request to the exact daemon socket used by the client, and
+the daemon broadcasts the resulting focus request to attached TUIs. OSC,
+`osascript`, and `notify-send` banners remain non-clickable.
+
 Banners are suppressed while lazybox's terminal is reported focused (DEC mode
 1004 focus reporting) so it doesn't self-spam — a terminal that never reports
 focus is treated as unfocused so it still notifies.
@@ -426,6 +437,7 @@ focus is treated as unfocused so it still notifies.
 - [ ] A workspace seen for the first time (already failing) does not fire a startup banner.
 - [ ] The in-app footer notice appears regardless of OS banner support.
 - [ ] `attention.desktop_notify: false` suppresses every OS banner but keeps the footer.
+- [ ] Clicking a `terminal-notifier` banner focuses the terminal and jumps to its originating workspace.
 - [ ] On Ghostty/iTerm2, the banner appears with no `terminal-notifier` installed.
 
 ### Known sharp edges

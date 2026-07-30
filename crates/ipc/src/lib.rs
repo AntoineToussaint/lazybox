@@ -637,6 +637,7 @@ pub enum Command {
     Write {
         terminal_id: TerminalId,
         bytes: Vec<u8>,
+        intent: TerminalInputIntent,
     },
     /// Append a prompt the user submitted to an agent terminal to that
     /// terminal's bounded per-session history (issue #523), so the
@@ -1233,16 +1234,32 @@ impl Command {
     /// the PTY reassembles the exact same stream. Ordering is
     /// preserved because every chunk travels the same ordered command
     /// channel as the original write would have.
-    pub fn write_chunked(terminal_id: TerminalId, bytes: Vec<u8>) -> Vec<Command> {
+    pub fn write_chunked(
+        terminal_id: TerminalId,
+        bytes: Vec<u8>,
+        intent: TerminalInputIntent,
+    ) -> Vec<Command> {
         if bytes.len() <= MAX_WRITE_CHUNK_BYTES {
             // Common case: no split, no copy.
-            return vec![Command::Write { terminal_id, bytes }];
+            return vec![Command::Write {
+                terminal_id,
+                bytes,
+                intent,
+            }];
         }
-        bytes
-            .chunks(MAX_WRITE_CHUNK_BYTES)
-            .map(|chunk| Command::Write {
+        let chunks: Vec<_> = bytes.chunks(MAX_WRITE_CHUNK_BYTES).collect();
+        let last = chunks.len().saturating_sub(1);
+        chunks
+            .into_iter()
+            .enumerate()
+            .map(|(index, chunk)| Command::Write {
                 terminal_id,
                 bytes: chunk.to_vec(),
+                intent: if index == last {
+                    intent
+                } else {
+                    TerminalInputIntent::Compose
+                },
             })
             .collect()
     }
@@ -1255,10 +1272,28 @@ impl Command {
     /// command-frame cap, regardless of which call site emitted it.
     pub fn into_write_chunks(self) -> Vec<Command> {
         match self {
-            Command::Write { terminal_id, bytes } => Command::write_chunked(terminal_id, bytes),
+            Command::Write {
+                terminal_id,
+                bytes,
+                intent,
+            } => Command::write_chunked(terminal_id, bytes, intent),
             other => vec![other],
         }
     }
+}
+
+/// Semantic origin of bytes written to a terminal.
+///
+/// Agent-state detection uses this at the I/O boundary: `Submit` is
+/// authoritative evidence that a turn may start, while `View` covers pointer
+/// traffic that can repaint a full-screen terminal without asking the agent
+/// to work. `Compose` changes the in-flight line without committing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum TerminalInputIntent {
+    Compose,
+    Submit,
+    View,
 }
 
 /// The terminal state a removable workspace's primary task reached,
@@ -2936,10 +2971,19 @@ mod transport_admission_tests {
     fn write_chunked_splits_at_the_cap_and_preserves_bytes() {
         // Below the cap: exactly one command, identical bytes.
         let small = vec![7u8; 64];
-        match Command::write_chunked(TerminalId(1), small.clone()).as_slice() {
-            [Command::Write { terminal_id, bytes }] => {
+        match Command::write_chunked(TerminalId(1), small.clone(), TerminalInputIntent::Compose)
+            .as_slice()
+        {
+            [
+                Command::Write {
+                    terminal_id,
+                    bytes,
+                    intent,
+                },
+            ] => {
                 assert_eq!(*terminal_id, TerminalId(1));
                 assert_eq!(*bytes, small);
+                assert_eq!(*intent, TerminalInputIntent::Compose);
             }
             other => panic!("small write must stay a single command: {other:?}"),
         }
@@ -2949,14 +2993,25 @@ mod transport_admission_tests {
         let original: Vec<u8> = (0..(MAX_WRITE_CHUNK_BYTES * 2 + 999))
             .map(|i| (i % 251) as u8)
             .collect();
-        let chunks = Command::write_chunked(TerminalId(9), original.clone());
+        let chunks =
+            Command::write_chunked(TerminalId(9), original.clone(), TerminalInputIntent::Submit);
         assert_eq!(chunks.len(), 3, "2·cap + tail = three chunks");
         let mut reassembled = Vec::new();
         for chunk in &chunks {
             match chunk {
-                Command::Write { terminal_id, bytes } => {
+                Command::Write {
+                    terminal_id,
+                    bytes,
+                    intent,
+                } => {
                     assert_eq!(*terminal_id, TerminalId(9));
                     assert!(bytes.len() <= MAX_WRITE_CHUNK_BYTES);
+                    let expected = if reassembled.len() + bytes.len() == original.len() {
+                        TerminalInputIntent::Submit
+                    } else {
+                        TerminalInputIntent::Compose
+                    };
+                    assert_eq!(*intent, expected);
                     reassembled.extend_from_slice(bytes);
                 }
                 other => panic!("chunking must only ever emit Write: {other:?}"),

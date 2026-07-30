@@ -1,5 +1,5 @@
 export const DESKTOP_PROTOCOL_VERSION = 1 as const;
-export const DESKTOP_PROTOCOL_FINGERPRINT = 1252080770 as const;
+export const DESKTOP_PROTOCOL_FINGERPRINT = 2578808868 as const;
 export const TERMINAL_SERVER_FRAME_HEADER_BYTES = 25 as const;
 export const TERMINAL_CLIENT_FRAME_HEADER_BYTES = 9 as const;
 export const TERMINAL_SERVER_FRAME_LAYOUT = {
@@ -26,6 +26,15 @@ export const TERMINAL_RESIZE_PAYLOAD_LAYOUT = {
 export const TERMINAL_RESYNC_PAYLOAD_LAYOUT = {
   bytes: 8,
   requiredSeqOffset: 0,
+} as const;
+export const TERMINAL_WRITE_PAYLOAD_LAYOUT = {
+  intentOffset: 0,
+  bytesOffset: 1,
+} as const;
+export const TERMINAL_INPUT_INTENTS = {
+  compose: 0,
+  submit: 1,
+  view: 2,
 } as const;
 export const TERMINAL_SERVER_FRAME_KINDS = {
   snapshot: 1,

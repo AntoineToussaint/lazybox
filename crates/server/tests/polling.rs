@@ -22,7 +22,7 @@ use lazybox_core::{
     Activity, ActivityKind, CiStatus, ProviderConfig, ReviewStatus, Task, TaskId, TaskRole,
     TaskState,
 };
-use lazybox_ipc::{Command, Event, channel};
+use lazybox_ipc::{Command, Event, TerminalInputIntent, channel};
 use lazybox_server::backend::{MockBackend, SessionBackend};
 use lazybox_server::polling::{self, FetchMode, TaskSource};
 use lazybox_server::workspace;
@@ -5709,6 +5709,7 @@ mod live_collapse_e2e {
                 .send(Command::Write {
                     terminal_id: live.terminal_id,
                     bytes: b"1\r".to_vec(),
+                    intent: TerminalInputIntent::Submit,
                 })
                 .unwrap();
             let flip = agent_state_key(&mut live.client, AgentState::Working)
@@ -5792,6 +5793,7 @@ mod live_collapse_e2e {
             .send(Command::Write {
                 terminal_id: live.terminal_id,
                 bytes: bytes.to_vec(),
+                intent: TerminalInputIntent::Submit,
             })
             .unwrap();
         let want = bytes.to_vec();

@@ -52,7 +52,7 @@ about it.
 capture path still drops OSC 8 hyperlinks relative to the raw stream.
 Depth and soft-wrap parity are guarded above; hyperlink parity is not.
 
-## Agent state / needs-input (#225, #357, #374, #397, #399)
+## Agent state / needs-input (#225, #357, #374, #397, #399, #694)
 
 | guard | shape it covers |
 |---|---|
@@ -61,6 +61,8 @@ Depth and soft-wrap parity are guarded above; hyperlink parity is not.
 | `crates/agents/src/state_machine.rs::hookless_lifecycle_never_regresses_to_idle` | #225 — the hookless (Codex/Cursor) lifecycle |
 | `crates/agents/src/state_machine.rs::ambiguous_working_never_clears_input_needed` | #374 — navigation/repaint noise can't clear a parked `?` |
 | `crates/server/src/spawn_handler.rs::a_repaint_scrape_never_clears_a_parked_prompt` | #374 at the pump level, over real fixture bytes |
+| `crates/server/src/spawn_handler.rs::resize_redraw_keeps_an_idle_agent_idle` | #694 — a client-requested resize can repaint a booted idle agent without entering `Working` |
+| `crates/server/src/spawn_handler.rs::multi_chunk_resize_redraw_keeps_a_done_agent_done` | #694 — a fragmented full-screen redraw cannot accumulate enough false progress to reopen `Working` |
 | `crates/server/src/spawn_handler.rs::agent_state_transitions_emit_an_ordered_sequence` | #357 — the ordered daemon transition stream end-to-end (mock backend) |
 | `crates/server/src/spawn_handler.rs::a_quiet_unclassifiable_screen_settles_working_to_done` | #225 — weak-detector agents still finish |
 | `crates/agents/src/state_machine.rs::hooks_gate_lets_only_the_pty_corrections_through_while_fresh` | hooks-vs-scrape precedence (#374 family) |

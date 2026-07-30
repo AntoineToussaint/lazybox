@@ -36,3 +36,18 @@ test('every install method has a copy control for its exact command', () => {
     assert.ok(html.includes(`data-copy="${command}"`), `missing copy control for: ${command}`);
   }
 });
+
+test('the hero presents lazybox as a terminal TUI before any install choice', () => {
+  const heroStart = html.indexOf('<header class="hero">');
+  const heroEnd = html.indexOf('<div class="strip">');
+  const hero = html.slice(heroStart, heroEnd);
+  const declaration = 'A terminal TUI — reactive GitHub inbox + agent fleet, keyboard-driven.';
+
+  assert.ok(heroStart > 0 && heroEnd > heroStart, 'expected the homepage hero');
+  assert.ok(hero.includes(declaration), 'expected the explicit terminal-TUI description');
+  assert.ok(hero.indexOf(declaration) < hero.indexOf(brewCommand), 'expected the terminal description before install');
+  assert.ok(hero.includes('Runs in your terminal. No Electron. No tab farm.'));
+  assert.ok(hero.includes('src="/demo/lazybox.mp4"'), 'expected the real TUI recording');
+  assert.ok(hero.includes('real TUI capture · 14s loop'));
+  assert.equal(hero.includes('<span class="dot r">'), false, 'hero must not use macOS window chrome');
+});

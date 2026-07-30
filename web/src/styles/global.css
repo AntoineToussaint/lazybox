@@ -190,25 +190,37 @@ img, video { max-width: 100%; display: block; }
 .btn-ghost:hover { border-color: var(--fg-faint); background: var(--bg-soft); color: var(--fg); }
 
 /* ── hero ────────────────────────────────────────────────── */
-.hero { padding: clamp(3rem, 8vw, 6rem) 0 2rem; text-align: center; }
-.eyebrow {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  font-family: var(--mono);
-  font-size: 0.78rem;
-  color: var(--accent);
-  background: rgba(124, 196, 255, 0.07);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 0.34rem 0.9rem;
-  margin-bottom: 1.6rem;
+.hero {
+  padding: clamp(2.5rem, 6vw, 5rem) 0 2rem;
+  border-bottom: 1px solid var(--border-soft);
 }
-.eyebrow .dot {
-  width: 0.5rem; height: 0.5rem; border-radius: 50%;
-  background: var(--accent-2);
-  box-shadow: 0 0 0 0 rgba(110,231,168,0.7);
-  animation: pulse 2.4s ease-out infinite;
+.hero-grid {
+  display: grid;
+  grid-template-columns: minmax(18rem, 0.72fr) minmax(0, 1.28fr);
+  gap: clamp(2rem, 4vw, 4rem);
+  align-items: center;
+  max-width: 1320px;
+}
+.hero-copy {
+  min-width: 0;
+  font-family: var(--mono);
+}
+.terminal-command {
+  margin: 0 0 0.65rem;
+  color: var(--fg-faint);
+  font-size: 0.82rem;
+}
+.terminal-command span {
+  margin-right: 0.55rem;
+  color: var(--accent-2);
+}
+.terminal-declaration {
+  margin: 0 0 1.6rem;
+  padding-left: 0.8rem;
+  border-left: 2px solid var(--accent-2);
+  color: var(--fg);
+  font-size: clamp(0.9rem, 1.6vw, 1.05rem);
+  line-height: 1.55;
 }
 @keyframes pulse {
   0% { box-shadow: 0 0 0 0 rgba(110,231,168,0.6); }
@@ -216,31 +228,47 @@ img, video { max-width: 100%; display: block; }
   100% { box-shadow: 0 0 0 0 rgba(110,231,168,0); }
 }
 .hero h1 {
-  font-size: clamp(2.4rem, 6.2vw, 4.4rem);
-  line-height: 1.04;
-  letter-spacing: -0.04em;
-  margin: 0 0 1.2rem;
+  margin: 0 0 1.15rem;
+  font-size: clamp(2.35rem, 4.8vw, 4.15rem);
   font-weight: 700;
+  letter-spacing: -0.055em;
+  line-height: 1.02;
 }
-.hero h1 .grad {
-  background: var(--grad);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
+.hero h1 span { color: var(--accent-2); }
 .lead {
-  font-size: clamp(1.08rem, 2.1vw, 1.32rem);
+  max-width: 36rem;
+  margin: 0 0 1rem;
   color: var(--fg-dim);
-  max-width: 40rem;
-  margin: 0 auto 2.1rem;
-  line-height: 1.6;
+  font-family: var(--sans);
+  font-size: clamp(1rem, 1.7vw, 1.16rem);
+  line-height: 1.65;
+}
+.terminal-proof {
+  margin: 0 0 1.7rem;
+  color: var(--accent);
+  font-size: 0.82rem;
 }
 .cta-row {
   display: flex;
   gap: 0.85rem;
-  justify-content: center;
   flex-wrap: wrap;
-  margin-bottom: 1.4rem;
+}
+.hero .btn {
+  border-radius: 0.25rem;
+  font-family: var(--mono);
+  font-size: 0.86rem;
+}
+.hero .btn-primary {
+  border-color: var(--accent-2);
+  background: rgba(110, 231, 168, 0.1);
+  box-shadow: none;
+  color: var(--accent-2);
+}
+.hero .btn-primary:hover {
+  border-color: #9af0c0;
+  background: rgba(110, 231, 168, 0.16);
+  box-shadow: none;
+  color: #9af0c0;
 }
 
 /* install options */
@@ -249,7 +277,7 @@ img, video { max-width: 100%; display: block; }
   flex-direction: column;
   align-items: center;
   width: min(100%, 54rem);
-  margin: 0 auto;
+  margin: clamp(2rem, 4vw, 3rem) auto 0;
 }
 .install-option {
   display: flex;
@@ -346,27 +374,43 @@ img, video { max-width: 100%; display: block; }
 
 /* ── terminal / demo frame ───────────────────────────────── */
 .term {
-  margin: clamp(2.5rem, 6vw, 4rem) auto 0;
-  max-width: 960px;
-  background: var(--bg-soft);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
+  margin: 0;
+  min-width: 0;
+  background: #05070a;
+  border: 1px solid var(--fg-faint);
+  border-radius: 0.25rem;
   overflow: hidden;
-  box-shadow: var(--shadow);
-  position: relative;
+  box-shadow: 0 22px 60px -34px rgba(0, 0, 0, 0.95);
 }
-.term::before {
-  content: "";
-  position: absolute;
-  inset: -1px;
-  border-radius: inherit;
-  padding: 1px;
-  background: linear-gradient(160deg, rgba(124,196,255,0.4), transparent 40%, transparent 60%, rgba(110,231,168,0.3));
-  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  pointer-events: none;
+.terminal-bar,
+.term figcaption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.55rem 0.75rem;
+  background: #090c12;
+  color: var(--fg-faint);
+  border-bottom: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 0.7rem;
 }
+.terminal-bar span:first-child { color: var(--accent-2); }
+.term figcaption {
+  justify-content: flex-start;
+  margin: 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 0;
+}
+.term figcaption span { color: var(--accent); }
+.term video,
+.term img {
+  width: 100%;
+  display: block;
+  background: var(--bg);
+  filter: brightness(1.14) contrast(1.08);
+}
+
 .term .bar {
   display: flex;
   align-items: center;
@@ -404,7 +448,6 @@ img, video { max-width: 100%; display: block; }
   line-height: 1.5;
 }
 .demo-item figcaption b { color: var(--fg); }
-.term video, .term img { width: 100%; display: block; background: var(--bg); }
 
 /* ── strip ───────────────────────────────────────────────── */
 .strip {
@@ -1883,6 +1926,8 @@ footer .links a:hover { color: var(--fg); }
 
 /* ── responsive ──────────────────────────────────────────── */
 @media (max-width: 900px) {
+  .hero-grid { grid-template-columns: 1fr; }
+  .hero-copy { max-width: 42rem; }
   .snippet-showcase { grid-template-columns: 1fr; }
   .snippet-copy { max-width: 42rem; }
   .snippet-create { grid-template-columns: 1fr; }
@@ -1917,6 +1962,8 @@ footer .links a:hover { color: var(--fg); }
 }
 @media (max-width: 560px) {
   .nav .links .hide-sm { display: none; }
+  .terminal-bar { align-items: flex-start; flex-direction: column; gap: 0.15rem; }
+  .term figcaption { align-items: flex-start; }
   .snippet-point { grid-template-columns: 4.5rem 1fr; }
   .snippet-scenes { min-height: 27rem; }
   .snippet-scene { padding: 0.8rem; }

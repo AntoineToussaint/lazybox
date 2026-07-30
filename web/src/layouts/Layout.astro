@@ -17,7 +17,7 @@ const {
 const canonical = new URL(Astro.url.pathname, Astro.site ?? 'https://lazybox.ai').href;
 const ogImage = new URL('/og.png', Astro.site ?? 'https://lazybox.ai').href;
 const ogImageAlt =
-  'lazybox — a terminal inbox for coding-agent fleets, continuous issue-to-PR sessions, and reusable snippet workflows.';
+  'lazybox — a terminal TUI with a reactive GitHub inbox and agent fleet. Runs in your terminal, with no Electron.';
 ---
 
 <!doctype html>

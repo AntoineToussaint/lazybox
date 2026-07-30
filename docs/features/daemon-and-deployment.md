@@ -119,8 +119,7 @@ trust boundary — there's no TCP/TLS in v2.0.
 **Status:** experimental
 **Crate(s):** `server` (`api_gateway.rs`)
 **Config / flags:** `LAZYBOX_API_ADDR` (default `127.0.0.1:8787`),
-`LAZYBOX_API_TOKEN` (required bearer unless `--insecure-no-auth`),
-`--allow-insecure-http` (required for a non-loopback plaintext bind)
+`LAZYBOX_API_TOKEN` (required bearer unless `--insecure-no-auth`)
 **Key bindings:** —
 
 ### What it does
@@ -131,33 +130,37 @@ without the terminal protocol.
 ### How to use it
 ```sh
 LAZYBOX_API_TOKEN=secret lazybox server api   # bind 127.0.0.1:8787
-LAZYBOX_API_TOKEN=secret lazybox server api 0.0.0.0:9000 --allow-insecure-http
 lazybox server api --insecure-no-auth         # explicitly unauthenticated
 ```
 
 Without `LAZYBOX_API_TOKEN` the gateway refuses to start unless
-`--insecure-no-auth` is passed. Because bearer auth does not encrypt HTTP,
-non-loopback listeners are separately refused without `--allow-insecure-http`.
-Prefer a loopback listener reached through SSH or an authenticated TLS proxy.
+`--insecure-no-auth` is passed. The gateway is loopback-only because bearer
+auth does not encrypt HTTP or isolate principals. Reach it remotely only
+through an encrypted tunnel such as SSH; direct remote transport remains
+disabled until TLS and principal-scoped authorization exist.
 
-Endpoints: `GET /v1/health`, `GET /v1/metrics` (event-pipeline drop/lag
-counters), `GET /v1/workspaces`, `GET /v1/events` (NDJSON stream), `POST
-/v1/commands` (single command), `POST /v1/stream` (duplex commands ↔ events).
-`GET /` serves the responsive read-only thin-client PoC without auth so the
-browser shell can load; every `/v1/*` request it makes still requires the
-configured bearer token.
+Endpoints: `GET /` (local read-only browser shell), `GET /v1/health`, `GET
+/v1/protocol`, `GET /v1/metrics`
+(event-pipeline drop/lag counters), `GET /v1/workspaces`, `GET /v1/events`
+(NDJSON control stream), `POST /v1/commands` (single command), `POST
+/v1/stream` (duplex NDJSON), and `POST /v1/terminal` (bounded binary terminal
+duplex). The browser shell loads without auth; every `/v1/*` request it makes
+still requires the configured bearer token.
 
 ### How it works (brief)
-`server_api` (`crates/tui/src/main.rs`) parses the addr (arg → `LAZYBOX_API_ADDR`
+`server_api` (`crates/tui-boot/src/main.rs`) parses the addr (arg → `LAZYBOX_API_ADDR`
 → default) and `LAZYBOX_API_TOKEN`, refusing to start without a token unless
 `--insecure-no-auth` is passed. The gateway (`api_gateway.rs`)
 serves the endpoints; streaming uses NDJSON frames (`JsonClientFrame::Command`
-/ `JsonServerFrame::Event`). When a token is set, requests need
+ / `JsonServerFrame::Event`) except terminal bytes, which use the versioned
+binary terminal stream. When a token is set, requests need
 `Authorization: Bearer <token>`. One-shot commands execute their handler to
-completion before HTTP 200; control commands that require a stream are
-rejected. Connections, request bodies, command lines, and commands per stream
-all have hard bounds. `GET /v1/workspaces` includes a `warnings` array for
-persisted rows that were preserved but could not be decoded.
+completion before HTTP 200 and return connection-scoped handler outcomes in
+the response's `events` array; control commands that require a stream are
+rejected. Terminal commands are accepted only by the ordered binary endpoint.
+Connections, request bodies, command lines, and commands per stream all have
+hard bounds. `GET /v1/workspaces` includes a `warnings` array for persisted
+rows that were preserved but could not be decoded.
 
 Provider credentials mutated through the experimental API remain in memory for
 the daemon process lifetime. Restarting the daemon discards them; persistent
@@ -166,6 +169,7 @@ or `~/.lazybox/config.yaml` until an encrypted credential store is available.
 
 ### Test checklist
 - [ ] `GET /v1/health` returns OK.
+- [ ] `GET /v1/protocol` reports the supported contract and terminal transport.
 - [ ] `GET /v1/metrics` returns the event-pipeline drop/lag counters as JSON.
 - [ ] `GET /v1/workspaces` lists current workspaces as JSON.
 - [ ] `GET /v1/events` streams NDJSON events.
@@ -174,8 +178,8 @@ or `~/.lazybox/config.yaml` until an encrypted credential store is available.
 - [ ] With `LAZYBOX_API_TOKEN` set, unauthenticated requests are rejected.
 - [ ] Without `LAZYBOX_API_TOKEN` and without `--insecure-no-auth`, the
       command refuses to start.
-- [ ] A non-loopback bind is refused without `--allow-insecure-http`.
-- [ ] A wildcard-bound gateway serves the thin client while preserving bearer
+- [ ] Every non-loopback bind is refused.
+- [ ] The loopback gateway serves the browser shell while preserving bearer
       auth on every API route.
 - [ ] `/v1/commands` does not respond until its handler side effect is visible.
 - [ ] Oversized bodies/lines and over-limit command streams are rejected.
@@ -183,7 +187,8 @@ or `~/.lazybox/config.yaml` until an encrypted credential store is available.
 ### Known sharp edges
 - Localhost-only by default and no CORS (ROADMAP §5); there is no built-in TLS.
 - API-managed provider credentials are deliberately session-only.
-- No OpenAPI schema yet; the wire shapes are defined in `crates/ipc`.
+- Generated TypeScript wire shapes and compatibility fixtures live under
+  `apps/desktop/src/generated`.
 
 ---
 

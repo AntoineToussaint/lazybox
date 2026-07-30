@@ -255,7 +255,7 @@ Do not keep an always-on VM per subscriber. Even the raw Fly reference reaches
 roughly $25–$30/user/month with storage before the control plane; managed
 sandbox compute approaches $180/user/month when left on continuously.
 
-## PoC included with this spike
+## Local browser PoC
 
 The JSON gateway now serves a responsive read-only client at `/`. The static
 shell is public so a browser can load it; the token is entered locally and
@@ -263,19 +263,9 @@ every `/v1/*` request still sends `Authorization: Bearer …`. The client reads
 the health endpoint and workspace snapshot and consumes the authenticated
 NDJSON event stream. It deliberately stores the token only in page memory.
 
-The existing CLI proves the non-local bind:
-
-```sh
-export LAZYBOX_API_TOKEN="$(openssl rand -hex 32)"
-lazybox server api 0.0.0.0:8787 --allow-insecure-http
-```
-
-Open `http://HOST:8787/` on a phone or desktop and enter the token. That command
-is only acceptable on a trusted private network or behind TLS; bearer auth does
-not encrypt plaintext HTTP. The integration test binds a wildcard listener,
-connects through loopback as a remote client would, verifies that the page
-loads, verifies an unauthenticated API request gets `401`, and verifies the
-same endpoint succeeds with the bearer token.
+The gateway remains loopback-only. The integration tests verify that the page
+loads locally, API routes still require the bearer token, and every
+non-loopback listener is rejected.
 
 This is intentionally not the cloud authentication design. Production needs
 TLS, user identity, short-lived access tokens, tenant authorization, origin

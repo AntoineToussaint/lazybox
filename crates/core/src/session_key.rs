@@ -20,8 +20,9 @@ use crate::TaskId;
 
 /// Unique identifier for a `Session`. Cheap to clone.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 #[serde(transparent)]
-pub struct SessionKey(Arc<str>);
+pub struct SessionKey(#[cfg_attr(feature = "desktop-contract", ts(type = "string"))] Arc<str>);
 
 impl SessionKey {
     /// Build a key from any string-like input.

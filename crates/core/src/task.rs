@@ -4,6 +4,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// A unique identifier for a task, scoped by source.
 /// e.g. ("github", "owner/repo#123") or ("linear", "ENG-456")
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct TaskId {
     /// Which provider created this task (e.g. "github", "linear").
     pub source: String,
@@ -19,6 +20,7 @@ impl std::fmt::Display for TaskId {
 
 /// Why this task is on your radar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum TaskRole {
     /// You authored it (your PR, your issue).
     Author,
@@ -32,6 +34,7 @@ pub enum TaskRole {
 
 /// The lifecycle state of a task (source-agnostic).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum TaskState {
     Open,
     InProgress,
@@ -47,6 +50,7 @@ pub enum TaskState {
 /// it from the URL shape. See [`Task::is_pr`] for how this authoritative
 /// field supersedes the legacy URL heuristic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum TaskKind {
     /// A pull request / merge request (GitHub PR, GitLab MR, …).
     Pr,
@@ -66,6 +70,7 @@ pub enum TaskKind {
 /// the two paths explicit prevents a JSON migration shim from breaking the
 /// daemon/client socket protocol.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct Label {
     pub name: String,
     #[serde(default)]
@@ -142,6 +147,7 @@ impl<'de> Deserialize<'de> for Label {
 
 /// CI / build status rolled up from individual checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum CiStatus {
     #[default]
     None,
@@ -154,6 +160,7 @@ pub enum CiStatus {
 
 /// Review status rolled up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum ReviewStatus {
     #[default]
     None,
@@ -168,6 +175,7 @@ pub enum ReviewStatus {
 /// `Mergeable` (no conflict). The sidebar surfaces `Unknown` as a
 /// `?` pill so the user can tell lazybox doesn't actually know.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum Mergeable {
     /// GitHub hasn't computed mergeability yet. Re-query nudges
     /// computation; usually resolves within a poll cycle or two.
@@ -190,6 +198,7 @@ impl Mergeable {
 
 /// An individual CI check run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct CheckRun {
     pub name: String,
     pub status: CiStatus,
@@ -198,6 +207,7 @@ pub struct CheckRun {
 
 /// A comment or activity entry on a task.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct Activity {
     pub author: String,
     pub body: String,
@@ -222,6 +232,7 @@ pub struct Activity {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum ActivityKind {
     Comment,
     Review,
@@ -248,6 +259,7 @@ pub const ACTIVITY_FINGERPRINT_BODY_PREFIX: usize = 64;
 /// tuple fallback — kept in core precisely so the TUI's fingerprint
 /// and the daemon's resolution can't drift.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum ActivityFingerprint {
     NodeId(String),
     Content {
@@ -300,6 +312,7 @@ impl ActivityFingerprint {
 /// A source-agnostic task descriptor. Providers convert their domain objects
 /// into this type. The TUI and session system only work with `Task`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct Task {
     pub id: TaskId,
     pub title: String,

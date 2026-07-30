@@ -1,0 +1,121 @@
+# Desktop client boundary
+
+The desktop client consumes the same public daemon as the TUI without copying
+daemon startup or Rust wire definitions. Product code is limited to the Tauri
+adapter and web UI; provider, store, worktree, PTY, polling, recovery, and agent
+behavior remain in the MIT-licensed Rust crates.
+
+## Embedded lifecycle
+
+`lazybox_server::client_runtime::ClientRuntime` owns the reusable service
+lifecycle:
+
+- backend-session recovery with a bounded startup wait;
+- optional persisted-session restore;
+- legacy sandbox migration;
+- provider polling, keep-awake, and scheduled agent updates;
+- optional Slack startup;
+- graceful task shutdown.
+
+The TUI, standalone daemon, foreground API, and desktop shell construct this
+runtime from one `ServerConfig`. Client-owned behavior stays outside it: the
+TUI setup wizard and embedded Unix socket, the standalone socket service, and
+the desktop loopback HTTP adapter. The standalone daemon continues to leave
+persisted-session restore to its durable backend, while embedded clients and
+the foreground API request restore.
+
+## Versioned contract
+
+`GET /v1/protocol` reports the desktop protocol version, Rust wire fingerprint,
+daemon build, binary terminal media type, and frame/write limits. Desktop
+requests send `x-lazybox-protocol-version` and
+`x-lazybox-protocol-fingerprint`; an unsupported value receives HTTP 426 with
+the requested and supported values.
+
+TypeScript definitions under `apps/desktop/src/generated/` are generated from
+the Rust desktop command/event DTOs, core model, and gateway DTOs:
+
+```sh
+cargo run -p lazybox-server --features desktop-contract \
+  --bin generate-desktop-contract
+UPDATE_DESKTOP_CONTRACT=1 cargo test -p lazybox-server --test api_gateway \
+  desktop_compatibility_fixture_is_current -- --exact
+```
+
+The committed compatibility fixture is serialized from every desktop command
+and event shape. Frontend tests pin the protocol version, fingerprint, and
+variant coverage. The desktop CI job regenerates the types and fails on any
+diff, so a Rust desktop wire change cannot silently leave the frontend
+contract stale.
+
+## Terminal transport
+
+Control and lifecycle events remain authenticated NDJSON. Terminal byte
+payloads are removed from that stream and use `POST /v1/terminal` with media
+type `application/vnd.lazybox.terminal.v1`.
+
+Server frames are length-prefixed:
+
+```text
+u32 body length (big endian)
+u8  kind: snapshot=1, output=2, resync=3, scrollback=4, resync-unavailable=5
+u64 terminal id
+u64 first sequence
+u64 last sequence
+raw terminal bytes
+```
+
+Client frames use a length, kind, terminal id, and command payload. Kinds are
+write, resize, resync, close, and fetch scrollback. JSON command routes reject
+those terminal commands so all terminal traffic shares the ordered binary
+queue. Frames and writes are capped by the existing IPC limits. Each gateway
+bridge retains the daemon's bounded
+drop-and-authoritative-replay behavior; the Tauri shell adds a bounded native
+queue and the webview pulls raw chunks, so neither side accumulates an
+unbounded terminal backlog. xterm.js receives `Uint8Array` payloads directly,
+not JSON number arrays.
+
+## Security
+
+The embedded gateway binds an ephemeral IPv4 loopback port with a random
+per-process bearer. The bearer is stored only in Rust: the webview invokes
+narrow Tauri commands and never receives the gateway URL or credential. The
+public `server api` command is also loopback-only. Remote use must tunnel the
+loopback listener over an encrypted channel such as SSH.
+
+Direct remote HTTP remains disabled because bearer authentication is not
+transport encryption or principal isolation. Enabling a routable listener
+requires a future design with TLS and principal-scoped authorization; a flag
+cannot waive that boundary.
+
+## Packaging and licensing boundary
+
+The reusable engine can remain public and MIT licensed:
+
+- `core`, `auth`, `store`, `config`, providers, `git-ops`, `agents`, and `ipc`;
+- `server`, including `ClientRuntime`, the gateway, PTY ownership, and protocol
+  generation;
+- the TUI and public daemon binaries.
+
+A separately distributed product can depend on those crates while keeping its
+desktop UI, signing/package metadata, updater, entitlement client, and hosted
+account services in a proprietary repository. It imports the generated
+versioned contract and calls the shared lifecycle; it does not fork daemon boot
+logic or hand-copy IPC shapes. Licensing, billing, updater behavior, and hosted
+multi-tenancy are intentionally outside this repository's boundary.
+
+## Verification
+
+```sh
+cargo test -p lazybox-server --test api_gateway
+cargo test -p lazybox-ipc --test protocol
+cd apps/desktop
+npm ci
+npm test
+npm run build
+cargo test --manifest-path src-tauri/Cargo.toml
+```
+
+The gateway integration suite uses a real raw PTY and covers binary input,
+resize, sustained output, a stalled consumer, authoritative recovery,
+disconnect, reconnect replay, and explicit resync.

@@ -1,0 +1,231 @@
+{
+  "commands": [
+    {
+      "SpawnAgent": {
+        "agent": "codex",
+        "session_key": "github:o/r#42"
+      }
+    },
+    {
+      "FocusWorkspace": {
+        "session_key": "github:o/r#42"
+      }
+    },
+    "Refresh"
+  ],
+  "events": [
+    {
+      "Snapshot": {
+        "terminals": [
+          {
+            "agent_state": "Working",
+            "kind": {
+              "Agent": "codex"
+            },
+            "last_seq": 42,
+            "session_key": "github:o/r#42",
+            "terminal_id": 7
+          }
+        ],
+        "workspaces": [
+          {
+            "activity": [],
+            "auto_merge_on_green": false,
+            "base_branch": null,
+            "branch": "github-o-r-42",
+            "cleanup_prompt": "unresolved",
+            "created_at": "2023-11-14T22:13:20Z",
+            "gh_issues": [],
+            "key": "github-o-r-42",
+            "last_viewed_at": null,
+            "linear_issues": [],
+            "linked_checkout": null,
+            "local": false,
+            "name": "PR o/r#42",
+            "notes": "",
+            "policies": {
+              "auto_fix_ci": "Default",
+              "auto_fix_conflict": "Default"
+            },
+            "pr": {
+              "additions": 0,
+              "assignees": [],
+              "auto_merge_enabled": false,
+              "base_branch": null,
+              "body": null,
+              "branch": null,
+              "checks": [],
+              "ci": "Success",
+              "closed_at": null,
+              "closes_issues": [],
+              "created_at": null,
+              "deletions": 0,
+              "id": {
+                "key": "o/r#42",
+                "source": "github"
+              },
+              "is_behind_base": false,
+              "is_in_merge_queue": false,
+              "kind": null,
+              "labels": [],
+              "last_commenter": null,
+              "mergeable": "Mergeable",
+              "needs_reply": false,
+              "node_id": null,
+              "recent_activity": [],
+              "repo": "o/r",
+              "review": "Pending",
+              "reviewers": [],
+              "role": "Reviewer",
+              "state": "Open",
+              "title": "PR o/r#42",
+              "unread_count": 0,
+              "updated_at": "2023-11-14T22:13:20Z",
+              "url": "https://github.com/o/r/pull/42"
+            },
+            "project_key": "github-o-r",
+            "read_indices": [],
+            "schema": 2,
+            "seen_count": 0,
+            "sent_snippets": [],
+            "sessions": [],
+            "snoozed_until": null,
+            "track_main": false,
+            "track_main_behind": false
+          }
+        ]
+      }
+    },
+    {
+      "WorkspaceUpserted": {
+        "activity": [],
+        "auto_merge_on_green": false,
+        "base_branch": null,
+        "branch": "github-o-r-42",
+        "cleanup_prompt": "unresolved",
+        "created_at": "2023-11-14T22:13:20Z",
+        "gh_issues": [],
+        "key": "github-o-r-42",
+        "last_viewed_at": null,
+        "linear_issues": [],
+        "linked_checkout": null,
+        "local": false,
+        "name": "PR o/r#42",
+        "notes": "",
+        "policies": {
+          "auto_fix_ci": "Default",
+          "auto_fix_conflict": "Default"
+        },
+        "pr": {
+          "additions": 0,
+          "assignees": [],
+          "auto_merge_enabled": false,
+          "base_branch": null,
+          "body": null,
+          "branch": null,
+          "checks": [],
+          "ci": "Success",
+          "closed_at": null,
+          "closes_issues": [],
+          "created_at": null,
+          "deletions": 0,
+          "id": {
+            "key": "o/r#42",
+            "source": "github"
+          },
+          "is_behind_base": false,
+          "is_in_merge_queue": false,
+          "kind": null,
+          "labels": [],
+          "last_commenter": null,
+          "mergeable": "Mergeable",
+          "needs_reply": false,
+          "node_id": null,
+          "recent_activity": [],
+          "repo": "o/r",
+          "review": "Pending",
+          "reviewers": [],
+          "role": "Reviewer",
+          "state": "Open",
+          "title": "PR o/r#42",
+          "unread_count": 0,
+          "updated_at": "2023-11-14T22:13:20Z",
+          "url": "https://github.com/o/r/pull/42"
+        },
+        "project_key": "github-o-r",
+        "read_indices": [],
+        "schema": 2,
+        "seen_count": 0,
+        "sent_snippets": [],
+        "sessions": [],
+        "snoozed_until": null,
+        "track_main": false,
+        "track_main_behind": false
+      }
+    },
+    {
+      "WorkspaceRemoved": "github:o/r#42"
+    },
+    {
+      "TerminalSpawned": {
+        "kind": "Shell",
+        "session_key": "github:o/r#42",
+        "terminal_id": 7
+      }
+    },
+    {
+      "TerminalExited": {
+        "exit_code": 0,
+        "last_output": "done",
+        "terminal_id": 7
+      }
+    },
+    {
+      "TerminalFocusRequested": {
+        "terminal_id": 7
+      }
+    },
+    {
+      "AgentState": {
+        "session_key": "github:o/r#42",
+        "state": "InputNeeded",
+        "terminal_id": 7
+      }
+    },
+    {
+      "ProviderError": {
+        "message": "unavailable",
+        "source": "github"
+      }
+    },
+    {
+      "CommandRejected": {
+        "command": "Refresh",
+        "message": "busy"
+      }
+    },
+    {
+      "PollCompleted": {
+        "count": 3,
+        "source": "github"
+      }
+    },
+    {
+      "PollProgress": {
+        "message": "page 2",
+        "source": "github"
+      }
+    },
+    {
+      "WorktreeProgress": {
+        "session_key": "github:o/r#42",
+        "status": {
+          "Progress": "50%"
+        },
+        "step": "Fetch"
+      }
+    }
+  ],
+  "protocol_fingerprint": 792369885,
+  "protocol_version": 1
+}

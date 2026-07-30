@@ -25,6 +25,7 @@ jobs:
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       web: ${{ steps.filter.outputs.web }}
+      desktop: ${{ steps.filter.outputs.desktop }}
       contracts: ${{ steps.filter.outputs.contracts }}
     steps:
       - uses: actions/checkout@v7
@@ -56,6 +57,16 @@ jobs:
               - ".github/workflows/ci.yml"
               - "crates/server/src/api_client.html"
               - "web/**"
+            desktop:
+              - ".cargo/**"
+              - ".github/workflows/ci.yml"
+              - "Cargo.lock"
+              - "Cargo.toml"
+              - "apps/desktop/**"
+              - "crates/core/**"
+              - "crates/ipc/**"
+              - "crates/server/**"
+              - "docs/desktop-spike.md"
             contracts:
               - ".github/ISSUE_TEMPLATE/**"
               - ".github/workflows/ci.yml"
@@ -191,6 +202,41 @@ jobs:
       - name: Verify Rust-backed web contracts
         if: needs.changes.outputs.contracts == 'true' && needs.changes.outputs.rust != 'true'
         run: cargo nextest run -p lazybox-tui --profile ci --test web_docs --test keymap_docs
+
+  desktop:
+    name: desktop boundary (macos-14)
+    needs: changes
+    if: needs.changes.outputs.desktop == 'true'
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - uses: ./.github/actions/rust-build-env
+        with:
+          rust-components: clippy,rustfmt
+      - name: Verify generated desktop contract
+        run: |
+          cargo run -p lazybox-server --features desktop-contract --bin generate-desktop-contract
+          cargo test -p lazybox-server --test api_gateway desktop_compatibility_fixture_is_current -- --exact
+          git diff --exit-code -- apps/desktop/src/generated
+      - name: Install frontend dependencies
+        working-directory: apps/desktop
+        run: npm ci
+      - name: Test and build frontend
+        working-directory: apps/desktop
+        run: |
+          npm audit --audit-level=moderate
+          npm test
+          npm run build
+      - name: Lint and test desktop shell
+        run: |
+          cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
+          cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
 
   rustdoc:
     name: rustdoc

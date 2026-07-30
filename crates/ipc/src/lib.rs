@@ -135,21 +135,25 @@ pub const IS_RELEASE_BUILD: bool = matches!(env!("LAZYBOX_RELEASE_BUILD").as_byt
 /// the wire-fingerprint handshake instead — adding even a trailing
 /// field shifts [`PROTOCOL_FINGERPRINT`] automatically.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct TerminalId(pub u64);
 
 /// Stable id for a structured agent runtime. This is intentionally
 /// separate from `TerminalId`: a run may be structured-JSON only, terminal
 /// only, or mirrored into both surfaces by higher layers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct AgentRunId(pub u64);
 
 /// Opaque client-generated id that correlates a structured-run start
 /// request with its success or failure event.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct AgentRunRequestId(pub String);
 
 /// Runtime surface requested for an agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum AgentRuntimeMode {
     /// Traditional PTY/terminal byte stream.
     Terminal,
@@ -160,6 +164,7 @@ pub enum AgentRuntimeMode {
 
 /// Host access granted to an agent launch.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum AgentRunAccess {
     /// Use the agent's normal provider policy.
     #[default]
@@ -171,6 +176,7 @@ pub enum AgentRunAccess {
 
 /// What to launch inside a terminal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum TerminalKind {
     /// A known agent by id (e.g. "claude", "codex"). The daemon looks
     /// up the `Agent` impl and computes argv.
@@ -218,6 +224,7 @@ impl TerminalKind {
 /// picker, so the per-session prompt history can tag snippet-sourced
 /// entries (issue #523).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum PromptSource {
     /// The user typed (or pasted) the prompt directly.
     #[default]
@@ -232,6 +239,7 @@ pub enum PromptSource {
 /// bounded per-session history (issue #523). The pinned "you ▸ …" recap
 /// is just the most recent entry; `]]h` opens the full list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct UserPrompt {
     /// The submitted prompt text (already trimmed, newlines preserved).
     pub text: String,
@@ -273,6 +281,7 @@ pub struct UserPrompt {
 /// Variants are appended, never reordered: the socket transport
 /// encodes this enum by bincode ordinal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum AgentState {
     /// Actively producing output / running a tool right now — the
     /// agent's status line shows a streaming spinner / pulser.
@@ -317,6 +326,7 @@ pub enum AgentState {
 /// [`AgentState`] lives there too. This type is the IPC-stable shape
 /// carried by [`Command::IngestHook`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct HookEvent {
     pub kind: HookEventKind,
     /// The agent's own session id (Claude's `session_id`). Informational
@@ -340,6 +350,7 @@ pub struct HookEvent {
 /// encodes this enum by bincode ordinal. `UserPromptSubmit` is appended
 /// at the end for the same reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum HookEventKind {
     SessionStart,
     SessionEnd,
@@ -358,6 +369,7 @@ pub enum HookEventKind {
 
 /// User input sent to a structured agent runtime.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct AgentInputMessage {
     /// Human-readable user text.
     pub text: Option<String>,
@@ -367,6 +379,7 @@ pub struct AgentInputMessage {
 
 /// Decision for a tool/permission request emitted by an agent runtime.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum AgentApprovalDecision {
     Approve,
     Deny { reason: Option<String> },
@@ -374,12 +387,14 @@ pub enum AgentApprovalDecision {
 
 /// Answer to a structured question from an agent runtime.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct AgentQuestionAnswer {
     pub answer: String,
 }
 
 /// Token/cost usage reported by a structured agent runtime.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct AgentUsage {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
@@ -394,6 +409,7 @@ pub struct AgentUsage {
 /// Lazybox daemon. The current local daemon uses `local`; remote/multi-user
 /// clients should authenticate into distinct principal ids.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct PrincipalId(String);
 
 impl PrincipalId {
@@ -444,6 +460,7 @@ impl fmt::Display for PrincipalId {
 /// snapshots or events. Secret material is deliberately not represented
 /// here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct ProviderCredentialMetadata {
     pub principal_id: PrincipalId,
     pub provider_id: String,
@@ -456,6 +473,7 @@ pub struct ProviderCredentialMetadata {
 /// Secret-bearing credential bootstrap payload. Custom `Debug` keeps
 /// daemon command tracing from printing provider tokens.
 #[derive(Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct ProviderCredentialInput {
     pub provider_id: String,
     pub token: String,
@@ -482,6 +500,7 @@ impl fmt::Debug for ProviderCredentialInput {
 /// press and the command arriving). Carries every spawn field that is
 /// not already supplied by `InjectPrompt` itself.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct SpawnFallback {
     pub session_key: SessionKey,
     #[serde(default)]
@@ -502,6 +521,7 @@ pub struct SpawnFallback {
 /// short tags from `OrphanReason::tag()` so clients can render
 /// without needing to depend on `lazybox-git-ops`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct WorktreeInspectionDto {
     pub path: std::path::PathBuf,
     pub bare_path: Option<std::path::PathBuf>,
@@ -522,6 +542,7 @@ pub struct WorktreeInspectionDto {
 /// origin allows. Wire-friendly projection of
 /// `lazybox_git_ops::DiscoveredCheckout` plus the resolved `repo`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct DiscoveredCheckoutDto {
     /// Absolute path to the checkout's working directory.
     pub path: std::path::PathBuf,
@@ -544,6 +565,7 @@ fn default_true() -> bool {
 
 /// TUI → daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum Command {
     /// Start streaming events. Connection replies with `Event::Snapshot`
     /// then a live stream.
@@ -1244,6 +1266,7 @@ impl Command {
 /// "merged", an issue is "closed". Both dispatch the same
 /// `Command::RemoveMergedWorkspace` on "yes".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum RemovableTerminalState {
     Merged,
     Closed,
@@ -1251,6 +1274,7 @@ pub enum RemovableTerminalState {
 
 /// Connection → TUI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum Event {
     // ── Hierarchy reminder ────────────────────────────────────────
     //
@@ -1931,6 +1955,7 @@ pub enum Event {
 /// Installed-vs-latest reading for one agent CLI, produced by the
 /// daemon's out-of-band update check.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct AgentCliUpdateStatus {
     pub agent_id: String,
     pub display_name: String,
@@ -1991,6 +2016,7 @@ impl ProviderErrorKind {
 /// animates with advancing sub-progress instead of one spinner that
 /// jumps straight to done.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum WorktreeStep {
     /// The one-time bare clone (a blobless partial fetch) — the slow
     /// part on a brand-new repo. Skipped (instant) when a healthy bare
@@ -2023,6 +2049,7 @@ pub enum WorktreeStep {
 /// controls unattended (no-permission) launch mode — a user `w` "work
 /// on this" runs unattended yet is `Interactive` here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum SpawnOrigin {
     /// The local user issued the spawn. Provisioning mounts the
     /// progress modal (today's behavior).
@@ -2036,6 +2063,7 @@ pub enum SpawnOrigin {
 /// Which autonomous source started a spawn — names the parenthetical
 /// tag on the "starting agent…" footer notice (issue #645).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum AutonomousTrigger {
     /// An `@lazybox` mention in an issue/PR body or comment.
     Mention,
@@ -2071,6 +2099,7 @@ impl AutonomousTrigger {
 /// 42% …` — updating the row's detail text without advancing the
 /// checklist (issue #405).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum WorktreeStepStatus {
     Started,
     Done,
@@ -2321,6 +2350,7 @@ impl Event {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct TerminalSnapshot {
     pub terminal_id: TerminalId,
     pub session_key: SessionKey,

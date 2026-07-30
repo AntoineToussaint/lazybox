@@ -34,6 +34,7 @@ pub mod auth;
 pub mod backend;
 pub mod chat;
 pub mod client_kv;
+pub mod client_runtime;
 pub mod event_forward;
 pub mod keep_awake;
 pub mod lifecycle;

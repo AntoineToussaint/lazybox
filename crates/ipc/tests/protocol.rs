@@ -15,6 +15,16 @@ use lazybox_ipc::{
 };
 use tokio::io::duplex;
 
+fn sample_time() -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
+        .expect("valid fixture timestamp")
+        .with_timezone(&chrono::Utc)
+}
+
+fn sample_session_id(value: u128) -> lazybox_core::SessionId {
+    lazybox_core::SessionId(uuid::Uuid::from_u128(value))
+}
+
 fn sample_workspace() -> lazybox_core::Workspace {
     let task = lazybox_core::Task {
         id: lazybox_core::TaskId {
@@ -33,7 +43,7 @@ fn sample_workspace() -> lazybox_core::Workspace {
         repo: Some("o/r".into()),
         branch: Some("b".into()),
         base_branch: None,
-        updated_at: chrono::Utc::now(),
+        updated_at: sample_time(),
         created_at: None,
         closed_at: None,
         labels: vec![],
@@ -52,14 +62,14 @@ fn sample_workspace() -> lazybox_core::Workspace {
         kind: None,
         closes_issues: vec![],
     };
-    lazybox_core::Workspace::from_task(task, chrono::Utc::now())
+    lazybox_core::Workspace::from_task(task, sample_time())
 }
 
 fn sample_project() -> lazybox_core::Project {
     lazybox_core::Project::new(
         lazybox_core::ProjectKey::github("o", "r"),
         "o/r",
-        chrono::Utc::now(),
+        sample_time(),
     )
 }
 
@@ -81,7 +91,7 @@ fn all_commands() -> Vec<Command> {
         },
         Command::Spawn {
             session_key: key.clone(),
-            session_id: Some(lazybox_core::SessionId::new()),
+            session_id: Some(sample_session_id(1)),
             client_request_id: None,
             kind: TerminalKind::Shell,
             cwd: None,
@@ -131,7 +141,7 @@ fn all_commands() -> Vec<Command> {
         Command::StartAgentRun {
             request_id: AgentRunRequestId("request-1".into()),
             session_key: key.clone(),
-            session_id: Some(lazybox_core::SessionId::new()),
+            session_id: Some(sample_session_id(2)),
             source_terminal_id: Some(TerminalId(7)),
             agent: "claude".into(),
             mode: AgentRuntimeMode::StreamJson,
@@ -288,7 +298,7 @@ fn all_commands() -> Vec<Command> {
         },
         Command::Snooze {
             session_key: key.clone(),
-            until: chrono::Utc::now() + chrono::Duration::hours(4),
+            until: sample_time() + chrono::Duration::hours(4),
         },
         Command::Unsnooze {
             session_key: key.clone(),
@@ -410,7 +420,7 @@ fn all_events() -> Vec<Event> {
         provider_id: "github".into(),
         source: "unit-test".into(),
         scopes: vec!["repo".into()],
-        updated_at: chrono::Utc::now(),
+        updated_at: sample_time(),
         expires_at: None,
     };
     vec![
@@ -518,12 +528,16 @@ fn all_events() -> Vec<Event> {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
             labels: vec![lazybox_core::Label::with_color("bug", "d73a4a")],
         },
-        Event::SessionCreated(Box::new(lazybox_core::WorkspaceSession::new(
-            lazybox_core::WorkspaceKey::new(key.as_str()),
-            lazybox_core::SessionKind::Shell,
-            std::path::PathBuf::from("/tmp/wt"),
-            chrono::Utc::now(),
-        ))),
+        {
+            let mut session = lazybox_core::WorkspaceSession::new(
+                lazybox_core::WorkspaceKey::new(key.as_str()),
+                lazybox_core::SessionKind::Shell,
+                std::path::PathBuf::from("/tmp/wt"),
+                sample_time(),
+            );
+            session.id = sample_session_id(5);
+            Event::SessionCreated(Box::new(session))
+        },
         Event::WorktreeProgress {
             session_key: key.clone(),
             step: WorktreeStep::Fetch,
@@ -538,7 +552,7 @@ fn all_events() -> Vec<Event> {
         },
         Event::SessionEnded {
             workspace_key: lazybox_core::WorkspaceKey::new(key.as_str()),
-            session_id: lazybox_core::SessionId::new(),
+            session_id: sample_session_id(3),
         },
         Event::TerminalSpawned {
             terminal_id: TerminalId(2),
@@ -611,7 +625,7 @@ fn all_events() -> Vec<Event> {
             request_id: AgentRunRequestId("request-1".into()),
             run_id: AgentRunId(9),
             session_key: key.clone(),
-            session_id: Some(lazybox_core::SessionId::new()),
+            session_id: Some(sample_session_id(4)),
             agent: "claude".into(),
             mode: AgentRuntimeMode::StreamJson,
         },

@@ -14,13 +14,14 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use lazybox_ipc::{
-    COMMAND_CHANNEL_CAPACITY, Command, Connection, EVENT_CHANNEL_CAPACITY, Event,
+    COMMAND_CHANNEL_CAPACITY, Command, Connection, EVENT_CHANNEL_CAPACITY, Event, TerminalId,
     event_forward_channel,
 };
 use lazybox_store::StoreError;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::fmt::Display;
+use std::mem::size_of;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,6 +29,73 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, mpsc};
 
 pub type Body = UnsyncBoxBody<Bytes, Infallible>;
+pub const DESKTOP_PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION_HEADER: &str = "x-lazybox-protocol-version";
+pub const PROTOCOL_FINGERPRINT_HEADER: &str = "x-lazybox-protocol-fingerprint";
+pub const TERMINAL_BINARY_CONTENT_TYPE: &str = "application/vnd.lazybox.terminal.v1";
+pub const TERMINAL_FRAME_LENGTH_OFFSET: usize = 0;
+pub const TERMINAL_FRAME_LENGTH_PREFIX_BYTES: usize = 4;
+pub const TERMINAL_SERVER_FRAME_HEADER_BYTES: usize = 25;
+pub const TERMINAL_SERVER_FRAME_KIND_OFFSET: usize = TERMINAL_FRAME_LENGTH_PREFIX_BYTES;
+pub const TERMINAL_SERVER_FRAME_TERMINAL_ID_OFFSET: usize =
+    TERMINAL_SERVER_FRAME_KIND_OFFSET + size_of::<u8>();
+pub const TERMINAL_SERVER_FRAME_FIRST_SEQ_OFFSET: usize =
+    TERMINAL_SERVER_FRAME_TERMINAL_ID_OFFSET + size_of::<u64>();
+pub const TERMINAL_SERVER_FRAME_LAST_SEQ_OFFSET: usize =
+    TERMINAL_SERVER_FRAME_FIRST_SEQ_OFFSET + size_of::<u64>();
+pub const TERMINAL_SERVER_FRAME_PAYLOAD_OFFSET: usize =
+    TERMINAL_FRAME_LENGTH_PREFIX_BYTES + TERMINAL_SERVER_FRAME_HEADER_BYTES;
+pub const MAX_TERMINAL_BINARY_FRAME_BYTES: usize =
+    crate::pty::REPLAY_RING_BYTES + TERMINAL_SERVER_FRAME_HEADER_BYTES;
+pub const TERMINAL_SERVER_FRAME_SNAPSHOT: u8 = 1;
+pub const TERMINAL_SERVER_FRAME_OUTPUT: u8 = 2;
+pub const TERMINAL_SERVER_FRAME_RESYNC: u8 = 3;
+pub const TERMINAL_SERVER_FRAME_SCROLLBACK: u8 = 4;
+pub const TERMINAL_SERVER_FRAME_RESYNC_UNAVAILABLE: u8 = 5;
+pub const TERMINAL_CLIENT_COMMAND_WRITE: u8 = 1;
+pub const TERMINAL_CLIENT_COMMAND_RESIZE: u8 = 2;
+pub const TERMINAL_CLIENT_COMMAND_RESYNC: u8 = 3;
+pub const TERMINAL_CLIENT_COMMAND_CLOSE: u8 = 4;
+pub const TERMINAL_CLIENT_COMMAND_FETCH_SCROLLBACK: u8 = 5;
+pub const TERMINAL_CLIENT_BODY_KIND_OFFSET: usize = 0;
+pub const TERMINAL_CLIENT_BODY_TERMINAL_ID_OFFSET: usize =
+    TERMINAL_CLIENT_BODY_KIND_OFFSET + size_of::<u8>();
+pub const TERMINAL_CLIENT_FRAME_HEADER_BYTES: usize = 9;
+pub const TERMINAL_CLIENT_BODY_PAYLOAD_OFFSET: usize = TERMINAL_CLIENT_FRAME_HEADER_BYTES;
+pub const TERMINAL_CLIENT_FRAME_KIND_OFFSET: usize =
+    TERMINAL_FRAME_LENGTH_PREFIX_BYTES + TERMINAL_CLIENT_BODY_KIND_OFFSET;
+pub const TERMINAL_CLIENT_FRAME_TERMINAL_ID_OFFSET: usize =
+    TERMINAL_FRAME_LENGTH_PREFIX_BYTES + TERMINAL_CLIENT_BODY_TERMINAL_ID_OFFSET;
+pub const TERMINAL_CLIENT_FRAME_PAYLOAD_OFFSET: usize =
+    TERMINAL_FRAME_LENGTH_PREFIX_BYTES + TERMINAL_CLIENT_BODY_PAYLOAD_OFFSET;
+pub const TERMINAL_RESIZE_PAYLOAD_BYTES: usize = 4;
+pub const TERMINAL_RESIZE_COLS_OFFSET: usize = 0;
+pub const TERMINAL_RESIZE_ROWS_OFFSET: usize = size_of::<u16>();
+pub const TERMINAL_RESYNC_PAYLOAD_BYTES: usize = size_of::<u64>();
+pub const TERMINAL_RESYNC_REQUIRED_SEQ_OFFSET: usize = 0;
+pub const DESKTOP_TERMINAL_STREAM_ITEM_RESET: u8 = 0;
+pub const DESKTOP_TERMINAL_STREAM_ITEM_DATA: u8 = 1;
+
+pub const DESKTOP_PROTOCOL_FINGERPRINT: u32 = desktop_protocol_fingerprint();
+
+const fn desktop_protocol_fingerprint() -> u32 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    let ipc = lazybox_ipc::PROTOCOL_FINGERPRINT.to_le_bytes();
+    let mut index = 0;
+    while index < ipc.len() {
+        hash ^= ipc[index] as u64;
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+        index += 1;
+    }
+    let source = include_bytes!("api_gateway.rs");
+    index = 0;
+    while index < source.len() {
+        hash ^= source[index] as u64;
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+        index += 1;
+    }
+    (hash ^ (hash >> 32)) as u32
+}
 
 const API_CLIENT_HTML: &str = include_str!("api_client.html");
 
@@ -63,6 +131,8 @@ pub enum GatewayError {
     Json(#[from] serde_json::Error),
     #[error("store error: {0}")]
     Store(String),
+    #[error("refusing plaintext API listener on non-loopback address {0}")]
+    NonLoopback(SocketAddr),
 }
 
 impl From<StoreError> for GatewayError {
@@ -72,12 +142,41 @@ impl From<StoreError> for GatewayError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct HealthResponse {
     pub ok: bool,
     pub service: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct ProtocolResponse {
+    pub protocol_version: u32,
+    pub protocol_fingerprint: u32,
+    pub build_version: String,
+    pub terminal_transport: String,
+    pub max_terminal_frame_bytes: usize,
+    pub max_terminal_write_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct UnsupportedProtocolResponse {
+    pub error: String,
+    pub requested: String,
+    pub supported: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct UnsupportedFingerprintResponse {
+    pub error: String,
+    pub requested: String,
+    pub supported: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct WorkspacesResponse {
     pub workspaces: Vec<lazybox_core::Workspace>,
     /// Persisted rows that were preserved but could not be decoded.
@@ -85,23 +184,220 @@ pub struct WorkspacesResponse {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct CommandResponse {
     pub ok: bool,
     /// Set only after the daemon-side handler has returned.
     pub completed: bool,
+    /// Connection-scoped outcomes emitted directly by the command handler.
+    pub events: Vec<Event>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 #[serde(tag = "type", content = "payload")]
 pub enum JsonClientFrame {
     Command(Command),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 #[serde(tag = "type", content = "payload")]
 pub enum JsonServerFrame {
     Event(Event),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct DesktopInfo {
+    pub protocol_version: u32,
+    pub max_terminal_frame_bytes: usize,
+    pub max_terminal_write_bytes: usize,
+    pub agents: Vec<String>,
+    pub default_agent: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum DesktopCommand {
+    SpawnAgent {
+        session_key: lazybox_core::SessionKey,
+        agent: String,
+    },
+    FocusWorkspace {
+        session_key: lazybox_core::SessionKey,
+    },
+    Refresh,
+}
+
+impl From<DesktopCommand> for Command {
+    fn from(command: DesktopCommand) -> Self {
+        match command {
+            DesktopCommand::SpawnAgent { session_key, agent } => Command::Spawn {
+                session_key,
+                session_id: None,
+                client_request_id: None,
+                kind: lazybox_ipc::TerminalKind::Agent(agent),
+                cwd: None,
+                initial_prompt: None,
+                on_main: false,
+                model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
+            },
+            DesktopCommand::FocusWorkspace { session_key } => {
+                Command::FocusWorkspace { session_key }
+            }
+            DesktopCommand::Refresh => Command::Refresh,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct DesktopTerminalSnapshot {
+    pub terminal_id: TerminalId,
+    pub session_key: lazybox_core::SessionKey,
+    pub kind: lazybox_ipc::TerminalKind,
+    pub last_seq: u64,
+    pub agent_state: Option<lazybox_ipc::AgentState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum DesktopEvent {
+    Snapshot {
+        workspaces: Vec<lazybox_core::Workspace>,
+        terminals: Vec<DesktopTerminalSnapshot>,
+    },
+    WorkspaceUpserted(Box<lazybox_core::Workspace>),
+    WorkspaceRemoved(lazybox_core::WorkspaceKey),
+    TerminalSpawned {
+        terminal_id: TerminalId,
+        session_key: lazybox_core::SessionKey,
+        kind: lazybox_ipc::TerminalKind,
+    },
+    TerminalExited {
+        terminal_id: TerminalId,
+        exit_code: Option<i32>,
+        last_output: Option<String>,
+    },
+    TerminalFocusRequested {
+        terminal_id: TerminalId,
+    },
+    AgentState {
+        session_key: lazybox_core::SessionKey,
+        terminal_id: TerminalId,
+        state: lazybox_ipc::AgentState,
+    },
+    ProviderError {
+        source: String,
+        message: String,
+    },
+    CommandRejected {
+        command: String,
+        message: String,
+    },
+    PollCompleted {
+        source: String,
+        count: usize,
+    },
+    PollProgress {
+        source: String,
+        message: String,
+    },
+    WorktreeProgress {
+        session_key: lazybox_core::SessionKey,
+        step: lazybox_ipc::WorktreeStep,
+        status: lazybox_ipc::WorktreeStepStatus,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+#[serde(tag = "type", content = "payload")]
+pub enum DesktopStreamMessage {
+    Connected,
+    Disconnected { message: String },
+    Frame(Box<DesktopEvent>),
+}
+
+pub fn desktop_event(event: Event) -> Option<DesktopEvent> {
+    match event {
+        Event::Snapshot {
+            workspaces,
+            terminals,
+            ..
+        } => Some(DesktopEvent::Snapshot {
+            workspaces,
+            terminals: terminals
+                .into_iter()
+                .map(|terminal| DesktopTerminalSnapshot {
+                    terminal_id: terminal.terminal_id,
+                    session_key: terminal.session_key,
+                    kind: terminal.kind,
+                    last_seq: terminal.last_seq,
+                    agent_state: terminal.agent_state,
+                })
+                .collect(),
+        }),
+        Event::WorkspaceUpserted(workspace) => Some(DesktopEvent::WorkspaceUpserted(workspace)),
+        Event::WorkspaceRemoved(key) => Some(DesktopEvent::WorkspaceRemoved(key)),
+        Event::TerminalSpawned {
+            terminal_id,
+            session_key,
+            kind,
+            ..
+        } => Some(DesktopEvent::TerminalSpawned {
+            terminal_id,
+            session_key,
+            kind,
+        }),
+        Event::TerminalExited {
+            terminal_id,
+            exit_code,
+            last_output,
+        } => Some(DesktopEvent::TerminalExited {
+            terminal_id,
+            exit_code,
+            last_output,
+        }),
+        Event::TerminalFocusRequested { terminal_id } => {
+            Some(DesktopEvent::TerminalFocusRequested { terminal_id })
+        }
+        Event::AgentState {
+            session_key,
+            terminal_id,
+            state,
+        } => Some(DesktopEvent::AgentState {
+            session_key,
+            terminal_id,
+            state,
+        }),
+        Event::ProviderError {
+            source, message, ..
+        } => Some(DesktopEvent::ProviderError { source, message }),
+        Event::CommandRejected { command, message } => {
+            Some(DesktopEvent::CommandRejected { command, message })
+        }
+        Event::PollCompleted { source, count } => {
+            Some(DesktopEvent::PollCompleted { source, count })
+        }
+        Event::PollProgress { source, message } => {
+            Some(DesktopEvent::PollProgress { source, message })
+        }
+        Event::WorktreeProgress {
+            session_key,
+            step,
+            status,
+            ..
+        } => Some(DesktopEvent::WorktreeProgress {
+            session_key,
+            step,
+            status,
+        }),
+        _ => None,
+    }
 }
 
 pub struct LocalIpcBridge {
@@ -145,6 +441,17 @@ pub fn health_response() -> HealthResponse {
     HealthResponse {
         ok: true,
         service: "lazybox-api-gateway".into(),
+    }
+}
+
+pub fn protocol_response() -> ProtocolResponse {
+    ProtocolResponse {
+        protocol_version: DESKTOP_PROTOCOL_VERSION,
+        protocol_fingerprint: DESKTOP_PROTOCOL_FINGERPRINT,
+        build_version: lazybox_ipc::BUILD_VERSION.to_string(),
+        terminal_transport: TERMINAL_BINARY_CONTENT_TYPE.to_string(),
+        max_terminal_frame_bytes: MAX_TERMINAL_BINARY_FRAME_BYTES,
+        max_terminal_write_bytes: lazybox_ipc::MAX_WRITE_CHUNK_BYTES,
     }
 }
 
@@ -219,6 +526,7 @@ pub fn spawn_local_bridge(config: ServerConfig) -> LocalIpcBridge {
 }
 
 pub async fn serve(config: ServerConfig, options: GatewayOptions) -> Result<(), GatewayError> {
+    ensure_loopback(options.bind_addr)?;
     let listener = TcpListener::bind(options.bind_addr).await?;
     serve_listener(config, options, listener).await
 }
@@ -228,6 +536,7 @@ pub async fn serve_listener(
     options: GatewayOptions,
     listener: TcpListener,
 ) -> Result<(), GatewayError> {
+    ensure_loopback(listener.local_addr()?)?;
     let connection_limit = Arc::new(Semaphore::new(options.max_connections.max(1)));
     loop {
         let permit = connection_limit
@@ -254,6 +563,14 @@ pub async fn serve_listener(
                 tracing::warn!("api gateway connection failed: {error}");
             }
         });
+    }
+}
+
+fn ensure_loopback(address: SocketAddr) -> Result<(), GatewayError> {
+    if address.ip().is_loopback() {
+        Ok(())
+    } else {
+        Err(GatewayError::NonLoopback(address))
     }
 }
 
@@ -299,8 +616,42 @@ where
         );
     }
 
+    if let Some(requested) = request.headers().get(PROTOCOL_VERSION_HEADER)
+        && requested.as_bytes() != DESKTOP_PROTOCOL_VERSION.to_string().as_bytes()
+    {
+        return json_response(
+            StatusCode::UPGRADE_REQUIRED,
+            &UnsupportedProtocolResponse {
+                error: format!(
+                    "unsupported lazybox protocol version {}; this daemon supports version {}",
+                    requested.to_str().unwrap_or("<non-UTF-8>"),
+                    DESKTOP_PROTOCOL_VERSION
+                ),
+                requested: requested.to_str().unwrap_or("<non-UTF-8>").to_string(),
+                supported: DESKTOP_PROTOCOL_VERSION,
+            },
+        );
+    }
+    if let Some(requested) = request.headers().get(PROTOCOL_FINGERPRINT_HEADER)
+        && requested.as_bytes() != DESKTOP_PROTOCOL_FINGERPRINT.to_string().as_bytes()
+    {
+        return json_response(
+            StatusCode::UPGRADE_REQUIRED,
+            &UnsupportedFingerprintResponse {
+                error: format!(
+                    "unsupported lazybox protocol fingerprint {}; this daemon supports {}",
+                    requested.to_str().unwrap_or("<non-UTF-8>"),
+                    DESKTOP_PROTOCOL_FINGERPRINT
+                ),
+                requested: requested.to_str().unwrap_or("<non-UTF-8>").to_string(),
+                supported: DESKTOP_PROTOCOL_FINGERPRINT,
+            },
+        );
+    }
+
     match (request.method(), request.uri().path()) {
         (&Method::GET, "/v1/health") => json_response(StatusCode::OK, &health_response()),
+        (&Method::GET, "/v1/protocol") => json_response(StatusCode::OK, &protocol_response()),
         (&Method::GET, "/v1/metrics") => json_response(StatusCode::OK, &metrics_response(&config)),
         (&Method::GET, "/v1/workspaces") => match workspaces_response(&config).await {
             Ok(payload) => json_response(StatusCode::OK, &payload),
@@ -314,6 +665,7 @@ where
             command_response(config, &options, request.into_body()).await
         }
         (&Method::POST, "/v1/stream") => stream_command_response(config, request.into_body()),
+        (&Method::POST, "/v1/terminal") => terminal_stream_response(config, request.into_body()),
         _ => json_response(
             StatusCode::NOT_FOUND,
             &serde_json::json!({ "error": "not found" }),
@@ -353,23 +705,38 @@ where
             }),
         );
     }
+    if is_binary_terminal_command(&command) {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            &serde_json::json!({
+                "error": "terminal input, resize, resync, close, and scrollback commands must use /v1/terminal"
+            }),
+        );
+    }
 
     // Execute and await the handler itself. Previously this endpoint returned
     // 200 as soon as an unbounded channel accepted the command, then dropped
     // the bridge; a slow mutation could be abandoned after the success reply.
-    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let event_tx = lazybox_ipc::EventSender::from_unbounded(event_tx);
     let mut task = tokio::spawn(async move {
         crate::dispatch_command(&config, &event_tx, command).await;
     });
     match tokio::time::timeout(options.command_timeout, &mut task).await {
-        Ok(Ok(())) => json_response(
-            StatusCode::OK,
-            &CommandResponse {
-                ok: true,
-                completed: true,
-            },
-        ),
+        Ok(Ok(())) => {
+            let mut events = Vec::new();
+            while let Ok(event) = event_rx.try_recv() {
+                events.push(event);
+            }
+            json_response(
+                StatusCode::OK,
+                &CommandResponse {
+                    ok: true,
+                    completed: true,
+                    events,
+                },
+            )
+        }
         Ok(Err(error)) => json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             &serde_json::json!({ "error": format!("command handler failed: {error}") }),
@@ -444,6 +811,9 @@ fn ndjson_event_response(
     tokio::spawn(async move {
         let _keepalive_tx = keepalive_tx;
         while let Some(event) = event_rx.recv().await {
+            let Some(event) = control_event(event) else {
+                continue;
+            };
             let frame = JsonServerFrame::Event(event);
             let mut bytes = match serde_json::to_vec(&frame) {
                 Ok(bytes) => bytes,
@@ -461,6 +831,301 @@ fn ndjson_event_response(
     response_with_body(StatusCode::OK, "application/x-ndjson", body.boxed_unsync())
 }
 
+pub(crate) fn control_event(mut event: Event) -> Option<Event> {
+    match &mut event {
+        Event::Snapshot { terminals, .. } => {
+            for terminal in terminals {
+                terminal.replay.clear();
+                terminal.replay_available = false;
+            }
+            Some(event)
+        }
+        Event::TerminalOutput { .. }
+        | Event::TerminalResync { .. }
+        | Event::TerminalScrollback { .. } => None,
+        _ => Some(event),
+    }
+}
+
+fn terminal_stream_response<B>(config: ServerConfig, body: B) -> Response<Body>
+where
+    B: HttpBody<Data = Bytes> + Send + Unpin + 'static,
+    B::Error: Display + Send + Sync + 'static,
+{
+    let bridge = spawn_local_bridge(config);
+    let command_tx = bridge.command_tx.clone();
+    let _ = command_tx.try_send(Command::Subscribe);
+    tokio::spawn(async move {
+        pump_terminal_commands(body, command_tx).await;
+    });
+    binary_terminal_response(bridge.event_rx, bridge.command_tx)
+}
+
+fn binary_terminal_response(
+    mut event_rx: mpsc::Receiver<Event>,
+    keepalive_tx: mpsc::Sender<Command>,
+) -> Response<Body> {
+    let (mut tx, body) = Channel::<Bytes, Infallible>::new(32);
+    tokio::spawn(async move {
+        let _keepalive_tx = keepalive_tx;
+        while let Some(event) = event_rx.recv().await {
+            for frame in encode_terminal_event(&event) {
+                if tx.send_data(Bytes::from(frame)).await.is_err() {
+                    return;
+                }
+            }
+        }
+    });
+    response_with_body(
+        StatusCode::OK,
+        TERMINAL_BINARY_CONTENT_TYPE,
+        body.boxed_unsync(),
+    )
+}
+
+pub fn encode_terminal_event(event: &Event) -> Vec<Vec<u8>> {
+    match event {
+        Event::Snapshot { terminals, .. } => terminals
+            .iter()
+            .filter(|terminal| terminal.replay_available)
+            .map(|terminal| {
+                encode_terminal_server_frame(
+                    TERMINAL_SERVER_FRAME_SNAPSHOT,
+                    terminal.terminal_id,
+                    0,
+                    terminal.last_seq,
+                    &terminal.replay,
+                )
+            })
+            .collect(),
+        Event::TerminalOutput {
+            terminal_id,
+            bytes,
+            first_seq,
+            seq,
+        } => vec![encode_terminal_server_frame(
+            TERMINAL_SERVER_FRAME_OUTPUT,
+            *terminal_id,
+            *first_seq,
+            *seq,
+            bytes,
+        )],
+        Event::TerminalResync {
+            terminal_id,
+            replay,
+            seq,
+        } => vec![encode_terminal_server_frame(
+            TERMINAL_SERVER_FRAME_RESYNC,
+            *terminal_id,
+            0,
+            *seq,
+            replay,
+        )],
+        Event::TerminalScrollback {
+            terminal_id,
+            replay,
+            seq,
+        } => vec![encode_terminal_server_frame(
+            TERMINAL_SERVER_FRAME_SCROLLBACK,
+            *terminal_id,
+            0,
+            *seq,
+            replay,
+        )],
+        Event::TerminalResyncUnavailable { terminal_id } => {
+            vec![encode_terminal_server_frame(
+                TERMINAL_SERVER_FRAME_RESYNC_UNAVAILABLE,
+                *terminal_id,
+                0,
+                0,
+                &[],
+            )]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn encode_terminal_server_frame(
+    kind: u8,
+    terminal_id: TerminalId,
+    first_seq: u64,
+    seq: u64,
+    payload: &[u8],
+) -> Vec<u8> {
+    let body_len = TERMINAL_SERVER_FRAME_HEADER_BYTES + payload.len();
+    let mut frame = Vec::with_capacity(TERMINAL_FRAME_LENGTH_PREFIX_BYTES + body_len);
+    frame.extend_from_slice(&(body_len as u32).to_be_bytes());
+    frame.push(kind);
+    frame.extend_from_slice(&terminal_id.0.to_be_bytes());
+    frame.extend_from_slice(&first_seq.to_be_bytes());
+    frame.extend_from_slice(&seq.to_be_bytes());
+    frame.extend_from_slice(payload);
+    frame
+}
+
+pub fn encode_terminal_command(command: &Command) -> Option<Vec<u8>> {
+    let (kind, terminal_id, tail) = match command {
+        Command::Write { terminal_id, bytes } => {
+            (TERMINAL_CLIENT_COMMAND_WRITE, *terminal_id, bytes.clone())
+        }
+        Command::Resize {
+            terminal_id,
+            cols,
+            rows,
+        } => {
+            let mut tail = Vec::with_capacity(TERMINAL_RESIZE_PAYLOAD_BYTES);
+            tail.extend_from_slice(&cols.to_be_bytes());
+            tail.extend_from_slice(&rows.to_be_bytes());
+            (TERMINAL_CLIENT_COMMAND_RESIZE, *terminal_id, tail)
+        }
+        Command::RequestTerminalResync {
+            terminal_id,
+            required_seq,
+        } => (
+            TERMINAL_CLIENT_COMMAND_RESYNC,
+            *terminal_id,
+            required_seq.to_be_bytes().to_vec(),
+        ),
+        Command::Close {
+            terminal_id,
+            client_request_id: None,
+        } => (TERMINAL_CLIENT_COMMAND_CLOSE, *terminal_id, Vec::new()),
+        Command::FetchScrollback { terminal_id } => (
+            TERMINAL_CLIENT_COMMAND_FETCH_SCROLLBACK,
+            *terminal_id,
+            Vec::new(),
+        ),
+        _ => return None,
+    };
+    let body_len = TERMINAL_CLIENT_FRAME_HEADER_BYTES + tail.len();
+    let mut frame = Vec::with_capacity(TERMINAL_FRAME_LENGTH_PREFIX_BYTES + body_len);
+    frame.extend_from_slice(&(body_len as u32).to_be_bytes());
+    frame.push(kind);
+    frame.extend_from_slice(&terminal_id.0.to_be_bytes());
+    frame.extend_from_slice(&tail);
+    Some(frame)
+}
+
+pub(crate) async fn pump_terminal_commands<B>(mut body: B, command_tx: mpsc::Sender<Command>)
+where
+    B: HttpBody<Data = Bytes> + Send + Unpin + 'static,
+    B::Error: Display + Send + Sync + 'static,
+{
+    let mut buffer = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let frame = match frame {
+            Ok(frame) => frame,
+            Err(error) => {
+                tracing::warn!("api gateway: read terminal command stream: {error}");
+                return;
+            }
+        };
+        let Ok(data) = frame.into_data() else {
+            continue;
+        };
+        let mut remaining = data.as_ref();
+        loop {
+            if buffer.len() < TERMINAL_FRAME_LENGTH_PREFIX_BYTES {
+                let take = (TERMINAL_FRAME_LENGTH_PREFIX_BYTES - buffer.len()).min(remaining.len());
+                buffer.extend_from_slice(&remaining[..take]);
+                remaining = &remaining[take..];
+                if buffer.len() < TERMINAL_FRAME_LENGTH_PREFIX_BYTES {
+                    break;
+                }
+            }
+            let body_len = u32::from_be_bytes(
+                buffer[..TERMINAL_FRAME_LENGTH_PREFIX_BYTES]
+                    .try_into()
+                    .expect("four-byte length"),
+            ) as usize;
+            if body_len > lazybox_ipc::MAX_COMMAND_FRAME_BYTES as usize {
+                tracing::warn!("api gateway: terminal command frame exceeded its limit");
+                return;
+            }
+            let frame_len = TERMINAL_FRAME_LENGTH_PREFIX_BYTES + body_len;
+            let take = (frame_len - buffer.len()).min(remaining.len());
+            buffer.extend_from_slice(&remaining[..take]);
+            remaining = &remaining[take..];
+            if buffer.len() < frame_len {
+                break;
+            }
+            match decode_terminal_command(&buffer[TERMINAL_FRAME_LENGTH_PREFIX_BYTES..frame_len]) {
+                Ok(command) => {
+                    if command_tx.send(command).await.is_err() {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!("api gateway: decode terminal command: {error}");
+                    return;
+                }
+            }
+            buffer.clear();
+            if remaining.is_empty() {
+                break;
+            }
+        }
+    }
+    if !buffer.is_empty() {
+        tracing::warn!("api gateway: terminal command stream ended with an incomplete frame");
+    }
+}
+
+pub(crate) fn decode_terminal_command(body: &[u8]) -> Result<Command, &'static str> {
+    if body.len() < TERMINAL_CLIENT_FRAME_HEADER_BYTES {
+        return Err("frame is shorter than its header");
+    }
+    let kind = body[TERMINAL_CLIENT_BODY_KIND_OFFSET];
+    let terminal_id = TerminalId(u64::from_be_bytes(
+        body[TERMINAL_CLIENT_BODY_TERMINAL_ID_OFFSET..TERMINAL_CLIENT_BODY_PAYLOAD_OFFSET]
+            .try_into()
+            .expect("eight-byte terminal id"),
+    ));
+    let tail = &body[TERMINAL_CLIENT_BODY_PAYLOAD_OFFSET..];
+    match kind {
+        TERMINAL_CLIENT_COMMAND_WRITE if tail.len() <= lazybox_ipc::MAX_WRITE_CHUNK_BYTES => {
+            Ok(Command::Write {
+                terminal_id,
+                bytes: tail.to_vec(),
+            })
+        }
+        TERMINAL_CLIENT_COMMAND_WRITE => Err("write payload exceeds its limit"),
+        TERMINAL_CLIENT_COMMAND_RESIZE if tail.len() == TERMINAL_RESIZE_PAYLOAD_BYTES => {
+            Ok(Command::Resize {
+                terminal_id,
+                cols: u16::from_be_bytes(
+                    tail[TERMINAL_RESIZE_COLS_OFFSET..TERMINAL_RESIZE_ROWS_OFFSET]
+                        .try_into()
+                        .expect("two-byte cols"),
+                ),
+                rows: u16::from_be_bytes(
+                    tail[TERMINAL_RESIZE_ROWS_OFFSET..TERMINAL_RESIZE_PAYLOAD_BYTES]
+                        .try_into()
+                        .expect("two-byte rows"),
+                ),
+            })
+        }
+        TERMINAL_CLIENT_COMMAND_RESYNC if tail.len() == TERMINAL_RESYNC_PAYLOAD_BYTES => {
+            Ok(Command::RequestTerminalResync {
+                terminal_id,
+                required_seq: u64::from_be_bytes(
+                    tail[TERMINAL_RESYNC_REQUIRED_SEQ_OFFSET..]
+                        .try_into()
+                        .expect("eight-byte required sequence"),
+                ),
+            })
+        }
+        TERMINAL_CLIENT_COMMAND_CLOSE if tail.is_empty() => Ok(Command::Close {
+            terminal_id,
+            client_request_id: None,
+        }),
+        TERMINAL_CLIENT_COMMAND_FETCH_SCROLLBACK if tail.is_empty() => {
+            Ok(Command::FetchScrollback { terminal_id })
+        }
+        _ => Err("unknown terminal command or invalid payload length"),
+    }
+}
+
 /// Ceiling on one ndjson command line. A client that streams an
 /// unterminated line would otherwise grow `buffer` without bound; no
 /// legitimate `Command` comes anywhere near this.
@@ -468,7 +1133,7 @@ const MAX_COMMAND_LINE_BYTES: usize = lazybox_ipc::MAX_COMMAND_FRAME_BYTES as us
 /// Bound the amount of work one duplex request can enqueue before reconnecting.
 const MAX_STREAM_COMMANDS: usize = 256;
 
-async fn pump_ndjson_commands<B>(mut body: B, command_tx: mpsc::Sender<Command>)
+pub(crate) async fn pump_ndjson_commands<B>(mut body: B, command_tx: mpsc::Sender<Command>)
 where
     B: HttpBody<Data = Bytes> + Send + Unpin + 'static,
     B::Error: Display + Send + Sync + 'static,
@@ -541,6 +1206,11 @@ async fn send_command_line(line: &[u8], command_tx: &mpsc::Sender<Command>) {
         return;
     }
     match decode_command_frame(trimmed) {
+        Ok(command) if is_binary_terminal_command(&command) => {
+            tracing::warn!(
+                "api gateway: terminal command rejected from JSON stream; use /v1/terminal"
+            );
+        }
         Ok(command) => {
             if command_tx.send(command).await.is_err() {
                 tracing::warn!("api gateway: command stream closed");
@@ -550,6 +1220,17 @@ async fn send_command_line(line: &[u8], command_tx: &mpsc::Sender<Command>) {
             tracing::warn!("api gateway: decode command stream line: {error}");
         }
     }
+}
+
+fn is_binary_terminal_command(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Write { .. }
+            | Command::Resize { .. }
+            | Command::RequestTerminalResync { .. }
+            | Command::Close { .. }
+            | Command::FetchScrollback { .. }
+    )
 }
 
 fn decode_command_frame(bytes: &[u8]) -> serde_json::Result<Command> {

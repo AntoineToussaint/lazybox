@@ -134,19 +134,17 @@ Current API is intended for local clients:
 - localhost bind by default;
 - bearer token required unless `--insecure-no-auth` is passed explicitly
   (shipped);
-- non-loopback plaintext binds refused without `--allow-insecure-http`
-  (shipped);
+- non-loopback binds refused (shipped);
 - no CORS by default.
 
 Before remote/mobile use:
 
-- ~~Require bearer auth for non-loopback binds~~ — shipped: the gateway
-  refuses to start without an auth decision on any bind, and non-loopback
-  additionally requires the `--allow-insecure-http` acknowledgement.
+- ~~Keep the plaintext gateway loopback-only~~ — shipped.
 - Document SSH tunnel and reverse tunnel setups.
 - Add token rotation and a generated-token bootstrap command.
-- Consider mTLS or platform-specific secure pairing only after the
-  product shape is clear.
+- Add TLS and principal-scoped authorization before direct remote transport.
+- Consider platform-specific secure pairing only after the product shape is
+  clear.
 
 ## 6. Multi-User Auth And Provider Credentials
 

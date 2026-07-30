@@ -31,6 +31,7 @@ use std::path::PathBuf;
 /// The prefix is purely advisory — the daemon routes by it in the
 /// same way it routes workspace keys in `build_provider_for_workspace`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct ProjectKey(pub String);
 
 impl ProjectKey {
@@ -173,6 +174,7 @@ pub fn github_owner_repo_from_url(url: &str) -> Option<(String, String)> {
 
 /// A top-level Project — a container that holds Workspaces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct Project {
     pub key: ProjectKey,
     /// Display name (e.g. `"owner/repo"` for github,

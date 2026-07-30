@@ -44,6 +44,13 @@ pub enum GitError {
     Command(String),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    #[error(
+        "branch '{branch}' is already checked out at {} — refusing to take it from another \
+         live worktree; join the live session that owns that checkout, or free an external \
+         checkout before retrying",
+        .holder.display()
+    )]
+    BranchHeldLive { branch: String, holder: PathBuf },
 }
 
 /// Executes one bounded git command. A non-zero exit is returned in
@@ -2189,6 +2196,7 @@ fn fetch_failure_reason(err: &GitError, authed: bool) -> String {
     let raw = match err {
         GitError::Command(stderr) => stderr.clone(),
         GitError::Io(e) => e.to_string(),
+        GitError::BranchHeldLive { .. } => err.to_string(),
     };
     let line = raw
         .lines()
@@ -2447,12 +2455,10 @@ async fn add_worktree_resilient(
             .map_err(explain_promisor_failure);
     }
 
-    Err(GitError::Command(format!(
-        "branch '{branch}' is already checked out at {} — refusing to take it \
-         from another live worktree; safely join or adopt the workspace that \
-         owns that checkout before retrying",
-        holder.display()
-    )))
+    Err(GitError::BranchHeldLive {
+        branch: branch.to_string(),
+        holder,
+    })
 }
 
 /// Parse the holding worktree's path out of a failed `worktree add`
@@ -4329,6 +4335,15 @@ mod resilient_add_tests {
         let err = add_worktree_resilient(default_git_runner(), &bare, &target, "feat", "HEAD", &[])
             .await
             .expect_err("a live external holder must not be silently stolen from");
+        assert!(
+            matches!(
+                &err,
+                GitError::BranchHeldLive { branch, holder }
+                    if branch == "feat"
+                        && canonical_or_self(holder) == canonical_or_self(&external)
+            ),
+            "the caller needs the holder path to decide whether it is reclaimable: {err}"
+        );
         let msg = err.to_string();
         assert!(msg.contains("already checked out at"), "{msg}");
         assert!(msg.contains("external"), "error names the holder: {msg}");

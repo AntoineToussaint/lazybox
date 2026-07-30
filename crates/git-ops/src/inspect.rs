@@ -191,6 +191,52 @@ impl WorktreeManager {
         Ok(paths)
     }
 
+    /// Remove a session-less managed holder only when it has no local
+    /// work to preserve. The caller owns session-liveness validation;
+    /// this boundary validates that `path` is a registered worktree for
+    /// `branch`, lives under lazybox's managed root, is unlocked, clean,
+    /// and has no unpushed commits before asking git to remove it.
+    ///
+    /// The local branch ref is deliberately retained so the caller can
+    /// immediately check it out at the intended workspace path.
+    pub async fn reclaim_managed_worktree_if_safe(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+        path: &Path,
+    ) -> Result<bool, GitError> {
+        let bare = self.bare_path(owner, repo);
+        if !bare.exists() {
+            return Ok(false);
+        }
+
+        let lock = crate::repo_lock(&bare);
+        let _guard = lock.lock().await;
+        let managed_root = canonical_or_self(&self.base_dir().join("worktrees"));
+        let key = canonical_or_self(path);
+        if !key.starts_with(&managed_root) {
+            return Ok(false);
+        }
+
+        let entries = list_porcelain(&bare).await?;
+        let Some(entry) = entries.into_iter().find(|entry| {
+            !entry.prunable
+                && entry.branch.as_deref() == Some(branch)
+                && canonical_or_self(&entry.path) == key
+        }) else {
+            return Ok(false);
+        };
+        let porcelain = HashMap::from([(key.clone(), (bare.clone(), entry))]);
+        let inspection = inspect_one(path, &key, &porcelain, &HashMap::new()).await;
+        if !inspection.is_safe_to_delete {
+            return Ok(false);
+        }
+
+        crate::run_git_in(&bare, &["worktree", "remove", &path.to_string_lossy()]).await?;
+        Ok(true)
+    }
+
     /// Scan the worktrees directory + every bare clone under
     /// `base/repos/**/*.git` and report each worktree's health.
     ///

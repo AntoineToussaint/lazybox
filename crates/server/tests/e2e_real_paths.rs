@@ -453,6 +453,90 @@ async fn e2e_spawn_provisions_a_real_worktree_and_collapse_carries_it_to_the_pr(
 }
 
 #[tokio::test]
+async fn e2e_sessionless_branch_holder_is_reclaimed_at_the_current_workspace_path() {
+    let _home = IsolatedConfigHome::new();
+    timeout(TEST_DEADLINE, async {
+        let root = tempfile::TempDir::new().unwrap();
+        let upstream = seed_local_upstream(root.path(), "acme", "core");
+        let manager = lazybox_git_ops::WorktreeManager::new(root.path().to_path_buf());
+        let bare = manager.bare_path("acme", "core");
+        let branch = "docs-start-work-by-tagging-issues";
+        publish_branch(upstream.path(), &bare, branch);
+
+        let leaked = root
+            .path()
+            .join("worktrees/github-acme-core")
+            .join("issue-584-publish-v0-1-8-tag-artifacts-homebrew-release");
+        std::fs::create_dir_all(leaked.parent().unwrap()).unwrap();
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-B",
+                branch,
+                &leaked.to_string_lossy(),
+                &format!("refs/heads/{branch}"),
+            ],
+        );
+        let leaked = std::fs::canonicalize(leaked).unwrap();
+
+        let mock = lazybox_server::backend::MockBackend::new();
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            Arc::new(MemoryStore::new()),
+            Arc::new(mock.clone()),
+            root.path().to_path_buf(),
+        );
+        let workspace = lazybox_core::Workspace::from_task(
+            task(
+                "acme/core#652",
+                "https://github.com/acme/core/pull/652",
+                Some(branch),
+                vec![],
+            ),
+            chrono::Utc::now(),
+        );
+        let workspace_key = workspace.key.clone();
+        let intended = lazybox_server::spawn_handler::worktree_path_for_session(&workspace, 0);
+        assert_ne!(
+            leaked, intended,
+            "fixture must reproduce a branch/workspace-path mismatch"
+        );
+        save_workspace(&config, &workspace);
+
+        let (mut client, _daemon) = subscribed(config.clone()).await;
+        let backend = spawn_and_capture(
+            &mut client,
+            &mock,
+            &workspace_key,
+            TerminalKind::Shell,
+            None,
+        )
+        .await;
+
+        assert!(!leaked.exists(), "the session-less holder is reclaimed");
+        assert_eq!(
+            mock.cwd_for(&backend).await.as_deref(),
+            Some(intended.as_path()),
+            "the retry provisions the current workspace's intended path"
+        );
+        let saved = load_workspace(&config, &workspace_key);
+        assert_eq!(saved.sessions.len(), 1);
+        assert_eq!(saved.sessions[0].worktree_path, intended);
+        let listed = git(&bare, &["worktree", "list", "--porcelain"]);
+        let branch_line = format!("branch refs/heads/{branch}");
+        assert_eq!(
+            listed.lines().filter(|line| *line == branch_line).count(),
+            1,
+            "the branch is checked out exactly once after recovery"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
+#[tokio::test]
 async fn e2e_cross_repo_pr_adopts_its_untracked_managed_worktree() {
     let home = IsolatedConfigHome::new();
     std::fs::write(

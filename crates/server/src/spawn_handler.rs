@@ -1940,7 +1940,7 @@ async fn resolve_or_create_session(
     // only the path is human-friendly.
     let kind_for_session = session_kind_from_terminal(kind);
     let path = worktree_path_for_session(&workspace, 0);
-    if let Some((adopted_path, session_id)) = adopt_untracked_pr_worktree(
+    if let Some((adopted_path, session_id)) = recover_untracked_pr_worktree(
         config,
         &workspace_key,
         &kind_for_session,
@@ -2019,7 +2019,7 @@ async fn resolve_or_create_session(
     Ok((path, new_session_id, false))
 }
 
-async fn adopt_untracked_pr_worktree(
+async fn recover_untracked_pr_worktree(
     config: &ServerConfig,
     workspace_key: &WorkspaceKey,
     kind: &SessionKind,
@@ -2065,6 +2065,20 @@ async fn adopt_untracked_pr_worktree(
     };
     if paths_match(candidate, intended_path)
         || managed_worktree_has_session_owner(config, candidate)
+    {
+        return Ok(None);
+    }
+
+    if reclaim_sessionless_managed_holder_locked(
+        config,
+        &config.worktree_manager(),
+        owner,
+        name,
+        &branch,
+        candidate,
+        intended_path,
+    )
+    .await
     {
         return Ok(None);
     }
@@ -2161,6 +2175,86 @@ fn paths_match(left: &Path, right: &Path) -> bool {
     let canonical =
         |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     canonical(left) == canonical(right)
+}
+
+async fn reclaim_sessionless_managed_holder(
+    config: &ServerConfig,
+    mgr: &lazybox_git_ops::WorktreeManager,
+    owner: &str,
+    repo: &str,
+    branch: &str,
+    holder: &Path,
+    intended_path: &Path,
+) -> bool {
+    let _ownership_guard = config.worktree_ownership_lock.lock().await;
+    reclaim_sessionless_managed_holder_locked(
+        config,
+        mgr,
+        owner,
+        repo,
+        branch,
+        holder,
+        intended_path,
+    )
+    .await
+}
+
+async fn reclaim_sessionless_managed_holder_locked(
+    config: &ServerConfig,
+    mgr: &lazybox_git_ops::WorktreeManager,
+    owner: &str,
+    repo: &str,
+    branch: &str,
+    holder: &Path,
+    intended_path: &Path,
+) -> bool {
+    if managed_worktree_has_session_owner(config, holder)
+        || managed_worktree_has_live_main_owner(config, holder).await
+    {
+        return false;
+    }
+
+    match mgr
+        .reclaim_managed_worktree_if_safe(owner, repo, branch, holder)
+        .await
+    {
+        Ok(true) => {
+            tracing::info!(
+                repo = %format!("{owner}/{repo}"),
+                branch,
+                holder = %holder.display(),
+                intended = %intended_path.display(),
+                "reclaimed session-less branch holder before provisioning"
+            );
+            true
+        }
+        Ok(false) => false,
+        Err(error) => {
+            tracing::warn!(
+                repo = %format!("{owner}/{repo}"),
+                branch,
+                holder = %holder.display(),
+                "could not reclaim session-less branch holder: {error}"
+            );
+            false
+        }
+    }
+}
+
+async fn managed_worktree_has_live_main_owner(config: &ServerConfig, candidate: &Path) -> bool {
+    let on_main = config.on_main_terminals.lock().await.clone();
+    if on_main.is_empty() {
+        return false;
+    }
+    let meta = config.terminal_meta.lock().await.clone();
+    on_main.into_iter().any(|terminal_id| {
+        meta.get(&terminal_id)
+            .and_then(|(session_key, _)| {
+                load_workspace(config, &WorkspaceKey::new(session_key.as_str())).ok()
+            })
+            .and_then(|workspace| main_worktree_path(&workspace))
+            .is_some_and(|path| paths_match(&path, candidate))
+    })
 }
 
 /// Build a deterministic branch name for a task that has no upstream
@@ -2451,9 +2545,24 @@ async fn provision_worktree(
                     // (issue #550). `None` on-main (that branch is always a
                     // plain origin branch) and for non-PR tasks.
                     let pr_number = (!on_main).then(|| task.and_then(Task::pr_number)).flatten();
-                    mgr.checkout_at(target, owner, name, branch, pr_number)
-                        .await
-                        .map_err(|e| ServerError::Worktree(format!("checkout_at: {e}")))?
+                    let mut checkout = mgr
+                        .checkout_at(target, owner, name, branch, pr_number)
+                        .await;
+                    let reclaim = match &checkout {
+                        Err(lazybox_git_ops::GitError::BranchHeldLive { holder, .. }) => {
+                            reclaim_sessionless_managed_holder(
+                                config, &mgr, owner, name, branch, holder, target,
+                            )
+                            .await
+                        }
+                        _ => false,
+                    };
+                    if reclaim {
+                        checkout = mgr
+                            .checkout_at(target, owner, name, branch, pr_number)
+                            .await;
+                    }
+                    checkout.map_err(|e| ServerError::Worktree(format!("checkout_at: {e}")))?
                 }
                 None => {
                     // Issue (or other branchless task, or blank workspace):
@@ -2472,11 +2581,32 @@ async fn provision_worktree(
                     let base = mgr.default_branch(owner, name).await.map_err(|e| {
                         ServerError::Worktree(format!("default_branch lookup: {e}"))
                     })?;
-                    mgr.checkout_new_branch_at(target, owner, name, &new_branch, &base)
-                        .await
-                        .map_err(|e| {
-                            ServerError::Worktree(format!("checkout_new_branch_at: {e}"))
-                        })?
+                    let mut checkout = mgr
+                        .checkout_new_branch_at(target, owner, name, &new_branch, &base)
+                        .await;
+                    let reclaim = match &checkout {
+                        Err(lazybox_git_ops::GitError::BranchHeldLive { holder, .. }) => {
+                            reclaim_sessionless_managed_holder(
+                                config,
+                                &mgr,
+                                owner,
+                                name,
+                                &new_branch,
+                                holder,
+                                target,
+                            )
+                            .await
+                        }
+                        _ => false,
+                    };
+                    if reclaim {
+                        checkout = mgr
+                            .checkout_new_branch_at(target, owner, name, &new_branch, &base)
+                            .await;
+                    }
+                    checkout.map_err(|e| {
+                        ServerError::Worktree(format!("checkout_new_branch_at: {e}"))
+                    })?
                 }
             };
             (worktree, Some(format!("{owner}/{name}")))

@@ -2072,8 +2072,10 @@ pub enum WorktreeRecovery {
     /// more specific matches but the text smells like network.
     Transient,
     /// B1: the branch is checked out in another *live* worktree; git
-    /// refuses to co-opt it. The user must explicitly join or adopt the
-    /// workspace that owns the checkout.
+    /// refuses to co-opt it. Session-less safe managed holders are
+    /// reclaimed by the daemon before this reaches the client, so the
+    /// remaining cases require joining a real session or freeing an
+    /// external checkout.
     BranchHeldLive,
     /// B3: a leftover directory holds real uncommitted work, so the
     /// provisioner refuses to reuse or overwrite it. Manual `mv` aside.
@@ -2200,8 +2202,8 @@ impl WorktreeRecovery {
         match self {
             Self::Transient => "Looks transient — press r to retry.",
             Self::BranchHeldLive => {
-                "Press Esc; use x a in the holding workspace to adopt it, or free \
-                 an external checkout."
+                "Press Esc; join the live session holding this branch, or free the \
+                 external checkout."
             }
             Self::DirtyLeftover => {
                 "A leftover folder holds uncommitted work. Move it aside, then start again."
@@ -2737,6 +2739,15 @@ mod worktree_recovery_tests {
         ] {
             assert!(c.retryable(), "{c:?} is retryable on its own");
         }
+        assert!(
+            WorktreeRecovery::BranchHeldLive
+                .hint()
+                .contains("join the live session")
+        );
+        assert!(
+            !WorktreeRecovery::BranchHeldLive.hint().contains("x a"),
+            "session adoption cannot release a branch checkout"
+        );
     }
 }
 
